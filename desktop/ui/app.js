@@ -6,6 +6,12 @@ const TAURI = window.__TAURI__ || {};
 const invoke = TAURI.core ? TAURI.core.invoke : async () => { throw new Error("Tauri not ready"); };
 const listen = TAURI.event ? TAURI.event.listen : async () => {};
 
+// i18n — strings.js (a plain script loaded before this module) provides t()/tEn()/HAVEN_LANG.
+// The fallbacks keep the app alive if strings.js ever fails to load: keys render as themselves.
+const t = window.t || ((k) => k);
+const tEn = window.tEn || ((k) => k);
+const HAVEN_LANG = window.HAVEN_LANG || "en";
+
 // Whose window chrome are we inside? Only macOS draws its own titlebar (`decorations: false`);
 // Windows and Linux are handed their OS's real one by `apply_window_chrome`, so this decides
 // exactly one thing: whether to draw the traffic lights.
@@ -56,7 +62,7 @@ function relTime(ms) {
   if (!n) return "";
   const diff = Date.now() - n;
   const s = Math.floor(diff / 1000);
-  if (s < 60) return "just now";
+  if (s < 60) return t("just_now");
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m`;
   const h = Math.floor(m / 60);
@@ -95,7 +101,7 @@ function sheet(title, body, foot) {
   const card = el("div", { class: "modal" },
     el("div", { class: "modal-head" },
       el("h2", {}, title),
-      el("button", { class: "icon-btn glass", title: "Close", onclick: () => closeModal() }, icon("xmark")),
+      el("button", { class: "icon-btn glass", title: t("close"), onclick: () => closeModal() }, icon("xmark")),
     ),
     el("div", { class: "modal-body" }, ...[body].flat().filter(Boolean)),
     foot ? el("div", { class: "modal-foot" }, foot) : null,
@@ -155,6 +161,11 @@ const ICONS = {
   "arrow.uturn.backward": { d: "M9 14l-5-5 5-5M4 9h9a6 6 0 010 12H8" },
   "lock.shield.fill": { fill: true, d: "M12 2L4 5v6.5c0 5 3.4 9.6 8 10.5 4.6-.9 8-5.5 8-10.5V5l-8-3zm0 6.2a2.3 2.3 0 012.3 2.3v1h.4a.8.8 0 01.8.8v3.4a.8.8 0 01-.8.8H9.3a.8.8 0 01-.8-.8v-3.4a.8.8 0 01.8-.8h.4v-1A2.3 2.3 0 0112 8.2zm0 1.4a.9.9 0 00-.9.9v1h1.8v-1a.9.9 0 00-.9-.9z" },
   "bell": { d: "M12 4a5.4 5.4 0 00-5.4 5.4v3.1L5 15.6a.8.8 0 00.7 1.2h12.6a.8.8 0 00.7-1.2l-1.6-3.1V9.4A5.4 5.4 0 0012 4zM10 19.2a2.1 2.1 0 004 0" },
+  "envelope": { d: "M3.5 6a2 2 0 012-2h13a2 2 0 012 2v12a2 2 0 01-2 2h-13a2 2 0 01-2-2V6z", extra: "M3.5 7l8.5 6 8.5-6" },
+  "lightbulb": { d: "M9.5 18h5M10.5 21h3M12 3a6 6 0 00-3.9 10.6c.7.6.9 1.4.9 2.4h6c0-1 .2-1.8.9-2.4A6 6 0 0012 3z" },
+  "questionmark.circle": { d: "M12 21a9 9 0 100-18 9 9 0 000 18z", extra: "M9.6 9.2a2.5 2.5 0 114.2 1.8c-.8.7-1.8 1.3-1.8 2.5M12 16.8h.01" },
+  "character.bubble": { d: "M4 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2h-5l-4 4v-4H6a2 2 0 01-2-2V6z", extra: "M9.2 13l2.1-6h1.4l2.1 6M10 11h4" },
+  "square.grid.2x2": { d: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" },
 };
 /** One glyph as an <svg>. `cls` lands on the element so callers can size it. */
 function icon(name, cls) {
@@ -246,9 +257,9 @@ async function loadMedia(node, circleId, ref) {
 // Retry once polling gives up — never a spinner that lies forever.
 function syncingPlaceholder(circleId, ref, isVideo) {
   const box = el("div", { class: "media-evicted", style: "position:relative;overflow:hidden" });
-  const t = ThumbIndex.thumbFor(ref);
-  if (t) {
-    invoke("media_data_url", { circleId, reference: t }).then((u) => {
+  const th = ThumbIndex.thumbFor(ref);
+  if (th) {
+    invoke("media_data_url", { circleId, reference: th }).then((u) => {
       if (!u || !box.isConnected) return;
       // SHARP, full opacity, nothing over it. The thumb IS the picture, just smaller — blurring it
       // behind a spinner made a post that was loading fine look broken. Apple/Android parity.
@@ -263,17 +274,17 @@ function syncingPlaceholder(circleId, ref, isVideo) {
   box.append(front);
   const waiting = () => front.replaceChildren(
     el("div", { class: "spinner" }),
-    el("div", { class: "muted small" }, isVideo ? "Video still loading…" : "Still loading…"));
+    el("div", { class: "muted small" }, isVideo ? t("video_still_loading") : t("still_loading")));
   // `gone` is terminal and ACTIONABLE, so it always shows — even over a thumb. Re-show the front
   // layer the thumb hid: the difference between "on its way" (say nothing) and "you need to do
   // something" is the only thing chrome should be marking here.
   const showFront = () => { front.style.display = ""; };
   const gone = () => (showFront(), front.replaceChildren(
-    el("div", { class: "muted small" }, "Not available yet"),
+    el("div", { class: "muted small" }, t("not_available_yet")),
     el("button", { class: "btn small", onclick: () => {
       invoke("media_download", { reference: ref }).catch(() => {});
       start();
-    } }, "Retry")));
+    } }, t("retry"))));
   let timer = null;
   const start = () => {
     waiting();
@@ -309,25 +320,25 @@ function evictedPlaceholder(circleId, ref, bytes, isVideo, post) {
   };
   const draw = async (mode) => {
     if (mode === "loading") {
-      box.replaceChildren(el("div", { class: "spinner" }), el("div", { class: "muted small" }, "Downloading…"));
+      box.replaceChildren(el("div", { class: "spinner" }), el("div", { class: "muted small" }, t("downloading")));
       return;
     }
     if (mode === "gone") {
       const wanted = await invoke("media_is_wanted", { reference: ref }).catch(() => false);
       box.replaceChildren(
-        el("div", { class: "muted small" }, "No longer available"),
-        el("button", { class: "btn small", onclick: () => start() }, "Retry"),
+        el("div", { class: "muted small" }, t("no_longer_available")),
+        el("button", { class: "btn small", onclick: () => start() }, t("retry")),
         wanted
-          ? el("div", { class: "muted small" }, "🔔 We'll tell you when it's back")
+          ? el("div", { class: "muted small" }, "🔔 " + t("tell_when_back"))
           : post && !post.isMe
-            ? el("button", { class: "btn small primary", onclick: askBack }, "Ask for it back")
+            ? el("button", { class: "btn small primary", onclick: askBack }, t("ask_for_it_back"))
             : null);
       return;
     }
     box.replaceChildren(
       el("button", { class: "btn small primary", onclick: () => start() },
-        `⬇ Download ${fmtBytes(bytes)}`),
-      el("div", { class: "muted small" }, "Removed to save space"));
+        "⬇ " + t("download_size", fmtBytes(bytes))),
+      el("div", { class: "muted small" }, t("removed_to_save_space")));
   };
   const start = async () => {
     draw("loading");
@@ -407,16 +418,16 @@ function renderTitlebarTrailing() {
   if (!slot) return;
   if (state.view === "circle") {
     const pill = el("button", { class: "circle-pill glass tint-pink", onclick: () => circleMenu(pill) },
-      icon("chevron.down", "chev"), el("span", { id: "tb-circle-name" }, state.activeCircleName || "My Circle"));
+      icon("chevron.down", "chev"), el("span", { id: "tb-circle-name" }, state.activeCircleName || t("my_circle")));
     slot.replaceChildren(pill,
-      el("button", { class: "icon-btn glass tint-pink pink", title: "Manage circle", "aria-label": "Manage circle",
+      el("button", { class: "icon-btn glass tint-pink pink", title: t("manage_circle"), "aria-label": t("manage_circle"),
         onclick: () => circleSheet() }, icon("person.2.fill")));
   } else if (state.view === "you") {
-    slot.replaceChildren(el("button", { class: "icon-btn glass", title: "Settings", "aria-label": "Settings",
+    slot.replaceChildren(el("button", { class: "icon-btn glass", title: t("settings"), "aria-label": t("settings"),
       onclick: () => settingsSheet() }, icon("gearshape.fill")));
   } else if (state.view === "messages" && !state.activeDm) {
     // macOS `MessagesView`'s toolbar: a `square.and.pencil` glass chip that opens the contact picker.
-    slot.replaceChildren(el("button", { class: "icon-btn glass", title: "New message", "aria-label": "New message",
+    slot.replaceChildren(el("button", { class: "icon-btn glass", title: t("new_message"), "aria-label": t("new_message"),
       onclick: () => newMessageSheet() }, icon("square.and.pencil")));
   } else {
     slot.replaceChildren();
@@ -435,12 +446,12 @@ async function circleMenu(anchor) {
   items.push({ sep: true });
   if (Hidden.ids.size) {
     items.push({
-      label: Hidden.showHidden ? "Hide hidden posts" : `Show hidden posts (${Hidden.ids.size})`,
+      label: Hidden.showHidden ? t("hide_hidden_posts") : t("show_hidden_posts", Hidden.ids.size),
       icon: Hidden.showHidden ? "eye.slash" : "eye",
       on: () => { Hidden.toggle(); renderFeed(); },
     });
   }
-  items.push({ label: "New circle…", icon: "plus.circle", on: newCircleDialog });
+  items.push({ label: t("new_circle_menu"), icon: "plus.circle", on: newCircleDialog });
   popMenu(anchor, items, { align: "right" });
 }
 
@@ -491,21 +502,21 @@ async function activityPanel() {
   invoke("mark_activity_seen").catch(() => {});
   const verb = (r) => {
     switch (r.kind) {
-      case "react": return `Reacted ${r.emoji || "👍"}`;
-      case "comment": return "Commented";
-      case "vote": return "Voted";
-      case "story": return "Shared a story";
+      case "react": return t("reacted", r.emoji || "👍");
+      case "comment": return t("commented");
+      case "vote": return t("voted");
+      case "story": return t("shared_a_story");
       // A `dm:` id encodes its participants as sorted node hexes joined by `-`, so 3+ means a GROUP
       // thread, where "sent you a message" is wrong — nobody sent it to you specifically.
-      case "dm": return isGroupDm(r.circleId) ? "Messaged the group" : "Sent you a message";
-      default: return "Posted";
+      case "dm": return isGroupDm(r.circleId) ? t("messaged_the_group") : t("sent_you_a_message");
+      default: return t("posted_verb");
     }
   };
   const list = el("div", { class: "thread-list" });
   if (!rows.length) {
     list.append(el("div", { class: "empty" },
-      el("div", { class: "h" }, "Nothing yet"),
-      el("div", {}, "Reactions, comments, new posts and messages land here.")));
+      el("div", { class: "h" }, t("nothing_yet")),
+      el("div", {}, t("activity_empty_sub"))));
   }
   // WINDOWED. An account that has been running a while accumulates thousands of activity rows, and
   // building a DOM node for every one of them froze the panel on open for what looked like a hang.
@@ -514,7 +525,7 @@ async function activityPanel() {
   let shown = 0;
   const row = (r) => {
     const unread = r.created_at > seenAt;
-    const title = r.kind === "app" ? (r.actor_name || "Haven") : `${r.actor_name || "Someone"} · ${verb(r)}`;
+    const title = r.kind === "app" ? (r.actor_name || "Haven") : `${r.actor_name || t("someone")} · ${verb(r)}`;
     return el("div", { class: "thread-item", onclick: async () => { closeModal(); if (r.link) await routeDeepLink(r.link); } },
       el("div", { class: "avatar" }, r.kind === "app" ? "🔔" : initials(r.actor_name || "?")),
       el("div", { style: "flex:1;min-width:0" },
@@ -523,16 +534,16 @@ async function activityPanel() {
       el("div", { class: "muted small" }, relTime(r.created_at)),
     );
   };
-  const more = el("button", { class: "btn small", onclick: () => showMore() }, "Show older");
+  const more = el("button", { class: "btn small", onclick: () => showMore() }, t("show_older"));
   const showMore = () => {
     const next = rows.slice(shown, shown + PAGE);
     shown += next.length;
     for (const r of next) list.insertBefore(row(r), more);
-    more.textContent = `Show older · ${rows.length - shown} left`;
+    more.textContent = t("show_older_left", rows.length - shown);
     if (shown >= rows.length) more.remove();
   };
   if (rows.length) { list.append(more); showMore(); }
-  sheet("Activity", list);
+  sheet(t("activity"), list);
   refreshBadges();   // opening marked everything seen — clear the badge now, not on the next sync
 }
 
@@ -551,12 +562,12 @@ async function refreshStatus() {
 }
 
 function connectionText(s) {
-  if (!s || !s.started) return "Offline — posts sync when you reconnect";
+  if (!s || !s.started) return t("offline_posts_sync");
   const paths = [];
-  if (s.internet_active) paths.push("internet");
-  if (s.hosting) paths.push("relaying here");
-  if (!paths.length) return "Online — looking for your circle…";
-  return "Connected · " + paths.join(" + ");
+  if (s.internet_active) paths.push(t("internet"));
+  if (s.hosting) paths.push(t("relaying_here"));
+  if (!paths.length) return t("online_looking");
+  return t("connected") + " · " + paths.join(" + ");
 }
 
 // ---- Deep links ------------------------------------------------------------------------
@@ -658,7 +669,7 @@ async function routeDeepLink(raw) {
   const c = DeepLink.circle(raw);
   if (c) {
     const circles = await invoke("circles").catch(() => []);
-    if (!circles.some((x) => x.id === c.circleId)) { toast("That link points at a circle you're not in."); return "circle"; }
+    if (!circles.some((x) => x.id === c.circleId)) { toast(t("link_circle_not_in")); return "circle"; }
     state.activeCircle = c.circleId;
     state.activeDm = null;
     switchView("circle");
@@ -673,7 +684,7 @@ async function routeDeepLink(raw) {
 async function openDmThread(circleId) {
   const threads = await invoke("dm_threads").catch(() => []);
   const t = threads.find((x) => x.circle_id === circleId);
-  if (!t) { toast("That conversation isn't on this device yet."); state.activeDm = null; switchView("messages"); return; }
+  if (!t) { toast(t("convo_not_on_device")); state.activeDm = null; switchView("messages"); return; }
   state.activeDm = { id: t.circle_id, name: t.name };
   switchView("messages");
 }
@@ -684,7 +695,7 @@ async function openDmThread(circleId) {
 // app, and the post genuinely may not be here: the link is a pointer, not a key.
 async function openPostLink(circleId, postId) {
   const circles = await invoke("circles").catch(() => []);
-  if (!circles.some((c) => c.id === circleId)) { toast("That post is in a circle you're not in."); return; }
+  if (!circles.some((c) => c.id === circleId)) { toast(t("post_circle_not_in")); return; }
   state.activeCircle = circleId;
   state.activeDm = null;
   state.focusPost = null;
@@ -699,9 +710,9 @@ async function openPostLink(circleId, postId) {
     state.focusPost = it.id;
   }
   switchView("circle");   // land them in the right circle either way — but never pretend we found the post
-  if (!it) toast("That post hasn't reached this device yet, or it isn't in this circle.");
-  else if (it.unsent) toast("That post was unsent.");
-  else if (it.story) toast("That link points at a story — open it under Stories.");
+  if (!it) toast(t("post_not_reached"));
+  else if (it.unsent) toast(t("post_was_unsent"));
+  else if (it.story) toast(t("link_points_story"));
 }
 
 // Scroll a linked-to post into view and flash it once. Consumed on the first render: the feed re-renders
@@ -802,11 +813,11 @@ async function relayNudgeBanner(circleId, memberCount) {
     el("div", { class: "nudge-body", onclick: () => relayWalkthrough(circleId) },
       el("span", { class: "nudge-icon" }, "📡"),
       el("div", { style: "min-width:0" },
-        el("div", { class: "nudge-title" }, "Give this circle a relay"),
-        el("div", { class: "nudge-sub" }, "A few of you are here now — a relay holds your sealed posts so nobody has to be online at the same time."),
+        el("div", { class: "nudge-title" }, t("give_circle_relay")),
+        el("div", { class: "nudge-sub" }, t("relay_nudge_sub")),
       ),
     ),
-    el("button", { class: "nudge-x", title: "Dismiss", onclick: () => { RelayNudge.dismiss(circleId); card.remove(); } }, "✕"),
+    el("button", { class: "nudge-x", title: t("dismiss"), onclick: () => { RelayNudge.dismiss(circleId); card.remove(); } }, "✕"),
   );
   return card;
 }
@@ -826,42 +837,42 @@ function relayWalkthrough(circleId) {
   const heading = (t) => el("div", { class: "muted small", style: "font-weight:600;margin-top:6px" }, t);
 
   modal(el("div", { style: "max-width:560px" },
-    el("h2", {}, "Set up a relay"),
+    el("h2", {}, t("set_up_relay")),
     el("div", { class: "col", style: "max-height:64vh;overflow:auto;gap:8px" },
-      point("📥", "Nobody has to be online at once",
-        "Posts upload sealed; friends pick them up next time they open Haven."),
-      point("🖼️", "Photos and videos actually arrive",
-        "Media comes from the relay, not the poster's device, so it lands even when they're offline."),
-      point("🔀", "It routes around home routers",
-        "When devices can't reach each other directly, the relay forwards sealed messages — no port forwarding."),
-      point("🔒", "The relay can't read a thing",
-        ["It only ever holds sealed blobs and a routing header — no content key ever goes near it. ",
-         el("a", { href: "https://wemiller.com/apps/haven/docs/#relay-idea", target: "_blank", style: "color:var(--pink);text-decoration:underline" }, "Learn more")]),
+      point("📥", t("wt_nobody_online_t"),
+        t("wt_nobody_online_b")),
+      point("🖼️", t("wt_media_t"),
+        t("wt_media_b")),
+      point("🔀", t("wt_routes_t"),
+        t("wt_routes_b")),
+      point("🔒", t("wt_cant_read_t"),
+        [t("wt_cant_read_b"),
+         el("a", { href: "https://wemiller.com/apps/haven/docs/#relay-idea", target: "_blank", style: "color:var(--pink);text-decoration:underline" }, t("learn_more"))]),
 
-      heading("How to set one up"),
-      point("🖥️", "The easy way — this PC",
-        "One click: this PC holds the circle's sealed mailbox — turn on the two Relay toggles to survive reboots."),
-      point("⌨️", "Or with no window at all",
-        "Prefer no window? Run haven-desktop --headless for relay-only."),
-      point("📦", "Or a spare machine",
-        "On a Mac, Linux box, or Raspberry Pi:\ncurl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh\n\nOn Windows, in PowerShell:\nirm https://wemiller.com/apps/haven/relay/install.ps1 | iex\n\nIt sets itself to start on every reboot; paste its node id under Relay to adopt it."),
+      heading(t("wt_how_heading")),
+      point("🖥️", t("wt_easy_t"),
+        t("wt_easy_b")),
+      point("⌨️", t("wt_headless_t"),
+        t("wt_headless_b")),
+      point("📦", t("wt_spare_t"),
+        t("wt_spare_b")),
 
-      heading("What everyone in the circle can count on"),
-      point("🔑", "Only the people you added can read it",
-        "Everything you post is sealed on this PC to your circle's members. Remove someone and the circle's key rotates, so they can't read anything posted afterwards."),
-      point("⚛️", "Encrypted for the long haul",
-        ["Double-locked: today's proven encryption plus post-quantum. Keys never leave your devices. ",
-         el("a", { href: "https://wemiller.com/apps/haven/docs/#encryption", target: "_blank", style: "color:var(--pink);text-decoration:underline" }, "Learn more")]),
+      heading(t("wt_counton_heading")),
+      point("🔑", t("wt_only_t"),
+        t("wt_only_b")),
+      point("⚛️", t("wt_pq_t"),
+        [t("wt_pq_b"),
+         el("a", { href: "https://wemiller.com/apps/haven/docs/#encryption", target: "_blank", style: "color:var(--pink);text-decoration:underline" }, t("learn_more"))]),
     ),
     // wrap: three buttons don't fit the sheet on a narrow window, and a clipped "Not now" is a trap.
     el("div", { class: "row wrap", style: "margin-top:14px" },
       el("button", { class: "btn primary", onclick: async () => {
-        try { await invoke("start_hosting"); toast("This PC is now the relay"); } catch (e) { toast("" + e); }
+        try { await invoke("start_hosting"); toast(t("pc_now_relay")); } catch (e) { toast("" + e); }
         $("#modal-root").replaceChildren();
         renderFeed();
-      } }, "Use this PC as the relay"),
-      el("button", { class: "btn ghost", onclick: () => relaySheet() }, "Add a relay I'm running →"),
-      el("button", { class: "btn ghost", style: "margin-left:auto", onclick: () => $("#modal-root").replaceChildren() }, "Not now"),
+      } }, t("use_pc_as_relay")),
+      el("button", { class: "btn ghost", onclick: () => relaySheet() }, t("add_relay_running")),
+      el("button", { class: "btn ghost", style: "margin-left:auto", onclick: () => $("#modal-root").replaceChildren() }, t("not_now")),
     )));
 }
 
@@ -889,7 +900,7 @@ const CircleNick = {
 
 /** The name to SHOW for a circle: my private nickname if I set one, else its real name. */
 function circleDisplayName(id, real) {
-  return CircleNick.get(id) || real || "My Circle";
+  return CircleNick.get(id) || real || t("my_circle");
 }
 
 const Hidden = {
@@ -923,7 +934,7 @@ async function renderFeed() {
     // Global video mute — macOS puts this on the media itself; on a pointer-driven desktop feed a
     // single always-visible control beats a per-card overlay. Circular, like every other control.
     el("button", {
-      class: "icon-btn glass", title: state.videoSoundOn ? "Mute all videos" : "Unmute all videos",
+      class: "icon-btn glass", title: state.videoSoundOn ? t("mute_all_videos") : t("unmute_all_videos"),
       onclick: async () => {
         state.videoSoundOn = !state.videoSoundOn;
         await invoke("set_video_sound", { on: state.videoSoundOn }).catch(() => {});
@@ -990,14 +1001,14 @@ async function renderFeed() {
   if (!items.length) {
     list.append(el("div", { class: "empty" },
       el("span", { class: "big" }, icon("sparkles", "empty-ic")),
-      el("div", { class: "h" }, "Nothing here yet"),
-      el("div", {}, "Share your first moment below. As your circle connects, their posts show up here too.")));
+      el("div", { class: "h" }, t("nothing_here_yet")),
+      el("div", {}, t("feed_empty_sub"))));
   }
   for (const it of items) list.append(postCard(it, state.activeCircle, reportsByTarget[it.id] || []));
 
   const composer = buildComposer(
     (body, music, muteVideo, retentionSecs) => invoke("post", { circleId: state.activeCircle, body, media: withThumbMarkers(state.attachments), music, muteVideo, retentionSecs }),
-    "Share something…",
+    t("share_something"),
     {
       circleId: state.activeCircle,
       floating: true,
@@ -1020,8 +1031,8 @@ async function pendingBanner(prefetched) {
     el("div", { class: "nudge-body" },
       el("span", { class: "nudge-icon" }, icon("person.badge.plus")),
       el("div", { style: "min-width:0" },
-        el("div", { class: "nudge-title" }, pending.length === 1 ? "1 connection request" : `${pending.length} connection requests`),
-        el("div", { class: "nudge-sub" }, "Click to review who wants to connect"),
+        el("div", { class: "nudge-title" }, pending.length === 1 ? t("connection_request_one") : t("connection_requests_many", pending.length)),
+        el("div", { class: "nudge-sub" }, t("click_to_review")),
       ),
     ),
     el("span", { class: "nudge-icon", style: "opacity:.85" }, icon("chevron.right")),
@@ -1057,8 +1068,8 @@ async function circleUpgradeBanner(circleId, prefetchedOffers, prefetchedCanOffe
     el("div", { class: "nudge-body", style: "cursor:default" },
       el("span", { class: "nudge-icon" }, icon("lock.shield.fill")),
       el("div", { style: "min-width:0" },
-        el("div", { class: "nudge-title" }, "Upgrade this circle"),
-        el("div", { class: "nudge-sub" }, "If you made this circle, give it a verified owner so removing someone cuts them off for good. Everyone here chooses whether to follow you."),
+        el("div", { class: "nudge-title" }, t("upgrade_this_circle")),
+        el("div", { class: "nudge-sub" }, t("upgrade_circle_sub")),
       ),
     ),
     el("button", {
@@ -1068,7 +1079,7 @@ async function circleUpgradeBanner(circleId, prefetchedOffers, prefetchedCanOffe
         if (id) state.activeCircle = id;
         renderFeed();
       },
-    }, "Upgrade"),
+    }, t("upgrade")),
   );
 }
 
@@ -1079,8 +1090,8 @@ function followUpgradeCard(circleId, o) {
     el("div", { class: "nudge-body", style: "cursor:default" },
       el("span", { class: "nudge-icon" }, icon("person.2.fill")),
       el("div", { style: "min-width:0" },
-        el("div", { class: "nudge-title" }, `${o.from_name} is upgrading “${o.name}”`),
-        el("div", { class: "nudge-sub" }, "They say they made this circle. We can't check that, so only follow if that's right — whoever you follow will be able to remove people."),
+        el("div", { class: "nudge-title" }, t("is_upgrading", o.from_name, o.name)),
+        el("div", { class: "nudge-sub" }, t("follow_upgrade_sub")),
       ),
     ),
     el("button", {
@@ -1090,7 +1101,7 @@ function followUpgradeCard(circleId, o) {
         if (ok) state.activeCircle = o.new_circle_id;
         renderFeed();
       },
-    }, "Follow"),
+    }, t("follow")),
   );
 }
 
@@ -1103,9 +1114,9 @@ function followUpgradeCard(circleId, o) {
  *  initials disc — exactly what postCard shows for the same author. */
 async function storiesTray(prefetched) {
   const tray = el("div", { class: "story-tray" });
-  tray.append(el("button", { class: "story-ring add", title: "Add to your story", onclick: addStoryDialog },
+  tray.append(el("button", { class: "story-ring add", title: t("add_to_your_story"), onclick: addStoryDialog },
     el("div", { class: "ring" }, el("div", {}, icon("camera.fill"))),
-    el("div", { class: "nm" }, "Add")));
+    el("div", { class: "nm" }, t("add"))));
   const stories = (prefetched || await invoke("feed", { circleId: state.activeCircle }).catch(() => []))
     .filter((i) => i.story && !i.unsent)
     .map((s) => ({ ...s, _circle: state.activeCircle }));
@@ -1126,7 +1137,7 @@ async function storiesTray(prefetched) {
     else disc.textContent = initials(name);   // identity chip — matches the author's postCard avatar
     tray.append(el("button", { class: "story-ring cover", onclick: () => viewStories(flat, starts.get(name) || 0) },
       el("div", { class: "ring" }, disc),
-      el("div", { class: "nm" }, it.is_me ? "You" : name.split(" ")[0])));
+      el("div", { class: "nm" }, it.is_me ? t("you") : name.split(" ")[0])));
   }
   return tray;
 }
@@ -1158,7 +1169,7 @@ function groupStoriesFlat(stories) {
  *
  *  `opts.floating` pins it to the bottom of the feed; the story composer reuses the same row
  *  inline inside its sheet. */
-function buildComposer(onPost, placeholder = "Share something…", opts = {}) {
+function buildComposer(onPost, placeholder = t("share_something"), opts = {}) {
   const circleId = opts.circleId || state.activeCircle;
   let music = null;
   let muteVideo = false;
@@ -1180,12 +1191,12 @@ function buildComposer(onPost, placeholder = "Share something…", opts = {}) {
     retentionRow.replaceChildren(retentionSecs
       ? el("div", { class: "song-chip", style: "margin-top:0" },
           el("span", { class: "note" }, "\u23F1"),
-          el("div", { style: "flex:1;min-width:0" }, `Disappears: ${retentionLabel(retentionSecs)}`),
+          el("div", { style: "flex:1;min-width:0" }, t("disappears_label", retentionLabel(retentionSecs))),
           el("span", { class: "x", style: "position:static;cursor:pointer",
                        onclick: () => { retentionSecs = null; drawRetention(); } }, "\u00D7"))
       : null);
   };
-  const muteBtn = el("button", { class: "btn small ghost", style: "display:none", onclick: () => { muteVideo = !muteVideo; muteBtn.textContent = muteVideo ? "🔇 Video muted" : "🔊 Mute video"; muteBtn.classList.toggle("primary", muteVideo); } }, "🔊 Mute video");
+  const muteBtn = el("button", { class: "btn small ghost", style: "display:none", onclick: () => { muteVideo = !muteVideo; muteBtn.textContent = muteVideo ? t("video_muted") : t("mute_video"); muteBtn.classList.toggle("primary", muteVideo); } }, t("mute_video"));
   const drawPreviews = () => {
     previews.replaceChildren(...state.attachments.map((a, i) =>
       el("div", { class: "chip" },
@@ -1195,7 +1206,7 @@ function buildComposer(onPost, placeholder = "Share something…", opts = {}) {
       )));
     const hasVideo = state.attachments.some((a) => a.isVideo);
     muteBtn.style.display = hasVideo ? "" : "none";
-    if (!hasVideo) { muteVideo = false; muteBtn.textContent = "🔊 Mute video"; muteBtn.classList.remove("primary"); }
+    if (!hasVideo) { muteVideo = false; muteBtn.textContent = t("mute_video"); muteBtn.classList.remove("primary"); }
   };
   const addAttachment = async (ref, isVideo, isAudio, thumbRef = null) => {
     const url = isAudio ? null : await invoke("media_data_url", { circleId, reference: ref }).catch(() => null);
@@ -1225,8 +1236,8 @@ function buildComposer(onPost, placeholder = "Share something…", opts = {}) {
   const refreshSync = async () => {
     const s = await invoke("sync_status", { circleId }).catch(() => "synced");
     const label = syncBadge.lastChild;
-    if (s === "local") { syncDot.style.background = "#EF4444"; label.textContent = "Device only"; syncBadge.classList.remove("hide"); }
-    else if (s === "syncing") { syncDot.style.background = "#F59E0B"; label.textContent = "Syncing"; syncBadge.classList.remove("hide"); }
+    if (s === "local") { syncDot.style.background = "#EF4444"; label.textContent = t("device_only"); syncBadge.classList.remove("hide"); }
+    else if (s === "syncing") { syncDot.style.background = "#F59E0B"; label.textContent = t("syncing"); syncBadge.classList.remove("hide"); }
     else syncBadge.classList.add("hide");
   };
   if (state.syncTimer) clearInterval(state.syncTimer);   // only one composer at a time — no leak across re-renders
@@ -1246,7 +1257,7 @@ function buildComposer(onPost, placeholder = "Share something…", opts = {}) {
     drawPreviews();
     drawMusic();
     drawRetention();
-    toast("Posted");
+    toast(t("posted_toast"));
   };
   // Enter sends, Shift+Enter is a newline — the desktop convention, and the field is a pill you
   // can't see a "Post" button next to at rest.
@@ -1255,27 +1266,27 @@ function buildComposer(onPost, placeholder = "Share something…", opts = {}) {
   });
 
   // The `+` menu — every attachment path the macOS composer's Menu holds, in its order.
-  const plus = el("button", { class: "composer-plus", title: "Attach", "aria-label": "Attach" }, icon("plus"));
+  const plus = el("button", { class: "composer-plus", title: t("attach"), "aria-label": t("attach") }, icon("plus"));
   plus.addEventListener("click", () => popMenu(plus, [
-    { label: "Photo or Video", icon: "photo", on: () => fileInput.click() },
-    { label: "Camera", icon: "camera.fill", on: async () => { const r = await cameraDialog(circleId); if (r) addAttachment(r.ref, r.isVideo, false); } },
-    { label: "Voice", icon: "mic", on: async () => { const r = await recordVoice(circleId); if (r) addAttachment(r, false, true); } },
-    { label: "Add a song", icon: "music.note", on: () => musicDialog((m) => { music = m; drawMusic(); }) },
+    { label: t("photo_or_video"), icon: "photo", on: () => fileInput.click() },
+    { label: t("camera"), icon: "camera.fill", on: async () => { const r = await cameraDialog(circleId); if (r) addAttachment(r.ref, r.isVideo, false); } },
+    { label: t("voice"), icon: "mic", on: async () => { const r = await recordVoice(circleId); if (r) addAttachment(r, false, true); } },
+    { label: t("add_a_song"), icon: "music.note", on: () => musicDialog((m) => { music = m; drawMusic(); }) },
     { sep: true },
-    { label: "Disappears after\u2026", icon: "timer", on: () => popMenu(plus, [
-      { label: "Off", on: () => { retentionSecs = null; drawRetention(); } },
-      { label: "1 hour", on: () => { retentionSecs = 3600; drawRetention(); } },
-      { label: "1 day", on: () => { retentionSecs = 86400; drawRetention(); } },
-      { label: "1 week", on: () => { retentionSecs = 604800; drawRetention(); } },
+    { label: t("disappears_after"), icon: "timer", on: () => popMenu(plus, [
+      { label: t("off"), on: () => { retentionSecs = null; drawRetention(); } },
+      { label: t("one_hour"), on: () => { retentionSecs = 3600; drawRetention(); } },
+      { label: t("one_day"), on: () => { retentionSecs = 86400; drawRetention(); } },
+      { label: t("one_week"), on: () => { retentionSecs = 604800; drawRetention(); } },
     ]) },
     opts.onSchedule ? { sep: true } : null,
-    opts.onSchedule ? { label: "Send later…", icon: "clock", on: () => {
+    opts.onSchedule ? { label: t("send_later"), icon: "clock", on: () => {
       const body = ta.value.trim();
-      if (!body && !state.attachments.length && !music) { toast("Write something first"); return; }
+      if (!body && !state.attachments.length && !music) { toast(t("write_something_first")); return; }
       scheduleDialog((ms) => {
         opts.onSchedule(body, music, muteVideo, ms);
         ta.value = ""; autoGrow(); state.attachments = []; music = null; muteVideo = false; drawPreviews(); drawMusic();
-        toast("Scheduled");
+        toast(t("scheduled_toast"));
       });
     } } : null,
   ]));
@@ -1289,7 +1300,7 @@ function buildComposer(onPost, placeholder = "Share something…", opts = {}) {
     el("div", { class: "composer-row" },
       plus,
       ta,
-      el("button", { class: "composer-send", title: "Post", "aria-label": "Post", onclick: send }, icon("paperplane.fill")),
+      el("button", { class: "composer-send", title: t("post_btn"), "aria-label": t("post_btn"), onclick: send }, icon("paperplane.fill")),
     ),
     fileInput,
   );
@@ -1309,21 +1320,21 @@ function openExternal(url) {
 // YouTube / etc.) + title + artist. Viewers tap the chip to open it in their own player — the
 // portable model the Android/desktop redesign uses where there's no universal catalog API.
 function musicDialog(onPick) {
-  const link = el("input", { placeholder: "Paste a song link (Apple Music, Spotify, YouTube…)" });
-  const title = el("input", { placeholder: "Title" });
-  const artist = el("input", { placeholder: "Artist" });
+  const link = el("input", { placeholder: t("paste_song_link") });
+  const title = el("input", { placeholder: t("song_title_ph") });
+  const artist = el("input", { placeholder: t("artist_ph") });
   modal(el("div", {},
-    el("h2", {}, "Attach a song"),
+    el("h2", {}, t("attach_a_song")),
     el("div", { class: "col" },
       link, el("div", { class: "row" }, title, artist),
-      el("div", { class: "muted small" }, "The link opens in your friend's own music app."),
+      el("div", { class: "muted small" }, t("song_link_hint")),
       el("div", { class: "row", style: "justify-content:flex-end" },
         el("button", { class: "btn primary", onclick: () => {
           const catalog_id = link.value.trim();
-          if (!catalog_id || !title.value.trim()) { toast("Add a link and a title"); return; }
-          onPick({ catalog_id, title: title.value.trim(), artist: artist.value.trim() || "Unknown artist" });
+          if (!catalog_id || !title.value.trim()) { toast(t("add_link_and_title")); return; }
+          onPick({ catalog_id, title: title.value.trim(), artist: artist.value.trim() || t("unknown_artist") });
           $("#modal-root").replaceChildren();
-        } }, "Attach")))));
+        } }, t("attach"))))));
 }
 
 // Secret-message marker — byte-identical to iOS SecretMessages.marker ("\u{2}").
@@ -1358,7 +1369,7 @@ function geoChip(geo) {
   const text = geo.label && geo.label.trim() ? geo.label : `${geo.lat.toFixed(4)}, ${geo.lon.toFixed(4)}`;
   return el("button", {
     class: "song-chip",
-    title: "Open in maps",
+    title: t("open_in_maps"),
     onclick: () => openExternal(`https://www.openstreetmap.org/?mlat=${geo.lat}&mlon=${geo.lon}#map=15/${geo.lat}/${geo.lon}`),
   }, el("span", { class: "note" }, "📍"), el("strong", {}, text));
 }
@@ -1380,11 +1391,11 @@ async function loadSensitive(circleId) {
 
 /** The frosted cover for one flagged item. Clicking it reveals the media underneath. */
 function sensitiveCover(onReveal) {
-  const cover = el("div", { class: "sensitive-cover", title: "Sensitive Content" },
+  const cover = el("div", { class: "sensitive-cover", title: t("sensitive_content") },
     el("div", { class: "sensitive-label" },
       icon("eye.slash"),
-      el("div", { class: "t" }, "Sensitive Content"),
-      el("div", { class: "s" }, "Tap to view")));
+      el("div", { class: "t" }, t("sensitive_content")),
+      el("div", { class: "s" }, t("tap_to_view"))));
   cover.addEventListener("click", (e) => {
     // Don't let the reveal double as a play/▶ or the feed's double-tap-to-❤️.
     e.stopPropagation();
@@ -1559,7 +1570,7 @@ function mediaNode(ref, imgStyle) {
   // regardless (call/capture audio priority).
   if (isVideoRef(ref)) return el("video", Object.assign({ "data-ref": ref, "data-video": "1", controls: "" }, state.videoSoundOn && !callAudioActive() && !captureUIOpen() && !state.superDataSaver ? {} : { muted: "" }));
   if (isAudioRef(ref)) return el("audio", { "data-ref": ref, controls: "", style: "width:100%;margin-top:6px;display:block" });
-  if (isFileRef(ref)) return el("div", { class: "tag", "data-ref": ref, style: "padding:12px;margin-top:6px" }, "📎 Attachment");
+  if (isFileRef(ref)) return el("div", { class: "tag", "data-ref": ref, style: "padding:12px;margin-top:6px" }, "📎 " + t("attachment_chip"));
   // decoding="async" keeps the decode off the thread that's scrolling: a data-URL image decodes
   // synchronously by default, and a multi-photo post paid every one of those decodes in one frame.
   return el("img", Object.assign({ "data-ref": ref, loading: "lazy", decoding: "async" }, imgStyle ? { style: imgStyle } : {}));
@@ -1751,16 +1762,16 @@ function mediaCarousel(refs, container) {
 function secretBubble(body, isMe) {
   const text = secretText(body);
   const wrap = el("div", { class: "chat-bubble secret" + (isMe ? " me" : "") });
-  let revealed = false, t;
+  let revealed = false, tm;
   const draw = () => {
     wrap.replaceChildren(revealed
       ? el("span", {}, text)
-      : el("span", { class: "muted" }, "🔒 Tap to reveal"));
+      : el("span", { class: "muted" }, t("tap_to_reveal")));
   };
   wrap.addEventListener("click", () => {
     revealed = !revealed; draw();
-    clearTimeout(t);
-    if (revealed) t = setTimeout(() => { revealed = false; draw(); }, 5000);
+    clearTimeout(tm);
+    if (revealed) tm = setTimeout(() => { revealed = false; draw(); }, 5000);
   });
   draw();
   return wrap;
@@ -1811,7 +1822,7 @@ const fmtMB = (b) => (b >= 1024 * 1024 * 1024 ? (b / 1024 / 1024 / 1024).toFixed
 function mediaSourceAllowed(sizeBytes, isVideo, label) {
   const cap = isVideo ? MEDIA_TARGETS.MAX_SOURCE_BYTES_VIDEO : MEDIA_TARGETS.MAX_SOURCE_BYTES_STILL;
   if (sizeBytes > cap) {
-    toast(`${label || "That file"} is ${fmtMB(sizeBytes)} — Haven caps ${isVideo ? "videos" : "photos"} at ${fmtMB(cap)}, so it wasn't attached.`);
+    toast(t("file_too_large", label || t("that_file"), fmtMB(sizeBytes), isVideo ? t("videos_word") : t("photos_word"), fmtMB(cap)));
     return false;
   }
   return true;
@@ -1824,49 +1835,49 @@ function recordVoice(circleId) {
     // A voice note is a capture too — a post clip playing into the mic is the same problem.
     const releaseCapture = beginCapture(() => finish(null));
     const timeEl = el("div", { style: "font-size:30px;text-align:center;margin:6px 0" }, "0:00");
-    const status = el("div", { class: "muted small", style: "text-align:center" }, "Tap record to start");
-    const recBtn = el("button", { class: "btn primary" }, "● Record");
-    const stopBtn = el("button", { class: "btn danger", style: "display:none" }, "■ Stop & attach");
+    const status = el("div", { class: "muted small", style: "text-align:center" }, t("tap_record_to_start"));
+    const recBtn = el("button", { class: "btn primary" }, t("record_btn"));
+    const stopBtn = el("button", { class: "btn danger", style: "display:none" }, t("stop_attach"));
     const finish = (ref) => { if (done) return; done = true; clearInterval(timer); if (stream) stream.getTracks().forEach((t) => t.stop()); releaseCapture(); $("#modal-root").replaceChildren(); resolve(ref); };
     recBtn.onclick = async () => {
       // Channel count is PRESERVED, capped at stereo (Apple's rule) — asking for `channelCount: 2`
       // as a max lets a mono mic stay mono rather than being upmixed to a wasteful stereo stream.
       try { stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: { ideal: 1, max: MEDIA_TARGETS.AUDIO_MAX_CHANNELS } } }); }
-      catch (e) { toast("Mic unavailable: " + e); return; }
+      catch (e) { toast(t("mic_unavailable", e)); return; }
       recorder = new MediaRecorder(stream, { audioBitsPerSecond: MEDIA_TARGETS.AUDIO_BITRATE_BPS });
       recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
       recorder.onstop = async () => {
         const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
         try { const ref = await invoke("add_audio", { circleId, dataBase64: await blobToBase64(blob) }); finish(ref); }
-        catch (e) { toast("Couldn't save: " + e); finish(null); }
+        catch (e) { toast(t("couldnt_save", e)); finish(null); }
       };
       recorder.start();
-      recBtn.style.display = "none"; stopBtn.style.display = ""; status.textContent = "Recording…";
+      recBtn.style.display = "none"; stopBtn.style.display = ""; status.textContent = t("recording");
       timer = setInterval(() => {
         secs++; timeEl.textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
         // Length cap: stop AT the limit rather than refusing after the fact — the user keeps what
         // they recorded, and nothing over the cap is ever sealed.
         if (secs >= MEDIA_TARGETS.MAX_DURATION_SEC && recorder && recorder.state !== "inactive") {
-          toast(`Voice notes are capped at ${MEDIA_TARGETS.MAX_DURATION_SEC / 60} minutes.`);
+          toast(t("voice_note_cap", MEDIA_TARGETS.MAX_DURATION_SEC / 60));
           recorder.stop();
         }
       }, 1000);
     };
     stopBtn.onclick = () => { if (recorder && recorder.state !== "inactive") recorder.stop(); };
-    modal(el("div", {}, el("h2", {}, "🎙️ Voice message"), timeEl, status,
+    modal(el("div", {}, el("h2", {}, t("voice_message")), timeEl, status,
       el("div", { class: "row", style: "justify-content:center;margin-top:12px" }, recBtn, stopBtn,
-        el("button", { class: "btn ghost", onclick: () => finish(null) }, "Cancel"))));
+        el("button", { class: "btn ghost", onclick: () => finish(null) }, t("cancel")))));
   });
 }
 
 // The 6 Haven capture filters (parity with iOS MediaFilters), as CSS filter strings.
 const CAMERA_FILTERS = [
-  { name: "Original", css: "" },
-  { name: "Warmth", css: "sepia(0.25) saturate(1.35) hue-rotate(-10deg) brightness(1.03)" },
-  { name: "Cool", css: "saturate(1.1) hue-rotate(14deg) brightness(1.05)" },
-  { name: "Sepia", css: "sepia(0.7) contrast(1.05)" },
-  { name: "Noir", css: "grayscale(1) contrast(1.25) brightness(1.05)" },
-  { name: "Vivid", css: "saturate(1.7) contrast(1.12)" },
+  { name: t("filter_original"), css: "" },
+  { name: t("filter_warmth"), css: "sepia(0.25) saturate(1.35) hue-rotate(-10deg) brightness(1.03)" },
+  { name: t("filter_cool"), css: "saturate(1.1) hue-rotate(14deg) brightness(1.05)" },
+  { name: t("filter_sepia"), css: "sepia(0.7) contrast(1.05)" },
+  { name: t("filter_noir"), css: "grayscale(1) contrast(1.25) brightness(1.05)" },
+  { name: t("filter_vivid"), css: "saturate(1.7) contrast(1.12)" },
 ];
 
 // In-app camera: live preview, a filter strip, photo capture (filter baked into the JPEG) and
@@ -1893,8 +1904,8 @@ function cameraDialog(circleId) {
       const ctx = c.getContext("2d"); ctx.filter = filter.css || "none"; ctx.drawImage(video, 0, 0, c.width, c.height);
       const b64 = c.toDataURL("image/jpeg", MEDIA_TARGETS.STILL_JPEG_QUALITY).split(",")[1];
       try { const ref = await invoke("add_media", { circleId, dataBase64: b64, isVideo: false }); finish({ ref, isVideo: false }); }
-      catch (e) { toast("Capture failed: " + e); }
-    } }, "📸 Capture");
+      catch (e) { toast(t("capture_failed", e)); }
+    } }, t("capture_btn"));
     const recBtn = el("button", { class: "btn", onclick: () => {
       if (!recording) {
         // Record a *filtered* canvas (the selected filter is drawn into every frame) plus the
@@ -1919,7 +1930,7 @@ function cameraDialog(circleId) {
         // for a clip that would then have to be rejected.
         recTimer = setTimeout(() => {
           if (recorder && recorder.state !== "inactive") {
-            toast(`Clips are capped at ${MEDIA_TARGETS.MAX_DURATION_SEC / 60} minutes.`);
+            toast(t("clip_cap", MEDIA_TARGETS.MAX_DURATION_SEC / 60));
             recorder.stop();
           }
         }, MEDIA_TARGETS.MAX_DURATION_SEC * 1000);
@@ -1928,17 +1939,17 @@ function cameraDialog(circleId) {
           if (rafId) cancelAnimationFrame(rafId);
           const blob = new Blob(chunks, { type: recorder.mimeType || "video/webm" });
           try { const ref = await invoke("add_media", { circleId, dataBase64: await blobToBase64(blob), isVideo: true }); finish({ ref, isVideo: true }); }
-          catch (e) { toast("Save failed: " + e); }
+          catch (e) { toast(t("save_failed", e)); }
         };
-        recorder.start(); recording = true; recBtn.textContent = "■ Stop"; recBtn.classList.add("danger");
+        recorder.start(); recording = true; recBtn.textContent = t("stop_btn"); recBtn.classList.add("danger");
       } else { recorder.stop(); }
-    } }, "🎥 Record");
-    modal(el("div", {}, el("h2", {}, "📷 Camera"), video, strip,
+    } }, t("record_video_btn"));
+    modal(el("div", {}, el("h2", {}, t("camera_title")), video, strip,
       el("div", { class: "row", style: "margin-top:12px" }, shoot, recBtn, el("div", { class: "spacer", style: "flex:1" }),
-        el("button", { class: "btn ghost", onclick: () => finish(null) }, "Close"))));
+        el("button", { class: "btn ghost", onclick: () => finish(null) }, t("close")))));
     navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true })
       .then((s) => { stream = s; video.srcObject = s; setFilter(CAMERA_FILTERS[0]); })
-      .catch((e) => { toast("Camera unavailable: " + e); finish(null); });
+      .catch((e) => { toast(t("camera_unavailable", e)); finish(null); });
   });
 }
 
@@ -1948,11 +1959,11 @@ function scheduleDialog(onPick) {
   const d = new Date(Date.now() + 3600_000); // default +1h
   const pad = (n) => String(n).padStart(2, "0");
   input.value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  modal(el("div", {}, el("h2", {}, "🕓 Schedule"),
-    el("div", { class: "muted small" }, "Haven has no server, so a scheduled message sends while this app is running at that time."),
+  modal(el("div", {}, el("h2", {}, t("schedule_title")),
+    el("div", { class: "muted small" }, t("schedule_hint")),
     input,
     el("div", { class: "row", style: "justify-content:flex-end;margin-top:12px" },
-      el("button", { class: "btn primary", onclick: () => { const ms = new Date(input.value).getTime(); if (!ms || ms < Date.now()) { toast("Pick a future time"); return; } onPick(ms); $("#modal-root").replaceChildren(); } }, "Schedule"))));
+      el("button", { class: "btn primary", onclick: () => { const ms = new Date(input.value).getTime(); if (!ms || ms < Date.now()) { toast(t("pick_future_time")); return; } onPick(ms); $("#modal-root").replaceChildren(); } }, t("schedule_btn")))));
 }
 
 /**
@@ -1980,7 +1991,7 @@ async function sanitizeMediaFile(f, isVideo) {
     return isVideo ? await optimizeVideoStrippingMetadata(f) : await imageToJpegBase64(f);
   } catch (e) {
     // optimizeVideoStrippingMetadata already toasted its own reason for refusing/failing.
-    if (!isVideo) toast("Couldn't attach: " + e);
+    if (!isVideo) toast(t("couldnt_attach", e));
     return null;
   }
 }
@@ -1996,7 +2007,7 @@ async function handleFiles(files, after) {
       const thumbRef = isVideo ? null : await mintThumb(b64, state.activeCircle);
       state.attachments.push({ ref, url, isVideo, thumbRef });
       after();
-    } catch (e) { toast("Couldn't attach: " + e); }
+    } catch (e) { toast(t("couldnt_attach", e)); }
   }
 }
 
@@ -2044,7 +2055,7 @@ function withThumbMarkers(atts) {
 function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_EDGE) {
   return new Promise((res, rej) => {
     if (typeof MediaRecorder === "undefined") {
-      toast("This video can't be stripped of location data on this system, so it wasn't attached.");
+      toast(t("video_cant_strip"));
       rej(new Error("MediaRecorder unavailable — refusing to post a video with possible location metadata"));
       return;
     }
@@ -2059,7 +2070,7 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
       if (raf) cancelAnimationFrame(raf);
       try { if (rec && rec.state !== "inactive") rec.stop(); } catch {}
       URL.revokeObjectURL(url);
-      toast("Couldn't process this video's metadata, so it wasn't attached.");
+      toast(t("video_meta_failed"));
       rej(e instanceof Error ? e : new Error(String(e)));
     };
     // A refusal (as opposed to a failure) has its own message and, like `fail`, rejects — so the
@@ -2076,7 +2087,7 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
       // drawn, recorded or sealed.
       const dur = video.duration;
       if (Number.isFinite(dur) && dur > MEDIA_TARGETS.MAX_DURATION_SEC) {
-        return refuse(`That video is ${Math.round(dur / 60)} minutes — Haven caps videos at ${MEDIA_TARGETS.MAX_DURATION_SEC / 60}, so it wasn't attached.`);
+        return refuse(t("video_too_long", Math.round(dur / 60), MEDIA_TARGETS.MAX_DURATION_SEC / 60));
       }
       const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
       const scale = Math.min(1, maxDim / Math.max(vw, vh));
@@ -2115,7 +2126,7 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
           // Every rejection out of here must have SAID something — the caller stays silent for
           // videos precisely because this function owns its own messaging.
           URL.revokeObjectURL(url);
-          toast("Couldn't finish processing this video, so it wasn't attached.");
+          toast(t("video_finish_failed"));
           rej(e);
         }
       };
@@ -2212,7 +2223,7 @@ const Reoptimize = {
       if (r && r.batch_limit) this.batchLimit = r.batch_limit;
       this.hasScanned = true;
     } catch (e) {
-      this.lastWarning = "Couldn't check your media: " + e;
+      this.lastWarning = t("couldnt_check_media", e);
     }
     this.scanning = false; this.draw();
   },
@@ -2238,7 +2249,7 @@ const Reoptimize = {
       // the disk in a loop is the other way a job like this ruins someone's day.
       let room = true;
       try { room = await invoke("reoptimize_headroom", { bytes: c.bytes }); } catch (_) {}
-      if (!room) { this.lastWarning = "Stopped — not enough free space to re-encode safely."; break; }
+      if (!room) { this.lastWarning = t("stopped_no_space"); break; }
 
       let newRef = null, newBytes = 0;
       try {
@@ -2282,16 +2293,18 @@ const Reoptimize = {
           if (await invoke("reoptimize_apply", { circleId: t.circle_id, eventId: t.event_id, media })) reshared++;
         }
       } catch (e) {
-        this.lastWarning = "Some posts couldn't be re-shared: " + e;
+        this.lastWarning = t("couldnt_reshare", e);
       }
     }
 
     const pct = before > 0 ? Math.max(0, 100 - Math.round((after * 100) / before)) : 0;
     this.lastSummary = !swapped
-      ? "Nothing could be made smaller"
-      : `${swapped} item${swapped === 1 ? "" : "s"} re-shared across ${reshared} post${reshared === 1 ? "" : "s"} · `
-        + `${fmtBytes(before)} → ${fmtBytes(after)} (${pct}% smaller)`;
-    if (this.cancelRequested) this.lastWarning = "Stopped.";
+      ? t("nothing_smaller")
+      : t("reoptimize_summary",
+          swapped === 1 ? t("item_one") : t("items_many", swapped),
+          reshared === 1 ? t("post_one") : t("posts_many", reshared),
+          fmtBytes(before), fmtBytes(after), pct);
+    if (this.cancelRequested) this.lastWarning = t("stopped");
     this.running = false;
     // Re-scan so the remaining count is honest and anything just rewritten drops off the list —
     // nothing references the old ref any more, so it is no longer one of my shared items.
@@ -2311,20 +2324,20 @@ const Reoptimize = {
   get pendingBytes() { return this.candidates.reduce((n, c) => n + c.bytes, 0); },
 
   title() {
-    if (this.scanning) return "Checking your shared media…";
-    if (this.running) return `Re-optimizing ${Math.min(this.doneCount + 1, this.batchCount)} of ${this.batchCount}…`;
-    if (!this.candidates.length) return "Re-optimize media I already shared";
+    if (this.scanning) return t("checking_shared_media");
+    if (this.running) return t("reoptimizing_of", Math.min(this.doneCount + 1, this.batchCount), this.batchCount);
+    if (!this.candidates.length) return t("reoptimize_title");
     const n = Math.min(this.candidates.length, this.batchLimit);
-    return `Shrink & re-share ${n} photo${n === 1 ? "" : "s"}`;
+    return t("shrink_reshare", n === 1 ? t("photo_one") : t("photos_many", n));
   },
 
   foundText() {
     const total = this.candidates.length;
     const batch = Math.min(total, this.batchLimit);
     const legacy = this.candidates.filter((c) => c.legacy_by_age).length;
-    let s = `${total} photo${total === 1 ? "" : "s"} · ${fmtBytes(this.pendingBytes)} currently on every member's device`;
-    if (legacy > 0) s += ` · ${legacy} shared before Haven learned to compress`;
-    if (batch < total) s += `. This run does the ${batch} largest; click again for the rest.`;
+    let s = t("found_text", total === 1 ? t("photo_one") : t("photos_many", total), fmtBytes(this.pendingBytes));
+    if (legacy > 0) s += t("legacy_suffix", legacy);
+    if (batch < total) s += t("batch_suffix", batch);
     return s;
   },
 
@@ -2347,7 +2360,7 @@ const Reoptimize = {
     kids.push(btn);
 
     if (this.running) {
-      const stop = el("button", { class: "btn danger small" }, this.cancelRequested ? "Stopping…" : "Stop after this one");
+      const stop = el("button", { class: "btn danger small" }, this.cancelRequested ? t("stopping") : t("stop_after_this"));
       stop.disabled = this.cancelRequested;
       stop.onclick = () => this.cancel();
       kids.push(stop);
@@ -2358,15 +2371,14 @@ const Reoptimize = {
     if (this.candidates.length && !this.running) {
       kids.push(el("div", { class: "muted small" }, this.foundText()));
     } else if (this.hasScanned && !busy && !this.lastSummary) {
-      kids.push(el("div", { class: "muted small" }, "✓ Every photo you've shared is already as small as it can be."));
+      kids.push(el("div", { class: "muted small" }, "✓ " + t("all_photos_small")));
     }
     // The honest footnote. Silently omitting my own oversized videos would let a 1.2 GB library look
     // like it had nothing to gain — and this device genuinely cannot re-encode them without handing
     // the circle a clip Apple can't play.
     if (this.hasScanned && this.videos > 0) {
       kids.push(el("div", { class: "muted small" },
-        `${this.videos} video${this.videos === 1 ? "" : "s"} and voice note${this.videos === 1 ? "" : "s"} of yours (${fmtBytes(this.videoBytes)}) skipped — `
-        + "video re-encoding isn't available here; use Haven on your phone for those."));
+        t("videos_skipped", this.videos, fmtBytes(this.videoBytes))));
     }
     host.replaceChildren(...kids);
   },
@@ -2437,9 +2449,9 @@ async function backupDetailSheet(circleId, refs) {
     return "Relay · " + dest.slice(0, 8) + "…";
   };
   const status = (have, isOwn) => {
-    if (!have) return "No copy yet";
-    const count = have === total ? "All" : `${have} of ${total}`;
-    return isOwn ? `${count} · on this device` : count;
+    if (!have) return t("no_copy_yet");
+    const count = have === total ? t("all_copies") : t("n_of_m", have, total);
+    return isOwn ? t("on_this_device_suffix", count) : count;
   };
 
   // Nothing but our own in-process relay holds a full set — it looks backed up and is in fact
@@ -2458,36 +2470,36 @@ async function backupDetailSheet(circleId, refs) {
             el("span", { style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, label(r.dest))),
           el("span", { class: "muted small" }, status(r.have, isOwn)));
       })
-    : [el("div", { class: "muted" }, "Not on any relay yet")];
+    : [el("div", { class: "muted" }, t("not_on_any_relay"))];
 
-  sheet("Where this is stored", [
+  sheet(t("where_stored"), [
     el("div", { class: "muted small", style: "margin-bottom:6px" },
-      total === 1 ? "1 attachment" : `${total} attachments`),
+      total === 1 ? t("attachment_one") : t("attachments_many", total)),
     ...list,
     stranded
       ? el("div", { class: "muted small", style: "margin-top:10px;color:var(--amber,#F59E0B)" },
-          "Only this device's own relay has a copy, so nobody else can fetch it yet.")
+          t("stranded_warning"))
       : null,
   ]);
 }
 
 function postCard(it, circleId, reports = []) {
   // macOS `header`: avatar, name and relative time all on ONE line, `···` at the far right.
-  const kebab = el("button", { class: "kebab", title: "More", "aria-label": "More" }, icon("ellipsis"));
+  const kebab = el("button", { class: "kebab", title: t("more"), "aria-label": t("more") }, icon("ellipsis"));
   kebab.addEventListener("click", () => postMenu(kebab, it, circleId));
   // "Where is this stored?" on your own posts with attachments — the same answer Apple's cloud
   // badge opens. Desktop showed nothing at all, so a post whose media never left this device looked
   // identical to one safely on a relay.
   const ownBlobs = (it.media || []).filter((r) => !isSyntheticMedia(r));
   const storedBtn = (it.is_me && !it.unsent && ownBlobs.length)
-    ? el("button", { class: "icon-btn ghost small", title: "Where this is stored",
-                     "aria-label": "Where this is stored",
+    ? el("button", { class: "icon-btn ghost small", title: t("where_stored"),
+                     "aria-label": t("where_stored"),
                      onclick: () => backupDetailSheet(circleId, ownBlobs) }, icon("icloud"))
     : null;
   const head = el("div", { class: "post-head" },
     el("div", { class: "avatar", style: "width:34px;height:34px;font-size:14px" }, initials(it.author_name)),
     el("span", { class: "name" }, it.author_name),
-    el("span", { class: "when" }, relTime(it.created_at) + (it.edited ? " · edited" : "")),
+    el("span", { class: "when" }, relTime(it.created_at) + (it.edited ? t("edited_suffix") : "")),
     storedBtn,
     kebab,
   );
@@ -2498,7 +2510,7 @@ function postCard(it, circleId, reports = []) {
   const banner = !it.is_me && reports.length ? reportedBanner(it, circleId, reports) : null;
 
   const body = it.unsent
-    ? el("div", { class: "post-body muted" }, "🚫 This post was unsent")
+    ? el("div", { class: "post-body muted" }, t("post_unsent_tombstone"))
     : el("div", { class: "post-body" }, it.body);
 
   const mediaRefs = it.media || [];
@@ -2537,7 +2549,7 @@ function postCard(it, circleId, reports = []) {
   // NowPlayingPill: a full-width pink-tinted glass capsule under the media.
   const song = it.music ? el("a", {
     class: "song-chip glass tint-pink",
-    title: "Open in your music app",
+    title: t("open_in_music_app"),
     onclick: () => { const u = musicLink(it.music); if (u) openExternal(u); },
   }, el("span", { class: "note" }, icon("music.note")),
      el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
@@ -2547,7 +2559,7 @@ function postCard(it, circleId, reports = []) {
   // four so a post can't flood the row), quick-react emoji + `＋` pinned right.
   const actions = el("div", { class: "post-actions" });
   for (const r of cappedReactions(it.reactions, 4)) {
-    actions.append(el("button", { class: "react-pill glass" + (r.mine ? " tint-pink mine" : ""), title: r.mine ? "Remove your reaction" : "React",
+    actions.append(el("button", { class: "react-pill glass" + (r.mine ? " tint-pink mine" : ""), title: r.mine ? t("remove_reaction") : t("react"),
       onclick: () => toggleReact(circleId, it.id, r.emoji, it.reactions) },
       el("span", {}, r.emoji), el("span", { class: "n" }, String(r.count))));
   }
@@ -2555,11 +2567,11 @@ function postCard(it, circleId, reports = []) {
   if (hiddenCount > 0) actions.append(el("span", { class: "react-pill glass" }, el("span", { class: "n" }, "+" + hiddenCount)));
 
   const quick = el("div", { class: "quick" });
-  for (const e of frequentEmoji(3)) quick.append(el("button", { title: "React " + e, onclick: () => quickReact(circleId, it.id, e, it.reactions) }, e));
-  const more = el("button", { class: "more", title: "More reactions", "aria-label": "More reactions" }, icon("plus.circle"));
+  for (const e of frequentEmoji(3)) quick.append(el("button", { title: t("react_emoji", e), onclick: () => quickReact(circleId, it.id, e, it.reactions) }, e));
+  const more = el("button", { class: "more", title: t("more_reactions"), "aria-label": t("more_reactions") }, icon("plus.circle"));
   more.addEventListener("click", () => emojiPicker(more, circleId, it.id));
   quick.append(more);
-  const cmtBtn = el("button", { title: "Comments" }, `💬 ${(it.comments || []).length}`);
+  const cmtBtn = el("button", { title: t("comments") }, `💬 ${(it.comments || []).length}`);
   quick.append(cmtBtn);
   actions.append(quick);
 
@@ -2571,7 +2583,7 @@ function postCard(it, circleId, reports = []) {
         el("div", { class: "avatar", style: "width:26px;height:26px;font-size:11px" }, initials(c.author_name)),
         el("div", { class: "bubble" },
           el("div", { class: "row", style: "gap:6px" },
-            el("span", { class: "who" + (c.is_me ? " me" : "") }, c.is_me ? "You" : c.author_name),
+            el("span", { class: "who" + (c.is_me ? " me" : "") }, c.is_me ? t("you") : c.author_name),
             el("span", { class: "when muted small" }, relTime(c.created_at))),
           el("div", {}, c.body)),
       ));
@@ -2579,7 +2591,7 @@ function postCard(it, circleId, reports = []) {
     comments.append(cl);
   }
   // Reply row: paperclip + pill field + circular pink send, straight from macOS `commentField`.
-  const cin = el("input", { placeholder: "Add a reply…", onkeydown: (e) => { if (e.key === "Enter") sendComment(); } });
+  const cin = el("input", { placeholder: t("add_a_reply"), onkeydown: (e) => { if (e.key === "Enter") sendComment(); } });
   const sendComment = async () => {
     const b = cin.value.trim();
     if (!b) return;
@@ -2587,9 +2599,9 @@ function postCard(it, circleId, reports = []) {
     cin.value = "";
   };
   comments.append(el("div", { class: "reply-row" },
-    el("button", { class: "icon-btn sm pink", title: "Attach", onclick: () => toast("Attach a photo to a reply from the phone apps for now") }, icon("paperclip")),
+    el("button", { class: "icon-btn sm pink", title: t("attach"), onclick: () => toast(t("attach_reply_phone")) }, icon("paperclip")),
     cin,
-    el("button", { class: "send-sm", title: "Send", "aria-label": "Send reply", onclick: sendComment }, icon("paperplane.fill")),
+    el("button", { class: "send-sm", title: t("send"), "aria-label": t("send_reply"), onclick: sendComment }, icon("paperplane.fill")),
   ));
   cmtBtn.addEventListener("click", () => comments.classList.toggle("show"));
 
@@ -2608,11 +2620,11 @@ function postCard(it, circleId, reports = []) {
 // and the category ever leave the circle (the backend's content-free ledger ping).
 
 const REPORT_REASONS = [
-  ["Harassment or bullying", "🗯"],
-  ["Nudity or sexual content", "🙈"],
-  ["Violence or dangerous acts", "⚠️"],
-  ["Spam or scam", "🛡"],
-  ["Something else", "🚩"],
+  ["report_harassment", "🗯"],
+  ["report_nudity", "🙈"],
+  ["report_violence", "⚠️"],
+  ["report_spam", "🛡"],
+  ["report_other", "🚩"],
 ];
 
 /// Pick a category, optionally add a circle-only note, optionally block the author in the same
@@ -2625,24 +2637,24 @@ function reportDialog(it, circleId) {
     Hidden.hide(it.id);
     if (alsoBlock && author) await invoke("block", { idHex: author }).catch(() => {});
     $("#modal-root").replaceChildren();
-    toast("Reported");
+    toast(t("reported_toast"));
     renderFeed();
-  } }, "Report");
-  const rows = REPORT_REASONS.map(([r, icon]) => el("button", { class: "btn reason", onclick: (e) => {
-    reason = r;
+  } }, t("report"));
+  const rows = REPORT_REASONS.map(([rk, icon]) => el("button", { class: "btn reason", onclick: (e) => {
+    reason = tEn(rk);
     submit.disabled = false;
     $$(".reason", e.target.closest(".col")).forEach((b) => b.classList.toggle("primary", b === e.target.closest(".reason")));
-  } }, `${icon} ${r}`));
-  const note = el("textarea", { placeholder: "Add a note for your circle (optional)", rows: 2 });
+  } }, `${icon} ${t(rk)}`));
+  const note = el("textarea", { placeholder: t("report_note_ph"), rows: 2 });
   const blockBox = el("input", { type: "checkbox", onchange: (e) => { alsoBlock = e.target.checked; } });
   modal(el("div", {},
-    el("h2", {}, "Report post"),
-    el("div", { class: "muted small", style: "margin-bottom:8px" }, "What's wrong with it?"),
+    el("h2", {}, t("report_post")),
+    el("div", { class: "muted small", style: "margin-bottom:8px" }, t("whats_wrong")),
     el("div", { class: "col" }, ...rows),
     note,
-    el("label", { class: "row", style: "margin-top:8px;gap:8px;cursor:pointer" }, blockBox, `✋ Also block ${it.author_name}`),
+    el("label", { class: "row", style: "margin-top:8px;gap:8px;cursor:pointer" }, blockBox, "✋ " + t("also_block", it.author_name)),
     el("div", { class: "muted small", style: "margin-top:10px" },
-      "Hides the post for you now; your circle sees the report. Nothing is ever logged."),
+      t("report_hint")),
     el("div", { class: "row", style: "margin-top:12px;justify-content:flex-end" }, submit),
   ));
 }
@@ -2656,31 +2668,31 @@ function reportedBanner(it, circleId, reports) {
   return el("div", { class: "reported-banner" },
     el("span", {}, "🚩"),
     el("div", { style: "flex:1;min-width:0" },
-      el("div", { class: "small", style: "font-weight:600" }, `Reported by ${names}`),
+      el("div", { class: "small", style: "font-weight:600" }, t("reported_by", names)),
       el("div", { class: "small muted" }, reasons + (notes.length ? ` — “${notes[0]}”` : "")),
     ),
-    el("button", { class: "btn small ghost", onclick: () => reportedActions(it, circleId, reports) }, "Act"),
+    el("button", { class: "btn small ghost", onclick: () => reportedActions(it, circleId, reports) }, t("act")),
   );
 }
 
 function reportedActions(it, circleId, reports) {
   const author = reports[0].author;   // FULL node hex, embedded by the reporter's core
-  const m = el("div", {}, el("h2", {}, "Reported post"),
+  const m = el("div", {}, el("h2", {}, t("reported_post")),
     el("div", { class: "col" },
-      el("button", { class: "btn", onclick: () => { Hidden.hide(it.id); $("#modal-root").replaceChildren(); renderFeed(); } }, "🙈 Hide for me"),
+      el("button", { class: "btn", onclick: () => { Hidden.hide(it.id); $("#modal-root").replaceChildren(); renderFeed(); } }, "🙈 " + t("hide_for_me")),
       el("button", { class: "btn danger", onclick: async () => {
-        if (!confirm(`Remove ${it.author_name} from this circle? Their posts leave your view of the circle and they can't rejoin through you.`)) return;
+        if (!confirm(t("remove_confirm", it.author_name))) return;
         await invoke("remove_from_circle", { circleId, contactIdHex: author }).catch(() => {});
         $("#modal-root").replaceChildren();
-        toast("Removed");
+        toast(t("removed_toast"));
         renderFeed();
-      } }, `👋 Remove ${it.author_name} from circle`),
+      } }, "👋 " + t("remove_from_circle_btn", it.author_name)),
       el("button", { class: "btn danger", onclick: async () => {
         await invoke("block", { idHex: author }).catch(() => {});
         $("#modal-root").replaceChildren();
-        toast("Blocked");
+        toast(t("blocked_toast"));
         renderFeed();
-      } }, `✋ Block ${it.author_name}`),
+      } }, "✋ " + t("block_person", it.author_name)),
     ));
   modal(m);
 }
@@ -2753,20 +2765,20 @@ function postMenu(anchor, it, circleId) {
   // "Message …": you can't DM someone you don't have.
   const author = authorContact(it.author_short);
   popMenu(anchor, [
-    keepRefs.length ? { label: "Keep on this device", icon: "pin", on: async () => {
-      try { await invoke("media_pin", { refs: keepRefs }); toast("Kept on this device"); }
-      catch (e) { toast("Couldn't keep: " + e); }
+    keepRefs.length ? { label: t("keep_on_device"), icon: "pin", on: async () => {
+      try { await invoke("media_pin", { refs: keepRefs }); toast(t("kept_on_device")); }
+      catch (e) { toast(t("couldnt_keep", e)); }
     } } : null,
     // Share a pointer to this post: the web form, so it crosses to iOS/Android and survives being
     // pasted into any chat app. It carries no key — only a device already in the circle can open it.
-    { label: "Share post", icon: "square.and.arrow.up", on: async () => {
-      try { await navigator.clipboard.writeText(DeepLink.postLink(circleId, it.id)); toast("Link copied"); }
-      catch (e) { toast("Couldn't copy: " + e); }
+    { label: t("share_post"), icon: "square.and.arrow.up", on: async () => {
+      try { await navigator.clipboard.writeText(DeepLink.postLink(circleId, it.id)); toast(t("link_copied")); }
+      catch (e) { toast(t("couldnt_copy", e)); }
     } },
-    it.is_me ? { label: "Edit", icon: "pencil.circle.fill", on: () => editPostDialog(it, circleId) } : null,
-    it.is_me ? { label: "Unsend", icon: "arrow.uturn.backward", danger: true, on: async () => { await invoke("unsend_post", { circleId, target: it.id }); toast("Unsent"); } } : null,
+    it.is_me ? { label: t("edit"), icon: "pencil.circle.fill", on: () => editPostDialog(it, circleId) } : null,
+    it.is_me ? { label: t("unsend"), icon: "arrow.uturn.backward", danger: true, on: async () => { await invoke("unsend_post", { circleId, target: it.id }); toast(t("unsent_toast")); } } : null,
     // Hide any post from my own feed (reversible via the circle menu's "Show hidden posts").
-    { label: isHidden ? "Unhide" : "Hide", icon: isHidden ? "eye" : "eye.slash",
+    { label: isHidden ? t("unhide") : t("hide"), icon: isHidden ? "eye" : "eye.slash",
       on: () => { isHidden ? Hidden.unhide(it.id) : Hidden.hide(it.id); renderFeed(); } },
     // Reply to the AUTHOR privately: open (or reuse) the DM with them and STAGE an unsent draft
     // naming the post, with the thread open and the cursor waiting.
@@ -2778,11 +2790,11 @@ function postMenu(anchor, it, circleId) {
     // into the DM circle before anyone has decided to send anything is work that shouldn't happen,
     // and the link opens the real post (with its media) for anyone already in the circle.
     it.is_me || !author ? null : {
-      label: `Message ${author.name}`, icon: "bubble.left",
+      label: t("message_name", author.name), icon: "bubble.left",
       on: async () => {
         const t = await invoke("message_author",
           { authorShort: it.author_short, circleId, postId: it.id }).catch(() => null);
-        if (!t || !t.dm) { toast("Couldn't open the message"); return; }
+        if (!t || !t.dm) { toast(t("couldnt_open_message")); return; }
         // Consumed once by renderThread's composer — appended there, never assigned, so re-entering
         // a thread cannot discard something half-typed.
         if (t.draft) state.pendingDraft = { id: t.dm, text: t.draft };
@@ -2791,25 +2803,25 @@ function postMenu(anchor, it, circleId) {
       },
     },
     // Report to the whole circle (decentralized moderation — see reportDialog).
-    it.is_me ? null : { label: "Report", icon: "flag", danger: true, on: () => reportDialog(it, circleId) },
+    it.is_me ? null : { label: t("report"), icon: "flag", danger: true, on: () => reportDialog(it, circleId) },
   ], { align: "right" });
 }
 
 function editPostDialog(it, circleId) {
   const ta = el("textarea", {}, );
   ta.value = it.body;
-  modal(el("div", {}, el("h2", {}, "Edit post"), ta,
+  modal(el("div", {}, el("h2", {}, t("edit_post")), ta,
     el("div", { class: "row", style: "margin-top:12px;justify-content:flex-end" },
       // media/music are passed back UNCHANGED: an edit replaces the arrays rather than merging, so
       // omitting them here deleted every photo and song off the post for the whole circle.
-      el("button", { class: "btn primary", onclick: async () => { await invoke("edit_post", { circleId, target: it.id, body: ta.value.trim(), media: it.media || [], music: it.music || null }); $("#modal-root").replaceChildren(); } }, "Save"))));
+      el("button", { class: "btn primary", onclick: async () => { await invoke("edit_post", { circleId, target: it.id, body: ta.value.trim(), media: it.media || [], music: it.music || null }); $("#modal-root").replaceChildren(); } }, t("save")))));
 }
 
 function newCircleDialog() {
-  const inp = el("input", { placeholder: "Circle name (e.g. Family)" });
-  modal(el("div", {}, el("h2", {}, "New circle"), inp,
+  const inp = el("input", { placeholder: t("circle_name_ph") });
+  modal(el("div", {}, el("h2", {}, t("new_circle")), inp,
     el("div", { class: "row", style: "margin-top:12px;justify-content:flex-end" },
-      el("button", { class: "btn primary", onclick: async () => { if (inp.value.trim()) { state.activeCircle = await invoke("create_circle", { name: inp.value.trim() }); } $("#modal-root").replaceChildren(); renderFeed(); } }, "Create"))));
+      el("button", { class: "btn primary", onclick: async () => { if (inp.value.trim()) { state.activeCircle = await invoke("create_circle", { name: inp.value.trim() }); } $("#modal-root").replaceChildren(); renderFeed(); } }, t("create")))));
 }
 
 /** The manage-circle SHEET behind the toolbar's people button — macOS `CircleView`, presented via
@@ -2827,7 +2839,7 @@ async function manageCircleDialog(circle) {
   // The REAL name — this field renames the circle for everyone, so it must never be seeded with my
   // private nickname, which would silently push my name for it onto the whole circle on Rename.
   const nameInp = el("input", { value: circle.name });
-  const nickInp = el("input", { value: CircleNick.get(circle.id) || "", placeholder: "Your name for this circle" });
+  const nickInp = el("input", { value: CircleNick.get(circle.id) || "", placeholder: t("your_name_for_circle_ph") });
   const contacts = await invoke("contacts").catch(() => []);
   // Switch-Flip 1.0.7 §2: the circle's current admin set (creator + delegated admins), so we can
   // label existing admins and only offer promotion to the rest.
@@ -2835,34 +2847,34 @@ async function manageCircleDialog(circle) {
     (await invoke("circle_admins", { circleId: circle.id }).catch(() => [])).map((h) => h.toLowerCase()),
   );
   const memberList = el("div", { class: "col" });
-  if (!contacts.length) memberList.append(el("div", { class: "muted small" }, "No contacts yet — connect a friend first."));
+  if (!contacts.length) memberList.append(el("div", { class: "muted small" }, t("no_contacts_connect_first")));
   for (const c of contacts) {
     const isAdmin = admins.has((c.id_hex || "").toLowerCase());
     memberList.append(el("div", { class: "list-item" },
       el("div", { class: "avatar", style: "width:30px;height:30px;font-size:12px" }, initials(c.name)),
       el("div", { style: "flex:1" }, c.name),
       el("button", { class: "btn small", onclick: async (e) => {
-        try { await invoke("add_to_circle", { circleId: circle.id, contactIdHex: c.id_hex }); e.target.textContent = "Added ✓"; e.target.disabled = true; toast(`Added ${c.name}`); }
-        catch (err) { toast("Couldn't add: " + err); }
-      } }, "Add"),
+        try { await invoke("add_to_circle", { circleId: circle.id, contactIdHex: c.id_hex }); e.target.textContent = t("added_check"); e.target.disabled = true; toast(t("added_name", c.name)); }
+        catch (err) { toast(t("couldnt_add", err)); }
+      } }, t("add")),
       // §2: promote a member to admin (creator/admin only — the engine refuses otherwise). Admins can
       // remove members from the encrypted group (MLS Remove), so this is a deliberate, per-member act.
       isAdmin
-        ? el("span", { class: "muted small", title: "Circle admin", style: "align-self:center" }, "Admin ✓")
-        : el("button", { class: "btn small ghost", title: "Make this member an admin (can remove members)", onclick: async (e) => {
+        ? el("span", { class: "muted small", title: t("circle_admin"), style: "align-self:center" }, t("admin_check"))
+        : el("button", { class: "btn small ghost", title: t("make_admin_title"), onclick: async (e) => {
             try {
               const ok = await invoke("grant_circle_admin", { circleId: circle.id, adminHex: c.id_hex });
-              if (ok) { e.target.textContent = "Admin ✓"; e.target.disabled = true; toast(`${c.name} is now an admin`); }
-              else { toast("Only the circle's creator or an admin can promote members"); }
-            } catch (err) { toast("Couldn't promote: " + err); }
-          } }, "Make admin"),
+              if (ok) { e.target.textContent = t("admin_check"); e.target.disabled = true; toast(t("now_admin", c.name)); }
+              else { toast(t("only_creator_promote")); }
+            } catch (err) { toast(t("couldnt_promote", err)); }
+          } }, t("make_admin")),
       // Removing works for the DEFAULT circle ("My Circle") too: the engine writes the authoritative
       // removal tombstone AND purges them, so they can't auto-rejoin on their next handshake/self-sync.
       // (Previously hidden for default, which is why a removed member silently rejoined.)
-      el("button", { class: "btn small ghost", title: isDefault ? "Remove from My Circle" : "Remove from this circle", onclick: async (e) => {
-        try { await invoke("remove_from_circle", { circleId: circle.id, contactIdHex: c.id_hex }); e.target.textContent = "Removed ✓"; e.target.disabled = true; toast(`Removed ${c.name}`); renderFeed(); }
-        catch (err) { toast("Couldn't remove: " + err); }
-      } }, "Remove")));
+      el("button", { class: "btn small ghost", title: isDefault ? t("remove_from_my_circle") : t("remove_from_this_circle"), onclick: async (e) => {
+        try { await invoke("remove_from_circle", { circleId: circle.id, contactIdHex: c.id_hex }); e.target.textContent = t("removed_check"); e.target.disabled = true; toast(t("removed_name", c.name)); renderFeed(); }
+        catch (err) { toast(t("couldnt_remove", err)); }
+      } }, t("remove"))));
   }
   // Per-circle relay override: pick which CONFIGURED relays this circle uses, beyond the all-circles
   // default. No inline relay configuration here — that lives under Relays (the ⚙ → "Manage relays" link).
@@ -2870,46 +2882,46 @@ async function manageCircleDialog(circle) {
   const explicit = new Set(await invoke("circle_relays", { circleId: circle.id }).catch(() => []));
   const relaySection = el("div", { class: "col" });
   if (!allRelays.length) {
-    relaySection.append(el("div", { class: "muted small" }, "No relays configured yet."));
+    relaySection.append(el("div", { class: "muted small" }, t("no_relays_configured")));
   } else {
     for (const r of allRelays) {
       const on = explicit.has(r.node_hex) || r.is_default;
       const chk = el("input", { type: "checkbox", style: "width:auto" }); chk.checked = on; chk.disabled = r.is_default;
-      chk.onchange = async () => { try { await invoke("set_circle_relay", { nodeHex: r.node_hex, circleId: circle.id, on: chk.checked }); toast("Updated"); } catch (e) { toast("" + e); chk.checked = !chk.checked; } };
+      chk.onchange = async () => { try { await invoke("set_circle_relay", { nodeHex: r.node_hex, circleId: circle.id, on: chk.checked }); toast(t("updated_toast")); } catch (e) { toast("" + e); chk.checked = !chk.checked; } };
       relaySection.append(el("label", { class: "row", style: "gap:8px;align-items:center" }, chk,
-        el("span", { style: "flex:1" }, r.name + (r.is_default ? " — default (all circles)" : "") + (r.is_s3 ? " · S3" : ""))));
+        el("span", { style: "flex:1" }, r.name + (r.is_default ? t("default_all_circles_suffix") : "") + (r.is_s3 ? " · S3" : ""))));
     }
   }
-  relaySection.append(el("button", { class: "btn small ghost", style: "align-self:flex-start", onclick: () => relaySheet() }, "Manage relays →"));
+  relaySection.append(el("button", { class: "btn small ghost", style: "align-self:flex-start", onclick: () => relaySheet() }, t("manage_relays_link")));
 
   // The circle's own name (nickname-resolved), not a hardcoded "My Circle" — this sheet manages
   // whichever circle is active.
   sheet(circleDisplayName(circle.id, circle.name), el("div", { class: "col" },
     // Connect's front door, now that it isn't a tab — the same prominent gradient pill macOS gives
     // it in YouView.actionsRow.
-    el("button", { class: "btn primary wide", onclick: () => connectSheet() }, "Invite someone to this circle"),
-    el("label", { class: "muted small", style: "margin-top:6px" }, "Name"),
+    el("button", { class: "btn primary wide", onclick: () => connectSheet() }, t("invite_someone")),
+    el("label", { class: "muted small", style: "margin-top:6px" }, t("name_label")),
     el("div", { class: "row" }, nameInp,
-      el("button", { class: "btn", onclick: async () => { const n = nameInp.value.trim(); if (n && n !== circle.name) { await invoke("rename_circle", { id: circle.id, name: n }); toast("Renamed"); closeModal(); renderFeed(); } } }, "Rename")),
-    el("div", { class: "muted small" }, "What this circle is called for you and everyone in it."),
+      el("button", { class: "btn", onclick: async () => { const n = nameInp.value.trim(); if (n && n !== circle.name) { await invoke("rename_circle", { id: circle.id, name: n }); toast(t("renamed_toast")); closeModal(); renderFeed(); } } }, t("rename"))),
+    el("div", { class: "muted small" }, t("circle_name_hint")),
     // A PRIVATE name, alongside the shared rename above. Renaming already renamed it for everyone in
     // the circle, which is not the same thing as wanting your own name for it.
-    el("label", { class: "muted small", style: "margin-top:6px" }, "Your name"),
+    el("label", { class: "muted small", style: "margin-top:6px" }, t("your_name_label")),
     el("div", { class: "row" }, nickInp,
       el("button", { class: "btn", onclick: () => {
         CircleNick.set(circle.id, nickInp.value);
-        toast(nickInp.value.trim() ? "Saved — only you see this" : "Using the circle's own name");
+        toast(nickInp.value.trim() ? t("saved_only_you") : t("using_circles_own_name"));
         closeModal(); renderFeed(); renderTitlebarTrailing();
-      } }, "Save")),
-    el("div", { class: "muted small" }, "Only you see this. It never reaches anyone else in the circle, and it doesn't change the circle's name for them. Leave it empty to use the circle's own name."),
-    el("label", { class: "muted small", style: "margin-top:6px" }, "Relays for this circle"),
-    el("div", { class: "muted small" }, "Pick which of your relays carry this circle — the default relay always applies."),
+      } }, t("save"))),
+    el("div", { class: "muted small" }, t("nickname_hint")),
+    el("label", { class: "muted small", style: "margin-top:6px" }, t("relays_for_circle")),
+    el("div", { class: "muted small" }, t("relays_for_circle_hint")),
     relaySection,
-    el("label", { class: "muted small", style: "margin-top:6px" }, "Members"),
+    el("label", { class: "muted small", style: "margin-top:6px" }, t("members_label")),
     memberList,
     isDefault ? null : el("button", { class: "btn danger", style: "margin-top:6px", onclick: async () => {
-      await invoke("leave_circle", { id: circle.id }); state.activeCircle = "default"; closeModal(); toast("Left circle"); renderFeed();
-    } }, "Leave this circle"),
+      await invoke("leave_circle", { id: circle.id }); state.activeCircle = "default"; closeModal(); toast(t("left_circle_toast")); renderFeed();
+    } }, t("leave_this_circle")),
   ));
 }
 
@@ -3024,7 +3036,7 @@ function addStoryDialog() {
     const encoded = StoryCaptions.encode(body, spec);
     await invoke("post_story", { body: encoded, media: state.attachments[0] ? state.attachments[0].ref : null, music });
     closeModal();
-  }, "Caption your story…", {
+  }, t("caption_your_story"), {
     circleId: state.activeCircle,
     onMusicChange: (m) => { previewMusic = m; syncPreviewAudio(); },
   });
@@ -3036,7 +3048,7 @@ function addStoryDialog() {
   // container-type on an inset:0 overlay, not the frame itself — same Chromium `contain: size`
   // trap storyContentNode documents.
   const capLayer = el("div", { style: "position:absolute;inset:0;container-type:size;pointer-events:none" });
-  const hint = el("div", { style: "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.5);font-size:12px;pointer-events:none" }, "Preview");
+  const hint = el("div", { style: "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.5);font-size:12px;pointer-events:none" }, t("preview"));
   const frame = el("div", { style: "position:relative;width:min(200px,55vw);aspect-ratio:9/16;margin:0 auto;border-radius:12px;overflow:hidden;background:#000;cursor:grab;touch-action:none" },
     mediaLayer, hint, capLayer);
   const renderCap = () => {
@@ -3056,16 +3068,16 @@ function addStoryDialog() {
     if (soundBtn) {
       const hasVideo = !!v;
       soundBtn.style.display = hasVideo ? "" : "none";
-      soundBtn.textContent = previewMusic ? "🎵 Song plays" : on ? "🔊 Clip sound on" : "🔇 Clip sound off";
+      soundBtn.textContent = previewMusic ? t("song_plays") : on ? t("clip_sound_on") : t("clip_sound_off");
       soundBtn.disabled = !!previewMusic;
       soundBtn.title = previewMusic
-        ? "The attached song is this story's soundtrack — remove it to hear the clip"
-        : "Hear the clip while you caption it";
+        ? t("song_soundtrack_title")
+        : t("hear_clip_title");
       soundBtn.classList.toggle("primary", on);
     }
   };
   const soundBtn = el("button", { class: "btn small ghost", style: "display:none",
-    onclick: () => { previewSound = !previewSound; syncPreviewAudio(); } }, "🔇 Clip sound off");
+    onclick: () => { previewSound = !previewSound; syncPreviewAudio(); } }, t("clip_sound_off"));
   let resetBtn = null;   // assigned below; applyMediaTransform only ever runs after that
   // The composer is the ONLY place the author sees their framing, so it applies the transform with the
   // same code path the viewer does (storyContentNode) — scale, THEN rotate, THEN translate. CSS applies
@@ -3173,17 +3185,17 @@ function addStoryDialog() {
   const swatches = el("div", { class: "row wrap", style: "gap:6px;justify-content:center" });
   const drawSwatches = () => {
     swatches.replaceChildren(...StoryCaptions.colors.map((c, i) =>
-      el("button", { title: "Caption color", style:
+      el("button", { title: t("caption_color"), style:
         "width:20px;height:20px;border-radius:50%;padding:0;cursor:pointer;background:" + c +
         ";border:2px solid " + (i === spec.color ? "var(--text, #fff)" : "rgba(128,128,128,.35)"),
         onclick: () => { spec.color = i; drawSwatches(); renderCap(); } })));
   };
   drawSwatches();
-  const STYLES = ["Plain", "Glow", "Shadow", "Neon", "Highlight"];   // wire styleRaw order
-  const styleBtn = el("button", { class: "btn small ghost", title: "Caption style",
+  const STYLES = [t("style_plain"), t("style_glow"), t("style_shadow"), t("style_neon"), t("style_highlight")];   // wire styleRaw order
+  const styleBtn = el("button", { class: "btn small ghost", title: t("caption_style"),
     onclick: () => { spec.style = (spec.style + 1) % STYLES.length; styleBtn.textContent = "Aa · " + STYLES[spec.style]; renderCap(); } },
     "Aa · " + STYLES[spec.style]);
-  const fontBtn = el("button", { class: "btn small ghost", title: "Caption font",
+  const fontBtn = el("button", { class: "btn small ghost", title: t("caption_font"),
     onclick: () => { spec.font = (spec.font + 1) % StoryCaptions.fonts.length; syncFont(); renderCap(); } }, "Ag");
   const syncFont = () => {
     const [family, weight] = StoryCaptions.fonts[spec.font].split("|");
@@ -3195,21 +3207,21 @@ function addStoryDialog() {
   // Only shown once the author has actually reframed something — an escape hatch back to the identity
   // (which is also the only way to get back to encoding the exact legacy bytes). Lives outside `frame`
   // so the frame's gesture handlers can't swallow its click.
-  resetBtn = el("button", { class: "btn small ghost", style: "display:none", title: "Undo zoom, pan and rotation",
+  resetBtn = el("button", { class: "btn small ghost", style: "display:none", title: t("undo_framing_title"),
     onclick: () => {
       spec.mediaScale = 1; spec.mediaOffX = 0; spec.mediaOffY = 0; spec.mediaRotation = 0; mediaRotDeg = 0;
       applyMediaTransform();
-    } }, "↺ Reset framing");
+    } }, t("reset_framing"));
 
-  sheet("New story", el("div", { class: "col" },
-    el("div", { class: "muted small" }, "Add a photo or video with the + button. Stories disappear after 24 hours."),
+  sheet(t("new_story"), el("div", { class: "col" },
+    el("div", { class: "muted small" }, t("story_hint")),
     frame,
     // Spelled out because none of these are guessable: the modifiers ARE the discoverability.
     el("div", { class: "muted small", style: "text-align:center" },
-      "Drag to place the caption · scroll or pinch to zoom · shift-scroll to rotate · ⌥-drag to move the photo"),
+      t("story_gestures_hint")),
     swatches,
     el("div", { class: "row", style: "gap:8px;align-items:center" },
-      styleBtn, fontBtn, el("span", { class: "muted small" }, "Size"), sizeInp),
+      styleBtn, fontBtn, el("span", { class: "muted small" }, t("size_label")), sizeInp),
     el("div", { class: "row wrap", style: "gap:6px" }, soundBtn, resetBtn),
     composer));
   renderMedia();
@@ -3241,11 +3253,11 @@ function storySongChip(m) {
   return el("div", {
     class: "song-chip glass tint-pink",
     style: "margin-top:10px;max-width:min(420px,100%);cursor:pointer",
-    title: "Open in your music app",
+    title: t("open_in_music_app"),
     onclick: (e) => { e.stopPropagation(); if (url) openExternal(url); },
   }, el("span", { class: "note" }, icon("music.note")),
      el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
-       el("strong", {}, m.title || "Unknown song"), m.artist ? ` · ${m.artist}` : ""));
+       el("strong", {}, m.title || t("unknown_song")), m.artist ? ` · ${m.artist}` : ""));
 }
 
 /** The rendered CONTENT of a single story — framed media (author zoom/pan preserved), the styled
@@ -3331,7 +3343,7 @@ function viewStories(list, startIndex = 0) {
   const bars = el("div", { class: "story-progress" });
   const slot = el("div", { class: "col", style: "align-items:center;min-width:min(88vw,420px)" });
   const hint = el("div", { class: "muted small", style: "text-align:center;margin-top:8px" },
-    "Tap to advance · ← → skip person · swipe to skip");
+    t("story_viewer_hint"));
   // KEEP — a TOGGLE that holds this story on MY PROFILE past the 24h window. It does NOT re-publish
   // it: turning a story into a permanent post puts it back in the circle feed as a new thing
   // everyone sees again, and wanting to hold on to something yourself is a different act from
@@ -3353,8 +3365,8 @@ function viewStories(list, startIndex = 0) {
     // button, which is exactly the complaint this replaced.
     // Label AND tint, no glyph: this icon set has no bookmark, and a missing glyph would render as
     // an empty box next to the word — worse than the word alone.
-    keepBtn.replaceChildren(on ? "Kept" : "Keep");
-    keepBtn.title = on ? "Kept on your profile" : "Keep on your profile";
+    keepBtn.replaceChildren(on ? t("kept") : t("keep"));
+    keepBtn.title = on ? t("kept_on_profile") : t("keep_on_profile");
   };
   keepBtn.addEventListener("click", async (e) => {
     e.stopPropagation();
@@ -3370,7 +3382,7 @@ function viewStories(list, startIndex = 0) {
       musicDurationMs: it.music ? Number(it.music.duration_ms) || 0 : null,
     };
     const on = await invoke("toggle_kept_story", { entry }).catch(() => null);
-    if (on === null) { toast("Couldn't update Keep."); return; }
+    if (on === null) { toast(t("couldnt_update_keep")); return; }
     if (on) keptIds.add(it.id); else keptIds.delete(it.id);
     paintKeep();
   });
@@ -3385,7 +3397,7 @@ function viewStories(list, startIndex = 0) {
 
   const show = () => {
     const it = stories[index];
-    title.textContent = (it.is_me ? "You" : it.author_name) + "'s story";
+    title.textContent = t("whose_story", it.is_me ? t("you") : it.author_name);
     // One progress segment per story in THIS person's run, filled through the current one.
     let runStart = index; while (runStart > 0 && author(runStart - 1) === author(index)) runStart--;
     let runEnd = index; while (runEnd < stories.length - 1 && author(runEnd + 1) === author(index)) runEnd++;
@@ -3463,11 +3475,11 @@ async function renderMessages() {
   const pinned = Pins.ids.map((id) => byId.get(id)).filter(Boolean);
   const rest = threads.filter((t) => !Pins.has(t.circle_id));
 
-  const openDm = (t) => { state.activeDm = { id: t.circle_id, name: t.name }; renderMessages(); };
-  const del = async (t) => {
-    if (!confirm(`Delete conversation with "${t.name}"? Its local messages are cleared.`)) return;
-    Pins.remove(t.circle_id);
-    await invoke("delete_conversation", { circleId: t.circle_id });
+  const openDm = (th) => { state.activeDm = { id: th.circle_id, name: th.name }; renderMessages(); };
+  const del = async (th) => {
+    if (!confirm(t("delete_convo_confirm", th.name))) return;
+    Pins.remove(th.circle_id);
+    await invoke("delete_conversation", { circleId: th.circle_id });
     renderMessages();
   };
 
@@ -3488,27 +3500,27 @@ async function renderMessages() {
   // One conversation row — macOS `rowLabel`: avatar, name (BOLD while unread), the most recent
   // message as a one-line preview, unread badge. The pin/delete verbs live in the row's `···`
   // menu (macOS `conversationMenu`), not as two permanently-visible emoji buttons.
-  const threadRow = (t) => {
-    const unread = t.unread || 0;
+  const threadRow = (th) => {
+    const unread = th.unread || 0;
     // (`dm_threads` carries no unsent flag, and src-tauri isn't mine to change — the thread view
     // renders the "Message unsent" tombstone properly, which is where it matters.)
-    const preview = isSecret(t.last_body) ? "🔒 Secret message" : (t.last_body || "No messages yet");
-    const kebab = el("button", { class: "kebab", title: "More", "aria-label": "More" }, icon("ellipsis"));
+    const preview = isSecret(th.last_body) ? t("secret_message_preview") : (th.last_body || t("no_messages_yet"));
+    const kebab = el("button", { class: "kebab", title: t("more"), "aria-label": t("more") }, icon("ellipsis"));
     kebab.addEventListener("click", (e) => {
       e.stopPropagation();
       popMenu(kebab, [
-        Pins.has(t.circle_id)
-          ? { label: "Unpin", icon: "mappin", on: () => { Pins.toggle(t.circle_id); renderMessages(); } }
-          : { label: "Pin", icon: "mappin", on: () => { if (Pins.full) { toast("You can pin up to 6 conversations."); return; } Pins.toggle(t.circle_id); renderMessages(); } },
-        { label: "Delete", icon: "eye.slash", danger: true, on: () => del(t) },
+        Pins.has(th.circle_id)
+          ? { label: t("unpin"), icon: "mappin", on: () => { Pins.toggle(th.circle_id); renderMessages(); } }
+          : { label: t("pin"), icon: "mappin", on: () => { if (Pins.full) { toast(t("pin_limit")); return; } Pins.toggle(th.circle_id); renderMessages(); } },
+        { label: t("delete"), icon: "eye.slash", danger: true, on: () => del(th) },
       ], { align: "right" });
     });
-    return el("div", { class: "thread-item", onclick: () => openDm(t) },
-      el("div", { class: "avatar" }, initials(t.name)),
+    return el("div", { class: "thread-item", onclick: () => openDm(th) },
+      el("div", { class: "avatar" }, initials(th.name)),
       el("div", { style: "flex:1;min-width:0" },
-        el("div", { class: "name" + (unread > 0 ? " unread" : "") }, t.name),
+        el("div", { class: "name" + (unread > 0 ? " unread" : "") }, th.name),
         el("div", { class: "preview" + (unread > 0 ? " unread" : ""), style: "white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, preview)),
-      el("div", { class: "muted small" }, relTime(t.last_at)),
+      el("div", { class: "muted small" }, relTime(th.last_at)),
       unread > 0 ? unreadPill(unread) : null,
       kebab,
     );
@@ -3519,11 +3531,11 @@ async function renderMessages() {
   for (const t of rest) list.append(threadRow(t));
   if (!threads.length) {
     list.append(el("div", { class: "empty" },
-      el("div", { class: "h" }, "No messages yet"),
-      el("div", {}, "Use the compose button to start one.")));
+      el("div", { class: "h" }, t("no_messages_yet")),
+      el("div", {}, t("messages_empty_sub"))));
   }
   root.replaceChildren(el("div", { class: "col-wrap" },
-    el("div", { class: "view-head" }, el("h1", {}, "Messages")),
+    el("div", { class: "view-head" }, el("h1", {}, t("messages"))),
     list));
 }
 
@@ -3542,15 +3554,15 @@ async function newMessageSheet() {
     state.activeDm = { id, name };
     switchView("messages");
   };
-  const startBtn = el("button", { class: "btn primary wide", disabled: true, onclick: start }, "Start");
-  const title = el("h2", {}, "New message");
+  const startBtn = el("button", { class: "btn primary wide", disabled: true, onclick: start }, t("start"));
+  const title = el("h2", {}, t("new_message"));
   const sync = () => {
     startBtn.disabled = picked.size === 0;
-    startBtn.textContent = picked.size > 1 ? "Start group" : "Start";
-    title.textContent = picked.size > 1 ? `New group · ${picked.size}` : "New message";
+    startBtn.textContent = picked.size > 1 ? t("start_group") : t("start");
+    title.textContent = picked.size > 1 ? t("new_group_n", picked.size) : t("new_message");
   };
   const col = el("div", { class: "col", style: "gap:2px" });
-  if (!contacts.length) col.append(el("div", { class: "muted small" }, "No contacts yet — invite someone from your circle first."));
+  if (!contacts.length) col.append(el("div", { class: "muted small" }, t("no_contacts_invite_first")));
   for (const c of contacts) {
     const check = el("span", { class: "pick-check" }, icon("checkmark"));
     const row = el("div", { class: "list-item", style: "cursor:pointer" },
@@ -3564,7 +3576,7 @@ async function newMessageSheet() {
     });
     col.append(row);
   }
-  sheet("New message", col, startBtn);
+  sheet(t("new_message"), col, startBtn);
   const h = $("#modal-root h2"); if (h) h.replaceWith(title);
 }
 
@@ -3605,18 +3617,18 @@ async function renderThread(root, dm) {
     // An unsent message is a TOMBSTONE, not a hidden row — macOS renders "Message unsent" in
     // italic on the secondary surface, so the thread still reads as a conversation.
     let bubble;
-    if (m.unsent) bubble = el("div", { class: "chat-bubble tombstone" }, "Message unsent");
+    if (m.unsent) bubble = el("div", { class: "chat-bubble tombstone" }, t("message_unsent"));
     else if (isSecret(m.body)) { bubble = secretBubble(m.body, m.is_me); if (mediaEls.length) bubble.append(...mediaEls); }
     else if (m.body) bubble = el("div", { class: "chat-bubble" + (m.is_me ? " me" : "") }, m.body);
     else bubble = null;
 
     const col = el("div", { class: "bubble-col" });
     // In a group DM, label each INCOMING message with who sent it.
-    if (isGroup && !m.is_me && !m.unsent) col.append(el("div", { class: "chat-sender" }, m.author_name || "Someone"));
+    if (isGroup && !m.is_me && !m.unsent) col.append(el("div", { class: "chat-sender" }, m.author_name || t("someone")));
     if (mediaEls.length && !isSecret(m.body)) col.append(el("div", { class: "bubble-media" }, ...mediaEls));
     if (m.music) {
       col.append(el("a", { class: "song-chip glass tint-pink", style: "margin-top:0;max-width:260px",
-        title: "Open in your music app",
+        title: t("open_in_music_app"),
         onclick: () => { const u = musicLink(m.music); if (u) openExternal(u); } },
         el("span", { class: "note" }, icon("music.note")),
         el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
@@ -3627,14 +3639,14 @@ async function renderThread(root, dm) {
     if ((m.reactions || []).length) {
       const rr = el("div", { class: "bubble-reacts" });
       for (const r of m.reactions) {
-        rr.append(el("button", { class: "msg-react" + (r.mine ? " mine" : ""), title: r.mine ? "Remove your reaction" : "React",
+        rr.append(el("button", { class: "msg-react" + (r.mine ? " mine" : ""), title: r.mine ? t("remove_reaction") : t("react"),
           onclick: () => invoke(r.mine ? "unreact" : "react", { circleId: dm.id, target: m.id, emoji: r.emoji }) },
           r.emoji + (r.count > 1 ? " " + r.count : "")));
       }
       col.append(rr);
     }
     const meta2 = el("div", { class: "chat-meta" }, relTime(m.created_at));
-    if (m.edited && !m.unsent) meta2.append(el("span", {}, "edited"));
+    if (m.edited && !m.unsent) meta2.append(el("span", {}, t("edited")));
     // sent → checkmark; reachable on the circle's relay → filled (store-and-forward delivered)
     if (m.is_me && !m.unsent) meta2.append(el("span", { class: "chat-check" + (relayReachable ? " on" : "") }, relayReachable ? "✓✓" : "✓"));
     col.append(meta2);
@@ -3647,18 +3659,18 @@ async function renderThread(root, dm) {
         e.preventDefault();
         const anchor = { getBoundingClientRect: () => ({ left: e.clientX, right: e.clientX, top: e.clientY, bottom: e.clientY }) };
         popMenu(anchor, [
-          ...frequentEmoji(3).map((emo) => ({ label: "React " + emo, on: () => { EmojiStore.record(emo); invoke("react", { circleId: dm.id, target: m.id, emoji: emo }); } })),
-          { label: "More reactions…", icon: "plus.circle", on: () => emojiPicker(anchor, dm.id, m.id) },
+          ...frequentEmoji(3).map((emo) => ({ label: t("react_emoji", emo), on: () => { EmojiStore.record(emo); invoke("react", { circleId: dm.id, target: m.id, emoji: emo }); } })),
+          { label: t("more_reactions_menu"), icon: "plus.circle", on: () => emojiPicker(anchor, dm.id, m.id) },
           (m.is_me && m.body && !isSecret(m.body)) ? { sep: true } : null,
-          (m.is_me && m.body && !isSecret(m.body)) ? { label: "Edit", icon: "pencil.circle.fill", on: () => beginEdit(m) } : null,
-          m.is_me ? { label: "Delete", icon: "eye.slash", danger: true, on: () => invoke("unsend_post", { circleId: dm.id, target: m.id }) } : null,
+          (m.is_me && m.body && !isSecret(m.body)) ? { label: t("edit"), icon: "pencil.circle.fill", on: () => beginEdit(m) } : null,
+          m.is_me ? { label: t("delete"), icon: "eye.slash", danger: true, on: () => invoke("unsend_post", { circleId: dm.id, target: m.id }) } : null,
         ]);
       });
     }
     chat.append(row);
   }
 
-  const input = el("textarea", { class: "composer-field glass", placeholder: "Message…", rows: 1 });
+  const input = el("textarea", { class: "composer-field glass", placeholder: t("message_ph"), rows: 1 });
   const autoGrow = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 132) + "px"; };
   input.addEventListener("input", autoGrow);
   // A draft staged elsewhere ("Message the author" on a post) lands here, UNSENT. Appended rather
@@ -3677,9 +3689,9 @@ async function renderThread(root, dm) {
     input.value = m.body; autoGrow(); input.focus();
     editBar.style.display = "";
     editBar.replaceChildren(
-      el("span", { class: "muted small" }, "Editing message"),
+      el("span", { class: "muted small" }, t("editing_message")),
       el("div", { class: "spacer" }),
-      el("button", { class: "pill-btn glass", onclick: () => { editingId = null; input.value = ""; autoGrow(); editBar.style.display = "none"; } }, "Cancel"),
+      el("button", { class: "pill-btn glass", onclick: () => { editingId = null; input.value = ""; autoGrow(); editBar.style.display = "none"; } }, t("cancel")),
     );
   };
   // A song attached to the NEXT send, shown as a removable chip — same shape as the feed composer.
@@ -3703,10 +3715,10 @@ async function renderThread(root, dm) {
       ? el("div", { class: "song-chip", style: "margin-top:0" },
           el("span", { class: "note" }, "\u23F1"),
           el("div", { style: "flex:1;min-width:0" },
-            `Disappears after ${dmRetentionSecs < 3600 ? Math.round(dmRetentionSecs / 60) + "m"
+            t("disappears_after_label", dmRetentionSecs < 3600 ? Math.round(dmRetentionSecs / 60) + "m"
               : dmRetentionSecs < 86400 ? Math.round(dmRetentionSecs / 3600) + "h"
               : dmRetentionSecs < 604800 ? Math.round(dmRetentionSecs / 86400) + "d"
-              : Math.round(dmRetentionSecs / 604800) + "w"}`),
+              : Math.round(dmRetentionSecs / 604800) + "w")),
           el("span", { class: "x", style: "position:static;cursor:pointer",
                        onclick: () => { dmRetentionSecs = null; drawDmRetention(); } }, "\u00D7"))
       : null);
@@ -3731,27 +3743,27 @@ async function renderThread(root, dm) {
   const setSecret = (on) => {
     secretOn = on;
     input.classList.toggle("tint-pink", on);
-    input.placeholder = on ? "Secret message…" : "Message…";
+    input.placeholder = on ? t("secret_message_ph") : t("message_ph");
   };
-  const plus = el("button", { class: "composer-plus", title: "Attach", "aria-label": "Attach" }, icon("plus"));
+  const plus = el("button", { class: "composer-plus", title: t("attach"), "aria-label": t("attach") }, icon("plus"));
   plus.addEventListener("click", () => popMenu(plus, [
-    { label: "Photo or video", icon: "photo", on: async () => { const r = await cameraDialog(dm.id); if (r) await invoke("send_dm", { circleId: dm.id, body: "", media: [r.ref], music: null, retentionSecs: dmRetentionSecs }); } },
-    { label: "Voice message", icon: "mic", on: async () => { const r = await recordVoice(dm.id); if (r) await invoke("send_dm", { circleId: dm.id, body: "", media: [r], music: null, retentionSecs: dmRetentionSecs }); } },
+    { label: t("photo_or_video"), icon: "photo", on: async () => { const r = await cameraDialog(dm.id); if (r) await invoke("send_dm", { circleId: dm.id, body: "", media: [r.ref], music: null, retentionSecs: dmRetentionSecs }); } },
+    { label: t("voice_message_menu"), icon: "mic", on: async () => { const r = await recordVoice(dm.id); if (r) await invoke("send_dm", { circleId: dm.id, body: "", media: [r], music: null, retentionSecs: dmRetentionSecs }); } },
     // Attaches to the NEXT send rather than firing immediately — a song usually accompanies a
     // message, and the composer shows it as a removable chip until you hit send (same as the feed).
-    { label: "Add a song", icon: "music.note", on: () => musicDialog((m) => { pendingMusic = m; drawDmMusic(); }) },
-    { label: secretOn ? "Secret: on" : "Send secretly", icon: "lock.shield.fill", on: () => setSecret(!secretOn) },
+    { label: t("add_a_song"), icon: "music.note", on: () => musicDialog((m) => { pendingMusic = m; drawDmMusic(); }) },
+    { label: secretOn ? t("secret_on") : t("send_secretly"), icon: "lock.shield.fill", on: () => setSecret(!secretOn) },
     { sep: true },
-    { label: "Disappears after\u2026", icon: "timer", on: () => popMenu(plus, [
-      { label: "Don't disappear", on: () => { dmRetentionSecs = null; drawDmRetention(); } },
-      { label: "After 1 hour", on: () => { dmRetentionSecs = 3600; drawDmRetention(); } },
-      { label: "After 1 day", on: () => { dmRetentionSecs = 86400; drawDmRetention(); } },
-      { label: "After 1 week", on: () => { dmRetentionSecs = 604800; drawDmRetention(); } },
+    { label: t("disappears_after"), icon: "timer", on: () => popMenu(plus, [
+      { label: t("dont_disappear"), on: () => { dmRetentionSecs = null; drawDmRetention(); } },
+      { label: t("after_1_hour"), on: () => { dmRetentionSecs = 3600; drawDmRetention(); } },
+      { label: t("after_1_day"), on: () => { dmRetentionSecs = 86400; drawDmRetention(); } },
+      { label: t("after_1_week"), on: () => { dmRetentionSecs = 604800; drawDmRetention(); } },
     ]) },
   ]));
 
   const partner = dm.id.replace("dm:", "").split("-").find((h) => h !== state.node) || "";
-  const presence = el("div", { class: "dm-presence" }, relayReachable ? "Connected" : "Offline");
+  const presence = el("div", { class: "dm-presence" }, relayReachable ? t("connected") : t("offline"));
 
   // `.col-wrap` is what every other view's root render puts here (the feed, the DM list, You), and
   // it is the ONE thing this one was missing: `.view` has NO horizontal padding of its own, so the
@@ -3763,21 +3775,21 @@ async function renderThread(root, dm) {
     // macOS pins the DM header (name + presence) to the LEADING edge — the window's centred tabs
     // own the middle and a centred header shoved them around as the name's width changed.
     el("div", { class: "dm-head" },
-      el("button", { class: "icon-btn glass", title: "Back", "aria-label": "Back", onclick: () => { state.activeDm = null; renderMessages(); } },
+      el("button", { class: "icon-btn glass", title: t("back"), "aria-label": t("back"), onclick: () => { state.activeDm = null; renderMessages(); } },
         icon("chevron.right", "flip")),
       el("div", { style: "min-width:0" },
         el("div", { class: "dm-name" }, dm.name),
         presence),
       el("div", { class: "spacer" }),
-      partner ? el("button", { class: "icon-btn glass", title: "Audio call", "aria-label": "Audio call", onclick: () => callStart([partner], dm.name, false) }, icon("phone.fill")) : null,
-      partner ? el("button", { class: "icon-btn glass", title: "Video call", "aria-label": "Video call", onclick: () => callStart([partner], dm.name, true) }, icon("video.fill")) : null,
+      partner ? el("button", { class: "icon-btn glass", title: t("audio_call"), "aria-label": t("audio_call"), onclick: () => callStart([partner], dm.name, false) }, icon("phone.fill")) : null,
+      partner ? el("button", { class: "icon-btn glass", title: t("video_call"), "aria-label": t("video_call"), onclick: () => callStart([partner], dm.name, true) }, icon("video.fill")) : null,
     ),
     chat,
     // Unlike the feed's composer, the DM composer DOES carry a glass band (macOS:
     // `.havenGlass(in: Rectangle())`) — it's the floor of the thread, not a pill over a gradient.
     el("div", { class: "dm-composer glass" }, editBar, musicRow, dmRetentionRow,
       el("div", { class: "composer-row" }, plus, input,
-        el("button", { class: "composer-send", title: "Send", "aria-label": "Send", onclick: sendText }, icon("paperplane.fill")))),
+        el("button", { class: "composer-send", title: t("send"), "aria-label": t("send"), onclick: sendText }, icon("paperplane.fill")))),
   )));
   hydrateMedia(root, dm.id);
   chat.scrollTop = chat.scrollHeight;
@@ -3796,11 +3808,11 @@ async function connectSheet() {
   const contacts = await invoke("contacts").catch(() => []);
 
   const qrBox = el("div", { class: "qr-box" });
-  try { qrBox.innerHTML = makeQrSvg(state.inviteUri); } catch (_) { qrBox.textContent = "QR unavailable"; }
+  try { qrBox.innerHTML = makeQrSvg(state.inviteUri); } catch (_) { qrBox.textContent = t("qr_unavailable"); }
 
   const mine = el("div", { class: "card col" },
-    el("h3", {}, "Your invite"),
-    el("div", { class: "muted small" }, "Have a friend scan this, or send them the link. Verify the safety code matches on both devices."),
+    el("h3", {}, t("your_invite")),
+    el("div", { class: "muted small" }, t("your_invite_hint")),
     // `wrap` on both rows, not just one: the QR is a fixed 200-odd px and the two Copy buttons are
     // nowrap pills, so on a narrow sheet the text column has to be allowed to drop BELOW the QR and
     // the buttons below each other. Without it they only had one way out — through the card's edge.
@@ -3808,57 +3820,57 @@ async function connectSheet() {
       el("div", { class: "col", style: "flex:1 1 260px" },
         el("div", { class: "mono" }, state.inviteUri),
         el("div", { class: "row wrap" },
-          el("button", { class: "btn small", onclick: () => { navigator.clipboard.writeText(state.inviteUri); toast("Invite copied"); } }, "Copy haven:// link"),
-          el("button", { class: "btn small", onclick: () => { navigator.clipboard.writeText(state.inviteLink); toast("Web link copied"); } }, "Copy web link"),
+          el("button", { class: "btn small", onclick: () => { navigator.clipboard.writeText(state.inviteUri); toast(t("invite_copied")); } }, t("copy_haven_link")),
+          el("button", { class: "btn small", onclick: () => { navigator.clipboard.writeText(state.inviteLink); toast(t("web_link_copied")); } }, t("copy_web_link")),
         ),
       ),
     ),
   );
 
-  const linkInput = el("input", { placeholder: "Paste a haven:// or https:// invite or post link…" });
+  const linkInput = el("input", { placeholder: t("paste_invite_ph") });
   const add = el("div", { class: "card col" },
-    el("h3", {}, "Connect a friend"),
+    el("h3", {}, t("connect_friend")),
     // Pasted links go through routeDeepLink, so a post link opens the post instead of being fed to the
     // invite handshake — an invite's payload has the same `<a>.<b>` fragment shape, so only the `p/`
     // check tells them apart.
     el("div", { class: "row" }, linkInput, el("button", { class: "btn primary", onclick: async () => {
       const kind = await routeDeepLink(linkInput.value);
-      if (kind === "invite") { toast("Invite sent — they'll appear once they accept"); linkInput.value = ""; }
+      if (kind === "invite") { toast(t("invite_sent")); linkInput.value = ""; }
       else if (kind === "post") linkInput.value = "";
-      else toast("That doesn't look like a Haven link");
-    } }, "Connect")),
-    el("button", { class: "btn ghost small", onclick: startScan }, "📷 Scan a QR with your camera"),
+      else toast(t("not_haven_link"));
+    } }, t("connect"))),
+    el("button", { class: "btn ghost small", onclick: startScan }, t("scan_qr_camera")),
   );
 
-  const pend = el("div", { class: "card col" }, el("h3", {}, `Requests (${pending.length})`));
-  if (!pending.length) pend.append(el("div", { class: "muted small" }, "No pending requests."));
+  const pend = el("div", { class: "card col" }, el("h3", {}, t("requests_n", pending.length)));
+  if (!pending.length) pend.append(el("div", { class: "muted small" }, t("no_pending_requests")));
   for (const p of pending) {
     pend.append(el("div", { class: "pending-item" },
       el("div", { class: "row" }, el("div", { class: "avatar" }, initials(p.name)),
-        el("div", { style: "flex:1" }, el("div", { class: "name" }, p.name), el("div", { class: "muted small mono" }, "safety: " + p.verify_hex.slice(0, 16))),
-        el("button", { class: "btn small primary", onclick: async () => { await invoke("approve", { idHex: p.id_hex }); toast("Connected"); } }, "Accept"),
-        el("button", { class: "btn small ghost", onclick: async () => { await invoke("dismiss", { idHex: p.id_hex }); } }, "Ignore"),
+        el("div", { style: "flex:1" }, el("div", { class: "name" }, p.name), el("div", { class: "muted small mono" }, t("safety_prefix") + p.verify_hex.slice(0, 16))),
+        el("button", { class: "btn small primary", onclick: async () => { await invoke("approve", { idHex: p.id_hex }); toast(t("connected")); } }, t("accept")),
+        el("button", { class: "btn small ghost", onclick: async () => { await invoke("dismiss", { idHex: p.id_hex }); } }, t("ignore")),
       )));
   }
 
-  const cl = el("div", { class: "card col" }, el("h3", {}, `Contacts (${contacts.length})`));
-  if (!contacts.length) cl.append(el("div", { class: "muted small" }, "No contacts yet."));
+  const cl = el("div", { class: "card col" }, el("h3", {}, t("contacts_n", contacts.length)));
+  if (!contacts.length) cl.append(el("div", { class: "muted small" }, t("no_contacts_yet")));
   for (const c of contacts) {
     cl.append(el("div", { class: "list-item" },
       el("div", { class: "avatar" }, initials(c.name)),
       el("div", { style: "flex:1" }, el("div", { class: "name" }, c.name), el("div", { class: "muted small mono" }, c.id_hex.slice(0, 16) + "…")),
-      el("button", { class: "btn small", onclick: async () => { const id = await invoke("start_dm", { contactIdHex: c.id_hex, contactName: c.name }); state.activeDm = { id, name: c.name }; closeModal(); switchView("messages"); } }, "Message"),
+      el("button", { class: "btn small", onclick: async () => { const id = await invoke("start_dm", { contactIdHex: c.id_hex, contactName: c.name }); state.activeDm = { id, name: c.name }; closeModal(); switchView("messages"); } }, t("message_btn")),
       (() => { const k = el("button", { class: "kebab" }, icon("ellipsis")); k.addEventListener("click", () => contactMenu(k, c)); return k; })(),
     ));
   }
 
-  sheet("Connect", el("div", { class: "col", style: "gap:16px" }, mine, add, pend, cl));
+  sheet(t("connect"), el("div", { class: "col", style: "gap:16px" }, mine, add, pend, cl));
 }
 
 function contactMenu(anchor, c) {
   popMenu(anchor, [
-    { label: "Block " + c.name, icon: "hand.raised.fill", danger: true,
-      on: async () => { await invoke("block", { idHex: c.id_hex }); toast("Blocked"); connectSheet(); } },
+    { label: t("block_person", c.name), icon: "hand.raised.fill", danger: true,
+      on: async () => { await invoke("block", { idHex: c.id_hex }); toast(t("blocked_toast")); connectSheet(); } },
   ], { align: "right" });
 }
 
@@ -3872,12 +3884,12 @@ function makeQrSvg(text) {
 async function startScan() {
   const video = el("video", { id: "scan-video", autoplay: "", muted: "", playsinline: "" });
   const canvas = el("canvas", { style: "display:none" });
-  const status = el("div", { class: "muted small" }, "Point your camera at a Haven QR code.");
+  const status = el("div", { class: "muted small" }, t("point_camera_qr"));
   let stream, raf;
   // The scanner is a live viewfinder — same rule as the camera: the feed goes quiet behind it.
   const releaseCapture = beginCapture(() => stop());
-  const close = modal(el("div", {}, el("h2", {}, "Scan QR"), video, status, canvas,
-    el("div", { class: "row", style: "margin-top:10px;justify-content:flex-end" }, el("button", { class: "btn", onclick: () => stop() }, "Close"))));
+  const close = modal(el("div", {}, el("h2", {}, t("scan_qr")), video, status, canvas,
+    el("div", { class: "row", style: "margin-top:10px;justify-content:flex-end" }, el("button", { class: "btn", onclick: () => stop() }, t("close")))));
   const stop = () => { if (raf) cancelAnimationFrame(raf); if (stream) stream.getTracks().forEach((t) => t.stop()); releaseCapture(); close(); };
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
@@ -3891,14 +3903,14 @@ async function startScan() {
         const code = window.jsQR ? window.jsQR(img.data, img.width, img.height) : null;
         if (code && code.data) {
           stop();
-          invoke("connect_by_link", { uri: code.data.trim() }).then((ok) => toast(ok ? "Invite sent!" : "Not a Haven QR"));
+          invoke("connect_by_link", { uri: code.data.trim() }).then((ok) => toast(ok ? t("invite_sent_short") : t("not_haven_qr")));
           return;
         }
       }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
-  } catch (e) { status.textContent = "Camera unavailable: " + e; }
+  } catch (e) { status.textContent = t("camera_unavailable", e); }
 }
 
 // ---- Relay -----------------------------------------------------------------------------
@@ -3920,25 +3932,25 @@ async function relayLimitsSection(hosting) {
   const cur = await invoke("get_relay_media_limits").catch(() => ({ max_age_days: 30, max_bytes: 32 * 1024 ** 3 }));
   const GB = 1024 ** 3;
   const ageSel = el("select", {},
-    ...[[7, "7 days"], [30, "30 days"], [90, "90 days"], [365, "1 year"], [0, "No limit"]]
+    ...[[7, t("days_7")], [30, t("days_30")], [90, t("days_90")], [365, t("year_1")], [0, t("no_limit")]]
       .map(([v, label]) => el("option", Object.assign({ value: String(v) }, v === cur.max_age_days ? { selected: "" } : {}), label)));
   const sizeSel = el("select", {},
-    ...[[8 * GB, "8 GB"], [32 * GB, "32 GB"], [128 * GB, "128 GB"], [512 * GB, "512 GB"], [0, "No limit"]]
+    ...[[8 * GB, "8 GB"], [32 * GB, "32 GB"], [128 * GB, "128 GB"], [512 * GB, "512 GB"], [0, t("no_limit")]]
       .map(([v, label]) => el("option", Object.assign({ value: String(v) }, v === cur.max_bytes ? { selected: "" } : {}), label)));
   const apply = async () => {
     await invoke("set_relay_media_limits", {
       maxAgeDays: Number(ageSel.value), maxBytes: Number(sizeSel.value),
     }).catch((e) => toast("" + e));
-    toast(hosting ? "Saved — applies next time the relay starts" : "Saved");
+    toast(hosting ? t("saved_applies_next") : t("saved"));
   };
   ageSel.onchange = apply;
   sizeSel.onchange = apply;
   return el("div", { class: "col", style: "margin-top:10px" },
-    el("label", { class: "muted small" }, "Keep media for"), ageSel,
-    el("label", { class: "muted small", style: "margin-top:6px" }, "Media storage limit"), sizeSel,
+    el("label", { class: "muted small" }, t("keep_media_for")), ageSel,
+    el("label", { class: "muted small", style: "margin-top:6px" }, t("media_storage_limit")), sizeSel,
     el("div", { class: "muted small" }, hosting
-      ? "Changes apply next time the relay starts — Stop hosting and start again to apply them now. Whichever limit is reached first wins: old media is swept on age, and the oldest goes first if the size cap is hit. Your circles' undelivered messages are never swept — only media."
-      : "Whichever limit is reached first wins: old media is swept on age, and the oldest goes first if the size cap is hit. Your circles' undelivered messages are never swept — only media."),
+      ? t("relay_limits_hint_hosting")
+      : t("relay_limits_hint")),
   );
 }
 async function relaySheet() {
@@ -3946,7 +3958,7 @@ async function relaySheet() {
   const pub = await invoke("relay_public_settings").catch(() => ({
     public_url: "", tunnel_token: "", auto_tunnel: true, front_door: "auto", derp_url: "",
   }));
-  const adoptInput = el("input", { placeholder: "Paste node id (64 hex) or haven-relay interface JSON…" });
+  const adoptInput = el("input", { placeholder: t("adopt_ph") });
   // Three first-class modes — Manual stays correct if free/token Cloudflare paths go away.
   let frontDoor = pub.front_door || "auto";
   const urlInput = el("input", {
@@ -3955,26 +3967,26 @@ async function relaySheet() {
   });
   const derpInput = el("input", {
     value: pub.derp_url || "",
-    placeholder: "optional — https://derp.example.com (sibling host for :3340)",
+    placeholder: t("derp_ph"),
   });
   const tokenInput = el("input", {
     type: "password",
     value: pub.tunnel_token || "",
-    placeholder: "Cloudflare tunnel install token",
+    placeholder: t("token_ph"),
     autocomplete: "off",
   });
   const modeBox = el("div", { class: "col", style: "gap:4px" });
   const modes = [
-    ["auto", "Free trycloudflare", "A free temporary Cloudflare address — zero setup, but it changes every restart."],
-    ["bundled", "Custom domain (Haven runs cloudflared)", "Your own domain: paste it plus a Cloudflare tunnel token, and Haven runs the tunnel for you."],
-    ["manual", "Manual / external tunnel", "You run the tunnel or reverse proxy; Haven just announces its HTTPS address."],
+    ["auto", t("mode_auto_label"), t("mode_auto_hint")],
+    ["bundled", t("mode_bundled_label"), t("mode_bundled_hint")],
+    ["manual", t("mode_manual_label"), t("mode_manual_hint")],
   ];
-  const derpLabel = el("label", { class: "muted small", style: "margin-top:6px" }, "DERP fabric URL (optional, distinct from media)");
+  const derpLabel = el("label", { class: "muted small", style: "margin-top:6px" }, t("derp_label"));
   const syncModeUi = () => {
     tokenInput.disabled = frontDoor === "manual" || frontDoor === "auto";
     tokenInput.style.opacity = tokenInput.disabled ? "0.5" : "1";
     urlInput.placeholder = frontDoor === "auto"
-      ? "optional stable media URL (switches to manual when set alone)"
+      ? t("url_ph_auto")
       : "https://relay.example.com";
     // Dedicated DERP URL for named/manual dual-role; free auto prefers path proxy (one origin).
     const hideDerp = frontDoor === "auto";
@@ -4007,25 +4019,25 @@ async function relaySheet() {
         derpUrl: derpInput.value.trim(),
       });
       toast(s.hosting
-        ? "Saved — restart hosting to apply front-door settings"
-        : "Saved");
+        ? t("saved_restart_hosting")
+        : t("saved"));
     } catch (e) { toast("" + e); }
   };
   const publicCard = el("div", { class: "card col" },
-    el("h3", {}, "Public HTTPS front door"),
+    el("h3", {}, t("public_front_door")),
     el("div", { class: "muted small" },
-      "Friends off your LAN need HTTPS to the media port (8674) and (for circle-hosted NAT fabric) DERP on 3340. Blobs stay E2E-sealed — the front door only moves ciphertext."),
+      t("front_door_hint")),
     modeBox,
-    el("label", { class: "muted small", style: "margin-top:8px" }, "Media public URL"),
+    el("label", { class: "muted small", style: "margin-top:8px" }, t("media_public_url")),
     urlInput,
     derpLabel,
     derpInput,
-    el("label", { class: "muted small", style: "margin-top:6px" }, "Tunnel token (bundled mode only)"),
+    el("label", { class: "muted small", style: "margin-top:6px" }, t("tunnel_token_label")),
     tokenInput,
-    el("button", { class: "btn small primary", style: "align-self:flex-start;margin-top:8px", onclick: savePublic }, "Save front door"),
+    el("button", { class: "btn small primary", style: "align-self:flex-start;margin-top:8px", onclick: savePublic }, t("save_front_door")),
     el("div", { class: "muted small" },
-      "Whichever mode you pick, the front door only ever carries sealed data. ",
-      el("a", { href: "https://wemiller.com/apps/haven/docs/#front-door", target: "_blank", style: "color:var(--pink);text-decoration:underline" }, "Learn more")),
+      t("front_door_sealed"),
+      el("a", { href: "https://wemiller.com/apps/haven/docs/#front-door", target: "_blank", style: "color:var(--pink);text-decoration:underline" }, t("learn_more"))),
   );
   const liveTunnelCard = (() => {
     if (!s.hosting) return null;
@@ -4034,25 +4046,25 @@ async function relaySheet() {
     if (!media && !derp) return null;
     if (s.path_routed && media) {
       return el("div", { class: "card col" },
-        el("h3", {}, "Live Cloudflare tunnel"),
-        el("div", { class: "ok-text" }, "One cloudflared → path proxy :8675 (media + DERP)"),
+        el("h3", {}, t("live_tunnel")),
+        el("div", { class: "ok-text" }, t("live_tunnel_path")),
         el("div", { class: "mono", style: "word-break:break-all" }, media),
-        el("button", { class: "btn small", style: "align-self:flex-start", onclick: () => { navigator.clipboard.writeText(media); toast("URL copied"); } }, "Copy"),
+        el("button", { class: "btn small", style: "align-self:flex-start", onclick: () => { navigator.clipboard.writeText(media); toast(t("url_copied")); } }, t("copy")),
       );
     }
     if (media && derp && media !== derp) {
       return el("div", { class: "card col" },
-        el("h3", {}, "Live Cloudflare tunnels (dual)"),
-        el("div", { class: "muted small" }, "Path proxy off — two free trycloudflare origins (both visible):"),
-        el("div", { class: "muted small" }, "Media"),
+        el("h3", {}, t("live_tunnels_dual")),
+        el("div", { class: "muted small" }, t("dual_hint")),
+        el("div", { class: "muted small" }, t("media_label")),
         el("div", { class: "mono", style: "word-break:break-all" }, media),
-        el("div", { class: "muted small", style: "margin-top:6px" }, "DERP fabric"),
+        el("div", { class: "muted small", style: "margin-top:6px" }, t("derp_fabric")),
         el("div", { class: "mono", style: "word-break:break-all" }, derp),
       );
     }
     if (media) {
       return el("div", { class: "card col" },
-        el("h3", {}, "Live Cloudflare tunnel"),
+        el("h3", {}, t("live_tunnel")),
         el("div", { class: "mono", style: "word-break:break-all" }, media),
         derp && derp !== media
           ? el("div", { class: "col" },
@@ -4064,50 +4076,50 @@ async function relaySheet() {
     return null;
   })();
   const hostCard = el("div", { class: "card col" },
-    el("h3", {}, "Host the relay on this PC"),
-    el("div", { class: "muted small" }, "Your circle's relay runs here so posts and media reach friends even when you're both offline. The relay never sees your content — everything is end-to-end sealed."),
+    el("h3", {}, t("host_relay_pc")),
+    el("div", { class: "muted small" }, t("host_relay_hint")),
     s.hosting
       ? el("div", { class: "col" },
-          el("div", { class: "ok-text" }, "● Relaying"),
-          s.relay_link ? el("div", { class: "row wrap" }, el("div", { class: "mono", style: "flex:1 1 200px" }, s.relay_link), el("button", { class: "btn small", onclick: () => { navigator.clipboard.writeText(s.relay_link); toast("Relay id copied"); } }, "Copy")) : null,
-          el("div", { class: "muted small" }, "Share this id with your circle so they adopt the same relay."),
-          el("button", { class: "btn danger small", onclick: async () => { await invoke("stop_hosting"); renderRelay(); } }, "Stop hosting"),
+          el("div", { class: "ok-text" }, t("relaying_status")),
+          s.relay_link ? el("div", { class: "row wrap" }, el("div", { class: "mono", style: "flex:1 1 200px" }, s.relay_link), el("button", { class: "btn small", onclick: () => { navigator.clipboard.writeText(s.relay_link); toast(t("relay_id_copied")); } }, t("copy"))) : null,
+          el("div", { class: "muted small" }, t("share_relay_id_hint")),
+          el("button", { class: "btn danger small", onclick: async () => { await invoke("stop_hosting"); renderRelay(); } }, t("stop_hosting")),
         )
-      : el("button", { class: "btn primary", onclick: async () => { try { await invoke("start_hosting"); toast("Relay started"); } catch (e) { toast("" + e); } renderRelay(); } }, "Start hosting"),
+      : el("button", { class: "btn primary", onclick: async () => { try { await invoke("start_hosting"); toast(t("relay_started")); } catch (e) { toast("" + e); } renderRelay(); } }, t("start_hosting")),
     await relayLimitsSection(s.hosting),
   );
   // Configured relays (active + inactive). "Remove" DEACTIVATES (config survives); "Delete" erases.
   const relayList = await invoke("relays").catch(() => []);
   const adoptCard = el("div", { class: "card col" },
-    el("h3", {}, `Configured relays (${relayList.length})`),
-    el("div", { class: "muted small" }, "Add more than one for redundancy — posts and media are mirrored to every relay, and if one goes down Haven quietly uses the others. The default relay (★) is inherited by every circle that hasn't picked its own. Removing a relay DEACTIVATES it (its name + circle settings survive so you can turn it back on); an inactive relay unseen for a week is cleaned up automatically."),
+    el("h3", {}, t("configured_relays", relayList.length)),
+    el("div", { class: "muted small" }, t("configured_relays_hint")),
   );
   for (const r of relayList) {
     const dotCls = !r.active ? "" : (r.reachable ? "on" : "");
-    const statusTxt = !r.active ? "deactivated — config kept"
-      : (r.is_s3 ? "S3 · store-and-forward" : (r.hosted ? "this PC" : (r.reachable ? "reachable" : "retrying…")));
+    const statusTxt = !r.active ? t("deactivated_config_kept")
+      : (r.is_s3 ? t("s3_saf") : (r.hosted ? t("this_pc") : (r.reachable ? t("reachable") : t("retrying"))));
     const actions = el("div", { class: "row", style: "gap:6px;flex-wrap:wrap" });
     if (r.active) {
-      actions.append(el("button", { class: "btn small", title: "Stop using this relay (keeps config)", onclick: async () => { await invoke("forget_relay", { nodeHex: r.node_hex }); toast("Relay deactivated"); renderRelay(); } }, "Deactivate"));
+      actions.append(el("button", { class: "btn small", title: t("deactivate_title"), onclick: async () => { await invoke("forget_relay", { nodeHex: r.node_hex }); toast(t("relay_deactivated")); renderRelay(); } }, t("deactivate")));
     } else {
-      actions.append(el("button", { class: "btn small primary", onclick: async () => { await invoke("reactivate_relay", { nodeHex: r.node_hex }); toast("Relay reactivated"); renderRelay(); } }, "Reactivate"));
+      actions.append(el("button", { class: "btn small primary", onclick: async () => { await invoke("reactivate_relay", { nodeHex: r.node_hex }); toast(t("relay_reactivated")); renderRelay(); } }, t("reactivate")));
     }
     actions.append(r.is_default
-      ? el("button", { class: "btn small ghost", title: "Stop being the all-circles default", onclick: async () => { await invoke("set_default_relay", { nodeHex: "" }); renderRelay(); } }, "Unset default")
-      : el("button", { class: "btn small ghost", title: "Use for every circle by default", onclick: async () => { await invoke("set_default_relay", { nodeHex: r.node_hex }); toast("Default relay set"); renderRelay(); } }, "Make default"));
+      ? el("button", { class: "btn small ghost", title: t("unset_default_title"), onclick: async () => { await invoke("set_default_relay", { nodeHex: "" }); renderRelay(); } }, t("unset_default"))
+      : el("button", { class: "btn small ghost", title: t("make_default_title"), onclick: async () => { await invoke("set_default_relay", { nodeHex: r.node_hex }); toast(t("default_relay_set")); renderRelay(); } }, t("make_default")));
     actions.append(el("button", { class: "btn small ghost", onclick: async () => {
-      const n = prompt("Relay name", r.name); if (n && n.trim()) { await invoke("rename_relay", { nodeHex: r.node_hex, name: n.trim() }); renderRelay(); }
-    } }, "Rename"));
-    actions.append(el("button", { class: "btn small danger", title: "Erase config for good", onclick: async () => { await invoke("erase_relay", { nodeHex: r.node_hex }); toast("Relay deleted"); renderRelay(); } }, "Delete"));
+      const n = prompt(t("relay_name_prompt"), r.name); if (n && n.trim()) { await invoke("rename_relay", { nodeHex: r.node_hex, name: n.trim() }); renderRelay(); }
+    } }, t("rename")));
+    actions.append(el("button", { class: "btn small danger", title: t("erase_title"), onclick: async () => { await invoke("erase_relay", { nodeHex: r.node_hex }); toast(t("relay_deleted")); renderRelay(); } }, t("delete")));
     adoptCard.append(el("div", { class: "list-item col", style: "align-items:stretch;gap:6px" },
       el("div", { class: "row", style: "gap:8px;align-items:center" },
         el("span", { class: "dot " + dotCls, title: statusTxt }),
         el("div", { style: "flex:1;min-width:0" },
           el("div", { class: "row", style: "gap:6px;align-items:center" },
             el("span", { style: "font-weight:600;overflow:hidden;text-overflow:ellipsis" }, r.name),
-            r.is_default ? el("span", { class: "tag", title: "Default for all circles" }, "★ default") : null,
+            r.is_default ? el("span", { class: "tag", title: t("default_for_all") }, t("star_default")) : null,
             r.is_s3 ? el("span", { class: "tag" }, "S3") : null,
-            r.hosted ? el("span", { class: "tag" }, "this PC") : null,
+            r.hosted ? el("span", { class: "tag" }, t("this_pc")) : null,
           ),
           el("div", { class: "mono small muted", style: "overflow:hidden;text-overflow:ellipsis" }, r.is_s3 ? r.node_hex : r.node_hex.slice(0, 20) + "…"),
           el("div", { class: "muted small" }, statusTxt),
@@ -4116,27 +4128,27 @@ async function relaySheet() {
       actions,
     ));
   }
-  if (!relayList.length) adoptCard.append(el("div", { class: "muted small" }, "No relays yet — host one above, adopt a friend's, or add an S3 bucket below."));
+  if (!relayList.length) adoptCard.append(el("div", { class: "muted small" }, t("no_relays_yet")));
   // Deleted relays — the undo for "Delete", which drops the entry, every circle association and the
   // default pick. A relay is a 64-character node id, not something anyone re-adds from memory.
   // Hidden entirely when there is nothing to recover. Apple/Android parity.
   const erased = await invoke("erased_relays").catch(() => []);
   if (erased.length) {
     const det = el("details", { class: "list-item col", style: "align-items:stretch;gap:6px" });
-    det.append(el("summary", {}, `Deleted relays · ${erased.length}`));
+    det.append(el("summary", {}, t("deleted_relays", erased.length)));
     for (const rec of erased) {
       const e = rec.entry || {};
       det.append(el("div", { class: "row", style: "gap:8px;align-items:center" },
         el("div", { style: "flex:1;min-width:0" },
           el("div", { style: "overflow:hidden;text-overflow:ellipsis" }, e.name || (e.hex || "").slice(0, 12) + "…"),
           el("div", { class: "mono small muted" },
-            (e.hex || "").slice(0, 20) + "…" + (rec.circles && rec.circles.length ? ` · ${rec.circles.length} circle${rec.circles.length === 1 ? "" : "s"}` : "")),
+            (e.hex || "").slice(0, 20) + "…" + (rec.circles && rec.circles.length ? t("circles_count", rec.circles.length) : "")),
         ),
-        el("button", { class: "btn small primary", onclick: async () => { await invoke("restore_erased_relay", { nodeHex: e.hex }); toast("Relay restored"); renderRelay(); } }, "Restore"),
-        el("button", { class: "btn small", onclick: async () => { await invoke("drop_erased_relay", { nodeHex: e.hex }); renderRelay(); } }, "Forget"),
+        el("button", { class: "btn small primary", onclick: async () => { await invoke("restore_erased_relay", { nodeHex: e.hex }); toast(t("relay_restored")); renderRelay(); } }, t("restore")),
+        el("button", { class: "btn small", onclick: async () => { await invoke("drop_erased_relay", { nodeHex: e.hex }); renderRelay(); } }, t("forget")),
       ));
     }
-    det.append(el("div", { class: "muted small" }, "Restore puts a deleted relay back in the circles it served. Cleared after 30 days."));
+    det.append(el("div", { class: "muted small" }, t("restore_hint")));
     adoptCard.append(det);
   }
   adoptCard.append(el("div", { class: "row" }, adoptInput, el("button", { class: "btn primary", onclick: async () => {
@@ -4145,56 +4157,56 @@ async function relaySheet() {
     const okJson = v.startsWith("{") && v.includes("node");
     if (okBare || okJson) {
       await invoke("adopt_relay", { nodeHex: v });
-      toast("Relay added");
+      toast(t("relay_added"));
       adoptInput.value = "";
       renderRelay();
     } else {
-      toast("Paste a 64-hex node id or the JSON block from haven-relay");
+      toast(t("paste_node_id_error"));
     }
-  } }, "Add Haven relay")));
+  } }, t("add_haven_relay"))));
   const au = await invoke("autostart_status").catch(() => ({ login_item: false, host_on_launch: false }));
   const loginChk = el("input", { type: "checkbox", style: "width:auto" }); loginChk.checked = au.login_item;
   const hostChk = el("input", { type: "checkbox", style: "width:auto" }); hostChk.checked = au.host_on_launch;
   const alwaysOn = el("div", { class: "card col" },
-    el("h3", {}, "Always-on relay (survives reboot)"),
-    el("div", { class: "muted small" }, "Have Haven start automatically when you log in and keep hosting your circle's relay — so this PC stays a relay across reboots, no terminal needed."),
-    el("label", { class: "row", style: "gap:8px" }, loginChk, el("span", {}, "Start Haven when I log in")),
-    el("label", { class: "row", style: "gap:8px" }, hostChk, el("span", {}, "Host the relay automatically on launch")),
-    el("button", { class: "btn primary", style: "align-self:flex-start", onclick: async () => { try { await invoke("set_autostart", { loginItem: loginChk.checked, hostOnLaunch: hostChk.checked }); toast("Saved"); renderRelay(); } catch (e) { toast("" + e); } } }, "Save"),
+    el("h3", {}, t("always_on_relay")),
+    el("div", { class: "muted small" }, t("always_on_hint")),
+    el("label", { class: "row", style: "gap:8px" }, loginChk, el("span", {}, t("start_on_login"))),
+    el("label", { class: "row", style: "gap:8px" }, hostChk, el("span", {}, t("host_on_launch"))),
+    el("button", { class: "btn primary", style: "align-self:flex-start", onclick: async () => { try { await invoke("set_autostart", { loginItem: loginChk.checked, hostOnLaunch: hostChk.checked }); toast(t("saved")); renderRelay(); } catch (e) { toast("" + e); } } }, t("save")),
   );
   const headless = el("div", { class: "card col" },
-    el("h3", {}, "Run headless"),
-    el("div", { class: "muted small html", html: "Prefer no window? Run <span class='mono'>haven-desktop --headless</span> for relay-only." }),
+    el("h3", {}, t("run_headless")),
+    el("div", { class: "muted small html", html: t("headless_hint_html") }),
   );
   const s3 = await invoke("s3_status");
   const f = {
-    name: el("input", { value: s3.configured ? ("S3 · " + s3.bucket) : "", placeholder: "Name (optional)" }),
-    endpoint: el("input", { value: s3.endpoint || "", placeholder: "Endpoint, e.g. https://s3.us-east-1.amazonaws.com" }),
-    region: el("input", { value: s3.region || "us-east-1", placeholder: "Region", style: "max-width:160px" }),
-    bucket: el("input", { value: s3.bucket || "", placeholder: "Bucket name" }),
-    access: el("input", { value: s3.access_key || "", placeholder: "Access key id" }),
-    secret: el("input", { type: "password", placeholder: s3.configured ? "•••••• (stored in your keychain)" : "Secret access key" }),
-    prefix: el("input", { value: s3.prefix || "", placeholder: "Key prefix (optional)" }),
+    name: el("input", { value: s3.configured ? ("S3 · " + s3.bucket) : "", placeholder: t("name_optional_ph") }),
+    endpoint: el("input", { value: s3.endpoint || "", placeholder: t("endpoint_ph") }),
+    region: el("input", { value: s3.region || "us-east-1", placeholder: t("region_ph"), style: "max-width:160px" }),
+    bucket: el("input", { value: s3.bucket || "", placeholder: t("bucket_ph") }),
+    access: el("input", { value: s3.access_key || "", placeholder: t("access_key_ph") }),
+    secret: el("input", { type: "password", placeholder: s3.configured ? t("stored_keychain_ph") : t("secret_key_ph") }),
+    prefix: el("input", { value: s3.prefix || "", placeholder: t("prefix_ph") }),
   };
   const s3default = el("input", { type: "checkbox", style: "width:auto" }); s3default.checked = true;
   const s3card = el("div", { class: "card col" },
-    el("h3", {}, "Add an S3 bucket as a relay (S3 / R2 / B2)"),
-    el("div", { class: "muted small" }, "Bring your own bucket as a store-and-forward relay. " + (s3.configured ? "✓ Configured: " + s3.bucket : "Not configured.")),
+    el("h3", {}, t("add_s3_title")),
+    el("div", { class: "muted small" }, t("byo_bucket") + (s3.configured ? t("configured_prefix") + s3.bucket : t("not_configured"))),
     el("div", { class: "muted small", style: "border-left:3px solid var(--warn,#e0a020);padding-left:8px" },
-      "⚠︎ Store-and-forward only: an S3 bucket holds sealed posts & media for offline delivery — it is NOT a live P2P relay (no realtime fan-out). The provider never sees plaintext; your secret stays in this device's keychain, never on any server. Works with AWS S3, Cloudflare R2, Backblaze B2, MinIO."),
+      t("s3_warning")),
     f.name, f.endpoint, el("div", { class: "row" }, f.region, f.bucket), f.access, f.secret, f.prefix,
-    el("label", { class: "row", style: "gap:8px" }, s3default, el("span", {}, "Make the default for all circles")),
+    el("label", { class: "row", style: "gap:8px" }, s3default, el("span", {}, t("make_default_all"))),
     el("div", { class: "row" },
       el("button", { class: "btn primary", onclick: async () => {
         try {
           await invoke("add_s3_relay", { endpoint: f.endpoint.value.trim(), region: f.region.value.trim(), bucket: f.bucket.value.trim(), accessKey: f.access.value.trim(), secretKey: f.secret.value, prefix: f.prefix.value.trim(), name: f.name.value.trim(), setDefault: s3default.checked });
-          toast("S3 relay added"); renderRelay();
+          toast(t("s3_added")); renderRelay();
         } catch (e) { toast("" + e); }
-      } }, s3.configured ? "Update bucket" : "Add S3 relay"),
-      s3.configured ? el("button", { class: "btn danger small", onclick: async () => { await invoke("erase_relay", { nodeHex: "s3:" + s3.bucket }); await invoke("s3_clear"); toast("S3 relay removed"); renderRelay(); } }, "Remove") : null,
+      } }, s3.configured ? t("update_bucket") : t("add_s3_relay")),
+      s3.configured ? el("button", { class: "btn danger small", onclick: async () => { await invoke("erase_relay", { nodeHex: "s3:" + s3.bucket }); await invoke("s3_clear"); toast(t("s3_removed")); renderRelay(); } }, t("remove")) : null,
     ),
   );
-  sheet("Relays", el("div", { class: "col", style: "gap:16px" }, hostCard, liveTunnelCard, publicCard, alwaysOn, adoptCard, s3card, headless));
+  sheet(t("relays"), el("div", { class: "col", style: "gap:16px" }, hostCard, liveTunnelCard, publicCard, alwaysOn, adoptCard, s3card, headless));
 }
 
 // ---- You / Settings --------------------------------------------------------------------
@@ -4207,16 +4219,16 @@ async function renderYou() {
   const p = await invoke("get_profile").catch(() => ({}));
   state.profile = p;
 
-  const avatar = el("button", { class: "profile-avatar", title: "Edit profile", onclick: () => editProfileSheet(p) },
+  const avatar = el("button", { class: "profile-avatar", title: t("edit_profile"), onclick: () => editProfileSheet(p) },
     el("div", { class: "disc" }, p.avatar ? el("img", { src: p.avatar }) : (p.emoji || initials(p.name))),
     el("span", { class: "pencil" }, icon("pencil.circle.fill")),
   );
   const head = el("div", { class: "profile-head" },
     avatar,
-    el("div", { class: "profile-name" }, p.name || "You"),
+    el("div", { class: "profile-name" }, p.name || t("you")),
     p.bio ? el("div", { class: "profile-bio" }, p.bio) : null,
     p.link ? el("button", { class: "profile-link", onclick: () => openExternal(p.link) }, icon("link"), p.link) : null,
-    (!p.bio && !p.link) ? el("div", { class: "profile-bio" }, "This is just for the people you choose.") : null,
+    (!p.bio && !p.link) ? el("div", { class: "profile-bio" }, t("profile_private_hint")) : null,
   );
 
   // Your own posts and stories, across every circle — macOS `feed.myPosts` / `feed.myStories`.
@@ -4241,7 +4253,7 @@ async function renderYou() {
   const kept = await invoke("kept_stories").catch(() => []);
   const revived = kept.filter((k) => !liveIds.has(k.id) && (k.media || []).length).map((k) => ({
     id: k.id,
-    author_name: "You",
+    author_name: t("you"),
     is_me: true,
     created_at: k.createdAt,
     body: k.body || "",
@@ -4272,12 +4284,12 @@ async function renderYou() {
       else inner.append(icon("photo", "story-ph"));
       tray.append(el("button", { class: "story-ring cover", onclick: () => viewStories(gallery, idx) }, el("div", { class: "ring" }, inner)));
     });
-    body.append(el("div", { class: "card" }, el("div", { class: "section-label" }, "Your stories"), tray));
+    body.append(el("div", { class: "card" }, el("div", { class: "section-label" }, t("your_stories")), tray));
   }
   if (!myPosts.length) {
     body.append(el("div", { class: "card" }, el("div", { class: "empty", style: "padding:28px 10px" },
-      el("div", { class: "h" }, "Your posts show up here"),
-      el("div", {}, "Everything you share lives here — and a copy stays on your device."))));
+      el("div", { class: "h" }, t("your_posts_here")),
+      el("div", {}, t("your_posts_sub")))));
   } else {
     for (const it of myPosts) body.append(postCard(it, it._circle));
   }
@@ -4330,9 +4342,9 @@ function avatarDataUrl(file) {
  *  with the name card, and neither the desktop `Contact` nor the profile card carries an avatar. So
  *  your circle still sees your initials. That gap is in the backend/wire, not here. */
 function editProfileSheet(p) {
-  const name = el("input", { class: "pill-field", value: p.name || "", placeholder: "Your name" });
-  const bio = el("textarea", { class: "field-soft", placeholder: "Add a short bio", rows: 2 }); bio.value = p.bio || "";
-  const link = el("input", { class: "field-capsule", value: p.link || "", placeholder: "Add a link (e.g. yoursite.com)" });
+  const name = el("input", { class: "pill-field", value: p.name || "", placeholder: t("your_name_ph") });
+  const bio = el("textarea", { class: "field-soft", placeholder: t("bio_ph"), rows: 2 }); bio.value = p.bio || "";
+  const link = el("input", { class: "field-capsule", value: p.link || "", placeholder: t("link_ph") });
   let avatar = p.avatar || "";
   let emoji = p.emoji || "🌿";
 
@@ -4346,12 +4358,12 @@ function editProfileSheet(p) {
     const f = e.target.files[0];
     if (!f) return;
     try { avatar = await avatarDataUrl(f); await save(); redraw(); renderYou(); }
-    catch (_) { toast("That file isn't an image Haven can read"); }
+    catch (_) { toast(t("not_an_image")); }
   } });
 
   const photoRow = el("div", { class: "row wrap", style: "justify-content:center" },
-    el("button", { class: "btn small tint-pink", onclick: () => picker.click() }, avatar ? "Change photo" : "Add photo"),
-    avatar ? el("button", { class: "btn small danger", onclick: async () => { avatar = ""; await save(); redraw(); renderYou(); } }, "Remove") : null,
+    el("button", { class: "btn small tint-pink", onclick: () => picker.click() }, avatar ? t("change_photo") : t("add_photo")),
+    avatar ? el("button", { class: "btn small danger", onclick: async () => { avatar = ""; await save(); redraw(); renderYou(); } }, t("remove")) : null,
     picker,
   );
 
@@ -4360,18 +4372,113 @@ function editProfileSheet(p) {
     grid.append(el("button", { class: "emoji-cell" + (emoji === e ? " on" : ""), onclick: async () => { emoji = e; await save(); redraw(); renderYou(); } }, e));
   }
 
-  sheet("Edit profile", el("div", { class: "edit-profile" },
+  sheet(t("edit_profile"), el("div", { class: "edit-profile" },
     el("div", { class: "ep-avatar" }, avatar ? el("img", { src: avatar }) : el("span", {}, emoji)),
     photoRow,
     name,
     el("div", { class: "col", style: "gap:10px" }, bio, link),
-    el("div", { class: "ep-caption" }, "Your bio and link show on your profile for the people in your circle."),
-    el("div", { class: "ep-label" }, avatar ? "Emoji (used if you remove your photo)" : "Pick an emoji"),
+    el("div", { class: "ep-caption" }, t("bio_hint")),
+    el("div", { class: "ep-label" }, avatar ? t("emoji_if_remove") : t("pick_emoji")),
     grid,
   ), el("button", { class: "btn primary wide", onclick: async () => {
     await save();
-    closeModal(); toast("Profile saved & shared"); renderYou();
-  } }, "Done"));
+    closeModal(); toast(t("profile_saved")); renderYou();
+  } }, t("done")));
+}
+
+// ---- Feedback & Support (MillerKit parity: Feedback.swift / SupportSection.swift /
+// TranslationFeedback.swift). Everything is a mailto: — no server, no account, and the user sees
+// exactly what is being sent before it goes.
+const SUPPORT_EMAIL = "blaine@wemiller.com";
+let APP_VERSION = "1.3.1";
+try {
+  if (TAURI.app && TAURI.app.getVersion) TAURI.app.getVersion().then((v) => { if (v) APP_VERSION = v; }).catch(() => {});
+} catch (_) {}
+
+/** Native name of the running UI language — "Deutsch" reads far better than "de". */
+function languageDisplayName(code) {
+  try {
+    const n = new Intl.DisplayNames([code], { type: "language" }).of(code);
+    if (n) return n.charAt(0).toUpperCase() + n.slice(1);
+  } catch (_) {}
+  return code;
+}
+
+/** The diagnostics block that makes a report actionable without a round of
+ *  "which version are you on?". Deliberately English — it's for the developer. */
+function diagnosticsFooter() {
+  return [
+    "----------------",
+    "Haven " + APP_VERSION + " (desktop, " + HOST_OS + ")",
+    "System: " + (navigator.userAgent || navigator.platform || ""),
+    "Locale: " + (navigator.language || "en"),
+  ].join("\n");
+}
+
+function mailtoUrl(subject, body) {
+  return "mailto:" + SUPPORT_EMAIL + "?subject=" + encodeURIComponent(subject) + "&body=" + encodeURIComponent(body);
+}
+
+/** Guided templates, mirroring MillerKit's Feedback.swift — "email me if you have a problem"
+ *  reliably produces "it doesn't work"; a guided form reliably produces something reproducible. */
+function feedbackMailto(kind) {
+  const subject = "Haven — " + (kind === "bug" ? t("bug_report") : kind === "feature" ? t("feature_request") : t("question"));
+  const body = (kind === "bug" ? t("fb_bug_template", "Haven")
+    : kind === "feature" ? t("fb_feature_template", "Haven")
+    : t("fb_question_template", "Haven")) + "\n\n" + diagnosticsFooter();
+  return mailtoUrl(subject, body);
+}
+
+/** "This app reads badly in my language — let me help fix it." Offered only when the UI is NOT
+ *  running in English, and it screens first: a translation fix is a conversation, and the gate
+ *  sets that expectation honestly (MillerKit TranslationFeedback parity). */
+function translationFeedbackSheet() {
+  const code = HAVEN_LANG;
+  const lang = languageDisplayName(code);
+  let readsEnglish = false, willIterate = false;
+  const screen = el("input", { placeholder: t("tf_screen_ph") });
+  const current = el("textarea", { placeholder: t("tf_current_ph"), rows: 2 });
+  const suggested = el("textarea", { placeholder: t("tf_suggested_ph", lang), rows: 2 });
+  const notes = el("textarea", { placeholder: t("tf_notes_ph"), rows: 2 });
+  const sendBtn = el("button", { class: "btn primary wide", disabled: true, onclick: () => {
+    let body = t("tf_body_intro", lang, "Haven") + "\n";
+    body += t("where_in_app") + "\n" + screen.value.trim() + "\n\n";
+    body += t("says_now") + "\n" + current.value.trim() + "\n\n";
+    body += t("should_say") + "\n" + suggested.value.trim() + "\n\n";
+    if (notes.value.trim()) body += t("why_else") + "\n" + notes.value.trim() + "\n\n";
+    body += t("tf_confirm_line");
+    body += "\n\n" + diagnosticsFooter();
+    body += "\n" + t("displaying") + " " + lang + " (" + code + ")";
+    openExternal(mailtoUrl("Haven — Translation fix (" + code + ")", body));
+    closeModal();
+  } }, t("send_it"));
+  const fields = el("div", { class: "col", style: "gap:8px;display:none" },
+    el("div", { class: "muted small", style: "font-weight:600" }, t("what_needs_fixing")),
+    screen, current, suggested, notes,
+    el("div", { class: "set-foot" }, t("tf_send_foot")));
+  const sync = () => {
+    const open = readsEnglish && willIterate;
+    fields.style.display = open ? "" : "none";
+    sendBtn.style.display = open ? "" : "none";
+    sendBtn.disabled = !(open && screen.value.trim() && suggested.value.trim());
+  };
+  screen.addEventListener("input", sync);
+  suggested.addEventListener("input", sync);
+  const gate = (label, set) => {
+    const chk = el("input", { type: "checkbox", style: "width:auto" });
+    chk.onchange = () => { set(chk.checked); sync(); };
+    return el("label", { class: "set-row", style: "cursor:pointer" }, el("span", { style: "flex:1" }, label), chk);
+  };
+  sendBtn.style.display = "none";
+  sheet(t("improve_translation", lang), el("div", { class: "col", style: "gap:10px" },
+    el("div", { class: "muted small" }, t("tf_intro", lang)),
+    el("div", { class: "muted small", style: "font-weight:600" }, t("before_we_start")),
+    el("div", { class: "set-group" },
+      gate(t("reads_english"), (v) => { readsEnglish = v; }),
+      gate(t("will_iterate"), (v) => { willIterate = v; })),
+    el("div", { class: "set-foot" }, t("tf_gate_foot")),
+    fields,
+  ), sendBtn);
 }
 
 /** SETTINGS — the gear in the You tab's toolbar. Grouped rows in the macOS order
@@ -4390,44 +4497,56 @@ async function settingsSheet() {
   const themeNow = document.documentElement.dataset.theme
     || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
 
-  sheet("Settings", el("div", { class: "col", style: "gap:6px" },
+  sheet(t("settings"), el("div", { class: "col", style: "gap:6px" },
     el("div", { class: "set-group" },
       el("div", { class: "set-row" },
         el("span", { class: "ri", style: "color:#34d399" }, icon("lock.shield.fill")),
         el("span", { style: "flex:1" },
-          el("div", { style: "font-weight:600" }, "Your circle is private"),
-          el("div", { class: "muted small", style: "margin-top:2px" }, "Everything you share is locked so only your people can see it. No ads, no tracking — ever.")))),
+          el("div", { style: "font-weight:600" }, t("circle_private_title")),
+          el("div", { class: "muted small", style: "margin-top:2px" }, t("circle_private_sub"))))),
 
     // RELAY LIVES HERE — nowhere else in the chrome.
-    group(row("Relays", "antenna", () => relaySheet())),
-    foot("Manage where your circles' sealed posts & media live so they reach people who were offline. Add unlimited relays (a Haven node or your own S3 bucket), pick a default for every circle, and activate or deactivate each. Each circle can override the default in its own settings."),
+    group(row(t("relays"), "antenna", () => relaySheet())),
+    foot(t("relays_foot")),
 
-    group(row("Blocked people", "hand.raised.fill", () => blockedSheet())),
-    foot("People you've blocked can't see your posts or reach you. Unblock anyone here."),
+    group(row(t("blocked_people"), "hand.raised.fill", () => blockedSheet())),
+    foot(t("blocked_foot")),
 
-    group(row("Identities", "icloud", () => identitiesSheet())),
-    foot("Keep more than one identity on this PC and switch between them. Each has its own profile, circles and contacts."),
+    group(row(t("identities"), "icloud", () => identitiesSheet())),
+    foot(t("identities_foot")),
 
-    group(row("Devices", "laptop", () => devicesSheet())),
-    foot("Link your other devices — each gets its own revocable key, never your master key."),
+    group(row(t("devices"), "laptop", () => devicesSheet())),
+    foot(t("devices_foot")),
 
-    group(row("Scheduled messages", "clock", () => scheduledSheet())),
-    foot("Posts and DMs waiting to send. Compose one with the + menu's “Send later…”."),
+    group(row(t("scheduled_messages"), "clock", () => scheduledSheet())),
+    foot(t("scheduled_foot")),
 
-    group(row("Privacy & media", "lock.shield.fill", () => privacyMediaSheet())),
-    foot("Notification lock-screen previews, super data saver, and whether to also send camera originals."),
+    group(row(t("privacy_media"), "lock.shield.fill", () => privacyMediaSheet())),
+    foot(t("privacy_media_foot")),
+
+    // Feedback & Support — the MillerKit block, one row per guided template. The translation row
+    // renders only when the UI is actually displaying one of the non-English languages.
+    el("div", { class: "muted small", style: "font-weight:600;margin-top:4px" }, t("feedback_support")),
+    group(
+      row(t("report_issue"), "envelope", () => openExternal(feedbackMailto("bug"))),
+      row(t("suggest_feature"), "lightbulb", () => openExternal(feedbackMailto("feature"))),
+      row(t("ask_question"), "questionmark.circle", () => openExternal(feedbackMailto("question"))),
+      HAVEN_LANG !== "en" ? row(t("improve_translation", languageDisplayName(HAVEN_LANG)), "character.bubble", () => translationFeedbackSheet()) : null,
+      row(t("my_other_apps"), "square.grid.2x2", () => openExternal("https://wemiller.com/apps/"), { value: t("other_apps_sub") }),
+    ),
+    foot(t("support_foot")),
 
     // The Mac follows the system appearance and offers no toggle; desktop keeps one because
     // Tauri's webview doesn't always inherit the OS theme on Linux/Windows.
-    group(row("Appearance", "moon", () => {
+    group(row(t("appearance"), "moon", () => {
       const next = themeNow === "light" ? "dark" : "light";
       document.documentElement.dataset.theme = next;
       localStorage.setItem("haven-theme", next);
       settingsSheet();
-    }, { value: themeNow === "light" ? "Light" : "Dark" })),
+    }, { value: themeNow === "light" ? t("light") : t("dark") })),
 
-    group(row("Advanced", "wrench", () => advancedSheet())),
-    foot("Technical details, your identity, and starting over."),
+    group(row(t("advanced"), "wrench", () => advancedSheet())),
+    foot(t("advanced_foot")),
   ));
 }
 
@@ -4448,7 +4567,7 @@ async function privacyMediaSheet() {
       try {
         await invoke("set_privacy_prefs", body);
         if (key === "super_data_saver") state.superDataSaver = chk.checked;
-        toast("Saved");
+        toast(t("saved"));
       } catch (e) { toast("" + e); chk.checked = !chk.checked; }
     };
     return el("label", { class: "set-row", style: "cursor:pointer" },
@@ -4456,9 +4575,9 @@ async function privacyMediaSheet() {
   };
 
   const detailOpts = [
-    ["full", "Full previews"],
-    ["private", "Name and type only"],
-    ["minimal", "Minimal"],
+    ["full", t("full_previews")],
+    ["private", t("name_type_only")],
+    ["minimal", t("minimal")],
   ];
   const detailBox = el("div", { class: "col", style: "gap:4px" });
   for (const [value, label] of detailOpts) {
@@ -4470,21 +4589,21 @@ async function privacyMediaSheet() {
         await invoke("set_privacy_prefs", {
           notificationDetail: value, superDataSaver: null, sendOriginal: null,
         });
-        toast("Saved");
+        toast(t("saved"));
       } catch (e) { toast("" + e); }
     };
     detailBox.append(el("label", { class: "row", style: "gap:8px;align-items:center;cursor:pointer" },
       radio, el("span", {}, label)));
   }
 
-  sheet("Privacy & media", el("div", { class: "col", style: "gap:10px" },
+  sheet(t("privacy_media"), el("div", { class: "col", style: "gap:10px" },
     el("div", { class: "set-group" },
-      toggle("Also send original", "send_original", prefs.send_original),
-      toggle("Super data saver", "super_data_saver", prefs.super_data_saver)),
+      toggle(t("also_send_original"), "send_original", prefs.send_original),
+      toggle(t("super_data_saver"), "super_data_saver", prefs.super_data_saver)),
     el("div", { class: "set-foot" },
-      "Super data saver skips autoplay and prefers poster stills. “Also send original” keeps the camera file beside the optimized video."),
-    el("div", { class: "muted small", style: "font-weight:600" }, "Notification previews"),
-    el("div", { class: "muted small" }, "How much detail banners show on the lock screen (iOS/Android parity)."),
+      t("privacy_toggles_foot")),
+    el("div", { class: "muted small", style: "font-weight:600" }, t("notification_previews")),
+    el("div", { class: "muted small" }, t("notification_previews_hint")),
     el("div", { class: "set-group" }, detailBox),
   ));
 }
@@ -4492,27 +4611,27 @@ async function privacyMediaSheet() {
 async function blockedSheet() {
   const blocked = await invoke("blocked").catch(() => []);
   const list = el("div", { class: "col" });
-  if (!blocked.length) list.append(el("div", { class: "muted small" }, "No one is blocked."));
+  if (!blocked.length) list.append(el("div", { class: "muted small" }, t("no_one_blocked")));
   for (const b of blocked) {
     list.append(el("div", { class: "list-item" },
       el("div", { class: "mono", style: "flex:1" }, b.slice(0, 24) + "…"),
-      el("button", { class: "btn small", onclick: async () => { await invoke("unblock", { idHex: b }); blockedSheet(); } }, "Unblock")));
+      el("button", { class: "btn small", onclick: async () => { await invoke("unblock", { idHex: b }); blockedSheet(); } }, t("unblock"))));
   }
-  sheet("Blocked people", list);
+  sheet(t("blocked_people"), list);
 }
 
 async function scheduledSheet() {
   const sched = await invoke("scheduled").catch(() => []);
   const list = el("div", { class: "col" });
-  if (!sched.length) list.append(el("div", { class: "muted small" }, "Nothing scheduled. Use the composer's + menu ▸ “Send later…”."));
+  if (!sched.length) list.append(el("div", { class: "muted small" }, t("nothing_scheduled")));
   for (const s of sched) {
     list.append(el("div", { class: "list-item" },
       el("div", { style: "flex:1;min-width:0" },
-        el("div", {}, (s.kind === "dm" ? "DM · " : "Post · ") + (s.body || (s.media_count ? `${s.media_count} attachment(s)` : "—"))),
-        el("div", { class: "muted small" }, "sends " + new Date(s.send_at_ms).toLocaleString())),
-      el("button", { class: "btn small danger", onclick: async () => { await invoke("cancel_scheduled", { id: s.id }); scheduledSheet(); } }, "Cancel")));
+        el("div", {}, (s.kind === "dm" ? t("dm_label") + " · " : t("post_label") + " · ") + (s.body || (s.media_count ? t("attachments_count", s.media_count) : "—"))),
+        el("div", { class: "muted small" }, t("sends_at", new Date(s.send_at_ms).toLocaleString()))),
+      el("button", { class: "btn small danger", onclick: async () => { await invoke("cancel_scheduled", { id: s.id }); scheduledSheet(); } }, t("cancel"))));
   }
-  sheet("Scheduled", list);
+  sheet(t("scheduled_title"), list);
 }
 
 // ---- #1 Manage media: size-sorted cleanup screen ----------------------------------------
@@ -4522,7 +4641,7 @@ async function scheduledSheet() {
 // downloadable placeholder. Port of iOS MediaCleanupView.
 async function manageMediaSheet() {
   const listWrap = el("div", { class: "col", style: "gap:8px" });
-  const headEl = el("div", { class: "muted small" }, "Measuring…");
+  const headEl = el("div", { class: "muted small" }, t("measuring"));
   const footBar = el("div", { class: "row", style: "gap:8px;align-items:center" });
   const selection = new Set();
   let rows = [];
@@ -4537,14 +4656,14 @@ async function manageMediaSheet() {
     footBar.replaceChildren();
     if (!selection.size) return;
     const btn = el("button", { class: "btn primary", onclick: async () => {
-      btn.disabled = true; btn.textContent = "Removing…";
+      btn.disabled = true; btn.textContent = t("removing");
       try {
         const freed = await invoke("media_delete_selected", { refs: [...selection] });
-        toast(`Freed ${fmtBytes(freed)}`);
-      } catch (e) { toast("Couldn't remove: " + e); }
+        toast(t("freed", fmtBytes(freed)));
+      } catch (e) { toast(t("couldnt_remove", e)); }
       selection.clear();
       await reload();
-    } }, `Remove ${selection.size} · frees ${fmtBytes(selectedBytes())}`);
+    } }, t("remove_n_frees", selection.size, fmtBytes(selectedBytes())));
     footBar.append(btn);
   };
 
@@ -4552,7 +4671,7 @@ async function manageMediaSheet() {
     const selected = selection.has(r.reference);
     // Selection control (pinned rows are ineligible — a pin glyph instead of a checkbox).
     const toggle = r.is_pinned
-      ? el("span", { class: "media-row-pin", title: "Kept on this device" }, "📌")
+      ? el("span", { class: "media-row-pin", title: t("kept_on_device") }, "📌")
       : el("input", { type: "checkbox", style: "width:auto" });
     if (!r.is_pinned) {
       toggle.checked = selected;
@@ -4566,18 +4685,18 @@ async function manageMediaSheet() {
         .then((u) => { if (u) thumb.replaceChildren(img), (img.src = u); })
         .catch(() => {});
     }
-    const sub = r.snippet ? r.snippet : (r.is_orphan ? "Not linked to any post" : "");
+    const sub = r.snippet ? r.snippet : (r.is_orphan ? t("not_linked_any_post") : "");
     const meta = el("div", { style: "flex:1;min-width:0" },
       el("div", { class: "name", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, r.circle_name),
       sub ? el("div", { class: "muted small", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, sub) : null,
-      el("div", { class: "muted small mono" }, fmtBytes(r.bytes) + (r.is_pinned ? " · Kept" : "")));
+      el("div", { class: "muted small mono" }, fmtBytes(r.bytes) + (r.is_pinned ? t("kept_suffix") : "")));
     const keep = el("button", { class: "btn small ghost", onclick: async () => {
       try {
         if (r.is_pinned) await invoke("media_unpin", { refs: [r.reference] });
         else await invoke("media_pin", { refs: [r.reference] });
         await reload();
       } catch (e) { toast("" + e); }
-    } }, r.is_pinned ? "Unkeep" : "Keep");
+    } }, r.is_pinned ? t("unkeep") : t("keep"));
     return el("div", { class: "list-item", style: "gap:10px;align-items:center" }, toggle, thumb, meta, keep);
   };
 
@@ -4586,20 +4705,20 @@ async function manageMediaSheet() {
     for (const r of [...selection]) if (!rows.some((x) => x.reference === r)) selection.delete(r);
     listWrap.replaceChildren();
     if (!rows.length) {
-      headEl.textContent = "No cached media.";
-      listWrap.append(el("div", { class: "muted small", style: "padding:16px 0" }, "Nothing stored on this device yet."));
+      headEl.textContent = t("no_cached_media");
+      listWrap.append(el("div", { class: "muted small", style: "padding:16px 0" }, t("nothing_stored_yet")));
     } else {
-      const kept = pinnedBytes() > 0 ? ` · ${fmtBytes(pinnedBytes())} kept` : "";
-      headEl.textContent = `${rows.length} item${rows.length === 1 ? "" : "s"} · ${fmtBytes(totalBytes())}${kept}`;
+      const kept = pinnedBytes() > 0 ? t("kept_bytes", fmtBytes(pinnedBytes())) : "";
+      headEl.textContent = t("items_summary", rows.length === 1 ? t("item_one") : t("items_many", rows.length), fmtBytes(totalBytes())) + kept;
       for (const r of rows) listWrap.append(rowEl(r));
     }
     renderFoot();
   };
 
-  sheet("Manage media",
+  sheet(t("manage_media"),
     el("div", { class: "col", style: "gap:10px" },
       headEl,
-      el("div", { class: "muted small" }, "Sorted by size. Removing an item frees only the copy on this device — the post stays and can be re-downloaded. “Keep” exempts an item from every cleanup."),
+      el("div", { class: "muted small" }, t("manage_media_hint")),
       listWrap),
     footBar);
   await reload();
@@ -4607,31 +4726,31 @@ async function manageMediaSheet() {
 
 async function advancedSheet() {
   const security = el("div", { class: "card col" },
-    el("h3", {}, "Security"),
-    el("div", { class: "muted small" }, "Run the on-device hybrid post-quantum self-test (Ed25519 + ML-DSA, X25519 + ML-KEM-768)."),
-    el("button", { class: "btn", onclick: async () => { const r = await invoke("self_test"); modal(el("div", {}, el("h2", {}, r.all_ok ? "✅ All checks passed" : "⚠️ Some checks failed"), el("div", { class: "col small" }, line("Identity", r.identity_ok), line("Hybrid KEM", r.hybrid_kem_ok), line("Signatures", r.signature_ok), line("Reach-me link", r.link_ok)), el("p", { class: "muted small" }, r.summary))); } }, "Run self-test"),
+    el("h3", {}, t("security")),
+    el("div", { class: "muted small" }, t("security_hint")),
+    el("button", { class: "btn", onclick: async () => { const r = await invoke("self_test"); modal(el("div", {}, el("h2", {}, r.all_ok ? t("all_checks_passed") : t("some_checks_failed")), el("div", { class: "col small" }, line(t("identity_label"), r.identity_ok), line(t("hybrid_kem"), r.hybrid_kem_ok), line(t("signatures"), r.signature_ok), line(t("reach_me_link"), r.link_ok)), el("p", { class: "muted small" }, r.summary))); } }, t("run_self_test")),
   );
 
   const storage = el("div", { class: "card col" },
-    el("h3", {}, "Storage"),
-    el("div", { class: "muted small" }, "Photos and videos from your circles, cached on this device. Manage them by size, set automatic limits, or clear media nothing references."),
+    el("h3", {}, t("storage")),
+    el("div", { class: "muted small" }, t("storage_hint")),
     // #1 Manage media — the size-sorted cleanup screen, with the #2 pinned ("kept") count.
     (() => {
       const kept = el("span", { class: "muted small" }, "");
-      invoke("media_pinned_count").then((n) => { if (n) kept.textContent = `${n} kept`; }).catch(() => {});
+      invoke("media_pinned_count").then((n) => { if (n) kept.textContent = t("n_kept", n); }).catch(() => {});
       return el("button", { class: "btn", style: "display:flex;justify-content:space-between;align-items:center", onclick: () => manageMediaSheet() },
-        el("span", {}, "Manage media"), kept);
+        el("span", {}, t("manage_media")), kept);
     })(),
     // #4 device-local age/size caps (default OFF). Changing either enforces immediately.
     (() => {
       const daysSel = el("select", { class: "pill-field" },
-        el("option", { value: "0" }, "Never"),
-        el("option", { value: "30" }, "30 days"),
-        el("option", { value: "90" }, "90 days"),
-        el("option", { value: "180" }, "6 months"),
-        el("option", { value: "365" }, "1 year"));
+        el("option", { value: "0" }, t("never")),
+        el("option", { value: "30" }, t("days_30")),
+        el("option", { value: "90" }, t("days_90")),
+        el("option", { value: "180" }, t("months_6")),
+        el("option", { value: "365" }, t("year_1")));
       const gbSel = el("select", { class: "pill-field" },
-        el("option", { value: "0" }, "No limit"),
+        el("option", { value: "0" }, t("no_limit")),
         el("option", { value: "1" }, "1 GB"),
         el("option", { value: "2" }, "2 GB"),
         el("option", { value: "5" }, "5 GB"),
@@ -4641,14 +4760,14 @@ async function advancedSheet() {
         if (l) { daysSel.value = String(l.days || 0); gbSel.value = String(l.gb || 0); }
       }).catch(() => {});
       const save = async () => {
-        try { await invoke("set_media_limits", { days: Number(daysSel.value), gb: Number(gbSel.value) }); toast("Saved"); }
+        try { await invoke("set_media_limits", { days: Number(daysSel.value), gb: Number(gbSel.value) }); toast(t("saved")); }
         catch (e) { toast("" + e); }
       };
       daysSel.onchange = save; gbSel.onchange = save;
       return el("div", { class: "col", style: "gap:6px" },
-        el("label", { class: "row", style: "gap:8px;align-items:center" }, el("span", { style: "flex:1" }, "Delete local media older than"), daysSel),
-        el("label", { class: "row", style: "gap:8px;align-items:center" }, el("span", { style: "flex:1" }, "Keep local media under"), gbSel),
-        el("div", { class: "muted small" }, "Automatically remove old/excess cached media (oldest first) to stay under your caps — posts stay and re-download on demand. Kept items are never removed."));
+        el("label", { class: "row", style: "gap:8px;align-items:center" }, el("span", { style: "flex:1" }, t("delete_older_than")), daysSel),
+        el("label", { class: "row", style: "gap:8px;align-items:center" }, el("span", { style: "flex:1" }, t("keep_under")), gbSel),
+        el("div", { class: "muted small" }, t("auto_remove_hint")));
     })(),
     // Shrink what I've ALREADY shared, and re-share it, so the whole circle gets the smaller copy.
     // Sits beside "Clean up unused media" because the two are the only levers on media that is
@@ -4658,79 +4777,79 @@ async function advancedSheet() {
     (() => {
       const status = el("div", { class: "muted small" }, "");
       const btn = el("button", { class: "btn", onclick: async () => {
-        btn.disabled = true; btn.textContent = "Cleaning up…";
+        btn.disabled = true; btn.textContent = t("cleaning_up");
         try {
           const r = await invoke("media_cleanup");
-          status.textContent = !r || !r.files ? "Nothing to clean up."
-            : `Freed ${fmtBytes(r.bytes)} across ${r.files} file${r.files === 1 ? "" : "s"}.`;
-        } catch (e) { status.textContent = "Cleanup failed: " + e; }
-        btn.disabled = false; btn.textContent = "Clean up unused media";
-      } }, "Clean up unused media");
+          status.textContent = !r || !r.files ? t("nothing_to_cleanup")
+            : t("freed_across", fmtBytes(r.bytes), r.files === 1 ? t("file_one") : t("files_many", r.files));
+        } catch (e) { status.textContent = t("cleanup_failed", e); }
+        btn.disabled = false; btn.textContent = t("cleanup_unused");
+      } }, t("cleanup_unused"));
       return el("div", { class: "col", style: "gap:6px" }, btn, status);
     })(),
   );
 
   const danger = el("div", { class: "card col" },
-    el("h3", {}, "Start over"),
-    el("div", { class: "muted small" }, "Wipe this device's identity, contacts, circles and media. This cannot be undone."),
-    el("button", { class: "btn danger", onclick: () => { modal(el("div", {}, el("h2", {}, "Start over?"), el("p", {}, "This permanently deletes your identity and all local data on this PC."), el("div", { class: "row", style: "justify-content:flex-end" }, el("button", { class: "btn ghost", onclick: () => closeModal() }, "Cancel"), el("button", { class: "btn danger", onclick: async () => { await invoke("reset"); location.reload(); } }, "Delete everything")))); } }, "Start over"),
+    el("h3", {}, t("start_over")),
+    el("div", { class: "muted small" }, t("start_over_hint")),
+    el("button", { class: "btn danger", onclick: () => { modal(el("div", {}, el("h2", {}, t("start_over_q")), el("p", {}, t("start_over_confirm")), el("div", { class: "row", style: "justify-content:flex-end" }, el("button", { class: "btn ghost", onclick: () => closeModal() }, t("cancel")), el("button", { class: "btn danger", onclick: async () => { await invoke("reset"); location.reload(); } }, t("delete_everything"))))); } }, t("start_over")),
   );
 
   const about = el("div", { class: "card col" },
-    el("h3", {}, "This device"),
+    el("h3", {}, t("this_device")),
     el("div", { class: "muted small mono" }, "node id: " + state.node),
   );
 
-  sheet("Advanced", el("div", { class: "col", style: "gap:16px" }, about, security, storage, danger));
+  sheet(t("advanced"), el("div", { class: "col", style: "gap:16px" }, about, security, storage, danger));
 }
 
 async function identitiesSheet() {
   const ids = await invoke("identities").catch(() => []);
   const idCard = el("div", { class: "col" },
-    el("div", { class: "muted small" }, "Keep more than one identity on this PC and switch between them. Each has its own profile, circles and contacts."));
+    el("div", { class: "muted small" }, t("identities_foot")));
   for (const id of ids) {
     idCard.append(el("div", { class: "list-item" },
       el("div", { class: "avatar", style: "width:30px;height:30px;font-size:12px" }, initials(id.label)),
-      el("div", { style: "flex:1;min-width:0" }, el("div", { class: "name" }, id.label, id.active ? el("span", { class: "tag", style: "margin-left:8px" }, "active") : null), el("div", { class: "muted small mono" }, id.node_hex.slice(0, 18) + "…")),
-      id.active ? null : el("button", { class: "btn small primary", onclick: async () => { if (confirm(`Switch to "${id.label}"? Haven will relaunch.`)) await invoke("switch_identity", { nodeHex: id.node_hex }); } }, "Switch"),
-      el("button", { class: "btn small ghost", title: "Rename", onclick: () => { const i = el("input", { value: id.label }); modal(el("div", {}, el("h2", {}, "Rename identity"), i, el("div", { class: "row", style: "justify-content:flex-end;margin-top:10px" }, el("button", { class: "btn primary", onclick: async () => { await invoke("rename_identity", { nodeHex: id.node_hex, label: i.value.trim() || id.label }); identitiesSheet(); } }, "Save")))); } }, "Rename"),
-      id.active ? null : el("button", { class: "btn small danger", title: "Remove", onclick: async () => { if (confirm(`Remove "${id.label}" from this PC? Its local data is deleted.`)) { await invoke("remove_identity", { nodeHex: id.node_hex }); identitiesSheet(); } } }, "Remove"),
+      el("div", { style: "flex:1;min-width:0" }, el("div", { class: "name" }, id.label, id.active ? el("span", { class: "tag", style: "margin-left:8px" }, t("active_tag")) : null), el("div", { class: "muted small mono" }, id.node_hex.slice(0, 18) + "…")),
+      id.active ? null : el("button", { class: "btn small primary", onclick: async () => { if (confirm(t("switch_identity_confirm", id.label))) await invoke("switch_identity", { nodeHex: id.node_hex }); } }, t("switch_btn")),
+      el("button", { class: "btn small ghost", title: t("rename"), onclick: () => { const i = el("input", { value: id.label }); modal(el("div", {}, el("h2", {}, t("rename_identity")), i, el("div", { class: "row", style: "justify-content:flex-end;margin-top:10px" }, el("button", { class: "btn primary", onclick: async () => { await invoke("rename_identity", { nodeHex: id.node_hex, label: i.value.trim() || id.label }); identitiesSheet(); } }, t("save"))))); } }, t("rename")),
+      id.active ? null : el("button", { class: "btn small danger", title: t("remove"), onclick: async () => { if (confirm(t("remove_identity_confirm", id.label))) { await invoke("remove_identity", { nodeHex: id.node_hex }); identitiesSheet(); } } }, t("remove")),
     ));
   }
   idCard.append(el("div", { class: "row wrap", style: "margin-top:6px" },
-    el("button", { class: "btn small", onclick: () => { const i = el("input", { placeholder: "Label (e.g. Work)" }); modal(el("div", {}, el("h2", {}, "New identity"), i, el("div", { class: "row", style: "justify-content:flex-end;margin-top:10px" }, el("button", { class: "btn primary", onclick: async () => { await invoke("add_identity", { label: i.value.trim() || "New identity" }); identitiesSheet(); toast("Identity created"); } }, "Create")))); } }, "+ New identity"),
-    el("button", { class: "btn small ghost", onclick: () => { const lab = el("input", { placeholder: "Label" }); const seed = el("input", { placeholder: "Transfer code (haven-seed:…) or seed" }); modal(el("div", {}, el("h2", {}, "Link an existing identity"), lab, seed, el("div", { class: "row", style: "justify-content:flex-end;margin-top:10px" }, el("button", { class: "btn primary", onclick: async () => { try { await invoke("import_identity", { label: lab.value.trim() || "Imported", seedB64: seed.value.trim() }); identitiesSheet(); toast("Imported"); } catch (e) { toast("Import failed: " + e); } } }, "Import")))); } }, "Import"),
+    el("button", { class: "btn small", onclick: () => { const i = el("input", { placeholder: t("label_work_ph") }); modal(el("div", {}, el("h2", {}, t("new_identity")), i, el("div", { class: "row", style: "justify-content:flex-end;margin-top:10px" }, el("button", { class: "btn primary", onclick: async () => { await invoke("add_identity", { label: i.value.trim() || t("new_identity") }); identitiesSheet(); toast(t("identity_created")); } }, t("create"))))); } }, t("new_identity_btn")),
+    el("button", { class: "btn small ghost", onclick: () => { const lab = el("input", { placeholder: t("label_ph") }); const seed = el("input", { placeholder: t("transfer_code_ph") }); modal(el("div", {}, el("h2", {}, t("link_existing")), lab, seed, el("div", { class: "row", style: "justify-content:flex-end;margin-top:10px" }, el("button", { class: "btn primary", onclick: async () => { try { await invoke("import_identity", { label: lab.value.trim() || t("imported_label"), seedB64: seed.value.trim() }); identitiesSheet(); toast(t("imported_toast")); } catch (e) { toast(t("import_failed", e)); } } }, t("import"))))); } }, t("import")),
   ));
-  sheet("Identities", idCard);
+  sheet(t("identities"), idCard);
 }
 
 // ---- Authorized devices (revocable multi-device roster — parity with iOS/Android) ----
 async function devicesSheet() {
   const roster = await invoke("device_roster").catch(() => ({ enabled: false, this_device_authorized: false, devices: [] }));
-  const roleTitle = roster.enabled ? "This is your primary device"
-    : roster.this_device_authorized ? "This is a linked device" : "This device isn’t linked yet";
-  const roleSub = roster.enabled ? "It holds your master key and authorizes or revokes your other devices."
-    : roster.this_device_authorized ? "It holds a copy of your master key and syncs with your primary device, which can revoke it."
-    : "Make it your primary, or link it to the device that already is.";
+  const roleTitle = roster.enabled ? t("primary_device_title")
+    : roster.this_device_authorized ? t("linked_device_title") : t("not_linked_title");
+  const roleSub = roster.enabled ? t("primary_device_sub")
+    : roster.this_device_authorized ? t("linked_device_sub")
+    : t("not_linked_sub");
   const devicesCard = el("div", { class: "col" },
     el("div", {}, el("strong", {}, roleTitle)),
     el("div", { class: "muted small" }, roleSub));
-  if (!roster.devices.length) devicesCard.append(el("div", { class: "muted small" }, "No devices linked yet."));
+  if (!roster.devices.length) devicesCard.append(el("div", { class: "muted small" }, t("no_devices_linked")));
   for (const d of roster.devices) {
     devicesCard.append(el("div", { class: "list-item" },
       el("div", {}, d.is_primary ? "🔑" : "💻"),
       el("div", { style: "flex:1" }, el("div", { class: "name" }, d.name),
-        el("div", { class: "muted small" }, d.is_primary ? "Master key" : d.is_this_device ? "This device" : "Linked device")),
+        el("div", { class: "muted small" }, d.is_primary ? t("master_key") : d.is_this_device ? t("this_device") : t("linked_device"))),
       d.is_primary ? null : el("button", { class: "btn small danger", onclick: async () => {
-        if (confirm(`Revoke “${d.name}”? Revoking stops it receiving what you post afterward — which cuts off a device that is simply lost or stolen. It can’t help if someone has extracted your master key from it: linked devices hold a copy of that key, and revoking doesn’t take it back. If that happened, the only remedy is to start a new identity.`)) { await invoke("revoke_device", { nodeHex: d.node_hex }); devicesSheet(); }
-      } }, "Revoke")));
+        if (confirm(t("revoke_confirm", d.name))) { await invoke("revoke_device", { nodeHex: d.node_hex }); devicesSheet(); }
+      } }, t("revoke"))));
   }
   devicesCard.append(el("div", { class: "row wrap", style: "margin-top:6px" },
     roster.enabled
-      ? el("button", { class: "btn small danger", onclick: async () => { if (confirm("Stop this device acting as the primary?")) { await invoke("step_down_as_primary"); devicesSheet(); } } }, "This isn’t my primary")
-      : el("button", { class: "btn small", onclick: async () => { await invoke("enable_device_roster"); devicesSheet(); toast("This is now your primary device"); } }, "Make this my primary"),
-    roster.enabled ? null : el("button", { class: "btn small ghost", onclick: async () => { await invoke("request_device_enrollment"); toast("Asked your primary device to authorize this one"); } },
-      roster.this_device_authorized ? "Re-sync from my primary" : "Make this a linked device")));
+      ? el("button", { class: "btn small danger", onclick: async () => { if (confirm(t("step_down_confirm"))) { await invoke("step_down_as_primary"); devicesSheet(); } } }, t("not_my_primary"))
+      : el("button", { class: "btn small", onclick: async () => { await invoke("enable_device_roster"); devicesSheet(); toast(t("now_primary_toast")); } }, t("make_my_primary")),
+    roster.enabled ? null : el("button", { class: "btn small ghost", onclick: async () => { await invoke("request_device_enrollment"); toast(t("asked_primary_toast")); } },
+      roster.this_device_authorized ? t("resync_primary") : t("make_linked_device"))));
 
   // seed-drop S4: the SECURE link. Only a seed-holding primary can grant, so offer it once this
   // device is the primary. A new device scans/pastes the one-time code, gets its OWN key + a
@@ -4738,7 +4857,7 @@ async function devicesSheet() {
   const seedless = await invoke("seedless_status").catch(() => ({ seedless: false }));
   if (roster.enabled && !seedless.seedless) {
     devicesCard.append(el("div", { class: "row wrap", style: "margin-top:6px" },
-      el("button", { class: "btn small primary", onclick: () => enrollDeviceSheet() }, "＋ Add a device (secure link)")));
+      el("button", { class: "btn small primary", onclick: () => enrollDeviceSheet() }, t("add_device_secure"))));
   }
 
   // Any pending link requests waiting on this primary's approval.
@@ -4747,13 +4866,13 @@ async function devicesSheet() {
     devicesCard.append(el("div", { class: "list-item" },
       el("div", {}, "🔗"),
       el("div", { style: "flex:1" },
-        el("div", { class: "name" }, p.name || "New device"),
-        el("div", { class: "muted small" }, "wants to link with a secure code")),
-      el("button", { class: "btn small primary", onclick: async () => { try { await invoke("enroll_approve", { deviceHex: p.device_hex }); toast("Device approved — sending its keys"); } catch (e) { toast("" + e); } devicesSheet(); } }, "Approve"),
-      el("button", { class: "btn small ghost", onclick: async () => { await invoke("enroll_reject", { deviceHex: p.device_hex }); devicesSheet(); } }, "Dismiss")));
+        el("div", { class: "name" }, p.name || t("new_device")),
+        el("div", { class: "muted small" }, t("wants_to_link"))),
+      el("button", { class: "btn small primary", onclick: async () => { try { await invoke("enroll_approve", { deviceHex: p.device_hex }); toast(t("device_approved")); } catch (e) { toast("" + e); } devicesSheet(); } }, t("approve")),
+      el("button", { class: "btn small ghost", onclick: async () => { await invoke("enroll_reject", { deviceHex: p.device_hex }); devicesSheet(); } }, t("dismiss"))));
   }
 
-  sheet("Devices", devicesCard);
+  sheet(t("devices"), devicesCard);
 }
 
 /// PRIMARY: mint a one-time `haven-enroll:` ticket and show it as a QR + copyable string for the new
@@ -4761,19 +4880,19 @@ async function devicesSheet() {
 async function enrollDeviceSheet() {
   let ticket = "";
   try { ticket = await invoke("enroll_mint_ticket"); }
-  catch (e) { toast("Couldn't create a link code: " + e); return; }
+  catch (e) { toast(t("couldnt_create_link_code", e)); return; }
   const qrBox = el("div", { class: "qr-box" });
-  try { qrBox.innerHTML = makeQrSvg(ticket); } catch (_) { qrBox.textContent = "QR unavailable"; }
+  try { qrBox.innerHTML = makeQrSvg(ticket); } catch (_) { qrBox.textContent = t("qr_unavailable"); }
   const body = el("div", { class: "col", style: "gap:12px;align-items:center;text-align:center" },
-    el("div", { class: "muted small" }, "On the new device choose “Link this as another of my devices” and scan this code (or paste the text). It's single-use and expires in about 10 minutes."),
+    el("div", { class: "muted small" }, t("enroll_hint")),
     qrBox,
-    el("button", { class: "btn small", onclick: async () => { try { await navigator.clipboard.writeText(ticket); toast("Link code copied"); } catch (_) { toast("Copy failed"); } } }, "Copy link code"),
+    el("button", { class: "btn small", onclick: async () => { try { await navigator.clipboard.writeText(ticket); toast(t("link_code_copied")); } catch (_) { toast(t("copy_failed")); } } }, t("copy_link_code")),
     el("div", { class: "muted small", style: "word-break:break-all;opacity:0.7" }, ticket),
-    el("div", { class: "muted small" }, "When the new device asks, come back to Devices and approve it."));
-  sheet("Add a device", body);
+    el("div", { class: "muted small" }, t("enroll_approve_hint")));
+  sheet(t("add_a_device"), body);
 }
 
-const line = (label, ok) => el("div", { class: "row" }, el("span", { style: "flex:1" }, label), el("span", { class: ok ? "ok-text" : "warn-text" }, ok ? "✓ pass" : "✗ fail"));
+const line = (label, ok) => el("div", { class: "row" }, el("span", { style: "flex:1" }, label), el("span", { class: ok ? "ok-text" : "warn-text" }, ok ? t("pass") : t("fail")));
 
 // ---- WebRTC mesh calls -----------------------------------------------------------------
 // Mirrors the iOS/Android CallManager: a call = sessionId + roster of node hexes; every
@@ -5063,7 +5182,7 @@ async function hairpinStartMedia(peer) {
     slot.remoteGain = ctx.createGain();
     slot.remoteGain.connect(ctx.destination);
     console.info("hairpin media fallback on", peer);
-    toast("Call media via fabric tunnel (TCP hairpin)");
+    toast(t("call_media_hairpin"));
   } catch (e) {
     console.warn("hairpin media start failed", e);
     slot.usingMedia = false;
@@ -5127,7 +5246,7 @@ function startRingTimeout() {
   clearTimeout(call.ringTimer);
   call.ringTimer = setTimeout(() => {
     if (!call.ringing || call.inCall) return;
-    toast("Missed call" + (call.name ? " from " + call.name : ""));
+    toast(call.name ? t("missed_call_from", call.name) : t("missed_call"));
     teardownCall();
   }, RING_TIMEOUT_MS);
 }
@@ -5230,13 +5349,13 @@ async function addToCall(others) {
 
 function addToCallDialog() {
   const addable = (state.contacts || []).filter((c) => !call.roster.has(c.id_hex));
-  if (!addable.length) { toast("No one else to add"); return; }
-  modal(el("div", {}, el("h2", {}, "Add to call"),
+  if (!addable.length) { toast(t("no_one_to_add")); return; }
+  modal(el("div", {}, el("h2", {}, t("add_to_call")),
     el("div", { class: "col", style: "max-height:300px;overflow:auto" },
       ...addable.map((c) => el("div", { class: "list-item" },
         el("div", { class: "avatar", style: "width:30px;height:30px;font-size:12px" }, initials(c.name)),
         el("div", { style: "flex:1" }, c.name),
-        el("button", { class: "btn small", onclick: async (e) => { await addToCall([c.id_hex]); e.target.textContent = "Added ✓"; e.target.disabled = true; } }, "Add"))))));
+        el("button", { class: "btn small", onclick: async (e) => { await addToCall([c.id_hex]); e.target.textContent = t("added_check"); e.target.disabled = true; } }, t("add")))))));
 }
 
 async function callAccept() {
@@ -5278,7 +5397,7 @@ async function startMesh() {
   } catch (e) {
     // No camera (or refused) — audio still works; the camera button stays disabled.
     call.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false }).catch(() => null);
-    if (!call.localStream) toast("Mic unavailable: " + e);
+    if (!call.localStream) toast(t("mic_unavailable", e));
   }
   if (call.localStream) {
     const vids = call.localStream.getVideoTracks();
@@ -5436,7 +5555,7 @@ async function onCallEvent(payload) {
 const validSession = (sid) => sid === call.session || !call.session;
 function displayNameFor(hex) {
   const c = (state.contacts || []).find((x) => x.id_hex === hex);
-  return c ? c.name : "Someone";
+  return c ? c.name : t("someone");
 }
 
 /** The contact behind a feed item's SHORT (8-hex) author id, or undefined if we don't hold them.
@@ -5499,9 +5618,9 @@ async function toggleScreen() {
   let display;
   try {
     display = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-  } catch (e) { toast("Screen share unavailable: " + e); return; }
+  } catch (e) { toast(t("screen_share_unavailable", e)); return; }
   const screenTrack = display.getVideoTracks()[0];
-  if (!screenTrack) { toast("No screen selected"); return; }
+  if (!screenTrack) { toast(t("no_screen_selected")); return; }
   // Remember the camera track so we can swap back.
   call.camTrack = call.localStream.getVideoTracks()[0] || call.camTrack;
   call.screenStream = display;
@@ -5535,10 +5654,10 @@ function renderCallOverlay() {
   if (call.ringing) {
     root.replaceChildren(el("div", { class: "modal-backdrop" }, el("div", { class: "modal call-overlay", style: "text-align:center" },
       el("div", { class: "avatar lg", style: "margin:0 auto 12px" }, initials(call.name)),
-      el("h2", {}, "Incoming call"), el("p", { class: "muted" }, call.name + " is calling…"),
+      el("h2", {}, t("incoming_call")), el("p", { class: "muted" }, t("is_calling", call.name)),
       el("div", { class: "row", style: "justify-content:center;gap:16px;margin-top:14px" },
-        el("button", { class: "btn danger", onclick: () => callHangup() }, "Decline"),
-        el("button", { class: "btn primary", onclick: () => callAccept() }, "Accept"),
+        el("button", { class: "btn danger", onclick: () => callHangup() }, t("decline")),
+        el("button", { class: "btn primary", onclick: () => callAccept() }, t("accept")),
       ))));
     return;
   }
@@ -5547,7 +5666,7 @@ function renderCallOverlay() {
   const localTile = el("div", { class: "call-tile" });
   const lv = el("video", { autoplay: "", muted: "", playsinline: "" });
   if (call.localStream) lv.srcObject = call.localStream;
-  localTile.append(lv, el("span", { class: "call-name" }, "You" + (call.camOn ? "" : " (camera off)")));
+  localTile.append(lv, el("span", { class: "call-name" }, t("you") + (call.camOn ? "" : t("camera_off_suffix"))));
   grid.append(localTile);
   for (const peer of invitees()) {
     // Who is talking, so a group call doesn't make you guess. Apple/Android parity.
@@ -5564,21 +5683,21 @@ function renderCallOverlay() {
       if (call.remote && call.remote[peer]) v.srcObject = call.remote[peer];
       tile.append(v);
     }
-    tile.append(el("span", { class: "call-name" }, displayNameFor(peer) + (camOff ? " (camera off)" : "")));
+    tile.append(el("span", { class: "call-name" }, displayNameFor(peer) + (camOff ? t("camera_off_suffix") : "")));
     grid.append(tile);
   }
   root.replaceChildren(el("div", { class: "modal-backdrop" }, el("div", { class: "call-overlay-full" },
-    el("div", { class: "muted small", style: "text-align:center;margin-bottom:8px" }, call.connecting ? "Calling " + call.name + "…" : call.name),
+    el("div", { class: "muted small", style: "text-align:center;margin-bottom:8px" }, call.connecting ? t("calling_name", call.name) : call.name),
     grid,
     el("div", { class: "call-controls" },
-      el("button", { class: "btn " + (call.micOn ? "" : "danger"), onclick: toggleMic }, call.micOn ? "🎤 Mute" : "🔇 Unmute"),
+      el("button", { class: "btn " + (call.micOn ? "" : "danger"), onclick: toggleMic }, call.micOn ? t("mute") : t("unmute")),
       // Always offered — the track is published for every call, so video is always available. It was
       // gated on `call.video`, which meant an audio call could never become a video one.
       call.hasCamera === false ? null
-        : el("button", { class: "btn " + (call.camOn ? "" : "danger"), onclick: toggleCam }, call.camOn ? "📹 Camera off" : "📷 Camera on"),
-      el("button", { class: "btn " + (call.screenOn ? "primary" : ""), onclick: toggleScreen }, call.screenOn ? "🛑 Stop sharing" : "🖥️ Share screen"),
-      el("button", { class: "btn", onclick: addToCallDialog }, "➕ Add"),
-      el("button", { class: "btn danger", onclick: () => callHangup() }, "📞 Hang up"),
+        : el("button", { class: "btn " + (call.camOn ? "" : "danger"), onclick: toggleCam }, call.camOn ? t("camera_off_btn") : t("camera_on_btn")),
+      el("button", { class: "btn " + (call.screenOn ? "primary" : ""), onclick: toggleScreen }, call.screenOn ? t("stop_sharing") : t("share_screen")),
+      el("button", { class: "btn", onclick: addToCallDialog }, t("add_call_btn")),
+      el("button", { class: "btn danger", onclick: () => callHangup() }, t("hang_up")),
     ))));
 }
 
@@ -5638,16 +5757,16 @@ function termsContent() {
       el("div", { style: "font-weight:600" }, title),
       el("div", { class: "muted small" }, body)));
   return el("div", { class: "col", style: "gap:18px;text-align:left" },
-    el("h2", { style: "font-size:26px;font-weight:800;margin:0;text-align:center" }, "The ground rules"),
+    el("h2", { style: "font-size:26px;font-weight:800;margin:0;text-align:center" }, t("ground_rules")),
     el("p", { class: "muted small", style: "margin:0" },
-      "Haven is yours and your people's — nobody else can see inside, so keeping it good is on all of us. There is zero tolerance for objectionable content or abusive behavior."),
-    rule("🚫", "Never allowed", "Harassment or bullying, hate, threats or violence, sexual content involving minors, non-consensual intimate content, scams, impersonation, or anything illegal."),
-    rule("🛡️", "Your circle enforces it", "Anyone can report a post — the whole circle sees the report and can hide it, remove the person, or block them instantly."),
-    rule("📒", "Actions are on the record", "Reports and blocks are logged permanently — who acted against whom and the category, never the content itself. Repeated abuse costs an identity its service."),
-    rule("💜", "You own what you share", "Everything is end-to-end encrypted, so only your circle sees it — and you're responsible for it."),
+      t("terms_intro")),
+    rule("🚫", t("never_allowed_t"), t("never_allowed_b")),
+    rule("🛡️", t("enforces_t"), t("enforces_b")),
+    rule("📒", t("on_record_t"), t("on_record_b")),
+    rule("💜", t("own_share_t"), t("own_share_b")),
     el("a", { href: "https://github.com/blaineam/haven/blob/main/docs/TERMS.md", target: "_blank",
               class: "small", style: "text-align:center;text-decoration:underline;color:var(--pink)" },
-       "Read the full terms of use"));
+       t("read_full_terms")));
 }
 
 /// The standalone gate for identities that exist but never agreed (upgraders, linked devices).
@@ -5659,7 +5778,7 @@ function renderTermsGate() {
       Terms.accept();
       document.getElementById("onboard-overlay")?.remove();
       boot();
-    } }, "I agree"));
+    } }, t("i_agree")));
   document.body.appendChild(el("div", { id: "onboard-overlay", style: "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:32px;background:var(--bg, #0d0b1a)" }, card));
 }
 
@@ -5692,13 +5811,13 @@ function renderOnboarding() {
   const code = el("input", { class: "field-capsule", placeholder: "haven-enroll:… or haven-seed:…", style: "width:100%" });
   const linkBox = () => el("div", { class: "col", style: "width:100%;gap:8px" },
     el("div", { class: "muted small" }, linkMode === "move"
-      ? "On the device you're replacing, open You ▸ Devices ▸ Advanced ▸ Transfer my identity and copy the transfer code. Paste it here. Your identity MOVES — finish setting up here before you retire that device."
-      : "On your other device open You ▸ Devices ▸ Add a device (secure link) for a one-time code. Paste it here. Both devices stay signed in and stay in sync."),
+      ? t("link_move_hint")
+      : t("link_add_hint")),
     code,
-    el("button", { class: "btn ghost small", style: "align-self:flex-start", onclick: () => { showLink = false; draw(); } }, "← Back"),
+    el("button", { class: "btn ghost small", style: "align-self:flex-start", onclick: () => { showLink = false; draw(); } }, t("back_arrow")),
     el("button", { class: "btn primary", style: "width:100%", onclick: async () => {
       const c = code.value.trim();
-      if (!c) { toast("Paste a link code first"); return; }
+      if (!c) { toast(t("paste_link_code_first")); return; }
       // A linked device inherits an identity that already agreed elsewhere — but acceptance is
       // per-device local state, so record it here too rather than drop them on the gate.
       Terms.accept();
@@ -5709,8 +5828,8 @@ function renderOnboarding() {
         if (/^haven-enroll:/i.test(c)) await invoke("onboard_link_seedless", { ticket: c });
         else await invoke("onboard_link", { code: c });
       }
-      catch (e) { toast("Couldn't link: " + e); }
-    } }, linkMode === "move" ? "Move my account here" : "Add this device"));
+      catch (e) { toast(t("couldnt_link", e)); }
+    } }, linkMode === "move" ? t("move_account_here") : t("add_this_device")));
 
   /// One onboarding path: what it's called, and — the part that actually prevents mistakes — what
   /// it does to the device you already have. A card, not a text link, so an alternative reads as a
@@ -5729,44 +5848,44 @@ function renderOnboarding() {
   // worked in it, but a box that mentions both is a box that answers neither question.
   const welcome = () => el("div", { class: "col", style: "align-items:center;gap:20px;text-align:center" },
     brandMark(),
-    el("h1", { style: "font-size:34px;font-weight:800;margin:6px 0 0" }, "Welcome to Haven"),
+    el("h1", { style: "font-size:34px;font-weight:800;margin:6px 0 0" }, t("welcome_haven")),
     el("p", { class: "muted", style: "margin:0;white-space:pre-line" },
-      "A private little place for the people you love.\nNo ads. No tracking. No strangers. Just your people."),
+      t("welcome_sub")),
     showLink ? linkBox()
              : el("div", { class: "col", style: "width:100%;gap:10px" },
-                 choice("I'm new to Haven",
-                        "Create a brand-new identity on this PC.",
+                 choice(t("new_to_haven_t"),
+                        t("new_to_haven_s"),
                         () => advance()),
-                 choice("Add this as another of my devices",
-                        "Use my existing Haven account here too. My other device stays signed in, and both stay in sync.",
+                 choice(t("add_device_choice_t"),
+                        t("add_device_choice_s"),
                         () => { showLink = true; linkMode = "add"; draw(); }),
-                 choice("Move my account to this device",
-                        "Bring my identity over from another device using a transfer code. Use this when replacing a device, not when adding one.",
+                 choice(t("move_account_t"),
+                        t("move_account_s"),
                         () => { showLink = true; linkMode = "move"; draw(); })));
 
   const pickName = () => {
-    const field = el("input", { class: "pill-field", style: "text-align:center;font-size:18px", placeholder: "Your name or nickname", value: name,
+    const field = el("input", { class: "pill-field", style: "text-align:center;font-size:18px", placeholder: t("name_nickname_ph"), value: name,
                                 oninput: (e) => { name = e.target.value; next.disabled = !name.trim(); next.style.opacity = name.trim() ? 1 : 0.5; } });
     const picker = el("input", { type: "file", accept: "image/*", style: "display:none", onchange: async (e) => {
       const f = e.target.files[0];
       if (!f) return;
       try { avatar = await avatarDataUrl(f); draw(); }
-      catch (_) { toast("That file isn't an image Haven can read"); }
+      catch (_) { toast(t("not_an_image")); }
     } });
     const grid = el("div", { class: "emoji-grid" });
     for (const em of AVATAR_EMOJI) {
       grid.appendChild(el("button", { class: "emoji-cell" + (emoji === em ? " on" : ""), onclick: () => { emoji = em; draw(); } }, em));
     }
     return el("div", { class: "col", style: "align-items:center;gap:16px;text-align:center" },
-      el("h2", { style: "font-size:26px;font-weight:800;margin:0;white-space:pre-line" }, "What should your\npeople call you?"),
+      el("h2", { style: "font-size:26px;font-weight:800;margin:0;white-space:pre-line" }, t("what_call_you")),
       el("div", { class: "disc", style: "width:96px;height:96px;font-size:40px" },
          avatar ? el("img", { src: avatar }) : emoji),
       el("div", { class: "row", style: "justify-content:center;gap:8px" },
-        el("button", { class: "btn small tint-pink", onclick: () => picker.click() }, avatar ? "Change photo" : "Add a photo"),
-        avatar ? el("button", { class: "btn small danger", onclick: () => { avatar = ""; draw(); } }, "Remove") : null,
+        el("button", { class: "btn small tint-pink", onclick: () => picker.click() }, avatar ? t("change_photo") : t("add_a_photo")),
+        avatar ? el("button", { class: "btn small danger", onclick: () => { avatar = ""; draw(); } }, t("remove")) : null,
         picker),
       field,
-      el("div", { class: "muted small" }, avatar ? "Emoji (shown if you remove your photo)" : "Or pick an emoji"),
+      el("div", { class: "muted small" }, avatar ? t("emoji_if_remove_photo") : t("or_pick_emoji")),
       grid);
   };
 
@@ -5777,10 +5896,10 @@ function renderOnboarding() {
         el("div", { style: "font-weight:600" }, title),
         el("div", { class: "muted small" }, body)));
     return el("div", { class: "col", style: "gap:22px" },
-      el("h2", { style: "font-size:26px;font-weight:800;margin:0;text-align:center" }, "How Haven works"),
-      point("🔒", "Private by design", "Everything you share is locked so only the people in your circle can ever see it."),
-      point("🚫", "No ads, no tracking", "There's no algorithm and no company watching. Haven doesn't collect anything about you."),
-      point("🤝", "You choose your circle", "Nothing happens with strangers. You invite the people you want, one at a time."));
+      el("h2", { style: "font-size:26px;font-weight:800;margin:0;text-align:center" }, t("how_haven_works")),
+      point("🔒", t("private_design_t"), t("private_design_b")),
+      point("🚫", t("no_ads_t"), t("no_ads_b")),
+      point("🤝", t("choose_circle_t"), t("choose_circle_b")));
   };
 
   const next = el("button", { class: "btn primary", style: "width:100%;padding:12px" });
@@ -5792,7 +5911,7 @@ function renderOnboarding() {
     Terms.accept();
     PendingProfile.stash({ name: name.trim(), emoji, avatar });
     try { await invoke("onboard_create"); }
-    catch (e) { toast("Couldn't create: " + e); }
+    catch (e) { toast(t("couldnt_create", e)); }
   };
   next.onclick = advance;
 
@@ -5805,7 +5924,7 @@ function renderOnboarding() {
     // Step 0 now offers the three paths as explicit choices, so a generic "Get started" underneath
     // them would be a fourth, ambiguous door onto the same screen.
     next.style.display = step === 0 ? "none" : "";
-    next.textContent = step === 3 ? "I agree — enter Haven" : "Continue";
+    next.textContent = step === 3 ? t("i_agree_enter") : t("continue_btn");
     const needName = step === 1 && !name.trim();
     next.disabled = needName;
     next.style.opacity = needName ? 0.5 : 1;
@@ -5816,7 +5935,7 @@ function renderOnboarding() {
   const card = el("div", { class: "col", style: "max-width:520px;width:100%;align-items:center;gap:14px" },
     body, next, dots,
     el("p", { class: "muted small", style: "margin-top:10px;text-align:center" },
-      "No phone number. No email. Your keys never leave this device."));
+      t("no_phone_email")));
 
   document.getElementById("onboard-overlay")?.remove();
   document.body.appendChild(el("div", { id: "onboard-overlay", style: "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:32px;overflow:auto;background:var(--bg, #0d0b1a)" }, card));
@@ -5830,10 +5949,10 @@ function renderSeedlessLinking() {
   const spinner = el("div", { style: "font-size:40px" }, "🔗");
   const card = el("div", { class: "col", style: "max-width:460px;width:100%;align-items:center;gap:16px;text-align:center" },
     spinner,
-    el("h1", { style: "font-size:26px;font-weight:800;margin:0" }, "Waiting for your other device"),
+    el("h1", { style: "font-size:26px;font-weight:800;margin:0" }, t("waiting_other_device")),
     el("p", { class: "muted", style: "margin:0" },
-      "Open Haven on the device that has your account, go to You ▸ Devices, and approve this device. It'll get its own key — your master seed never leaves that device."),
-    el("button", { class: "btn ghost small", onclick: () => location.reload() }, "Check again"));
+      t("seedless_hint")),
+    el("button", { class: "btn ghost small", onclick: () => location.reload() }, t("check_again")));
   document.getElementById("onboard-overlay")?.remove();
   document.body.appendChild(el("div", { id: "onboard-overlay", style: "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:32px;overflow:auto;background:var(--bg, #0d0b1a)" }, card));
   // The grant lands over iroh → the engine emits `haven:enrolled`; relaunch to rebuild seedless-linked.
@@ -5886,7 +6005,7 @@ async function boot() {
     state.inviteLink = b.invite_link;
     state.profile = b.profile;
   } catch (e) {
-    toast("Backend not ready: " + e);
+    toast(t("backend_not_ready", e));
   }
   await Pins.load();   // adopt pins synced from the user's other devices before Messages renders
   await refreshStatus();
@@ -5925,11 +6044,11 @@ async function boot() {
     const pending = !!(e.payload && e.payload.rebindPending);
     if (pending && !window.__havenFabricRebindHinted) {
       window.__havenFabricRebindHinted = true;
-      toast("Haven fabric ready — reconnecting this session onto circle DERP…");
+      toast(t("fabric_ready"));
     }
     if (!pending && window.__havenFabricRebindHinted && !window.__havenFabricRebindDone) {
       window.__havenFabricRebindDone = true;
-      toast("Connected on Haven fabric (circle DERP)");
+      toast(t("fabric_connected"));
     }
   });
   // A notification carrying a deepLink is ABOUT something openable — make the toast take you there
@@ -5942,15 +6061,15 @@ async function boot() {
   });
   // seed-drop S4: a new device asked THIS primary to link with a secure code. Nudge the user to the
   // Devices sheet, where the request shows an Approve/Dismiss row.
-  listen("haven:enroll-request", (e) => { const p = e.payload || {}; toast(`“${p.name || "A device"}” wants to link — open You ▸ Devices to approve`); });
+  listen("haven:enroll-request", (e) => { const p = e.payload || {}; toast(t("device_wants_link", p.name || t("new_device"))); });
   // Deep links (`haven://…` from the OS). The backend QUEUES them and pings us rather than putting the
   // URL in the event, because a link that launched Haven arrives long before this webview has a
   // listener — so we drain once at boot too, or a cold-start link is silently dropped.
   const drainDeepLinks = async () => {
     for (const url of await invoke("take_deep_links").catch(() => [])) {
       const kind = await routeDeepLink(url);
-      if (kind === "invite") toast("Invite sent — they'll appear once they accept");
-      else if (!kind) toast("That doesn't look like a Haven link");
+      if (kind === "invite") toast(t("invite_sent"));
+      else if (!kind) toast(t("not_haven_link"));
     }
   };
   listen("haven:deep-link", drainDeepLinks);
@@ -5997,8 +6116,8 @@ async function boot() {
         // The Rust side enforces the same size cap before it reads, so name that reason explicitly
         // rather than reporting it as a generic failure.
         toast(String(err).includes("too large")
-          ? `That ${isVideo ? "video" : "photo"} is over Haven's ${fmtMB(maxBytes)} limit, so it wasn't attached.`
-          : "Couldn't attach that file");
+          ? t("over_limit", isVideo ? t("video_word") : t("photo_word"), fmtMB(maxBytes))
+          : t("couldnt_attach_file"));
       }
     }
   });

@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="styles.css" />
     <script src="vendor/qrcode.js" defer></script>
     <script src="vendor/jsQR.js" defer></script>
+    <script src="strings.js" defer></script>
     <script src="app.js" type="module" defer></script>
   </head>
   <body>
@@ -18,21 +19,22 @@
          decorated and get their OS's own titlebar above this bar. -->
     <div class="titlebar" data-tauri-drag-region>
       <div class="traffic">
-        <button class="tl close" id="win-close" aria-label="Close window"></button>
-        <button class="tl min" id="win-min" aria-label="Minimize window"></button>
-        <button class="tl max" id="win-max" aria-label="Zoom window"></button>
+        <button class="tl close" id="win-close" aria-label="Close window" data-i18n-aria="close_window"></button>
+        <button class="tl min" id="win-min" aria-label="Minimize window" data-i18n-aria="minimize_window"></button>
+        <button class="tl max" id="win-max" aria-label="Zoom window" data-i18n-aria="zoom_window"></button>
       </div>
 
       <nav class="tabs glass" id="tabs" role="tablist" aria-label="Haven">
         <button class="tab active" data-view="circle" role="tab">Circle<i class="badge" id="badge-circle"></i></button>
-        <button class="tab" data-view="messages" role="tab">Messages<i class="badge" id="badge-messages"></i></button>
-        <button class="tab" data-view="you" role="tab">You</button>
+        <button class="tab" data-view="messages" role="tab" data-i18n="messages">Messages<i class="badge" id="badge-messages"></i></button>
+        <button class="tab" data-view="you" role="tab" data-i18n="you">You</button>
       </nav>
 
       <!-- Activity bell — the in-app notification list. Rides beside the per-tab trailing slot
            (the tabs pill is absolutely centred, so this is the flow position "next to the tabs");
            app.js fills the glyph, wires the panel, and drives the unread badge. -->
       <button class="icon-btn glass" id="bell-btn" title="Activity" aria-label="Activity"
+              data-i18n-title="activity" data-i18n-aria="activity"
               style="margin-left:auto;position:relative"><i class="badge" id="badge-bell"
               style="position:absolute;top:-4px;right:-6px;margin-left:0"></i></button>
 

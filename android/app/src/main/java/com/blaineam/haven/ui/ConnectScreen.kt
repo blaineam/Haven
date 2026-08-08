@@ -48,12 +48,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.blaineam.haven.R
 import com.blaineam.haven.core.HavenCore
 import com.blaineam.haven.core.HavenNet
 import com.blaineam.haven.core.SafetyWords
@@ -84,13 +86,19 @@ fun ConnectScreen(initialLink: String? = null, onDone: () -> Unit) {
     var problem by remember { mutableStateOf<String?>(null) }
     var showScanner by remember { mutableStateOf(false) }
 
+    // Hoisted here (composable scope) because `lookup` and the permission/onAdd callbacks below are
+    // plain non-composable lambdas — stringResource can't be called from inside them.
+    val invalidLinkMsg = stringResource(R.string.connect_invalid_link)
+    val cameraPermissionMsg = stringResource(R.string.connect_camera_permission_needed)
+    val connectFailedMsg = stringResource(R.string.connect_start_failed)
+
     // Resolve a link into the confirm step. Deliberately does NOT connect — the user has to read
     // the safety words first.
     fun lookup(link: String) {
         val trimmed = link.trim()
         val info = runCatching { parseLink(trimmed) }.getOrNull()
         if (info == null) {
-            problem = "That doesn't look like a Haven invite link. Double-check and try again."
+            problem = invalidLinkMsg
         } else {
             problem = null
             foundLink = trimmed
@@ -111,7 +119,7 @@ fun ConnectScreen(initialLink: String? = null, onDone: () -> Unit) {
 
     val camPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) showScanner = true
-        else problem = "Camera permission is needed to scan."
+        else problem = cameraPermissionMsg
     }
     fun launchScanner() {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
@@ -134,7 +142,10 @@ fun ConnectScreen(initialLink: String? = null, onDone: () -> Unit) {
         ) {
             Spacer(Modifier.height(8.dp))
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                listOf("Invite a friend", "Add a friend").forEachIndexed { i, label ->
+                listOf(
+                    stringResource(R.string.connect_invite_a_friend),
+                    stringResource(R.string.connect_add_a_friend),
+                ).forEachIndexed { i, label ->
                     SegmentedButton(
                         selected = mode == i,
                         onClick = { mode = i },
@@ -161,7 +172,7 @@ fun ConnectScreen(initialLink: String? = null, onDone: () -> Unit) {
                             // Re-parses the same link internally; passing the RAW link keeps the
                             // ?d= device hints that make the first dial reachable.
                             added = HavenNet.connectByLink(foundLink)
-                            if (!added) problem = "Couldn't start that invite. Try again."
+                            if (!added) problem = connectFailedMsg
                         },
                         onCancel = { found = null; pasted = ""; foundLink = "" },
                     )
@@ -180,7 +191,7 @@ fun ConnectScreen(initialLink: String? = null, onDone: () -> Unit) {
             // state that has no other action: after "Invite sent" the card is terminal — no cancel,
             // no back — so the only way off this screen was to force-quit the app.
             Text(
-                "Done",
+                stringResource(R.string.common_done),
                 color = if (added) HavenTheme.textPrimary else HavenTheme.textSecondary,
                 fontSize = if (added) 16.sp else 14.sp,
                 fontWeight = if (added) FontWeight.SemiBold else FontWeight.Normal,
@@ -198,10 +209,10 @@ private fun InviteCard(uri: String, qr: androidx.compose.ui.graphics.ImageBitmap
         Modifier.fillMaxWidth().havenCard().padding(18.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        BrandText("Invite someone you trust", fontSize = 22)
+        BrandText(stringResource(R.string.connect_invite_someone_you_trust), fontSize = 22)
         Spacer(Modifier.height(6.dp))
         Text(
-            "Have them scan this, or send them your invite link.",
+            stringResource(R.string.connect_invite_instructions),
             color = HavenTheme.textSecondary, fontSize = 13.sp, textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(16.dp))
@@ -210,19 +221,19 @@ private fun InviteCard(uri: String, qr: androidx.compose.ui.graphics.ImageBitmap
             // BOTH themes — a light backdrop renders the code invisible, not merely low-contrast.
             Image(
                 bitmap = qr,
-                contentDescription = "Your Haven invite QR code",
+                contentDescription = stringResource(R.string.connect_qr_content_description),
                 modifier = Modifier.size(220.dp).clip(RoundedCornerShape(12.dp))
                     .background(Color(0xFF101018)).padding(8.dp),
             )
         }
         Spacer(Modifier.height(16.dp))
         // The raw URL used to be printed here, truncated to 2 lines — unreadable and unusable.
-        BrandButton(text = "Share invite link") { shareInvite(context, uri) }
+        BrandButton(text = stringResource(R.string.connect_share_invite_link)) { shareInvite(context, uri) }
         Spacer(Modifier.height(16.dp))
         SafetyCard(
-            title = "Your safety words",
+            title = stringResource(R.string.connect_your_safety_words),
             words = myWords,
-            note = "When your friend adds you, make sure they see these same words — that's how you both know it's really you.",
+            note = stringResource(R.string.connect_my_words_note),
         )
     }
 }
@@ -240,21 +251,21 @@ private fun AddCard(
         Modifier.fillMaxWidth().havenCard().padding(18.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        BrandText("Add a friend", fontSize = 22)
+        BrandText(stringResource(R.string.connect_add_a_friend), fontSize = 22)
         Spacer(Modifier.height(6.dp))
         Text(
-            "Scan their invite QR, or paste the link they sent you.",
+            stringResource(R.string.connect_add_instructions),
             color = HavenTheme.textSecondary, fontSize = 13.sp, textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(16.dp))
-        BrandButton(text = "Scan their QR code") { onScan() }
+        BrandButton(text = stringResource(R.string.connect_scan_qr_button)) { onScan() }
         Spacer(Modifier.height(12.dp))
-        Text("or", color = HavenTheme.textSecondary, fontSize = 12.sp)
+        Text(stringResource(R.string.connect_or), color = HavenTheme.textSecondary, fontSize = 12.sp)
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = pasted,
             onValueChange = onPastedChange,
-            label = { Text("Paste invite link…") },
+            label = { Text(stringResource(R.string.connect_paste_link_placeholder)) },
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
             modifier = Modifier.fillMaxWidth(),
@@ -267,10 +278,13 @@ private fun AddCard(
         )
         if (problem != null) {
             Spacer(Modifier.height(10.dp))
-            Text("⚠ $problem", color = HavenTheme.amber, fontSize = 12.sp, textAlign = TextAlign.Center)
+            Text(
+                stringResource(R.string.connect_problem_prefixed, problem),
+                color = HavenTheme.amber, fontSize = 12.sp, textAlign = TextAlign.Center,
+            )
         }
         Spacer(Modifier.height(12.dp))
-        BrandButton(text = "Find my friend", enabled = pasted.isNotBlank()) { onFind() }
+        BrandButton(text = stringResource(R.string.connect_find_my_friend_button), enabled = pasted.isNotBlank()) { onFind() }
     }
 }
 
@@ -281,22 +295,22 @@ private fun FoundCard(info: LinkInfo, onAdd: () -> Unit, onCancel: () -> Unit) {
         Modifier.fillMaxWidth().havenCard().padding(18.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        BrandText("Found someone! 🎉", fontSize = 22)
+        BrandText(stringResource(R.string.connect_found_someone), fontSize = 22)
         Spacer(Modifier.height(16.dp))
         SafetyCard(
-            title = "Check these safety words",
+            title = stringResource(R.string.connect_check_safety_words),
             words = SafetyWords.words(info.verificationHex),
-            note = "Ask your friend to read their safety words aloud. If they match, it's really them.",
+            note = stringResource(R.string.connect_check_words_note),
         )
         Spacer(Modifier.height(16.dp))
-        BrandButton(text = "Add to my circle") { onAdd() }
+        BrandButton(text = stringResource(R.string.connect_add_to_circle_button)) { onAdd() }
         Spacer(Modifier.height(6.dp))
         Text(
-            "Their own name will appear once you connect — they choose it, signed with their key.",
+            stringResource(R.string.connect_name_appears_note),
             color = HavenTheme.textSecondary, fontSize = 12.sp, textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(10.dp))
-        Text("The words don't match — cancel", color = HavenTheme.textSecondary, fontSize = 13.sp,
+        Text(stringResource(R.string.connect_words_dont_match_cancel), color = HavenTheme.textSecondary, fontSize = 13.sp,
             modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { onCancel() }.padding(8.dp))
     }
 }
@@ -309,9 +323,9 @@ private fun AddedCard() {
     ) {
         Icon(Icons.Filled.CheckCircle, null, tint = Color(0xFF34D399), modifier = Modifier.size(54.dp))
         Spacer(Modifier.height(12.dp))
-        Text("Invite sent", color = HavenTheme.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Text(stringResource(R.string.connect_invite_sent), color = HavenTheme.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(6.dp))
-        Text("They'll show up once you're both online.",
+        Text(stringResource(R.string.connect_show_up_online),
             color = HavenTheme.textSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
     }
 }
@@ -363,7 +377,7 @@ private fun SafetyCard(title: String, words: List<String>, note: String) {
 internal fun shareInvite(context: Context, uri: String) {
     val send = Intent(Intent.ACTION_SEND).apply {
         type = "text/plain"
-        putExtra(Intent.EXTRA_TEXT, "Add me on Haven: $uri")
+        putExtra(Intent.EXTRA_TEXT, context.getString(R.string.connect_share_invite_text, uri))
     }
-    context.startActivity(Intent.createChooser(send, "Invite to Haven"))
+    context.startActivity(Intent.createChooser(send, context.getString(R.string.connect_share_chooser_title)))
 }

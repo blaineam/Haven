@@ -58,10 +58,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.blaineam.haven.R
 import com.blaineam.haven.core.Contact
 import com.blaineam.haven.core.HavenNet
 import kotlinx.coroutines.launch
@@ -77,12 +79,12 @@ fun MessagesScreen() {
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                 Text("🔒", fontSize = 48.sp)
                 Spacer(Modifier.height(12.dp))
-                Text("Messages are locked", color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.msg_locked_title), color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(6.dp))
-                Text("Unlock your circle to see your private chats.", color = HavenTheme.textSecondary,
+                Text(stringResource(R.string.msg_locked_subtitle), color = HavenTheme.textSecondary,
                     fontSize = 13.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                 Spacer(Modifier.height(16.dp))
-                BrandButton(text = "Unlock", modifier = Modifier.fillMaxWidth(0.6f)) {
+                BrandButton(text = stringResource(R.string.msg_unlock_button), modifier = Modifier.fillMaxWidth(0.6f)) {
                     (context as? androidx.fragment.app.FragmentActivity)?.let {
                         com.blaineam.haven.core.CircleLock.authenticate(it, com.blaineam.haven.core.DEFAULT_CIRCLE) {}
                     }
@@ -137,11 +139,11 @@ private fun dmPartner(circleId: String): Contact? {
 }
 
 /** The newest message as one line — what iOS's rowLabel shows (unsent / secret never leak content). */
-private fun previewOf(circleId: String): String {
+private fun previewOf(circleId: String, context: android.content.Context): String {
     val last = HavenNet.messages(circleId).maxByOrNull { it.createdAt } ?: return ""
     return when {
-        last.unsent -> "Message unsent"
-        com.blaineam.haven.core.SecretMessages.isSecret(last.body) -> "🔒 Secret message"
+        last.unsent -> context.getString(R.string.msg_message_unsent)
+        com.blaineam.haven.core.SecretMessages.isSecret(last.body) -> context.getString(R.string.msg_secret_message_preview)
         else -> last.body
     }
 }
@@ -149,6 +151,7 @@ private fun previewOf(circleId: String): String {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ThreadList(onOpen: (String, Contact) -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val contacts = HavenNet.contacts
     val version by HavenNet.feedVersion
     val readTick by com.blaineam.haven.core.DmRead.version
@@ -165,7 +168,7 @@ private fun ThreadList(onOpen: (String, Contact) -> Unit) {
             .map { c ->
                 val partner = if (HavenNet.isGroupDm(c.id)) null else dmPartner(c.id)
                 Conversation(
-                    c.id, HavenNet.dmPartnerName(c.id), partner, previewOf(c.id),
+                    c.id, HavenNet.dmPartnerName(c.id), partner, previewOf(c.id, context),
                     HavenNet.lastActivity(c.id), HavenNet.unreadMessages(c.id),
                 )
             }
@@ -194,11 +197,11 @@ private fun ThreadList(onOpen: (String, Contact) -> Unit) {
                 Modifier.fillMaxWidth().padding(start = 20.dp, top = 16.dp, bottom = 8.dp, end = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                BrandText("Messages", fontSize = 26)
+                BrandText(stringResource(R.string.msg_screen_title), fontSize = 26)
                 Spacer(Modifier.weight(1f))
                 if (contacts.isNotEmpty()) {
                     Box(Modifier.clip(CircleShape).clickable { showPicker = true }.padding(6.dp)) {
-                        Icon(Icons.Filled.Edit, "New message", tint = HavenTheme.pink)
+                        Icon(Icons.Filled.Edit, stringResource(R.string.msg_new_message), tint = HavenTheme.pink)
                     }
                 }
             }
@@ -208,12 +211,14 @@ private fun ThreadList(onOpen: (String, Contact) -> Unit) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
                 ) {
-                    Text(if (contacts.isEmpty()) "No one to message yet" else "No messages yet",
+                    Text(
+                        if (contacts.isEmpty()) stringResource(R.string.msg_no_one_to_message)
+                        else stringResource(R.string.msg_no_messages_yet),
                         color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        if (contacts.isEmpty()) "Add a friend from the Circle tab, then DM them here."
-                        else "Tap the pencil to start one.",
+                        if (contacts.isEmpty()) stringResource(R.string.msg_no_contacts_hint)
+                        else stringResource(R.string.msg_no_messages_hint),
                         color = HavenTheme.textSecondary, fontSize = 14.sp, textAlign = TextAlign.Center,
                     )
                 }
@@ -273,7 +278,7 @@ private fun ConversationRow(conv: Conversation, pinned: Boolean, onOpen: () -> U
                 Spacer(Modifier.size(8.dp))
             }
             if (pinned) {
-                Icon(Icons.Filled.PushPin, "Pinned", tint = HavenTheme.pink, modifier = Modifier.size(16.dp))
+                Icon(Icons.Filled.PushPin, stringResource(R.string.msg_pinned), tint = HavenTheme.pink, modifier = Modifier.size(16.dp))
             }
         }
         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
@@ -281,11 +286,11 @@ private fun ConversationRow(conv: Conversation, pinned: Boolean, onOpen: () -> U
             val canPin = isPinned || !com.blaineam.haven.core.DmPins.isFull
             DropdownMenuItem(
                 enabled = canPin,
-                text = { Text(if (isPinned) "Unpin" else "Pin") },
+                text = { Text(if (isPinned) stringResource(R.string.msg_unpin) else stringResource(R.string.msg_pin)) },
                 onClick = { com.blaineam.haven.core.DmPins.toggle(conv.circleId); showMenu = false },
             )
             DropdownMenuItem(
-                text = { Text("Delete conversation", color = HavenTheme.pink) },
+                text = { Text(stringResource(R.string.msg_delete_conversation), color = HavenTheme.pink) },
                 onClick = { showMenu = false; confirmDelete = true },
             )
         }
@@ -294,18 +299,18 @@ private fun ConversationRow(conv: Conversation, pinned: Boolean, onOpen: () -> U
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             containerColor = HavenTheme.card,
-            title = { Text("Delete conversation?", color = HavenTheme.textPrimary) },
-            text = { Text("This hides the messages on this device. Re-starting the chat won't restore them.",
+            title = { Text(stringResource(R.string.msg_delete_conversation_title), color = HavenTheme.textPrimary) },
+            text = { Text(stringResource(R.string.msg_delete_conversation_message),
                 color = HavenTheme.textSecondary) },
             confirmButton = {
                 TextButton(onClick = {
                     com.blaineam.haven.core.DmPins.unpin(conv.circleId)
                     HavenNet.deleteConversation(conv.circleId)
                     confirmDelete = false
-                }) { Text("Delete", color = HavenTheme.pink) }
+                }) { Text(stringResource(R.string.common_delete), color = HavenTheme.pink) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmDelete = false }) { Text("Cancel", color = HavenTheme.textSecondary) }
+                TextButton(onClick = { confirmDelete = false }) { Text(stringResource(R.string.common_cancel), color = HavenTheme.textSecondary) }
             },
         )
     }
@@ -321,7 +326,7 @@ fun UnreadBadge(count: Int) {
         contentAlignment = Alignment.Center,
     ) {
         // White-on-pink-fill, not a theme surface — stays white in both modes.
-        Text(if (count > 99) "99+" else "$count", color = Color.White,
+        Text(if (count > 99) stringResource(R.string.msg_unread_99_plus) else "$count", color = Color.White,
             fontSize = 11.sp, fontWeight = FontWeight.Bold)
     }
 }
@@ -335,7 +340,7 @@ private fun NewMessagePicker(onDismiss: () -> Unit, onStart: (List<Contact>) -> 
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = HavenTheme.card,
-        title = { Text("New message", color = HavenTheme.textPrimary) },
+        title = { Text(stringResource(R.string.msg_new_message), color = HavenTheme.textPrimary) },
         text = {
             LazyColumn(Modifier.heightIn(max = 360.dp)) {
                 items(contacts, key = { it.idHex }) { c ->
@@ -360,7 +365,7 @@ private fun NewMessagePicker(onDismiss: () -> Unit, onStart: (List<Contact>) -> 
         confirmButton = {
             val ready = picked.isNotEmpty()
             Text(
-                if (ready) "Start (${picked.size})" else "Pick someone",
+                if (ready) stringResource(R.string.msg_start_count, picked.size) else stringResource(R.string.msg_pick_someone),
                 color = if (ready) HavenTheme.pink else HavenTheme.textSecondary,
                 modifier = Modifier.clickable(enabled = ready) {
                     onStart(contacts.filter { picked.contains(it.idHex) })
@@ -368,7 +373,7 @@ private fun NewMessagePicker(onDismiss: () -> Unit, onStart: (List<Contact>) -> 
             )
         },
         dismissButton = {
-            Text("Cancel", color = HavenTheme.textSecondary,
+            Text(stringResource(R.string.common_cancel), color = HavenTheme.textSecondary,
                 modifier = Modifier.clickable { onDismiss() }.padding(8.dp))
         },
     )
@@ -453,7 +458,7 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
             ) {
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable { onBack() },
                     contentAlignment = Alignment.Center) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = HavenTheme.textPrimary)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.common_back), tint = HavenTheme.textPrimary)
                 }
                 Spacer(Modifier.size(4.dp))
                 HavenAvatar(idOrShort = partner.idHex, name = partner.name, size = 32.dp)
@@ -467,7 +472,7 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                     val ring = HavenNet.dmMemberHexes(circleId).filter { it != HavenNet.nodeIdHex.lowercase() }
                     startCall(if (ring.isNotEmpty()) ring else listOf(partner.idHex), partner.name)
                 }, contentAlignment = Alignment.Center) {
-                    Icon(Icons.Filled.Videocam, "Video call", tint = HavenTheme.pink)
+                    Icon(Icons.Filled.Videocam, stringResource(R.string.msg_video_call), tint = HavenTheme.pink)
                 }
             }
 
@@ -535,15 +540,15 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
             pendingMusic?.let { m ->
                 Row(Modifier.padding(start = 16.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     MusicChip(m)
-                    Icon(Icons.Filled.Close, "Remove song", tint = HavenTheme.textPrimary,
+                    Icon(Icons.Filled.Close, stringResource(R.string.msg_remove_song), tint = HavenTheme.textPrimary,
                         modifier = Modifier.padding(start = 6.dp).size(18.dp).clickable { pendingMusic = null })
                 }
             }
             if (editingId != null) {
                 Row(Modifier.padding(start = 16.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Editing message", color = HavenTheme.pink, fontSize = 12.sp)
+                    Text(stringResource(R.string.msg_editing_message), color = HavenTheme.pink, fontSize = 12.sp)
                     Spacer(Modifier.size(10.dp))
-                    Text("Cancel", color = HavenTheme.textSecondary, fontSize = 12.sp,
+                    Text(stringResource(R.string.common_cancel), color = HavenTheme.textSecondary, fontSize = 12.sp,
                         modifier = Modifier.clickable { editingId = null; draft = ""; secretMode = false })
                 }
             }
@@ -557,12 +562,12 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                 Box(contentAlignment = Alignment.Center) {
                     Box(Modifier.size(40.dp).clip(CircleShape).clickable { showOptions = true },
                         contentAlignment = Alignment.Center) {
-                        Icon(Icons.Filled.AddCircle, "Attach", tint = HavenTheme.pink)
+                        Icon(Icons.Filled.AddCircle, stringResource(R.string.msg_attach), tint = HavenTheme.pink)
                     }
                     DropdownMenu(expanded = showOptions, onDismissRequest = { showOptions = false }) {
                         DropdownMenuItem(
                             leadingIcon = { Icon(Icons.Filled.AddPhotoAlternate, null, tint = HavenTheme.pink) },
-                            text = { Text("Photo or video") },
+                            text = { Text(stringResource(R.string.msg_photo_or_video)) },
                             onClick = {
                                 showOptions = false
                                 picker.launch(androidx.activity.result.PickVisualMediaRequest(
@@ -570,31 +575,31 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                             })
                         DropdownMenuItem(
                             leadingIcon = { Icon(Icons.Filled.PhotoCamera, null, tint = HavenTheme.pink) },
-                            text = { Text("Camera") },
+                            text = { Text(stringResource(R.string.msg_camera)) },
                             onClick = { showOptions = false; openDmCamera() })
                         DropdownMenuItem(
                             leadingIcon = { Icon(Icons.Filled.Mic, null, tint = HavenTheme.pink) },
-                            text = { Text("Voice message") },
+                            text = { Text(stringResource(R.string.msg_voice_message)) },
                             onClick = { showOptions = false; showVoice = true })
                         DropdownMenuItem(
                             leadingIcon = { Icon(Icons.Filled.MusicNote, null, tint = HavenTheme.pink) },
-                            text = { Text("Song") },
+                            text = { Text(stringResource(R.string.msg_song)) },
                             onClick = { showOptions = false; showMusicDialog = true })
                         androidx.compose.material3.HorizontalDivider(color = HavenTheme.cardBorder)
                         DropdownMenuItem(
-                            text = { Text(if (secretMode) "✓ Secret message" else "Secret message") },
+                            text = { Text(if (secretMode) stringResource(R.string.msg_secret_message_checked) else stringResource(R.string.msg_secret_message)) },
                             onClick = { secretMode = !secretMode; showOptions = false })
                         DropdownMenuItem(
-                            text = { Text(if (disappearSecs == null) "✓ Don't disappear" else "Don't disappear") },
+                            text = { Text(if (disappearSecs == null) stringResource(R.string.msg_dont_disappear_checked) else stringResource(R.string.msg_dont_disappear)) },
                             onClick = { disappearSecs = null; showOptions = false })
                         DropdownMenuItem(
-                            text = { Text(if (disappearSecs == 3_600UL) "✓ Disappear · 1 hour" else "Disappear · 1 hour") },
+                            text = { Text(if (disappearSecs == 3_600UL) stringResource(R.string.msg_disappear_1h_checked) else stringResource(R.string.msg_disappear_1h)) },
                             onClick = { disappearSecs = 3_600UL; showOptions = false })
                         DropdownMenuItem(
-                            text = { Text(if (disappearSecs == 86_400UL) "✓ Disappear · 1 day" else "Disappear · 1 day") },
+                            text = { Text(if (disappearSecs == 86_400UL) stringResource(R.string.msg_disappear_1d_checked) else stringResource(R.string.msg_disappear_1d)) },
                             onClick = { disappearSecs = 86_400UL; showOptions = false })
                         DropdownMenuItem(
-                            text = { Text(if (disappearSecs == 604_800UL) "✓ Disappear · 1 week" else "Disappear · 1 week") },
+                            text = { Text(if (disappearSecs == 604_800UL) stringResource(R.string.msg_disappear_1w_checked) else stringResource(R.string.msg_disappear_1w)) },
                             onClick = { disappearSecs = 604_800UL; showOptions = false })
                     }
                 }
@@ -608,7 +613,7 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                 Spacer(Modifier.size(4.dp))
                 OutlinedTextField(
                     value = draft, onValueChange = { draft = it },
-                    placeholder = { Text(if (secretMode) "Secret message…" else "Message…") },
+                    placeholder = { Text(if (secretMode) stringResource(R.string.msg_secret_placeholder) else stringResource(R.string.msg_message_placeholder)) },
                     modifier = Modifier.weight(1f), shape = RoundedCornerShape(22.dp), maxLines = 4,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
@@ -628,7 +633,7 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                         },
                     contentAlignment = Alignment.Center,
                     // White-on-brand-gradient — never themed.
-                ) { Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = Color.White) }
+                ) { Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.common_send), tint = Color.White) }
             }
         }
         if (showMusicDialog) {
@@ -739,11 +744,11 @@ private fun Bubble(
             horizontalArrangement = Arrangement.spacedBy(3.dp),
         ) {
             Text(msgTime(m.createdAt), color = HavenTheme.textSecondary, fontSize = 10.sp)
-            if (m.edited && !m.unsent) Text("edited", color = HavenTheme.textSecondary, fontSize = 10.sp)
+            if (m.edited && !m.unsent) Text(stringResource(R.string.msg_edited_label), color = HavenTheme.textSecondary, fontSize = 10.sp)
             if (mine && !m.unsent) {
                 Icon(
                     if (relayReachable) Icons.Filled.DoneAll else Icons.Filled.Check,
-                    contentDescription = if (relayReachable) "Delivered" else "Sent",
+                    contentDescription = if (relayReachable) stringResource(R.string.msg_delivered) else stringResource(R.string.msg_sent),
                     tint = if (relayReachable) HavenTheme.pink else HavenTheme.textSecondary,
                     modifier = Modifier.size(12.dp),
                 )
@@ -753,7 +758,7 @@ private fun Bubble(
     if (showReact) {
         AlertDialog(
             onDismissRequest = { showReact = false },
-            confirmButton = { TextButton(onClick = { showReact = false }) { Text("Close", color = HavenTheme.pink) } },
+            confirmButton = { TextButton(onClick = { showReact = false }) { Text(stringResource(R.string.common_close), color = HavenTheme.pink) } },
             text = {
                 Column {
                     Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -767,9 +772,9 @@ private fun Bubble(
                     if (mine) {
                         Spacer(Modifier.size(14.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                            if (text.isNotBlank()) Text("Edit", color = HavenTheme.pink, fontSize = 15.sp,
+                            if (text.isNotBlank()) Text(stringResource(R.string.common_edit), color = HavenTheme.pink, fontSize = 15.sp,
                                 modifier = Modifier.clickable { onEdit?.invoke(m); showReact = false })
-                            Text("Delete", color = HavenTheme.pink, fontSize = 15.sp,
+                            Text(stringResource(R.string.common_delete), color = HavenTheme.pink, fontSize = 15.sp,
                                 modifier = Modifier.clickable { HavenNet.unsendPost(circleId, m.id); showReact = false })
                         }
                     }

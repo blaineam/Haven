@@ -39,6 +39,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.blaineam.haven.R
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -81,10 +83,10 @@ fun RelayNudgeBanner(circleId: String) {
         Icon(Icons.Filled.Podcasts, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp))
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text("Give this circle a relay", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(stringResource(R.string.nudge_banner_title), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(2.dp))
             Text(
-                "A few of you are here now — a relay holds your sealed posts so nobody has to be online at the same time.",
+                stringResource(R.string.nudge_banner_body),
                 color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp,
             )
         }
@@ -94,7 +96,7 @@ fun RelayNudgeBanner(circleId: String) {
                 .background(Color.White.copy(alpha = 0.18f))
                 .clickable { RelayNudge.dismiss(circleId) },   // one-way: never nag again for this circle
             contentAlignment = Alignment.Center,
-        ) { Icon(Icons.Filled.Close, contentDescription = "Dismiss", tint = Color.White, modifier = Modifier.size(15.dp)) }
+        ) { Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.nudge_dismiss), tint = Color.White, modifier = Modifier.size(15.dp)) }
     }
 
     if (showWalkthrough) {
@@ -114,39 +116,39 @@ private fun RelayWalkthrough(onDone: () -> Unit) {
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("Set up a relay", color = HavenTheme.textPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text(stringResource(R.string.nudge_walkthrough_title), color = HavenTheme.textPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
 
-        Point(Icons.Filled.Inbox, "Nobody has to be online at once",
-            "Posts upload sealed; friends pick them up next time they open Haven.")
-        Point(Icons.Filled.PhotoLibrary, "Photos and videos actually arrive",
-            "Media comes from the relay, not the sender — it lands even on tricky networks.")
-        Point(Icons.Filled.Hub, "It routes around home routers",
-            "The relay forwards sealed messages when a member can't be dialed directly.")
-        Point(Icons.Filled.Lock, "The relay can't read a thing",
-            "It only holds sealed blobs and routing info — never a key, so it can never read anything.")
+        Point(Icons.Filled.Inbox, stringResource(R.string.nudge_p1_title),
+            stringResource(R.string.nudge_p1_body))
+        Point(Icons.Filled.PhotoLibrary, stringResource(R.string.nudge_p2_title),
+            stringResource(R.string.nudge_p2_body))
+        Point(Icons.Filled.Hub, stringResource(R.string.nudge_p3_title),
+            stringResource(R.string.nudge_p3_body))
+        Point(Icons.Filled.Lock, stringResource(R.string.nudge_p4_title),
+            stringResource(R.string.nudge_p4_body))
 
-        Header("How to set one up")
-        Point(Icons.Filled.Smartphone, "The easy way — this phone",
-            "One tap: this phone holds the circle's sealed mailbox while Haven runs. Turn off anytime.")
-        Point(Icons.Filled.Terminal, "Or a spare machine",
-            "On a Mac, Linux box, or Raspberry Pi, one line installs it:\ncurl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh\n\nOn Windows, in PowerShell:\nirm https://wemiller.com/apps/haven/relay/install.ps1 | iex\n\nIt sets itself to start on every reboot, then prints a node id. Add it under Settings ▸ Relays ▸ Add a relay.")
+        Header(stringResource(R.string.nudge_how_header))
+        Point(Icons.Filled.Smartphone, stringResource(R.string.nudge_p5_title),
+            stringResource(R.string.nudge_p5_body))
+        Point(Icons.Filled.Terminal, stringResource(R.string.nudge_p6_title),
+            stringResource(R.string.nudge_p6_body))
 
-        Header("What everyone in the circle can count on")
-        Point(Icons.Filled.Key, "Only the people you added can read it",
+        Header(stringResource(R.string.nudge_count_header))
+        Point(Icons.Filled.Key, stringResource(R.string.nudge_p7_title),
             // "Remove", NOT "add or remove": rotate_epoch fires on removal, on device-roster changes,
             // and on the periodic rotate_circle — never on adding a member. Claiming add rotates would
             // imply a new member is fenced off from earlier posts. They aren't.
-            "Everything you post is sealed on your device to your circle's members. Remove someone and the circle's key rotates, so they can't read anything posted afterwards.")
-        Point(Icons.Filled.Science, "Encrypted for the long haul",
-            "Double-locked: today's proven encryption plus post-quantum. Keys never leave your devices.",
+            stringResource(R.string.nudge_p7_body))
+        Point(Icons.Filled.Science, stringResource(R.string.nudge_p8_title),
+            stringResource(R.string.nudge_p8_body),
             learnMore = "encryption")
 
         Spacer(Modifier.height(4.dp))
-        BrandButton(text = "Use this phone as the relay") {
+        BrandButton(text = stringResource(R.string.nudge_use_phone)) {
             HavenNet.startHosting()   // hosting adopts + announces itself to the circles — see startHosting
             onDone()
         }
-        Text("Not now", color = HavenTheme.textSecondary, fontSize = 14.sp,
+        Text(stringResource(R.string.common_not_now), color = HavenTheme.textSecondary, fontSize = 14.sp,
             modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { onDone() }.padding(10.dp),
             textAlign = androidx.compose.ui.text.style.TextAlign.Center)
     }
@@ -173,7 +175,7 @@ private fun Point(icon: ImageVector, title: String, body: String, learnMore: Str
             learnMore?.let { anchor ->
                 val context = androidx.compose.ui.platform.LocalContext.current
                 Spacer(Modifier.height(3.dp))
-                Text("Learn more", color = HavenTheme.pink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                Text(stringResource(R.string.nudge_learn_more), color = HavenTheme.pink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.clickable { openInApp(context, "https://wemiller.com/apps/haven/docs/#$anchor") })
             }
         }

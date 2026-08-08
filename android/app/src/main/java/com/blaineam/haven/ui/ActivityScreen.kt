@@ -35,10 +35,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.blaineam.haven.R
 import com.blaineam.haven.core.ActivityStore
 import com.blaineam.haven.core.CircleLinkInbox
 import com.blaineam.haven.core.DeepLink
@@ -70,10 +72,10 @@ fun ActivityScreen(onDone: () -> Unit, onConnect: () -> Unit) {
                 Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Activity", color = HavenTheme.textPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.activity_title), color = HavenTheme.textPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = onDone) {
-                    Icon(Icons.Filled.Close, contentDescription = "Close", tint = HavenTheme.textSecondary)
+                    Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.common_close), tint = HavenTheme.textSecondary)
                 }
             }
             if (rows.isEmpty()) {
@@ -84,10 +86,10 @@ fun ActivityScreen(onDone: () -> Unit, onConnect: () -> Unit) {
                 ) {
                     Icon(Icons.Filled.Notifications, null, tint = HavenTheme.textSecondary, modifier = Modifier.size(40.dp))
                     Spacer(Modifier.height(10.dp))
-                    Text("Nothing yet", color = HavenTheme.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text(stringResource(R.string.activity_empty_title), color = HavenTheme.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Reactions, comments and new posts from your circle land here.",
+                        stringResource(R.string.activity_empty_subtitle),
                         color = HavenTheme.textSecondary, fontSize = 13.sp,
                     )
                 }
@@ -127,24 +129,25 @@ fun ActivityScreen(onDone: () -> Unit, onConnect: () -> Unit) {
 
 @Composable
 private fun ActivityRow(row: ActivityStore.Row, unseen: Boolean, onTap: () -> Unit) {
+    val someone = stringResource(R.string.activity_someone)
     val actorName = when (row.kind) {
-        "connect" -> row.snippet.ifBlank { "Someone" }
-        "circle" -> row.snippet.ifBlank { "A circle" }
-        else -> HavenNet.displayName(row.actorShort).ifEmpty { "Someone" }
+        "connect" -> row.snippet.ifBlank { someone }
+        "circle" -> row.snippet.ifBlank { stringResource(R.string.activity_a_circle) }
+        else -> HavenNet.displayName(row.actorShort).ifEmpty { someone }
     }
     val line = when (row.kind) {
-        "react" -> "Reacted ${row.emoji ?: "❤️"} to your post"
-        "comment" -> if (row.snippet.isBlank()) "Commented on your post" else "Commented: ${row.snippet}"
-        "vote" -> "Voted in your poll"
-        "story" -> "Shared a story"
+        "react" -> stringResource(R.string.activity_reacted_fmt, row.emoji ?: "❤️")
+        "comment" -> if (row.snippet.isBlank()) stringResource(R.string.activity_commented_on_post) else stringResource(R.string.activity_commented_fmt, row.snippet)
+        "vote" -> stringResource(R.string.activity_voted)
+        "story" -> stringResource(R.string.activity_shared_story)
         // A group thread says so — "sent you a message" is wrong when it went to everyone.
         "dm" -> if (row.snippet.isBlank()) {
-            if (com.blaineam.haven.core.PushBanner.isGroupDm(row.circleId)) "Messaged the group"
-            else "Sent you a message"
+            if (com.blaineam.haven.core.PushBanner.isGroupDm(row.circleId)) stringResource(R.string.activity_messaged_group)
+            else stringResource(R.string.activity_sent_message)
         } else row.snippet
-        "connect" -> "You're now connected"
-        "circle" -> "You were added to this circle"
-        else -> if (row.snippet.isBlank()) "Shared something" else row.snippet
+        "connect" -> stringResource(R.string.activity_now_connected)
+        "circle" -> stringResource(R.string.activity_added_to_circle)
+        else -> if (row.snippet.isBlank()) stringResource(R.string.activity_shared_something) else row.snippet
     }
     Row(
         Modifier.fillMaxWidth()

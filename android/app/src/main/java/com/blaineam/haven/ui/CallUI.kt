@@ -51,10 +51,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.blaineam.haven.R
 import com.blaineam.haven.core.CallManager
 import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
@@ -163,13 +165,13 @@ private fun MinimizedCall() {
             }
             Spacer(Modifier.size(10.dp))
             Column {
-                Text(name.ifBlank { "Haven call" }, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                Text("Tap to return", color = CallSecondary, fontSize = 11.sp)
+                Text(name.ifBlank { stringResource(R.string.call_haven_call) }, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.call_tap_to_return), color = CallSecondary, fontSize = 11.sp)
             }
             Spacer(Modifier.size(12.dp))
             Box(Modifier.size(40.dp).clip(CircleShape).background(Color(0xFFEF4444)).clickable { CallManager.hangup() },
                 contentAlignment = Alignment.Center) {
-                Icon(Icons.Filled.CallEnd, "End", tint = Color.White, modifier = Modifier.size(20.dp))
+                Icon(Icons.Filled.CallEnd, stringResource(R.string.call_end), tint = Color.White, modifier = Modifier.size(20.dp))
             }
         }
     }
@@ -184,13 +186,13 @@ private fun IncomingCall() {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             ConstellationMark(Modifier.size(72.dp), color = Color.White)   // fixed-black ring surface
             Spacer(Modifier.height(20.dp))
-            Text(name.ifBlank { "Incoming call" }, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Text(name.ifBlank { stringResource(R.string.call_incoming_call) }, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(4.dp))
-            Text("Haven call", color = CallSecondary, fontSize = 14.sp)
+            Text(stringResource(R.string.call_haven_call), color = CallSecondary, fontSize = 14.sp)
             Spacer(Modifier.height(48.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(48.dp)) {
-                RoundButton(Icons.Filled.CallEnd, Color(0xFFEF4444), "Decline") { CallManager.decline() }
-                RoundButton(Icons.Filled.Videocam, Color(0xFF22C55E), "Accept") { CallManager.accept() }
+                RoundButton(Icons.Filled.CallEnd, Color(0xFFEF4444), stringResource(R.string.call_decline)) { CallManager.decline() }
+                RoundButton(Icons.Filled.Videocam, Color(0xFF22C55E), stringResource(R.string.call_accept)) { CallManager.accept() }
             }
         }
     }
@@ -223,14 +225,14 @@ private fun InCall() {
         when {
             screenShareEntry != null -> {
                 CallVideoTile(screenShareEntry.value, Modifier.fillMaxSize(), fit = true)
-                Text("${screenShareEntry.key.take(6)} is sharing their screen",
+                Text(stringResource(R.string.call_screen_share_notice, screenShareEntry.key.take(6)),
                     color = Color.White, fontSize = 12.sp,
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = 64.dp)
                         .clip(RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = 0.5f)).padding(horizontal = 10.dp, vertical = 4.dp))
             }
             participants.isEmpty() -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("Connecting…", color = Color.White, fontSize = 18.sp)
+                    Text(stringResource(R.string.call_connecting), color = Color.White, fontSize = 18.sp)
                 }
             }
             participants.size == 1 -> {
@@ -264,10 +266,10 @@ private fun InCall() {
         Row(Modifier.align(Alignment.TopStart).padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(40.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.4f))
                 .clickable { CallManager.minimized.value = true }, contentAlignment = Alignment.Center) {
-                Icon(Icons.Filled.KeyboardArrowDown, "Minimize", tint = Color.White)
+                Icon(Icons.Filled.KeyboardArrowDown, stringResource(R.string.call_minimize), tint = Color.White)
             }
             Spacer(Modifier.size(10.dp))
-            Text(name.ifBlank { "Haven call" }, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text(name.ifBlank { stringResource(R.string.call_haven_call) }, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         }
 
         // Controls — TWO rows, matching iOS: media toggles up top, call actions (share / add /
@@ -280,20 +282,20 @@ private fun InCall() {
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 RoundButton(if (micOn) Icons.Filled.Mic else Icons.Filled.MicOff,
-                    if (micOn) CallChip else Color.White, "Mic") { CallManager.toggleMic() }
+                    if (micOn) CallChip else Color.White, stringResource(R.string.call_mic)) { CallManager.toggleMic() }
                 RoundButton(if (speakerOn) Icons.Filled.VolumeUp else Icons.Filled.PhoneInTalk,
-                    if (speakerOn) Color.White else CallChip, if (speakerOn) "Speaker on" else "Speaker off") {
+                    if (speakerOn) Color.White else CallChip, if (speakerOn) stringResource(R.string.call_speaker_on) else stringResource(R.string.call_speaker_off)) {
                     CallManager.toggleSpeaker()
                 }
                 RoundButton(if (cameraOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
-                    if (cameraOn) CallChip else Color.White, "Camera") { CallManager.toggleCamera() }
+                    if (cameraOn) CallChip else Color.White, stringResource(R.string.call_camera)) { CallManager.toggleCamera() }
                 if (cameraOn) {
-                    RoundButton(Icons.Filled.Cameraswitch, CallChip, "Flip") { CallManager.switchCamera() }
+                    RoundButton(Icons.Filled.Cameraswitch, CallChip, stringResource(R.string.call_flip)) { CallManager.switchCamera() }
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 RoundButton(if (sharing) Icons.Filled.StopScreenShare else Icons.Filled.ScreenShare,
-                    if (sharing) Color.White else CallChip, "Share screen") {
+                    if (sharing) Color.White else CallChip, stringResource(R.string.call_share_screen)) {
                     if (sharing) CallManager.stopScreenShare()
                     else {
                         val mpm = context.getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE)
@@ -301,9 +303,9 @@ private fun InCall() {
                         projectionLauncher.launch(mpm.createScreenCaptureIntent())
                     }
                 }
-                RoundButton(Icons.Filled.PersonAdd, CallChip, "Add people",
+                RoundButton(Icons.Filled.PersonAdd, CallChip, stringResource(R.string.call_add_people),
                     enabled = CallManager.addableContacts().isNotEmpty()) { showAddPeople = true }
-                RoundButton(Icons.Filled.CallEnd, Color(0xFFEF4444), "End") { CallManager.hangup() }
+                RoundButton(Icons.Filled.CallEnd, Color(0xFFEF4444), stringResource(R.string.call_end)) { CallManager.hangup() }
             }
         }
     }
@@ -316,7 +318,7 @@ private fun AddToCallPicker(onDismiss: () -> Unit) {
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = HavenTheme.card,
-        title = { Text("Add to call", color = HavenTheme.textPrimary) },
+        title = { Text(stringResource(R.string.call_add_to_call_title), color = HavenTheme.textPrimary) },
         text = {
             LazyColumn(Modifier.heightIn(max = 320.dp)) {
                 lazyItems(candidates, key = { it.idHex }) { c: Contact ->
@@ -336,7 +338,7 @@ private fun AddToCallPicker(onDismiss: () -> Unit) {
         },
         confirmButton = {},
         dismissButton = {
-            Text("Done", color = HavenTheme.pink, modifier = Modifier.clickable { onDismiss() }.padding(8.dp))
+            Text(stringResource(R.string.common_done), color = HavenTheme.pink, modifier = Modifier.clickable { onDismiss() }.padding(8.dp))
         },
     )
 }

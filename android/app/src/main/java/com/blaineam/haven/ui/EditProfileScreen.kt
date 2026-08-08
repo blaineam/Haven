@@ -30,6 +30,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.blaineam.haven.R
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -66,10 +68,10 @@ fun EditProfileScreen(onDone: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable { onDone() },
                     contentAlignment = Alignment.Center) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = HavenTheme.textPrimary)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.common_back), tint = HavenTheme.textPrimary)
                 }
                 Spacer(Modifier.size(6.dp))
-                BrandText("Edit profile", fontSize = 24)
+                BrandText(stringResource(R.string.profile_title), fontSize = 24)
             }
             Spacer(Modifier.height(20.dp))
 
@@ -80,26 +82,26 @@ fun EditProfileScreen(onDone: () -> Unit) {
                         androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly)) },
                     contentAlignment = Alignment.Center) {
                     when {
-                        avatarBmp != null -> androidx.compose.foundation.Image(avatarBmp, "Avatar",
+                        avatarBmp != null -> androidx.compose.foundation.Image(avatarBmp, stringResource(R.string.profile_avatar),
                             Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
                         else -> Text(emoji, fontSize = 34.sp)
                     }
                 }
                 Spacer(Modifier.size(14.dp))
                 Column {
-                    Text(if (avatarB64.isBlank()) "Add a photo" else "Change photo", color = HavenTheme.pink, fontSize = 14.sp,
+                    Text(if (avatarB64.isBlank()) stringResource(R.string.profile_add_photo) else stringResource(R.string.profile_change_photo), color = HavenTheme.pink, fontSize = 14.sp,
                         modifier = Modifier.clickable { pickAvatar.launch(androidx.activity.result.PickVisualMediaRequest(
                             androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly)) })
                     if (avatarB64.isNotBlank()) {
                         Spacer(Modifier.height(4.dp))
-                        Text("Remove", color = HavenTheme.textSecondary, fontSize = 13.sp,
+                        Text(stringResource(R.string.common_remove), color = HavenTheme.textSecondary, fontSize = 13.sp,
                             modifier = Modifier.clickable { avatarB64 = "" })
                     }
                 }
             }
             Spacer(Modifier.height(18.dp))
 
-            Text("Your face", color = HavenTheme.textSecondary, fontSize = 13.sp)
+            Text(stringResource(R.string.profile_your_face), color = HavenTheme.textSecondary, fontSize = 13.sp)
             Spacer(Modifier.height(8.dp))
             LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(emojis.size) { i ->
@@ -117,28 +119,28 @@ fun EditProfileScreen(onDone: () -> Unit) {
 
             Spacer(Modifier.height(18.dp))
             OutlinedTextField(
-                value = name, onValueChange = { name = it }, label = { Text("Name") },
+                value = name, onValueChange = { name = it }, label = { Text(stringResource(R.string.profile_name)) },
                 singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink, focusedLabelColor = HavenTheme.pink),
             )
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
-                value = bio, onValueChange = { bio = it }, label = { Text("Bio") },
+                value = bio, onValueChange = { bio = it }, label = { Text(stringResource(R.string.profile_bio)) },
                 modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), maxLines = 3,
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink, focusedLabelColor = HavenTheme.pink),
             )
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
-                value = link, onValueChange = { link = it }, label = { Text("Link") }, singleLine = true,
+                value = link, onValueChange = { link = it }, label = { Text(stringResource(R.string.profile_link)) }, singleLine = true,
                 modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink, focusedLabelColor = HavenTheme.pink),
             )
 
             Spacer(Modifier.height(24.dp))
-            BrandButton(text = "Save", enabled = name.isNotBlank()) {
+            BrandButton(text = stringResource(R.string.common_save), enabled = name.isNotBlank()) {
                 profile.displayName = name.trim()
                 profile.bio = bio.trim()
                 profile.link = link.trim()

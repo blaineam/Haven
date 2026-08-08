@@ -30,6 +30,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.blaineam.haven.R
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -62,21 +64,21 @@ fun PeopleScreen(onAddFriend: () -> Unit, onClose: () -> Unit) {
             Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 16.dp, top = 14.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable { onClose() }, contentAlignment = Alignment.Center) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = HavenTheme.textPrimary)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.common_back), tint = HavenTheme.textPrimary)
                 }
                 Spacer(Modifier.size(4.dp))
-                BrandText("Your circle", fontSize = 24)
+                BrandText(stringResource(R.string.people_title), fontSize = 24)
                 Spacer(Modifier.weight(1f))
-                Text("Invite", color = HavenTheme.pink, fontWeight = FontWeight.SemiBold,
+                Text(stringResource(R.string.people_invite), color = HavenTheme.pink, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { onAddFriend() }.padding(8.dp))
             }
 
             if (contacts.isEmpty()) {
                 Column(Modifier.fillMaxSize().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center) {
-                    Text("No one in your circle yet", color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    Text(stringResource(R.string.people_empty_title), color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(8.dp))
-                    Text("Tap Invite to add someone by QR or link.",
+                    Text(stringResource(R.string.people_empty_body),
                         color = HavenTheme.textSecondary, fontSize = 14.sp, textAlign = TextAlign.Center)
                 }
             } else {
@@ -92,11 +94,11 @@ fun PeopleScreen(onAddFriend: () -> Unit, onClose: () -> Unit) {
                             }
                             Box(Modifier.size(40.dp).clip(CircleShape).clickable { dm = HavenNet.startDm(c) to c },
                                 contentAlignment = Alignment.Center) {
-                                Icon(Icons.Filled.Chat, "Message", tint = HavenTheme.pink)
+                                Icon(Icons.Filled.Chat, stringResource(R.string.people_message), tint = HavenTheme.pink)
                             }
-                            Text("Remove", color = HavenTheme.textSecondary, fontSize = 13.sp,
+                            Text(stringResource(R.string.common_remove), color = HavenTheme.textSecondary, fontSize = 13.sp,
                                 modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { confirmRemove = c }.padding(8.dp))
-                            Text("Block", color = Color(0xFFF87171), fontSize = 13.sp,
+                            Text(stringResource(R.string.people_block), color = Color(0xFFF87171), fontSize = 13.sp,
                                 modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { confirmBlock = c }.padding(8.dp))
                         }
                     }
@@ -109,12 +111,12 @@ fun PeopleScreen(onAddFriend: () -> Unit, onClose: () -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmBlock = null },
             containerColor = HavenTheme.card,
-            title = { Text("Block ${c.name}?", color = HavenTheme.textPrimary) },
-            text = { Text("They'll be removed from your circle and can't reach you. This can't be undone here.",
+            title = { Text(stringResource(R.string.people_block_confirm_title, c.name), color = HavenTheme.textPrimary) },
+            text = { Text(stringResource(R.string.people_block_confirm_body),
                 color = HavenTheme.textSecondary) },
             confirmButton = { TextButton(onClick = { HavenNet.block(c.idHex); confirmBlock = null }) {
-                Text("Block", color = Color(0xFFF87171)) } },
-            dismissButton = { TextButton(onClick = { confirmBlock = null }) { Text("Cancel", color = HavenTheme.pink) } },
+                Text(stringResource(R.string.people_block), color = Color(0xFFF87171)) } },
+            dismissButton = { TextButton(onClick = { confirmBlock = null }) { Text(stringResource(R.string.common_cancel), color = HavenTheme.pink) } },
         )
     }
 
@@ -122,12 +124,12 @@ fun PeopleScreen(onAddFriend: () -> Unit, onClose: () -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmRemove = null },
             containerColor = HavenTheme.card,
-            title = { Text("Remove ${c.name}?", color = HavenTheme.textPrimary) },
-            text = { Text("They'll be removed from this circle but not blocked — you can add them again later.",
+            title = { Text(stringResource(R.string.people_remove_confirm_title, c.name), color = HavenTheme.textPrimary) },
+            text = { Text(stringResource(R.string.people_remove_confirm_body),
                 color = HavenTheme.textSecondary) },
             confirmButton = { TextButton(onClick = { HavenNet.removeFromCircle(c.idHex); confirmRemove = null }) {
-                Text("Remove", color = HavenTheme.pink) } },
-            dismissButton = { TextButton(onClick = { confirmRemove = null }) { Text("Cancel", color = HavenTheme.pink) } },
+                Text(stringResource(R.string.common_remove), color = HavenTheme.pink) } },
+            dismissButton = { TextButton(onClick = { confirmRemove = null }) { Text(stringResource(R.string.common_cancel), color = HavenTheme.pink) } },
         )
     }
 }

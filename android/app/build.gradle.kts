@@ -136,6 +136,9 @@ dependencies {
     // Background sync (serverless, like the iOS BGAppRefreshTask) for local notifications.
     implementation("androidx.work:work-runtime-ktx:2.9.1")
 
+    // Play In-App Review (support kit's RatingManager) — gated, earned review prompts.
+    implementation("com.google.android.play:review-ktx:2.0.2")
+
     // Biometric (per-circle Face/fingerprint lock) — needs a FragmentActivity host.
     implementation("androidx.biometric:biometric:1.1.0")
     // Force a modern Fragment: biometric 1.1.0 drags in fragment 1.2.5, whose legacy 16-bit

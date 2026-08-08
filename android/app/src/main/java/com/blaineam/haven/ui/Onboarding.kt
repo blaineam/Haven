@@ -41,10 +41,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.blaineam.haven.R
 import com.blaineam.haven.core.HavenCore
 import com.blaineam.haven.core.HavenNet
 import com.blaineam.haven.core.ProfileStore
@@ -125,10 +127,10 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
         ) {
             ConstellationMark(Modifier.size(96.dp))
             Spacer(Modifier.height(20.dp))
-            BrandText("Haven", fontSize = 40)
+            BrandText(stringResource(R.string.app_name), fontSize = 40)
             Spacer(Modifier.height(10.dp))
             Text(
-                "Your friends and your family. That's the whole product.",
+                stringResource(R.string.onb_tagline),
                 color = HavenTheme.textSecondary,
                 textAlign = TextAlign.Center,
                 fontSize = 15.sp,
@@ -142,7 +144,7 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
                 contentAlignment = Alignment.Center,
             ) {
                 if (avatarBmp != null) {
-                    Image(avatarBmp, "Your photo", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                    Image(avatarBmp, stringResource(R.string.onb_your_photo_description), Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                 } else {
                     Text(emoji, fontSize = 44.sp)
                 }
@@ -152,18 +154,18 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
                 TextButton(onClick = {
                     pickAvatar.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 }) {
-                    Text(if (avatarB64.isBlank()) "Add a photo" else "Change photo", color = HavenTheme.pink, fontSize = 14.sp)
+                    Text(if (avatarB64.isBlank()) stringResource(R.string.onb_add_photo) else stringResource(R.string.onb_change_photo), color = HavenTheme.pink, fontSize = 14.sp)
                 }
                 if (avatarB64.isNotBlank()) {
                     TextButton(onClick = { avatarB64 = "" }) {
-                        Text("Remove", color = HavenTheme.textSecondary, fontSize = 14.sp)
+                        Text(stringResource(R.string.common_remove), color = HavenTheme.textSecondary, fontSize = 14.sp)
                     }
                 }
             }
             Spacer(Modifier.height(14.dp))
 
             Text(
-                if (avatarB64.isBlank()) "Or pick an emoji" else "Emoji (shown if you remove your photo)",
+                if (avatarB64.isBlank()) stringResource(R.string.onb_pick_emoji_prompt) else stringResource(R.string.onb_emoji_shown_hint),
                 color = HavenTheme.textSecondary,
                 fontSize = 13.sp,
                 modifier = Modifier.fillMaxWidth(),
@@ -195,7 +197,7 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
-                label = { Text("Your name") },
+                label = { Text(stringResource(R.string.onb_your_name_label)) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 modifier = Modifier.fillMaxWidth(),
@@ -214,27 +216,27 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
             // so each now states its consequence — in the same words the Devices screen uses, so the
             // two screens can be followed side by side.
             BrandButton(
-                text = "I'm new to Haven",
+                text = stringResource(R.string.onb_new_to_haven_button),
                 enabled = name.isNotBlank(),
             ) { onDone(name.trim(), emoji, avatarB64) }
             Spacer(Modifier.height(4.dp))
             Text(
-                "Create a brand-new identity on this device, with the name and photo above.",
+                stringResource(R.string.onb_new_identity_desc),
                 color = HavenTheme.textSecondary, textAlign = TextAlign.Center, fontSize = 12.sp,
             )
             Spacer(Modifier.height(14.dp))
             OnboardingChoice(
-                title = "Add this as another of my devices",
-                subtitle = "Use my existing Haven account here too. My other device stays signed in, and both stay in sync.",
+                title = stringResource(R.string.onb_add_device_title),
+                subtitle = stringResource(R.string.onb_add_device_subtitle),
             ) { enrollCode = ""; enrollError = false; showSeedless = true }
             Spacer(Modifier.height(10.dp))
             OnboardingChoice(
-                title = "Move my account to this device",
-                subtitle = "Bring my identity here with a transfer code — for replacing a device, not adding one.",
+                title = stringResource(R.string.onb_move_account_title),
+                subtitle = stringResource(R.string.onb_move_account_subtitle),
             ) { code = ""; linkError = false; showLink = true }
             Spacer(Modifier.height(16.dp))
             Text(
-                "No phone number. No email. Your keys never leave this device.",
+                stringResource(R.string.onb_privacy_note),
                 color = HavenTheme.textSecondary,
                 textAlign = TextAlign.Center,
                 fontSize = 12.sp,
@@ -245,11 +247,11 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
         if (showLink) {
             AlertDialog(
                 onDismissRequest = { showLink = false },
-                title = { Text("Link an existing identity") },
+                title = { Text(stringResource(R.string.onb_link_existing_title)) },
                 text = {
                     Column {
                         Text(
-                            "On your other device open You ▸ Link a new device, then paste the code here or scan its QR.",
+                            stringResource(R.string.onb_link_existing_instructions),
                             color = HavenTheme.textSecondary,
                             fontSize = 13.sp,
                         )
@@ -268,17 +270,17 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
                         )
                         if (linkError) {
                             Spacer(Modifier.height(6.dp))
-                            Text("That isn't a valid transfer code.", color = HavenTheme.pink, fontSize = 12.sp)
+                            Text(stringResource(R.string.onb_invalid_transfer_code), color = HavenTheme.pink, fontSize = 12.sp)
                         }
                     }
                 },
                 confirmButton = {
                     TextButton(onClick = { if (!adopt(code)) linkError = true }) {
-                        Text("Adopt", color = HavenTheme.pink)
+                        Text(stringResource(R.string.onb_adopt_button), color = HavenTheme.pink)
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { showLink = false; showScan = true }) { Text("Scan QR") }
+                    TextButton(onClick = { showLink = false; showScan = true }) { Text(stringResource(R.string.onb_scan_qr_button)) }
                 },
             )
         }
@@ -295,11 +297,11 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
         if (showSeedless) {
             AlertDialog(
                 onDismissRequest = { showSeedless = false },
-                title = { Text("Link to your other device") },
+                title = { Text(stringResource(R.string.onb_link_to_other_device_title)) },
                 text = {
                     Column {
                         Text(
-                            "On your current device: Settings ▸ Identity & devices ▸ Link a new device, then scan the code it shows. This device gets its own revocable key — never your master key.",
+                            stringResource(R.string.onb_seedless_instructions),
                             color = HavenTheme.textSecondary,
                             fontSize = 13.sp,
                         )
@@ -318,17 +320,17 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
                         )
                         if (enrollError) {
                             Spacer(Modifier.height(6.dp))
-                            Text("That isn't a valid link code.", color = HavenTheme.pink, fontSize = 12.sp)
+                            Text(stringResource(R.string.onb_invalid_link_code), color = HavenTheme.pink, fontSize = 12.sp)
                         }
                     }
                 },
                 confirmButton = {
                     TextButton(onClick = {
                         if (beginSeedless(enrollCode)) showSeedless = false else enrollError = true
-                    }) { Text("Link", color = HavenTheme.pink) }
+                    }) { Text(stringResource(R.string.onb_link_button), color = HavenTheme.pink) }
                 },
                 dismissButton = {
-                    TextButton(onClick = { showSeedless = false; showSeedlessScan = true }) { Text("Scan QR") }
+                    TextButton(onClick = { showSeedless = false; showSeedlessScan = true }) { Text(stringResource(R.string.onb_scan_qr_button)) }
                 },
             )
         }
@@ -352,15 +354,15 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
                 ) {
                     androidx.compose.material3.CircularProgressIndicator(color = HavenTheme.pink)
                     Spacer(Modifier.height(20.dp))
-                    BrandText("Linking…", fontSize = 22)
+                    BrandText(stringResource(R.string.onb_linking_title), fontSize = 22)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Confirm “link this device” on your other phone. Keep both phones nearby and unlocked.",
+                        stringResource(R.string.onb_linking_wait_message),
                         color = HavenTheme.textSecondary, textAlign = TextAlign.Center, fontSize = 13.sp,
                     )
                     Spacer(Modifier.height(24.dp))
                     TextButton(onClick = { HavenNet.cancelSeedlessLink() }) {
-                        Text("Cancel", color = HavenTheme.textSecondary)
+                        Text(stringResource(R.string.common_cancel), color = HavenTheme.textSecondary)
                     }
                 }
             }

@@ -36,6 +36,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.blaineam.haven.R
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -67,9 +69,9 @@ fun ReportSheet(item: FeedItemFfi, circleId: String, authorName: String, onDismi
         containerColor = HavenTheme.card,
     ) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
-            Text("Report post", color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text(stringResource(R.string.report_title), color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(4.dp))
-            Text("What's wrong with it?", color = HavenTheme.textSecondary, fontSize = 13.sp)
+            Text(stringResource(R.string.report_whats_wrong), color = HavenTheme.textSecondary, fontSize = 13.sp)
             Spacer(Modifier.height(10.dp))
             REPORT_REASONS.forEach { r ->
                 Row(
@@ -86,13 +88,13 @@ fun ReportSheet(item: FeedItemFfi, circleId: String, authorName: String, onDismi
             Spacer(Modifier.height(10.dp))
             OutlinedTextField(
                 value = comment, onValueChange = { comment = it },
-                placeholder = { Text("Add a note for your circle (optional)", fontSize = 13.sp) },
+                placeholder = { Text(stringResource(R.string.report_note_placeholder), fontSize = 13.sp) },
                 modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), maxLines = 3,
                 colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
             )
             Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Also block $authorName", color = HavenTheme.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                Text(stringResource(R.string.report_also_block, authorName), color = HavenTheme.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
                 Switch(
                     checked = alsoBlock, onCheckedChange = { alsoBlock = it },
                     colors = SwitchDefaults.colors(checkedTrackColor = HavenTheme.pink),
@@ -100,11 +102,11 @@ fun ReportSheet(item: FeedItemFfi, circleId: String, authorName: String, onDismi
             }
             Spacer(Modifier.height(6.dp))
             Text(
-                "Hides the post for you now; your circle sees the report. Nothing is ever logged.",
+                stringResource(R.string.report_hides_note),
                 color = HavenTheme.textSecondary, fontSize = 12.sp,
             )
             Spacer(Modifier.height(14.dp))
-            BrandButton(text = "Report", modifier = Modifier.fillMaxWidth(), enabled = reason != null) {
+            BrandButton(text = stringResource(R.string.report_submit), modifier = Modifier.fillMaxWidth(), enabled = reason != null) {
                 val author = HavenNet.report(circleId, item.id, reason ?: return@BrandButton, comment.trim())
                 if (alsoBlock && author != null) HavenNet.block(author)
                 onDismiss()
@@ -120,26 +122,27 @@ fun ReportSheet(item: FeedItemFfi, circleId: String, authorName: String, onDismi
 fun ReportedBanner(item: FeedItemFfi, circleId: String, authorName: String, reports: List<ReportFfi>) {
     var actMenu by remember(item.id) { mutableStateOf(false) }
     var confirmRemove by remember(item.id) { mutableStateOf(false) }
+    val youLabel = stringResource(R.string.report_you)
     val reporterNames = reports.map { r ->
-        if (r.reporter.startsWith(HavenNet.nodeIdHex.take(8))) "You" else HavenNet.displayName(r.reporterShort)
+        if (r.reporter.startsWith(HavenNet.nodeIdHex.take(8))) youLabel else HavenNet.displayName(r.reporterShort)
     }.toSortedSet().joinToString(", ")
     val reasons = reports.map { it.reason }.distinct().joinToString(" · ")
 
     if (confirmRemove) {
         AlertDialog(
             onDismissRequest = { confirmRemove = false }, containerColor = HavenTheme.card,
-            title = { Text("Remove $authorName from this circle?", color = HavenTheme.textPrimary, fontSize = 16.sp) },
+            title = { Text(stringResource(R.string.report_remove_confirm_title, authorName), color = HavenTheme.textPrimary, fontSize = 16.sp) },
             text = {
-                Text("Their posts leave your view of the circle and they can't rejoin through you. Your own devices stay in sync.",
+                Text(stringResource(R.string.report_remove_confirm_body),
                     color = HavenTheme.textSecondary, fontSize = 13.sp)
             },
             confirmButton = {
                 TextButton(onClick = {
                     confirmRemove = false
                     reports.firstOrNull()?.author?.let { HavenNet.removeFromCircle(circleId, it) }
-                }) { Text("Remove", color = Color(0xFFF87171)) }
+                }) { Text(stringResource(R.string.common_remove), color = Color(0xFFF87171)) }
             },
-            dismissButton = { TextButton(onClick = { confirmRemove = false }) { Text("Cancel", color = HavenTheme.textSecondary) } },
+            dismissButton = { TextButton(onClick = { confirmRemove = false }) { Text(stringResource(R.string.common_cancel), color = HavenTheme.textSecondary) } },
         )
     }
 
@@ -152,24 +155,24 @@ fun ReportedBanner(item: FeedItemFfi, circleId: String, authorName: String, repo
         Icon(Icons.Filled.Flag, null, tint = Color(0xFFF59E0B), modifier = Modifier.size(16.dp))
         Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f)) {
-            Text("Reported by $reporterNames", color = HavenTheme.textPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Text(stringResource(R.string.report_reported_by, reporterNames), color = HavenTheme.textPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             Text(reasons, color = HavenTheme.textSecondary, fontSize = 11.sp)
         }
         Box {
-            Text("Act", color = HavenTheme.pink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            Text(stringResource(R.string.report_act), color = HavenTheme.pink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { actMenu = true }.padding(6.dp))
             DropdownMenu(expanded = actMenu, onDismissRequest = { actMenu = false },
                 modifier = Modifier.background(HavenTheme.card)) {
                 DropdownMenuItem(
-                    text = { Text("Hide for me", color = HavenTheme.textPrimary) },
+                    text = { Text(stringResource(R.string.report_hide_for_me), color = HavenTheme.textPrimary) },
                     onClick = { actMenu = false; HiddenStore.hide(item.id) },
                 )
                 DropdownMenuItem(
-                    text = { Text("Remove $authorName from circle", color = Color(0xFFF87171)) },
+                    text = { Text(stringResource(R.string.report_remove_from_circle, authorName), color = Color(0xFFF87171)) },
                     onClick = { actMenu = false; confirmRemove = true },
                 )
                 DropdownMenuItem(
-                    text = { Text("Block $authorName", color = Color(0xFFF87171)) },
+                    text = { Text(stringResource(R.string.report_block_author, authorName), color = Color(0xFFF87171)) },
                     onClick = {
                         actMenu = false
                         reports.firstOrNull()?.author?.let { HavenNet.block(it) }

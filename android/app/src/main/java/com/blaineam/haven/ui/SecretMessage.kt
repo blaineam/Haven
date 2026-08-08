@@ -24,6 +24,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.blaineam.haven.R
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -69,7 +71,7 @@ fun SecretBubble(body: String, contentColor: Color = HavenTheme.textPrimary) {
         Icon(Icons.Filled.Lock, null, tint = contentColor, modifier = Modifier.size(15.dp))
         Spacer(Modifier.size(6.dp))
         Text(
-            if (revealed) SecretMessages.text(body) else "Tap to view secret",
+            if (revealed) SecretMessages.text(body) else stringResource(R.string.secret_tap_to_view),
             color = contentColor, fontSize = 15.sp,
         )
     }

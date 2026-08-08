@@ -13,6 +13,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.blaineam.haven.R
 import androidx.compose.ui.unit.dp
 
 /**
@@ -41,7 +43,7 @@ fun MediaProcessingCard(modifier: Modifier = Modifier) {
             CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
             Text(
                 // Plural only when it's actually plural — "Preparing 1 items" reads like a bug.
-                if (n == 1) "Preparing your media…" else "Preparing $n items…",
+                if (n == 1) stringResource(R.string.mediaproc_one) else stringResource(R.string.mediaproc_many, n),
                 style = MaterialTheme.typography.bodyMedium,
             )
         }

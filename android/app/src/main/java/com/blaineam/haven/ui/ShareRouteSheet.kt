@@ -31,10 +31,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.blaineam.haven.R
 import com.blaineam.haven.core.CircleLock
 import com.blaineam.haven.core.Contact
 import com.blaineam.haven.core.DEFAULT_CIRCLE
@@ -81,17 +83,17 @@ fun ShareRouteSheet(payload: ShareInbox.Payload, onDone: () -> Unit) {
             ) {
                 BrandText(
                     when (val r = route) {
-                        Route.Choose -> "Share to Haven"
-                        Route.Post -> "Share as post"
+                        Route.Choose -> stringResource(R.string.sharesheet_title)
+                        Route.Post -> stringResource(R.string.sharesheet_share_as_post)
                         is Route.Dm -> HavenNet.dmPartnerName(r.circleId)
-                        Route.PickPerson -> "Send to"
+                        Route.PickPerson -> stringResource(R.string.sharesheet_send_to)
                     },
                     fontSize = 24, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
                 Spacer(Modifier.weight(1f))
                 Text(
-                    "Cancel", color = HavenTheme.textSecondary, fontSize = 15.sp,
+                    stringResource(R.string.common_cancel), color = HavenTheme.textSecondary, fontSize = 15.sp,
                     modifier = Modifier.clickable { ShareInbox.clear(); onDone() }.padding(8.dp),
                 )
             }
@@ -168,7 +170,7 @@ private fun ChooseRoute(
         val recents = recentThreads()
         if (recents.isNotEmpty()) {
             item {
-                Text("Recent", color = HavenTheme.textSecondary, fontSize = 13.sp,
+                Text(stringResource(R.string.sharesheet_recent), color = HavenTheme.textSecondary, fontSize = 13.sp,
                      modifier = Modifier.padding(bottom = 8.dp))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                     items(recents.size) { i ->
@@ -189,10 +191,25 @@ private fun ChooseRoute(
                 Spacer(Modifier.size(16.dp))
             }
         }
-        item { RouteRow("📣", "Share as post", "Post it to one of your circles", onPost) }
-        item { RouteRow("💬", "Send as direct message", "Pick a conversation or someone new", onDm) }
+        item {
+            RouteRow(
+                "📣", stringResource(R.string.sharesheet_share_as_post),
+                stringResource(R.string.sharesheet_share_as_post_subtitle), onPost,
+            )
+        }
+        item {
+            RouteRow(
+                "💬", stringResource(R.string.sharesheet_send_as_dm),
+                stringResource(R.string.sharesheet_send_as_dm_subtitle), onDm,
+            )
+        }
         if (storyable != null) {
-            item { RouteRow("✨", "Create story", "Add a caption and share for 24 hours") { onStory(storyable) } }
+            item {
+                RouteRow(
+                    "✨", stringResource(R.string.sharesheet_create_story),
+                    stringResource(R.string.sharesheet_create_story_subtitle),
+                ) { onStory(storyable) }
+            }
         }
     }
 }
@@ -251,7 +268,10 @@ private fun SendStep(payload: ShareInbox.Payload, target: Target, onSent: () -> 
                         .background(HavenTheme.card).padding(12.dp),
                 ) {
                     if (caption.isEmpty()) {
-                        Text("Add a caption…", color = HavenTheme.textSecondary, fontSize = 15.sp)
+                        Text(
+                            stringResource(R.string.sharesheet_add_caption_placeholder),
+                            color = HavenTheme.textSecondary, fontSize = 15.sp,
+                        )
                     }
                     field()
                 }
@@ -269,7 +289,7 @@ private fun SendStep(payload: ShareInbox.Payload, target: Target, onSent: () -> 
                 }
                 Target.People -> {
                     if (threads.isNotEmpty()) {
-                        item { SectionLabel("Conversations") }
+                        item { SectionLabel(stringResource(R.string.sharesheet_conversations)) }
                         items(threads.size) { i ->
                             val id = threads[i]
                             PickRow(HavenNet.dmPartnerName(id), circleId == id) {
@@ -278,7 +298,7 @@ private fun SendStep(payload: ShareInbox.Payload, target: Target, onSent: () -> 
                         }
                     }
                     if (freshContacts.isNotEmpty()) {
-                        item { SectionLabel("Other people") }
+                        item { SectionLabel(stringResource(R.string.sharesheet_other_people)) }
                         items(freshContacts.size) { i ->
                             val c = freshContacts[i]
                             PickRow(c.name, newContact?.idHex == c.idHex) {
@@ -293,7 +313,7 @@ private fun SendStep(payload: ShareInbox.Payload, target: Target, onSent: () -> 
         val hasContent = payload.text.isNotBlank() || payload.media.isNotEmpty() || caption.isNotBlank()
         val ready = hasContent && (circleId.isNotBlank() || newContact != null)
         Text(
-            "Send",
+            stringResource(R.string.common_send),
             color = if (ready) HavenTheme.pink else HavenTheme.textSecondary,
             fontSize = 16.sp,
             modifier = Modifier.align(Alignment.End).clickable(enabled = ready) {

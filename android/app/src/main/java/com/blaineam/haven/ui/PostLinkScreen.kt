@@ -18,6 +18,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.blaineam.haven.R
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -63,10 +65,10 @@ fun PostLinkScreen(circleId: String, postId: String, onDone: () -> Unit) {
                 Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 12.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Post", color = HavenTheme.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.postlink_title), color = HavenTheme.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.weight(1f))
                 Text(
-                    "Done", color = HavenTheme.pink, fontWeight = FontWeight.SemiBold,
+                    stringResource(R.string.common_done), color = HavenTheme.pink, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { onDone() }.padding(8.dp),
                 )
             }
@@ -93,10 +95,10 @@ fun PostLinkScreen(circleId: String, postId: String, onDone: () -> Unit) {
                 ) {
                     Text("🔍", fontSize = 48.sp)
                     Spacer(Modifier.height(12.dp))
-                    Text("Post not found", color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    Text(stringResource(R.string.postlink_not_found), color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "It may have been unsent, or you're not in this circle. If it's new, it may not have reached this device yet.",
+                        stringResource(R.string.postlink_not_found_body),
                         color = HavenTheme.textSecondary, fontSize = 13.sp, textAlign = TextAlign.Center,
                     )
                 }

@@ -42,10 +42,12 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.blaineam.haven.R
 import com.blaineam.haven.core.MusicSearch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -205,14 +207,14 @@ fun MusicSearchSheet(onPick: (TrackRefFfi) -> Unit, onDismiss: () -> Unit) {
     HavenBackground {
         Column(Modifier.fillMaxWidth().padding(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                BrandText("Add a song", fontSize = 24)
+                BrandText(stringResource(R.string.music_add_song_title), fontSize = 24)
                 Spacer(Modifier.weight(1f))
-                Text("Done", color = HavenTheme.textSecondary, modifier = Modifier.clickable { onDismiss() }.padding(8.dp))
+                Text(stringResource(R.string.common_done), color = HavenTheme.textSecondary, modifier = Modifier.clickable { onDismiss() }.padding(8.dp))
             }
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
                 value = query, onValueChange = { query = it },
-                placeholder = { Text("Search songs…") }, singleLine = true,
+                placeholder = { Text(stringResource(R.string.music_search_placeholder)) }, singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp),
                 colors = OutlinedTextFieldDefaults.colors(
@@ -244,7 +246,7 @@ fun MusicSearchSheet(onPick: (TrackRefFfi) -> Unit, onDismiss: () -> Unit) {
                         val isPlaying = MusicPlayer.playingUrl == t.previewUrl
                         Icon(
                             if (isPlaying) Icons.Filled.PauseCircle else Icons.Filled.PlayCircle,
-                            "Preview", tint = HavenTheme.pink,
+                            stringResource(R.string.music_cd_preview), tint = HavenTheme.pink,
                             modifier = Modifier.size(34.dp).clickable { MusicPlayer.toggle(sheetContext, t.previewUrl) },
                         )
                     }
@@ -264,7 +266,7 @@ private fun ListenOnMenu(music: TrackRefFfi) {
         java.net.URLEncoder.encode("${music.title} ${music.artist}".trim(), "UTF-8")
     }
     Box {
-        Text("Listen on ▾", color = HavenTheme.pink, fontSize = 11.sp,
+        Text(stringResource(R.string.music_listen_on), color = HavenTheme.pink, fontSize = 11.sp,
             modifier = Modifier.clickable { open = true })
         androidx.compose.material3.DropdownMenu(
             expanded = open, onDismissRequest = { open = false },
@@ -272,9 +274,9 @@ private fun ListenOnMenu(music: TrackRefFfi) {
         ) {
             val apple = if (music.catalogId.startsWith("http")) music.catalogId
                 else "https://music.apple.com/search?term=$q"
-            ProviderItem("Apple Music") { openExternal(context, apple); open = false }
-            ProviderItem("Spotify") { openExternal(context, "https://open.spotify.com/search/$q"); open = false }
-            ProviderItem("YouTube Music") { openExternal(context, "https://music.youtube.com/search?q=$q"); open = false }
+            ProviderItem(stringResource(R.string.music_apple_music)) { openExternal(context, apple); open = false }
+            ProviderItem(stringResource(R.string.music_spotify)) { openExternal(context, "https://open.spotify.com/search/$q"); open = false }
+            ProviderItem(stringResource(R.string.music_youtube_music)) { openExternal(context, "https://music.youtube.com/search?q=$q"); open = false }
         }
     }
 }
@@ -318,7 +320,7 @@ fun MusicChip(music: TrackRefFfi, modifier: Modifier = Modifier) {
         if (previewUrl != null) {
             Icon(
                 if (isPlaying) Icons.Filled.PauseCircle else Icons.Filled.PlayCircle,
-                "Play preview", tint = HavenTheme.pink,
+                stringResource(R.string.music_cd_play_preview), tint = HavenTheme.pink,
                 modifier = Modifier.size(38.dp).clickable { MusicPlayer.toggle(context, previewUrl) },
             )
         }

@@ -32,6 +32,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.blaineam.haven.R
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -111,9 +113,9 @@ fun AudioPlayerPill(
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play", tint = contentColor, modifier = Modifier.size(20.dp))
+        Icon(if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, stringResource(R.string.audio_play), tint = contentColor, modifier = Modifier.size(20.dp))
         Spacer(Modifier.size(8.dp))
-        Text("Voice message", color = contentColor, fontSize = 13.sp)
+        Text(stringResource(R.string.audio_voice_message), color = contentColor, fontSize = 13.sp)
     }
 }
 
@@ -134,14 +136,14 @@ fun VoiceRecorderDialog(circleId: String, onDone: (String) -> Unit, onDismiss: (
             TextButton(enabled = recording, onClick = {
                 val f = recorder.stop(); recording = false
                 if (f != null) onDone(LocalMedia.storeAudio(circleId, f.readBytes())) else onDismiss()
-            }) { Text("Send", color = HavenTheme.pink) }
+            }) { Text(stringResource(R.string.common_send), color = HavenTheme.pink) }
         },
-        dismissButton = { TextButton(onClick = { recorder.cancel(); onDismiss() }) { Text("Cancel") } },
-        title = { Text(if (recording) "Recording… ${elapsed}s" else "Voice message") },
+        dismissButton = { TextButton(onClick = { recorder.cancel(); onDismiss() }) { Text(stringResource(R.string.common_cancel)) } },
+        title = { Text(if (recording) stringResource(R.string.audio_recording, elapsed) else stringResource(R.string.audio_voice_message)) },
         text = {
             Box(Modifier.fillMaxWidth().padding(8.dp), contentAlignment = Alignment.Center) {
                 Icon(
-                    if (recording) Icons.Filled.Stop else Icons.Filled.Mic, "Record",
+                    if (recording) Icons.Filled.Stop else Icons.Filled.Mic, stringResource(R.string.audio_record),
                     tint = HavenTheme.pink,
                     modifier = Modifier.size(64.dp).clickable {
                         if (!recording) {

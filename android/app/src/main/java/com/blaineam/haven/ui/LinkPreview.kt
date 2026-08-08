@@ -23,9 +23,11 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.blaineam.haven.R
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -129,7 +131,7 @@ fun LinkPreviewCard(text: String, modifier: Modifier = Modifier) {
                         },
                 ) {
                     Text(
-                        if (loading) "Loading preview…" else "Load preview",
+                        if (loading) stringResource(R.string.linkpreview_loading) else stringResource(R.string.linkpreview_load),
                         color = HavenTheme.pink, fontSize = 11.sp,
                         modifier = Modifier.padding(vertical = 4.dp),
                     )

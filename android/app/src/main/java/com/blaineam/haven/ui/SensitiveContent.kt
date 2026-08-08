@@ -24,6 +24,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.blaineam.haven.R
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
@@ -105,8 +107,8 @@ fun SensitiveGuard(
                         modifier = Modifier.padding(8.dp),
                     ) {
                         Icon(Icons.Filled.VisibilityOff, null, tint = HavenTheme.textSecondary, modifier = Modifier.size(22.dp))
-                        Text("Sensitive Content", color = HavenTheme.textSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                        Text("Tap to view", color = HavenTheme.textSecondary, fontSize = 11.sp)
+                        Text(stringResource(R.string.sensitive_title), color = HavenTheme.textSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Text(stringResource(R.string.sensitive_tap_to_view), color = HavenTheme.textSecondary, fontSize = 11.sp)
                     }
                 }
             }

@@ -36,12 +36,14 @@ import androidx.compose.ui.geometry.Size as GSize
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.blaineam.haven.R
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
@@ -141,11 +143,11 @@ fun QrScannerScreen(onResult: (String) -> Unit, onCancel: () -> Unit) {
         Column(Modifier.fillMaxWidth().align(Alignment.TopStart).statusBarsPadding().padding(16.dp)) {
             Box(Modifier.size(40.dp).clip(RoundedCornerShape(20.dp)).clickable { onCancel() },
                 contentAlignment = Alignment.Center) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.common_back), tint = Color.White)
             }
         }
         Text(
-            "Point at your friend's Haven QR",
+            stringResource(R.string.qr_point_at_qr),
             color = Color.White, fontSize = 15.sp, textAlign = TextAlign.Center,
             modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 60.dp),
         )

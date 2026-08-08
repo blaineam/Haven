@@ -96,7 +96,9 @@ import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.viewinterop.AndroidView
+import com.blaineam.haven.R
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
@@ -245,7 +247,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                 Box(
                     Modifier.size(40.dp).clip(CircleShape).clickable { onAddFriend() },
                     contentAlignment = Alignment.Center,
-                ) { Icon(Icons.Filled.PersonAdd, "Add a friend", tint = HavenTheme.pink) }
+                ) { Icon(Icons.Filled.PersonAdd, stringResource(R.string.circle_add_friend_cd), tint = HavenTheme.pink) }
             }
 
             val lockV by com.blaineam.haven.core.CircleLock.version
@@ -256,12 +258,12 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                     horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                     Text("🔒", fontSize = 48.sp)
                     Spacer(Modifier.height(12.dp))
-                    Text("This circle is locked", color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    Text(stringResource(R.string.circle_locked_title), color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(6.dp))
-                    Text("Stories, posts and messages stay hidden until you unlock.",
+                    Text(stringResource(R.string.circle_locked_message),
                         color = HavenTheme.textSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
                     Spacer(Modifier.height(16.dp))
-                    BrandButton(text = "Unlock", modifier = Modifier.fillMaxWidth(0.6f)) {
+                    BrandButton(text = stringResource(R.string.circle_unlock_button), modifier = Modifier.fillMaxWidth(0.6f)) {
                         (context as? androidx.fragment.app.FragmentActivity)?.let {
                             com.blaineam.haven.core.CircleLock.authenticate(it, active) {}
                         }
@@ -302,12 +304,12 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                     if (posts.isEmpty()) item {
                         Column(Modifier.fillMaxWidth().height(260.dp).padding(24.dp),
                             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                            Text("Nothing here yet", color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                            Text(stringResource(R.string.circle_empty_title), color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                             Spacer(Modifier.height(8.dp))
                             Text(
                                 if (HavenNet.contacts.isEmpty())
-                                    "Add a friend to start sharing.\nEverything you post is end-to-end encrypted to your circle."
-                                else "Say something to your circle below.",
+                                    stringResource(R.string.circle_empty_no_contacts)
+                                else stringResource(R.string.circle_empty_has_contacts),
                                 color = HavenTheme.textSecondary, fontSize = 14.sp, textAlign = TextAlign.Center,
                             )
                         }
@@ -336,7 +338,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                             Box {
                                 Box(Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)).background(HavenTheme.card),
                                     contentAlignment = Alignment.Center) {
-                                    Icon(Icons.Filled.Place, "Location", tint = HavenTheme.pink, modifier = Modifier.size(26.dp))
+                                    Icon(Icons.Filled.Place, stringResource(R.string.circle_location_cd), tint = HavenTheme.pink, modifier = Modifier.size(26.dp))
                                 }
                                 // White-on-black-scrim over the tile — not a theme surface.
                                 Text("✕", color = Color.White, fontSize = 13.sp,
@@ -360,7 +362,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                 Row(Modifier.padding(start = 16.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Filled.MusicNote, null, tint = HavenTheme.pink, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.size(6.dp))
-                    Text("${m.title} · ${m.artist}", color = HavenTheme.textPrimary, fontSize = 12.sp, maxLines = 1)
+                    Text(stringResource(R.string.circle_music_chip_format, m.title, m.artist), color = HavenTheme.textPrimary, fontSize = 12.sp, maxLines = 1)
                     Spacer(Modifier.size(8.dp))
                     Text("✕", color = HavenTheme.textSecondary, fontSize = 14.sp,
                         modifier = Modifier.clickable { pendingMusic = null })
@@ -370,17 +372,17 @@ fun CircleScreen(onAddFriend: () -> Unit) {
             Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 2.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable { openCamera(true) },
-                    contentAlignment = Alignment.Center) { Icon(Icons.Filled.PhotoCamera, "Camera", tint = HavenTheme.pink) }
+                    contentAlignment = Alignment.Center) { Icon(Icons.Filled.PhotoCamera, stringResource(R.string.circle_camera_cd), tint = HavenTheme.pink) }
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable {
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
-                }, contentAlignment = Alignment.Center) { Icon(Icons.Filled.AddPhotoAlternate, "Add photo or video", tint = HavenTheme.pink) }
+                }, contentAlignment = Alignment.Center) { Icon(Icons.Filled.AddPhotoAlternate, stringResource(R.string.circle_add_photo_video_cd), tint = HavenTheme.pink) }
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable { showMusicDialog = true },
-                    contentAlignment = Alignment.Center) { Icon(Icons.Filled.MusicNote, "Add a song", tint = HavenTheme.pink) }
+                    contentAlignment = Alignment.Center) { Icon(Icons.Filled.MusicNote, stringResource(R.string.circle_add_song_cd), tint = HavenTheme.pink) }
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable { attachLocation() },
-                    contentAlignment = Alignment.Center) { Icon(Icons.Filled.Place, "Share location", tint = HavenTheme.pink) }
+                    contentAlignment = Alignment.Center) { Icon(Icons.Filled.Place, stringResource(R.string.circle_share_location_cd), tint = HavenTheme.pink) }
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable {
                     if (draft.isNotBlank() || pendingMedia.isNotEmpty()) showSchedule = true
-                }, contentAlignment = Alignment.Center) { Icon(Icons.Filled.Schedule, "Schedule send", tint = HavenTheme.pink) }
+                }, contentAlignment = Alignment.Center) { Icon(Icons.Filled.Schedule, stringResource(R.string.circle_schedule_send_cd), tint = HavenTheme.pink) }
                 Spacer(Modifier.weight(1f))
                 SyncStatusBadge(active)
                 Box {
@@ -388,14 +390,14 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                         .background(if (disappearSecs != null) HavenTheme.pink.copy(alpha = 0.2f) else Color.Transparent)
                         .clickable { showDisappearMenu = true }.padding(horizontal = 10.dp, vertical = 7.dp),
                         verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Timer, "Disappearing",
+                        Icon(Icons.Filled.Timer, stringResource(R.string.circle_disappearing_cd),
                             tint = if (disappearSecs != null) HavenTheme.pink else HavenTheme.textSecondary, modifier = Modifier.size(18.dp))
-                        if (disappearSecs != null) { Spacer(Modifier.size(4.dp)); Text(disappearLabel(disappearSecs!!), fontSize = 12.sp, color = HavenTheme.pink) }
+                        if (disappearSecs != null) { Spacer(Modifier.size(4.dp)); Text(disappearLabel(disappearSecs!!, context), fontSize = 12.sp, color = HavenTheme.pink) }
                     }
                     DropdownMenu(expanded = showDisappearMenu, onDismissRequest = { showDisappearMenu = false }) {
                         listOf<Pair<String, ULong?>>(
-                            "Don't disappear" to null, "After 1 hour" to 3_600uL,
-                            "After 1 day" to 86_400uL, "After 1 week" to 604_800uL,
+                            stringResource(R.string.circle_disappear_off) to null, stringResource(R.string.circle_disappear_1h) to 3_600uL,
+                            stringResource(R.string.circle_after_1_day) to 86_400uL, stringResource(R.string.circle_after_1_week) to 604_800uL,
                         ).forEach { (label, secs) ->
                             DropdownMenuItem(text = { Text(label) }, onClick = { disappearSecs = secs; showDisappearMenu = false })
                         }
@@ -407,7 +409,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = draft, onValueChange = { draft = it },
-                    placeholder = { Text("Share with your circle…") },
+                    placeholder = { Text(stringResource(R.string.circle_composer_placeholder)) },
                     modifier = Modifier.weight(1f), shape = RoundedCornerShape(22.dp), maxLines = 4,
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
                 )
@@ -416,9 +418,15 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                 // The glyph is white-on-brand-gradient — never themed.
                 Box(Modifier.size(48.dp).clip(CircleShape).background(HavenTheme.brandHorizontal)
                     .clickable(enabled = canPost) {
+                        val actionsBefore = com.blaineam.haven.support.RatingManager.significantActions(context)
                         HavenNet.post(active, draft.trim(), pendingMedia.toList(), pendingMusic, retentionSecs = disappearSecs)
                         draft = ""; pendingMedia.clear(); pendingMusic = null; disappearSecs = null
-                    }, contentAlignment = Alignment.Center) { Icon(Icons.AutoMirrored.Filled.Send, "Post", tint = Color.White) }
+                        // HavenNet.post records a significant action only when the engine accepted the
+                        // post — so "the count moved" is exactly "a publish just succeeded".
+                        if (com.blaineam.haven.support.RatingManager.significantActions(context) > actionsBefore) {
+                            com.blaineam.haven.support.RatingManager.maybeAskAfterPublish(context)
+                        }
+                    }, contentAlignment = Alignment.Center) { Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.circle_post_cd), tint = Color.White) }
             }
             }
         }
@@ -462,10 +470,10 @@ fun CircleScreen(onAddFriend: () -> Unit) {
         }
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { showSchedule = false }, containerColor = HavenTheme.card,
-            title = { Text("Send later", color = HavenTheme.textPrimary) },
+            title = { Text(stringResource(R.string.circle_send_later_title), color = HavenTheme.textPrimary) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Posts from this phone when the time comes (it catches up next time you open Haven).",
+                    Text(stringResource(R.string.circle_send_later_description),
                         color = HavenTheme.textSecondary, fontSize = 12.sp)
                     val now = java.util.Calendar.getInstance()
                     fun at(addDays: Int, hour: Int): Long = (java.util.Calendar.getInstance().apply {
@@ -474,14 +482,14 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                     }).timeInMillis
                     val eveningToday = at(0, 19)
                     listOfNotNull(
-                        "In 1 hour" to (now.timeInMillis + 3_600_000L),
-                        if (eveningToday > now.timeInMillis) "This evening (7 PM)" to eveningToday else null,
-                        "Tomorrow morning (9 AM)" to at(1, 9),
+                        stringResource(R.string.circle_send_in_1_hour) to (now.timeInMillis + 3_600_000L),
+                        if (eveningToday > now.timeInMillis) stringResource(R.string.circle_send_this_evening) to eveningToday else null,
+                        stringResource(R.string.circle_send_tomorrow_morning) to at(1, 9),
                     ).forEach { (label, ms) ->
                         Text(label, color = HavenTheme.pink, fontSize = 15.sp,
                             modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { doSchedule(ms) }.padding(vertical = 10.dp))
                     }
-                    Text("Pick a date & time…", color = HavenTheme.textPrimary, fontSize = 15.sp,
+                    Text(stringResource(R.string.circle_pick_date_time), color = HavenTheme.textPrimary, fontSize = 15.sp,
                         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable {
                             val c = java.util.Calendar.getInstance()
                             android.app.DatePickerDialog(context, { _, y, mo, d ->
@@ -494,7 +502,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                         }.padding(vertical = 10.dp))
                 }
             },
-            confirmButton = { androidx.compose.material3.TextButton(onClick = { showSchedule = false }) { Text("Cancel", color = HavenTheme.textSecondary) } },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = { showSchedule = false }) { Text(stringResource(R.string.common_cancel), color = HavenTheme.textSecondary) } },
         )
     }
 }
@@ -514,7 +522,7 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
     val csVersion by cs.version
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss, containerColor = HavenTheme.card,
-        title = { Text("Circle settings", color = HavenTheme.textPrimary) },
+        title = { Text(stringResource(R.string.circle_settings_title), color = HavenTheme.textPrimary) },
         text = {
             // SCROLLABLE. An AlertDialog caps its own height, and this sheet carries a rename field,
             // a private nickname, retention, the biometric lock and the member list — more than fits
@@ -528,10 +536,10 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
                 if (!isDefault) {
                     OutlinedTextField(
                         value = name, onValueChange = { name = it }, singleLine = true,
-                        label = { Text("Circle name") }, modifier = Modifier.fillMaxWidth(),
+                        label = { Text(stringResource(R.string.circle_circle_name_label)) }, modifier = Modifier.fillMaxWidth(),
                         colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
                     )
-                    Text("What this circle is called for you and everyone in it.",
+                    Text(stringResource(R.string.circle_name_description),
                         color = HavenTheme.textSecondary, fontSize = 11.sp)
                 }
                 // A PRIVATE name, alongside the shared rename above. Renaming a circle already
@@ -539,38 +547,37 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
                 // for it — this is the contact-nickname shape: local, never sent, never synced.
                 OutlinedTextField(
                     value = nick, onValueChange = { nick = it }, singleLine = true,
-                    label = { Text("Your name for this circle") }, modifier = Modifier.fillMaxWidth(),
+                    label = { Text(stringResource(R.string.circle_your_name_label)) }, modifier = Modifier.fillMaxWidth(),
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
                 )
-                Text("Only you see this. It never reaches anyone else in the circle, and it doesn't " +
-                    "change the circle's name for them. Leave it empty to use the circle's own name.",
+                Text(stringResource(R.string.circle_your_name_description),
                     color = HavenTheme.textSecondary, fontSize = 11.sp)
                 // Per-circle media overrides (parity with iOS "Media in this circle"). Each falls
                 // back to the app-wide default in Settings unless pinned here.
                 key(csVersion) {
-                    Text("Media in this circle", color = HavenTheme.textSecondary, fontSize = 12.sp)
-                    OverrideRow("Save your posts", cs.saveOwnOverride(circleId)) { cs.setSaveOwn(circleId, it) }
-                    OverrideRow("Save others' posts", cs.saveOthersOverride(circleId)) { cs.setSaveOthers(circleId, it) }
-                    OverrideRow("Auto-optimize media", cs.optimizeOverride(circleId)) { cs.setOptimize(circleId, it) }
+                    Text(stringResource(R.string.circle_media_section_title), color = HavenTheme.textSecondary, fontSize = 12.sp)
+                    OverrideRow(stringResource(R.string.circle_save_own_posts), cs.saveOwnOverride(circleId)) { cs.setSaveOwn(circleId, it) }
+                    OverrideRow(stringResource(R.string.circle_save_others_posts), cs.saveOthersOverride(circleId)) { cs.setSaveOthers(circleId, it) }
+                    OverrideRow(stringResource(R.string.circle_auto_optimize_media), cs.optimizeOverride(circleId)) { cs.setOptimize(circleId, it) }
                     RetentionOverrideRow(cs.retentionOverride(circleId)) { cs.setRetention(circleId, it) }
-                    Text("Override the app-wide Photos / optimize / auto-delete defaults just for this circle.",
+                    Text(stringResource(R.string.circle_media_override_description),
                         color = HavenTheme.textSecondary, fontSize = 11.sp)
                 }
                 // Per-circle relay OVERRIDE: pick which CONFIGURED relays this circle uses. Adding /
                 // removing relays lives under Settings ▸ Relays — not here.
                 CircleRelaySection(circleId)
-                Text("Members (${members.size})", color = HavenTheme.textSecondary, fontSize = 12.sp)
+                Text(stringResource(R.string.circle_members_count, members.size), color = HavenTheme.textSecondary, fontSize = 12.sp)
                 if (members.isEmpty()) {
-                    Text("No one else yet — invite a friend to this circle.", color = HavenTheme.textSecondary, fontSize = 13.sp)
+                    Text(stringResource(R.string.circle_no_members), color = HavenTheme.textSecondary, fontSize = 13.sp)
                 }
                 members.forEach { m ->
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         HavenAvatar(m.idHex, m.name, size = 30.dp)
                         Spacer(Modifier.size(8.dp))
                         Text(m.name, color = HavenTheme.textPrimary, modifier = Modifier.weight(1f), maxLines = 1)
-                        Text("Remove", color = HavenTheme.pink, fontSize = 13.sp,
+                        Text(stringResource(R.string.common_remove), color = HavenTheme.pink, fontSize = 13.sp,
                             modifier = Modifier.clickable { HavenNet.removeFromCircle(circleId, m.idHex) }.padding(horizontal = 6.dp, vertical = 4.dp))
-                        Text("Block", color = Color(0xFFEF4444), fontSize = 13.sp,
+                        Text(stringResource(R.string.circle_block), color = Color(0xFFEF4444), fontSize = 13.sp,
                             modifier = Modifier.clickable { HavenNet.block(m.idHex) }.padding(horizontal = 6.dp, vertical = 4.dp))
                     }
                 }
@@ -581,11 +588,11 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
                 if (!isDefault && name.isNotBlank()) HavenNet.renameCircle(circleId, name.trim())
                 com.blaineam.haven.core.CircleSettings.setNickname(circleId, nick)   // blank clears it
                 onDismiss()
-            }) { Text("Done", color = HavenTheme.pink) }
+            }) { Text(stringResource(R.string.common_done), color = HavenTheme.pink) }
         },
         dismissButton = {
             if (!isDefault) androidx.compose.material3.TextButton(onClick = { HavenNet.leaveCircle(circleId); onDismiss() }) {
-                Text("Leave circle", color = Color(0xFFEF4444))
+                Text(stringResource(R.string.circle_leave_circle), color = Color(0xFFEF4444))
             }
         },
     )
@@ -596,9 +603,9 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
 private fun OverrideRow(label: String, current: Boolean?, onSet: (Boolean?) -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(label, color = HavenTheme.textPrimary, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 1)
-        OverrideSeg("Auto", current == null) { onSet(null) }
-        OverrideSeg("On", current == true) { onSet(true) }
-        OverrideSeg("Off", current == false) { onSet(false) }
+        OverrideSeg(stringResource(R.string.circle_toggle_auto), current == null) { onSet(null) }
+        OverrideSeg(stringResource(R.string.circle_toggle_on), current == true) { onSet(true) }
+        OverrideSeg(stringResource(R.string.circle_toggle_off), current == false) { onSet(false) }
     }
 }
 
@@ -627,9 +634,9 @@ private fun CircleRelaySection(circleId: String) {
     val explicit = remember(relaysVersion, circleId) { HavenNet.explicitRelaysForCircle(circleId).toSet() }
     val default = remember(relaysVersion) { HavenNet.defaultRelay() }
 
-    Text("Relays for this circle", color = HavenTheme.textSecondary, fontSize = 12.sp)
+    Text(stringResource(R.string.circle_relays_section_title), color = HavenTheme.textSecondary, fontSize = 12.sp)
     if (configured.isEmpty()) {
-        Text("No relays configured. Add one under Settings ▸ Relays so this circle's posts reach people who were offline.",
+        Text(stringResource(R.string.circle_relays_empty),
             color = HavenTheme.textSecondary, fontSize = 11.sp)
         return
     }
@@ -638,7 +645,7 @@ private fun CircleRelaySection(circleId: String) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(e.name, color = HavenTheme.textPrimary, fontSize = 13.sp, maxLines = 1)
-                if (isDefault) Text("Default — inherited by every circle", color = HavenTheme.textSecondary, fontSize = 10.sp)
+                if (isDefault) Text(stringResource(R.string.circle_relay_default_label), color = HavenTheme.textSecondary, fontSize = 10.sp)
             }
             androidx.compose.material3.Switch(
                 checked = explicit.contains(e.hex) || isDefault,
@@ -649,7 +656,7 @@ private fun CircleRelaySection(circleId: String) {
             )
         }
     }
-    Text("Pick which relays this circle uses. The default (★) always applies.",
+    Text(stringResource(R.string.circle_relays_footer),
         color = HavenTheme.textSecondary, fontSize = 11.sp)
 }
 
@@ -658,18 +665,21 @@ private fun CircleRelaySection(circleId: String) {
 private fun RetentionOverrideRow(currentDays: Int?, onSet: (Int?) -> Unit) {
     var open by remember { mutableStateOf(false) }
     val label = when (currentDays) {
-        null -> "Auto"; 0 -> "Keep forever"; 1 -> "After 1 day"; 7 -> "After 1 week"
-        30 -> "After 30 days"; 365 -> "After 1 year"; else -> "After $currentDays days"
+        null -> stringResource(R.string.circle_toggle_auto); 0 -> stringResource(R.string.circle_keep_forever)
+        1 -> stringResource(R.string.circle_after_1_day); 7 -> stringResource(R.string.circle_after_1_week)
+        30 -> stringResource(R.string.circle_after_30_days); 365 -> stringResource(R.string.circle_after_1_year)
+        else -> stringResource(R.string.circle_after_n_days, currentDays)
     }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text("Auto-delete old posts", color = HavenTheme.textPrimary, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 1)
+        Text(stringResource(R.string.circle_auto_delete_posts), color = HavenTheme.textPrimary, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 1)
         Box {
             Text(label, color = HavenTheme.pink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { open = true }.padding(horizontal = 8.dp, vertical = 4.dp))
             DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
                 val opts = listOf<Pair<String, Int?>>(
-                    "Auto (use default)" to null, "Keep forever" to 0, "After 1 day" to 1,
-                    "After 1 week" to 7, "After 30 days" to 30, "After 1 year" to 365,
+                    stringResource(R.string.circle_auto_use_default) to null, stringResource(R.string.circle_keep_forever) to 0,
+                    stringResource(R.string.circle_after_1_day) to 1, stringResource(R.string.circle_after_1_week) to 7,
+                    stringResource(R.string.circle_after_30_days) to 30, stringResource(R.string.circle_after_1_year) to 365,
                 )
                 opts.forEach { (t, v) ->
                     DropdownMenuItem(text = { Text(t) }, onClick = { onSet(v); open = false })
@@ -680,8 +690,11 @@ private fun RetentionOverrideRow(currentDays: Int?, onSet: (Int?) -> Unit) {
 }
 
 /** Short label for a disappearing-post window (mirrors the composer chip). */
-private fun disappearLabel(secs: ULong): String = when (secs) {
-    3_600uL -> "1h"; 86_400uL -> "1d"; 604_800uL -> "1w"; else -> "${secs / 3_600uL}h"
+private fun disappearLabel(secs: ULong, context: android.content.Context): String = when (secs) {
+    3_600uL -> context.getString(R.string.circle_time_hours, 1)
+    86_400uL -> context.getString(R.string.circle_time_days, 1)
+    604_800uL -> context.getString(R.string.circle_time_weeks, 1)
+    else -> context.getString(R.string.circle_time_hours, (secs / 3_600uL).toInt())
 }
 
 /** Hosts content in a borderless full-screen dialog window so it covers the bottom tab bar too.
@@ -722,13 +735,13 @@ private fun PendingCard(req: PendingRequest) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text("${req.name} wants to connect", color = HavenTheme.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text("Safety: ${com.blaineam.haven.core.SafetyWords.phrase(req.verifyHex)}",
+            Text(stringResource(R.string.circle_wants_to_connect, req.name), color = HavenTheme.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(stringResource(R.string.circle_safety_phrase, com.blaineam.haven.core.SafetyWords.phrase(req.verifyHex)),
                 color = HavenTheme.textSecondary, fontSize = 11.sp)
         }
-        Text("Accept", color = HavenTheme.pink, fontWeight = FontWeight.SemiBold,
+        Text(stringResource(R.string.circle_accept), color = HavenTheme.pink, fontWeight = FontWeight.SemiBold,
             modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { HavenNet.approve(req) }.padding(8.dp))
-        Text("Ignore", color = HavenTheme.textSecondary,
+        Text(stringResource(R.string.circle_ignore), color = HavenTheme.textSecondary,
             modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { HavenNet.dismiss(req) }.padding(8.dp))
     }
 }
@@ -787,17 +800,17 @@ private fun FollowUpgradeCard(circleId: String, offer: CircleUpgradeOffer) {
         Icon(Icons.Filled.VerifiedUser, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp))
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text("${HavenNet.displayName(offer.fromHex)} is upgrading “${offer.name}”",
+            Text(stringResource(R.string.circle_upgrading_format, HavenNet.displayName(offer.fromHex), offer.name),
                 color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(2.dp))
             // Say plainly what we can and can't vouch for — the user is the one deciding.
             Text(
-                "We can't verify they made this circle. Whoever you follow can remove people — only follow if that's right.",
+                stringResource(R.string.circle_follow_disclaimer),
                 color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp,
             )
         }
         Spacer(Modifier.width(8.dp))
-        UpgradeAction("Follow") { HavenNet.followCircleUpgrade(circleId, offer.newCircleId) }
+        UpgradeAction(stringResource(R.string.circle_follow_action)) { HavenNet.followCircleUpgrade(circleId, offer.newCircleId) }
     }
 }
 
@@ -813,15 +826,15 @@ private fun OfferUpgradeCard(circleId: String) {
         Icon(Icons.Filled.Lock, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp))
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text("Upgrade this circle", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(stringResource(R.string.circle_upgrade_this_circle_title), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(2.dp))
             Text(
-                "If you made this circle, give it a verified owner so removals stick. Everyone here chooses whether to follow you.",
+                stringResource(R.string.circle_upgrade_this_circle_description),
                 color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp,
             )
         }
         Spacer(Modifier.width(8.dp))
-        UpgradeAction("Upgrade") { HavenNet.offerCircleUpgrade(circleId) }
+        UpgradeAction(stringResource(R.string.circle_upgrade_action)) { HavenNet.offerCircleUpgrade(circleId) }
     }
 }
 
@@ -900,10 +913,10 @@ fun ComposerAttachmentTile(
                 )
                 Text(
                     when {
-                        LocalMedia.isVideo(ref) -> "Video"
-                        LocalMedia.isAudio(ref) -> "Voice"
-                        LocalMedia.isFile(ref) -> "File"
-                        else -> "Photo"
+                        LocalMedia.isVideo(ref) -> stringResource(R.string.circle_video_label)
+                        LocalMedia.isAudio(ref) -> stringResource(R.string.circle_voice_label)
+                        LocalMedia.isFile(ref) -> stringResource(R.string.circle_file_label)
+                        else -> stringResource(R.string.circle_photo_label)
                     },
                     color = HavenTheme.textSecondary, fontSize = 9.sp,
                 )
@@ -1005,7 +1018,7 @@ private fun MediaBitmapContent(circleId: String, ref: String, bmp: ImageBitmap?,
                 if (alpha < 1f) {
                     MissingMediaPlaceholder(circleId, ref, LocalMedia.isVideo(ref), Modifier.matchParentSize())
                 }
-                Image(bmp, contentDescription = "Photo",
+                Image(bmp, contentDescription = stringResource(R.string.circle_photo_label),
                       modifier = modifier.graphicsLayer { this.alpha = alpha },
                       contentScale = contentScale)
             }
@@ -1082,8 +1095,8 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
                 Spacer(Modifier.height(8.dp))
                 // Honest i/n while a big chunked blob reassembles (resumable across retries).
                 Text(
-                    if (progress != null && progress.second > 1) "Downloading… ${progress.first}/${progress.second}"
-                    else "Downloading…",
+                    if (progress != null && progress.second > 1) stringResource(R.string.circle_downloading_progress, progress.first, progress.second)
+                    else stringResource(R.string.circle_downloading),
                     color = if (thumbBmp != null) Color.White else HavenTheme.textSecondary, fontSize = 12.sp,
                 )
             }
@@ -1094,15 +1107,15 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
                     tint = if (thumbBmp != null) Color.White else HavenTheme.textSecondary,
                     modifier = Modifier.size(28.dp))
                 Spacer(Modifier.height(6.dp))
-                Text("Waiting for sender…",
+                Text(stringResource(R.string.circle_waiting_for_sender),
                     color = if (thumbBmp != null) Color.White else HavenTheme.textSecondary, fontSize = 12.sp)
             }
             unavailable -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(Icons.Filled.WifiOff, null, tint = HavenTheme.textSecondary, modifier = Modifier.size(28.dp))
                 Spacer(Modifier.height(6.dp))
-                Text("No longer available", color = HavenTheme.textSecondary, fontSize = 12.sp)
+                Text(stringResource(R.string.circle_no_longer_available), color = HavenTheme.textSecondary, fontSize = 12.sp)
                 Spacer(Modifier.height(6.dp))
-                Text("Retry", color = HavenTheme.pink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                Text(stringResource(R.string.common_retry), color = HavenTheme.pink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.clip(RoundedCornerShape(8.dp))
                         .clickable { com.blaineam.haven.core.HavenNet.downloadEvicted(ref) }
                         .padding(horizontal = 10.dp, vertical = 4.dp))
@@ -1116,13 +1129,13 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
                     // hides the button that would earn one.
                     com.blaineam.haven.core.MediaWantedStore.isManuallyWanted(ref) -> {
                         Spacer(Modifier.height(6.dp))
-                        Text("We'll tell you when it's back", color = HavenTheme.textSecondary, fontSize = 11.sp)
+                        Text(stringResource(R.string.circle_will_tell_you), color = HavenTheme.textSecondary, fontSize = 11.sp)
                     }
                     // Nothing to ask for on your own post: you ARE the author, so if the bytes are
                     // gone here they're gone everywhere.
                     post != null && !post.isMe -> {
                         Spacer(Modifier.height(6.dp))
-                        Text("Ask for it back", color = HavenTheme.pink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                        Text(stringResource(R.string.circle_ask_for_it_back), color = HavenTheme.pink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.clip(RoundedCornerShape(8.dp))
                                 .clickable {
                                     com.blaineam.haven.core.HavenNet.requestMediaWhenAvailable(
@@ -1140,10 +1153,10 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
             ) {
                 Icon(Icons.Filled.Download, null, tint = HavenTheme.pink, modifier = Modifier.size(34.dp))
                 Spacer(Modifier.height(6.dp))
-                Text("Download ${android.text.format.Formatter.formatShortFileSize(context, evictedBytes)}",
+                Text(stringResource(R.string.circle_download_size, android.text.format.Formatter.formatShortFileSize(context, evictedBytes)),
                     color = HavenTheme.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(2.dp))
-                Text("Removed to save space", color = HavenTheme.textSecondary, fontSize = 11.sp)
+                Text(stringResource(R.string.circle_removed_to_save_space), color = HavenTheme.textSecondary, fontSize = 11.sp)
             }
             // We are holding the picture and no bookkeeping flag says anything is wrong: the bytes are
             // simply not here YET. That is the ordinary progressive-load case and it needs no chrome —
@@ -1157,7 +1170,7 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
                 androidx.compose.material3.CircularProgressIndicator(
                     color = HavenTheme.pink, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
                 Spacer(Modifier.height(8.dp))
-                Text(if (isVideo) "Video still loading…" else "Media still loading…",
+                Text(if (isVideo) stringResource(R.string.circle_video_still_loading) else stringResource(R.string.circle_media_still_loading),
                     color = HavenTheme.textSecondary, fontSize = 12.sp)
             }
         }
@@ -1176,7 +1189,7 @@ private fun MediaThumb(circleId: String, ref: String, modifier: Modifier, onOpen
                 if (LocalMedia.isVideo(ref) && LocalMedia.has(ref)) {
                     Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.18f)), contentAlignment = Alignment.Center) {
                         // White-on-scrim over media — not a theme surface.
-                        Icon(Icons.Filled.PlayCircle, "Play", tint = Color.White, modifier = Modifier.size(40.dp))
+                        Icon(Icons.Filled.PlayCircle, stringResource(R.string.circle_play_cd), tint = Color.White, modifier = Modifier.size(40.dp))
                     }
                 }
             }
@@ -1212,7 +1225,7 @@ fun LocationChip(ref: String) {
         Spacer(Modifier.size(10.dp))
         Column(Modifier.weight(1f)) {
             Text(pin.label, color = HavenTheme.textPrimary, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium, maxLines = 1)
-            Text("Tap to open in Maps", color = HavenTheme.textSecondary, fontSize = 11.sp)
+            Text(stringResource(R.string.circle_tap_to_open_maps), color = HavenTheme.textSecondary, fontSize = 11.sp)
         }
     }
 }
@@ -1392,7 +1405,7 @@ private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, pl
                                 color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(28.dp))
                         } else {
                             // White-on-scrim over media — not a theme surface.
-                            Icon(Icons.Filled.PlayCircle, "Play", tint = Color.White, modifier = Modifier.size(40.dp))
+                            Icon(Icons.Filled.PlayCircle, stringResource(R.string.circle_play_cd), tint = Color.White, modifier = Modifier.size(40.dp))
                         }
                     }
                 }
@@ -1488,9 +1501,10 @@ private fun FileAttachmentPage(circleId: String, ref: String) {
     val feedTick = com.blaineam.haven.core.HavenNet.feedVersion.value
     val here = remember(ref, feedTick) { LocalMedia.has(ref) }
     val downloading = com.blaineam.haven.core.HavenNet.downloadingMedia.contains(ref)
+    val defaultFileName = stringResource(R.string.circle_file_attachment_default)
     // The name lives INSIDE the archive, so reading it means a decrypt — off the main thread, once.
-    val name by androidx.compose.runtime.produceState("File attachment", ref, circleId, here) {
-        value = if (!here) "File attachment" else kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    val name by androidx.compose.runtime.produceState(defaultFileName, ref, circleId, here) {
+        value = if (!here) defaultFileName else kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             com.blaineam.haven.core.FileAttachments.displayName(context, circleId, ref)
         }
     }
@@ -1511,22 +1525,22 @@ private fun FileAttachmentPage(circleId: String, ref: String) {
             }
             Spacer(Modifier.height(12.dp))
             if (!here) {
-                PillAction(if (downloading) "Getting it…" else "Download", enabled = !downloading) {
+                PillAction(if (downloading) stringResource(R.string.circle_getting_it) else stringResource(R.string.circle_download_action), enabled = !downloading) {
                     com.blaineam.haven.core.HavenNet.downloadEvicted(ref)
                 }
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PillAction("Open") {
+                    PillAction(stringResource(R.string.circle_open_action)) {
                         failed = !com.blaineam.haven.core.FileAttachments.open(context, circleId, ref)
                     }
-                    PillAction("Share", filled = false) {
+                    PillAction(stringResource(R.string.common_share), filled = false) {
                         failed = !com.blaineam.haven.core.FileAttachments.share(context, circleId, ref)
                     }
                 }
             }
             if (failed) {
                 Spacer(Modifier.height(6.dp))
-                Text("Couldn't open that file.", color = HavenTheme.textSecondary, fontSize = 12.sp)
+                Text(stringResource(R.string.circle_couldnt_open_file), color = HavenTheme.textSecondary, fontSize = 12.sp)
             }
         }
     }
@@ -1602,7 +1616,7 @@ fun MediaViewer(circleId: String, refs: List<String>, startIndex: Int, onClose: 
         // scanner had.
         Box(Modifier.align(Alignment.TopStart).statusBarsPadding().padding(16.dp).size(42.dp).clip(CircleShape)
             .background(Color.Black.copy(alpha = 0.4f)).clickable { onClose() }, contentAlignment = Alignment.Center) {
-            Icon(Icons.Filled.Close, "Close", tint = Color.White)
+            Icon(Icons.Filled.Close, stringResource(R.string.common_close), tint = Color.White)
         }
         // Top-right actions: keep-on-device (pin) + save to Photos.
         Row(Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(16.dp),
@@ -1614,7 +1628,7 @@ fun MediaViewer(circleId: String, refs: List<String>, startIndex: Int, onClose: 
             Box(Modifier.size(42.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.4f))
                 .clickable { curRef?.let { com.blaineam.haven.core.PinnedMediaStore.togglePin(listOf(it)) } },
                 contentAlignment = Alignment.Center) {
-                Icon(Icons.Filled.PushPin, if (pinned) "Kept on this device" else "Keep on this device",
+                Icon(Icons.Filled.PushPin, if (pinned) stringResource(R.string.circle_kept_on_device) else stringResource(R.string.circle_keep_on_device),
                     tint = if (pinned) HavenTheme.pink else Color.White)
             }
             // Save this item to Photos.
@@ -1627,15 +1641,15 @@ fun MediaViewer(circleId: String, refs: List<String>, startIndex: Int, onClose: 
                         }
                     }
                 }, contentAlignment = Alignment.Center) {
-                Icon(Icons.Filled.Download, "Save to Photos", tint = Color.White)
+                Icon(Icons.Filled.Download, stringResource(R.string.circle_save_to_photos_cd), tint = Color.White)
             }
         }
         // The viewer's surface is Color.Black in both modes — all its chrome stays white.
-        if (refs.size > 1) Text("${pager.currentPage + 1} / ${refs.size}", color = Color.White, fontSize = 13.sp,
+        if (refs.size > 1) Text(stringResource(R.string.circle_page_indicator, pager.currentPage + 1, refs.size), color = Color.White, fontSize = 13.sp,
             modifier = Modifier.align(Alignment.TopCenter).padding(top = 24.dp))
         if (saved) {
             LaunchedEffect(Unit) { kotlinx.coroutines.delay(1500); saved = false }
-            Text("Saved to Photos ✓", color = Color.White, fontSize = 13.sp,
+            Text(stringResource(R.string.circle_saved_to_photos), color = Color.White, fontSize = 13.sp,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 40.dp).clip(RoundedCornerShape(20.dp))
                     .background(Color.Black.copy(alpha = 0.6f)).padding(horizontal = 16.dp, vertical = 8.dp))
         }
@@ -1658,7 +1672,7 @@ private fun CircleSwitcher(activeId: String, circlesVersion: Int, modifier: Modi
             // it) while a long one is capped at the space the bar can spare and ellipsizes there.
             BrandText(name, Modifier.weight(1f, fill = false), fontSize = 24,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Start)
-            Icon(androidx.compose.material.icons.Icons.Filled.ArrowDropDown, "Switch circle", tint = HavenTheme.pink)
+            Icon(androidx.compose.material.icons.Icons.Filled.ArrowDropDown, stringResource(R.string.circle_switch_circle_cd), tint = HavenTheme.pink)
         }
         androidx.compose.material3.DropdownMenu(
             expanded = menu, onDismissRequest = { menu = false }, modifier = Modifier.background(HavenTheme.card),
@@ -1667,30 +1681,30 @@ private fun CircleSwitcher(activeId: String, circlesVersion: Int, modifier: Modi
                 androidx.compose.material3.DropdownMenuItem(
                     // Through circleName, not c.name — the switcher is a display site, so a circle
                     // I've privately renamed must read the same here as it does in the header.
-                    text = { Text("${HavenNet.circleName(c.id)}  ·  ${c.memberCount}", color = HavenTheme.textPrimary) },
+                    text = { Text(stringResource(R.string.circle_name_member_count, HavenNet.circleName(c.id), c.memberCount), color = HavenTheme.textPrimary) },
                     onClick = { HavenNet.setActiveCircle(c.id); menu = false },
                 )
             }
             androidx.compose.material3.HorizontalDivider(color = HavenTheme.cardBorder)
             androidx.compose.material3.DropdownMenuItem(
-                text = { Text("⚙️  Circle settings", color = HavenTheme.textPrimary) },
+                text = { Text(stringResource(R.string.circle_settings_menu_item), color = HavenTheme.textPrimary) },
                 onClick = { menu = false; showManage = true },
             )
             val locked = com.blaineam.haven.core.CircleLock.isLocked(activeId)
             androidx.compose.material3.DropdownMenuItem(
-                text = { Text(if (locked) "🔓 Unlock this circle" else "🔒 Lock this circle", color = HavenTheme.textPrimary) },
+                text = { Text(if (locked) stringResource(R.string.circle_unlock_circle_menu) else stringResource(R.string.circle_lock_circle_menu), color = HavenTheme.textPrimary) },
                 onClick = { com.blaineam.haven.core.CircleLock.setLocked(context, activeId, !locked); menu = false },
             )
             val anyHidden = com.blaineam.haven.core.HiddenStore.hidden.size
             val showingHidden by com.blaineam.haven.core.HiddenStore.showHidden
             if (anyHidden > 0) {
                 androidx.compose.material3.DropdownMenuItem(
-                    text = { Text(if (showingHidden) "🙈  Hide hidden posts" else "👁  Show hidden posts ($anyHidden)", color = HavenTheme.textPrimary) },
+                    text = { Text(if (showingHidden) stringResource(R.string.circle_hide_hidden_posts) else stringResource(R.string.circle_show_hidden_posts_format, anyHidden), color = HavenTheme.textPrimary) },
                     onClick = { com.blaineam.haven.core.HiddenStore.toggleShowHidden(); menu = false },
                 )
             }
             androidx.compose.material3.DropdownMenuItem(
-                text = { Text("+ New circle", color = HavenTheme.pink) },
+                text = { Text(stringResource(R.string.circle_new_circle_menu_item), color = HavenTheme.pink) },
                 onClick = { menu = false; showCreate = true },
             )
         }
@@ -1700,19 +1714,19 @@ private fun CircleSwitcher(activeId: String, circlesVersion: Int, modifier: Modi
         var nm by remember { mutableStateOf("") }
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { showCreate = false }, containerColor = HavenTheme.card,
-            title = { Text("New circle", color = HavenTheme.textPrimary) },
+            title = { Text(stringResource(R.string.circle_new_circle_title), color = HavenTheme.textPrimary) },
             text = {
                 OutlinedTextField(value = nm, onValueChange = { nm = it }, singleLine = true,
-                    placeholder = { Text("Circle name") },
+                    placeholder = { Text(stringResource(R.string.circle_circle_name_label)) },
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink))
             },
             confirmButton = {
                 androidx.compose.material3.TextButton(enabled = nm.isNotBlank(),
                     onClick = { HavenNet.createCircle(nm.trim()); showCreate = false }) {
-                    Text("Create", color = HavenTheme.pink)
+                    Text(stringResource(R.string.circle_create_action), color = HavenTheme.pink)
                 }
             },
-            dismissButton = { androidx.compose.material3.TextButton(onClick = { showCreate = false }) { Text("Cancel", color = HavenTheme.textSecondary) } },
+            dismissButton = { androidx.compose.material3.TextButton(onClick = { showCreate = false }) { Text(stringResource(R.string.common_cancel), color = HavenTheme.textSecondary) } },
         )
     }
 }
@@ -1738,16 +1752,16 @@ private fun ConnectionDot() {
         // squeezed Text wraps by CHARACTER — "Connected" became "Co / nn / ec / te / d" and dragged
         // the whole title bar to five lines tall. It must be able to run out of room without ever
         // growing downward; the name beside it is what yields (it ellipsizes).
-        Text(if (started) (if (online || relay || nearby > 0) "Connected" else "Online") else "Connecting",
+        Text(if (started) (if (online || relay || nearby > 0) stringResource(R.string.circle_connected) else stringResource(R.string.circle_online)) else stringResource(R.string.circle_connecting),
             color = HavenTheme.textSecondary, fontSize = 11.sp, maxLines = 1, softWrap = false)
-        if (relay) Text("· Relay", color = Color(0xFF34D399), fontSize = 11.sp, maxLines = 1, softWrap = false)
-        if (nearby > 0) Text("· Nearby", color = Color(0xFF34D399), fontSize = 11.sp, maxLines = 1, softWrap = false)
+        if (relay) Text(stringResource(R.string.circle_relay_suffix), color = Color(0xFF34D399), fontSize = 11.sp, maxLines = 1, softWrap = false)
+        if (nearby > 0) Text(stringResource(R.string.circle_nearby_suffix), color = Color(0xFF34D399), fontSize = 11.sp, maxLines = 1, softWrap = false)
         // LIVE active-sync indicator — a small spinner + count whenever media is still transferring.
         if (pending > 0) {
             androidx.compose.material3.CircularProgressIndicator(
                 color = Color(0xFFF59E0B), strokeWidth = 1.5.dp,
                 modifier = Modifier.size(11.dp))
-            Text("Syncing $pending", color = Color(0xFFF59E0B), fontSize = 11.sp, maxLines = 1, softWrap = false)
+            Text(stringResource(R.string.circle_syncing_count, pending), color = Color(0xFFF59E0B), fontSize = 11.sp, maxLines = 1, softWrap = false)
         }
     }
     if (showDetail) {
@@ -1777,8 +1791,8 @@ private fun SyncStatusBadge(circleId: String) {
     // Only surface the pill when there's something to know. Collapse to nothing when fully synced.
     val (color, label) = when (status) {
         HavenNet.SyncStatus.SYNCED -> return
-        HavenNet.SyncStatus.SYNCING -> Color(0xFFF59E0B) to "Syncing"
-        HavenNet.SyncStatus.LOCAL -> Color(0xFFEF4444) to "Device only"
+        HavenNet.SyncStatus.SYNCING -> Color(0xFFF59E0B) to stringResource(R.string.circle_syncing_label)
+        HavenNet.SyncStatus.LOCAL -> Color(0xFFEF4444) to stringResource(R.string.circle_device_only)
     }
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -1820,37 +1834,37 @@ private fun SyncDetailContent() {
     Column(
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp, top = 4.dp),
     ) {
-        Text("Sync activity", color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text(stringResource(R.string.circle_sync_activity_title), color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.size(6.dp))
         // The live headline: are we actively moving media right now, or idle/synced?
         Text(
-            if (pending > 0) "Syncing $pending item${if (pending == 1) "" else "s"}…" else "Up to date",
+            if (pending > 0) stringResource(R.string.circle_syncing_items, pending, if (pending == 1) "" else "s") else stringResource(R.string.circle_up_to_date),
             color = if (pending > 0) Color(0xFFF59E0B) else Color(0xFF34D399), fontSize = 13.sp,
         )
         Spacer(Modifier.size(14.dp))
-        SyncDetailRow(Icons.Filled.ArrowUpward, "$out media sent")
+        SyncDetailRow(Icons.Filled.ArrowUpward, stringResource(R.string.circle_media_sent, out))
         Spacer(Modifier.size(10.dp))
-        SyncDetailRow(Icons.Filled.ArrowDownward, "$inn media received")
+        SyncDetailRow(Icons.Filled.ArrowDownward, stringResource(R.string.circle_media_received, inn))
         Spacer(Modifier.size(10.dp))
-        SyncDetailRow(Icons.Filled.AccessTime, "$pending media waiting")
+        SyncDetailRow(Icons.Filled.AccessTime, stringResource(R.string.circle_media_waiting, pending))
         Spacer(Modifier.size(14.dp))
         androidx.compose.material3.HorizontalDivider(color = HavenTheme.cardBorder)
         Spacer(Modifier.size(14.dp))
-        Text("Transports", color = HavenTheme.textSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Text(stringResource(R.string.circle_transports_title), color = HavenTheme.textSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.size(8.dp))
         // Which paths are actually carrying this device's sync right now.
         SyncDetailRow(
             if (online || relay) Icons.Filled.Wifi else Icons.Filled.WifiOff,
-            when { relay -> "Relay / mailbox: active"; online -> "Internet (iroh): connected"; else -> "Internet: connecting…" },
+            when { relay -> stringResource(R.string.circle_relay_active); online -> stringResource(R.string.circle_internet_connected); else -> stringResource(R.string.circle_internet_connecting) },
             tint = if (online || relay) HavenTheme.pink else HavenTheme.textSecondary,
             valueColor = if (online || relay) HavenTheme.textPrimary else HavenTheme.textSecondary,
         )
         Spacer(Modifier.size(10.dp))
         val (nearbyIcon, nearbyText) = when (nearbyState) {
-            HavenNet.NearbyState.CONNECTED -> Icons.Filled.Wifi to "Nearby: connected ($nearbyPeers device${if (nearbyPeers == 1) "" else "s"})"
-            HavenNet.NearbyState.SEARCHING -> Icons.Filled.Wifi to "Nearby: searching… (Android-to-Android on this network)"
-            HavenNet.NearbyState.NO_PERMISSION -> Icons.Filled.WifiOff to "Nearby: needs Bluetooth/Nearby permission"
-            HavenNet.NearbyState.OFF -> Icons.Filled.WifiOff to "Nearby: off (enable in You ▸ Settings)"
+            HavenNet.NearbyState.CONNECTED -> Icons.Filled.Wifi to stringResource(R.string.circle_nearby_connected, nearbyPeers, if (nearbyPeers == 1) "" else "s")
+            HavenNet.NearbyState.SEARCHING -> Icons.Filled.Wifi to stringResource(R.string.circle_nearby_searching)
+            HavenNet.NearbyState.NO_PERMISSION -> Icons.Filled.WifiOff to stringResource(R.string.circle_nearby_no_permission)
+            HavenNet.NearbyState.OFF -> Icons.Filled.WifiOff to stringResource(R.string.circle_nearby_off)
         }
         SyncDetailRow(
             nearbyIcon, nearbyText,
@@ -1859,8 +1873,7 @@ private fun SyncDetailContent() {
         )
         Spacer(Modifier.size(14.dp))
         Text(
-            "Nearby is a direct phone-to-phone link between Android devices; iPhone/Mac use their own " +
-            "nearby system, so cross-platform sync goes over the relay. Updates live.",
+            stringResource(R.string.circle_nearby_explainer),
             color = HavenTheme.textSecondary, fontSize = 12.sp,
         )
     }
@@ -1971,7 +1984,7 @@ fun VideoTile(
     val f = file
     if (f == null) {
         Box(modifier.background(HavenTheme.card).padding(40.dp), contentAlignment = Alignment.Center) {
-            Icon(Icons.Filled.Videocam, "Video", tint = HavenTheme.textSecondary)
+            Icon(Icons.Filled.Videocam, stringResource(R.string.circle_video_label), tint = HavenTheme.textSecondary)
         }
     } else {
         Box(modifier) {
@@ -2052,7 +2065,7 @@ fun VideoTile(
                 ) {
                     Icon(
                         if (soundOn) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
-                        "Toggle sound", tint = Color.White, modifier = Modifier.size(18.dp),
+                        stringResource(R.string.circle_toggle_sound_cd), tint = Color.White, modifier = Modifier.size(18.dp),
                     )
                 }
             }
@@ -2130,27 +2143,28 @@ fun PostCard(
             text = {
                 Column {
                     r.authors.forEach { a ->
-                        Text(if (a.startsWith(HavenNet.nodeIdHex.take(8))) "You" else HavenNet.displayName(a.take(8)),
+                        Text(if (a.startsWith(HavenNet.nodeIdHex.take(8))) stringResource(R.string.circle_you_label) else HavenNet.displayName(a.take(8)),
                             color = HavenTheme.textPrimary, fontSize = 14.sp, modifier = Modifier.padding(vertical = 2.dp))
                     }
                 }
             },
-            confirmButton = { androidx.compose.material3.TextButton(onClick = { whoReacted = null }) { Text("Done", color = HavenTheme.pink) } },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = { whoReacted = null }) { Text(stringResource(R.string.common_done), color = HavenTheme.pink) } },
         )
     }
 
     Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            HavenAvatar(item.authorShort, if (item.isMe) "You" else HavenNet.displayName(item.authorShort),
+            val youLabel = stringResource(R.string.circle_you_label)
+            HavenAvatar(item.authorShort, if (item.isMe) youLabel else HavenNet.displayName(item.authorShort),
                 34.dp, isMe = item.isMe)
             Spacer(Modifier.size(10.dp))
             Text(
-                if (item.isMe) "You" else HavenNet.displayName(item.authorShort),
+                if (item.isMe) youLabel else HavenNet.displayName(item.authorShort),
                 color = HavenTheme.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.weight(1f))
             Text(
-                relativeTime(item.createdAt) + if (item.edited) " · edited" else "",
+                relativeTime(item.createdAt, context) + if (item.edited) stringResource(R.string.circle_edited_suffix) else "",
                 color = HavenTheme.textSecondary, fontSize = 12.sp,
             )
             // Upload state for your OWN media posts, shown whenever the circle has a relay to back up
@@ -2185,9 +2199,9 @@ fun PostCard(
                         else -> androidx.compose.material.icons.Icons.Filled.ArrowCircleUp
                     }
                     val label = when {
-                        backed -> "Backed up to a relay others can read"
-                        localOnly -> "Only on this device's own relay — nobody else can fetch it yet"
-                        else -> "Uploading to a relay…"
+                        backed -> stringResource(R.string.circle_backed_up_relay)
+                        localOnly -> stringResource(R.string.circle_local_relay_only)
+                        else -> stringResource(R.string.circle_uploading_to_relay)
                     }
                     // Tap for the full answer — WHICH relays hold it, and how many attachments each
                     // has. The glyph alone says yes/no, which is exactly what was not enough the day
@@ -2210,7 +2224,7 @@ fun PostCard(
                 }
             }
             Box {
-                Icon(androidx.compose.material.icons.Icons.Filled.MoreVert, "More",
+                Icon(androidx.compose.material.icons.Icons.Filled.MoreVert, stringResource(R.string.circle_more_cd),
                     tint = HavenTheme.textSecondary,
                     modifier = Modifier.padding(start = 4.dp).size(20.dp).clickable { postMenu = true })
                 DropdownMenu(expanded = postMenu, onDismissRequest = { postMenu = false },
@@ -2223,11 +2237,11 @@ fun PostCard(
                                    else com.blaineam.haven.core.DeepLink.postUrl(circleId, item.id)
                     shareUrl?.let { url ->
                         DropdownMenuItem(
-                            text = { Text("Share post", color = HavenTheme.textPrimary) },
+                            text = { Text(stringResource(R.string.circle_share_post), color = HavenTheme.textPrimary) },
                             onClick = { postMenu = false; sharePost(context, url) },
                         )
                         DropdownMenuItem(
-                            text = { Text("Copy link", color = HavenTheme.textPrimary) },
+                            text = { Text(stringResource(R.string.circle_copy_link), color = HavenTheme.textPrimary) },
                             onClick = { postMenu = false; copyPostLink(context, url) },
                         )
                     }
@@ -2235,11 +2249,11 @@ fun PostCard(
                     // replying now (iOS keeps Edit/Unsend in this same ellipsis menu).
                     if (item.isMe) {
                         DropdownMenuItem(
-                            text = { Text("Edit", color = HavenTheme.textPrimary) },
+                            text = { Text(stringResource(R.string.common_edit), color = HavenTheme.textPrimary) },
                             onClick = { postMenu = false; showEdit = true },
                         )
                         DropdownMenuItem(
-                            text = { Text("Delete", color = Color(0xFFF87171)) },
+                            text = { Text(stringResource(R.string.common_delete), color = Color(0xFFF87171)) },
                             onClick = { postMenu = false; HavenNet.unsendPost(circleId, item.id) },
                         )
                     }
@@ -2251,13 +2265,13 @@ fun PostCard(
                     if (keepRefs.isNotEmpty()) {
                         val anyPinned = keepRefs.any { com.blaineam.haven.core.PinnedMediaStore.refs.contains(it) }
                         DropdownMenuItem(
-                            text = { Text(if (anyPinned) "Stop keeping on this device" else "Keep on this device", color = HavenTheme.textPrimary) },
+                            text = { Text(if (anyPinned) stringResource(R.string.circle_stop_keep_on_device) else stringResource(R.string.circle_keep_on_device), color = HavenTheme.textPrimary) },
                             onClick = { postMenu = false; com.blaineam.haven.core.PinnedMediaStore.togglePin(keepRefs) },
                         )
                     }
                     val hidden = com.blaineam.haven.core.HiddenStore.isHidden(item.id)
                     DropdownMenuItem(
-                        text = { Text(if (hidden) "Unhide post" else "Hide post", color = HavenTheme.textPrimary) },
+                        text = { Text(if (hidden) stringResource(R.string.circle_unhide_post) else stringResource(R.string.circle_hide_post), color = HavenTheme.textPrimary) },
                         onClick = {
                             if (hidden) com.blaineam.haven.core.HiddenStore.unhide(item.id)
                             else com.blaineam.haven.core.HiddenStore.hide(item.id)
@@ -2276,7 +2290,7 @@ fun PostCard(
                         if (authorHex != null) {
                             val authorName = HavenNet.displayName(item.authorShort)
                             DropdownMenuItem(
-                                text = { Text("Message $authorName", color = HavenTheme.textPrimary) },
+                                text = { Text(stringResource(R.string.circle_message_author, authorName), color = HavenTheme.textPrimary) },
                                 onClick = {
                                     postMenu = false
                                     // Staging sets DmDrafts.openThread, which RootScreen watches to
@@ -2289,7 +2303,7 @@ fun PostCard(
                         }
                     }
                     if (!item.isMe) DropdownMenuItem(
-                        text = { Text("Report", color = Color(0xFFF87171)) },
+                        text = { Text(stringResource(R.string.circle_report_action), color = Color(0xFFF87171)) },
                         onClick = { postMenu = false; showReport = true },
                     )
                 }
@@ -2310,7 +2324,7 @@ fun PostCard(
         // strips the interaction controls. Keep the author + timestamp row above.
         if (item.unsent) {
             Spacer(Modifier.height(8.dp))
-            Text("Message unsent", color = HavenTheme.textSecondary, fontSize = 14.sp,
+            Text(stringResource(R.string.circle_message_unsent), color = HavenTheme.textSecondary, fontSize = 14.sp,
                 fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
             return@Column
         }
@@ -2392,7 +2406,7 @@ fun PostCard(
                 }
             }
             Box(Modifier.clip(CircleShape).clickable { showPicker = !showPicker }.padding(5.dp)) {
-                Icon(Icons.Filled.AddReaction, "More reactions", tint = HavenTheme.textSecondary,
+                Icon(Icons.Filled.AddReaction, stringResource(R.string.circle_more_reactions_cd), tint = HavenTheme.textSecondary,
                     modifier = Modifier.size(20.dp))
             }
         }
@@ -2403,7 +2417,7 @@ fun PostCard(
                 OutlinedTextField(value = editText, onValueChange = { editText = it },
                     modifier = Modifier.weight(1f), shape = RoundedCornerShape(18.dp),
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink))
-                Text("Save", color = HavenTheme.pink, fontWeight = FontWeight.SemiBold,
+                Text(stringResource(R.string.common_save), color = HavenTheme.pink, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable {
                         // Text only — editPost carries the post's photos, video mute flag and
                         // track through itself, because an edit REPLACES them rather than
@@ -2430,14 +2444,14 @@ fun PostCard(
                 OutlinedTextField(
                     value = customEmoji,
                     onValueChange = { customEmoji = it },
-                    placeholder = { Text("Any emoji…", fontSize = 13.sp) },
+                    placeholder = { Text(stringResource(R.string.circle_any_emoji_placeholder), fontSize = 13.sp) },
                     singleLine = true,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(18.dp),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
                 )
-                Text("Add", color = if (customEmoji.isNotBlank()) HavenTheme.pink else HavenTheme.textSecondary,
+                Text(stringResource(R.string.common_add), color = if (customEmoji.isNotBlank()) HavenTheme.pink else HavenTheme.textSecondary,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(enabled = customEmoji.isNotBlank()) {
                         HavenNet.react(circleId, item.id, customEmoji.trim()); customEmoji = ""; showPicker = false
@@ -2461,7 +2475,7 @@ fun PostCard(
                     // Tap-and-hold a comment to react to it (parity with iOS).
                     Row(Modifier.combinedClickable(onClick = {},
                         onLongClick = { commentPicker = if (commentPicker == c.id) null else c.id })) {
-                        Text(if (c.isMe) "You: " else "${HavenNet.displayName(c.authorShort)}: ",
+                        Text(if (c.isMe) stringResource(R.string.circle_you_colon) else stringResource(R.string.circle_author_colon_format, HavenNet.displayName(c.authorShort)),
                             color = HavenTheme.pink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         Text(c.body, color = HavenTheme.textPrimary, fontSize = 13.sp)
                     }
@@ -2516,12 +2530,12 @@ fun PostCard(
                             LocalMedia.isAudio(ref) ->
                                 Box(Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)).background(HavenTheme.card),
                                     contentAlignment = Alignment.Center) {
-                                    Icon(Icons.Filled.Mic, "Audio reply", tint = HavenTheme.pink, modifier = Modifier.size(20.dp))
+                                    Icon(Icons.Filled.Mic, stringResource(R.string.circle_audio_reply_cd), tint = HavenTheme.pink, modifier = Modifier.size(20.dp))
                                 }
                             LocalMedia.isVideo(ref) ->
                                 Box(Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)).background(HavenTheme.card),
                                     contentAlignment = Alignment.Center) {
-                                    Icon(Icons.Filled.Videocam, "Video", tint = HavenTheme.textPrimary, modifier = Modifier.size(20.dp))
+                                    Icon(Icons.Filled.Videocam, stringResource(R.string.circle_video_label), tint = HavenTheme.textPrimary, modifier = Modifier.size(20.dp))
                                 }
                             else -> MediaImage(circleId, ref, Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)),
                                 contentScale = ContentScale.Crop)
@@ -2540,19 +2554,19 @@ fun PostCard(
             // the post composer and DM thread already use, so a reply's media rides the identical
             // store → seal → relay-backup path.
             Box {
-                Icon(Icons.Filled.AttachFile, "Attach to reply", tint = HavenTheme.textSecondary,
+                Icon(Icons.Filled.AttachFile, stringResource(R.string.circle_attach_to_reply_cd), tint = HavenTheme.textSecondary,
                     modifier = Modifier.size(22.dp).clip(CircleShape).clickable { commentAttachMenu = true })
                 DropdownMenu(expanded = commentAttachMenu, onDismissRequest = { commentAttachMenu = false },
                     modifier = Modifier.background(HavenTheme.card)) {
                     DropdownMenuItem(
-                        text = { Text("Photo or video", color = HavenTheme.textPrimary) },
+                        text = { Text(stringResource(R.string.circle_photo_or_video), color = HavenTheme.textPrimary) },
                         onClick = {
                             commentAttachMenu = false
                             commentPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("Audio reply", color = HavenTheme.textPrimary) },
+                        text = { Text(stringResource(R.string.circle_audio_reply_cd), color = HavenTheme.textPrimary) },
                         onClick = { commentAttachMenu = false; showCommentRecorder = true },
                     )
                 }
@@ -2560,7 +2574,7 @@ fun PostCard(
             Spacer(Modifier.size(4.dp))
             OutlinedTextField(
                 value = commentDraft, onValueChange = { commentDraft = it },
-                placeholder = { Text("Add a reply…", fontSize = 13.sp) },
+                placeholder = { Text(stringResource(R.string.circle_add_reply_placeholder), fontSize = 13.sp) },
                 modifier = Modifier.weight(1f), shape = RoundedCornerShape(18.dp), maxLines = 5,
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
@@ -2575,7 +2589,7 @@ fun PostCard(
                 },
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Filled.ArrowCircleUp, "Send reply",
+                Icon(Icons.Filled.ArrowCircleUp, stringResource(R.string.circle_send_reply_cd),
                     tint = if (canSend) HavenTheme.pink else HavenTheme.textSecondary,
                     modifier = Modifier.size(28.dp))
             }
@@ -2596,16 +2610,16 @@ fun PostCard(
 }
 
 /** Compact relative timestamp for the feed (now / 5m / 3h / 2d / 1w), like the iOS feed. */
-private fun relativeTime(createdAtMs: kotlin.ULong): String {
+private fun relativeTime(createdAtMs: kotlin.ULong, context: android.content.Context): String {
     val diff = System.currentTimeMillis() - createdAtMs.toLong()
-    if (diff < 0) return "now"
+    if (diff < 0) return context.getString(R.string.circle_time_now)
     val s = diff / 1000
     return when {
-        s < 45 -> "now"
-        s < 3600 -> "${s / 60}m"
-        s < 86_400 -> "${s / 3600}h"
-        s < 604_800 -> "${s / 86_400}d"
-        else -> "${s / 604_800}w"
+        s < 45 -> context.getString(R.string.circle_time_now)
+        s < 3600 -> context.getString(R.string.circle_time_minutes, (s / 60).toInt())
+        s < 86_400 -> context.getString(R.string.circle_time_hours, (s / 3600).toInt())
+        s < 604_800 -> context.getString(R.string.circle_time_days, (s / 86_400).toInt())
+        else -> context.getString(R.string.circle_time_weeks, (s / 604_800).toInt())
     }
 }
 
@@ -2616,11 +2630,11 @@ private fun sharePost(context: android.content.Context, url: String) {
         type = "text/plain"
         putExtra(android.content.Intent.EXTRA_TEXT, url)
     }
-    context.startActivity(android.content.Intent.createChooser(send, "Share post"))
+    context.startActivity(android.content.Intent.createChooser(send, context.getString(R.string.circle_share_post)))
 }
 
 private fun copyPostLink(context: android.content.Context, url: String) {
     (context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager)
         .setPrimaryClip(android.content.ClipData.newPlainText("haven post link", url))
-    android.widget.Toast.makeText(context, "Link copied", android.widget.Toast.LENGTH_SHORT).show()
+    android.widget.Toast.makeText(context, context.getString(R.string.circle_link_copied), android.widget.Toast.LENGTH_SHORT).show()
 }

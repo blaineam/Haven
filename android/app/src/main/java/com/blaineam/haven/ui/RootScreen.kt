@@ -31,19 +31,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.blaineam.haven.R
 import com.blaineam.haven.core.DemoEnv
 import com.blaineam.haven.core.DemoSeeder
 import com.blaineam.haven.core.HavenCore
 import com.blaineam.haven.core.HavenNet
 import com.blaineam.haven.core.ProfileStore
 
-private enum class Tab(val label: String, val icon: ImageVector) {
-    Circle("Circle", Icons.Filled.AutoAwesome),
-    Messages("Messages", Icons.Filled.Forum),
-    You("You", Icons.Filled.Person),
+// labelRes is a resource id (a compile-time constant), not a resolved string — resolving happens
+// where it's displayed, via stringResource(t.labelRes), since this enum lives outside any
+// composable scope.
+private enum class Tab(val labelRes: Int, val icon: ImageVector) {
+    Circle(R.string.root_tab_circle, Icons.Filled.AutoAwesome),
+    Messages(R.string.root_tab_messages, Icons.Filled.Forum),
+    You(R.string.root_tab_you, Icons.Filled.Person),
 }
 
 /** Map the DEBUG `haven_tab` launch extra to the starting tab (null = default to Circle). */
@@ -244,15 +249,16 @@ private fun MainScaffold() {
                         selected = tab == t,
                         onClick = { tab = t },
                         icon = {
+                            val label = stringResource(t.labelRes)
                             if (badgeCount > 0) {
                                 androidx.compose.material3.BadgedBox(
                                     badge = { androidx.compose.material3.Badge(containerColor = HavenTheme.pink) { Text("$badgeCount") } },
-                                ) { Icon(t.icon, contentDescription = t.label) }
+                                ) { Icon(t.icon, contentDescription = label) }
                             } else {
-                                Icon(t.icon, contentDescription = t.label)
+                                Icon(t.icon, contentDescription = label)
                             }
                         },
-                        label = { Text(t.label) },
+                        label = { Text(stringResource(t.labelRes)) },
                         colors = navColors,
                     )
                 }
@@ -264,15 +270,16 @@ private fun MainScaffold() {
                     selected = false,
                     onClick = { showActivity = true },
                     icon = {
+                        val activityLabel = stringResource(R.string.root_activity)
                         if (unseen > 0) {
                             androidx.compose.material3.BadgedBox(
                                 badge = { androidx.compose.material3.Badge(containerColor = HavenTheme.pink) { Text("$unseen") } },
-                            ) { Icon(Icons.Filled.Notifications, contentDescription = "Activity") }
+                            ) { Icon(Icons.Filled.Notifications, contentDescription = activityLabel) }
                         } else {
-                            Icon(Icons.Filled.Notifications, contentDescription = "Activity")
+                            Icon(Icons.Filled.Notifications, contentDescription = activityLabel)
                         }
                     },
-                    label = { Text("Activity") },
+                    label = { Text(stringResource(R.string.root_activity)) },
                     colors = navColors,
                 )
                 // A minimized call shows as a "Call" tab to the right of You (iOS parity), not a banner.
@@ -280,8 +287,8 @@ private fun MainScaffold() {
                     NavigationBarItem(
                         selected = false,
                         onClick = { com.blaineam.haven.core.CallManager.minimized.value = false },
-                        icon = { Icon(Icons.Filled.Call, contentDescription = "Return to call", tint = HavenTheme.pink) },
-                        label = { Text("Call", color = HavenTheme.pink) },
+                        icon = { Icon(Icons.Filled.Call, contentDescription = stringResource(R.string.root_return_to_call), tint = HavenTheme.pink) },
+                        label = { Text(stringResource(R.string.root_call_tab_label), color = HavenTheme.pink) },
                         colors = navColors,
                     )
                 }

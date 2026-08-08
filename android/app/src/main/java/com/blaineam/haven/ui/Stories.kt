@@ -49,9 +49,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.blaineam.haven.R
 import com.blaineam.haven.core.DEFAULT_CIRCLE
 import kotlinx.coroutines.delay
 import uniffi.haven_ffi.FeedItemFfi
@@ -92,9 +94,9 @@ fun StoriesTray(groups: List<StoryGroup>, onAddStory: () -> Unit, onOpen: (Int) 
                 Box(
                     Modifier.size(64.dp).clip(CircleShape).background(HavenTheme.card).clickable { onAddStory() },
                     contentAlignment = Alignment.Center,
-                ) { Icon(Icons.Filled.Add, "Add to your story", tint = HavenTheme.pink) }
+                ) { Icon(Icons.Filled.Add, stringResource(R.string.story_add_to_your_story), tint = HavenTheme.pink) }
                 Spacer(Modifier.height(4.dp))
-                androidx.compose.material3.Text("Your story", color = HavenTheme.textSecondary, fontSize = 11.sp)
+                androidx.compose.material3.Text(stringResource(R.string.story_your_story), color = HavenTheme.textSecondary, fontSize = 11.sp)
             }
         }
         items(groups.size) { idx ->
@@ -111,13 +113,13 @@ fun StoriesTray(groups: List<StoryGroup>, onAddStory: () -> Unit, onOpen: (Int) 
                     // thumbnails. (iOS parity: FeedView.storyThumb.)
                     HavenAvatar(
                         g.authorShort,
-                        if (g.isMe) "You" else com.blaineam.haven.core.HavenNet.displayName(g.authorShort),
+                        if (g.isMe) stringResource(R.string.story_you) else com.blaineam.haven.core.HavenNet.displayName(g.authorShort),
                         56.dp, isMe = g.isMe,
                     )
                 }
                 Spacer(Modifier.height(4.dp))
                 androidx.compose.material3.Text(
-                    if (g.isMe) "You" else com.blaineam.haven.core.HavenNet.displayName(g.authorShort),
+                    if (g.isMe) stringResource(R.string.story_you) else com.blaineam.haven.core.HavenNet.displayName(g.authorShort),
                     color = HavenTheme.textPrimary, fontSize = 11.sp, maxLines = 1,
                 )
             }
@@ -431,11 +433,11 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            val authorName = if (group.isMe) "You"
+            val authorName = if (group.isMe) stringResource(R.string.story_you)
                 else com.blaineam.haven.core.HavenNet.displayName(group.authorShort)
             HavenAvatar(group.authorShort, authorName, 28.dp, isMe = group.isMe)
             androidx.compose.material3.Text(
-                if (group.isMe) "Your story" else authorName,
+                if (group.isMe) stringResource(R.string.story_your_story) else authorName,
                 color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
             )
             androidx.compose.material3.Text(
@@ -469,7 +471,7 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
                 @Suppress("UNUSED_EXPRESSION") com.blaineam.haven.core.KeptStoriesStore.version.intValue
                 val isKept = com.blaineam.haven.core.KeptStoriesStore.isKept(item.id)
                 StoryActionChip(
-                    if (isKept) "Kept" else "Keep",
+                    if (isKept) stringResource(R.string.story_kept) else stringResource(R.string.story_keep),
                     tint = if (isKept) HavenTheme.pink else Color.White,
                 ) {
                     com.blaineam.haven.core.KeptStoriesStore.toggle(
@@ -481,7 +483,7 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
                     )
                 }
                 // Delete: unsend my own story everywhere it was shared.
-                StoryActionChip("Delete") { confirmDelete = true }
+                StoryActionChip(stringResource(R.string.common_delete)) { confirmDelete = true }
             }
             // The close glyph needs a real hit target: a bare 22sp Text with .clickable is tappable
             // only across the drawn glyph, far under the platform minimum, so most taps missed it.
@@ -496,17 +498,17 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { confirmDelete = false },
                 containerColor = HavenTheme.card,
-                title = { androidx.compose.material3.Text("Delete this story?", color = HavenTheme.textPrimary) },
-                text = { androidx.compose.material3.Text("It will be removed from your story and for everyone you shared it with.", color = HavenTheme.textSecondary) },
+                title = { androidx.compose.material3.Text(stringResource(R.string.story_delete_confirm_title), color = HavenTheme.textPrimary) },
+                text = { androidx.compose.material3.Text(stringResource(R.string.story_delete_confirm_message), color = HavenTheme.textSecondary) },
                 confirmButton = {
                     androidx.compose.material3.TextButton(onClick = {
                         com.blaineam.haven.core.HavenNet.unsendPost(com.blaineam.haven.core.DEFAULT_CIRCLE, item.id)
                         confirmDelete = false; onClose()
-                    }) { androidx.compose.material3.Text("Delete story", color = Color(0xFFEF4444)) }
+                    }) { androidx.compose.material3.Text(stringResource(R.string.story_delete_story), color = Color(0xFFEF4444)) }
                 },
                 dismissButton = {
                     androidx.compose.material3.TextButton(onClick = { confirmDelete = false }) {
-                        androidx.compose.material3.Text("Cancel", color = HavenTheme.pink)
+                        androidx.compose.material3.Text(stringResource(R.string.common_cancel), color = HavenTheme.pink)
                     }
                 },
             )
@@ -537,7 +539,7 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                     decorationBox = { inner ->
                         if (replyText.isEmpty()) androidx.compose.material3.Text(
-                            "Reply to ${com.blaineam.haven.core.HavenNet.displayName(group.authorShort)}…",
+                            stringResource(R.string.story_reply_placeholder, com.blaineam.haven.core.HavenNet.displayName(group.authorShort)),
                             color = Color.White.copy(alpha = 0.6f), fontSize = 15.sp)
                         inner()
                     },
@@ -548,7 +550,7 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
                         com.blaineam.haven.core.HavenNet.replyToStory(group.authorShort, item.media.firstOrNull(), replyText.trim())
                         replyText = ""; replying = false; sentNote = true
                     }, contentAlignment = Alignment.Center) {
-                        androidx.compose.material3.Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = Color.White)
+                        androidx.compose.material3.Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.common_send), tint = Color.White)
                     }
                 }
             }
@@ -556,7 +558,7 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
         if (sentNote) {
             LaunchedEffect(Unit) { delay(1600); sentNote = false }
             androidx.compose.material3.Text(
-                "Sent privately ✓", color = Color.White, fontSize = 14.sp,
+                stringResource(R.string.story_sent_privately), color = Color.White, fontSize = 14.sp,
                 modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 84.dp)
                     .clip(RoundedCornerShape(20.dp)).background(Color.Black.copy(alpha = 0.6f)).padding(horizontal = 16.dp, vertical = 8.dp),
             )

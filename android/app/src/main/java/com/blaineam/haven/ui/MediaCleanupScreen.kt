@@ -41,9 +41,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.blaineam.haven.R
 import com.blaineam.haven.core.HavenNet
 import com.blaineam.haven.core.LocalMedia
 import com.blaineam.haven.core.PinnedMediaStore
@@ -91,24 +93,28 @@ fun MediaCleanupScreen() {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(color = HavenTheme.pink, strokeWidth = 2.dp, modifier = Modifier.size(28.dp))
                     Spacer(Modifier.height(10.dp))
-                    Text("Measuring…", color = HavenTheme.textSecondary, fontSize = 13.sp)
+                    Text(stringResource(R.string.cleanup_measuring), color = HavenTheme.textSecondary, fontSize = 13.sp)
                 }
             }
             rows.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No cached media", color = HavenTheme.textSecondary, fontSize = 14.sp)
+                Text(stringResource(R.string.cleanup_no_cached_media), color = HavenTheme.textSecondary, fontSize = 14.sp)
             }
             else -> {
                 LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
                     item {
                         Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+                            val itemCountText = stringResource(
+                                if (rows.size == 1) R.string.cleanup_item_count_one else R.string.cleanup_item_count_other,
+                                rows.size,
+                            )
                             Text(
-                                "${rows.size} item${if (rows.size == 1) "" else "s"} · ${fmt(totalBytes)}" +
-                                    if (keptBytes > 0) " · ${fmt(keptBytes)} kept" else "",
+                                stringResource(R.string.cleanup_items_summary, itemCountText, fmt(totalBytes)) +
+                                    if (keptBytes > 0) stringResource(R.string.cleanup_kept_suffix, fmt(keptBytes)) else "",
                                 color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
                             )
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "Sorted by size. Removing frees only this device's copy — posts stay. Kept items are never removed.",
+                                stringResource(R.string.cleanup_footer_note),
                                 color = HavenTheme.textSecondary, fontSize = 12.sp,
                             )
                         }
@@ -150,7 +156,8 @@ fun MediaCleanupScreen() {
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            if (working) "Removing…" else "Remove ${selection.size} · frees ${fmt(selectedBytes)}",
+                            if (working) stringResource(R.string.cleanup_removing)
+                            else stringResource(R.string.cleanup_remove_button, selection.size, fmt(selectedBytes)),
                             color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp,
                         )
                     }
@@ -180,11 +187,11 @@ private fun MediaInventoryRowView(
         // Selection toggle — pinned rows are ineligible (a pin glyph instead of a checkbox).
         Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
             if (row.pinned) {
-                Icon(Icons.Filled.PushPin, "Kept", tint = HavenTheme.pink, modifier = Modifier.size(20.dp))
+                Icon(Icons.Filled.PushPin, stringResource(R.string.cleanup_cd_kept), tint = HavenTheme.pink, modifier = Modifier.size(20.dp))
             } else {
                 Icon(
                     if (selected) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked,
-                    if (selected) "Selected" else "Not selected",
+                    if (selected) stringResource(R.string.cleanup_cd_selected) else stringResource(R.string.cleanup_cd_not_selected),
                     tint = if (selected) HavenTheme.pink else HavenTheme.textSecondary,
                     modifier = Modifier.size(22.dp),
                 )
@@ -197,7 +204,7 @@ private fun MediaInventoryRowView(
             val t = thumb
             if (t != null) {
                 androidx.compose.foundation.Image(
-                    t.asImageBitmap(), "Thumbnail",
+                    t.asImageBitmap(), stringResource(R.string.cleanup_cd_thumbnail),
                     modifier = Modifier.fillMaxSize(),
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                 )
@@ -212,22 +219,22 @@ private fun MediaInventoryRowView(
         Spacer(Modifier.size(12.dp))
         Column(Modifier.weight(1f)) {
             Text(row.circleName, color = HavenTheme.textPrimary, fontWeight = FontWeight.Medium, fontSize = 14.sp, maxLines = 1)
-            val sub = row.snippet ?: if (row.orphan) "Not linked to any post" else null
+            val sub = row.snippet ?: if (row.orphan) stringResource(R.string.cleanup_orphan_note) else null
             if (sub != null) {
                 Text(sub, color = HavenTheme.textSecondary, fontSize = 12.sp, maxLines = 1)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("${fmt(row.bytes)} · ${relativeAgoMs(row.mtimeMs)}", color = HavenTheme.textSecondary, fontSize = 11.sp)
+                Text(stringResource(R.string.cleanup_size_ago, fmt(row.bytes), relativeAgoMs(row.mtimeMs)), color = HavenTheme.textSecondary, fontSize = 11.sp)
                 if (row.pinned) {
                     Spacer(Modifier.size(6.dp))
-                    Text("· Kept", color = HavenTheme.pink, fontWeight = FontWeight.SemiBold, fontSize = 11.sp)
+                    Text(stringResource(R.string.cleanup_kept_badge), color = HavenTheme.pink, fontWeight = FontWeight.SemiBold, fontSize = 11.sp)
                 }
             }
         }
         Spacer(Modifier.size(8.dp))
         // Per-row "Keep on this device" toggle.
         Box(Modifier.size(36.dp).clip(CircleShape).clickable { onTogglePin() }, contentAlignment = Alignment.Center) {
-            Icon(Icons.Filled.PushPin, if (row.pinned) "Stop keeping" else "Keep on this device",
+            Icon(Icons.Filled.PushPin, if (row.pinned) stringResource(R.string.cleanup_cd_stop_keeping) else stringResource(R.string.cleanup_cd_keep_on_device),
                 tint = if (row.pinned) HavenTheme.pink else HavenTheme.textSecondary, modifier = Modifier.size(18.dp))
         }
     }

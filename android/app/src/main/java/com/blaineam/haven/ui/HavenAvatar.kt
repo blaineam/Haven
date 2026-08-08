@@ -12,6 +12,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.blaineam.haven.R
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -51,7 +53,7 @@ fun HavenAvatar(idOrShort: String, name: String, size: Dp, isMe: Boolean = false
     }
     Box(Modifier.size(size).clip(CircleShape).background(HavenTheme.brand), contentAlignment = Alignment.Center) {
         when {
-            img != null -> Image(img, "Avatar", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            img != null -> Image(img, stringResource(R.string.avatar_cd), Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             emoji.isNotBlank() -> Text(emoji, fontSize = (size.value * 0.5f).sp)
             // White-on-brand-gradient — never themed.
             else -> Text(name.take(1).uppercase().ifBlank { "•" }, color = Color.White,

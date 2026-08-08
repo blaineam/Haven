@@ -36,9 +36,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.blaineam.haven.R
 import com.blaineam.haven.core.HavenCore
 import com.blaineam.haven.core.HavenNet
 import com.blaineam.haven.core.ProfileStore
@@ -131,7 +133,7 @@ fun YouScreen(onAddFriend: () -> Unit) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable { showSettings = true },
                     contentAlignment = Alignment.Center) {
-                    Icon(Icons.Filled.Settings, "Settings", tint = HavenTheme.textSecondary)
+                    Icon(Icons.Filled.Settings, stringResource(R.string.common_settings), tint = HavenTheme.textSecondary)
                 }
             }
             // Avatar — tap to edit your profile. Must go through HavenAvatar (which prefers the
@@ -150,11 +152,11 @@ fun YouScreen(onAddFriend: () -> Unit) {
                         .padding(2.dp).clip(CircleShape).background(HavenTheme.pink)
                         .clickable { showEdit = true },
                     contentAlignment = Alignment.Center,
-                ) { Icon(Icons.Filled.Edit, "Edit profile", tint = Color.White, modifier = Modifier.size(15.dp)) }
+                ) { Icon(Icons.Filled.Edit, stringResource(R.string.you_edit_profile_cd), tint = Color.White, modifier = Modifier.size(15.dp)) }
             }
             Spacer(Modifier.height(12.dp))
             Text(
-                profile.displayName.ifBlank { "You" },
+                profile.displayName.ifBlank { stringResource(R.string.you_default_name) },
                 color = HavenTheme.textPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold,
             )
             if (profile.bio.isNotBlank()) {
@@ -164,27 +166,30 @@ fun YouScreen(onAddFriend: () -> Unit) {
             }
             if (profile.link.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
-                Text("🔗 ${profile.link}", color = HavenTheme.pink, fontSize = 13.sp, maxLines = 1,
+                Text(stringResource(R.string.you_link_prefix, profile.link), color = HavenTheme.pink, fontSize = 13.sp, maxLines = 1,
                     modifier = Modifier.clickable { openInApp(context, profile.link) })
             }
             Spacer(Modifier.height(4.dp))
             Text(
-                if (contactCount == 0) "This is just for the people you choose."
-                else "$contactCount ${if (contactCount == 1) "person" else "people"} in your circle  ›",
+                if (contactCount == 0) stringResource(R.string.you_circle_empty)
+                else stringResource(
+                    if (contactCount == 1) R.string.you_circle_count_one else R.string.you_circle_count_other,
+                    contactCount,
+                ),
                 color = HavenTheme.pink, fontSize = 13.sp,
                 modifier = Modifier.clickable(enabled = contactCount > 0) { showPeople = true }.padding(4.dp),
             )
 
             Spacer(Modifier.height(24.dp))
-            BrandButton(text = "Add a friend") { onAddFriend() }
+            BrandButton(text = stringResource(R.string.you_add_friend)) { onAddFriend() }
             Spacer(Modifier.height(8.dp))
-            Text("Share invite link", color = HavenTheme.pink, fontSize = 13.sp,
+            Text(stringResource(R.string.you_share_invite_link), color = HavenTheme.pink, fontSize = 13.sp,
                 modifier = Modifier.clickable { shareInvite(context, HavenNet.inviteUri()) }.padding(6.dp))
 
             // Your stories — the disappearing half of your profile (iOS parity).
             if (myStories.isNotEmpty()) {
                 Spacer(Modifier.height(20.dp))
-                Text("Your stories", color = HavenTheme.textSecondary, fontWeight = FontWeight.SemiBold,
+                Text(stringResource(R.string.you_your_stories), color = HavenTheme.textSecondary, fontWeight = FontWeight.SemiBold,
                     fontSize = 14.sp, modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(10.dp))
                 Row(
@@ -210,7 +215,7 @@ fun YouScreen(onAddFriend: () -> Unit) {
             // Your posts — this screen is your profile, like iOS.
             if (myPosts.isNotEmpty()) {
                 Spacer(Modifier.height(20.dp))
-                Text("Your posts", color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp,
+                Text(stringResource(R.string.you_your_posts), color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp,
                     modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(10.dp))
                 myPosts.forEach { post ->

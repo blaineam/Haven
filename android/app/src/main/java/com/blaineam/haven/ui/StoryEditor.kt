@@ -61,6 +61,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -70,6 +71,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.blaineam.haven.R
 import com.blaineam.haven.core.DEFAULT_CIRCLE
 import com.blaineam.haven.core.FilterSpec
 import com.blaineam.haven.core.GlPhotoFilter
@@ -96,6 +98,17 @@ private fun typefaceFor(i: Int): Typeface = when (i % fontFamilies.size) {
 
 /** iOS-style caption looks. */
 private enum class CapStyle(val label: String) { PLAIN("Plain"), SHADOW("Shadow"), GLOW("Glow"), NEON("Neon"), HIGHLIGHT("Mark") }
+
+/** Localized display label for a [CapStyle] (the enum's own [CapStyle.label] stays English-only —
+ *  it's not composable scope — this is the string shown in the UI). */
+@Composable
+private fun CapStyle.displayLabel(): String = when (this) {
+    CapStyle.PLAIN -> stringResource(R.string.editor_style_plain)
+    CapStyle.SHADOW -> stringResource(R.string.editor_style_shadow)
+    CapStyle.GLOW -> stringResource(R.string.editor_style_glow)
+    CapStyle.NEON -> stringResource(R.string.editor_style_neon)
+    CapStyle.HIGHLIGHT -> stringResource(R.string.editor_style_highlight)
+}
 
 /** Black text on light colors, white on dark — so highlighted text is always legible. */
 private fun contrastOn(c: Color): Color =
@@ -147,7 +160,10 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
     var previewSound by remember { mutableStateOf(false) }
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
     var sharing by remember { mutableStateOf(false) }
-    var shareLabel by remember { mutableStateOf("Share to story") }
+    val shareToStoryLabel = stringResource(R.string.editor_share_to_story)
+    val applyingFilterLabel = stringResource(R.string.editor_applying_filter)
+    val shareFailedLabel = stringResource(R.string.editor_share_failed)
+    var shareLabel by remember { mutableStateOf(shareToStoryLabel) }
     // Pinch to zoom, twist to rotate, drag to position the media within the story frame (baked into
     // the share). The floor is 0.25 rather than 1: clamping to 1 meant the media could only ever be
     // zoomed IN, so a LANDSCAPE photo could not be made to fit a portrait story at all — it was
@@ -215,7 +231,7 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
             )
             if (isVideo) EditorVideo(ref, filter.spec, muted = music != null || !previewSound, mediaMod,
                                      restartToken = musicRestartToken)
-            else previewBmp?.let { Image(it.asImageBitmap(), "Story", mediaMod, contentScale = ContentScale.Crop) }
+            else previewBmp?.let { Image(it.asImageBitmap(), stringResource(R.string.editor_story_photo_description), mediaMod, contentScale = ContentScale.Crop) }
         }
 
         // ── Caption (lifts above the keyboard via imePadding) ──────────────────────────────
@@ -235,7 +251,7 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
                     modifier = Modifier.wrapContentWidth().background(lc.bg, RoundedCornerShape(8.dp))
                         .padding(horizontal = if (lc.bg == Color.Transparent) 0.dp else 12.dp, vertical = if (lc.bg == Color.Transparent) 0.dp else 5.dp),
                     decorationBox = { inner ->
-                        if (caption.isEmpty()) Text("Tap to type", color = Color.White.copy(alpha = 0.65f), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                        if (caption.isEmpty()) Text(stringResource(R.string.editor_caption_placeholder), color = Color.White.copy(alpha = 0.65f), fontSize = 22.sp, fontWeight = FontWeight.Bold)
                         inner()
                     },
                 )
@@ -245,7 +261,7 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
         // ── Top bar: close + caption controls ──────────────────────────────────────────────
         Row(Modifier.align(Alignment.TopStart).statusBarsPadding().fillMaxWidth().padding(10.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            CtlButton({ onClose() }) { Icon(Icons.Filled.Close, "Close", tint = Color.White) }
+            CtlButton({ onClose() }) { Icon(Icons.Filled.Close, stringResource(R.string.common_close), tint = Color.White) }
             // Preview sound — only meaningful for a clip with no song attached; once there IS a song the
             // clip is silenced either way, so the control would be a lie.
             if (isVideo && music == null) {
@@ -253,7 +269,7 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
                 CtlButton({ previewSound = !previewSound }) {
                     Icon(
                         if (previewSound) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
-                        if (previewSound) "Mute preview" else "Unmute preview", tint = Color.White,
+                        if (previewSound) stringResource(R.string.editor_mute_preview) else stringResource(R.string.editor_unmute_preview), tint = Color.White,
                     )
                 }
             }
@@ -288,7 +304,7 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
                     }
                 }
                 Spacer(Modifier.size(6.dp))
-                Text(style.label, color = Color.White, fontSize = 12.sp,
+                Text(style.displayLabel(), color = Color.White, fontSize = 12.sp,
                     modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 10.dp, vertical = 4.dp))
             }
         }
@@ -313,9 +329,9 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
                     .padding(horizontal = 16.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Filled.MusicNote, null, tint = Color.White, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.size(6.dp))
-                    Text(if (music == null) "Music" else "Change", color = Color.White, fontSize = 14.sp)
+                    Text(if (music == null) stringResource(R.string.editor_music_label) else stringResource(R.string.editor_change_label), color = Color.White, fontSize = 14.sp)
                 }
-                Text(if (sharing) shareLabel else "Share to story", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                Text(if (sharing) shareLabel else shareToStoryLabel, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.clip(CircleShape).background(HavenTheme.brandHorizontal)
                         .clickable(enabled = !sharing) {
                             sharing = true
@@ -326,11 +342,11 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
                                 // spinner; only close on success, else show an error so the user retries.
                                 val ok = runCatching {
                                     if (isVideo) {
-                                        shareLabel = "Applying filter…"
+                                        shareLabel = applyingFilterLabel
                                         val newRef = withContext(Dispatchers.IO) {
                                             val inFile = LocalMedia.videoFile(DEFAULT_CIRCLE, ref)
                                             if (inFile == null) ref else {
-                                                val out = VideoFilter.transcode(context, inFile, filter.spec) { shareLabel = "Applying filter… ${(it * 100).toInt()}%" }
+                                                val out = VideoFilter.transcode(context, inFile, filter.spec) { shareLabel = context.getString(R.string.editor_applying_filter_progress, (it * 100).toInt()) }
                                                 if (out.absolutePath == inFile.absolutePath) ref
                                                 else runCatching { LocalMedia.store(DEFAULT_CIRCLE, out.readBytes(), isVideo = true) }.getOrNull() ?: ref
                                             }
@@ -350,7 +366,7 @@ fun StoryEditor(ref: String, isVideo: Boolean, initialFilter: Int = 0, onClose: 
                                     }
                                 }.onFailure { android.util.Log.e("StoryEditor", "share to story failed", it) }.isSuccess
                                 sharing = false
-                                if (ok) onClose() else shareLabel = "Couldn't share — try again"
+                                if (ok) onClose() else shareLabel = shareFailedLabel
                             }
                         }.padding(horizontal = 26.dp, vertical = 13.dp))
             }

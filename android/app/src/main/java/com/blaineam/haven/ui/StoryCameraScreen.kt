@@ -67,6 +67,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -75,6 +76,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.blaineam.haven.R
 import com.blaineam.haven.core.DEFAULT_CIRCLE
 import com.blaineam.haven.core.LocalMedia
 import com.blaineam.haven.core.readVideoBytes
@@ -102,11 +104,21 @@ fun StoryCameraScreen(
     if (d != null) { StoryEditor(ref = d.ref, isVideo = d.isVideo, initialFilter = d.filterIdx, onClose = onClose); return }
 
     val context = LocalContext.current
+    // Hoisted here (composable scope) because the plain local funs below (takePhoto/startVideo,
+    // not @Composable) capture them by closure — stringResource() itself can't be called from there.
+    val statusTapHoldHint = stringResource(R.string.camera_status_tap_hold)
+    val statusCapturing = stringResource(R.string.camera_status_capturing)
+    val statusCaptureFailed = stringResource(R.string.camera_status_capture_failed)
+    val statusCouldntCapture = stringResource(R.string.camera_status_couldnt_capture)
+    val statusRecording = stringResource(R.string.camera_status_recording)
+    val statusCouldntSaveVideo = stringResource(R.string.camera_status_couldnt_save_video)
+    val statusHoldLonger = stringResource(R.string.camera_status_hold_longer)
+    val statusRecordingFailedFmt = stringResource(R.string.camera_status_recording_failed)
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     var lensFront by remember { mutableStateOf(false) }
     var liveFilterIdx by remember { mutableStateOf(0) }
-    var status by remember { mutableStateOf("Tap for photo · hold for video") }
+    var status by remember { mutableStateOf(statusTapHoldHint) }
     var isRecording by remember { mutableStateOf(false) }
     val imageCapture = remember { ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).build() }
     val videoCapture = remember {
@@ -143,7 +155,7 @@ fun StoryCameraScreen(
         android.content.pm.PackageManager.PERMISSION_GRANTED
 
     fun takePhoto() {
-        status = "Capturing…"
+        status = statusCapturing
         imageCapture.takePicture(ContextCompat.getMainExecutor(context),
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: androidx.camera.core.ImageProxy) {
@@ -161,16 +173,16 @@ fun StoryCameraScreen(
                         }
                         if (ref != null) {
                             if (onCaptured != null) onCaptured(ref, false) else draft = StoryDraft(ref, false, liveFilterIdx)
-                        } else status = "Couldn't capture"
+                        } else status = statusCouldntCapture
                     }
                 }
-                override fun onError(e: ImageCaptureException) { status = "Capture failed" }
+                override fun onError(e: ImageCaptureException) { status = statusCaptureFailed }
             })
     }
 
     fun startVideo() {
         if (recordingRef[0] != null) return
-        status = "Recording…"; isRecording = true
+        status = statusRecording; isRecording = true
         // Record to an app cache file (no MediaStore/scoped-storage — far more reliable).
         val file = java.io.File(context.cacheDir, "haven_rec_${System.nanoTime()}.mp4")
         val opts = androidx.camera.video.FileOutputOptions.Builder(file).build()
@@ -207,11 +219,11 @@ fun StoryCameraScreen(
                         }
                         if (ref != null) {
                             if (onCaptured != null) onCaptured(ref, true) else draft = StoryDraft(ref, true, liveFilterIdx)
-                        } else status = "Couldn't save video"
+                        } else status = statusCouldntSaveVideo
                     }
                 } else {
                     runCatching { file.delete() }
-                    status = if (ok) "Hold longer to record" else "Recording failed (${ev.error})"
+                    status = if (ok) statusHoldLonger else String.format(statusRecordingFailedFmt, ev.error)
                 }
             }
         }
@@ -278,10 +290,10 @@ fun StoryCameraScreen(
         // handled here; the top just got missed.
         Box(Modifier.align(Alignment.TopStart).statusBarsPadding().padding(16.dp).size(42.dp).clip(CircleShape)
             .background(Color.Black.copy(alpha = 0.35f)).pointerInput(Unit) { detectTap(onClose) },
-            contentAlignment = Alignment.Center) { Icon(Icons.Filled.Close, "Close", tint = Color.White) }
+            contentAlignment = Alignment.Center) { Icon(Icons.Filled.Close, stringResource(R.string.common_close), tint = Color.White) }
         Box(Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(16.dp).size(42.dp).clip(CircleShape)
             .background(Color.Black.copy(alpha = 0.35f)).pointerInput(Unit) { detectTap { lensFront = !lensFront } },
-            contentAlignment = Alignment.Center) { Icon(Icons.Filled.Cameraswitch, "Flip", tint = Color.White) }
+            contentAlignment = Alignment.Center) { Icon(Icons.Filled.Cameraswitch, stringResource(R.string.camera_flip_cd), tint = Color.White) }
 
         Text(status, color = Color.White, fontSize = 13.sp,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 150.dp))

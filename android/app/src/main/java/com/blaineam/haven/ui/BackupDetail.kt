@@ -24,6 +24,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import com.blaineam.haven.R
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -72,10 +74,10 @@ fun BackupDetailSheet(refs: List<String>, circleId: String, onDismiss: () -> Uni
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState,
                      containerColor = HavenTheme.card) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
-            Text("Where this is stored",
+            Text(stringResource(R.string.backup_title),
                 color = HavenTheme.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(4.dp))
-            Text(if (refs.size == 1) "1 attachment" else "${refs.size} attachments",
+            Text(if (refs.size == 1) stringResource(R.string.backup_one_attachment) else stringResource(R.string.backup_n_attachments, refs.size),
                 color = HavenTheme.textSecondary, fontSize = 12.sp)
             Spacer(Modifier.height(14.dp))
 
@@ -84,7 +86,7 @@ fun BackupDetailSheet(refs: List<String>, circleId: String, onDismiss: () -> Uni
                     Icon(Icons.Filled.RadioButtonUnchecked, null,
                         tint = HavenTheme.textSecondary, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.size(10.dp))
-                    Text("Not on any relay yet", color = HavenTheme.textSecondary, fontSize = 14.sp)
+                    Text(stringResource(R.string.backup_no_relay), color = HavenTheme.textSecondary, fontSize = 14.sp)
                 }
             }
             rows.forEach { (dest, have) ->
@@ -125,7 +127,7 @@ fun BackupDetailSheet(refs: List<String>, circleId: String, onDismiss: () -> Uni
             if (strandedOnOwnRelay) {
                 Spacer(Modifier.height(10.dp))
                 Box(Modifier.fillMaxWidth().background(Color(0x22F59E0B)).padding(10.dp)) {
-                    Text("Only this device's own relay has a copy, so nobody else can fetch it yet.",
+                    Text(stringResource(R.string.backup_stranded),
                         color = Color(0xFFF59E0B), fontSize = 12.sp)
                 }
             }
@@ -133,17 +135,19 @@ fun BackupDetailSheet(refs: List<String>, circleId: String, onDismiss: () -> Uni
     }
 }
 
+@Composable
 private fun statusText(have: Int, total: Int, isOwn: Boolean): String {
-    if (have == 0) return "No copy yet"
-    val count = if (have == total) "All" else "$have of $total"
-    return if (isOwn) "$count · on this device" else count
+    if (have == 0) return stringResource(R.string.backup_no_copy)
+    val count = if (have == total) stringResource(R.string.backup_all) else stringResource(R.string.backup_x_of_y, have, total)
+    return if (isOwn) stringResource(R.string.backup_on_this_device, count) else count
 }
 
 /** A relay's friendly name, falling back to a short hex. An S3 destination is stored by bucket
  *  rather than node hex, so it is already readable. */
+@Composable
 private fun relayLabel(dest: String): String {
     val known = runCatching { HavenNet.relayName(dest) }.getOrNull()
     if (!known.isNullOrBlank()) return known
     if (dest.contains("/") || dest.contains(".")) return dest   // s3-style destination
-    return "Relay · ${dest.take(8)}…"
+    return stringResource(R.string.backup_relay_short, dest.take(8))
 }

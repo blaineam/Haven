@@ -1,0 +1,5 @@
+1.4.0 — Haven dans votre langue.
+
+• Localisation complète en six langues : japonais, allemand, espagnol, coréen, portugais (Brésil) et italien — toute l'app, sur iPhone, iPad et Mac.
+• Nouveau menu Commentaires et assistance : contactez directement le développeur depuis les Réglages, et laissez une note en toute simplicité, sans quitter l'app.
+• Les éléments d'activité et les notifications de réactions ou de réponses à vos commentaires ouvrent désormais la publication concernée, avec le commenta

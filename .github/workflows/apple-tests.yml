@@ -60,6 +60,32 @@ jobs:
             echo "// Placeholder for xcodegen spec validation — see .github/workflows/apple-tests.yml" \
               > Generated/haven_ffi.swift
 
+      # MillerKit resolves from the PRIVATE github.com/blaineam/MillerKit, which this runner's
+      # GITHUB_TOKEN cannot clone — and just like the FFI bindings above, the logic suite never
+      # compiles a line of it (HavenLogicTests lists its sources explicitly; none import MillerKit).
+      # So: point the spec at an empty local stub package for this job only. SPM resolution
+      # succeeds offline, and nothing that links the real MillerKit is ever built here.
+      - name: Stub the private MillerKit package (never compiled by this target)
+        working-directory: apple
+        run: |
+          STUB="$RUNNER_TEMP/MillerKitStub"
+          mkdir -p "$STUB/Sources/MillerKit"
+          printf '%s\n' \
+            '// swift-tools-version:5.9' \
+            'import PackageDescription' \
+            'let package = Package(' \
+            '    name: "MillerKit",' \
+            '    platforms: [.iOS(.v17), .macOS(.v14), .watchOS(.v10)],' \
+            '    products: [.library(name: "MillerKit", targets: ["MillerKit"])],' \
+            '    targets: [.target(name: "MillerKit")])' \
+            > "$STUB/Package.swift"
+          echo "// stub — see .github/workflows/apple-tests.yml" > "$STUB/Sources/MillerKit/Stub.swift"
+          /usr/bin/sed -i '' \
+            -e "s#url: https://github.com/blaineam/MillerKit#path: $STUB#" \
+            -e '/^    from: "1\.0\.0"$/d' \
+            project.yml
+          grep -n -A2 'MillerKit:' project.yml | head -4
+
       - name: Generate the project
         working-directory: apple
         run: xcodegen generate --project .

@@ -17,22 +17,31 @@
 <!-- .reveal starts at opacity:0 and is un-hidden by app.js. With JS off nothing would ever
      paint, so opt straight into the revealed state — the page is static and reads fine. -->
 <noscript><style>.reveal{opacity:1;transform:none}</style></noscript>
+  <link rel="alternate" hreflang="x-default" href="https://wemiller.com/apps/haven/features/">
+  <link rel="alternate" hreflang="en" href="https://wemiller.com/apps/haven/features/">
+  <link rel="alternate" hreflang="ja" href="https://wemiller.com/apps/haven/features/?lang=ja">
+  <link rel="alternate" hreflang="de" href="https://wemiller.com/apps/haven/features/?lang=de">
+  <link rel="alternate" hreflang="es" href="https://wemiller.com/apps/haven/features/?lang=es">
+  <link rel="alternate" hreflang="ko" href="https://wemiller.com/apps/haven/features/?lang=ko">
+  <link rel="alternate" hreflang="pt-BR" href="https://wemiller.com/apps/haven/features/?lang=pt-BR">
+  <link rel="alternate" hreflang="it" href="https://wemiller.com/apps/haven/features/?lang=it">
+  <script src="../i18n/i18n.js" defer data-page="features" data-langs="en,ja,de,es,ko,pt-BR,it" data-pos="bottom-left"></script>
 </head>
 <body>
-<a class="skip" href="#main">Skip to content</a>
+<a class="skip" href="#main" data-i18n="skip-to-content.0a4470">Skip to content</a>
 
 <header class="nav">
   <div class="nav-inner">
     <a class="brand" href="../">Haven</a>
     <button class="nav-toggle" aria-label="Open menu" aria-expanded="false" aria-controls="nav-links">☰</button>
     <nav class="nav-links" id="nav-links" aria-label="Primary">
-      <a href="../">Home</a>
-      <a href="./" class="active">Features</a>
-      <a href="../relay/">Relays</a>
-      <a href="../#privacy">Privacy</a>
-      <a href="../docs/">Docs</a>
+      <a href="../" data-i18n="home.70f8bb">Home</a>
+      <a href="./" class="active" data-i18n="features.fc338f">Features</a>
+      <a href="../relay/" data-i18n="relays.a239ca">Relays</a>
+      <a href="../#privacy" data-i18n="privacy.cf0148">Privacy</a>
+      <a href="../docs/" data-i18n="docs.68a419">Docs</a>
       <a href="https://github.com/blaineam/haven" rel="noopener">GitHub</a>
-      <a href="../#download" class="cta">Get Haven</a>
+      <a href="../#download" class="cta" data-i18n="get-haven.1a671e">Get Haven</a>
     </nav>
   </div>
 </header>
@@ -41,9 +50,9 @@
 
   <section class="hero" style="padding:64px 0 26px">
     <div class="container">
-      <span class="eyebrow reveal">A guided tour</span>
-      <h1 class="reveal" style="font-size:clamp(34px,6vw,58px)">Everything Haven does,<br /><span class="h-grad">explained simply.</span></h1>
-      <p class="lead reveal">
+      <span class="eyebrow reveal" data-i18n="a-guided-tour.66b8c2">A guided tour</span>
+      <h1 class="reveal" style="font-size:clamp(34px,6vw,58px)" data-i18n-html="everything-haven-does-explained.5b5d6f">Everything Haven does,<br /><span class="h-grad">explained simply.</span></h1>
+      <p class="lead reveal" data-i18n-html="take-it-one-feature.984aa1">
         Take it one feature at a time. Each one comes with a plain-English explanation and why it
         matters. Curious how the magic works? Every section has a little
         <span class="tag-tech">How this works</span> you can open for the technical detail.
@@ -55,17 +64,17 @@
   <section class="container reveal" style="margin-bottom:8px">
     <div class="card flat" style="padding:16px 18px">
       <div class="platforms" style="justify-content:center">
-        <a class="pill" href="#circles">Circles</a>
-        <a class="pill" href="#posts">Posts &amp; feed</a>
-        <a class="pill" href="#stories">Stories &amp; camera</a>
-        <a class="pill" href="#messages">Direct &amp; group DMs</a>
-        <a class="pill" href="#calls">Voice &amp; video calls</a>
-        <a class="pill" href="#music">Music on posts</a>
-        <a class="pill" href="#reactions">Reactions &amp; comments</a>
-        <a class="pill" href="#nearby">Nearby</a>
-        <a class="pill" href="#lock">Face ID locks</a>
-        <a class="pill" href="#devices">Multi-device</a>
-        <a class="pill" href="#serverless">No central server</a>
+        <a class="pill" href="#circles" data-i18n="circles.947d11">Circles</a>
+        <a class="pill" href="#posts" data-i18n="posts-feed.3a1ff7">Posts &amp; feed</a>
+        <a class="pill" href="#stories" data-i18n="stories-camera.851fa5">Stories &amp; camera</a>
+        <a class="pill" href="#messages" data-i18n="direct-group-dms.e8e176">Direct &amp; group DMs</a>
+        <a class="pill" href="#calls" data-i18n="voice-video-calls.0a4fe1">Voice &amp; video calls</a>
+        <a class="pill" href="#music" data-i18n="music-on-posts.0b2bb4">Music on posts</a>
+        <a class="pill" href="#reactions" data-i18n="reactions-comments.55e278">Reactions &amp; comments</a>
+        <a class="pill" href="#nearby" data-i18n="nearby.f1536c">Nearby</a>
+        <a class="pill" href="#lock" data-i18n="face-id-locks.96affc">Face ID locks</a>
+        <a class="pill" href="#devices" data-i18n="multi-device.c2d460">Multi-device</a>
+        <a class="pill" href="#serverless" data-i18n="no-central-server.6cba5f">No central server</a>
       </div>
     </div>
   </section>
@@ -78,22 +87,22 @@
         <article class="card wrow reveal" id="circles">
           <div class="num" aria-hidden="true">👪</div>
           <div>
-            <h3>Circles <span class="badge ok">Built &amp; shipping</span></h3>
-            <p>
+            <h3 data-i18n-html="circles-built-shipping.0989bf">Circles <span class="badge ok">Built &amp; shipping</span></h3>
+            <p data-i18n="a-circle-is-a.0fc268">
               A circle is a small, private group — your family, your closest friends, your band, your
               book club. You decide exactly who's in it, and only those people can see what's shared
               there. You can have as many circles as you like, each with its own vibe and its own people.
             </p>
-            <p class="why"><b>Why it matters:</b> no "friends of friends," no public profile, no strangers
+            <p class="why" data-i18n-html="why-it-matters-no.b6691e"><b>Why it matters:</b> no "friends of friends," no public profile, no strangers
               wandering in. Sharing with your family circle never accidentally reaches your work circle.</p>
             <details class="tech">
-              <summary><span class="tag-tech">How this works</span><span class="chev">›</span></summary>
+              <summary><span class="tag-tech" data-i18n="how-this-works.b895a8">How this works</span><span class="chev">›</span></summary>
               <div class="tbody">
-                <p>Each circle is a cryptographic group. Every post, comment, reaction, message and
+                <p data-i18n="each-circle-is-a.9cedf5">Each circle is a cryptographic group. Every post, comment, reaction, message and
                   media file is sealed to the exact set of members with a fresh content key, wrapped
                   individually for each member using a hybrid post-quantum key exchange
                   (X25519 + ML-KEM-768) and signed (Ed25519 + ML-DSA-65).</p>
-                <p>Membership is enforced by the math, not by a server's permission check — there is no
+                <p data-i18n="membership-is-enforced-by.20a5de">Membership is enforced by the math, not by a server's permission check — there is no
                   server. Posts are signed by the author's identity key, so members can always attribute
                   and, if needed, remove a bad actor. Per-circle privacy (Spotlight exclusion + Face ID
                   lock) is built in.</p>
@@ -106,19 +115,19 @@
         <article class="card wrow reveal" id="posts">
           <div class="num" aria-hidden="true">📰</div>
           <div>
-            <h3>Posts &amp; the feed <span class="badge ok">Built &amp; shipping</span></h3>
-            <p>
+            <h3 data-i18n-html="posts-the-feed-built.274f26">Posts &amp; the feed <span class="badge ok">Built &amp; shipping</span></h3>
+            <p data-i18n-html="share-a-photo-a.aaf9ca">
               Share a photo, a video, a thought. It lands in your circle's feed in the order it was
               posted — newest at top, no algorithm deciding what you do and don't see. Made a typo?
               Edit it. Changed your mind? Unsend it. It's <em>your</em> feed.
             </p>
-            <p class="why"><b>Why it matters:</b> a chronological feed of just your people means you
+            <p class="why" data-i18n-html="why-it-matters-a.743f95"><b>Why it matters:</b> a chronological feed of just your people means you
               actually see Grandma's update — not whatever an engagement engine decided would keep
               you scrolling.</p>
             <details class="tech">
-              <summary><span class="tag-tech">How this works</span><span class="chev">›</span></summary>
+              <summary><span class="tag-tech" data-i18n="how-this-works.b895a8">How this works</span><span class="chev">›</span></summary>
               <div class="tbody">
-                <p>The feed is built by a deterministic reducer over the stream of sealed events each
+                <p data-i18n="the-feed-is-built.4ff64c">The feed is built by a deterministic reducer over the stream of sealed events each
                   member receives (posts, edits, unsends, reactions, comments). Edits and unsends are
                   themselves signed events, so history stays tamper-evident. Media is content-addressed
                   with BLAKE3 and chunked into 512&nbsp;KB sealed pieces, so the same photo is never
@@ -132,23 +141,23 @@
         <article class="card wrow reveal" id="stories">
           <div class="num" aria-hidden="true">🎞️</div>
           <div>
-            <h3>Stories, the camera &amp; film filters <span class="badge ok">Built &amp; shipping</span></h3>
-            <p>
+            <h3 data-i18n-html="stories-the-camera-film.29967f">Stories, the camera &amp; film filters <span class="badge ok">Built &amp; shipping</span></h3>
+            <p data-i18n-html="tap-the-in-app.b7eee2">
               Tap the in-app camera to snap a photo or hold to record a video, flip the camera, add a
               caption, and post it as a story your circle can watch in a tap-through tray. Dress it up
               with gorgeous film-style filters — including a warm, nostalgic <b>Kodak Gold</b> look
               alongside nine other Apple-style variants.
             </p>
-            <p class="why"><b>Why it matters:</b> a real, beautiful camera and filters built right in —
+            <p class="why" data-i18n-html="why-it-matters-a.929bdd"><b>Why it matters:</b> a real, beautiful camera and filters built right in —
               with none of it ever touching a server. Your candid moments stay candid, and private.</p>
             <details class="tech">
-              <summary><span class="tag-tech">How this works</span><span class="chev">›</span></summary>
+              <summary><span class="tag-tech" data-i18n="how-this-works.b895a8">How this works</span><span class="chev">›</span></summary>
               <div class="tbody">
-                <p>Capture uses AVFoundation (<code>AVCaptureSession</code>): tap for photo, hold to
+                <p data-i18n-html="capture-uses-avfoundation-avcaptures.47cf88">Capture uses AVFoundation (<code>AVCaptureSession</code>): tap for photo, hold to
                   record, flip, flash. Captured files live only in the app's sandbox and are sealed
                   end-to-end before they ever leave the device. There are <b>ten filters</b> — nine
                   Apple-style variants plus the Kodak Gold film look — applied on-device.</p>
-                <p>Privacy hygiene is built in: GPS/EXIF location and identifying maker tags are stripped
+                <p data-i18n-html="privacy-hygiene-is-built.e52683">Privacy hygiene is built in: GPS/EXIF location and identifying maker tags are stripped
                   by default on capture, the camera pipeline calls no third-party SDK, logs nothing, and
                   temp files are deleted once the post is sealed. Apple's on-device
                   <code>SensitiveContentAnalysis</code> can blur sensitive media with tap-to-reveal,
@@ -162,20 +171,20 @@
         <article class="card wrow reveal" id="messages">
           <div class="num" aria-hidden="true">💬</div>
           <div>
-            <h3>Direct &amp; group messages <span class="badge ok">Built &amp; shipping</span></h3>
-            <p>
+            <h3 data-i18n-html="direct-group-messages-built.974e58">Direct &amp; group messages <span class="badge ok">Built &amp; shipping</span></h3>
+            <p data-i18n-html="message-anyone-in-your.429071">
               Message anyone in your circles one-to-one, or start a group chat with several people at
               once. Same warmth as the feed — text, photos, and videos, all locked down end-to-end.
               Each message shows who sent it, when, and a delivery checkmark so you know it landed.
               You can even <b>schedule a message</b> to send later, and send screenshot-protected
               <b>secret messages</b> for the things meant for one set of eyes.
             </p>
-            <p class="why"><b>Why it matters:</b> private means private. No "for your eyes only" disclaimer
+            <p class="why" data-i18n-html="why-it-matters-private.a301e3"><b>Why it matters:</b> private means private. No "for your eyes only" disclaimer
               on a server that could be read by someone else — the message is mathematically yours.</p>
             <details class="tech">
-              <summary><span class="tag-tech">How this works</span><span class="chev">›</span></summary>
+              <summary><span class="tag-tech" data-i18n="how-this-works.b895a8">How this works</span><span class="chev">›</span></summary>
               <div class="tbody">
-                <p>A DM is modeled as a tiny circle (a deterministic <code>dm:</code> group); a group DM
+                <p data-i18n-html="a-dm-is-modeled.daa2e4">A DM is modeled as a tiny circle (a deterministic <code>dm:</code> group); a group DM
                   is the same construct with more members — so both reuse the exact same sealing, signing
                   and delivery path as group posts, one battle-tested code path, not a special case. Every
                   message carries its author's signed identity, a timestamp, and a delivery receipt.
@@ -191,18 +200,18 @@
         <article class="card wrow reveal" id="calls">
           <div class="num" aria-hidden="true">📞</div>
           <div>
-            <h3>Voice &amp; video group calls <span class="badge ok">Built &amp; shipping</span></h3>
-            <p>
+            <h3 data-i18n-html="voice-video-group-calls.f59481">Voice &amp; video group calls <span class="badge ok">Built &amp; shipping</span></h3>
+            <p data-i18n="call-your-circle-one.c6da39">
               Call your circle — one friend or the whole group — with crisp voice and video, plus
               screen sharing when you want to show, not just tell. It rings through your phone's native
               call screen so it feels like any other call.
             </p>
-            <p class="why"><b>Why it matters:</b> face-to-face with the people you love, encrypted the
+            <p class="why" data-i18n-html="why-it-matters-face.a4ee2f"><b>Why it matters:</b> face-to-face with the people you love, encrypted the
               whole way, with no meeting links, no accounts, and no company hosting the call.</p>
             <details class="tech">
-              <summary><span class="tag-tech">How this works</span><span class="chev">›</span></summary>
+              <summary><span class="tag-tech" data-i18n="how-this-works.b895a8">How this works</span><span class="chev">›</span></summary>
               <div class="tbody">
-                <p>Calls use WebRTC for real-time audio/video and screen share, negotiated peer-to-peer
+                <p data-i18n-html="calls-use-webrtc-for.c2ca2b">Calls use WebRTC for real-time audio/video and screen share, negotiated peer-to-peer
                   over Haven's encrypted transport. On Apple platforms the system call UI is CallKit; on
                   Android it's Telecom/ConnectionService. When two peers can't connect directly (hard
                   NAT), a stateless <b>connection relay</b> forwards the encrypted stream — it never
@@ -216,25 +225,25 @@
         <article class="card wrow reveal" id="music">
           <div class="num" aria-hidden="true">🎵</div>
           <div>
-            <h3>Music on posts <span class="badge ok">Shipped</span></h3>
-            <p>
+            <h3 data-i18n-html="music-on-posts-shipped.f13433">Music on posts <span class="badge ok">Shipped</span></h3>
+            <p data-i18n-html="attach-a-song-to.5defd1">
               Attach a song to a photo or video so your moment has a soundtrack. Viewers see a little
               pill with the artist and title and a gentle playing animation, and hear it through
               <em>their own</em> Apple Music. If you unmute a video, the music smoothly fades out and the
               video's audio fades in — a clean crossfade.
             </p>
-            <p class="why"><b>Why it matters:</b> the right song makes a memory. And because Haven only
+            <p class="why" data-i18n-html="why-it-matters-the.6cdb1d"><b>Why it matters:</b> the right song makes a memory. And because Haven only
               sends a reference to the track — never the audio — it's the only model that's truly legal,
               private, and piracy-free.</p>
             <details class="tech">
-              <summary><span class="tag-tech">How this works</span><span class="chev">›</span></summary>
+              <summary><span class="tag-tech" data-i18n="how-this-works.b895a8">How this works</span><span class="chev">›</span></summary>
               <div class="tbody">
-                <p>The post carries a tiny <code>TrackRef</code> (catalog id, title, artist, artwork URL,
+                <p data-i18n-html="the-post-carries-a.878dbb">The post carries a tiny <code>TrackRef</code> (catalog id, title, artist, artwork URL,
                   duration) — never the audio data — sealed inside the same encrypted event as the rest
                   of the post. Each viewer plays it through their own MusicKit subscription; without one
                   they get a 30-second preview or a tap-to-open link. Haven never sees your Apple ID or
                   listening history.</p>
-                <p>An <code>AudioCoordinator</code> owns both the music player and the video player and
+                <p data-i18n-html="an-audiocoordinator-owns-both.c20ff6">An <code>AudioCoordinator</code> owns both the music player and the video player and
                   ramps volumes over ~300–500ms for the crossfade; only one post's audio plays at a time.
                   The feed pill, animation, crossfade, and live Apple Music playback are all shipped
                   (the MusicKit entitlement is granted on the App ID).</p>
@@ -247,17 +256,17 @@
         <article class="card wrow reveal" id="reactions">
           <div class="num" aria-hidden="true">❤️</div>
           <div>
-            <h3>Reactions &amp; comments <span class="badge ok">Built &amp; shipping</span></h3>
-            <p>
+            <h3 data-i18n-html="reactions-comments-built-shipping.3a1f30">Reactions &amp; comments <span class="badge ok">Built &amp; shipping</span></h3>
+            <p data-i18n="react-with-a-tap.241406">
               React with a tap and leave a comment to keep the conversation going right under a post —
               the small, warm back-and-forth that makes a group feel alive.
             </p>
-            <p class="why"><b>Why it matters:</b> connection lives in the little moments. Reactions and
+            <p class="why" data-i18n-html="why-it-matters-connection.858834"><b>Why it matters:</b> connection lives in the little moments. Reactions and
               comments are private to your circle, just like everything else.</p>
             <details class="tech">
-              <summary><span class="tag-tech">How this works</span><span class="chev">›</span></summary>
+              <summary><span class="tag-tech" data-i18n="how-this-works.b895a8">How this works</span><span class="chev">›</span></summary>
               <div class="tbody">
-                <p>Reactions and comments are sealed, signed events addressed to the same circle as the
+                <p data-i18n="reactions-and-comments-are.7bb1ee">Reactions and comments are sealed, signed events addressed to the same circle as the
                   post they attach to, then folded into the feed by the same reducer. They flow
                   peer-to-peer over whichever path is available (nearby, direct, or relay).</p>
               </div>
@@ -269,18 +278,18 @@
         <article class="card wrow reveal" id="nearby">
           <div class="num" aria-hidden="true">📡</div>
           <div>
-            <h3>Nearby sharing (works offline) <span class="badge ok">Built &amp; shipping</span></h3>
-            <p>
+            <h3 data-i18n-html="nearby-sharing-works-offline.9579dc">Nearby sharing (works offline) <span class="badge ok">Built &amp; shipping</span></h3>
+            <p data-i18n="no-internet-no-problem.471b6c">
               No internet? No problem. When your people are physically close, Haven can pass posts,
               messages and invites directly between phones over Bluetooth and local Wi-Fi — campsite,
               airplane, basement, blackout, all fine.
             </p>
-            <p class="why"><b>Why it matters:</b> a truly peer-to-peer app shouldn't fall over when the
+            <p class="why" data-i18n-html="why-it-matters-a.0eb7d6"><b>Why it matters:</b> a truly peer-to-peer app shouldn't fall over when the
               Wi-Fi does. Your circle keeps working anywhere you're together.</p>
             <details class="tech">
-              <summary><span class="tag-tech">How this works</span><span class="chev">›</span></summary>
+              <summary><span class="tag-tech" data-i18n="how-this-works.b895a8">How this works</span><span class="chev">›</span></summary>
               <div class="tbody">
-                <p>On Apple devices this is MultipeerConnectivity (Bluetooth + local Wi-Fi); on Android
+                <p data-i18n-html="on-apple-devices-this.e648ae">On Apple devices this is MultipeerConnectivity (Bluetooth + local Wi-Fi); on Android
                   it's the Nearby Connections API. A <b>mesh relay</b> hop lets one internet-connected
                   phone forward a sealed message onward for a friend who's only reachable over the local
                   mesh — still ciphertext only, end to end.</p>
@@ -293,18 +302,18 @@
         <article class="card wrow reveal" id="lock">
           <div class="num" aria-hidden="true">🛡️</div>
           <div>
-            <h3>Per-circle Face ID lock <span class="badge ok">Built &amp; shipping</span></h3>
-            <p>
+            <h3 data-i18n-html="per-circle-face-id.9e3b35">Per-circle Face ID lock <span class="badge ok">Built &amp; shipping</span></h3>
+            <p data-i18n="some-circles-are-more.9d63ec">
               Some circles are more private than others. Lock any circle behind Face ID (or Touch ID),
               and keep it out of search and Spotlight, so a glance at your unlocked phone never reveals
               what's inside.
             </p>
-            <p class="why"><b>Why it matters:</b> privacy from the world <em>and</em> from the person
+            <p class="why" data-i18n-html="why-it-matters-privacy.a6b748"><b>Why it matters:</b> privacy from the world <em>and</em> from the person
               holding your phone. The most personal circle gets the most protection.</p>
             <details class="tech">
-              <summary><span class="tag-tech">How this works</span><span class="chev">›</span></summary>
+              <summary><span class="tag-tech" data-i18n="how-this-works.b895a8">How this works</span><span class="chev">›</span></summary>
               <div class="tbody">
-                <p>Per-circle privacy combines biometric gating (Face ID / Touch ID) with Spotlight
+                <p data-i18n="per-circle-privacy-combines.3812a1">Per-circle privacy combines biometric gating (Face ID / Touch ID) with Spotlight
                   exclusion so locked circles don't surface in system search. The master seed that
                   unlocks your identity is itself Secure-Enclave-wrapped on-device, so even a raw
                   Keychain dump yields nothing without your biometrics.</p>
@@ -317,27 +326,27 @@
         <article class="card wrow reveal" id="devices">
           <div class="num" aria-hidden="true">🔗</div>
           <div>
-            <h3>Multi-device sync <span class="badge ok">Built &amp; shipping</span></h3>
-            <p>
+            <h3 data-i18n-html="multi-device-sync-built.c0b6a4">Multi-device sync <span class="badge ok">Built &amp; shipping</span></h3>
+            <p data-i18n-html="use-haven-on-your.631992">
               Use Haven on your phone, your iPad, your Mac. Your own devices now <b>converge and stay in
               sync</b> — post from your phone and it shows up on your iPad; your circles, profile and
               conversations line up across every device you own. Move your identity to a new device with
               a quick transfer code or QR scan, and your contacts never even notice — you're still you to
               everyone in your circles.
             </p>
-            <p class="why"><b>Why it matters:</b> your life isn't on one screen. Haven follows you across
+            <p class="why" data-i18n-html="why-it-matters-your.c22aeb"><b>Why it matters:</b> your life isn't on one screen. Haven follows you across
               your devices — your identity moves by a local transfer code or QR, never through a server
               that could hold it.</p>
             <details class="tech">
-              <summary><span class="tag-tech">How this works</span><span class="chev">›</span></summary>
+              <summary><span class="tag-tech" data-i18n="how-this-works.b895a8">How this works</span><span class="chev">›</span></summary>
               <div class="tbody">
-                <p>A multi-identity switcher, move-to-device via a transfer code / QR
+                <p data-i18n-html="a-multi-identity-switcher.522c9c">A multi-identity switcher, move-to-device via a transfer code / QR
                   (<code>haven-seed:…</code>), iCloud-Keychain backup/restore of identity history (the
                   active seed stays device-only), and multi-token push so every linked device gets
                   notifications. A user's own devices self-sync their circles, posts and profile so they
                   converge to the same state — the sync path is strictly additive, so a freshly-restored
                   or empty device can never tombstone content that already exists elsewhere.</p>
-                <p>Each device is authorized by a credential your long-term identity key signs into an
+                <p data-i18n-html="each-device-is-authorized.3835b6">Each device is authorized by a credential your long-term identity key signs into an
                   account device-list, so adding or revoking a device never changes who you are to your
                   contacts. As of <b>1.0.7</b>, a device you link no longer has to hold a copy of your
                   account seed — it runs on its own <b>per-device keys</b>, and a device added through
@@ -358,24 +367,24 @@
         <article class="card wrow reveal" id="serverless">
           <div class="num" aria-hidden="true">🌐</div>
           <div>
-            <h3>No central server, end-to-end encrypted <span class="badge ok">The foundation</span></h3>
-            <p>
+            <h3 data-i18n-html="no-central-server-end.772017">No central server, end-to-end encrypted <span class="badge ok">The foundation</span></h3>
+            <p data-i18n-html="this-is-the-heart.83257c">
               This is the heart of Haven: there is no central server holding your life. Everything is
               encrypted on your device, the keys stay on your own devices (the only sync is Apple's
               end-to-end iCloud Keychain between <i>your</i> devices — never to us), and your content
               travels directly between the people in your circle. It even resists future quantum computers.
             </p>
-            <p class="why"><b>Why it matters:</b> nothing to hack, nothing to sell, nothing to subpoena,
+            <p class="why" data-i18n-html="why-it-matters-nothing.5e9442"><b>Why it matters:</b> nothing to hack, nothing to sell, nothing to subpoena,
               nothing to shut down. You don't trust a company with your memories — you don't have to.</p>
             <details class="tech">
-              <summary><span class="tag-tech">How this works</span><span class="chev">›</span></summary>
+              <summary><span class="tag-tech" data-i18n="how-this-works.b895a8">How this works</span><span class="chev">›</span></summary>
               <div class="tbody">
-                <p>One Rust core (<code>p2pcore</code>) handles identity, hybrid post-quantum crypto,
+                <p data-i18n-html="one-rust-core-p2pcore.9cd254">One Rust core (<code>p2pcore</code>) handles identity, hybrid post-quantum crypto,
                   circles, and the social engine, shared by every platform. The transport ladder picks
                   the best path automatically: <b>nearby</b> (Bluetooth/Wi-Fi) → <b>direct</b> (iroh QUIC
                   with NAT hole-punching) → <b>relay</b> (only if nothing local works). Above the
                   transport, everything is opaque encrypted bytes.</p>
-                <p>Discovery uses signed records on the decentralized mainline DHT (the one BitTorrent
+                <p data-i18n-html="discovery-uses-signed-records.93a20a">Discovery uses signed records on the decentralized mainline DHT (the one BitTorrent
                   uses) keyed by your public key — so a link to you is permanent with zero backend. The
                   result is a one-time-price app with <b>no monthly operator cost, ever</b>.</p>
               </div>
@@ -385,7 +394,7 @@
 
       </div>
 
-      <div class="callout reveal" style="margin-top:26px">
+      <div class="callout reveal" style="margin-top:26px" data-i18n-html="a-note-on-honesty.c8f062">
         <b>A note on honesty:</b> Haven ships fast. Everything above is built and running today; a
         <span class="badge ok">green tag</span> means it's shipping. When something is only partly
         wired, we say so with an <span class="badge soon">amber tag</span> rather than overpromising.
@@ -397,8 +406,8 @@
 
       <div class="center" style="margin-top:34px">
         <div class="btn-row">
-          <a class="btn" href="../relay/">Make it rock-solid: run a relay</a>
-          <a class="btn ghost" href="../docs/">Read the technical docs</a>
+          <a class="btn" href="../relay/" data-i18n="make-it-rock-solid.4a5d21">Make it rock-solid: run a relay</a>
+          <a class="btn ghost" href="../docs/" data-i18n="read-the-technical-docs.2944c7">Read the technical docs</a>
         </div>
       </div>
     </div>
@@ -410,34 +419,34 @@
     <div class="foot-grid">
       <div>
         <a class="brand" href="../">Haven</a>
-        <p class="blurb">A private, peer-to-peer, end-to-end-encrypted social app for your close circle. No central server, no ads, no tracking.</p>
+        <p class="blurb" data-i18n="a-private-peer-to.754370">A private, peer-to-peer, end-to-end-encrypted social app for your close circle. No central server, no ads, no tracking.</p>
         <div class="platforms" style="justify-content:flex-start">
-          <span class="pill">iOS</span><span class="pill">macOS</span><span class="pill">Android</span>
-          <span class="pill">Windows</span><span class="pill">Linux</span>
+          <span class="pill">iOS</span><span class="pill">macOS</span><span class="pill" data-i18n="android.1928f9">Android</span>
+          <span class="pill" data-i18n="windows.26d9c2">Windows</span><span class="pill" data-i18n="linux.83ad85">Linux</span>
         </div>
       </div>
       <div>
-        <h5>Product</h5>
-        <a href="../features/">Features</a>
-        <a href="../relay/">Relays</a>
-        <a href="../#privacy">Privacy</a>
-        <a href="../docs/">Documentation</a>
+        <h5 data-i18n="product.dd3b86">Product</h5>
+        <a href="../features/" data-i18n="features.fc338f">Features</a>
+        <a href="../relay/" data-i18n="relays.a239ca">Relays</a>
+        <a href="../#privacy" data-i18n="privacy.cf0148">Privacy</a>
+        <a href="../docs/" data-i18n="documentation.9e9cf3">Documentation</a>
       </div>
       <div>
-        <h5>Learn more</h5>
-        <a href="../docs/#architecture">How it works</a>
-        <a href="../docs/#threat">Threat model</a>
-        <a href="../docs/#cost">Operating costs</a>
-        <a href="../relay/#byo">Bring your own storage</a>
+        <h5 data-i18n="learn-more.824d76">Learn more</h5>
+        <a href="../docs/#architecture" data-i18n="how-it-works.1dd6a1">How it works</a>
+        <a href="../docs/#threat" data-i18n="threat-model.eb9233">Threat model</a>
+        <a href="../docs/#cost" data-i18n="operating-costs.d2d6be">Operating costs</a>
+        <a href="../relay/#byo" data-i18n="bring-your-own-storage.31e6d3">Bring your own storage</a>
       </div>
       <div>
-        <h5>Project</h5>
-        <a href="https://github.com/blaineam/haven" rel="noopener">GitHub repo ↗</a>
-        <a href="https://github.com/blaineam/haven/tree/main/docs" rel="noopener">Technical docs ↗</a>
-        <a href="https://github.com/blaineam/haven/tree/main/relay" rel="noopener">Relay tooling ↗</a>
+        <h5 data-i18n="project.f6f4da">Project</h5>
+        <a href="https://github.com/blaineam/haven" rel="noopener" data-i18n="github-repo.5ec5f3">GitHub repo ↗</a>
+        <a href="https://github.com/blaineam/haven/tree/main/docs" rel="noopener" data-i18n="technical-docs.a67b2e">Technical docs ↗</a>
+        <a href="https://github.com/blaineam/haven/tree/main/relay" rel="noopener" data-i18n="relay-tooling.3c7113">Relay tooling ↗</a>
       </div>
     </div>
-    <p class="legal">Made with care for the people you love. Haven holds no keys and keeps no copy of your content — your circle is yours alone.</p>
+    <p class="legal" data-i18n="made-with-care-for.6c5857">Made with care for the people you love. Haven holds no keys and keeps no copy of your content — your circle is yours alone.</p>
   </div>
 </footer>
 

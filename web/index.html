@@ -21,23 +21,32 @@
 <!-- .reveal starts at opacity:0 and is un-hidden by app.js. With JS off nothing would ever
      paint, so opt straight into the revealed state — the page is static and reads fine. -->
 <noscript><style>.reveal{opacity:1;transform:none}</style></noscript>
+  <link rel="alternate" hreflang="x-default" href="https://wemiller.com/apps/haven/">
+  <link rel="alternate" hreflang="en" href="https://wemiller.com/apps/haven/">
+  <link rel="alternate" hreflang="ja" href="https://wemiller.com/apps/haven/?lang=ja">
+  <link rel="alternate" hreflang="de" href="https://wemiller.com/apps/haven/?lang=de">
+  <link rel="alternate" hreflang="es" href="https://wemiller.com/apps/haven/?lang=es">
+  <link rel="alternate" hreflang="ko" href="https://wemiller.com/apps/haven/?lang=ko">
+  <link rel="alternate" hreflang="pt-BR" href="https://wemiller.com/apps/haven/?lang=pt-BR">
+  <link rel="alternate" hreflang="it" href="https://wemiller.com/apps/haven/?lang=it">
+  <script src="i18n/i18n.js" defer data-page="index" data-langs="en,ja,de,es,ko,pt-BR,it" data-pos="bottom-left"></script>
 </head>
 <body>
-<a class="skip" href="#main">Skip to content</a>
+<a class="skip" href="#main" data-i18n="skip-to-content.0a4470">Skip to content</a>
 
 <header class="nav">
   <div class="nav-inner">
     <a class="brand" href="./">Haven</a>
     <button class="nav-toggle" aria-label="Open menu" aria-expanded="false" aria-controls="nav-links">☰</button>
     <nav class="nav-links" id="nav-links" aria-label="Primary">
-      <a href="./" class="active">Home</a>
-      <a href="features/">Features</a>
-      <a href="relay/">Relays</a>
-      <a href="#privacy">Privacy</a>
-      <a href="#security">Security</a>
-      <a href="docs/">Docs</a>
+      <a href="./" class="active" data-i18n="home.70f8bb">Home</a>
+      <a href="features/" data-i18n="features.fc338f">Features</a>
+      <a href="relay/" data-i18n="relays.a239ca">Relays</a>
+      <a href="#privacy" data-i18n="privacy.cf0148">Privacy</a>
+      <a href="#security" data-i18n="security.f25ce1">Security</a>
+      <a href="docs/" data-i18n="docs.68a419">Docs</a>
       <a href="https://github.com/blaineam/haven" rel="noopener">GitHub</a>
-      <a href="#download" class="cta">Get Haven</a>
+      <a href="#download" class="cta" data-i18n="get-haven.1a671e">Get Haven</a>
     </nav>
   </div>
 </header>
@@ -54,33 +63,33 @@
     <div class="container">
       <div class="issue-line reveal">
         <span>Haven</span><span class="dot-sep"></span>
-        <span class="accent">The Private Edition</span><span class="dot-sep"></span>
-        <span>End-to-end encrypted</span><span class="dot-sep"></span>
-        <span>Peer-to-peer · No ads</span>
+        <span class="accent" data-i18n="the-private-edition.27c0e2">The Private Edition</span><span class="dot-sep"></span>
+        <span data-i18n="end-to-end-encrypted.7f5a65">End-to-end encrypted</span><span class="dot-sep"></span>
+        <span data-i18n="peer-to-peer-no.b65316">Peer-to-peer · No ads</span>
       </div>
 
       <div class="mag-hero-grid">
         <div class="reveal">
-          <h1 class="mag-title">A private home<br /><span class="h-grad">for your people.</span></h1>
-          <p class="mag-deck">
+          <h1 class="mag-title" data-i18n-html="a-private-home-for.a0aa8b">A private home<br /><span class="h-grad">for your people.</span></h1>
+          <p class="mag-deck" data-i18n="haven-is-a-calm.047c38">
             Haven is a calm little social app just for the people you love. Share photos, stories,
             messages and calls — all end-to-end encrypted and peer-to-peer, with no ads and no
             tracking. Nothing you share ever leaves your circle.
           </p>
-          <div class="btn-row" style="justify-content:flex-start">
+          <div class="btn-row" style="justify-content:flex-start" data-i18n-html="download-haven-see-everything.5a8075">
             <!-- Primary auto-detect download button. href/label filled by the hero-download
                  script below from the DOWNLOADS config; falls back to the #download section. -->
             <a class="btn" id="hero-download" href="#download">Download Haven</a>
             <a class="btn ghost" href="features/">See everything Haven does</a>
           </div>
           <div class="platforms" style="justify-content:flex-start;margin-top:26px">
-            <span class="pill"><span class="ic"></span>iPhone &amp; iPad</span>
+            <span class="pill" data-i18n-html="iphone-ipad.05773c"><span class="ic"></span>iPhone &amp; iPad</span>
             <span class="pill"><span class="ic"></span>Mac</span>
-            <span class="pill"><span class="ic"></span>Android</span>
-            <span class="pill"><span class="ic"></span>Windows</span>
-            <span class="pill"><span class="ic"></span>Linux</span>
+            <span class="pill" data-i18n-html="android.25401f"><span class="ic"></span>Android</span>
+            <span class="pill" data-i18n-html="windows.7898ec"><span class="ic"></span>Windows</span>
+            <span class="pill" data-i18n-html="linux.a56266"><span class="ic"></span>Linux</span>
           </div>
-          <p class="hero-note">
+          <p class="hero-note" data-i18n-html="9-99-once-now.4eabe5">
             <b>$9.99, once.</b> Now on the App&nbsp;Store for iPhone, iPad &amp; Mac, on
             Google&nbsp;Play for Android and on the Microsoft&nbsp;Store for Windows — no subscription,
             no ads, no tracking. Linux is a free download today.
@@ -104,7 +113,7 @@
   <section class="section tight">
     <div class="container">
       <div class="card reveal" style="padding:clamp(28px,5vw,44px) clamp(22px,4vw,40px);max-width:880px;margin:0 auto">
-        <p class="drop-cap" style="font-size:clamp(19px,2.9vw,26px);font-weight:650;line-height:1.42;margin:0;letter-spacing:-.015em">
+        <p class="drop-cap" style="font-size:clamp(19px,2.9vw,26px);font-weight:650;line-height:1.42;margin:0;letter-spacing:-.015em" data-i18n-html="imagine-a-family-photo.562467">
           Imagine a family photo album and a group chat that
           <span class="h-grad">only your people can ever open</span> — with no company in the middle.
           That's Haven. The keys that lock your moments live on your phone, not on a server.
@@ -126,17 +135,17 @@
                loading="lazy" width="637" height="1320" />
         </div>
         <div class="spread-copy">
-          <div class="spread-num">01 — The feed</div>
-          <span class="eyebrow">Built like a quiet room, not a stadium</span>
-          <h2>A feed that exists to connect you, not to keep you scrolling.</h2>
-          <p class="lead">
+          <div class="spread-num" data-i18n="01-the-feed.f64fee">01 — The feed</div>
+          <span class="eyebrow" data-i18n="built-like-a-quiet.180dd6">Built like a quiet room, not a stadium</span>
+          <h2 data-i18n="a-feed-that-exists.e9a1b1">A feed that exists to connect you, not to keep you scrolling.</h2>
+          <p class="lead" data-i18n="no-likes-to-chase.d7e96f">
             No likes to chase, no strangers, no algorithm deciding what you see. Just the people
             you actually know, in a small private circle you control.
           </p>
           <ul class="points">
-            <li><span class="dot"></span><span><b>Circles</b> — small private groups for family, close friends, a team. You choose who's in.</span></li>
-            <li><span class="dot"></span><span><b>No accounts, no profiles</b> — there's no central database of you sitting in a data center.</span></li>
-            <li><span class="dot"></span><span><b>Calm by design</b> — no ads, no tracking, no engagement traps.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="circles-small-private-groups.0c0e7a"><b>Circles</b> — small private groups for family, close friends, a team. You choose who's in.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="no-accounts-no-profiles.1f93be"><b>No accounts, no profiles</b> — there's no central database of you sitting in a data center.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="calm-by-design-no.cdc75a"><b>Calm by design</b> — no ads, no tracking, no engagement traps.</span></li>
           </ul>
         </div>
       </div>
@@ -148,8 +157,8 @@
     <div class="container">
       <blockquote class="pullquote reveal">
         <span class="pq-mark">“</span>The keys that lock your moments live on
-        <span class="h-grad">your phone</span>, not on a server.<span class="pq-mark">”</span>
-        <div class="pq-cite">The Haven promise</div>
+        <span class="h-grad" data-i18n="your-phone.c503af">your phone</span>, not on a server.<span class="pq-mark">”</span>
+        <div class="pq-cite" data-i18n="the-haven-promise.a1b0b4">The Haven promise</div>
       </blockquote>
     </div>
   </section>
@@ -166,18 +175,18 @@
                loading="lazy" width="637" height="1320" />
         </div>
         <div class="spread-copy">
-          <div class="spread-num">02 — Posts &amp; stories</div>
-          <span class="eyebrow">Moments, beautifully kept</span>
-          <h2>Photos and stories with a warm, film-style soul.</h2>
-          <p class="lead">
+          <div class="spread-num" data-i18n="02-posts-stories.6e6cc4">02 — Posts &amp; stories</div>
+          <span class="eyebrow" data-i18n="moments-beautifully-kept.d72e82">Moments, beautifully kept</span>
+          <h2 data-i18n="photos-and-stories-with.ff350a">Photos and stories with a warm, film-style soul.</h2>
+          <p class="lead" data-i18n="share-photos-and-videos.59e9ff">
             Share photos and videos with beautiful film-style filters — including a warm Kodak Gold
             look — and add a song so your moment has a soundtrack, played through each viewer's own
             music subscription.
           </p>
           <ul class="points">
-            <li><span class="dot"></span><span><b>Film-style filters</b> for posts and stories, including a warm Kodak Gold look.</span></li>
-            <li><span class="dot"></span><span><b>Music on posts</b> — attach a song, played through each viewer's own subscription.</span></li>
-            <li><span class="dot"></span><span><b>Encrypted before it leaves</b> — every photo and video is locked to your circle.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="film-style-filters-for.4c1ec9"><b>Film-style filters</b> for posts and stories, including a warm Kodak Gold look.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="music-on-posts-attach.e05aaa"><b>Music on posts</b> — attach a song, played through each viewer's own subscription.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="encrypted-before-it-leaves.0022e0"><b>Encrypted before it leaves</b> — every photo and video is locked to your circle.</span></li>
           </ul>
         </div>
       </div>
@@ -197,17 +206,17 @@
                  loading="lazy" width="554" height="722" />
           </div>
           <div class="spread-copy">
-            <div class="spread-num">03 — Messages &amp; calls</div>
-            <span class="eyebrow">Stay close, stay private</span>
-            <h2>Direct messages, group calls, screen sharing.</h2>
-            <p class="lead">
+            <div class="spread-num" data-i18n="03-messages-calls.a6d1a4">03 — Messages &amp; calls</div>
+            <span class="eyebrow" data-i18n="stay-close-stay-private.445adf">Stay close, stay private</span>
+            <h2 data-i18n="direct-messages-group-calls.fc416f">Direct messages, group calls, screen sharing.</h2>
+            <p class="lead" data-i18n="talk-in-real-time.9bb09f">
               Talk in real time with voice and video calls for your whole circle, share your screen,
               and keep one continuous conversation — all end-to-end encrypted.
             </p>
             <ul class="points">
-              <li><span class="dot"></span><span><b>Group voice &amp; video calls</b> with screen sharing built in.</span></li>
-              <li><span class="dot"></span><span><b>Nearby sharing</b> — pass things device-to-device even with no internet at all.</span></li>
-              <li><span class="dot"></span><span><b>One app, every device</b> — iPhone, iPad, Mac, Android, Windows and Linux.</span></li>
+              <li><span class="dot"></span><span data-i18n-html="group-voice-video-calls.6ba4e5"><b>Group voice &amp; video calls</b> with screen sharing built in.</span></li>
+              <li><span class="dot"></span><span data-i18n-html="nearby-sharing-pass-things.5d75c1"><b>Nearby sharing</b> — pass things device-to-device even with no internet at all.</span></li>
+              <li><span class="dot"></span><span data-i18n-html="one-app-every-device.ce3246"><b>One app, every device</b> — iPhone, iPad, Mac, Android, Windows and Linux.</span></li>
             </ul>
           </div>
         </div>
@@ -221,32 +230,32 @@
   <section class="section">
     <div class="container">
       <div class="center reveal" style="margin-bottom:40px">
-        <span class="eyebrow">A quick tour</span>
-        <h2 style="font-size:clamp(26px,4.2vw,40px)">Everything you'd want, kept private.</h2>
-        <p class="lead">Calls, conversations, and a place that's truly yours — across every screen.</p>
+        <span class="eyebrow" data-i18n="a-quick-tour.eb97a3">A quick tour</span>
+        <h2 style="font-size:clamp(26px,4.2vw,40px)" data-i18n="everything-you-d-want.27a576">Everything you'd want, kept private.</h2>
+        <p class="lead" data-i18n="calls-conversations-and-a.29a10f">Calls, conversations, and a place that's truly yours — across every screen.</p>
       </div>
       <div class="gallery reveal">
         <figure class="g-item" style="margin:0">
           <img class="render" src="assets/renders/phone-call.png?v=4"
                alt="Haven group video call on iPhone — three participants in an encrypted call"
                loading="lazy" width="637" height="1320" />
-          <figcaption class="g-cap">Group calls &amp; screen share</figcaption>
+          <figcaption class="g-cap" data-i18n="group-calls-screen-share.94be00">Group calls &amp; screen share</figcaption>
         </figure>
         <figure class="g-item lift" style="margin:0">
           <img class="render" src="assets/renders/phone-messages.png?v=4"
                alt="Haven messages on iPhone — a list of private direct-message conversations"
                loading="lazy" width="637" height="1320" />
-          <figcaption class="g-cap">Direct &amp; group messages</figcaption>
+          <figcaption class="g-cap" data-i18n="direct-group-messages.8cbb04">Direct &amp; group messages</figcaption>
         </figure>
         <figure class="g-item" style="margin:0">
           <img class="render" src="assets/renders/phone-you.png?v=4"
                alt="Haven profile and settings on iPhone — your identity and circle controls"
                loading="lazy" width="637" height="1320" />
-          <figcaption class="g-cap">Your space, your controls</figcaption>
+          <figcaption class="g-cap" data-i18n="your-space-your-controls.9bb47c">Your space, your controls</figcaption>
         </figure>
       </div>
       <div class="btn-row reveal">
-        <a class="btn" href="features/">Explore every feature</a>
+        <a class="btn" href="features/" data-i18n="explore-every-feature.ec2db3">Explore every feature</a>
       </div>
     </div>
   </section>
@@ -255,10 +264,10 @@
   <section class="section tight">
     <div class="container">
       <div class="spread reveal" style="align-items:center">
-        <blockquote class="pullquote left" style="margin:0">
+        <blockquote class="pullquote left" style="margin:0" data-i18n-html="we-never-hold-your.5cba82">
           <span class="h-grad">We never</span> hold your keys.
         </blockquote>
-        <p class="muted" style="font-size:17px;max-width:46ch">
+        <p class="muted" style="font-size:17px;max-width:46ch" data-i18n="the-secret-keys-that.b3c983">
           The secret keys that unlock your content stay on your own devices — never on a server,
           never with us. That single fact is what makes everything else on this page true.
         </p>
@@ -270,9 +279,9 @@
   <section class="section" id="privacy" style="padding-top:24px">
     <div class="container">
       <div class="center reveal">
-        <span class="eyebrow">Privacy, in plain words</span>
-        <h2 style="font-size:clamp(26px,4.5vw,40px)">The honest version, no fine print.</h2>
-        <p class="lead">
+        <span class="eyebrow" data-i18n="privacy-in-plain-words.d20122">Privacy, in plain words</span>
+        <h2 style="font-size:clamp(26px,4.5vw,40px)" data-i18n="the-honest-version-no.612b8f">The honest version, no fine print.</h2>
+        <p class="lead" data-i18n="here-s-how-haven.b57b5e">
           Here's how Haven keeps your life yours — what stays private, and the honest limits too.
         </p>
       </div>
@@ -281,44 +290,44 @@
         <!-- The four claims stay visible — they're the load-bearing promise. The proof and the
              caveats sit one click down, so trust doesn't arrive as a wall of prose. -->
         <div class="card">
-          <h3 style="font-size:20px;margin-bottom:8px">What stays private</h3>
+          <h3 style="font-size:20px;margin-bottom:8px" data-i18n="what-stays-private.98aefc">What stays private</h3>
           <ul class="points" style="margin-top:6px">
-            <li><span class="dot"></span><span>Every post, message, photo, video and call is <b>encrypted on your device</b> before it's sent.</span></li>
-            <li><span class="dot"></span><span>The secret keys that unlock your content <b>stay on your own devices</b>. <b>We never hold them.</b></span></li>
-            <li><span class="dot"></span><span>There's <b>no central account</b>, no profile database, no advertising ID, no analytics.</span></li>
-            <li><span class="dot"></span><span>Choose <b>your own storage</b> — a relay you run, or your own S3 bucket. We run no storage and hold no credentials.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="every-post-message-photo.0935fe">Every post, message, photo, video and call is <b>encrypted on your device</b> before it's sent.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="the-secret-keys-that.9ca77f">The secret keys that unlock your content <b>stay on your own devices</b>. <b>We never hold them.</b></span></li>
+            <li><span class="dot"></span><span data-i18n-html="there-s-no-central.8a0c48">There's <b>no central account</b>, no profile database, no advertising ID, no analytics.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="choose-your-own-storage.c071ae">Choose <b>your own storage</b> — a relay you run, or your own S3 bucket. We run no storage and hold no credentials.</span></li>
           </ul>
           <details class="tech">
-            <summary><span class="tag-tech">Where the keys actually live</span><span class="chev">›</span></summary>
+            <summary><span class="tag-tech" data-i18n="where-the-keys-actually.330908">Where the keys actually live</span><span class="chev">›</span></summary>
             <div class="tbody">
-              <p>In the Secure Enclave on Apple devices, the OS secure store elsewhere. The only way
+              <p data-i18n-html="in-the-secure-enclave.376555">In the Secure Enclave on Apple devices, the OS secure store elsewhere. The only way
                 they sync between <i>your</i> devices is Apple's end-to-end-encrypted iCloud Keychain,
                 which we can't read either.</p>
-              <p>“Your own storage” means a Haven relay you (or a friend) run, or your own S3 bucket
+              <p data-i18n="your-own-storage-means.d809aa">“Your own storage” means a Haven relay you (or a friend) run, or your own S3 bucket
                 (S3/R2/B2) — we hold no credentials for any of it.</p>
             </div>
           </details>
         </div>
         <div class="card">
-          <h3 style="font-size:20px;margin-bottom:8px">The honest limits</h3>
+          <h3 style="font-size:20px;margin-bottom:8px" data-i18n="the-honest-limits.cf049d">The honest limits</h3>
           <ul class="points" style="margin-top:6px">
-            <li><span class="dot"></span><span>A <b>relay</b> (an optional helper) can see that <em>some</em> encrypted bytes passed through, but never what they say.</span></li>
-            <li><span class="dot"></span><span>To deliver bytes to you, a relay <b>briefly handles your IP address</b> — never logged, never stored, and never tied to a name, because there isn't one.</span></li>
-            <li><span class="dot"></span><span>Friends <b>never see each other's IP</b> when a relay is in the path — only the relay does, briefly.</span></li>
-            <li><span class="dot"></span><span>If someone steals your unlocked, malware-infected device, they have your device. No app on earth fixes that.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="a-relay-an-optional.ef4825">A <b>relay</b> (an optional helper) can see that <em>some</em> encrypted bytes passed through, but never what they say.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="to-deliver-bytes-to.f16f89">To deliver bytes to you, a relay <b>briefly handles your IP address</b> — never logged, never stored, and never tied to a name, because there isn't one.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="friends-never-see-each.396ef4">Friends <b>never see each other's IP</b> when a relay is in the path — only the relay does, briefly.</span></li>
+            <li><span class="dot"></span><span data-i18n="if-someone-steals-your.89de84">If someone steals your unlocked, malware-infected device, they have your device. No app on earth fixes that.</span></li>
           </ul>
           <details class="tech">
-            <summary><span class="tag-tech">What that means for your IP</span><span class="chev">›</span></summary>
+            <summary><span class="tag-tech" data-i18n="what-that-means-for.f57e18">What that means for your IP</span><span class="chev">›</span></summary>
             <div class="tbody">
-              <p>A relay handling your IP for a moment is just how the internet works — every app you
+              <p data-i18n="a-relay-handling-your.5e491a">A relay handling your IP for a moment is just how the internet works — every app you
                 own does the same thing. The difference is that Haven's relay never logs it, never
                 stores it, and has nothing to tie it to: no account, no name, no email, no phone.</p>
-              <p>Being precise: while a relay is moving your bytes it does see your app's key — a long
+              <p data-i18n-html="being-precise-while-a.86c019">Being precise: while a relay is moving your bytes it does see your app's key — a long
                 random identifier — alongside your IP. It has to check that key, or a stranger could
                 help themselves to your circle's mailbox. It can't read anything with it, and it can't
                 turn it into your name. So the promise is <b>never logged, never sold, never readable</b>
                 — not "never seen".</p>
-              <p>If you want to hide your IP from a relay entirely, run Haven behind your own VPN, or
+              <p data-i18n="if-you-want-to.b4b4d9">If you want to hide your IP from a relay entirely, run Haven behind your own VPN, or
                 host your own relay. We looked hard at a built-in onion/Tor mode and decided against
                 it: Tor can't carry the kind of traffic Haven's calls and direct connections need, so
                 it would quietly break them.</p>
@@ -327,7 +336,7 @@
         </div>
       </div>
 
-      <div class="callout reveal" style="margin-top:18px">
+      <div class="callout reveal" style="margin-top:18px" data-i18n-html="the-promise-never-logged.2d7cd1">
         <b>The promise:</b> never logged, never sold, never readable. For the full picture,
         read the <a class="inline" href="docs/">threat model and architecture docs</a>.
       </div>
@@ -338,9 +347,9 @@
   <section class="section" id="security" style="padding-top:24px">
     <div class="container">
       <div class="center reveal">
-        <span class="eyebrow">New in 1.0.7 · Security &amp; polish</span>
-        <h2 style="font-size:clamp(26px,4.5vw,40px)">Harder to break into, <span class="h-grad">easier to tidy up.</span></h2>
-        <p class="lead">
+        <span class="eyebrow" data-i18n="new-in-1-0.1b500c">New in 1.0.7 · Security &amp; polish</span>
+        <h2 style="font-size:clamp(26px,4.5vw,40px)" data-i18n-html="harder-to-break-into.184a57">Harder to break into, <span class="h-grad">easier to tidy up.</span></h2>
+        <p class="lead" data-i18n-html="the-big-security-release.edef94">
           The big security release. It quietly upgrades how your devices trust each other and how
           your storage stays under control — <b>automatically, circle by circle, as everyone
           updates</b>. Nothing to set up, nothing lost.
@@ -349,38 +358,38 @@
 
       <div class="grid cols-2 reveal" style="margin-top:34px">
         <div class="card">
-          <h3 style="font-size:20px;margin-bottom:8px">A stolen device can now be locked out for real</h3>
+          <h3 style="font-size:20px;margin-bottom:8px" data-i18n="a-stolen-device-can.876298">A stolen device can now be locked out for real</h3>
           <ul class="points" style="margin-top:6px">
-            <li><span class="dot"></span><span>A device you link <b>no longer has to hold a copy of your master key</b> — each one runs on its own keys.</span></li>
-            <li><span class="dot"></span><span>So removing a lost or stolen device can <b>cut it off cryptographically</b> — from your circle's content <em>and</em> from the settings and contacts that sync between your devices — not just hide it.</span></li>
-            <li><span class="dot"></span><span>Your master key stays on <b>one primary device plus your encrypted iCloud&nbsp;Keychain backup</b>, instead of being copied everywhere.</span></li>
-            <li><span class="dot"></span><span>Everything is still <b>hybrid post-quantum</b> — built to resist tomorrow's quantum computers, today.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="a-device-you-link.561578">A device you link <b>no longer has to hold a copy of your master key</b> — each one runs on its own keys.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="so-removing-a-lost.94c68b">So removing a lost or stolen device can <b>cut it off cryptographically</b> — from your circle's content <em>and</em> from the settings and contacts that sync between your devices — not just hide it.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="your-master-key-stays.c0d06d">Your master key stays on <b>one primary device plus your encrypted iCloud&nbsp;Keychain backup</b>, instead of being copied everywhere.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="everything-is-still-hybrid.d2dfcf">Everything is still <b>hybrid post-quantum</b> — built to resist tomorrow's quantum computers, today.</span></li>
           </ul>
           <details class="tech">
-            <summary><span class="tag-tech">How the rollout works, honestly</span><span class="chev">›</span></summary>
+            <summary><span class="tag-tech" data-i18n="how-the-rollout-works.c95dbf">How the rollout works, honestly</span><span class="chev">›</span></summary>
             <div class="tbody">
-              <p>This turns on <b>per circle, once every member's devices have updated</b> — an
+              <p data-i18n-html="this-turns-on-per.5882ec">This turns on <b>per circle, once every member's devices have updated</b> — an
                 all-present signal, never guessed from silence. Until then a coexistence path keeps
                 un-upgraded devices working exactly as before, so no one is ever stranded and no old
                 message becomes unreadable.</p>
-              <p>One honest limit stays honest: this shrinks the key's footprint from <i>every</i>
+              <p data-i18n-html="one-honest-limit-stays.4b9eba">One honest limit stays honest: this shrinks the key's footprint from <i>every</i>
                 device to a single primary you choose. A fully compromised <i>primary</i> is still a
                 full compromise — the fix for that is rolling a new identity, same as before.</p>
             </div>
           </details>
         </div>
         <div class="card">
-          <h3 style="font-size:20px;margin-bottom:8px">Storage that stays under control</h3>
+          <h3 style="font-size:20px;margin-bottom:8px" data-i18n="storage-that-stays-under.91ee19">Storage that stays under control</h3>
           <ul class="points" style="margin-top:6px">
-            <li><span class="dot"></span><span><b>See what's taking space</b> — a cleanup screen lists everything you've downloaded, sorted by size.</span></li>
-            <li><span class="dot"></span><span>Delete to free space, and the post stays with a <b>placeholder you can re-download anytime</b> — nothing is really lost.</span></li>
-            <li><span class="dot"></span><span><b>"Keep on this device"</b> pins anything you never want swept away.</span></li>
-            <li><span class="dot"></span><span>Set limits by <b>age or size</b>, on your device and on a relay you run — and auto-delete now <b>really removes the media</b>, not just the post.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="see-what-s-taking.daec22"><b>See what's taking space</b> — a cleanup screen lists everything you've downloaded, sorted by size.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="delete-to-free-space.34bc0e">Delete to free space, and the post stays with a <b>placeholder you can re-download anytime</b> — nothing is really lost.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="keep-on-this-device.20b4d5"><b>"Keep on this device"</b> pins anything you never want swept away.</span></li>
+            <li><span class="dot"></span><span data-i18n-html="set-limits-by-age.3875e0">Set limits by <b>age or size</b>, on your device and on a relay you run — and auto-delete now <b>really removes the media</b>, not just the post.</span></li>
           </ul>
           <details class="tech">
-            <summary><span class="tag-tech">And a little more polish</span><span class="chev">›</span></summary>
+            <summary><span class="tag-tech" data-i18n="and-a-little-more.fd38ac">And a little more polish</span><span class="chev">›</span></summary>
             <div class="tbody">
-              <p>Video is compressed on posting to save space and data. Story styling — including how
+              <p data-i18n="video-is-compressed-on.023f2c">Video is compressed on posting to save space and data. Story styling — including how
                 photos and video are framed — now looks the same on every platform. And we closed a
                 location-metadata leak on video, so nothing about where a clip was taken rides along.</p>
             </div>
@@ -388,7 +397,7 @@
         </div>
       </div>
 
-      <div class="callout reveal" style="margin-top:18px">
+      <div class="callout reveal" style="margin-top:18px" data-i18n-html="also-shipping-out-in.40af1c">
         <b>Also shipping, out in the open:</b> the next generation of Haven's group encryption —
         forward secrecy and post-compromise security, on our <b>own post-quantum cryptography</b>
         (MLS-style, not a classical off-the-shelf standard). It's <b>enabled in this release</b> and
@@ -409,38 +418,38 @@
       <div class="card reveal" style="padding:32px 26px;background:var(--brand-soft)">
         <div class="grid cols-2" style="align-items:center;gap:24px">
           <div>
-            <span class="eyebrow">Want it even more reliable?</span>
-            <h2 style="font-size:clamp(23px,4vw,32px)">Be the bridge for your circle.</h2>
-            <p class="muted" style="margin-top:12px;font-size:16px">
+            <span class="eyebrow" data-i18n="want-it-even-more.8598a9">Want it even more reliable?</span>
+            <h2 style="font-size:clamp(23px,4vw,32px)" data-i18n="be-the-bridge-for.19efff">Be the bridge for your circle.</h2>
+            <p class="muted" style="margin-top:12px;font-size:16px" data-i18n-html="every-haven-app-can.ae0e5a">
               Every Haven app can be a relay: flip <b>“Be your circle's relay”</b> in Settings and your
               device quietly holds your circle's <em>sealed</em> messages for friends who are offline.
               No terminal, nothing to install.
             </p>
             <details class="tech">
-              <summary><span class="tag-tech">What your device is actually doing</span><span class="chev">›</span></summary>
+              <summary><span class="tag-tech" data-i18n="what-your-device-is.b0ba99">What your device is actually doing</span><span class="chev">›</span></summary>
               <div class="tbody">
-                <p>It runs reliably in the background, holding messages that stay end-to-end encrypted
+                <p data-i18n="it-runs-reliably-in.4d5f36">It runs reliably in the background, holding messages that stay end-to-end encrypted
                   with post-quantum cryptography it can never open — your device is a post box, not a
                   reader.</p>
-                <p>Leave a Mac or desktop app running and your whole circle gets more resilient.</p>
+                <p data-i18n="leave-a-mac-or.1a19e1">Leave a Mac or desktop app running and your whole circle gets more resilient.</p>
               </div>
             </details>
             <div class="btn-row" style="justify-content:flex-start">
-              <a class="btn" href="relay/">Turn yours on</a>
+              <a class="btn" href="relay/" data-i18n="turn-yours-on.b38e46">Turn yours on</a>
             </div>
           </div>
           <div class="card flat" style="padding:18px">
-            <p style="margin:0;font-size:15px"><b>1.</b> Open Haven on a device you leave running<br />
+            <p style="margin:0;font-size:15px" data-i18n-html="1-open-haven-on.fd0e3f"><b>1.</b> Open Haven on a device you leave running<br />
               <b>2.</b> Settings ▸ Relays → <b>“Be your circle's relay”</b><br />
               <b>3.</b> Done — friends' apps find it automatically</p>
             <details class="tech" style="margin-top:14px">
-              <summary>Prefer a terminal? The standalone relay</summary>
+              <summary data-i18n="prefer-a-terminal-the.d7aa2c">Prefer a terminal? The standalone relay</summary>
               <div class="copywrap" style="margin-top:10px">
-                <button class="copybtn" type="button">Copy</button>
+                <button class="copybtn" type="button" data-i18n="copy.af74f7">Copy</button>
                 <pre><code>curl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh
 haven-relay run --link "haven-relay://circle#…"</code></pre>
               </div>
-              <p class="dim" style="font-size:13px;margin:10px 4px 0">
+              <p class="dim" style="font-size:13px;margin:10px 4px 0" data-i18n="one-command-to-install.ae63ea">
                 One command to install, one to go live — for a Pi or server with no Haven app.
                 No ports, no domain, no cloud required.
               </p>
@@ -455,10 +464,10 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
   <section class="section tight">
     <div class="container">
       <div class="statrow reveal">
-        <div class="stat"><div class="n">0</div><div class="l">Servers holding your data</div></div>
-        <div class="stat"><div class="n">0</div><div class="l">Ads &amp; trackers</div></div>
-        <div class="stat"><div class="n">$0</div><div class="l">Monthly cost, ever</div></div>
-        <div class="stat"><div class="n">5</div><div class="l">Platforms, one circle</div></div>
+        <div class="stat"><div class="n">0</div><div class="l" data-i18n="servers-holding-your-data.09f482">Servers holding your data</div></div>
+        <div class="stat"><div class="n">0</div><div class="l" data-i18n="ads-trackers.563e28">Ads &amp; trackers</div></div>
+        <div class="stat"><div class="n">$0</div><div class="l" data-i18n="monthly-cost-ever.2116c4">Monthly cost, ever</div></div>
+        <div class="stat"><div class="n">5</div><div class="l" data-i18n="platforms-one-circle.07c5e7">Platforms, one circle</div></div>
       </div>
     </div>
   </section>
@@ -467,27 +476,27 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
   <section class="section tight" id="pricing">
     <div class="container">
       <div class="card reveal" style="max-width:820px;margin:0 auto;padding:clamp(28px,5vw,44px) clamp(22px,4vw,40px)">
-        <span class="eyebrow">$9.99 · one-time · yours</span>
-        <h2 style="font-size:clamp(24px,4vw,34px)">You're the customer, not the product.</h2>
-        <p class="muted" style="font-size:17px;margin-top:14px">
+        <span class="eyebrow" data-i18n="9-99-one-time.46703a">$9.99 · one-time · yours</span>
+        <h2 style="font-size:clamp(24px,4vw,34px)" data-i18n="you-re-the-customer.ec379a">You're the customer, not the product.</h2>
+        <p class="muted" style="font-size:17px;margin-top:14px" data-i18n-html="haven-is-a-one.e6119c">
           Haven is a <b>one-time $9.99 purchase</b> on the App&nbsp;Store, Google&nbsp;Play and the
           Microsoft&nbsp;Store — buy it once, own it, no subscription and no monthly cost, ever.
           <b>Linux is a free download</b> from the latest GitHub release; <b>Android is live on
           Google&nbsp;Play</b> and <b>Windows is live on the Microsoft&nbsp;Store</b>. Same one-time
           price wherever you get it.
         </p>
-        <p class="muted" style="font-size:17px;margin-top:14px">
+        <p class="muted" style="font-size:17px;margin-top:14px" data-i18n="that-price-is-the.36fa82">
           That price is the whole business model. When you pay for the app, your privacy is the
           product you're buying — not the thing being sold.
         </p>
         <!-- The elaboration people only want once the claim above has landed. -->
         <details class="tech">
-          <summary><span class="tag-tech">How a $9.99 app stays free of ads</span><span class="chev">›</span></summary>
+          <summary><span class="tag-tech" data-i18n="how-a-9-99.f577a4">How a $9.99 app stays free of ads</span><span class="chev">›</span></summary>
           <div class="tbody">
-            <p>Haven makes money from the purchase, <b>not</b> from ads, tracking, or selling your
+            <p data-i18n-html="haven-makes-money-from.185495">Haven makes money from the purchase, <b>not</b> from ads, tracking, or selling your
               data — because it holds no data to sell. No ads, no behavioral tracking, no analytics,
               no data harvesting.</p>
-            <p>It's also the only model that works here: Haven runs no central servers of its own to
+            <p data-i18n="it-s-also-the.0df987">It's also the only model that works here: Haven runs no central servers of its own to
               bill you for — your content lives on your devices, the push relay is blind and rides a
               free tier, and any storage relay is one you or a friend host. So there's no monthly bill
               to cover and nothing to monetise you for. A one-time price is what a peer-to-peer app
@@ -507,9 +516,9 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
   <section class="section" id="download">
     <div class="container">
       <div class="center reveal">
-        <span class="eyebrow">Now on the App&nbsp;Store</span>
-        <h2 style="font-size:clamp(26px,4.5vw,40px)">Get <span class="h-grad">Haven</span> on every screen</h2>
-        <p class="lead">iPhone, iPad &amp; Mac on the App&nbsp;Store; Android on Google&nbsp;Play; Windows on the Microsoft&nbsp;Store; Linux and Steam&nbsp;Deck straight from the latest release; a tiny relay for a Pi or server.</p>
+        <span class="eyebrow" data-i18n="now-on-the-app.9240af">Now on the App&nbsp;Store</span>
+        <h2 style="font-size:clamp(26px,4.5vw,40px)" data-i18n-html="get-haven-on-every.538cda">Get <span class="h-grad">Haven</span> on every screen</h2>
+        <p class="lead" data-i18n="iphone-ipad-mac-on.77ff36">iPhone, iPad &amp; Mac on the App&nbsp;Store; Android on Google&nbsp;Play; Windows on the Microsoft&nbsp;Store; Linux and Steam&nbsp;Deck straight from the latest release; a tiny relay for a Pi or server.</p>
       </div>
 
       <!-- Device lineup — the one place the non-Apple platforms get their own art. The iPhone
@@ -520,32 +529,32 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
           <img class="render" src="assets/renders/windows-feed.png?v=1"
                alt="Haven running on a Windows laptop — the circle feed in the desktop app"
                loading="lazy" width="1028" height="663" />
-          <figcaption>Windows</figcaption>
+          <figcaption data-i18n="windows.26d9c2">Windows</figcaption>
         </figure>
         <figure class="lu lu-hero" role="listitem">
           <img class="render" src="assets/renders/phone-feed.png?v=4"
                alt="Haven running on iPhone — the circle feed"
                loading="lazy" width="637" height="1320" />
-          <figcaption>iPhone &amp; iPad</figcaption>
+          <figcaption data-i18n="iphone-ipad.0e7acd">iPhone &amp; iPad</figcaption>
         </figure>
         <figure class="lu lu-phone" role="listitem">
           <img class="render" src="assets/renders/android-feed.png?v=1"
                alt="Haven running on an Android phone — the circle feed"
                loading="lazy" width="440" height="927" />
-          <figcaption>Android</figcaption>
+          <figcaption data-i18n="android.1928f9">Android</figcaption>
         </figure>
         <figure class="lu lu-lap" role="listitem">
           <img class="render" src="assets/renders/linux-feed.png?v=1"
                alt="Haven running on a Linux laptop — the circle feed in the desktop app"
                loading="lazy" width="1028" height="663" />
-          <figcaption>Linux</figcaption>
+          <figcaption data-i18n="linux.83ad85">Linux</figcaption>
         </figure>
       </div>
 
       <div class="dl-grid reveal" id="download-grid" aria-live="polite">
-        <p class="muted center" id="download-loading">Loading the latest release…</p>
+        <p class="muted center" id="download-loading" data-i18n="loading-the-latest-release.c289a9">Loading the latest release…</p>
       </div>
-      <p class="muted small center" style="margin-top:16px">
+      <p class="muted small center" style="margin-top:16px" data-i18n-html="android-is-live-on.6384b9">
         Android is live on Google&nbsp;Play; Windows is live on the Microsoft&nbsp;Store.
         The Linux desktop, Steam&nbsp;Deck &amp; relay builds come from the
         <a class="inline" id="download-release-link" href="https://github.com/blaineam/haven/releases/latest" rel="noopener">latest GitHub release</a>
@@ -556,11 +565,11 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
 
   <section class="section center">
     <div class="container reveal">
-      <h2 style="font-size:clamp(28px,5vw,44px)">A smaller, kinder internet —<br /><span class="h-grad">just for your people.</span></h2>
-      <p class="lead">Bring your circle home to Haven.</p>
+      <h2 style="font-size:clamp(28px,5vw,44px)" data-i18n-html="a-smaller-kinder-internet.c056c2">A smaller, kinder internet —<br /><span class="h-grad">just for your people.</span></h2>
+      <p class="lead" data-i18n="bring-your-circle-home.f1f40e">Bring your circle home to Haven.</p>
       <div class="btn-row">
-        <a class="btn" href="#download">Get Haven</a>
-        <a class="btn ghost" href="https://github.com/blaineam/haven" rel="noopener">View the source on GitHub</a>
+        <a class="btn" href="#download" data-i18n="get-haven.1a671e">Get Haven</a>
+        <a class="btn ghost" href="https://github.com/blaineam/haven" rel="noopener" data-i18n="view-the-source-on.e1be36">View the source on GitHub</a>
       </div>
     </div>
   </section>
@@ -571,34 +580,34 @@ haven-relay run --link "haven-relay://circle#…"</code></pre>
     <div class="foot-grid">
       <div>
         <a class="brand" href="./">Haven</a>
-        <p class="blurb">A private, peer-to-peer, end-to-end-encrypted social app for your close circle. No central server, no ads, no tracking.</p>
+        <p class="blurb" data-i18n="a-private-peer-to.754370">A private, peer-to-peer, end-to-end-encrypted social app for your close circle. No central server, no ads, no tracking.</p>
         <div class="platforms" style="justify-content:flex-start">
-          <span class="pill">iOS</span><span class="pill">macOS</span><span class="pill">Android</span>
-          <span class="pill">Windows</span><span class="pill">Linux</span>
+          <span class="pill">iOS</span><span class="pill">macOS</span><span class="pill" data-i18n="android.1928f9">Android</span>
+          <span class="pill" data-i18n="windows.26d9c2">Windows</span><span class="pill" data-i18n="linux.83ad85">Linux</span>
         </div>
       </div>
       <div>
-        <h5>Product</h5>
-        <a href="features/">Features</a>
-        <a href="relay/">Relays</a>
-        <a href="#privacy">Privacy</a>
-        <a href="docs/">Documentation</a>
+        <h5 data-i18n="product.dd3b86">Product</h5>
+        <a href="features/" data-i18n="features.fc338f">Features</a>
+        <a href="relay/" data-i18n="relays.a239ca">Relays</a>
+        <a href="#privacy" data-i18n="privacy.cf0148">Privacy</a>
+        <a href="docs/" data-i18n="documentation.9e9cf3">Documentation</a>
       </div>
       <div>
-        <h5>Learn more</h5>
-        <a href="docs/#architecture">How it works</a>
-        <a href="docs/#threat">Threat model</a>
-        <a href="docs/#cost">Operating costs</a>
-        <a href="relay/#byo">Bring your own storage</a>
+        <h5 data-i18n="learn-more.824d76">Learn more</h5>
+        <a href="docs/#architecture" data-i18n="how-it-works.1dd6a1">How it works</a>
+        <a href="docs/#threat" data-i18n="threat-model.eb9233">Threat model</a>
+        <a href="docs/#cost" data-i18n="operating-costs.d2d6be">Operating costs</a>
+        <a href="relay/#byo" data-i18n="bring-your-own-storage.31e6d3">Bring your own storage</a>
       </div>
       <div>
-        <h5>Project</h5>
-        <a href="https://github.com/blaineam/haven" rel="noopener">GitHub repo ↗</a>
-        <a href="https://github.com/blaineam/haven/tree/main/docs" rel="noopener">Technical docs ↗</a>
-        <a href="https://github.com/blaineam/haven/tree/main/relay" rel="noopener">Relay tooling ↗</a>
+        <h5 data-i18n="project.f6f4da">Project</h5>
+        <a href="https://github.com/blaineam/haven" rel="noopener" data-i18n="github-repo.5ec5f3">GitHub repo ↗</a>
+        <a href="https://github.com/blaineam/haven/tree/main/docs" rel="noopener" data-i18n="technical-docs.a67b2e">Technical docs ↗</a>
+        <a href="https://github.com/blaineam/haven/tree/main/relay" rel="noopener" data-i18n="relay-tooling.3c7113">Relay tooling ↗</a>
       </div>
     </div>
-    <p class="legal">
+    <p class="legal" data-i18n="made-with-care-for.6c5857">
       Made with care for the people you love. Haven holds no keys and keeps no copy of your content — your circle is yours alone.
     </p>
   </div>

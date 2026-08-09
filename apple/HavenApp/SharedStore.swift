@@ -142,9 +142,20 @@ final class MediaBackupQueue {
         draining = true
         Task { @MainActor in
             // Keep the upload alive after the app backgrounds (iOS suspends otherwise). No-op on macOS.
+            // Always install an expirationHandler: without one, a hung PUT holds the assertion until
+            // iOS kills the process — and every second of that window is "Background" battery.
             #if canImport(UIKit)
-            let bgId = UIApplication.shared.beginBackgroundTask(withName: "haven.media-backup")
-            defer { if bgId != .invalid { UIApplication.shared.endBackgroundTask(bgId) } }
+            var bgId: UIBackgroundTaskIdentifier = .invalid
+            bgId = UIApplication.shared.beginBackgroundTask(withName: "haven.media-backup") {
+                let id = bgId
+                bgId = .invalid
+                if id != .invalid { UIApplication.shared.endBackgroundTask(id) }
+            }
+            defer {
+                let id = bgId
+                bgId = .invalid
+                if id != .invalid { UIApplication.shared.endBackgroundTask(id) }
+            }
             #endif
             // BUDGETED pass. A Mac hosting a circle relay with a large library used to seal+upload
             // every pending ref in one go (videos × 2 in RAM) → multi‑GB footprint and beachball.
@@ -242,11 +253,26 @@ final class MediaBackupQueue {
             let queuedRefs = (pending + priorityPending).map(\.ref)
             let anyDueNow = !queuedRefs.isEmpty && MediaBackupBackoff.earliestDue(queuedRefs) == nil
             if anyDueNow {
+                #if os(iOS)
+                // Pocketed: ONE budgeted pass per wake, then stop. Chaining 2s re-arms here is how a
+                // non-empty backlog held a UIApplication assertion for hours (Settings → Battery →
+                // Background 2h+ with zero activity). Foreground timer / next push / BGAppRefresh
+                // re-drives the queue; backfill does not need to finish in the pocket.
+                if !FeedStore.shared.appIsForeground {
+                    HavenLog.sync("media-backup: background — one pass done, not re-arming (\(queuedRefs.count) still queued)")
+                } else {
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        MediaBackupQueue.shared.drainPersisted(social: social)
+                    }
+                }
+                #else
                 // Continue later without stacking concurrent drains.
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     MediaBackupQueue.shared.drainPersisted(social: social)
                 }
+                #endif
             } else if !queuedRefs.isEmpty {
                 HavenLog.sync("media-backup idle — \(queuedRefs.count) ref(s) all in backoff; the 2-min sweep will re-drive them")
             }

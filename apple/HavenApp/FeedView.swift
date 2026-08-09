@@ -339,14 +339,25 @@ final class FeedStore: ObservableObject {
     func setForeground(_ on: Bool) {
         guard appIsForeground != on else { return }
         appIsForeground = on
-        // Foregrounding is activity — you came back to look at something.
-        //
-        // Backgrounding deliberately does NOTHING to the schedule. The next heartbeat recomputes the
-        // interval with `appIsForeground` false, so the full stretch applies from then on its own;
-        // pushing the due time out here would only duplicate `pollBaseMs` (which is a DIFFERENT
-        // value on macOS) into a second place to drift. It also lets one already-due poll finish
-        // before we go quiet, which is the right last act on the way out.
-        if on { bumpActivity() }
+        if on {
+            // Foregrounding is activity — you came back to look at something.
+            bumpActivity()
+            return
+        }
+        #if os(iOS)
+        // HARD PARK while pocketed. Stretching the idle multipliers was not enough: any wake that
+        // holds a UIApplication background-task assertion (media-backup drain, upload flush,
+        // content-available push, BGAppRefresh) also keeps the main runloop alive, so the 15s/30s
+        // heartbeats keep firing and re-arm hello fan-out + mailbox LIST for the whole assertion
+        // window. That is how Settings shows hours of Background activity with zero real messages
+        // — the phone was never permitted to suspend. Park Multipeer immediately, and push the
+        // timer due-gates so far out that heartbeats become pure integer compares until we are
+        // frontmost again. Push + BGAppRefresh call `slimBackgroundSync` / `pollMailboxNow`
+        // directly and do not need the timers.
+        nearby?.parkDiscovery()
+        nextPollDueMs = UInt64.max / 2
+        nextSyncDueMs = UInt64.max / 2
+        #endif
     }
 
     /// How long until the next MAILBOX poll — deliberately not `adaptiveInterval`.
@@ -674,6 +685,11 @@ final class FeedStore: ObservableObject {
         mailboxTimer = Timer.scheduledTimer(withTimeInterval: pollHeartbeat, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                #if os(iOS)
+                // Pocketed → timers are parked. Push / BGAppRefresh own background delivery.
+                // (An active call still needs the live-call timer, which is a separate arm.)
+                guard self.appIsForeground else { return }
+                #endif
                 guard self.now() >= self.nextPollDueMs else { return }
                 #if os(iOS)
                 // When seriously hot, park mailbox LIST entirely until thermal recovers or a push wakes us.
@@ -2147,6 +2163,11 @@ final class FeedStore: ObservableObject {
         syncTimer = Timer.scheduledTimer(withTimeInterval: syncHeartbeat, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                #if os(iOS)
+                // Pocketed → no hello fan-out, no media backfill sweep, no Multipeer. Those are
+                // foreground work; background delivery is push + slimBackgroundSync only.
+                guard self.appIsForeground else { return }
+                #endif
                 guard self.now() >= self.nextSyncDueMs else { return }
                 // Re-read host state: user may have toggled relay after timer start.
                 #if os(macOS)
@@ -3217,6 +3238,13 @@ final class FeedStore: ObservableObject {
     private var lastSyncContactsMs: UInt64 = 0
 
     func syncWithContacts(force: Bool = false) {
+        #if os(iOS)
+        // Pocketed: never fan hello/roster. Event-driven callers (relay learned, fabric rebind,
+        // member change) used to bypass the timer gate and keep the radio warm under a leftover
+        // background assertion — same battery symptom as the timer heartbeats. User-forced
+        // (force: true from Connect UI) is only reachable while frontmost.
+        if !appIsForeground && !force { return }
+        #endif
         let nowMsFloor = now()
         if !force, lastSyncContactsMs != 0,
            nowMsFloor &- lastSyncContactsMs < Self.syncContactsFloorMs {
@@ -4010,18 +4038,50 @@ final class FeedStore: ObservableObject {
         refresh(); requestMissingMedia()
     }
 
-    /// SLIM background sync for BG-refresh wakes: push-inbox drain + a mailbox-only pull + the
-    /// upload-queue flush. Deliberately NO Multipeer nudge and NO hello/roster fan-out — those
-    /// are foreground work that just cooked the SoC in a 30s pocket wake. Returns whether
-    /// anything new arrived so the caller can end the window early on an empty poll.
+    /// SLIM background sync for BG-refresh and content-available push wakes: push-inbox drain +
+    /// a mailbox-only pull + one upload-queue pass. Deliberately NO Multipeer nudge and NO
+    /// hello/roster fan-out — those are foreground work that just cooked the SoC in a pocket wake.
+    /// Returns whether anything new arrived so the caller can end the window early on an empty poll
+    /// (the common case with zero activity is a quick no-op).
     @discardableResult
     func slimBackgroundSync() async -> Bool {
         ingestPushInbox()
-        consumePushHints()
-        guard let social else { return false }
-        let got = await pullMailbox(circleIds: circles.map(\.id))
-        MediaBackupQueue.shared.drainPersisted(social: social)   // upload-queue flush (media half)
-        return got > 0
+        // Hints: process in THIS task. The general `consumePushHints` spawns fire-and-forget work
+        // that can outlive setTaskCompleted / fetchCompletionHandler and keep the process warm
+        // after we told iOS we were done — the opposite of a quick no-op wake.
+        let hints = SharedPushHints.drain()
+        let known = Set(circles.map(\.id))
+        let hintedCids = Array(Set(hints.map(\.c)).intersection(known))
+        var gotFromHints = 0
+        if !hints.isEmpty {
+            var fetched: [(cid: String, key: String, env: Data)] = []
+            for h in hints.prefix(32) {
+                guard known.contains(h.c), let mk = h.mk, !mk.isEmpty else { continue }
+                if let data = await SharedStore.fetchMailboxKey(circleId: h.c, key: mk) {
+                    fetched.append((cid: h.c, key: mk, env: data))
+                }
+            }
+            if !fetched.isEmpty {
+                await ingestHintedEnvelopes(fetched)
+                gotFromHints = fetched.count
+            }
+            for h in hints {
+                for ref in (h.mr ?? []).prefix(8)
+                    where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) {
+                    MediaFetchBackoff.clear(ref)
+                    fastReq[ref] = nil
+                    requestMedia(ref, circleId: known.contains(h.c) ? h.c : nil)
+                }
+            }
+        }
+        guard social != nil else { return gotFromHints > 0 }
+        // Prefer hinted circles first, then a full sweep so a banner-only push (no mk) still lands.
+        let all = circles.map(\.id)
+        let ordered = hintedCids + all.filter { !hintedCids.contains($0) }
+        let got = await pullMailbox(circleIds: ordered.isEmpty ? all : ordered)
+        // One media-backup pass only — drain itself refuses to re-arm while backgrounded.
+        if let social { MediaBackupQueue.shared.drainPersisted(social: social) }
+        return got > 0 || gotFromHints > 0
     }
 
     func pollMailboxNow() {

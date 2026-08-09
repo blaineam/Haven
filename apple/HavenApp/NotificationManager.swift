@@ -86,19 +86,21 @@ final class NotificationManager {
     private func handleRefresh(_ task: BGAppRefreshTask) {
         scheduleRefresh()   // chain the next wake
         let work = Task { @MainActor in
+            // Always complete exactly once — even when the expiration handler cancels us.
+            defer { task.setTaskCompleted(success: !Task.isCancelled) }
             await BackgroundUploader.shared.flush()   // finish any posts that didn't reach the mailbox
             // SLIM background sync — NOT forceSync. A BG-refresh window is ~30s of battery the
             // system lends us while the phone is pocketed: bringing up Multipeer discovery and
             // fanning hello+roster to every contact there was pure heat with nobody to answer.
             // Push-inbox drain + a mailbox-only pull + the upload-queue flush is the whole point
-            // of the wake; when the poll comes back empty we end the window early instead of
-            // idling out the full grant.
+            // of the wake; when the poll comes back empty we end the window EARLY (quick no-op)
+            // instead of idling out the full grant — that was part of "Haven ran 2h in Background".
             let gotSomething = await FeedStore.shared.slimBackgroundSync()
-            if gotSomething {
-                // Give ingest side effects (banner posting, sibling fan-out) a short window.
-                try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if gotSomething && !Task.isCancelled {
+                // Give ingest side effects (banner posting, sibling fan-out) a short window —
+                // still far shorter than sitting on the full BG grant.
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
-            task.setTaskCompleted(success: !Task.isCancelled)
         }
         task.expirationHandler = { work.cancel() }
     }

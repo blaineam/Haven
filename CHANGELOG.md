@@ -9,6 +9,28 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-08-09
+
+### Fixed — Apple (battery)
+
+- **Haven ran for hours in the Background with zero activity.** Settings → Battery showed multi-hour
+  Background time while nothing was happening in the circle. Three things stacked:
+
+  1. Every `content-available` push wake (including the storage-owner remint cron) called
+     `forceSync()` — Multipeer discovery for ~45s plus hello/roster fan-out to every contact — and
+     always reported `.newData`, so iOS never treated the wake as empty.
+  2. Backgrounding only *stretched* the idle timers. Any leftover `UIApplication` assertion (media
+     backup drain, envelope flush) kept the main runloop alive, so the 15s/30s heartbeats kept
+     LISTing and fanning out for the whole assertion window.
+  3. The media-backup drain could re-arm every 2s while pocketed whenever the backlog was non-empty,
+     holding a background-task assertion each pass. Background tasks also had no expiration handler.
+
+  Now: hard-park Multipeer and park timer due-gates on background; mailbox/sync timers and
+  `syncWithContacts` no-op while pocketed; push and BGAppRefresh use `slimBackgroundSync` only
+  (inbox + mailbox pull + one upload pass) and report `.noData` on an empty poll so the process can
+  suspend immediately; remint-only cron does not sync; media backup does one budgeted pass while
+  pocketed and does not re-arm; upload drains install expiration handlers.
+
 ### Fixed — Apple + Android + Desktop + relay core
 
 - **A large video could get permanently stuck at "No longer available", with the original sitting on

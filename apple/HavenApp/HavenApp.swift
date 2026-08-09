@@ -76,11 +76,27 @@ final class HavenAppDelegate: NSObject, UIApplicationDelegate {
         if let ev = userInfo["ev"] as? String, let env = Data(base64Encoded: ev) {
             SharedInbox.append(env: env)
         }
-        // The storage-owner cron nudge → re-mint fresh pre-signed URLs in the background.
-        if userInfo["remint"] != nil {
-            Task { @MainActor in PresignStore.shared.remintAllOwned() }
+        let remint = userInfo["remint"] != nil
+        // Remint-only cron: no content to fetch — do not open Multipeer or fan hello. That path used
+        // to call forceSync() and always report .newData, so a nightly URL refresh looked like hours
+        // of "Background" work with zero messages.
+        let contentWake = userInfo["ev"] != nil || userInfo["e"] != nil
+            || userInfo["call"] != nil || !remint
+        Task { @MainActor in
+            if remint { PresignStore.shared.remintAllOwned() }
+            // Already on screen → the live timers own delivery; don't stack another full wake.
+            if PlatformApp.isActive {
+                if contentWake { FeedStore.shared.syncBecauseOfPush() }
+                completionHandler(contentWake ? .newData : .noData)
+                return
+            }
+            // SLIM only. forceSync opens Multipeer for ~45s and fans hello+roster to every contact
+            // — pure heat on a pocket content-available wake. Empty poll → .noData so iOS can
+            // suspend us immediately; new data → short finish then done.
+            await BackgroundUploader.shared.flush()
+            let got = contentWake ? await FeedStore.shared.slimBackgroundSync() : false
+            completionHandler(got ? .newData : .noData)
         }
-        Task { @MainActor in FeedStore.shared.forceSync(); completionHandler(.newData) }
     }
 }
 #else
@@ -248,7 +264,10 @@ struct HavenApp: App {
                 let cid = FeedStore.shared.activeCircleId
                 if BiometricGate.shared.isLocked(cid) { BiometricGate.shared.unlock(cid) }
             case .background:
-                FeedStore.shared.setForeground(false)   // back to the full idle stretch — nobody is watching
+                // Hard-parks Multipeer + timer-driven radio (see FeedStore.setForeground). Without
+                // that park, any leftover UIApplication assertion kept the 15s/30s heartbeats firing
+                // in the pocket and Settings reported hours of Background with no messages.
+                FeedStore.shared.setForeground(false)
                 #if os(iOS)
                 SilentSwitch.stopMonitoring()   // no reason to keep probing off-screen
                 #endif
@@ -263,7 +282,9 @@ struct HavenApp: App {
                 // rest of the app's life; foregrounding again re-asserts it if a call really is up.
                 CallManager.shared.syncIdleTimer()
                 SharedStore.flushSeenMailbox()     // persist the ingestion cursor NOW (survive a kill)
-                Task { await BackgroundUploader.shared.flush() }   // finish pending mailbox uploads
+                // One short flush of authored envelopes still in the queue — then suspend. Media
+                // backup does its own single budgeted pass (no 2s re-arm while pocketed).
+                Task { await BackgroundUploader.shared.flush() }
             default: break
             }
         }

@@ -56,14 +56,32 @@ final class BackgroundUploader {
 
         // iOS suspends the app shortly after backgrounding; a background-task assertion keeps the
         // upload alive long enough to finish. macOS apps aren't suspended this way — no-op there.
+        // Expiration handler is mandatory: a hung relay PUT must not pin the process (and the
+        // battery meter) until the system force-kills us.
         #if canImport(UIKit)
-        let bgId = UIApplication.shared.beginBackgroundTask(withName: "haven.upload")
-        defer { if bgId != .invalid { UIApplication.shared.endBackgroundTask(bgId) } }
+        var bgId: UIBackgroundTaskIdentifier = .invalid
+        bgId = UIApplication.shared.beginBackgroundTask(withName: "haven.upload") {
+            let id = bgId
+            bgId = .invalid
+            if id != .invalid { UIApplication.shared.endBackgroundTask(id) }
+        }
+        defer {
+            let id = bgId
+            bgId = .invalid
+            if id != .invalid { UIApplication.shared.endBackgroundTask(id) }
+        }
         #endif
 
         let work = queue
         var stillPending: [Pending] = []
-        for item in work {
+        for (i, item) in work.enumerated() {
+            #if canImport(UIKit)
+            // System revoked our time — leave this item and the rest queued for the next wake.
+            if bgId == .invalid {
+                stillPending.append(contentsOf: work[i...])
+                break
+            }
+            #endif
             let ok = await SharedStore.uploadEvent(circleId: item.circleId, env: item.env)
             if !ok { stillPending.append(item) }
         }

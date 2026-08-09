@@ -13,7 +13,7 @@ packages:
   # Shared feedback / rating / "other apps" kit (Libraries/MillerKit).
   MillerKit:
     url: https://github.com/blaineam/MillerKit
-    from: "1.0.0"
+    from: "1.1.0"
   # Prebuilt WebRTC binary (libwebrtc) for reliable E2EE audio/video calls. Signaling rides
   # Haven's own sealed channel; media is DTLS-SRTP peer-to-peer.
   WebRTC:

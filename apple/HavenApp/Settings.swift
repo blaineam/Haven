@@ -416,6 +416,10 @@ struct SettingsView: View {
 
                 SupportSection(app: .haven)
                 LoveThisAppSection(app: .haven)
+                // Settings carried no version or privacy row. AboutSection reads
+                // the version from the app bundle (iOS and macOS alike) and links
+                // the one policy URL.
+                AboutSection(app: .haven)
             }
             .formStyle(.grouped)   // grouped sections (not macOS right-aligned columns)
             .scrollContentBackground(.hidden)

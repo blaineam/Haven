@@ -34,14 +34,11 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Offerta lancio — 50% fino al 30 settembre: 4,99 $, poi 9,99 $. Casa privata e crittografata end‑to‑end per i tuoi cari. Niente pubblicità né tracciamento, peer‑to‑peer.
 
 ## whats_new
-1.4.0 — Haven nella tua lingua.
+1.4.2 — Batteria: niente più ore in Background a vuoto.
 
-• Localizzazione completa in sei lingue: giapponese, tedesco, spagnolo, coreano, portoghese (Brasile) e italiano — tutta l'app, su iPhone, iPad e Mac.
-• Nuova sezione Feedback e supporto: contatta direttamente lo sviluppatore dalle Impostazioni e lascia una valutazione con un invito discreto, senza uscire dall'app.
-• Toccando una riga dell'attività o una notifica su una reazione o una risposta a un tuo commento si apre ora il post a cui appartiene, con quel commento evidenziato.
-• Affidabilità dei contenuti multimediali: risolto un caso in cui un file di grandi dimensioni suddiviso in blocchi poteva diventare irraggiungibile per sempre.
-• Rifiniture e miglioramenti di affidabilità su tutte le piattaforme.
-
+• Risolto: Haven poteva restare attiva per ore in Background senza messaggi né attività nel cerchio. Un risveglio a freddo da push o aggiornamento in background non esegue più l’intero percorso di sync/Multipeer in primo piano.
+• Con il telefono in tasca, timer e discovery nelle vicinanze si parcheggiano subito così iOS può sospendere l’app dopo un poll vuoto rapido.
+• Continua il lavoro batteria di 1.4.1 (wake push snelli, niente loop di re-arm del backup media in tasca).
 ## marketing_url
 https://wemiller.com/apps/haven/
 

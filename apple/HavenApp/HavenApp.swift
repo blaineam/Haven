@@ -83,6 +83,10 @@ final class HavenAppDelegate: NSObject, UIApplicationDelegate {
         let contentWake = userInfo["ev"] != nil || userInfo["e"] != nil
             || userInfo["call"] != nil || !remint
         Task { @MainActor in
+            // Pocketed process wake (incl. cold launch with no scenePhase): hard-park timers /
+            // Multipeer before any work. Without this, appIsForeground stayed true and heartbeats
+            // kept the radio warm for the whole assertion window.
+            FeedStore.shared.syncForegroundFromSystem()
             if remint { PresignStore.shared.remintAllOwned() }
             // Already on screen → the live timers own delivery; don't stack another full wake.
             if PlatformApp.isActive {

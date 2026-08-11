@@ -9,6 +9,23 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.4.2] — 2026-08-11
+
+### Fixed — Apple (battery)
+
+- **The 1.4.1 battery park still left a door open on cold background launches.** Settings → Battery
+  could still show multi-hour Background time with zero circle activity after the 1.4.1 fix shipped
+  in build 470. Root cause: `FeedStore.appIsForeground` defaulted to `true`, and a pure background
+  launch (content-available push, VoIP, BGAppRefresh after the process was killed) never fires a
+  `scenePhase` `onChange` — so `setForeground(false)` never ran, the 15s/30s heartbeats kept the
+  "on screen" cadence, Multipeer still opened a discovery window, and the daily mailbox re-assert
+  could seal+upload under a background assertion. Same trap `AudioCoordinator` already fixed for
+  silent overnight music.
+
+  Now: seed `appIsForeground` from `UIApplication.applicationState`; re-sync at configure, remote-
+  notification, and BGAppRefresh entry; skip Multipeer discovery + daily backfill + immediate
+  self-sync fan-out on pocket boots; re-nudge Multipeer only when the user is actually frontmost.
+
 ## [1.4.1] — 2026-08-09
 
 ### Fixed — Apple (battery)

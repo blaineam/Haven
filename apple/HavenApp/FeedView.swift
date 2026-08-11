@@ -332,7 +332,23 @@ final class FeedStore: ObservableObject {
     /// But it measures INTERACTION, not attention: reading the feed without touching it for 30
     /// seconds is "idle", and someone watching the screen waiting for a reply is the most idle user
     /// there is. See `mailboxPollInterval` for what that costs and why the two cadences now differ.
+    ///
+    /// **Default from the real application state.** A background LAUNCH (content-available push,
+    /// VoIP, BGAppRefresh after the process was killed) never fires a `scenePhase` `onChange` — the
+    /// system builds the engine with no UI — so a hard-coded `true` left every timer guard and the
+    /// Multipeer boot path believing we were on screen. That is how Settings still showed multi-hour
+    /// Background time after the 1.4.1 park: parks only run when `setForeground(false)` is called,
+    /// and on a pure background launch it never was. Same trap AudioCoordinator already fixed.
+    #if os(iOS)
+    private(set) var appIsForeground: Bool = {
+        // `UIApplication` is ready by the time FeedStore is first touched (delegate launch /
+        // SwiftUI body). `.inactive` (e.g. Control Center over us) still counts as "on screen"
+        // for our purposes — only `.background` is pocketed.
+        UIApplication.shared.applicationState != .background
+    }()
+    #else
     private(set) var appIsForeground = true
+    #endif
 
     /// Foreground/background transition. Foregrounding also counts as activity — you just came back
     /// to look at something.
@@ -340,8 +356,13 @@ final class FeedStore: ObservableObject {
         guard appIsForeground != on else { return }
         appIsForeground = on
         if on {
-            // Foregrounding is activity — you came back to look at something.
+            // Foregrounding is activity — you just came back to look at something.
             bumpActivity()
+            #if os(iOS)
+            // Background launches never open Multipeer (see bringOnline). Give nearby a short
+            // discovery window now that someone is actually looking — same 12s budget as cold start.
+            nearby?.nudgeDiscovery(parkAfter: 12)
+            #endif
             return
         }
         #if os(iOS)
@@ -357,6 +378,17 @@ final class FeedStore: ObservableObject {
         nearby?.parkDiscovery()
         nextPollDueMs = UInt64.max / 2
         nextSyncDueMs = UInt64.max / 2
+        #endif
+    }
+
+    /// Re-read `UIApplication.applicationState` and park if we are pocketed. Call at the top of
+    /// every background entry point that can boot the engine without a scenePhase transition
+    /// (remote-notification, BGAppRefresh, VoIP launch → configure). Cheap no-op when already parked
+    /// or actually frontmost.
+    func syncForegroundFromSystem() {
+        #if os(iOS)
+        let front = UIApplication.shared.applicationState != .background
+        setForeground(front)
         #endif
     }
 
@@ -520,6 +552,9 @@ final class FeedStore: ObservableObject {
 
     func configure(mode: BootMode) {
         guard social == nil else { return }
+        // Background launch never gets scenePhase — pin the flag from the system before any
+        // Multipeer / timer / daily-backfill work below can treat a pocket wake as "on screen".
+        syncForegroundFromSystem()
         let seedless: Bool
         switch mode {
         case .seeded(let seed):
@@ -606,7 +641,11 @@ final class FeedStore: ObservableObject {
         // launch. One real circle had accumulated ~6700 mailbox entries for 88 events, and every
         // cold start re-pulled + re-verified all of them — the 30-second circle-feed cold start.
         // New-relay adoption and share-history still backfill immediately (their own call sites).
-        dailyMailboxRefreshIfDue()
+        // Daily full-history re-assert is foreground work: on a pocket wake it is a multi-minute
+        // seal+upload storm under a background assertion. Push / slimBackgroundSync cover delivery.
+        if appIsForeground {
+            dailyMailboxRefreshIfDue()
+        }
         Task { await BackgroundUploader.shared.flush() }   // retry any posts that didn't reach the mailbox
         ScheduledStore.shared.start()   // fire any "send later" posts/DMs whose time has come
     }
@@ -664,8 +703,18 @@ final class FeedStore: ObservableObject {
                 }
             }
         }
-        forceSelfSyncNextPoll()
-        pollMailboxNow()
+        // Foreground cold start: pull immediately so the open feed is not empty. Background launch
+        // (push / BGAppRefresh) lets the caller drive a single slimBackgroundSync / pollMailboxNow
+        // and then suspend — starting a full self-sync fan-out here re-opens the heat path.
+        if appIsForeground {
+            forceSelfSyncNextPoll()
+            pollMailboxNow()
+        } else {
+            // Park due-gates so the heartbeats we arm below are pure integer compares until
+            // setForeground(true). (They also early-return on !appIsForeground.)
+            nextPollDueMs = UInt64.max / 2
+            nextSyncDueMs = UInt64.max / 2
+        }
         // 10s heartbeat, but the actual poll only runs when due (30s base, stretching when idle).
         #if os(iOS)
         // 45s base. Push + activity still force a poll immediately; idle LIST is pure heat.
@@ -1869,16 +1918,24 @@ final class FeedStore: ObservableObject {
                 // if nobody connects. Live sessions keep working; send path is rate-limited so neither
                 // side can flood (Mac→iPhone history dump was the field heat source).
                 #if os(iOS)
-                // Very short discovery — if Mac isn't nearby in 12s, park Bonjour. Continuous
-                // Multipeer advertise/browse on launch was a top field heat source (phone scorch).
-                // User forceSync / peer-left still re-opens a short window.
-                switch ProcessInfo.processInfo.thermalState {
-                case .fair, .serious, .critical:
-                    // Already warm: don't even start discovery; internet + mailbox cover delivery.
-                    nt.start(parkAfter: 1)
-                    nt.parkDiscovery()
-                default:
-                    nt.start(parkAfter: 12)
+                // Pocketed cold launch (push / BGAppRefresh / VoIP): do NOT open Multipeer at all.
+                // A 12s discovery window under a background-task assertion is pure heat with nobody
+                // looking, and is exactly the "hours of Background with zero activity" symptom when
+                // combined with timers that still thought we were foreground (see appIsForeground).
+                // Foregrounding nudges discovery; forceSync / peer-left still re-open a short window.
+                if appIsForeground {
+                    // Very short discovery — if Mac isn't nearby in 12s, park Bonjour. Continuous
+                    // Multipeer advertise/browse on launch was a top field heat source (phone scorch).
+                    switch ProcessInfo.processInfo.thermalState {
+                    case .fair, .serious, .critical:
+                        // Already warm: don't even start discovery; internet + mailbox cover delivery.
+                        nt.start(parkAfter: 1)
+                        nt.parkDiscovery()
+                    default:
+                        nt.start(parkAfter: 12)
+                    }
+                } else {
+                    HavenLog.net("nearby: skipped discovery — background launch")
                 }
                 #else
                 // Host Mac: shorter window than 120s — Multipeer + CF tunnel + engine lock was

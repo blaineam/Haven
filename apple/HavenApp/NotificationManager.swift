@@ -88,6 +88,9 @@ final class NotificationManager {
         let work = Task { @MainActor in
             // Always complete exactly once — even when the expiration handler cancels us.
             defer { task.setTaskCompleted(success: !Task.isCancelled) }
+            // Cold BGAppRefresh never gets scenePhase — park before any work so timers/Multipeer
+            // don't run the foreground cadence under the refresh assertion.
+            FeedStore.shared.syncForegroundFromSystem()
             await BackgroundUploader.shared.flush()   // finish any posts that didn't reach the mailbox
             // SLIM background sync — NOT forceSync. A BG-refresh window is ~30s of battery the
             // system lends us while the phone is pocketed: bringing up Multipeer discovery and

@@ -34,14 +34,11 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Launch-Sale – bis 30. September 50 % Rabatt: 4,99 $, danach 9,99 $. Ein privates, Ende-zu-Ende verschlüsseltes Zuhause für deine Liebsten. Werbefrei, Peer-to-Peer.
 
 ## whats_new
-1.4.0 – Haven in deiner Sprache.
+1.4.2 – Akku: kein stundenlanger Hintergrund-Betrieb mehr.
 
-• Vollständige Lokalisierung in sechs Sprachen: Japanisch, Deutsch, Spanisch, Koreanisch, Portugiesisch (Brasilien) und Italienisch – die gesamte App, auf iPhone, iPad und Mac.
-• Neu: Feedback & Support. Schreib der Entwicklung direkt aus den Einstellungen – und bewerte die App ganz unaufdringlich in der App selbst.
-• Aktivitätszeilen und Mitteilungen zu Reaktionen oder Antworten auf deine Kommentare öffnen jetzt den zugehörigen Beitrag – mit dem markierten Kommentar.
-• Zuverlässigere Medien: Ein Fehler wurde behoben, durch den große, in Teilen übertragene Dateien dauerhaft unerreichbar werden konnten.
-• Feinschliff und mehr Stabilität auf allen Plattformen.
-
+• Behoben: Haven konnte stundenlang im Hintergrund warm bleiben, obwohl in deinem Circle nichts passierte. Ein Kaltstart durch Push oder Hintergrundaktualisierung fährt nicht mehr den vollen Vordergrund-Sync/Multipeer-Pfad.
+• Im Hintergrund geparkte Telefone stoppen Timer und Nearby-Discovery sofort, damit iOS die App nach einer kurzen leeren Abfrage suspendieren kann.
+• Setzt die Akku-Arbeit aus 1.4.1 fort (schlanke Push-Wakes, kein Media-Backup-Re-Arm-Loop in der Tasche).
 ## marketing_url
 https://wemiller.com/apps/haven/
 

@@ -34,14 +34,11 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Offre de lancement — ‑50 % jusqu'au 30 septembre : 4,99 $, puis 9,99 $. Un espace privé, chiffré de bout en bout, pour vos proches. Sans pub, sans suivi, pair‑à‑pair.
 
 ## whats_new
-1.4.0 — Haven dans votre langue.
+1.4.2 — Batterie : plus d’activité en arrière-plan pendant des heures.
 
-• Localisation complète en six langues : japonais, allemand, espagnol, coréen, portugais (Brésil) et italien — toute l'app, sur iPhone, iPad et Mac.
-• Nouveau menu Commentaires et assistance : contactez directement le développeur depuis les Réglages, et laissez une note en toute simplicité, sans quitter l'app.
-• Les éléments d'activité et les notifications de réactions ou de réponses à vos commentaires ouvrent désormais la publication concernée, avec le commentaire mis en évidence.
-• Fiabilité des médias : correction d'un cas où un fichier volumineux transféré par blocs pouvait devenir définitivement inaccessible.
-• Améliorations de finition et de fiabilité sur toutes les plateformes.
-
+• Corrigé : Haven pouvait rester actif des heures en arrière-plan sans message ni activité de cercle. Un réveil à froid (push ou actualisation en arrière-plan) n’exécute plus le chemin complet de sync/Multipeer au premier plan.
+• Téléphone en poche : les minuteurs et la découverte à proximité s’arrêtent tout de suite pour qu’iOS puisse suspendre l’app après un sondage vide rapide.
+• Poursuit le travail batterie de 1.4.1 (réveils push allégés, plus de boucle de réarmement de sauvegarde média en poche).
 ## marketing_url
 https://wemiller.com/apps/haven/
 

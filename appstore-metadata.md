@@ -32,6 +32,13 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Launch sale — 50% off through September 30: $4.99, then $9.99. A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer.
 
 ## whats_new
+1.4.2 — Battery: stop multi-hour Background drain.
+
+• Fixed a case where Haven could stay warm for hours in the Background with no messages or circle activity. A cold wake from push or background refresh no longer runs the full foreground sync/Multipeer path.
+• Pocketed phones park timers and nearby discovery immediately so iOS can suspend the app after a quick empty poll.
+• Continues the 1.4.1 battery work (slim push wakes, no media-backup re-arm loop while pocketed).
+
+## whats_new_previous
 1.4.0 — Haven in your language.
 
 • Full localization in six languages: Japanese, German, Spanish, Korean, Portuguese (Brazil), and Italian — the whole app, across iPhone, iPad, and Mac.
@@ -39,13 +46,6 @@ Launch sale — 50% off through September 30: $4.99, then $9.99. A private, end�
 • Activity rows and notifications about reactions or replies on your comments now open the post they belong to, with the comment highlighted.
 • Media reliability: fixed a case where a large chunked file could become permanently unreachable.
 • Cross-platform polish and reliability improvements throughout.
-
-## whats_new_previous
-1.3.0 — share into Haven from anywhere.
-
-• Share sheet: send photos, videos, links, text and files to Haven from any app. Pick a circle for a post, open the story editor, or send straight to a conversation without leaving the share sheet.
-• Your recent conversations now appear in the row at the top of any app's share sheet, so a photo is two taps from being sent. Locked circles never appear there.
-• Files arrive intact — PDFs, zips, documents — and can be opened on the other side.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

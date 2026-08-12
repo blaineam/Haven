@@ -113,8 +113,10 @@ fun ActivityScreen(onDone: () -> Unit, onConnect: () -> Unit) {
                                 // branch and tried to open a DM message as a feed post — which is why
                                 // activity rows all behaved like posts.
                                 row.circleId.startsWith("dm:") -> DmDrafts.openThread.value = row.circleId
-                                // Posts/stories, and reactions/comments/votes on MY posts → the post
-                                // itself (targetId = the parent where the row is about my event).
+                                // Stories open the story viewer (music/progress), not a feed post.
+                                row.kind == "story" -> com.blaineam.haven.core.StoryLinkInbox.offer(
+                                    DeepLink.Story(row.circleId, row.id))
+                                // Posts, and reactions/comments/votes on MY posts → the post itself.
                                 else -> PostLinkInbox.offer(
                                     DeepLink.Post(row.circleId, row.targetId ?: row.id))
                             }

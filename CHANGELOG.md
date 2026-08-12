@@ -9,6 +9,36 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.4.5] — 2026-08-12
+
+### Changed — Apple + Android + Desktop (story replies in DMs)
+
+- **Replying to a story now attaches a deep link, not a resealed permanent media copy.** The DM
+  bubble shows a **tall portrait crop** of the story (author framing applied) that matches the
+  story canvas. Tap opens the real story sheet — progress bars, music, caption framing — the same
+  deep-link path as the activity feed. When the story's 24h window ends, the tile becomes
+  **"Story expired"** unless the author **kept** it on their profile (kept stories still open the
+  full viewer). Localized across the supported languages. Same behavior on iOS, Android, and
+  desktop for cross-platform parity with "Message the author" post links.
+
+- **Retroactive for older story replies.** Pre-1.4.5 replies that only resealed media (no deep link)
+  are matched back to the peer’s (or your) story that was live when the reply was sent — tall crop,
+  full story open when still live/kept. **When the story is past 24h and not kept, the DM tile is
+  always "Story no longer available"** — never the eternal resealed media thumbnail (hard 24h
+  window + association so purged events still swap out correctly).
+
+## [1.4.4] — 2026-08-11
+
+### Fixed — Apple (feed media)
+
+- **Feed videos still painted black letterbox bars over the blurred poster wash.** 1.4.3 cleared
+  `AVPlayerLayer.backgroundColor` and stacked the blur under the player; on device CoreAnimation
+  still filled the pillar/letterbox regions with opaque black for the whole loop. Photos never hit
+  this because `Image` `.fit` leaves those strips transparent.
+
+  Now: size the live player to the video's own aspect (same layout as a photo tile). The layer no
+  longer letterboxes at all, so the blurred poster wash fills the strips for the whole loop.
+
 ## [1.4.3] — 2026-08-11
 
 ### Fixed — Apple (feed media)
@@ -18,8 +48,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   The live `AVPlayerLayer` defaulted to an opaque black letterbox fill, which painted over that wash
   for the whole loop — "thumb has the blur, then it disappears when the video starts."
 
-  Now: clear the player layer (and host view) letterbox fill, and put the blur wash under the player
-  in a `ZStack` so `UIViewRepresentable` compositing cannot bury it.
+  (Incomplete: clearing the layer background was not enough on device — fixed properly in 1.4.4.)
 
 ## [1.4.2] — 2026-08-11
 

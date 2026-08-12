@@ -571,12 +571,14 @@ function connectionText(s) {
 }
 
 // ---- Deep links ------------------------------------------------------------------------
-// Three shapes reach us, and they must be told apart BEFORE anything routes them:
+// Four shapes reach us, and they must be told apart BEFORE anything routes them:
 //   https://wemiller.com/apps/haven/#p/<circleId>.<postId>   a shared post — the form we emit
+//   https://wemiller.com/apps/haven/#s/<circleId>.<postId>   a shared story (DM reply pointer)
 //   haven://p/<circleId>/<postId>                            the same post, legacy scheme — parsed forever
+//   haven://s/<circleId>/<postId>                            the same story, on-device form
 //   https://wemiller.com/apps/haven/#<id>.<verify>           an invite (also haven://invite#<id>.<verify>)
 // An invite's payload is ALSO `<a>.<b>` in the fragment, so an unguarded invite check swallows every
-// post link — that exact bug is live in android/…/ShareInbox.kt:49. Hence: post marker first, always.
+// post link — that exact bug is live in android/…/ShareInbox.kt:49. Hence: post/story markers first.
 // Grammar mirrors apple/HavenApp/DeepLink.swift; see docs/LINK-SYSTEM.md ▸ "Post links".
 //
 // ⚠️ THE PAYLOAD RIDES IN THE #FRAGMENT — DO NOT "TIDY" IT INTO A PATH. ⚠️
@@ -599,6 +601,10 @@ const DeepLink = {
    *  below. Payload in the #fragment — read the banner above before touching this. */
   postLink(circleId, postId) {
     return `https://${HAVEN_SITE.host}${HAVEN_SITE.linkPath}/#p/${this._token(circleId)}.${this._token(postId)}`;
+  },
+  /** Shareable story pointer for a DM story-reply — `#s/<c>.<p>`, same privacy rules as posts. */
+  storyLink(circleId, postId) {
+    return `https://${HAVEN_SITE.host}${HAVEN_SITE.linkPath}/#s/${this._token(circleId)}.${this._token(postId)}`;
   },
   /** Percent-encode one fragment token with Apple's charset (DeepLink.swift ▸ fragmentToken):
    *  unreserved MINUS `.` and `/`, so our two delimiters stay unambiguous whatever an id contains — a
@@ -627,6 +633,37 @@ const DeepLink = {
     const body = frag.slice(2);
     const dot = body.indexOf(".");
     return dot > 0 ? this._decode(body.slice(0, dot), body.slice(dot + 1)) : null;
+  },
+  /** → {circleId, postId} for either story form (`haven://s/…` or web `#s/…`). */
+  story(raw) {
+    let u;
+    try { u = new URL((raw || "").trim()); } catch (_) { return null; }
+    if (u.protocol === "haven:") {
+      if (u.hostname !== "s") return null;
+      const parts = u.pathname.split("/").filter(Boolean);
+      return parts.length >= 2 ? this._decode(parts[0], parts[1]) : null;
+    }
+    if (u.protocol !== "https:") return null;
+    if (u.hostname.toLowerCase() !== HAVEN_SITE.host || !u.pathname.startsWith(HAVEN_SITE.path)) return null;
+    const frag = u.hash.replace(/^#/, "");
+    if (!frag.startsWith("s/")) return null;
+    const body = frag.slice(2);
+    const dot = body.indexOf(".");
+    return dot > 0 ? this._decode(body.slice(0, dot), body.slice(dot + 1)) : null;
+  },
+  /** First story pointer in free-form body text. */
+  firstStoryIn(text) {
+    const s = String(text || "");
+    for (const token of s.split(/\s+/)) {
+      const hit = this.story(token);
+      if (hit) return { ...hit, raw: token };
+    }
+    const m = s.match(/https?:\/\/[^\s]+/) || s.match(/haven:\/\/s\/[^\s]+/);
+    if (m) {
+      const hit = this.story(m[0]);
+      if (hit) return { ...hit, raw: m[0] };
+    }
+    return null;
   },
   _decode(c, p) {
     try {
@@ -657,13 +694,61 @@ const DeepLink = {
     const parts = u.pathname.split("/").filter(Boolean);
     return parts.length ? parts : null;
   },
+  /**
+   * Resolve story for a DM message: explicit deep link, else retroactive match for legacy
+   * media-only story replies (resealed attach without a pointer).
+   * liveStories: [{circleId, id, author_short, is_me, created_at, has_media}]
+   * keptMine: [{id, createdAt}]
+   */
+  storyReplyTarget(msg, { peerHex, liveStories, keptMine }) {
+    if (msg.unsent) return null;
+    const hit = this.firstStoryIn(msg.body || "");
+    if (hit) return { circleId: hit.circleId, postId: hit.postId, raw: hit.raw };
+    return this._inferLegacyStoryReply(msg, peerHex, liveStories || [], keptMine || []);
+  },
+  _inferLegacyStoryReply(msg, peerHex, liveStories, keptMine) {
+    const visual = displayMediaRefs(msg.media || []).filter((r) => !isAudioRef(r) && !String(r).startsWith("geo:"));
+    if (visual.length !== 1) return null;
+    const replyAt = Number(msg.created_at) || 0;
+    const dayMs = 24 * 60 * 60 * 1000;
+    const lookingForMine = !msg.is_me;
+    const peer = (peerHex || "").toLowerCase();
+    const peerShort = peer.slice(0, 12);
+    const cands = [];
+    for (const s of liveStories) {
+      if (!s.has_media) continue;
+      const created = Number(s.created_at) || 0;
+      if (created > replyAt || replyAt - created > dayMs) continue;
+      if (lookingForMine) {
+        if (!s.is_me) continue;
+      } else {
+        const a = String(s.author_short || "").toLowerCase();
+        const ok = (peerShort && (a.startsWith(peerShort) || peerShort.startsWith(a)))
+          || (peer && (peer.startsWith(a) || a.startsWith(peer.slice(0, a.length))));
+        if (!ok) continue;
+      }
+      cands.push({ circleId: s.circleId, postId: s.id, createdAt: created });
+    }
+    if (lookingForMine) {
+      for (const k of keptMine) {
+        const created = Number(k.createdAt || k.created_at) || 0;
+        if (created > replyAt || replyAt - created > dayMs * 7) continue;
+        cands.push({ circleId: "default", postId: k.id, createdAt: created });
+      }
+    }
+    if (!cands.length) return null;
+    cands.sort((a, b) => b.createdAt - a.createdAt);
+    return { circleId: cands[0].circleId, postId: cands[0].postId, raw: null };
+  },
 };
 
-/** Route a link from the OS or the Connect paste box. Post links are discriminated FIRST, so one can
- *  never be mistaken for an invite. Returns "post" | "invite" | null (null = not a Haven link). */
+/** Route a link from the OS or the Connect paste box. Post/story links are discriminated FIRST, so
+ *  one can never be mistaken for an invite. Returns "post"|"story"|"invite"|…|null. */
 async function routeDeepLink(raw) {
   const p = DeepLink.post(raw);
   if (p) { await openPostLink(p.circleId, p.postId); return "post"; }
+  const s = DeepLink.story(raw);
+  if (s) { await openStoryLink(s.circleId, s.postId); return "story"; }
   const m = DeepLink.message(raw);
   if (m) { await openDmThread(m.circleId); return "dm"; }
   const c = DeepLink.circle(raw);
@@ -677,6 +762,48 @@ async function routeDeepLink(raw) {
   }
   try { return (await invoke("connect_by_link", { uri: (raw || "").trim() })) ? "invite" : null; }
   catch (_) { return null; }
+}
+
+/** Open a deep-linked story in the viewer (music, framing, progress) or show "Story expired". */
+const STORY_LIFETIME_MS = 24 * 60 * 60 * 1000;
+function isPastStoryWindow(createdAt) {
+  const age = Date.now() - Number(createdAt || 0);
+  return age > STORY_LIFETIME_MS;
+}
+async function openStoryLink(circleId, postId) {
+  // Kept first (author deliberately held it past 24h).
+  const kept = await invoke("kept_stories").catch(() => []);
+  const k = (kept || []).find((x) => x.id === postId);
+  if (k && (k.media || []).length) {
+    const revived = {
+      id: k.id, body: k.body || "", media: k.media || [], created_at: k.createdAt || k.created_at || 0,
+      is_me: true, story: true, unsent: false, author_name: t("you"),
+      music: k.musicCatalogId ? {
+        catalog_id: k.musicCatalogId, title: k.musicTitle || "", artist: k.musicArtist || "",
+        artwork_url: k.musicArtworkUrl || "", duration_ms: k.musicDurationMs || 0,
+      } : null,
+      _circle: circleId,
+    };
+    viewStories([revived], 0);
+    return;
+  }
+  // Live stories — hard 24h window.
+  let msgs = await invoke("messages", { circleId }).catch(() => []);
+  let stories = (msgs || []).filter((i) => i.story && !i.unsent && (i.media || []).length
+    && !isPastStoryWindow(i.created_at));
+  let idx = stories.findIndex((i) => i.id === postId);
+  if (idx >= 0) {
+    stories.forEach((s) => { s._circle = s._circle || circleId; });
+    viewStories(stories, idx);
+    return;
+  }
+  // Expired (and not kept).
+  const card = el("div", { class: "col", style: "align-items:center;padding:28px;min-width:min(88vw,360px);text-align:center" },
+    el("div", { style: "font-size:36px" }, "⏱"),
+    el("h2", { style: "margin:12px 0 6px" }, t("story_no_longer_available")),
+    el("p", { class: "muted", style: "margin:0 0 16px" }, t("story_expired_body")),
+    el("button", { class: "primary", onclick: () => closeModal() }, t("done")));
+  modal(card);
 }
 
 // Open a DM thread from a deep link (haven://m/…): resolve its display name from the thread list
@@ -3386,8 +3513,46 @@ function viewStories(list, startIndex = 0) {
     if (on) keptIds.add(it.id); else keptIds.delete(it.id);
     paintKeep();
   });
+  // Reply privately — DM the author with a story deep link (tall crop in the thread; tap opens
+  // this viewer). Not shown on your own story.
+  const replyRow = el("div", { class: "row", style: "gap:8px;margin-top:10px;display:none" });
+  const replyInput = el("input", {
+    type: "text", class: "field", style: "flex:1",
+    placeholder: t("story_reply_placeholder", ""),
+  });
+  const replySend = el("button", { class: "primary", style: "flex:0" }, t("send"));
+  replyRow.append(replyInput, replySend);
+  const paintReply = () => {
+    const it = stories[index];
+    if (!it || it.is_me) { replyRow.style.display = "none"; return; }
+    replyRow.style.display = "";
+    const name = it.author_name || t("friend");
+    replyInput.placeholder = t("story_reply_placeholder", name);
+  };
+  replySend.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const it = stories[index];
+    if (!it || it.is_me) return;
+    const text = (replyInput.value || "").trim();
+    if (!text) return;
+    // Find the author's full hex among contacts so we can open/reuse a DM.
+    const contacts = await invoke("contacts").catch(() => []);
+    const short = (it.author_short || "").toString();
+    const c = (contacts || []).find((x) =>
+      (x.id_hex || "").startsWith(short) ||
+      (x.name || "") === it.author_name);
+    if (!c || !c.id_hex) { toast(t("story_reply_no_contact")); return; }
+    const dmId = await invoke("start_dm", { contactIdHex: c.id_hex, contactName: c.name || it.author_name }).catch(() => null);
+    if (!dmId) { toast(t("story_reply_failed")); return; }
+    const circleId = it._circle || state.activeCircle || "default";
+    const link = DeepLink.storyLink(circleId, it.id);
+    const body = text + "\n" + link;
+    await invoke("send_dm", { circleId: dmId, body, media: [], music: null, retentionSecs: null }).catch(() => null);
+    replyInput.value = "";
+    toast(t("story_sent_privately"));
+  });
   const actions = el("div", { class: "row", style: "justify-content:center;margin-top:8px" }, keepBtn);
-  const card = el("div", { style: "min-width:min(88vw,420px)" }, bars, title, slot, actions, hint);
+  const card = el("div", { style: "min-width:min(88vw,420px)" }, bars, title, slot, actions, replyRow, hint);
   const close = modal(card);
   // Which of these are already kept — one call for the whole session, refreshed locally on toggle.
   invoke("kept_stories").then((ks) => { keptIds = new Set((ks || []).map((k) => k.id)); paintKeep(); }).catch(() => {});
@@ -3406,6 +3571,7 @@ function viewStories(list, startIndex = 0) {
     slot.replaceChildren(storyContentNode(it));
     hydrateMedia(slot, it._circle || state.activeCircle || "default");
     paintKeep();   // the pill belongs to the story on screen, not to the viewer
+    paintReply();
   };
 
   const nextStory = () => { if (index < stories.length - 1) { index++; show(); } else done(); };
@@ -3459,6 +3625,62 @@ function viewStories(list, startIndex = 0) {
   mo.observe($("#modal-root"), { childList: true, subtree: true });
 
   show();
+}
+
+/** Tall portrait tile for a story deep link in a DM — tap opens the real story viewer. */
+function storyReplyCard(circleId, postId) {
+  const card = el("button", {
+    class: "story-reply-card",
+    type: "button",
+    style: "width:128px;aspect-ratio:9/16;border-radius:14px;overflow:hidden;padding:0;border:1px solid color-mix(in srgb, var(--text) 10%, transparent);background:var(--card);cursor:pointer;position:relative;display:block",
+    title: t("view_story"),
+    onclick: () => openStoryLink(circleId, postId),
+  });
+  const thumb = el("div", {
+    style: "position:absolute;inset:0;background:center/cover no-repeat #222;display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px",
+  }, "▶");
+  card.append(thumb);
+  (async () => {
+    try {
+      const kept = await invoke("kept_stories").catch(() => []);
+      let it = null;
+      const k = (kept || []).find((x) => x.id === postId);
+      if (k && (k.media || []).length) {
+        it = { media: k.media || [], body: k.body || "", created_at: k.createdAt || k.created_at };
+      } else {
+        let msgs = await invoke("messages", { circleId }).catch(() => []);
+        it = (msgs || []).find((i) => i.id === postId && i.story && !i.unsent
+          && !isPastStoryWindow(i.created_at));
+      }
+      if (!it) {
+        card.onclick = null;
+        card.style.cursor = "default";
+        thumb.replaceChildren();
+        thumb.append(
+          el("div", { style: "padding:10px;text-align:center;font-size:12px;line-height:1.3;color:var(--muted,#888)" },
+            el("div", { style: "font-size:18px;margin-bottom:6px" }, "⏱"),
+            t("story_no_longer_available")));
+        return;
+      }
+      const refs = displayMediaRefs(it.media || []);
+      const ref = refs.find((r) => isVideoRef(r))
+        ? (refs.find((r) => !isVideoRef(r) && !isAudioRef(r)) || refs[0])
+        : refs[0];
+      if (ref) {
+        thumb.setAttribute("data-ref", ref);
+        hydrateMedia(card, circleId);
+      }
+    } catch (_) { /* leave play affordance */ }
+  })();
+  return card;
+}
+
+function storyNoLongerAvailableCard() {
+  return el("div", {
+    style: "width:128px;aspect-ratio:9/16;border-radius:14px;background:var(--card);display:flex;align-items:center;justify-content:center;padding:10px;text-align:center;font-size:12px;line-height:1.3;color:var(--muted,#888);border:1px solid color-mix(in srgb, var(--text) 10%, transparent)",
+  }, el("div", {},
+    el("div", { style: "font-size:18px;margin-bottom:6px" }, "⏱"),
+    t("story_no_longer_available")));
 }
 
 // ---- Messages --------------------------------------------------------------------------
@@ -3589,6 +3811,31 @@ async function renderThread(root, dm) {
   const threads = await invoke("dm_threads");
   const meta = threads.find((t) => t.circle_id === dm.id);
   const isGroup = (meta?.member_count || 0) > 2;
+  // Story inventory for retroactive legacy story-reply matching (media attach without deep link).
+  let threadLiveStories = [];
+  let threadKeptMine = [];
+  let dmPeerHex = null;
+  try {
+    const circles = await invoke("circles").catch(() => []);
+    for (const c of circles || []) {
+      if (String(c.id || "").startsWith("dm:")) continue;
+      const items = await invoke("messages", { circleId: c.id }).catch(() => []);
+      for (const s of items || []) {
+        if (!s.story || s.unsent) continue;
+        threadLiveStories.push({
+          circleId: c.id, id: s.id, author_short: s.author_short, is_me: s.is_me,
+          created_at: s.created_at, has_media: (s.media || []).length > 0,
+        });
+      }
+    }
+    const kept = await invoke("kept_stories").catch(() => []);
+    threadKeptMine = (kept || []).map((k) => ({ id: k.id, createdAt: k.createdAt || k.created_at }));
+    if (!isGroup) {
+      const contacts = await invoke("contacts").catch(() => []);
+      const c = (contacts || []).find((x) => x.name === dm.name || x.name === meta?.name);
+      if (c) dmPeerHex = c.id_hex;
+    }
+  } catch (_) {}
   let relayReachable = false;
   try { const rs = await invoke("relay_status"); relayReachable = !!(rs.hosting || rs.relay_active || (rs.has_relay && rs.internet_active)); } catch (_) {}
   let secretOn = false;
@@ -3614,18 +3861,49 @@ async function renderThread(root, dm) {
       return [guardSensitive(reserveAspect(mediaNode(r, "max-width:240px;border-radius:12px;display:block"), r, "intrinsic"), r)];
     });
 
+    // Story reply: explicit deep link OR retroactive match for legacy media-only attaches.
+    // (liveStories/keptMine filled once per thread open — see below loop setup)
+    const storyHit = (!m.unsent)
+      ? DeepLink.storyReplyTarget(m, { peerHex: dmPeerHex, liveStories: threadLiveStories, keptMine: threadKeptMine })
+      : null;
+    let bodyText = m.body || "";
+    if (storyHit && storyHit.raw) {
+      bodyText = bodyText.replace(storyHit.raw, "").replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+    }
+    const storyVisualOnly = !storyHit && mediaEls.length === 1
+      && displayMediaRefs(m.media || []).filter((r) => !isAudioRef(r) && !String(r).startsWith("geo:")).length === 1;
+
     // An unsent message is a TOMBSTONE, not a hidden row — macOS renders "Message unsent" in
     // italic on the secondary surface, so the thread still reads as a conversation.
     let bubble;
     if (m.unsent) bubble = el("div", { class: "chat-bubble tombstone" }, t("message_unsent"));
     else if (isSecret(m.body)) { bubble = secretBubble(m.body, m.is_me); if (mediaEls.length) bubble.append(...mediaEls); }
-    else if (m.body) bubble = el("div", { class: "chat-bubble" + (m.is_me ? " me" : "") }, m.body);
+    else if (bodyText) bubble = el("div", { class: "chat-bubble" + (m.is_me ? " me" : "") }, bodyText);
     else bubble = null;
 
     const col = el("div", { class: "bubble-col" });
     // In a group DM, label each INCOMING message with who sent it.
     if (isGroup && !m.is_me && !m.unsent) col.append(el("div", { class: "chat-sender" }, m.author_name || t("someone")));
-    if (mediaEls.length && !isSecret(m.body)) col.append(el("div", { class: "bubble-media" }, ...mediaEls));
+    if (storyHit) {
+      col.append(storyReplyCard(storyHit.circleId, storyHit.postId));
+    } else if (storyVisualOnly && isPastStoryWindow(m.created_at)) {
+      // Legacy story reply whose event is gone — never keep the resealed media forever.
+      col.append(storyNoLongerAvailableCard());
+    } else if (storyVisualOnly) {
+      // Young unmatched attach: tall crop until the story window passes.
+      const wrap = el("div", { class: "bubble-media story-tall" });
+      mediaEls.forEach((n) => {
+        n.style.maxWidth = "128px";
+        n.style.width = "128px";
+        n.style.aspectRatio = "9/16";
+        n.style.objectFit = "cover";
+        n.style.borderRadius = "14px";
+        wrap.append(n);
+      });
+      col.append(wrap);
+    } else if (mediaEls.length && !isSecret(m.body)) {
+      col.append(el("div", { class: "bubble-media" }, ...mediaEls));
+    }
     if (m.music) {
       col.append(el("a", { class: "song-chip glass tint-pink", style: "margin-top:0;max-width:260px",
         title: t("open_in_music_app"),

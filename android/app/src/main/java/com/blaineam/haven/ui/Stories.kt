@@ -547,7 +547,13 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
                 if (replyText.isNotBlank()) {
                     Spacer(Modifier.size(8.dp))
                     Box(Modifier.size(44.dp).clip(CircleShape).background(HavenTheme.brandHorizontal).clickable {
-                        com.blaineam.haven.core.HavenNet.replyToStory(group.authorShort, item.media.firstOrNull(), replyText.trim())
+                        com.blaineam.haven.core.HavenNet.replyToStory(
+                            group.authorShort,
+                            item.media.firstOrNull(),
+                            replyText.trim(),
+                            storyPostId = item.id,
+                            storyCircleId = com.blaineam.haven.core.DEFAULT_CIRCLE,
+                        )
                         replyText = ""; replying = false; sentNote = true
                     }, contentAlignment = Alignment.Center) {
                         androidx.compose.material3.Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.common_send), tint = Color.White)

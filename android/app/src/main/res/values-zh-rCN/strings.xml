@@ -696,4 +696,8 @@
     <string name="activity_shared_something">分享了内容</string>
     <string name="linkpreview_loading">正在加载预览…</string>
     <string name="linkpreview_load">加载预览</string>
+    <string name="story_expired_title">快拍已过期</string>
+    <string name="story_expired_body">快拍会在 24 小时后消失，除非作者将其保留在个人资料中。</string>
+    <string name="view_story">查看快拍</string>
+    <string name="story_no_longer_available">快拍已不可用</string>
 </resources>

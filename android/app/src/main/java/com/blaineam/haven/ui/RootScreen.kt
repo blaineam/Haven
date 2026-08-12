@@ -99,6 +99,7 @@ private fun MainScaffold() {
     var showConnect by remember { mutableStateOf(false) }
     var showActivity by remember { mutableStateOf(false) }
     var openPost by remember { mutableStateOf<com.blaineam.haven.core.DeepLink.Post?>(null) }
+    var openStory by remember { mutableStateOf<com.blaineam.haven.core.DeepLink.Story?>(null) }
     var pendingInvite by remember { mutableStateOf<String?>(null) }
 
     // Deep-linked invite (haven:// or the invite web page) → surface the Connect screen with the
@@ -123,6 +124,16 @@ private fun MainScaffold() {
                 HavenNet.setActiveCircle(p.circleId)
                 tab = Tab.Circle
             } else openPost = p
+        }
+    }
+
+    // Deep-linked story (https #s/<c>.<p> or haven://s/<c>/<p>) — same lock rule as posts.
+    LaunchedEffect(com.blaineam.haven.core.StoryLinkInbox.pending) {
+        com.blaineam.haven.core.StoryLinkInbox.consume()?.let { s ->
+            if (com.blaineam.haven.core.CircleLock.needsUnlock(s.circleId)) {
+                HavenNet.setActiveCircle(s.circleId)
+                tab = Tab.Circle
+            } else openStory = s
         }
     }
 
@@ -309,6 +320,7 @@ private fun MainScaffold() {
     androidx.activity.compose.BackHandler(enabled = showConnect) { showConnect = false }
     androidx.activity.compose.BackHandler(enabled = showActivity) { showActivity = false }
     androidx.activity.compose.BackHandler(enabled = openPost != null) { openPost = null }
+    androidx.activity.compose.BackHandler(enabled = openStory != null) { openStory = null }
     androidx.activity.compose.BackHandler(enabled = shareRoute != null) {
         com.blaineam.haven.core.ShareInbox.clear(); shareRoute = null
     }
@@ -348,6 +360,18 @@ private fun MainScaffold() {
         val shown = remember { mutableStateOf(postSheet) }
         if (postSheet != null) shown.value = postSheet
         shown.value?.let { PostLinkScreen(it.circleId, it.postId, onDone = { openPost = null }) }
+    }
+
+    // Deep-linked story sheet — tall viewer or "Story expired".
+    val storySheet = openStory
+    AnimatedVisibility(
+        visible = storySheet != null,
+        enter = slideInVertically { it },
+        exit = slideOutVertically { it },
+    ) {
+        val shown = remember { mutableStateOf(storySheet) }
+        if (storySheet != null) shown.value = storySheet
+        shown.value?.let { StoryLinkScreen(it.circleId, it.postId, onDone = { openStory = null }) }
     }
 
     // Share routing sheet (same slide-up as Connect). Latched like the post sheet so it survives

@@ -34,9 +34,12 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Launch-Sale – bis 30. September 50 % Rabatt: 4,99 $, danach 9,99 $. Ein privates, Ende-zu-Ende verschlüsseltes Zuhause für deine Liebsten. Werbefrei, Peer-to-Peer.
 
 ## whats_new
-1.4.3 – Feed: weicher Letterbox-Blur bleibt beim Video abspielen.
+1.4.5 – Feed-Blur + Story-Antworten in DMs.
 
-• Behoben: Bei Video-Beiträgen im Feed verschwand der weiche unscharfe Rand-Blur, sobald die Wiedergabe startete. Der Live-Player übermalt die Letterbox-Streifen nicht mehr deckend schwarz — der Blur bleibt den ganzen Loop, wie bei Fotos und dem Poster vor dem Abspielen.
+• Feed-Videos behalten den weichen unscharfen Rand-Blur über den ganzen Loop (wie Fotos).
+• Story-Antworten im DM: hohes Hochformat-Vorschaubild, Tipp öffnet die echte Story mit Fortschritt und Musik.
+• Abgelaufene Stories: „Story nicht mehr verfügbar“ (außer der Autor hat sie behalten). Auch ältere Antworten.
+
 ## marketing_url
 https://wemiller.com/apps/haven/
 

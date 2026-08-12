@@ -34,9 +34,12 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Offerta lancio — 50% fino al 30 settembre: 4,99 $, poi 9,99 $. Casa privata e crittografata end‑to‑end per i tuoi cari. Niente pubblicità né tracciamento, peer‑to‑peer.
 
 ## whats_new
-1.4.3 — Feed: lo sfocato letterbox resta mentre i video riproducono.
+1.4.5 — Sfumatura del feed + risposte alle storie in DM.
 
-• Risolto: nei post video del feed lo sfocato morbido ai bordi spariva non appena partiva la riproduzione. Il player live non copre più di nero opaco le bande letterbox; lo sfocato resta per tutto il loop, come sulle foto e sul poster prima del play.
+• I video del feed mantengono lo sfocato morbido ai bordi per tutto il loop (come le foto).
+• Rispondere a una storia in DM: miniatura verticale, tocca per aprire la storia con progresso e musica.
+• Storia scaduta: «Storia non più disponibile» (a meno che l’autore non l’abbia conservata). Anche per risposte vecchie.
+
 ## marketing_url
 https://wemiller.com/apps/haven/
 

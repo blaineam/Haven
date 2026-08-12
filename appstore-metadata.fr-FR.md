@@ -34,9 +34,12 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Offre de lancement — ‑50 % jusqu'au 30 septembre : 4,99 $, puis 9,99 $. Un espace privé, chiffré de bout en bout, pour vos proches. Sans pub, sans suivi, pair‑à‑pair.
 
 ## whats_new
-1.4.3 — Fil : le flou letterbox reste pendant la lecture vidéo.
+1.4.5 — Flou du fil + réponses aux stories en message.
 
-• Corrigé : sur les publications vidéo du fil, le doux flou des bords disparaissait dès le démarrage de la lecture. Le lecteur en direct ne peint plus en noir opaque les bandes letterbox ; le flou reste pendant toute la boucle, comme pour les photos et l’affiche avant lecture.
+• Les vidéos du fil gardent le doux flou des bords pendant toute la boucle (comme les photos).
+• Répondre à une story en DM : vignette portrait, toucher ouvre la vraie story avec progression et musique.
+• Story expirée : « Story plus disponible » (sauf si l’auteur l’a conservée). Aussi pour les anciennes réponses.
+
 ## marketing_url
 https://wemiller.com/apps/haven/
 

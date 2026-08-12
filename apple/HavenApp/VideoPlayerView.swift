@@ -16,11 +16,9 @@ import AppKit
 /// movement never claims those touches at all, so the feed scrolls natively; horizontal
 /// movement begins the pan and drives the scrub.
 ///
-/// **Clear letterbox:** the feed draws a blurred poster wash behind the player so off-ratio clips
-/// extend the media's colors to the card edge (same look as photo posts). AVPlayerLayer defaults
-/// to an opaque black background in the letterbox strips, which painted over that wash the moment
-/// playback replaced the poster still. Clear the layer (and the hosting view) so only the decoded
-/// video pixels are opaque — the SwiftUI backdrop shows through the pillars for the whole loop.
+/// Letterbox strips: the feed sizes this view to the video's aspect (see PostMediaView) so the
+/// layer never pillars — a clear layer background alone is not enough; AVPlayerLayer still paints
+/// opaque black into off-ratio regions even when `backgroundColor` is clear.
 final class PlayerLayerView: UIView, UIGestureRecognizerDelegate {
     override class var layerClass: AnyClass { AVPlayerLayer.self }
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
@@ -35,13 +33,14 @@ final class PlayerLayerView: UIView, UIGestureRecognizerDelegate {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        configureClearLetterbox()
+        configureClearSurface()
     }
     required init?(coder: NSCoder) {
         super.init(coder: coder)
-        configureClearLetterbox()
+        configureClearSurface()
     }
-    private func configureClearLetterbox() {
+    private func configureClearSurface() {
+        // Still clear: any residual 1px mismatch or parent peek-through should not flash black.
         backgroundColor = .clear
         isOpaque = false
         playerLayer.backgroundColor = UIColor.clear.cgColor
@@ -82,7 +81,7 @@ final class PlayerLayerView: UIView, UIGestureRecognizerDelegate {
 /// AVPlayerLayer-backed surface with no system chrome (native macOS / AppKit). Layer-backed
 /// `NSView` hosting an `AVPlayerLayer`. Mirrors the iOS class's public API (`playerLayer`).
 /// `.resizeAspect` letterboxes — the whole frame is always visible, never cropped.
-/// Clear letterbox (see iOS note): feed blur wash must remain visible while the clip loops.
+/// Feed sizes the surface to the video aspect so the layer never letterboxes (see iOS note).
 final class PlayerLayerView: NSView {
     private let _playerLayer = AVPlayerLayer()
     var playerLayer: AVPlayerLayer { _playerLayer }
@@ -91,15 +90,15 @@ final class PlayerLayerView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer = _playerLayer
-        configureClearLetterbox()
+        configureClearSurface()
     }
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         wantsLayer = true
         layer = _playerLayer
-        configureClearLetterbox()
+        configureClearSurface()
     }
-    private func configureClearLetterbox() {
+    private func configureClearSurface() {
         _playerLayer.backgroundColor = NSColor.clear.cgColor
         _playerLayer.isOpaque = false
     }

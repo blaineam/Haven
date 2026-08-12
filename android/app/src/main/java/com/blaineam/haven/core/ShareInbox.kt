@@ -77,6 +77,15 @@ object PostLinkInbox {
     fun consume(): DeepLink.Post? = pending.also { pending = null }
 }
 
+/// A story deep link (`https://…/#s/<c>.<p>` or `haven://s/<c>/<p>`) — RootScreen presents the
+/// story viewer (or "Story expired"). Same inbox pattern as [PostLinkInbox].
+object StoryLinkInbox {
+    var pending by mutableStateOf<DeepLink.Story?>(null)
+        private set
+    fun offer(story: DeepLink.Story?) { if (story != null) pending = story }
+    fun consume(): DeepLink.Story? = pending.also { pending = null }
+}
+
 /// A bare circle deep link (`haven://c/<circleId>`, e.g. a notification that only names the
 /// circle). RootScreen observes it, switches to that circle's feed (honoring the circle lock the
 /// same way the post path does), and clears it.

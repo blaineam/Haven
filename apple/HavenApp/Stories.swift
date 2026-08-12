@@ -508,9 +508,15 @@ struct StoryViewer: View {
         let name = ContactsStore.shared.name(forNodePrefix: s.authorShort) ?? friendName
         guard let idHex = ContactsStore.shared.idHex(forNodePrefix: s.authorShort) else { return }
         let dm = FeedStore.shared.startDM(with: idHex, name: name)
-        // Attach the story being replied to (its media) so the author knows which one — sendMessage
-        // re-seals the media to the DM circle via SharedStore.backup. Cross-platform parity w/ Android.
-        FeedStore.shared.sendMessage(to: dm, text, media: s.media, music: nil)
+        // Point at the story with a deep link (same idea as "Message the author" on a post) —
+        // do NOT re-seal the media into the DM. The bubble renders a tall framed crop and opens
+        // the real story viewer (music, caption, progress); when the story expires the card
+        // becomes "Story expired" unless the author kept it. Cross-platform parity.
+        let circleId = Self.circleId(forStoryId: s.id) ?? FeedStore.shared.activeCircleId
+        let link = DeepLink.storyURL(circleId: circleId, postId: s.id)?.absoluteString
+            ?? DeepLink.storyLink(circleId: circleId, postId: s.id)
+        let body = text + "\n" + link
+        FeedStore.shared.sendMessage(to: dm, body, media: [], music: nil)
         replyText = ""
         replyFocused = false
         withAnimation { replySent = true }
@@ -518,6 +524,17 @@ struct StoryViewer: View {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             await MainActor.run { withAnimation { replySent = false } }
         }
+    }
+
+    /// Which circle hosts this story id — active circle first, then every known circle.
+    private static func circleId(forStoryId id: String) -> String? {
+        let store = FeedStore.shared
+        let active = store.activeCircleId
+        if store.messages(in: active).contains(where: { $0.id == id }) { return active }
+        for c in store.circles where store.messages(in: c.id).contains(where: { $0.id == id }) {
+            return c.id
+        }
+        return nil
     }
 
     // MARK: - Playback per story

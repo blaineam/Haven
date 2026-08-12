@@ -788,6 +788,24 @@ struct DMThreadView: View {
         }
     }
 
+    /// Body text for a DM bubble after stripping a story/post deep-link token that the card already shows.
+    private static func dmShownBody(_ body: String, storyRaw: String?, previewed: URL?) -> String {
+        if let raw = storyRaw {
+            var shown = body
+            if let u = URL(string: raw) {
+                shown = LinkScanner.stripping(u, from: shown)
+            }
+            if shown.contains(raw) {
+                shown = shown.replacingOccurrences(of: raw, with: "")
+            }
+            return shown.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let previewed {
+            return LinkScanner.stripping(previewed, from: body)
+        }
+        return body
+    }
+
     @ViewBuilder private func bubble(_ m: FeedItemFfi) -> some View {
         HStack {
             if m.isMe { Spacer(minLength: 50) }
@@ -797,7 +815,23 @@ struct DMThreadView: View {
                     Text(senderName(m)).font(.caption2.weight(.semibold))
                         .foregroundStyle(HavenTheme.pink).padding(.leading, 4)
                 }
-                if !m.media.isEmpty { dmMedia(m) }
+                // Story reply: never keep showing resealed media after the story is gone.
+                // Explicit link / association / inference → StoryReplyCard (live thumb or
+                // "Story no longer available"). Legacy single story-shaped attach past 24h with
+                // no recoverable event → unavailable tile (not the eternal media crop).
+                let storyTarget = !m.unsent ? DeepLink.storyReplyTarget(message: m, dmCircleId: circleId) : nil
+                let explicitStory = DeepLink.firstStory(in: m.body)
+                let isStoryReply = !m.unsent && DeepLink.isStoryReplyMessage(m, dmCircleId: circleId)
+
+                if let storyTarget {
+                    StoryReplyCard(circleId: storyTarget.circleId, postId: storyTarget.postId)
+                } else if isStoryReply {
+                    // Classified as a story reply but no openable story (expired + purged, not kept).
+                    StoryNoLongerAvailableCard()
+                } else if !m.media.isEmpty {
+                    dmMedia(m)
+                }
+
                 if let t = m.music { DMSongChip(track: t, isMe: m.isMe) }
                 if m.unsent {
                     Text("Message unsent").italic()
@@ -807,12 +841,15 @@ struct DMThreadView: View {
                 } else if SecretMessages.isSecret(m.body) {
                     SecretBubble(text: SecretMessages.text(m.body), isMe: m.isMe)
                 } else if !m.body.isEmpty {
+                    // Story reply: tall framed crop + deep-link open (same path as activity feed).
+                    // Prefer over a generic OG card — a story pointer is not a web page.
+                    let storyRef = explicitStory
                     // The previewed link is dropped from the bubble: the card below already names the
                     // destination, so leaving the raw URL in the text repeats it (and a shared post
                     // link is long enough to swamp the sentence around it). A bubble with ONLY a link
                     // becomes just its card.
-                    let previewed = LinkScanner.urls(in: m.body).first
-                    let shown = previewed.map { LinkScanner.stripping($0, from: m.body) } ?? m.body
+                    let previewed = storyRef == nil ? LinkScanner.urls(in: m.body).first : nil
+                    let shown = Self.dmShownBody(m.body, storyRaw: storyRef?.raw, previewed: previewed)
                     if !shown.isEmpty {
                         Text(shown)
                             .padding(.horizontal, 12).padding(.vertical, 8)
@@ -820,8 +857,9 @@ struct DMThreadView: View {
                                         in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                             .foregroundStyle(m.isMe ? .white : .primary)
                     }
-                    // Rich Open Graph preview for a link in the message.
-                    if let url = previewed {
+                    // Explicit link card is already drawn above when storyTarget is set; only need
+                    // the OG card for non-story URLs here.
+                    if storyRef == nil, let url = previewed {
                         LinkPreviewCard(url: url).frame(maxWidth: 260)
                     }
                 }

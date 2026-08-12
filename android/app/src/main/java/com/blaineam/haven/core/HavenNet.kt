@@ -1818,16 +1818,37 @@ object HavenNet : InboundListener {
     }
 
     /**
-     * Reply to someone's story → opens a DM with them and ATTACHES the story's media (re-sealed to
-     * the DM circle) so the author knows exactly which story you mean. Returns the DM circle id.
+     * Reply to someone's story → opens a DM with them and attaches a STORY DEEP LINK (not a
+     * resealed media copy). The bubble renders a tall framed crop and opens the real story viewer;
+     * when the story expires the card becomes "Story expired" unless the author kept it. Parity
+     * with Apple `Stories.sendReply` and with "Message the author" on a post.
+     *
+     * [storyPostId] is the event id; [storyCircleId] is where the story lives (default circle for
+     * tray stories). Returns the DM circle id.
      */
-    fun replyToStory(authorShort: String, storyMediaRef: String?, text: String): String? {
+    fun replyToStory(
+        authorShort: String,
+        storyMediaRef: String?,
+        text: String,
+        storyPostId: String? = null,
+        storyCircleId: String = DEFAULT_CIRCLE,
+    ): String? {
         val contact = contacts.firstOrNull { it.idHex.startsWith(authorShort) } ?: return null
         val dmCircle = startDm(contact)
-        val media = storyMediaRef?.let { ref ->
-            LocalMedia.loadAnyCircle(ref)?.let { listOf(LocalMedia.store(dmCircle, it, isVideo = LocalMedia.isVideo(ref))) }
-        } ?: emptyList()
-        sendDm(dmCircle, text, media)
+        val link = storyPostId?.takeIf { it.isNotEmpty() }?.let { DeepLink.storyUrl(storyCircleId, it) }
+        val body = if (link != null) {
+            if (text.isBlank()) link else "$text\n$link"
+        } else {
+            // Legacy fallback if a caller has no post id: reseal media so the author still sees
+            // which story (pre-1.4.5 clients / incomplete callers).
+            text
+        }
+        val media = if (link == null && storyMediaRef != null) {
+            LocalMedia.loadAnyCircle(storyMediaRef)?.let {
+                listOf(LocalMedia.store(dmCircle, it, isVideo = LocalMedia.isVideo(storyMediaRef)))
+            } ?: emptyList()
+        } else emptyList()
+        sendDm(dmCircle, body, media)
         return dmCircle
     }
 

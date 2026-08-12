@@ -361,26 +361,24 @@ struct PostMediaView: View {
                 // Data saver with local video: don't autoplay until the user asked (pending play
                 // from a poster tap, or a first tap on an already-local clip). Tap then toggles mute.
                 let player = playerFor(ref, url)
-                // Blur as a ZStack SIBLING under the player, not `.background`.
+                // Match the photo path: fit the media into the page, blur fills the rest.
                 //
-                // AVPlayerLayer letterboxes with an opaque black fill by default. Photos (and the
-                // pre-play poster still) use Image `.fit`, so the letterbox strips are transparent
-                // and the blurred edge wash shows through. The moment the live player replaced the
-                // poster, that black fill painted over the wash for the whole loop — reported as
-                // "thumb has the blur, then it disappears when the video starts".
-                //
-                // Two fixes stack: VideoSurface clears the player layer's letterbox (see there),
-                // and the wash lives under the player in a ZStack so UIViewRepresentable z-order
-                // cannot bury a SwiftUI `.background` behind an opaque host view.
+                // Photos use Image `.fit` so letterbox strips stay transparent and the blurred
+                // poster wash shows through. A full-bleed AVPlayerLayer does NOT — even with a
+                // clear layer background, CoreAnimation still paints opaque black into the
+                // pillar/letterbox regions for the whole loop (1.4.3 tried clear + ZStack and
+                // failed on device). So size the player to the video's own aspect; the layer
+                // never letterboxes, and the wash lives in the strips the same way photos do.
                 let poster = MediaVariants.poster(for: ref, in: item.media)
-                ZStack {
-                    pageBackdrop(poster ?? ref, containerAspect: containerAspect)
-                    GestureVideoPlayer(player: player,
-                                       onTap: { dataSaverVideoTap(ref, player) },
-                                       onDoubleTap: { heartIt() },
-                                       inCarousel: inCarousel,
-                                       onScrubbing: onScrubbing)
-                }
+                let videoAspect = singleAspect(ref)
+                GestureVideoPlayer(player: player,
+                                   onTap: { dataSaverVideoTap(ref, player) },
+                                   onDoubleTap: { heartIt() },
+                                   inCarousel: inCarousel,
+                                   onScrubbing: onScrubbing)
+                    .aspectRatio(videoAspect, contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background { pageBackdrop(poster ?? ref, containerAspect: containerAspect) }
                     .onAppear {
                         if dataSaver, dataSaverPendingPlay.contains(ref) {
                             startDataSaverPlayback(ref, player)

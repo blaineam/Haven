@@ -697,4 +697,8 @@
     <string name="activity_shared_something">Hat etwas geteilt</string>
     <string name="linkpreview_loading">Vorschau wird geladen…</string>
     <string name="linkpreview_load">Vorschau laden</string>
+    <string name="story_expired_title">Story abgelaufen</string>
+    <string name="story_expired_body">Stories verschwinden nach 24 Stunden, es sei denn, der Autor hat sie im Profil behalten.</string>
+    <string name="view_story">Story ansehen</string>
+    <string name="story_no_longer_available">Story nicht mehr verfügbar</string>
 </resources>

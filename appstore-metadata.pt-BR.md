@@ -34,9 +34,12 @@ privado,criptografado,família,amigos,mensagens,seguro,offline,chamadas,sem anú
 Lançamento — 50% até 30/9: $4,99, depois $9,99. Espaço privado e criptografado de ponta a ponta para seus mais próximos. Sem anúncios, sem rastreamento, peer-to-peer.
 
 ## whats_new
-1.4.3 — Feed: o desfoque letterbox permanece enquanto o vídeo toca.
+1.4.5 — Desfoque do feed + respostas de story no DM.
 
-• Corrigido: em posts de vídeo no feed, o desfoque suave das bordas sumia assim que a reprodução começava. O player ao vivo não pinta mais preto opaco sobre as faixas letterbox; o desfoque fica o loop inteiro, como nas fotos e no pôster antes de tocar.
+• Vídeos do feed mantêm o desfoque suave nas bordas durante todo o loop (como fotos).
+• Responder a um story no DM: miniatura vertical; toque abre o story real com progresso e música.
+• Story expirado: «Story não está mais disponível» (exceto se o autor manteve). Também em respostas antigas.
+
 ## marketing_url
 https://wemiller.com/apps/haven/
 

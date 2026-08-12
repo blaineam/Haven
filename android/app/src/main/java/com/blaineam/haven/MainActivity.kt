@@ -246,6 +246,7 @@ class MainActivity : FragmentActivity() {
                 val dm = DeepLink.parseDm(link)
                 val circle = DeepLink.parseCircle(link)
                 val post = DeepLink.parsePost(link)
+                val story = DeepLink.parseStory(link)
                 when {
                     // Open the Messages THREAD: RootScreen switches to the Messages tab on this
                     // signal and MessagesScreen consumes it to open the conversation.
@@ -253,6 +254,8 @@ class MainActivity : FragmentActivity() {
                     // Switch to the circle's feed — RootScreen honors CircleLock.needsUnlock the
                     // same way the post path does (the lock screen takes over, never a peek).
                     circle != null -> com.blaineam.haven.core.CircleLinkInbox.offer(circle)
+                    // Story before post: both are #fragment pointers; s/ must not fall into invite.
+                    story != null -> com.blaineam.haven.core.StoryLinkInbox.offer(story)
                     post != null -> PostLinkInbox.offer(post)
                     else -> InviteInbox.offer(link)
                 }

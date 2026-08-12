@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -506,7 +507,9 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(msgs, key = { it.id }) { m ->
-                    Bubble(m, circleId = circleId, isGroup = isGroup, relayReachable = relayReachable, onEdit = { msg ->
+                    Bubble(m, circleId = circleId, isGroup = isGroup, relayReachable = relayReachable,
+                        peerHex = if (!isGroup) partner.idHex.ifBlank { null } else null,
+                        onEdit = { msg ->
                         editingId = msg.id; secretMode = com.blaineam.haven.core.SecretMessages.isSecret(msg.body)
                         draft = com.blaineam.haven.core.SecretMessages.text(msg.body)
                     })
@@ -666,11 +669,53 @@ private fun Bubble(
     circleId: String,
     isGroup: Boolean = false,
     relayReachable: Boolean = false,
+    peerHex: String? = null,
     onEdit: ((uniffi.haven_ffi.FeedItemFfi) -> Unit)? = null,
 ) {
     val mine = m.isMe
     val text = m.body
     var showReact by remember(m.id) { mutableStateOf(false) }
+    val version by HavenNet.feedVersion
+    @Suppress("UNUSED_EXPRESSION") com.blaineam.haven.core.KeptStoriesStore.version.intValue
+    // Explicit deep link or retroactive match to a live/kept story (legacy media-only replies).
+    val storyTarget = remember(version, m.id, m.body, m.media, m.createdAt, peerHex,
+        com.blaineam.haven.core.KeptStoriesStore.version.intValue) {
+        val live = buildList {
+            for (c in HavenNet.feedCircles()) {
+                if (c.id.startsWith("dm:")) continue
+                val items = runCatching {
+                    HavenNet.engine.feed(c.id, com.blaineam.haven.core.nowMs(),
+                        com.blaineam.haven.core.CircleSettings.retentionSecs(c.id))
+                }.getOrDefault(emptyList())
+                for (s in items) {
+                    if (!s.story || s.unsent || s.media.isEmpty()) continue
+                    add(Triple(c.id, s.id, com.blaineam.haven.core.DeepLink.LiveStory(
+                        authorShort = s.authorShort, isMe = s.isMe,
+                        createdAtMs = s.createdAt.toLong(), hasMedia = s.media.isNotEmpty(),
+                    )))
+                }
+            }
+        }
+        val kept = com.blaineam.haven.core.KeptStoriesStore.all()
+            .map { it.id to it.createdAt }
+        com.blaineam.haven.core.DeepLink.storyReplyTarget(
+            body = m.body, media = m.media, messageIsMe = m.isMe,
+            messageAuthorShort = m.authorShort, createdAtMs = m.createdAt.toLong(),
+            dmPeerHex = peerHex, unsent = m.unsent, liveStories = live, keptMine = kept,
+        )
+    }
+    val visualRefs = com.blaineam.haven.core.MediaVariants.displayRefs(m.media).filter {
+        !com.blaineam.haven.core.LocalMedia.isAudio(it) && !com.blaineam.haven.core.LocalMedia.isFile(it)
+    }
+    // After 24h, a lone story-shaped visual with no openable story is treated as an expired
+    // story reply — never keep showing the resealed media forever.
+    val storyLifetimeMs = 24L * 60 * 60 * 1000
+    val replyAge = com.blaineam.haven.core.nowMs() - m.createdAt.toLong()
+    val looksLikeLegacyStoryReply = visualRefs.size == 1 && replyAge > storyLifetimeMs
+    val showsStoryCard = storyTarget != null
+    val showsUnavailable = !showsStoryCard && looksLikeLegacyStoryReply
+        && (storyTarget == null) // no recoverable live/kept story
+
     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (mine) Alignment.End else Alignment.Start) {
         // In a group DM, label each INCOMING message with who sent it (parity with iOS).
         if (isGroup && !mine) {
@@ -688,32 +733,68 @@ private fun Bubble(
                 .combinedClickable(onClick = {}, onLongClick = { showReact = true })
                 .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
-            // `displayRefs`, not the raw list (iOS Messages.swift `dmMedia`). A shared image travels
-            // with companions — `thumb:<ref>:<thumb>`, `orig:`, `poster:` — which are MARKERS, not
-            // blobs. Iterating the raw list drew one tile per entry, so a single sent photo showed
-            // two stacked tiles, and the marker one span forever: there is no blob at that ref to
-            // fetch, so its spinner could never resolve. The composer path already collapsed these
-            // (line ~476); only the received bubble was left rendering them.
-            com.blaineam.haven.core.MediaVariants.displayRefs(m.media).forEach { ref ->
-                when {
-                    com.blaineam.haven.core.LocalMedia.isAudio(ref) -> AudioPlayerPill(circleId, ref, contentColor = bubbleContent)
-                    // Honors a flag federated by a member whose platform has an analyzer (iOS
-                    // Messages.swift:457,468 wraps the same two cases at radius 14).
-                    com.blaineam.haven.core.LocalMedia.isVideo(ref) ->
-                        SensitiveGuard(circleId, ref, cornerRadius = 14) { covered ->
-                            // A blur hides the picture, not the sound — don't play a covered clip.
-                            if (covered) Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(HavenTheme.card))
-                            else VideoTile(circleId, ref, Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)))
-                        }
-                    else -> SensitiveGuard(circleId, ref, cornerRadius = 14) { _ ->
-                        MediaImage(circleId, ref, Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)))
-                    }
+            if (showsStoryCard && storyTarget != null) {
+                StoryReplyCard(storyTarget.circleId, storyTarget.postId)
+                if (text.isNotBlank() || m.music != null) Spacer(Modifier.size(6.dp))
+            } else if (showsUnavailable) {
+                // Expired story reply — never keep the resealed media thumbnail.
+                Column(
+                    Modifier.width(128.dp).aspectRatio(9f / 16f).clip(RoundedCornerShape(14.dp))
+                        .background(HavenTheme.card).padding(10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Text("⏱", fontSize = 20.sp)
+                    Spacer(Modifier.size(6.dp))
+                    Text(
+                        stringResource(R.string.story_no_longer_available),
+                        color = HavenTheme.textSecondary, fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    )
                 }
                 if (text.isNotBlank() || m.music != null) Spacer(Modifier.size(6.dp))
+            } else {
+                // Generic multi-media / landscape path.
+                com.blaineam.haven.core.MediaVariants.displayRefs(m.media).forEach { ref ->
+                    when {
+                        com.blaineam.haven.core.LocalMedia.isAudio(ref) -> AudioPlayerPill(circleId, ref, contentColor = bubbleContent)
+                        com.blaineam.haven.core.LocalMedia.isVideo(ref) ->
+                            SensitiveGuard(circleId, ref, cornerRadius = 14) { covered ->
+                                if (covered) Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(HavenTheme.card))
+                                else VideoTile(circleId, ref, Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)))
+                            }
+                        else -> SensitiveGuard(circleId, ref, cornerRadius = 14) { _ ->
+                            MediaImage(circleId, ref, Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)))
+                        }
+                    }
+                    if (text.isNotBlank() || m.music != null) Spacer(Modifier.size(6.dp))
+                }
+            }
+            // Audio still rides alongside a story/unavailable card.
+            if (showsStoryCard || showsUnavailable) {
+                com.blaineam.haven.core.MediaVariants.displayRefs(m.media).forEach { ref ->
+                    if (com.blaineam.haven.core.LocalMedia.isAudio(ref)) {
+                        AudioPlayerPill(circleId, ref, contentColor = bubbleContent)
+                        Spacer(Modifier.size(6.dp))
+                    }
+                }
             }
             if (text.isNotBlank()) {
                 if (com.blaineam.haven.core.SecretMessages.isSecret(text)) SecretBubble(text, bubbleContent)
-                else LinkedText(text, color = bubbleContent, fontSize = 15.sp)
+                else {
+                    val storyHit = com.blaineam.haven.core.DeepLink.firstStoryIn(text)
+                    val shown = if (storyHit != null) {
+                        text.replace(storyHit.second, "")
+                            .replace(Regex("[ \\t]{2,}"), " ")
+                            .replace(Regex("\\n{3,}"), "\n\n")
+                            .trim()
+                    } else text
+                    if (shown.isNotBlank()) {
+                        LinkedText(shown, color = bubbleContent, fontSize = 15.sp)
+                    }
+                    // Card already shown above when storyTarget is set (includes explicit links).
+                }
             }
             // A shared song renders as the same chip as in the feed.
             m.music?.let { mus ->

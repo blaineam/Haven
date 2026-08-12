@@ -34,9 +34,12 @@ privado,cifrado,familia,amigos,mensajería,seguro,sin conexión,llamadas,sin anu
 Oferta de lanzamiento: 50 % de descuento hasta el 30/9: 4,99 $, luego 9,99 $. Hogar privado y cifrado de extremo a extremo para los tuyos. Sin anuncios ni rastreo, P2P.
 
 ## whats_new
-1.4.3 — Feed: el desenfoque letterbox se mantiene al reproducir vídeo.
+1.4.5 — Desenfoque del feed y respuestas a historias en MD.
 
-• Corregido: en las publicaciones de vídeo del feed, el suave desenfoque de los bordes desaparecía en cuanto empezaba la reproducción. El reproductor en vivo ya no pinta negro opaco sobre las franjas letterbox; el desenfoque se mantiene todo el bucle, igual que en las fotos y el póster previo.
+• Los vídeos del feed mantienen el desenfoque suave de los bordes durante todo el bucle (como las fotos).
+• Responder a una historia en el MD: miniatura vertical, toca para abrir la historia con progreso y música.
+• Si la historia caduca: «La historia ya no está disponible» (salvo que el autor la haya conservado). También en respuestas antiguas.
+
 ## marketing_url
 https://wemiller.com/apps/haven/
 

@@ -71,6 +71,9 @@ fun bodyWithoutPreviewedUrl(text: String): String {
  */
 fun openInApp(context: Context, url: String) {
     val uri = Uri.parse(if (url.startsWith("http")) url else "https://$url")
+    DeepLink.parseStory(uri.toString())?.let {
+        com.blaineam.haven.core.StoryLinkInbox.offer(it); return
+    }
     DeepLink.parsePost(uri.toString())?.let { PostLinkInbox.offer(it); return }
     runCatching { CustomTabsIntent.Builder().build().launchUrl(context, uri) }
         .onFailure { runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) } }

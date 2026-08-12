@@ -697,4 +697,8 @@
     <string name="activity_shared_something">何かをシェアしました</string>
     <string name="linkpreview_loading">プレビューを読み込み中…</string>
     <string name="linkpreview_load">プレビューを読み込む</string>
+    <string name="story_expired_title">ストーリーの期限切れ</string>
+    <string name="story_expired_body">ストーリーは24時間で消えます。作者がプロフィールに残していない場合は表示できません。</string>
+    <string name="view_story">ストーリーを見る</string>
+    <string name="story_no_longer_available">ストーリーはもう利用できません</string>
 </resources>

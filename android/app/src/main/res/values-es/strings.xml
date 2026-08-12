@@ -703,4 +703,8 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="activity_shared_something">Compartió algo</string>
     <string name="linkpreview_loading">Cargando vista previa…</string>
     <string name="linkpreview_load">Cargar vista previa</string>
+    <string name="story_expired_title">Historia caducada</string>
+    <string name="story_expired_body">Las historias desaparecen a las 24 horas, a menos que el autor las haya conservado en su perfil.</string>
+    <string name="view_story">Ver historia</string>
+    <string name="story_no_longer_available">La historia ya no está disponible</string>
 </resources>

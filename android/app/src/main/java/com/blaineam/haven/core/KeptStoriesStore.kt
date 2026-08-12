@@ -93,6 +93,12 @@ object KeptStoriesStore {
 
     fun isKept(id: String): Boolean = kept.any { it.id == id }
 
+    /** Lookup a kept snapshot by original event id (DM story reply / deep link). */
+    fun get(id: String): Kept? = kept.firstOrNull { it.id == id }
+
+    /** Snapshot list for retroactive story-reply matching. */
+    fun all(): List<Kept> = kept.toList()
+
     /**
      * Keep a story: snapshot it and PIN its media, so the blobs survive the cleanup sweeps that
      * would otherwise reclaim them once the event is gone.

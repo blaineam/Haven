@@ -32,9 +32,11 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Launch sale — 50% off through September 30: $4.99, then $9.99. A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer.
 
 ## whats_new
-1.4.3 — Feed: keep the letterbox blur while videos play.
+1.4.5 — Feed blur + story replies in DMs.
 
-• Fixed feed video posts losing their soft blurred edge wash the moment playback started. The live player no longer paints opaque black over the letterbox strips; the blur stays for the whole loop, matching photo posts and the pre-play poster.
+• Feed videos keep their soft blurred edge wash for the whole loop (same look as photo posts).
+• Replying to a story attaches a story reference in the DM: tall portrait crop, tap opens the real story with progress and music.
+• When a story expires, the DM tile becomes “Story no longer available” (unless the author kept it). Older story replies get the same treatment.
 
 ## whats_new_previous
 1.4.2 — Battery: stop multi-hour Background drain.

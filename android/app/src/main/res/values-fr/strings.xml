@@ -697,4 +697,8 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="activity_shared_something">A partagé quelque chose</string>
     <string name="linkpreview_loading">Chargement de l\'aperçu…</string>
     <string name="linkpreview_load">Charger l\'aperçu</string>
+    <string name="story_expired_title">Story expirée</string>
+    <string name="story_expired_body">Les stories disparaissent après 24 heures, sauf si l'auteur les a conservées sur son profil.</string>
+    <string name="view_story">Voir la story</string>
+    <string name="story_no_longer_available">Story plus disponible</string>
 </resources>

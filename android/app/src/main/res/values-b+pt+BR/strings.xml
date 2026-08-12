@@ -732,4 +732,8 @@ O que já tentei:
     <string name="activity_shared_something">Compartilhou algo</string>
     <string name="linkpreview_loading">Carregando prévia…</string>
     <string name="linkpreview_load">Carregar prévia</string>
+    <string name="story_expired_title">Story expirado</string>
+    <string name="story_expired_body">Stories somem após 24 horas, a menos que o autor tenha mantido no perfil.</string>
+    <string name="view_story">Ver story</string>
+    <string name="story_no_longer_available">Story não está mais disponível</string>
 </resources>

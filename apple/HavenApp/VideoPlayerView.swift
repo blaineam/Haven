@@ -1,5 +1,8 @@
 import SwiftUI
 import AVKit
+#if os(macOS)
+import AppKit
+#endif
 
 #if !os(macOS)
 /// AVPlayerLayer-backed surface with no system chrome. `.resizeAspect` letterboxes — the whole
@@ -12,6 +15,12 @@ import AVKit
 /// `UIPanGestureRecognizer` whose `gestureRecognizerShouldBegin` REFUSES vertical-dominant
 /// movement never claims those touches at all, so the feed scrolls natively; horizontal
 /// movement begins the pan and drives the scrub.
+///
+/// **Clear letterbox:** the feed draws a blurred poster wash behind the player so off-ratio clips
+/// extend the media's colors to the card edge (same look as photo posts). AVPlayerLayer defaults
+/// to an opaque black background in the letterbox strips, which painted over that wash the moment
+/// playback replaced the poster still. Clear the layer (and the hosting view) so only the decoded
+/// video pixels are opaque — the SwiftUI backdrop shows through the pillars for the whole loop.
 final class PlayerLayerView: UIView, UIGestureRecognizerDelegate {
     override class var layerClass: AnyClass { AVPlayerLayer.self }
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
@@ -23,6 +32,21 @@ final class PlayerLayerView: UIView, UIGestureRecognizerDelegate {
     var onScrubChangedX: ((CGFloat) -> Void)?   // cumulative horizontal translation
     var onScrubEnded: (() -> Void)?
     private var pan: UIPanGestureRecognizer?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        configureClearLetterbox()
+    }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureClearLetterbox()
+    }
+    private func configureClearLetterbox() {
+        backgroundColor = .clear
+        isOpaque = false
+        playerLayer.backgroundColor = UIColor.clear.cgColor
+        playerLayer.isOpaque = false
+    }
 
     func installScrubPan() {
         guard pan == nil else { return }
@@ -58,6 +82,7 @@ final class PlayerLayerView: UIView, UIGestureRecognizerDelegate {
 /// AVPlayerLayer-backed surface with no system chrome (native macOS / AppKit). Layer-backed
 /// `NSView` hosting an `AVPlayerLayer`. Mirrors the iOS class's public API (`playerLayer`).
 /// `.resizeAspect` letterboxes — the whole frame is always visible, never cropped.
+/// Clear letterbox (see iOS note): feed blur wash must remain visible while the clip loops.
 final class PlayerLayerView: NSView {
     private let _playerLayer = AVPlayerLayer()
     var playerLayer: AVPlayerLayer { _playerLayer }
@@ -66,11 +91,17 @@ final class PlayerLayerView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer = _playerLayer
+        configureClearLetterbox()
     }
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         wantsLayer = true
         layer = _playerLayer
+        configureClearLetterbox()
+    }
+    private func configureClearLetterbox() {
+        _playerLayer.backgroundColor = NSColor.clear.cgColor
+        _playerLayer.isOpaque = false
     }
 }
 #endif
@@ -90,12 +121,19 @@ struct VideoSurface: UIViewRepresentable {
         let v = PlayerLayerView()
         v.playerLayer.player = player
         v.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+        // Re-assert clear letterbox: UIKit can re-opaque a recycled layer when the player attaches.
+        v.backgroundColor = .clear
+        v.isOpaque = false
+        v.playerLayer.backgroundColor = UIColor.clear.cgColor
+        v.playerLayer.isOpaque = false
         if scrubStripHeight != nil { v.installScrubPan() }
         return v
     }
     func updateUIView(_ v: PlayerLayerView, context: Context) {
         if v.playerLayer.player !== player { v.playerLayer.player = player }
         v.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+        v.playerLayer.backgroundColor = UIColor.clear.cgColor
+        v.playerLayer.isOpaque = false
         v.scrubStripHeight = scrubStripHeight ?? 0
         v.onScrubBegan = onScrubBegan
         v.onScrubChangedX = onScrubChangedX
@@ -111,11 +149,15 @@ struct VideoSurface: NSViewRepresentable {
         let v = PlayerLayerView()
         v.playerLayer.player = player
         v.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+        v.playerLayer.backgroundColor = NSColor.clear.cgColor
+        v.playerLayer.isOpaque = false
         return v
     }
     func updateNSView(_ v: PlayerLayerView, context: Context) {
         if v.playerLayer.player !== player { v.playerLayer.player = player }
         v.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+        v.playerLayer.backgroundColor = NSColor.clear.cgColor
+        v.playerLayer.isOpaque = false
     }
 }
 #endif

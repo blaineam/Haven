@@ -361,12 +361,26 @@ struct PostMediaView: View {
                 // Data saver with local video: don't autoplay until the user asked (pending play
                 // from a poster tap, or a first tap on an already-local clip). Tap then toggles mute.
                 let player = playerFor(ref, url)
-                GestureVideoPlayer(player: player,
-                                   onTap: { dataSaverVideoTap(ref, player) },
-                                   onDoubleTap: { heartIt() },
-                                   inCarousel: inCarousel,
-                                   onScrubbing: onScrubbing)
-                    .background { pageBackdrop(ref, containerAspect: containerAspect) }
+                // Blur as a ZStack SIBLING under the player, not `.background`.
+                //
+                // AVPlayerLayer letterboxes with an opaque black fill by default. Photos (and the
+                // pre-play poster still) use Image `.fit`, so the letterbox strips are transparent
+                // and the blurred edge wash shows through. The moment the live player replaced the
+                // poster, that black fill painted over the wash for the whole loop — reported as
+                // "thumb has the blur, then it disappears when the video starts".
+                //
+                // Two fixes stack: VideoSurface clears the player layer's letterbox (see there),
+                // and the wash lives under the player in a ZStack so UIViewRepresentable z-order
+                // cannot bury a SwiftUI `.background` behind an opaque host view.
+                let poster = MediaVariants.poster(for: ref, in: item.media)
+                ZStack {
+                    pageBackdrop(poster ?? ref, containerAspect: containerAspect)
+                    GestureVideoPlayer(player: player,
+                                       onTap: { dataSaverVideoTap(ref, player) },
+                                       onDoubleTap: { heartIt() },
+                                       inCarousel: inCarousel,
+                                       onScrubbing: onScrubbing)
+                }
                     .onAppear {
                         if dataSaver, dataSaverPendingPlay.contains(ref) {
                             startDataSaverPlayback(ref, player)

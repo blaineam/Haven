@@ -9,6 +9,18 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.4.3] — 2026-08-11
+
+### Fixed — Apple (feed media)
+
+- **Feed video letterbox lost its blurred edge wash as soon as playback started.** Photo posts (and
+  a video's poster still) use `Image` `.fit`, so the blurred edge wash shows in the letterbox strips.
+  The live `AVPlayerLayer` defaulted to an opaque black letterbox fill, which painted over that wash
+  for the whole loop — "thumb has the blur, then it disappears when the video starts."
+
+  Now: clear the player layer (and host view) letterbox fill, and put the blur wash under the player
+  in a `ZStack` so `UIViewRepresentable` compositing cannot bury it.
+
 ## [1.4.2] — 2026-08-11
 
 ### Fixed — Apple (battery)

@@ -34,11 +34,9 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Launch-Sale – bis 30. September 50 % Rabatt: 4,99 $, danach 9,99 $. Ein privates, Ende-zu-Ende verschlüsseltes Zuhause für deine Liebsten. Werbefrei, Peer-to-Peer.
 
 ## whats_new
-1.4.2 – Akku: kein stundenlanger Hintergrund-Betrieb mehr.
+1.4.3 – Feed: weicher Letterbox-Blur bleibt beim Video abspielen.
 
-• Behoben: Haven konnte stundenlang im Hintergrund warm bleiben, obwohl in deinem Circle nichts passierte. Ein Kaltstart durch Push oder Hintergrundaktualisierung fährt nicht mehr den vollen Vordergrund-Sync/Multipeer-Pfad.
-• Im Hintergrund geparkte Telefone stoppen Timer und Nearby-Discovery sofort, damit iOS die App nach einer kurzen leeren Abfrage suspendieren kann.
-• Setzt die Akku-Arbeit aus 1.4.1 fort (schlanke Push-Wakes, kein Media-Backup-Re-Arm-Loop in der Tasche).
+• Behoben: Bei Video-Beiträgen im Feed verschwand der weiche unscharfe Rand-Blur, sobald die Wiedergabe startete. Der Live-Player übermalt die Letterbox-Streifen nicht mehr deckend schwarz — der Blur bleibt den ganzen Loop, wie bei Fotos und dem Poster vor dem Abspielen.
 ## marketing_url
 https://wemiller.com/apps/haven/
 

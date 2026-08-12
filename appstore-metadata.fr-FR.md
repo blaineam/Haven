@@ -34,11 +34,9 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Offre de lancement — ‑50 % jusqu'au 30 septembre : 4,99 $, puis 9,99 $. Un espace privé, chiffré de bout en bout, pour vos proches. Sans pub, sans suivi, pair‑à‑pair.
 
 ## whats_new
-1.4.2 — Batterie : plus d’activité en arrière-plan pendant des heures.
+1.4.3 — Fil : le flou letterbox reste pendant la lecture vidéo.
 
-• Corrigé : Haven pouvait rester actif des heures en arrière-plan sans message ni activité de cercle. Un réveil à froid (push ou actualisation en arrière-plan) n’exécute plus le chemin complet de sync/Multipeer au premier plan.
-• Téléphone en poche : les minuteurs et la découverte à proximité s’arrêtent tout de suite pour qu’iOS puisse suspendre l’app après un sondage vide rapide.
-• Poursuit le travail batterie de 1.4.1 (réveils push allégés, plus de boucle de réarmement de sauvegarde média en poche).
+• Corrigé : sur les publications vidéo du fil, le doux flou des bords disparaissait dès le démarrage de la lecture. Le lecteur en direct ne peint plus en noir opaque les bandes letterbox ; le flou reste pendant toute la boucle, comme pour les photos et l’affiche avant lecture.
 ## marketing_url
 https://wemiller.com/apps/haven/
 

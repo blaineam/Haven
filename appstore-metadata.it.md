@@ -34,11 +34,9 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Offerta lancio — 50% fino al 30 settembre: 4,99 $, poi 9,99 $. Casa privata e crittografata end‑to‑end per i tuoi cari. Niente pubblicità né tracciamento, peer‑to‑peer.
 
 ## whats_new
-1.4.2 — Batteria: niente più ore in Background a vuoto.
+1.4.3 — Feed: lo sfocato letterbox resta mentre i video riproducono.
 
-• Risolto: Haven poteva restare attiva per ore in Background senza messaggi né attività nel cerchio. Un risveglio a freddo da push o aggiornamento in background non esegue più l’intero percorso di sync/Multipeer in primo piano.
-• Con il telefono in tasca, timer e discovery nelle vicinanze si parcheggiano subito così iOS può sospendere l’app dopo un poll vuoto rapido.
-• Continua il lavoro batteria di 1.4.1 (wake push snelli, niente loop di re-arm del backup media in tasca).
+• Risolto: nei post video del feed lo sfocato morbido ai bordi spariva non appena partiva la riproduzione. Il player live non copre più di nero opaco le bande letterbox; lo sfocato resta per tutto il loop, come sulle foto e sul poster prima del play.
 ## marketing_url
 https://wemiller.com/apps/haven/
 

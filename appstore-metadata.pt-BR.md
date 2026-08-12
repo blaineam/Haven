@@ -34,11 +34,9 @@ privado,criptografado,família,amigos,mensagens,seguro,offline,chamadas,sem anú
 Lançamento — 50% até 30/9: $4,99, depois $9,99. Espaço privado e criptografado de ponta a ponta para seus mais próximos. Sem anúncios, sem rastreamento, peer-to-peer.
 
 ## whats_new
-1.4.2 — Bateria: fim do consumo em segundo plano por horas.
+1.4.3 — Feed: o desfoque letterbox permanece enquanto o vídeo toca.
 
-• Corrigido: o Haven podia ficar quente por horas em segundo plano sem mensagens nem atividade no círculo. Um despertar a frio por push ou atualização em segundo plano não roda mais o caminho completo de sync/Multipeer em primeiro plano.
-• Com o telefone no bolso, timers e descoberta por perto param na hora para o iOS poder suspender o app depois de uma checagem vazia rápida.
-• Continua o trabalho de bateria do 1.4.1 (wakes de push enxutos, sem loop de rearmar backup de mídia no bolso).
+• Corrigido: em posts de vídeo no feed, o desfoque suave das bordas sumia assim que a reprodução começava. O player ao vivo não pinta mais preto opaco sobre as faixas letterbox; o desfoque fica o loop inteiro, como nas fotos e no pôster antes de tocar.
 ## marketing_url
 https://wemiller.com/apps/haven/
 

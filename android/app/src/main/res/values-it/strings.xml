@@ -698,7 +698,7 @@
     <string name="linkpreview_loading">Carico l\'anteprima…</string>
     <string name="linkpreview_load">Carica anteprima</string>
     <string name="story_expired_title">Storia scaduta</string>
-    <string name="story_expired_body">Le storie scompaiono dopo 24 ore, a meno che l'autore non le abbia conservate sul profilo.</string>
+    <string name="story_expired_body">Le storie scompaiono dopo 24 ore, a meno che l\'autore non le abbia conservate sul profilo.</string>
     <string name="view_story">Vedi storia</string>
     <string name="story_no_longer_available">Storia non più disponibile</string>
 </resources>

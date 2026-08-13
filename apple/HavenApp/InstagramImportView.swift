@@ -130,9 +130,14 @@ struct InstagramImportView: View {
                 }
 
                 Section {
-                    Text("These publish to \(circleName) with their original dates, so they slot into history rather than arriving as new posts today.")
+                    Text("Posts and reels publish to \(circleName) with their original dates, so they slot into history rather than arriving as new posts today.")
+                    if s.count(.story) > 0 {
+                        Label("Your \(s.count(.story)) stories are kept to your profile", systemImage: "person.crop.circle")
+                        Text("A story only still exists because you kept it — on Instagram it expired after 24 hours, exactly as it does here. So they're saved as kept stories rather than published, which means they stay yours and nobody else's feed fills up with them.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                     Label("Nobody is notified", systemImage: "bell.slash")
-                    Text("An import this size would otherwise fire a notification for every post. Members see them in the feed in their proper place, with no banners, and the photos download only when actually opened.")
+                    Text("An import this size would otherwise fire a notification for every post. Members see them in the feed in their proper place, with no banners, and the full photo or video downloads for them only if they actually open it.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
 

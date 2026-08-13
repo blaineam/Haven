@@ -66,15 +66,19 @@ and the total size — and nothing is published until you confirm.
 |---|---|
 | Post (single or carousel) | One post, with every photo/video in the album kept together |
 | Reel | A post with its video |
-| Story | A post — see below |
+| Story | A **kept story** on your profile — see below |
 | Caption | The post's text |
 | Original date | The post's date — history keeps its real order |
 | Audio in a video | Plays as part of the video, exactly as it did on Instagram |
 
-Everything arrives as a **post**, including stories. A Haven story is ephemeral by design — it
-expires after 24 hours — so importing a three-year-old story *as* a story would either delete it
-again immediately or leave a "story" that never expires, which is not a story at all. Archived
-stories are history, and history belongs in the feed where you can still scroll to it next year.
+**Stories are kept, not published.** A story you posted to Instagram is only still in your export
+because you kept it — the story itself expired after 24 hours there, exactly as it does in Haven.
+So imported stories are saved the same way Haven's own **Keep** does it: your own snapshot, on your
+profile, with its media pinned so cleanup can't reclaim it. They stay yours, and nobody else's feed
+fills up with three years of your old stories.
+
+Re-importing the same export won't duplicate them — a kept story is recorded against the archive
+entry it came from, so importing twice is harmless.
 
 Photos and videos are re-encoded through Haven's usual optimizer on the way in, and every video
 gets a poster still cut for it, so imported media behaves exactly like media you posted by hand.

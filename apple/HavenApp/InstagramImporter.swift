@@ -104,14 +104,24 @@ final class InstagramImporter: ObservableObject {
                 if refs.isEmpty {
                     skipped += 1
                 } else {
-                    // Everything imports as a POST, including stories and reels. A Haven story is
-                    // ephemeral by design (24 h retention); an archived story that never expires is
-                    // not a story, it is history — and history belongs in the feed where it can
-                    // still be scrolled to a year from now.
-                    let body = item.body, at = item.createdAt
+                    let body = item.body, at = item.createdAt, kind = item.kind
+                    // A story you posted to Instagram is only still around because you kept it —
+                    // Instagram's own story expires in 24h just as Haven's does. So an imported
+                    // story becomes a KEPT story: your own snapshot, on your profile, media pinned
+                    // so the cleanup sweeps can't reclaim it. Keeping deliberately does not
+                    // republish (see KeptStoriesStore), which is exactly right here — nobody in the
+                    // circle asked to have three years of your old stories appear in their feed.
+                    //
+                    // Posts and reels ARE feed content and publish normally (silent + backdated).
+                    let identity = Self.keptIdentity(item)
                     await MainActor.run {
-                        FeedStore.shared.postImported(circleId: circleId, body: body, media: refs,
-                                                      music: nil, story: false, createdAt: at)
+                        if kind == .story {
+                            KeptStoriesStore.shared.keep(id: identity, body: body, media: refs,
+                                                         createdAt: at, music: nil)
+                        } else {
+                            FeedStore.shared.postImported(circleId: circleId, body: body, media: refs,
+                                                          music: nil, story: false, createdAt: at)
+                        }
                     }
                     imported += 1
                 }
@@ -169,6 +179,15 @@ final class InstagramImporter: ObservableObject {
             }
         }
         return refs
+    }
+
+    /// Stable id for a kept story, derived from the archive entry it came from.
+    ///
+    /// `KeptStoriesStore.keep` is keyed on the original event id so a story is kept at most once —
+    /// an import has no Haven event to point at, so the archive path stands in. It is stable across
+    /// runs, which makes re-importing the same export idempotent instead of doubling every story.
+    private nonisolated static func keptIdentity(_ item: InstagramArchive.Item) -> String {
+        "ig:" + (item.mediaNames.first ?? "\(item.createdAt)")
     }
 
     private nonisolated static func ext(_ name: String) -> String {

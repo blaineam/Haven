@@ -18,9 +18,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   at the step where it is made rather than in the error afterwards.
 
   Nothing publishes until a preview is confirmed: it shows what was found, the date span, the total
-  size, and any files referenced but missing from the archive. Posts arrive backdated, silently, and
-  photos/videos are re-encoded through Haven's usual optimizer with a poster still cut for every
-  video, so imported media behaves like media posted by hand. Carousels stay a single post.
+  size, and any files referenced but missing from the archive. Posts and reels arrive backdated and
+  silently; photos/videos are re-encoded through Haven's usual optimizer with a poster still cut for
+  every video, so imported media behaves like media posted by hand. Carousels stay a single post.
+
+  **Stories are kept, not published.** A story is only still in the export because the user kept it
+  — it expired after 24 h on Instagram exactly as it does in Haven — so imported stories are saved
+  the way Haven's own Keep does it: a personal snapshot with its media pinned, on the user's
+  profile, never republished into anyone's feed. Keyed on the archive entry, so re-importing the
+  same export does not duplicate them.
 
   Verified end to end against a real 1.28 GB export: 372 items (203 posts, 85 reels, 84 stories),
   1129 media files, zero unresolved references, and a 21-photo carousel preserved as one post.

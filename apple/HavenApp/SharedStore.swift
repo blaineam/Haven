@@ -111,6 +111,13 @@ final class MediaBackupQueue {
     /// Whether a specific blob is still waiting to reach a relay (drives the post upload indicator).
     func hasPending(_ ref: String) -> Bool { pendingRefs.contains(ref) }
 
+    /// Is ANY blob still owed to a relay? Read by `NotificationManager.scheduleRefresh` to decide
+    /// whether a background wake is worth asking iOS for. Refs sitting inside their retry backoff
+    /// still count — they are unfinished work, just not yet due.
+    var hasAnyPending: Bool {
+        !pending.isEmpty || !priorityPending.isEmpty || !inFlightHi.isEmpty || !inFlightLo.isEmpty
+    }
+
     /// `priority`: a just-authored event's media — drained before any backfill backlog. Callers
     /// enqueue in the media list's order (thumbs/posters ride before the video), which the lane
     /// preserves, so a poster is on the relay before its (much larger) video starts.

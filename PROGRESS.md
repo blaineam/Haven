@@ -6,6 +6,19 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **Haven kept asking to be woken (2026-08-12, 1.4.7, iPhone/iPad)** — 1.4.1–1.4.6 each made a
+  background wake cheaper; none of them stopped the app from *requesting* wakes. A background-refresh
+  request was chained unconditionally on every background entry and again at the end of every
+  refresh, so each granted window ran a full mailbox LIST across every circle plus a media-backup
+  pass and then booked the next one — a treadmill that ran all night on a phone where nothing had
+  happened, and all of it counted as "Background Activity". Refreshes are now requested only for work
+  already known to be unfinished (queued envelopes, media owed to a relay, a backlog mid-drain), and
+  chained *after* a pass based on what is still owed; idle devices schedule one wake for a 6-hourly
+  safety sweep (~4 a day instead of ~96), and a wake with nothing owed lists no mailbox at all. The
+  15s/30s heartbeats, previously gated but still scheduled, are now invalidated on background and
+  re-armed on foreground — a cold background launch arms neither, while a PushKit VoIP launch still
+  arms the live-call frame poll a backgrounded call needs. Push delivery is unchanged (APNs is the
+  lane; hints are still fetched on every wake). Build 471 → Xcode Cloud → TestFlight.
 - **Activity rows about a comment open the post again (2026-08-03, 1.3.1, every client)** — a
   reaction or a reply on one of YOUR comments produced an activity row (and a push) whose tap target
   is the *comment's* id. A comment isn't a top-level feed item — it lives inside its parent — so the

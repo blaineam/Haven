@@ -362,6 +362,8 @@ final class FeedStore: ObservableObject {
             // Background launches never open Multipeer (see bringOnline). Give nearby a short
             // discovery window now that someone is actually looking — same 12s budget as cold start.
             nearby?.nudgeDiscovery(parkAfter: 12)
+            // The heartbeats were invalidated on the way out, not merely gated — put them back.
+            armHeartbeats()
             #endif
             return
         }
@@ -380,8 +382,31 @@ final class FeedStore: ObservableObject {
         armFastMediaTimer(false)
         nextPollDueMs = UInt64.max / 2
         nextSyncDueMs = UInt64.max / 2
+        // 1.4.7: STOP the heartbeats, don't just gate them. See `armMailboxTimer`.
+        disarmHeartbeats()
         #endif
     }
+
+    #if os(iOS)
+    /// Invalidate every repeating timer that exists only to serve a visible app. Nothing here is
+    /// needed while pocketed: push + `slimBackgroundSync` own background delivery.
+    ///
+    /// `liveCallTimer` is deliberately NOT touched — a call that continues while the app is
+    /// backgrounded still needs its 3s live-frame poll, and `callActivityChanged` already tears
+    /// that down the moment the call ends.
+    private func disarmHeartbeats() {
+        mailboxTimer?.invalidate(); mailboxTimer = nil
+        syncTimer?.invalidate(); syncTimer = nil
+    }
+
+    /// Put the heartbeats back when we come on screen. No-op before the engine exists (a cold
+    /// background launch foregrounded later re-arms from `startMailboxPolling` / `bringOnline`).
+    private func armHeartbeats() {
+        guard social != nil else { return }
+        if mailboxTimer == nil { armMailboxTimer() }
+        if syncTimer == nil { startSyncTimer() }
+    }
+    #endif
 
     /// Re-read `UIApplication.applicationState` and park if we are pocketed. Call at the top of
     /// every background entry point that can boot the engine without a scenePhase transition
@@ -723,6 +748,33 @@ final class FeedStore: ObservableObject {
             nextPollDueMs = UInt64.max / 2
             nextSyncDueMs = UInt64.max / 2
         }
+        armMailboxTimer()
+    }
+
+    /// Arm (or re-arm) the mailbox heartbeat. Split out of `startMailboxPolling` so backgrounding can
+    /// **invalidate** the timer outright and foregrounding can put it back, without re-running the
+    /// one-shot seen-set repairs and epoch-head publish at the top of `startMailboxPolling`.
+    ///
+    /// 1.4.7: an early-`return` guard inside the timer body was not enough. A repeating `Timer` on the
+    /// main runloop is a scheduled *wakeup*: for as long as any assertion (upload flush, media backup,
+    /// push wake, BGAppRefresh grant) keeps the process unsuspended, these fired every 15s/30s and
+    /// hopped the main actor just to compare two integers and return. Invalidate them instead — a
+    /// pocketed Haven should have nothing at all scheduled.
+    func armMailboxTimer() {
+        mailboxTimer?.invalidate()
+        mailboxTimer = nil
+        #if os(iOS)
+        // A cold BACKGROUND launch (content-available push, VoIP, BGAppRefresh after a kill) runs
+        // `startMailboxPolling` with no scenePhase ever arriving. Arming here would schedule a 15s
+        // runloop wakeup for the whole grant window. `setForeground(true)` re-arms when we're seen.
+        //
+        // The live-call poll is armed BEFORE that guard: a PushKit VoIP launch brings the app up
+        // in the background precisely so a call can ring, and it needs its 3s frame poll there.
+        guard appIsForeground else {
+            callActivityChanged(CallManager.shared.callInProgress)
+            return
+        }
+        #endif
         // 10s heartbeat, but the actual poll only runs when due (30s base, stretching when idle).
         #if os(iOS)
         // 45s base. Push + activity still force a poll immediately; idle LIST is pure heat.
@@ -2210,6 +2262,16 @@ final class FeedStore: ObservableObject {
 
     private func startSyncTimer() {
         syncTimer?.invalidate()
+        syncTimer = nil
+        #if os(iOS)
+        // Same trap as `armMailboxTimer`: a pocketed cold launch must schedule nothing.
+        guard appIsForeground else {
+            #if DEBUG
+            startMatrixQaPoller()
+            #endif
+            return
+        }
+        #endif
         // 10s heartbeat, but the expensive fan-out (hello+roster to every contact, relay re-announce,
         // mesh dials) only runs when due — 20s base, stretching to 60s/120s as the app sits idle. This
         // is the primary device-heat fix: an open-but-idle phone no longer blasts the radio every 20s.
@@ -4109,7 +4171,12 @@ final class FeedStore: ObservableObject {
     /// Returns whether anything new arrived so the caller can end the window early on an empty poll
     /// (the common case with zero activity is a quick no-op).
     @discardableResult
-    func slimBackgroundSync() async -> Bool {
+    /// `allowMailboxPull`: whether this wake may LIST every circle's mailbox. Push wakes pass `true`
+    /// (a banner-only push carries no key, so the LIST is the only way to find what arrived).
+    /// BGAppRefresh passes `false` unless it has a known backlog or the 6h safety sweep is due —
+    /// listing every circle to discover nothing was the bulk of an idle wake's radio time.
+    /// Push HINTS are still fetched in both cases: those are targeted single-key GETs.
+    func slimBackgroundSync(allowMailboxPull: Bool = true) async -> Bool {
         // Re-pin the park at the start of every wake. A concurrent scenePhase blip or an
         // earlier configure that raced us must not leave Multipeer / media timers warm.
         #if os(iOS)
@@ -4141,12 +4208,14 @@ final class FeedStore: ObservableObject {
             // when the user opens the app. Envelope text is enough for the banner.
         }
         guard social != nil else { return gotFromHints > 0 }
+        // One media-backup pass only — drain itself refuses to re-arm while backgrounded. Runs even
+        // on a no-LIST wake: finishing an owed upload is exactly why such a wake was requested.
+        defer { if let social { MediaBackupQueue.shared.drainPersisted(social: social) } }
+        guard allowMailboxPull else { return gotFromHints > 0 }
         // Prefer hinted circles first, then a full sweep so a banner-only push (no mk) still lands.
         let all = circles.map(\.id)
         let ordered = hintedCids + all.filter { !hintedCids.contains($0) }
         let got = await pullMailbox(circleIds: ordered.isEmpty ? all : ordered)
-        // One media-backup pass only — drain itself refuses to re-arm while backgrounded.
-        if let social { MediaBackupQueue.shared.drainPersisted(social: social) }
         return got > 0 || gotFromHints > 0
     }
 

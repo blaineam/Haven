@@ -64,6 +64,10 @@ final class NotificationManager {
     /// always-running app + live inbound notifications (no background-refresh wake).
     func registerBackgroundTask() {
         #if os(iOS)
+        // Anchor the safety-net clock on first launch (and after an update that introduced it), so
+        // "6h since the last sweep" is measured from a real point instead of the epoch — otherwise
+        // the very first background entry would look 56 years overdue and sweep immediately.
+        if UserDefaults.standard.double(forKey: Self.safetyNetKey) <= 0 { markSafetyNetSweep() }
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.refreshTaskId, using: nil) { task in
             guard let refresh = task as? BGAppRefreshTask else { task.setTaskCompleted(success: false); return }
             // The launch handler runs on a PRIVATE (non-main) queue, so MainActor.assumeIsolated
@@ -73,24 +77,84 @@ final class NotificationManager {
         #endif
     }
 
-    /// Ask iOS to wake us again later (it decides the real cadence). No-op on macOS.
-    func scheduleRefresh() {
+    /// Ask iOS to wake us again later (it decides the real cadence) — **only when there is real work
+    /// waiting**. No-op on macOS.
+    ///
+    /// 1.4.7: this used to be unconditional, chained from every background entry and from the end of
+    /// every refresh. That built a self-sustaining wake treadmill: iOS granted a window, the handler
+    /// ran a full mailbox LIST across every circle plus a media-backup pass, then immediately booked
+    /// the next one — forever, on a phone where nothing had happened. Each grant is background CPU +
+    /// radio, and Settings adds every one of them to "Background Activity". The parks in 1.4.1–1.4.6
+    /// made each wake cheaper; they never stopped the app from ASKING to be woken.
+    ///
+    /// APNs is Haven's actual delivery path (`docs/NOTIFICATIONS.md` — background fetch was found
+    /// unworkable for delivery years ago). So a refresh is worth a wake only for work we already know
+    /// is unfinished — authored envelopes still queued, media still owed to a relay, a mailbox
+    /// backlog mid-drain — plus a slow safety-net sweep in case a push was ever dropped. With none of
+    /// those, nothing is scheduled and the process just stays suspended until a push arrives. That is
+    /// the "basically zero" case: no timers, no wakes, no work.
+    func scheduleRefresh(force: Bool = false) {
         #if os(iOS)
+        // Work we know is owed → come back soon and finish it. Nothing owed → book ONE wake at the
+        // moment the 6h safety sweep comes due, instead of every 15 minutes forever. Idle days cost
+        // ~4 wakes instead of ~96, and each of those 4 is the only one that lists anything.
+        let delay: TimeInterval = (force || backgroundWorkOutstanding) ? 15 * 60 : secondsUntilSafetyNetSweep
         let req = BGAppRefreshTaskRequest(identifier: Self.refreshTaskId)
-        req.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+        req.earliestBeginDate = Date(timeIntervalSinceNow: delay)
         try? BGTaskScheduler.shared.submit(req)
         #endif
     }
 
     #if os(iOS)
+    /// Unfinished outbound work that a background window could actually finish.
+    private var backgroundWorkOutstanding: Bool {
+        BackgroundUploader.shared.hasAnyPending
+            || MediaBackupQueue.shared.hasAnyPending
+            || SharedStore.anyOutstandingBacklog()
+    }
+
+    /// Push is the delivery path, but pushes can be dropped (APNs is best-effort, and the worker
+    /// drops oversized bodies). One mailbox sweep every 6h is a cheap net that costs ~4 wakes a day
+    /// instead of one every 15 minutes.
+    private static let safetyNetKey = "haven.bg.lastSafetySweepMs"
+    private static let safetyNetIntervalMs: Double = 6 * 60 * 60 * 1000
+    private var safetyNetSweepDue: Bool {
+        let last = UserDefaults.standard.double(forKey: Self.safetyNetKey)
+        guard last > 0 else { return false }   // stamped at registration; see registerBackgroundTask
+        return Date().timeIntervalSince1970 * 1000 - last >= Self.safetyNetIntervalMs
+    }
+    private func markSafetyNetSweep() {
+        UserDefaults.standard.set(Date().timeIntervalSince1970 * 1000, forKey: Self.safetyNetKey)
+    }
+
+    /// How far out to book the idle wake. Floored at iOS's own 15-minute minimum so a due-now sweep
+    /// still submits a legal request.
+    private var secondsUntilSafetyNetSweep: TimeInterval {
+        let last = UserDefaults.standard.double(forKey: Self.safetyNetKey)
+        guard last > 0 else { return Self.safetyNetIntervalMs / 1000 }
+        let elapsed = Date().timeIntervalSince1970 * 1000 - last
+        return max(15 * 60, (Self.safetyNetIntervalMs - elapsed) / 1000)
+    }
+    #endif
+
+    #if os(iOS)
     private func handleRefresh(_ task: BGAppRefreshTask) {
-        scheduleRefresh()   // chain the next wake
+        // Is this window allowed to do a full mailbox LIST? Only when we know there's a backlog
+        // mid-drain, or the 6h safety-net sweep is due. Otherwise the window flushes what it knows
+        // is owed and ends — a wake that lists every circle's mailbox to find nothing is exactly
+        // the background cost we're removing. Push hints are still fetched either way (targeted,
+        // one key each), so a push that arrived while we were suspended still lands.
+        let fullSweep = safetyNetSweepDue || SharedStore.anyOutstandingBacklog()
+        if fullSweep { markSafetyNetSweep() }
         let work = Task { @MainActor in
             // Always complete exactly once — even when the expiration handler cancels us.
             defer {
                 // Re-park after work so any ingest side-effect cannot leave Multipeer / media
                 // timers warm under the residual assertion window.
                 FeedStore.shared.syncForegroundFromSystem()
+                // Chain the next wake only if something is STILL owed after this pass. Booking it
+                // up front (as this used to) meant an empty window always bought another one.
+                self.scheduleRefresh()
                 task.setTaskCompleted(success: !Task.isCancelled)
             }
             // Cold BGAppRefresh never gets scenePhase — park before any work so timers/Multipeer
@@ -103,7 +167,7 @@ final class NotificationManager {
             // Push-inbox drain + a mailbox-only pull + the upload-queue flush is the whole point
             // of the wake; when the poll comes back empty we end the window EARLY (quick no-op)
             // instead of idling out the full grant — that was part of "Haven ran 2h in Background".
-            let gotSomething = await FeedStore.shared.slimBackgroundSync()
+            let gotSomething = await FeedStore.shared.slimBackgroundSync(allowMailboxPull: fullSweep)
             if gotSomething && !Task.isCancelled {
                 // Give ingest side effects (banner posting, sibling fan-out) a short window —
                 // still far shorter than sitting on the full BG grant.

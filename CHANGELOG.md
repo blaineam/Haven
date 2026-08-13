@@ -9,6 +9,37 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.4.7] — 2026-08-12
+
+### Fixed — Apple (battery)
+
+- **Haven asked iOS to wake it every 15 minutes forever, whether or not anything was waiting.**
+  1.4.1–1.4.6 made each background wake cheaper; none of them stopped the app from *requesting*
+  wakes. A `BGAppRefreshTaskRequest` was chained unconditionally on every background entry and again
+  at the end of every refresh, so each granted window ran a full mailbox LIST across every circle
+  plus a media-backup pass and then immediately booked the next one — a self-sustaining treadmill on
+  a phone where nothing had happened, and every grant of it counted toward Settings' "Background
+  Activity".
+
+  A refresh is now requested only when there is work we already know is unfinished — authored
+  envelopes still queued for a mailbox, media still owed to a relay, or a mailbox backlog mid-drain
+  — and the next wake is chained *after* the pass, based on what is still owed rather than booked up
+  front. With nothing outstanding, Haven schedules **one** wake at the moment a 6-hourly safety-net
+  sweep comes due (≈4 idle wakes a day instead of ≈96), and a wake with no backlog and no sweep due
+  flushes what it owes without listing any mailbox at all. Push hints are still fetched on every
+  wake (targeted single-key GETs), so delivery is unchanged: APNs remains the delivery path.
+
+- **The 15s/30s heartbeats were gated, not stopped.** Backgrounding parked their due-gates but left
+  both repeating `Timer`s scheduled on the main runloop. For as long as anything kept the process
+  unsuspended — an upload flush, a media-backup assertion, a push wake, a BGAppRefresh grant — they
+  kept firing and hopping the main actor purely to compare two integers and return. They are now
+  invalidated on background and re-armed on foreground, and a cold *background* launch (push, VoIP,
+  BGAppRefresh after a kill) no longer arms them at all. A PushKit VoIP launch still arms its
+  live-call frame poll, which is the one timer a backgrounded call genuinely needs.
+
+  Net effect: a pocketed Haven with no circle activity has nothing scheduled and nothing to wake it
+  but a real push. MARKETING_VERSION 1.4.7, build 471.
+
 ## [1.4.6] — 2026-08-12
 
 ### Fixed — Apple (battery)

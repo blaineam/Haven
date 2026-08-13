@@ -68,6 +68,22 @@ Worker).
    duplicate local banner. A generic `alert` stub is the fallback when the NSE can't decrypt.
 5. Local notifications + the (crash-fixed) background refresh remain as a fallback.
 
+### Background refresh is a net, not a lane (1.4.7)
+
+Because APNs is the delivery path, `BGAppRefreshTask` is scheduled **only when there is work we
+already know is unfinished** — authored envelopes still queued for a mailbox, media still owed to a
+relay, or a mailbox backlog mid-drain — and the next wake is chained after a pass completes, based
+on what is still owed, rather than booked up front. With nothing outstanding, exactly one wake is
+scheduled for a **6-hourly safety-net sweep** (in case a push was ever dropped: APNs is best-effort
+and the Worker drops oversized bodies).
+
+A wake with no backlog and no sweep due flushes what it owes and ends **without listing any
+mailbox**; push *hints* are still fetched on every wake, since those are targeted single-key GETs.
+Before this, a refresh was chained unconditionally from every background entry and from the end of
+every refresh, so each granted window ran a full LIST across every circle and then booked the next
+one — a self-sustaining wake treadmill on an idle phone, and the bulk of Haven's "Background
+Activity" time. See `NotificationManager.scheduleRefresh`.
+
 ### Sealed banner wire format
 The relay's `e` = base64 of the signed notification envelope (see `seal_signed_notification`).
 Plaintext is JSON built by `PushBanner` on the **sender** (the NSE has the seed alone and

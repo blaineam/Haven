@@ -33,6 +33,11 @@ final class BackgroundUploader {
     /// the post sync-status light: pending = "syncing", empty = "in the relay").
     func hasPending(circleId: String) -> Bool { queue.contains { $0.circleId == circleId } }
 
+    /// Is ANY authored event still waiting for a mailbox, in any circle? This is one of the few
+    /// honest reasons to ask iOS for another background wake — see
+    /// `NotificationManager.scheduleRefresh`.
+    var hasAnyPending: Bool { !queue.isEmpty }
+
     /// Is an upload flush ACTIVELY running right now? The sync-status light shows "Syncing…" off this
     /// (a transient, real upload) rather than off `hasPending` (a queue that may be stuck/unreachable and
     /// would otherwise pin the badge to yellow forever — the post already went directly to online members,

@@ -371,11 +371,13 @@ final class FeedStore: ObservableObject {
         // content-available push, BGAppRefresh) also keeps the main runloop alive, so the 15s/30s
         // heartbeats keep firing and re-arm hello fan-out + mailbox LIST for the whole assertion
         // window. That is how Settings shows hours of Background activity with zero real messages
-        // — the phone was never permitted to suspend. Park Multipeer immediately, and push the
-        // timer due-gates so far out that heartbeats become pure integer compares until we are
-        // frontmost again. Push + BGAppRefresh call `slimBackgroundSync` / `pollMailboxNow`
-        // directly and do not need the timers.
-        nearby?.parkDiscovery()
+        // — the phone was never permitted to suspend.
+        //
+        // 1.4.6: also drop live Multipeer sessions (discovery park alone left AWDL/BT warm) and
+        // kill the 5s fresh-media retry timer (armed by push-hint media requests during a wake).
+        // Push + BGAppRefresh call `slimBackgroundSync` / `pollMailboxNow` directly.
+        nearby?.disconnectForBackground()
+        armFastMediaTimer(false)
         nextPollDueMs = UInt64.max / 2
         nextSyncDueMs = UInt64.max / 2
         #endif
@@ -611,7 +613,11 @@ final class FeedStore: ObservableObject {
         reconcileRemovals()  // heal old-build damage: purge engine members that are still client-tombstoned
         applyCryptoSwitches(seedless: seedless)   // Switch-Flip 1.0.7: re-apply the non-persisted crypto switches
         refresh()
-        if let social { MediaBackupQueue.shared.drainPersisted(social: social) }   // finish uploads killed mid-flight
+        // Media-backup drain holds a UIApplication assertion. On a pocket cold launch (push /
+        // BGAppRefresh) the wake path already runs one budgeted pass via slimBackgroundSync —
+        // starting another here stacks assertions and keeps the process warm for the whole drain.
+        // Foreground open: finish mid-flight uploads so the user sees them land.
+        if appIsForeground, let social { MediaBackupQueue.shared.drainPersisted(social: social) }
         recomputeUnreadDMs()   // one-time badge compute at startup (kept OFF the per-refresh hot path)
         seedDemoIfNeeded()   // HAVEN_DEMO=1 only — PII-free synthetic dataset for screenshots
         restoreReassemblies()   // pick half-finished media transfers back up instead of restarting them
@@ -645,9 +651,11 @@ final class FeedStore: ObservableObject {
         // seal+upload storm under a background assertion. Push / slimBackgroundSync cover delivery.
         if appIsForeground {
             dailyMailboxRefreshIfDue()
+            // Retry posts that didn't reach the mailbox. Pocket boots leave this to the push /
+            // BGAppRefresh handler (one flush under its own assertion, then suspend).
+            Task { await BackgroundUploader.shared.flush() }
         }
-        Task { await BackgroundUploader.shared.flush() }   // retry any posts that didn't reach the mailbox
-        ScheduledStore.shared.start()   // fire any "send later" posts/DMs whose time has come
+        ScheduledStore.shared.start()   // one-shot arm only if anything is queued; cheap when empty
     }
 
     /// Once a day: re-assert everything I authored — upload anything a mailbox never saw AND
@@ -4102,6 +4110,11 @@ final class FeedStore: ObservableObject {
     /// (the common case with zero activity is a quick no-op).
     @discardableResult
     func slimBackgroundSync() async -> Bool {
+        // Re-pin the park at the start of every wake. A concurrent scenePhase blip or an
+        // earlier configure that raced us must not leave Multipeer / media timers warm.
+        #if os(iOS)
+        syncForegroundFromSystem()
+        #endif
         ingestPushInbox()
         // Hints: process in THIS task. The general `consumePushHints` spawns fire-and-forget work
         // that can outlive setTaskCompleted / fetchCompletionHandler and keep the process warm
@@ -4122,14 +4135,10 @@ final class FeedStore: ObservableObject {
                 await ingestHintedEnvelopes(fetched)
                 gotFromHints = fetched.count
             }
-            for h in hints {
-                for ref in (h.mr ?? []).prefix(8)
-                    where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref) {
-                    MediaFetchBackoff.clear(ref)
-                    fastReq[ref] = nil
-                    requestMedia(ref, circleId: known.contains(h.c) ? h.c : nil)
-                }
-            }
+            // Media: do NOT call requestMedia here. That kicks peer mesh asks + a 5s fast-lane
+            // timer that outlives fetchCompletionHandler and holds the process warm for minutes.
+            // NSE may already have prefetched sealed blobs into the app group; the rest loads
+            // when the user opens the app. Envelope text is enough for the banner.
         }
         guard social != nil else { return gotFromHints > 0 }
         // Prefer hinted circles first, then a full sweep so a banner-only push (no mk) still lands.
@@ -6194,6 +6203,12 @@ final class FeedStore: ObservableObject {
     /// would re-mirror a DM's media to the wrong circle's relay.
     func requestMedia(_ ref: String, circleId: String? = nil) {
         guard let social, !MediaStore.isSynthetic(ref), !MediaStore.shared.has(ref) else { return }
+        #if os(iOS)
+        // Pocketed: refuse. Peer mesh ask + URLSession restore outlive the wake completion and
+        // are what still racked multi-hour Background after the 1.4.1/1.4.2 parks. Media lands
+        // when the user opens the app (or via NSE app-group prefetch).
+        guard appIsForeground else { return }
+        #endif
         let circle = circleId ?? activeCircleId
         mediaReqCircle[ref] = circle   // remember the circle so a peer-delivered blob re-mirrors correctly
         let myHex = social.myNodeHex()
@@ -6243,10 +6258,21 @@ final class FeedStore: ObservableObject {
     /// Keep the fresh-lane 5s timer armed exactly while fresh refs are still retrying.
     private func armFastMediaTimer(_ active: Bool) {
         if active {
+            #if os(iOS)
+            // Never arm while pocketed — a 5s media retry loop under a wake assertion is the
+            // residual that still showed multi-hour Background after 1.4.1/1.4.2.
+            guard appIsForeground else { return }
+            #endif
             guard fastMediaTimer == nil else { return }
             fastMediaTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     guard let self else { return }
+                    #if os(iOS)
+                    guard self.appIsForeground else {
+                        self.armFastMediaTimer(false)
+                        return
+                    }
+                    #endif
                     self.lastMediaScanMs = 0   // the fresh lane bypasses the 2s scan gate
                     self.requestMissingMedia()
                 }
@@ -6258,6 +6284,12 @@ final class FeedStore: ObservableObject {
     }
 
     private func requestMissingMedia() {
+        #if os(iOS)
+        // Pocketed: no media scan, no peer asks, no restore Tasks. slimBackgroundSync owns
+        // envelopes only; media loads on the next open. Without this, ingest side-effects of a
+        // push wake re-arm the 5s lane and keep the radio warm past completionHandler.
+        guard appIsForeground else { return }
+        #endif
         verifyHeldMedia()   // held != readable — a blob we hold but cannot open is invisible here
         guard let social, node != nil || nearby != nil else { return }
         // The scan below is O(items × media) with a stat() per ref (MediaStore.has) — cap it to

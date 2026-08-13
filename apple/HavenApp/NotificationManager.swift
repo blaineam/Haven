@@ -87,7 +87,12 @@ final class NotificationManager {
         scheduleRefresh()   // chain the next wake
         let work = Task { @MainActor in
             // Always complete exactly once — even when the expiration handler cancels us.
-            defer { task.setTaskCompleted(success: !Task.isCancelled) }
+            defer {
+                // Re-park after work so any ingest side-effect cannot leave Multipeer / media
+                // timers warm under the residual assertion window.
+                FeedStore.shared.syncForegroundFromSystem()
+                task.setTaskCompleted(success: !Task.isCancelled)
+            }
             // Cold BGAppRefresh never gets scenePhase — park before any work so timers/Multipeer
             // don't run the foreground cadence under the refresh assertion.
             FeedStore.shared.syncForegroundFromSystem()

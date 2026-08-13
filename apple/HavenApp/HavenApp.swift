@@ -77,11 +77,14 @@ final class HavenAppDelegate: NSObject, UIApplicationDelegate {
             SharedInbox.append(env: env)
         }
         let remint = userInfo["remint"] != nil
-        // Remint-only cron: no content to fetch — do not open Multipeer or fan hello. That path used
-        // to call forceSync() and always report .newData, so a nightly URL refresh looked like hours
-        // of "Background" work with zero messages.
-        let contentWake = userInfo["ev"] != nil || userInfo["e"] != nil
-            || userInfo["call"] != nil || !remint
+        // Explicit content coordinates (inline event, sealed banner, call). Remint-only cron must
+        // NOT count as content — that path used to forceSync and always report .newData, so a
+        // nightly URL refresh looked like hours of Background with zero messages.
+        //
+        // A silent content-available push with none of those keys still means "check mailbox"
+        // (the worker drops large bodies), but remint-alone never does.
+        let hasContentKeys = userInfo["ev"] != nil || userInfo["e"] != nil || userInfo["call"] != nil
+        let contentWake = hasContentKeys || !remint
         Task { @MainActor in
             // Pocketed process wake (incl. cold launch with no scenePhase): hard-park timers /
             // Multipeer before any work. Without this, appIsForeground stayed true and heartbeats
@@ -94,11 +97,18 @@ final class HavenAppDelegate: NSObject, UIApplicationDelegate {
                 completionHandler(contentWake ? .newData : .noData)
                 return
             }
+            // Remint-only: mint URLs, report .noData, suspend. No flush, no mailbox LIST.
+            guard contentWake else {
+                completionHandler(.noData)
+                return
+            }
             // SLIM only. forceSync opens Multipeer for ~45s and fans hello+roster to every contact
             // — pure heat on a pocket content-available wake. Empty poll → .noData so iOS can
             // suspend us immediately; new data → short finish then done.
             await BackgroundUploader.shared.flush()
-            let got = contentWake ? await FeedStore.shared.slimBackgroundSync() : false
+            let got = await FeedStore.shared.slimBackgroundSync()
+            // Re-park after work in case ingest side-effects armed anything.
+            FeedStore.shared.syncForegroundFromSystem()
             completionHandler(got ? .newData : .noData)
         }
     }

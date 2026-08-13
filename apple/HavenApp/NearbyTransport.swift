@@ -1,5 +1,8 @@
 import Foundation
 import MultipeerConnectivity
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Nearby offline transport over MultipeerConnectivity — spans Bluetooth + peer-to-peer
 /// Wi-Fi with no internet or router, and forms a small mesh. It carries the exact same
@@ -248,6 +251,35 @@ final class NearbyTransport: NSObject {
         isDiscovering = false
     }
 
+    /// Pocketed hard park: stop discovery AND drop live Multipeer sessions.
+    ///
+    /// `parkDiscovery` alone is not enough — a connected (or flapping) MCSession keeps AWDL /
+    /// Bluetooth warm, and peer-left then re-opens Bonjour for 45s. Settings → Battery shows that
+    /// as hours of Background with zero messages. Foregrounding re-nudges discovery.
+    func disconnectForBackground() {
+        if Thread.isMainThread {
+            disconnectForBackgroundOnMain()
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.disconnectForBackgroundOnMain() }
+        }
+    }
+
+    private func disconnectForBackgroundOnMain() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        parkDiscoveryOnMain()
+        session.disconnect()
+        peersLock.lock(); peersSnapshot = []; peersLock.unlock()
+    }
+
+    /// True when iOS would count us as pocketed — used to refuse auto-rediscovery on peer leave.
+    private static var isAppPocketed: Bool {
+        #if os(iOS)
+        return UIApplication.shared.applicationState == .background
+        #else
+        return false
+        #endif
+    }
+
     /// Call only on main. Idempotent — never double-stop Multipeer discovery.
     private func stopDiscoveryIfNeeded() {
         dispatchPrecondition(condition: .onQueue(.main))
@@ -410,8 +442,15 @@ extension NearbyTransport: MCSessionDelegate {
             }
         } else if peers.isEmpty {
             // Peer left / Multipeer flap: debounced rediscovery (settle delay inside startDiscovery).
+            // Never re-open Bonjour while pocketed — that is pure radio heat with nobody looking,
+            // and is how a disconnect-at-lock-screen becomes multi-hour Background battery.
             DispatchQueue.main.async { [weak self] in
-                self?.startDiscovery(parkAfter: 45)
+                guard let self else { return }
+                guard !Self.isAppPocketed else {
+                    NSLog("haven nearby: peer left while pocketed — not rediscovering")
+                    return
+                }
+                self.startDiscovery(parkAfter: 45)
             }
         }
     }

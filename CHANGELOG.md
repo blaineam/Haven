@@ -9,6 +9,27 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.4.6] — 2026-08-12
+
+### Fixed — Apple (battery)
+
+- **Still multi-hour Background after 1.4.1/1.4.2 with zero activity.** Residual warm paths that
+  survived the earlier parks:
+
+  1. **Live Multipeer sessions stayed up in the pocket.** Discovery was parked, but a connected
+     (or flapping) `MCSession` kept AWDL/Bluetooth warm; peer-left then re-opened Bonjour for 45s
+     with no foreground check.
+  2. **Push-hint media `requestMedia` armed a 5s retry timer** that outlived
+     `fetchCompletionHandler` / `setTaskCompleted` and kept restore Tasks + peer asks running.
+  3. **Cold pocket configure still started media-backup drain + upload flush** under their own
+     background-task assertions, stacking with the push/BGAppRefresh work.
+
+  Now: on background, fully disconnect Multipeer (not just park discovery) and kill the fresh-media
+  timer; refuse peer-left rediscovery, `requestMedia`, and `requestMissingMedia` while pocketed;
+  slim wakes skip media fetch entirely (envelopes only — media loads on open / NSE prefetch);
+  remint-only cron does remint and reports `.noData` with no flush/LIST; re-park after every wake
+  completes. MARKETING_VERSION 1.4.6, build 470.
+
 ## [1.4.5] — 2026-08-12
 
 ### Changed — Apple + Android + Desktop (story replies in DMs)

@@ -9,6 +9,23 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed — all platforms (backfill media is lazy)
+
+- **Backfilled media no longer downloads eagerly.** A post whose creation date is far older than
+  now did not just happen — it arrived from an archive import or a history sync — so its full-size
+  media is now fetched on demand rather than prefetched. Thumbnails and video posters still
+  prefetch (≤32 KB by contract), so backfilled history renders immediately as browsable tiles and
+  the full photo or video downloads when it is actually opened.
+
+  Silence alone did not protect members here. An imported post carries no sender retention, and the
+  default viewer retention is `0` (keep forever), so `is_expired` dropped nothing: every member on
+  the default setting would have eagerly pulled the entire archive — for the test archive, 1129
+  files and 1.24 GB — the moment they opened the circle. Only members who had set a keep threshold
+  shorter than the post's age were protected, because those posts never entered their feed at all.
+
+  Fresh posts are unaffected: real news still arrives eagerly, which is what keeps media instant in
+  a live circle.
+
 ### Added — all platforms (silent archive import)
 
 - **Silent posting for archive imports**, the groundwork the Instagram importer needs. Importing a

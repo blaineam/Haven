@@ -6340,6 +6340,11 @@ final class FeedStore: ObservableObject {
     // `unavailableMedia` (the placeholder's Retry / Ask-for-it-back state); a tap retry or a fresh
     // ingest of the same ref restarts the schedule.
     private static let freshEventMs: UInt64 = 5 * 60_000
+    /// Older than this and a newly-ingested post is BACKFILL (archive import / history sync), not
+    /// news — its full-size media prefetch becomes lazy. See the `backfill` gate in `scan`.
+    /// A week is comfortably past anything the live feed treats as recent, so normal posting and
+    /// normal catch-up after a few days offline are untouched.
+    private static let backfillLazyMs: UInt64 = 7 * 24 * 60 * 60 * 1000
     private static let fastSteps: [UInt64] = [5_000, 10_000, 20_000, 45_000, 90_000]
     private var fastReq: [String: (n: Int, due: UInt64)] = [:]
     private var fastMediaTimer: Timer?
@@ -6411,10 +6416,23 @@ final class FeedStore: ObservableObject {
         var thumbs: [String: String] = [:]   // thumb image ref → circle (prefetched unconditionally)
         func scan(_ item: FeedItemFfi, circleId: String) {
             let fresh = nowMs >= item.createdAt && nowMs &- item.createdAt < Self.freshEventMs
+            // BACKFILL IS LAZY. A post whose creation date is far older than now did not just
+            // happen — it arrived from an archive import or a history sync. Prefetching those
+            // eagerly is how one member importing a back-catalogue turns into every other member
+            // silently downloading gigabytes: an Instagram archive is ~370 posts / 1100 files / 1.2 GB,
+            // and a viewer on the DEFAULT retention (0 = forever) expires none of it, so every last
+            // byte would land on their phone the moment they opened the circle.
+            //
+            // Thumbs and posters below are deliberately still prefetched — they are ≤32 KB by
+            // contract and are what makes the feed look right — so backfilled history renders
+            // immediately as browsable tiles and the full photo/video downloads when it is actually
+            // opened (`requestMedia` on tap). Fresh posts are unaffected: real news still arrives
+            // eagerly, which is what makes media feel instant in a live circle.
+            let backfill = nowMs >= item.createdAt && nowMs &- item.createdAt > Self.backfillLazyMs
             // Super data saver: only prefetch posters/images/audio/files — never full videos or
             // original companions. Videos download when the user taps play; originals via the menu.
-            let candidates: [String] = dataSaver
-                ? MediaVariants.dataSaverPrefetchRefs(item.media)
+            let candidates: [String] = backfill ? []
+                : dataSaver ? MediaVariants.dataSaverPrefetchRefs(item.media)
                 : item.media
             // NOTE: `unopenableMedia` is deliberately NOT a gate here — it gates the RELAY half of
             // `fetch` instead. The flag means "the stored copy we downloaded could not be decrypted",
@@ -6447,7 +6465,9 @@ final class FeedStore: ObservableObject {
                 thumbs[p] = circleId
             }
             for c in item.comments {
-                let cands: [String] = dataSaver ? MediaVariants.dataSaverPrefetchRefs(c.media) : c.media
+                // Same lazy rule as the post itself — a backfilled thread's attachments load on tap.
+                let cands: [String] = backfill ? []
+                    : dataSaver ? MediaVariants.dataSaverPrefetchRefs(c.media) : c.media
                 for ref in cands where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref)
                     && !EvictedMediaStore.shared.contains(ref) && !unopenableMedia.contains(ref) {
                     if missing[ref] == nil || fresh { missing[ref] = (circleId, fresh) }

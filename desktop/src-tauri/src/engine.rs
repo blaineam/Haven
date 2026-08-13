@@ -8243,6 +8243,11 @@ impl Engine {
         // A ref on an event < 5 min old rides the FRESH lane below: its author is right there
         // uploading it, so it retries at 5s..90s instead of waiting out the 5-min throttle.
         const FRESH_WINDOW_MS: u64 = 5 * 60 * 1000;
+        // Older than this and a newly-ingested post is BACKFILL (archive import / history sync),
+        // not news — its full-size media prefetch becomes lazy (see the `backfill` gate below).
+        // A week is well past anything the live feed treats as recent, so normal posting and
+        // catch-up after a few days offline are unaffected.
+        const BACKFILL_LAZY_MS: u64 = 7 * 24 * 60 * 60 * 1000;
         let mut missing: Vec<(String, String, bool)> = vec![]; // (ref, circleId, fresh)
         let mut thumbs: Vec<(String, String)> = vec![]; // declared `thumb:` companions, missing
         for c in self.social.circles() {
@@ -8254,21 +8259,33 @@ impl Engine {
                 // refetching them would silently undo the space the user just freed — they re-download
                 // only on an explicit "Download" tap (media_download clears the eviction first).
                 let fresh = now.saturating_sub(item.created_at) < FRESH_WINDOW_MS;
+                // BACKFILL IS LAZY (Apple/Android parity). A post whose creation date is far older
+                // than now did not just happen — it arrived from an archive import or a history
+                // sync. Prefetching those eagerly is how ONE member importing a back-catalogue turns
+                // into every other member silently downloading gigabytes: an Instagram archive is
+                // ~370 posts / 1100 files / 1.2 GB, and a viewer on the DEFAULT retention
+                // (0 = forever) expires none of it. Thumbs and posters still prefetch below (≤32 KB
+                // by contract), so backfilled history renders as browsable tiles and the full
+                // photo/video downloads when it is actually opened. Fresh posts are untouched.
+                let backfill = now.saturating_sub(item.created_at) > BACKFILL_LAZY_MS;
                 for t in Self::thumb_refs(&item.media) {
                     if !self.media.has(&t) && !unopenable.contains(&t) && !thumbs.iter().any(|(tt, _)| tt == &t) {
                         thumbs.push((t, c.id.clone()));
                     }
                 }
-                for r in item.media {
-                    if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !missing.iter().any(|(rr, _, _)| rr == &r) {
-                        missing.push((r, c.id.clone(), fresh));
-                    }
-                }
-                for cm in item.comments {
-                    let cm_fresh = now.saturating_sub(cm.created_at) < FRESH_WINDOW_MS;
-                    for r in cm.media {
+                if !backfill {
+                    for r in item.media {
                         if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !missing.iter().any(|(rr, _, _)| rr == &r) {
-                            missing.push((r, c.id.clone(), cm_fresh));
+                            missing.push((r, c.id.clone(), fresh));
+                        }
+                    }
+                    // Same lazy rule as the post — a backfilled thread's attachments load on tap.
+                    for cm in item.comments {
+                        let cm_fresh = now.saturating_sub(cm.created_at) < FRESH_WINDOW_MS;
+                        for r in cm.media {
+                            if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !missing.iter().any(|(rr, _, _)| rr == &r) {
+                                missing.push((r, c.id.clone(), cm_fresh));
+                            }
                         }
                     }
                 }

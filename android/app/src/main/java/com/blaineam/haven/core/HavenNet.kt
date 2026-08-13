@@ -5652,6 +5652,11 @@ object HavenNet : InboundListener {
     // in seconds after the author's upload lands, instead of waiting out the flat 5-min throttle.
     // The fresh state is in-memory: freshness itself expires in minutes.
     private val FRESH_EVENT_MS = 5 * 60_000L
+    /** Older than this and a newly-ingested post is BACKFILL (archive import / history sync), not
+     *  news — its full-size media prefetch becomes lazy. See the `backfill` gate in
+     *  [requestMissingMedia]. A week is well past anything the live feed treats as recent, so
+     *  normal posting and catch-up after a few days offline are unaffected. Apple parity. */
+    private val BACKFILL_LAZY_MS = 7 * 24 * 60 * 60 * 1000L
     private val FAST_STEPS = longArrayOf(5_000, 10_000, 20_000, 45_000, 90_000)
     private val fastReq = HashMap<String, Pair<Int, Long>>()   // ref -> (attempts, dueMs)
     @Volatile private var fastSweepArmed = false
@@ -5709,7 +5714,17 @@ object HavenNet : InboundListener {
                     val prior = missing[ref]
                     if (prior == null || (fresh && !prior.second)) missing[ref] = c.id to fresh
                 }
-                item.media.forEach { consider(it) }
+                // BACKFILL IS LAZY (Apple parity). A post whose creation date is far older than now
+                // did not just happen — it arrived from an archive import or a history sync.
+                // Prefetching those eagerly is how ONE member importing a back-catalogue turns into
+                // every other member silently downloading gigabytes: an Instagram archive is ~370
+                // posts / 1100 files / 1.2 GB, and a viewer on the DEFAULT retention (0 = forever)
+                // expires none of it. Thumbs and posters below still prefetch (≤32 KB by contract),
+                // so backfilled history renders as browsable tiles and the full photo/video
+                // downloads when it is actually opened. Fresh posts are untouched.
+                val backfill = now >= item.createdAt &&
+                    (now - item.createdAt) > BACKFILL_LAZY_MS.toULong()
+                if (!backfill) item.media.forEach { consider(it) }
                 // Thumb companions: remember the pairing (feeds the blurred placeholder) and
                 // prefetch for EVERY post regardless of lane/data saver — ≤32KB by contract.
                 for (m in item.media) {
@@ -5730,7 +5745,8 @@ object HavenNet : InboundListener {
                         }
                     }
                 }
-                item.comments.forEach { cm -> cm.media.forEach { consider(it) } }
+                // Same lazy rule as the post — a backfilled thread's attachments load on tap.
+                if (!backfill) item.comments.forEach { cm -> cm.media.forEach { consider(it) } }
             }
         }
         SyncMetrics.setPending(missing.size)   // media refs still missing locally (iOS nbMediaPending)

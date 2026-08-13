@@ -64,16 +64,26 @@ and the total size — and nothing is published until you confirm.
 
 | From Instagram | Becomes in Haven |
 |---|---|
-| Post (single or carousel) | A post, with every photo/video in the album |
-| Story | A story |
+| Post (single or carousel) | One post, with every photo/video in the album kept together |
 | Reel | A post with its video |
+| Story | A post — see below |
 | Caption | The post's text |
 | Original date | The post's date — history keeps its real order |
 | Audio in a video | Plays as part of the video, exactly as it did on Instagram |
 
-**Your circle is not notified.** Importing publishes silently: an import of several hundred posts
-would otherwise fire several hundred notifications for content that is often years old. Members see
-the posts in the feed in their proper place in history, with no banners.
+Everything arrives as a **post**, including stories. A Haven story is ephemeral by design — it
+expires after 24 hours — so importing a three-year-old story *as* a story would either delete it
+again immediately or leave a "story" that never expires, which is not a story at all. Archived
+stories are history, and history belongs in the feed where you can still scroll to it next year.
+
+Photos and videos are re-encoded through Haven's usual optimizer on the way in, and every video
+gets a poster still cut for it, so imported media behaves exactly like media you posted by hand.
+
+**Your circle is not notified, and nobody is made to download it.** Importing publishes silently —
+several hundred posts would otherwise mean several hundred notifications for content that is often
+years old. And because imported posts are backdated, members fetch only the thumbnail and the video
+poster (a few KB each); the full photo or video downloads for them only if they actually open it.
+So a large import costs the people in your circle almost nothing until they choose to look.
 
 ## What does not come across
 

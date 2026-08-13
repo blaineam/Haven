@@ -9,6 +9,22 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — Apple (Instagram importer)
+
+- **Import from Instagram**, in Settings. A guided walkthrough — open Instagram's download page,
+  request the export, come back days later and hand Haven the `.zip` — because there is no API for
+  this and the user has to wait on Instagram either way. The one irreversible mistake (choosing
+  Instagram's HTML format, which contains no importable data and cannot be converted) is called out
+  at the step where it is made rather than in the error afterwards.
+
+  Nothing publishes until a preview is confirmed: it shows what was found, the date span, the total
+  size, and any files referenced but missing from the archive. Posts arrive backdated, silently, and
+  photos/videos are re-encoded through Haven's usual optimizer with a poster still cut for every
+  video, so imported media behaves like media posted by hand. Carousels stay a single post.
+
+  Verified end to end against a real 1.28 GB export: 372 items (203 posts, 85 reels, 84 stories),
+  1129 media files, zero unresolved references, and a 21-photo carousel preserved as one post.
+
 ### Changed — all platforms (backfill media is lazy)
 
 - **Backfilled media no longer downloads eagerly.** A post whose creation date is far older than

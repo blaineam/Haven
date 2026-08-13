@@ -223,6 +223,7 @@ struct SettingsView: View {
     @State private var storageText = "…"
     @State private var cleaningMedia = false
     @State private var cleanupResult: String?
+    @State private var showInstagramImport = false
     private var pinnedCount: Int { pinnedStore.count }
 
     /// Walk the media dir off the main actor and format the total (e.g. "1.2 GB · 340 files").
@@ -269,6 +270,16 @@ struct SettingsView: View {
                         .tint(HavenTheme.pink)
                 } footer: {
                     Text("Shares a smaller copy by default and always strips location.")
+                }
+                Section {
+                    Button {
+                        showInstagramImport = true
+                    } label: {
+                        Label("Import from Instagram", systemImage: "square.and.arrow.down.on.square")
+                    }
+                } header: { Text("Bring your posts over") }
+                footer: {
+                    Text("Walks you through asking Instagram for your export, then brings your posts, stories and reels into this circle with their original dates. Nobody is notified.")
                 }
                 Section {
                     Picker("Notification previews", selection: $settings.notificationDetail) {
@@ -430,5 +441,13 @@ struct SettingsView: View {
         // Settings covers the feed — the post song behind it must stop. Applied on the DESTINATION
         // rather than at each presentation site so it holds wherever this is opened from.
         .havenPausesPostAudio()
+        .sheet(isPresented: $showInstagramImport) {
+            let cid = FeedStore.shared.activeCircleId
+            InstagramImportView(
+                circleId: cid,
+                circleName: CircleSettingsStore.shared.displayName(
+                    cid, real: FeedStore.shared.circles.first(where: { $0.id == cid })?.name ?? "your circle")
+            )
+        }
     }
 }

@@ -22,11 +22,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   silently; photos/videos are re-encoded through Haven's usual optimizer with a poster still cut for
   every video, so imported media behaves like media posted by hand. Carousels stay a single post.
 
-  **Stories are kept, not published.** A story is only still in the export because the user kept it
-  — it expired after 24 h on Instagram exactly as it does in Haven — so imported stories are saved
-  the way Haven's own Keep does it: a personal snapshot with its media pinned, on the user's
-  profile, never republished into anyone's feed. Keyed on the archive entry, so re-importing the
-  same export does not duplicate them.
+  **Stories are skipped unless asked for.** Instagram archives every story automatically, so the
+  export holds all of them rather than the ones added to a Highlight — and it carries no marker for
+  which were highlighted, so they cannot be told apart. Importing them by default would resurrect
+  years of stories the user deliberately let expire. Opted in, they are saved as kept stories: a
+  personal snapshot with its media pinned, on the user's profile, never published to the circle.
+  Keyed on the archive entry, so re-importing the same export does not duplicate them.
 
   Verified end to end against a real 1.28 GB export: 372 items (203 posts, 85 reels, 84 stories),
   1129 media files, zero unresolved references, and a 21-photo carousel preserved as one post.

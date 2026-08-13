@@ -15,6 +15,15 @@ struct InstagramImportView: View {
     @StateObject private var importer = InstagramImporter.shared
     @Environment(\.dismiss) private var dismiss
     @State private var picking = false
+    /// Off by default on purpose — see `InstagramImporter.run(into:includeStories:)`.
+    @State private var includeStories = false
+
+    /// Button label reflects what will ACTUALLY be imported, so the count never contradicts the
+    /// stories toggle sitting directly above it.
+    private func importCount(_ s: InstagramArchive.Summary) -> String {
+        let n = includeStories ? s.items.count : s.items.count - s.count(.story)
+        return "\(n) item\(n == 1 ? "" : "s")"
+    }
 
     /// Accounts Center → Your information and permissions → Download your information.
     private let exportURL = URL(string: "https://accountscenter.instagram.com/info_and_permissions/dyi/")!
@@ -129,13 +138,18 @@ struct InstagramImportView: View {
                     }
                 }
 
+                if s.count(.story) > 0 {
+                    Section {
+                        Toggle("Also bring in \(s.count(.story)) stories", isOn: $includeStories)
+                            .tint(HavenTheme.pink)
+                    } header: { Text("Stories") }
+                    footer: {
+                        Text("Instagram archives **every** story you post, automatically — so this is all of them, not the ones you added to a Highlight. Your export doesn't record which were highlighted, so Haven can't tell them apart. Left off, they're skipped entirely. Turned on, they're saved as kept stories on your profile — yours to look back on, never published to \(circleName).")
+                    }
+                }
+
                 Section {
                     Text("Posts and reels publish to \(circleName) with their original dates, so they slot into history rather than arriving as new posts today.")
-                    if s.count(.story) > 0 {
-                        Label("Your \(s.count(.story)) stories are kept to your profile", systemImage: "person.crop.circle")
-                        Text("A story only still exists because you kept it — on Instagram it expired after 24 hours, exactly as it does here. So they're saved as kept stories rather than published, which means they stay yours and nobody else's feed fills up with them.")
-                            .font(.footnote).foregroundStyle(.secondary)
-                    }
                     Label("Nobody is notified", systemImage: "bell.slash")
                     Text("An import this size would otherwise fire a notification for every post. Members see them in the feed in their proper place, with no banners, and the full photo or video downloads for them only if they actually open it.")
                         .font(.footnote).foregroundStyle(.secondary)
@@ -143,9 +157,9 @@ struct InstagramImportView: View {
 
                 Section {
                     Button {
-                        importer.run(into: circleId)
+                        importer.run(into: circleId, includeStories: includeStories)
                     } label: {
-                        Label("Import \(s.items.count) posts", systemImage: "square.and.arrow.down")
+                        Label("Import \(importCount(s))", systemImage: "square.and.arrow.down")
                     }
                     Button("Choose a different file") { importer.reset() }
                         .foregroundStyle(.secondary)

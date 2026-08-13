@@ -76,9 +76,16 @@ final class InstagramImporter: ObservableObject {
     ///
     /// Oldest-first matters: the feed orders by creation date, so importing chronologically means
     /// anyone watching it happen sees history fill in forwards rather than as a shuffled heap.
-    func run(into circleId: String) {
+    /// `includeStories` is OFF by default, and that default is load-bearing.
+    ///
+    /// Instagram archives EVERY story you post, automatically — `stories.json` is not "the ones you
+    /// chose to keep", it is all of them, and the export carries no signal for which were added to a
+    /// Highlight (checked: no highlight field, no separate file, nothing). So importing them by
+    /// default would resurrect years of stories the user deliberately let expire. It has to be
+    /// something they ask for, having been told what the archive actually contains.
+    func run(into circleId: String, includeStories: Bool = false) {
         guard let summary, let url = archiveURL, case .previewing = phase else { return }
-        let items = summary.items
+        let items = includeStories ? summary.items : summary.items.filter { $0.kind != .story }
         phase = .importing(done: 0, total: items.count)
         cancelled = false
 
@@ -105,12 +112,11 @@ final class InstagramImporter: ObservableObject {
                     skipped += 1
                 } else {
                     let body = item.body, at = item.createdAt, kind = item.kind
-                    // A story you posted to Instagram is only still around because you kept it —
-                    // Instagram's own story expires in 24h just as Haven's does. So an imported
-                    // story becomes a KEPT story: your own snapshot, on your profile, media pinned
-                    // so the cleanup sweeps can't reclaim it. Keeping deliberately does not
-                    // republish (see KeptStoriesStore), which is exactly right here — nobody in the
-                    // circle asked to have three years of your old stories appear in their feed.
+                    // Stories, when the user opted in, land as KEPT stories rather than feed posts:
+                    // a personal snapshot on their profile with its media pinned. Keeping
+                    // deliberately does not republish (see KeptStoriesStore), which is what makes
+                    // this safe — nobody else's feed fills with someone's old stories, and the
+                    // circle is not asked to carry them at all.
                     //
                     // Posts and reels ARE feed content and publish normally (silent + backdated).
                     let identity = Self.keptIdentity(item)

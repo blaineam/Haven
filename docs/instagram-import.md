@@ -66,16 +66,19 @@ and the total size — and nothing is published until you confirm.
 |---|---|
 | Post (single or carousel) | One post, with every photo/video in the album kept together |
 | Reel | A post with its video |
-| Story | A **kept story** on your profile — see below |
+| Story | Skipped by default — optional, see below |
 | Caption | The post's text |
 | Original date | The post's date — history keeps its real order |
 | Audio in a video | Plays as part of the video, exactly as it did on Instagram |
 
-**Stories are kept, not published.** A story you posted to Instagram is only still in your export
-because you kept it — the story itself expired after 24 hours there, exactly as it does in Haven.
-So imported stories are saved the same way Haven's own **Keep** does it: your own snapshot, on your
-profile, with its media pinned so cleanup can't reclaim it. They stay yours, and nobody else's feed
-fills up with three years of your old stories.
+**Stories are off by default, and worth understanding before you turn them on.** Instagram archives
+**every** story you post, automatically. So the export contains all of them — not the ones you added
+to a Highlight — and it records no marker for which were highlighted, which means Haven cannot tell
+them apart either. Left off, stories are skipped entirely.
+
+Turn them on and they're saved as **kept stories** on your profile: your own snapshot, media pinned
+so cleanup can't reclaim it, exactly as Haven's own **Keep** works. They are never published to your
+circle, so nobody else's feed fills up with years of your old stories.
 
 Re-importing the same export won't duplicate them — a kept story is recorded against the archive
 entry it came from, so importing twice is harmless.

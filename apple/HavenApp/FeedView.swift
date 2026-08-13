@@ -3181,6 +3181,38 @@ final class FeedStore: ObservableObject {
         }
     }
 
+    /// Author a post that came from an ARCHIVE IMPORT (Instagram et al) — silent by construction.
+    ///
+    /// An import republishes a whole back-catalogue at once: a 900-post Instagram archive would fire
+    /// 900 lock-screen banners at every member of the circle. That is the one case where the content
+    /// is genuinely not news — the member is not being told something happened just now, the owner is
+    /// backfilling history that is often years old. So this takes NO `banner` and goes out over
+    /// `broadcastEvent(silent:)`: the event still delivers, still syncs, still reaches offline members
+    /// through the mailbox — only the banner is suppressed (see `broadcastEvent`).
+    ///
+    /// Deliberately a SEPARATE entry point rather than a `silent:` flag on `post`: silence is a
+    /// property of importing, not a mode the user can leave switched on. No normal authoring path can
+    /// reach it, so there is no way to accidentally publish real news without notifying anyone.
+    ///
+    /// `createdAt` is the ORIGINAL capture time in ms (Instagram exports seconds — multiply). The feed
+    /// orders by it, so backdating is what makes an imported archive slot into history instead of
+    /// landing in a heap at today's date.
+    func postImported(circleId: String, body: String, media rawMedia: [String],
+                      music: TrackRefFfi? = nil, story: Bool = false, createdAt: UInt64) {
+        let media = withThumbMarkers(rawMedia)
+        guard let social, let env = try? social.post(circleId: circleId, body: body, media: media,
+                                                     music: music, retentionSecs: nil, story: story,
+                                                     muteVideo: false, createdAt: createdAt) else { return }
+        broadcastEvent(circleId, env, silent: true)
+        postTick += 1; publishedPostCount += 1
+        if circleId == activeCircleId { refresh() }
+        enqueueAuthoredMedia(media, circleId: circleId, social: social)
+        if !media.isEmpty {
+            Task { await SharedStore.publishDeviceRoster(social: social) }
+            if RelayHost.shared.serving { reannounceOwnRelay() }
+        }
+    }
+
     /// Post to a SPECIFIC circle (used by the scheduler when a queued post fires — the target
     /// circle may not be the active one). Same seal → broadcast → mailbox-backup path as `post`.
     func postScheduled(circleId: String, body: String, media rawMedia: [String]) {

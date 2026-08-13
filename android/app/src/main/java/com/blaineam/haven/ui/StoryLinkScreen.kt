@@ -221,7 +221,7 @@ fun resolveStory(circleId: String, postId: String): FeedItemFfi? {
                 .firstOrNull { it.id == postId && it.story && !it.unsent && it.media.isNotEmpty() }
         }.getOrNull()
     if (live != null) {
-        val age = nowMs() - live.createdAt.toLong()
+        val age = nowMs().toLong() - live.createdAt.toLong()
         if (age > STORY_LIFETIME_MS) return null
         return live
     }

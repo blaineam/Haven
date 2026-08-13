@@ -3128,6 +3128,34 @@ object HavenNet : InboundListener {
             scope.launch { media.forEach { MediaSaver.autoSave(appContext, it) } }
     }
 
+    /** Author a post that came from an ARCHIVE IMPORT (Instagram et al) — silent by construction.
+     *
+     *  An import republishes a whole back-catalogue at once: a 900-post Instagram archive would fire
+     *  900 lock-screen banners at every member. That is the one case where the content genuinely is
+     *  not news — the owner is backfilling history that is often years old, not saying something
+     *  happened just now. So this passes NO banner, which is what [afterAuthor] already turns into a
+     *  bannerless content-available wake: the event still delivers, still syncs, still reaches
+     *  offline members via the mailbox — only the banner is suppressed.
+     *
+     *  Deliberately a SEPARATE entry point rather than a `silent` flag on [post]: silence is a
+     *  property of importing, not a mode the user can leave switched on, so no normal authoring path
+     *  can reach it. Apple `FeedStore.postImported` parity.
+     *
+     *  [createdAt] is the ORIGINAL capture time in ms (Instagram exports SECONDS — multiply). The
+     *  feed orders by it, so backdating is what slots an imported archive into history instead of
+     *  heaping it at today's date. */
+    fun postImported(circleId: String, body: String, media: List<String> = emptyList(),
+                     music: uniffi.haven_ffi.TrackRefFfi? = null, story: Boolean = false,
+                     createdAt: ULong) {
+        if (body.isBlank() && media.isEmpty() && music == null) return
+        val withThumbs = withThumbMarkers(media)
+        val env = runCatching {
+            social.post(circleId, body, withThumbs, music, null, story, false, createdAt)
+        }.getOrNull() ?: return
+        afterAuthor(circleId, env, banner = null)   // null banner → silent wake (see afterAuthor)
+        enqueueAuthoredMedia(circleId, withThumbs)
+    }
+
     /** Build a portable track reference from a shared streaming link (YouTube/Spotify/etc.). */
     fun trackFromLink(url: String, title: String, artist: String): uniffi.haven_ffi.TrackRefFfi =
         uniffi.haven_ffi.TrackRefFfi(

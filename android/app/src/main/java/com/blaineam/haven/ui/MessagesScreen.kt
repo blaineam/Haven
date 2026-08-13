@@ -710,7 +710,7 @@ private fun Bubble(
     // After 24h, a lone story-shaped visual with no openable story is treated as an expired
     // story reply — never keep showing the resealed media forever.
     val storyLifetimeMs = 24L * 60 * 60 * 1000
-    val replyAge = com.blaineam.haven.core.nowMs() - m.createdAt.toLong()
+    val replyAge = com.blaineam.haven.core.nowMs().toLong() - m.createdAt.toLong()
     val looksLikeLegacyStoryReply = visualRefs.size == 1 && replyAge > storyLifetimeMs
     val showsStoryCard = storyTarget != null
     val showsUnavailable = !showsStoryCard && looksLikeLegacyStoryReply

@@ -3528,6 +3528,36 @@ impl Engine {
         }
     }
 
+    /// Author a post that came from an ARCHIVE IMPORT (Instagram et al) — silent by construction.
+    ///
+    /// An import republishes a whole back-catalogue at once: a 900-post Instagram archive would fire
+    /// 900 lock-screen banners at every member. That is the one case where the content genuinely is
+    /// not news — the owner is backfilling history that is often years old, not saying something just
+    /// happened. So this passes NO banner, which `after_author` already turns into a bannerless
+    /// content-available wake (the same property the 25-re-shares note above depends on): the event
+    /// still delivers, still syncs, still reaches offline members through the mailbox.
+    ///
+    /// Deliberately a SEPARATE entry point rather than a `silent` flag on `post`: silence is a
+    /// property of importing, not a mode the user can leave switched on, so no normal authoring path
+    /// can reach it. Apple `FeedStore.postImported` / Android `HavenNet.postImported` parity.
+    ///
+    /// `created_at` is the ORIGINAL capture time in ms (Instagram exports SECONDS — multiply). The
+    /// feed orders by it, so backdating is what slots an imported archive into history instead of
+    /// heaping it at today's date.
+    pub fn post_imported(self: &Arc<Self>, circle_id: String, body: String, media: Vec<String>,
+                         music: Option<TrackRefFfi>, story: bool, created_at: u64) {
+        if body.trim().is_empty() && media.is_empty() && music.is_none() {
+            return;
+        }
+        match self.social.post(circle_id.clone(), body, media.clone(), music, None, story, false, created_at) {
+            Ok(env) => {
+                self.after_author(&circle_id, &env, None, None); // None banner → silent wake
+                self.upload_authored_media(circle_id, media);
+            }
+            Err(e) => log::error!("imported post failed: {e}"),
+        }
+    }
+
     /// The UI always passes `DEFAULT_CIRCLE` (stories live in the personal circle); the circle is
     /// a parameter so the qa-cmd driver can honor an explicit `circle_id` (docs/QA.md).
     pub fn post_story(self: &Arc<Self>, circle_id: String, body: String, media: Option<String>, music: Option<TrackRefFfi>) {

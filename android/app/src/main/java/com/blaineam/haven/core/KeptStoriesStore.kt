@@ -88,16 +88,14 @@ object KeptStoriesStore {
         }
     }
 
-    /** Every kept story, newest first. */
+    /** Every kept story, newest first — also the snapshot used for retroactive story-reply
+     *  matching (a sorted copy is still a copy, so the two callers share one accessor). */
     fun all(): List<Kept> = kept.sortedByDescending { it.createdAt }
 
     fun isKept(id: String): Boolean = kept.any { it.id == id }
 
     /** Lookup a kept snapshot by original event id (DM story reply / deep link). */
     fun get(id: String): Kept? = kept.firstOrNull { it.id == id }
-
-    /** Snapshot list for retroactive story-reply matching. */
-    fun all(): List<Kept> = kept.toList()
 
     /**
      * Keep a story: snapshot it and PIN its media, so the blobs survive the cleanup sweeps that

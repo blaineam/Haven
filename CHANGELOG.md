@@ -9,6 +9,30 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — all platforms (silent archive import)
+
+- **Silent posting for archive imports**, the groundwork the Instagram importer needs. Importing a
+  back-catalogue republishes hundreds of posts at once, and every one of them would have fired a
+  lock-screen banner at every member of the circle — a 900-post archive means 900 banners for
+  content that is often years old. Imported posts now publish over the existing silent path: the
+  event still delivers, still syncs, and still reaches offline members through the mailbox — only
+  the banner is suppressed.
+
+  Deliberately a **separate authoring entry point** on each platform (`FeedStore.postImported`,
+  `HavenNet.postImported`, `Engine::post_imported`) rather than a `silent` flag on the normal post
+  path or a user-facing setting: silence is a property of *importing*, not a mode anyone can leave
+  switched on, so no ordinary post can be published without notifying its circle. Each takes the
+  original capture time so an imported archive slots into history by its real date instead of
+  landing in a heap at today's.
+
+### Fixed — Android (build)
+
+- **Android has not compiled since 1.4.5.** That release landed a second `KeptStoriesStore.all()`
+  alongside the existing one; the ambiguous overload cascaded into `MessagesScreen`, `YouScreen` and
+  `StoryLinkScreen` (20+ errors). The two accessors wanted the same thing — a stable snapshot of the
+  kept stories — so they are now one, sorted newest-first. Two `nowMs()` subtractions in the same
+  release also mixed `ULong` with `Long` and are now done in `Long`.
+
 ## [1.4.7] — 2026-08-12
 
 ### Fixed — Apple (battery)

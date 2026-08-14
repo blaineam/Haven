@@ -33,6 +33,76 @@ final class InstagramImporter: ObservableObject {
     private var cancelled = false
     private var archiveURL: URL?
 
+    /// True while an import is running — the app-wide banner watches this, and the sheet uses it to
+    /// offer "continue in the background" rather than holding the user on a progress bar.
+    var isRunning: Bool { if case .importing = phase { return true }; return false }
+
+    // MARK: - Resume across launches
+
+    /// Everything needed to pick a half-finished import back up after the app is killed.
+    ///
+    /// The archive is stored as a security-scoped BOOKMARK, not a path: the file lives outside the
+    /// sandbox (Files, iCloud Drive, a download) and a bare path would be unreadable on the next
+    /// launch. `done` is an index into the deterministic item order — see `InstagramArchive.read`,
+    /// which sorts with a tiebreak precisely so this index means the same thing on every run.
+    private struct Pending: Codable {
+        var bookmark: Data
+        var circleId: String
+        var includeStories: Bool
+        var done: Int
+    }
+
+    private static let pendingKey = "haven.instagram.import.pending"
+
+    private func savePending(_ p: Pending) {
+        guard let d = try? JSONEncoder().encode(p) else { return }
+        UserDefaults.standard.set(d, forKey: Self.pendingKey)
+    }
+    private func loadPending() -> Pending? {
+        guard let d = UserDefaults.standard.data(forKey: Self.pendingKey) else { return nil }
+        return try? JSONDecoder().decode(Pending.self, from: d)
+    }
+    private func clearPending() { UserDefaults.standard.removeObject(forKey: Self.pendingKey) }
+
+    /// Restart an import that was interrupted by the app being killed or backgrounded out.
+    ///
+    /// Called on launch. Silent when there is nothing pending, and silent when the bookmark no
+    /// longer resolves — the user may have deleted the archive, and nagging about it on every cold
+    /// start would be worse than quietly forgetting an import they can simply run again.
+    func resumeIfNeeded() {
+        guard !isRunning, let p = loadPending() else { return }
+        var stale = false
+        guard let url = try? URL(resolvingBookmarkData: p.bookmark,
+                                 options: bookmarkResolutionOptions,
+                                 relativeTo: nil, bookmarkDataIsStale: &stale) else {
+            clearPending(); return
+        }
+        Task { [weak self] in
+            let parsed = await Task.detached(priority: .utility) { Self.parse(url) }.value
+            guard let self, case .success(let s) = parsed else { self?.clearPending(); return }
+            guard p.done < s.items.count else { self.clearPending(); return }
+            self.archiveURL = url
+            self.summary = s
+            self.phase = .previewing          // `run` requires this state
+            self.run(into: p.circleId, includeStories: p.includeStories, startAt: p.done)
+        }
+    }
+
+    private var bookmarkResolutionOptions: URL.BookmarkResolutionOptions {
+        #if os(macOS)
+        return [.withSecurityScope]
+        #else
+        return []
+        #endif
+    }
+    private var bookmarkCreationOptions: URL.BookmarkCreationOptions {
+        #if os(macOS)
+        return [.withSecurityScope]
+        #else
+        return []
+        #endif
+    }
+
     // MARK: - Preview
 
     func read(_ url: URL) {
@@ -83,11 +153,21 @@ final class InstagramImporter: ObservableObject {
     /// Highlight (checked: no highlight field, no separate file, nothing). So importing them by
     /// default would resurrect years of stories the user deliberately let expire. It has to be
     /// something they ask for, having been told what the archive actually contains.
-    func run(into circleId: String, includeStories: Bool = false) {
+    /// `startAt` resumes a previous run, skipping items already imported. Only `resumeIfNeeded`
+    /// passes it; a fresh import starts at 0.
+    func run(into circleId: String, includeStories: Bool = false, startAt: Int = 0) {
         guard let summary, let url = archiveURL, case .previewing = phase else { return }
         let items = includeStories ? summary.items : summary.items.filter { $0.kind != .story }
-        phase = .importing(done: 0, total: items.count)
+        phase = .importing(done: min(startAt, items.count), total: items.count)
         cancelled = false
+
+        // Record the job BEFORE any work, so a crash on the very first item still resumes.
+        // Best-effort: without a bookmark the import runs fine, it just won't survive a relaunch.
+        if let bookmark = try? url.bookmarkData(options: bookmarkCreationOptions,
+                                                includingResourceValuesForKeys: nil, relativeTo: nil) {
+            savePending(Pending(bookmark: bookmark, circleId: circleId,
+                                includeStories: includeStories, done: startAt))
+        }
 
         Task.detached(priority: .userInitiated) { [weak self] in
             let scoped = url.startAccessingSecurityScopedResource()
@@ -106,6 +186,7 @@ final class InstagramImporter: ObservableObject {
             // main actor only ever receives already-computed values.
             var imported = 0, skipped = 0
             for (idx, item) in items.enumerated() {
+                if idx < startAt { continue }   // already imported on a previous run
                 if await MainActor.run(body: { [weak self] in self?.cancelled ?? true }) { break }
                 let refs = await Self.stage(item, zip: zip, byName: byName)
                 if refs.isEmpty {
@@ -131,12 +212,24 @@ final class InstagramImporter: ObservableObject {
                     }
                     imported += 1
                 }
+                // Checkpoint after EVERY item. The unit of work is one post, so the most a kill can
+                // cost is the item in flight — and re-importing that one item is the failure mode
+                // we accept, rather than re-importing all 300.
                 let done = idx + 1, total = items.count
-                await MainActor.run { [weak self] in self?.phase = .importing(done: done, total: total) }
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.phase = .importing(done: done, total: total)
+                    if var p = self.loadPending() { p.done = done; self.savePending(p) }
+                }
             }
             let finalImported = imported, finalSkipped = skipped
+            let stopped = await MainActor.run(body: { [weak self] in self?.cancelled ?? false })
             await MainActor.run { [weak self] in
-                self?.phase = .finished(imported: finalImported, skipped: finalSkipped)
+                guard let self else { return }
+                // A cancel keeps the checkpoint, so "Stop" is really "pause" — reopening the
+                // importer offers to carry on. Finishing clears it.
+                if !stopped { self.clearPending() }
+                self.phase = .finished(imported: finalImported, skipped: finalSkipped)
             }
         }
     }

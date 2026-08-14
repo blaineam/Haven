@@ -69,7 +69,15 @@ enum InstagramArchive {
         items += posts(zip)
         items += stories(zip)
         items += reels(zip)
-        items.sort { $0.createdAt < $1.createdAt }
+        // Deterministic order, not merely sorted. A resumed import skips the first N items by
+        // INDEX, so two runs over the same archive must produce the same sequence — and Swift's
+        // sort is not stable, so items sharing a timestamp (a carousel and a story posted in the
+        // same second) could swap places between runs and be imported twice or skipped. The media
+        // name breaks the tie and is unique per entry.
+        items.sort {
+            $0.createdAt != $1.createdAt ? $0.createdAt < $1.createdAt
+                                         : ($0.mediaNames.first ?? "") < ($1.mediaNames.first ?? "")
+        }
         guard !items.isEmpty else { throw Failure.noContent }
 
         // Resolve every referenced name against the archive up front. A missing entry means a

@@ -308,8 +308,25 @@ struct InstagramImportView: View {
                 Text("Each photo and video is optimized and encrypted here as it goes.")
                     .font(.footnote).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center).padding(.horizontal, 40)
+
+                // The import does not need this screen — it runs on InstagramImporter.shared, keeps
+                // going while Haven is used normally, and resumes itself if the app is killed. So
+                // the primary action here is to LEAVE, not to wait.
+                Button {
+                    dismiss()
+                } label: {
+                    Label("Browse while it runs", systemImage: "chevron.down")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent).tint(HavenTheme.pink)
+                .controlSize(.large)
+                .padding(.horizontal, 40).padding(.top, 8)
+
+                Text("You can close Haven too — it picks up where it left off.")
+                    .font(.caption).foregroundStyle(.secondary)
+
                 Button("Stop", role: .destructive) { importer.cancel() }
-                    .padding(.top, 4)
+                    .padding(.top, 6)
             }
             .animation(.snappy, value: done)
         }

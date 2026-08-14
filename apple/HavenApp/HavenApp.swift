@@ -374,6 +374,8 @@ struct RootView: View {
     @ObservedObject private var terms = TermsStore.shared          // zero-tolerance terms gate (1.2)
 
     @State private var tab = ProcessInfo.processInfo.environment["HAVEN_TAB"] ?? "circle"
+    /// Reopened by tapping the import banner (the sheet is dismissible mid-import by design).
+    @State private var showImportSheet = false
     @State private var showConnect = false
     // Persisted so the "add your first friend" sheet shows once, not on every cold launch
     // (it was firing whenever you have no contacts yet).
@@ -491,6 +493,27 @@ struct RootView: View {
     }
 
     private var tabs: some View {
+        tabsCore
+            // An archive import runs on its own (InstagramImporter.shared, not tied to any view),
+            // so the user can browse Haven while it works — and watch the posts arrive, which is
+            // the point. This strip is what keeps it visible, and reopens the full sheet on tap.
+            .overlay(alignment: .bottom) {
+                ImportBanner { showImportSheet = true }
+                    .padding(.bottom, 6)
+            }
+            .sheet(isPresented: $showImportSheet) {
+                let cid = FeedStore.shared.activeCircleId
+                InstagramImportView(
+                    circleId: cid,
+                    circleName: CircleSettingsStore.shared.displayName(
+                        cid, real: FeedStore.shared.circles.first(where: { $0.id == cid })?.name ?? "your circle"))
+            }
+            // Pick up an import the app was killed in the middle of. No-op when there is nothing
+            // pending, so this costs a UserDefaults read on a normal launch.
+            .task { InstagramImporter.shared.resumeIfNeeded() }
+    }
+
+    private var tabsCore: some View {
         TabView(selection: $tab) {
             FeedView(account: accountStore.account, seed: accountStore.account.secretSeed(), friendName: "Friend")
                 .id(accountStore.account.nodeIdHex())

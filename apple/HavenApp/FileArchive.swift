@@ -191,9 +191,20 @@ enum FileArchive {
         }
     }()
 
+    /// Iterating a `Data` element-by-element goes through its `Collection` conformance — a retain,
+    /// a bounds check and a slice-offset add PER BYTE. That is tolerable for the few-MB attachments
+    /// this was written for and ruinous for an archive import, which CRCs every entry it reads: on a
+    /// 1.24 GB Instagram export that is 1.24 BILLION of those, and it dominated the import.
+    ///
+    /// Same algorithm, same table — the bytes are just walked through one unsafe pointer instead.
     static func crc32(_ data: Data) -> UInt32 {
         var c: UInt32 = 0xffffffff
-        for b in data { c = crcTable[Int((c ^ UInt32(b)) & 0xff)] ^ (c >> 8) }
+        data.withUnsafeBytes { raw in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+            for i in 0..<raw.count {
+                c = crcTable[Int((c ^ UInt32(base[i])) & 0xff)] ^ (c >> 8)
+            }
+        }
         return c ^ 0xffffffff
     }
 

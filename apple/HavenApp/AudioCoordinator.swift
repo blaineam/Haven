@@ -451,7 +451,13 @@ final class MusicPlayback {
     private(set) var current: TrackRefFfi?
     private let player = MPMusicPlayerController.applicationMusicPlayer
     private var authed = false
-    var isPlaying: Bool { player.playbackState == .playing }
+    var isPlaying: Bool {
+        #if targetEnvironment(simulator)
+        return previewPlayer.timeControlStatus == .playing
+        #else
+        return player.playbackState == .playing
+        #endif
+    }
 
     /// NEVER issue playback unless the app is frontmost. The application music player is a
     /// SYSTEM-side agent: it plays audibly even when Haven is backgrounded, and starting it steals
@@ -567,20 +573,18 @@ final class MusicPlayback {
 
     func duck() {
         invalidate()   // kill any in-flight play() — pausing can't stop a song that hasn't started yet
-        #if targetEnvironment(simulator)
-        previewPlayer.pause()
-        #else
-        if player.playbackState == .playing { player.pause() }
-        #endif
+        pausePlayback()
     }
     func unduck() {
-        if current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent, !havenCameraIsOpen { player.play() }
+        if current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent, !havenCameraIsOpen {
+            resumePlayback()
+        }
     }
     /// Resume the queued song if it's paused (e.g. a video had ducked it).
     func resume() {
         guard current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent, !havenCameraIsOpen,
-              player.playbackState != .playing else { return }
-        player.play()
+              !isPlaying else { return }
+        resumePlayback()
     }
     /// Fully (re)queue and start the current track — used on unmute, when the song may never
     /// have been queued (play() bails while the app is silent, so resume() has nothing to do).
@@ -591,10 +595,50 @@ final class MusicPlayback {
     func stop() {
         invalidate()   // an in-flight play must not resurrect the song we just stopped
         current = nil
+        stopPlayback()
+    }
+
+    // MARK: - Transport
+    //
+    // EVERY control path goes through these three, on both the real player and the simulator's
+    // preview stand-in. When the fallback was added it was wired into play() and duck() only, so
+    // stop() called player.stop() on a system player that does not exist in the simulator and the
+    // preview clip kept going — a story's song outlived the story being skipped or dismissed. A
+    // transport with two backends needs one door, not a conditional at each call site.
+
+    private func pausePlayback() {
+        #if targetEnvironment(simulator)
+        previewPlayer.pause()
+        #else
+        if player.playbackState == .playing { player.pause() }
+        #endif
+    }
+
+    private func resumePlayback() {
+        #if targetEnvironment(simulator)
+        // Nothing queued (a fresh story, or after stop()) — there is no paused clip to resume.
+        guard previewPlayer.currentItem != nil else {
+            if let track = current { play(track) }
+            return
+        }
+        previewPlayer.play()
+        #else
+        player.play()
+        #endif
+    }
+
+    private func stopPlayback() {
+        #if targetEnvironment(simulator)
+        // Clear the item as well as pausing: `stop()` means "there is nothing to come back to",
+        // and a merely-paused item is exactly what resume()/unduck() would pick up again.
+        previewPlayer.pause()
+        previewPlayer.replaceCurrentItem(with: nil)
+        #else
         // stop(), NOT pause(). The application music player is a SYSTEM-side agent: iOS resumes a merely
         // paused one when another audio session (a capture session finishing a recording) deactivates.
         // stop() ends playback and clears the queue, so there is nothing for the system to bring back.
         player.stop()
+        #endif
     }
 }
 #endif

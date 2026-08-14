@@ -98,7 +98,16 @@ enum SongSuggester {
         var reused: [TrackRefFfi] = []
 
         for term in terms(themes: themes, genre: genre, year: year, month: month) {
-            guard let songs = try? await catalog(term) else { continue }
+            let songs: [MusicKit.Song]
+            do {
+                songs = try await catalog(term)
+            } catch {
+                // Loud on purpose. This used to be `try?`, so when the request started failing —
+                // an over-limit parameter — every post silently got no suggestion and the feature
+                // looked switched off rather than broken.
+                HavenLog.sync("song search failed for '\(term)': \(error.localizedDescription)")
+                continue
+            }
             for song in rankedByEra(songs, year: year) {
                 let id = "\(song.id.rawValue)~"
                 guard seen.insert(id).inserted else { continue }
@@ -108,7 +117,10 @@ enum SongSuggester {
                                       durationMs: UInt64((song.duration ?? 0) * 1000))
                 if exclude.contains(id) { reused.append(ref) } else { fresh.append(ref) }
             }
-            if fresh.count >= limit { break }
+            // Keep going past the first satisfying term. Stopping early meant the pool came from
+            // ONE search, so the "random" pick chose between 8 near-identical results; drawing from
+            // a couple of terms is what makes two posts actually sound different.
+            if fresh.count >= limit * 2 { break }
         }
         // Unused songs first, then already-used ones as a fallback so a post is never left bare
         // purely because the catalog was small.
@@ -258,9 +270,11 @@ enum SongSuggester {
 
     private static func catalog(_ term: String) async throws -> [MusicKit.Song] {
         var req = MusicCatalogSearchRequest(term: term, types: [MusicKit.Song.self])
-        // A wider net, because the pool is shared across an entire archive: 25 was barely more
-        // than the exclude set could burn through in a single year's worth of posts.
-        req.limit = 50
+        // 25 is the MAXIMUM MusicCatalogSearchRequest accepts. Asking for 50 to widen the pool made
+        // every request throw, and because this is called as `try?` the failure was silent: the
+        // suggester simply returned nothing for every post, so only Shazam-identified posts ended
+        // up with a chip. Widen the pool with MORE TERMS (below), never with a bigger limit.
+        req.limit = 25
         return Array(try await req.response().songs)
     }
 

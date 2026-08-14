@@ -199,8 +199,13 @@ final class InstagramImporter: ObservableObject {
                 if idx < startAt { continue }   // already imported on a previous run
                 if await MainActor.run(body: { [weak self] in self?.cancelled ?? true }) { break }
                 let began = Date()
-                let (refs, hasAudio, detected, themes) = await Self.stage(item, zip: zip, byName: byName,
-                                                                         identify: matchSongs)
+                let (refs, hasAudio, detected, themes) = await Self.stage(
+                    item, zip: zip, byName: byName, identify: matchSongs,
+                    isCancelled: { await MainActor.run { [weak self] in self?.cancelled ?? true } })
+                // Stop means STOP. Staging an item can take a minute (a video transcode), and the
+                // check above happened before all of it — so hitting Stop used to finish the clip
+                // AND publish it, which is not what "stop" looks like from the outside.
+                if await MainActor.run(body: { [weak self] in self?.cancelled ?? true }) { break }
                 if hasAudio { audible += 1 }
                 if detected != nil { identified += 1 }
                 if refs.isEmpty {
@@ -291,7 +296,8 @@ final class InstagramImporter: ObservableObject {
     private nonisolated static func stage(_ item: InstagramArchive.Item,
                                           zip: ZipReader,
                                           byName: [String: ZipReader.Entry],
-                                          identify: Bool) async -> ([String], Bool, TrackRefFfi?, [String]) {
+                                          identify: Bool,
+                                          isCancelled: @Sendable () async -> Bool) async -> ([String], Bool, TrackRefFfi?, [String]) {
         var refs: [String] = []
         /// Does ANY of this post's media make sound? One song plays per post, so a carousel with a
         /// single talking video should not get one layered on top of it.
@@ -302,6 +308,8 @@ final class InstagramImporter: ObservableObject {
         /// what makes one silent post's suggestion differ from the next one's.
         var themes: [String] = SongSuggester.captionThemes(item.body)
         for name in item.mediaNames {
+            // A 20-photo carousel is 20 encodes; a cancel should not have to wait out the album.
+            if await isCancelled() { break }
             guard let entry = byName[name] else { continue }
             // Disk read + CRC over the entry — the expensive part, and the reason this is detached.
             guard let bytes = zip.data(for: entry) else { continue }
@@ -326,9 +334,11 @@ final class InstagramImporter: ObservableObject {
                         // archive that is not instant — a too-tight bound turns a would-be match
                         // into a silent miss, which looks exactly like "Shazam didn't run".
                         let began = Date()
-                        detected = await withTimeout(45) { await ShazamDetector.identify(scratch) } ?? nil
-                        HavenLog.sync("ig-import: shazam \(detected == nil ? "no match" : "MATCHED \(detected!.title)") "
-                            + "in \(String(format: "%.1f", Date().timeIntervalSince(began)))s — \(name)")
+                        let outcome = await withTimeout(45) { await ShazamDetector.identifyDetailed(scratch) }
+                        detected = outcome?.track
+                        let why = outcome?.reason ?? "timed out"
+                        HavenLog.sync("ig-import: shazam \(why) in "
+                            + "\(String(format: "%.1f", Date().timeIntervalSince(began)))s — \(name)")
                     }
                 }
                 // forceOptimize: an import is bulk media at someone else's encoder settings —

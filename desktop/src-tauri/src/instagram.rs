@@ -402,7 +402,7 @@ pub fn ext(name: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
 
@@ -563,7 +563,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn validation_archive() -> Option<std::path::PathBuf> {
+    pub(crate) fn validation_archive() -> Option<std::path::PathBuf> {
         let dir = dirs::home_dir()?.join("Downloads");
         let mut hits: Vec<_> = std::fs::read_dir(dir)
             .ok()?

@@ -644,3 +644,78 @@ mod tests {
         assert_eq!(kept_identity(&no_media), "ig:1700000000000");
     }
 }
+
+#[cfg(test)]
+mod smoke {
+    use super::*;
+    use crate::engine::Engine;
+    use crate::store::Paths;
+
+    /// END-TO-END: parse a real archive, stage its bytes, PUBLISH, and read the posts back.
+    ///
+    /// Everything else about the desktop importer is unit-tested in pieces — ordering, checkpoints,
+    /// theme extraction, the audio probe. What none of it covered is whether a post ever actually
+    /// comes out the other end, which is the one thing an importer exists to do. This runs the real
+    /// publish path against a real engine and asserts the feed contains the result.
+    ///
+    /// Hermetic: HAVEN_DESKTOP_DATA points the whole data tree at a temp dir, so this builds its own
+    /// throwaway identity and cannot see (or touch) a real desktop install.
+    #[test]
+    fn imported_posts_actually_reach_the_feed() {
+        let Some(archive) = crate::instagram::tests::validation_archive() else {
+            eprintln!("skipping: no instagram-*.zip in ~/Downloads");
+            return;
+        };
+
+        let tmp = std::env::temp_dir().join(format!("haven-igsmoke-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("HAVEN_DESKTOP_DATA", &tmp);
+        let paths = Paths::resolve().expect("paths");
+        let engine = Engine::new(paths, [7u8; 32]).expect("engine");
+
+        let summary = crate::instagram::read(&archive).expect("parse");
+        // NEWEST FIRST, exactly as the runner orders them.
+        let items: Vec<_> = ordered(&summary, false).into_iter().take(3).collect();
+        assert_eq!(items.len(), 3, "need three feed items to publish");
+
+        let mut zip = crate::instagram::Archive::open(&archive).expect("open archive");
+        let circle = "default";
+        let mut published = 0usize;
+        for item in &items {
+            let mut refs = Vec::new();
+            for name in &item.media_names {
+                let Some(bytes) = zip.read(name) else { continue };
+                let is_video = crate::instagram::is_video(name);
+                refs.push(engine.add_local_media(circle, &bytes, is_video));
+            }
+            assert!(!refs.is_empty(), "staged no media for {:?}", item.media_names);
+            engine.post_imported(circle.to_string(), item.body.clone(), refs,
+                                 None, false, item.created_at);
+            published += 1;
+        }
+        assert_eq!(published, 3);
+
+        let feed = engine.feed(circle);
+        assert!(feed.len() >= 3, "feed holds {} items, expected >= 3", feed.len());
+
+        // BACKDATED — the whole point. A post must carry the archive's timestamp, not "now".
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        for item in &items {
+            let found = feed.iter().find(|f| f.created_at == item.created_at)
+                .unwrap_or_else(|| panic!("no feed post at {}", item.created_at));
+            assert!(found.created_at < now_ms - 86_400_000,
+                    "post is not backdated: {} vs now {}", found.created_at, now_ms);
+            assert!(!found.media.is_empty(), "published post has no media");
+        }
+
+        // Newest-first feed: publishing oldest-last means the newest sits at the top.
+        let dates: Vec<u64> = feed.iter().map(|f| f.created_at).collect();
+        let mut sorted = dates.clone();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(dates, sorted, "feed is not newest-first");
+
+        std::env::remove_var("HAVEN_DESKTOP_DATA");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}

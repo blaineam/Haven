@@ -80,6 +80,26 @@ object InstagramImporter {
     private lateinit var appContext: Context
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * Drop the importing thread to BACKGROUND scheduling priority.
+     *
+     * Transcoding is the expensive half of an import, and on a device with no hardware encoder (any
+     * emulator, some low-end phones) MediaCodec runs in software and will take every core it is
+     * given. At default priority it then competes with the UI thread and the app stops drawing — the
+     * emulator's ANR traces showed a main thread that was not blocked on anything of ours at all,
+     * it simply could not get scheduled to finish a frame.
+     *
+     * An import is by definition not urgent: it is backfilling years-old history while the user is
+     * meant to carry on using the app. So it yields. Where a real encoder exists this costs nothing
+     * measurable; where one does not, it is the difference between a usable app and an unresponsive
+     * one.
+     */
+    private fun yieldToUi() {
+        runCatching {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+        }
+    }
+
     @Volatile private var cancelled = false
     private var archiveUri: Uri? = null
 
@@ -361,6 +381,7 @@ object InstagramImporter {
     }
 
     private fun runLoop(uri: Uri, items: List<InstagramArchive.Item>, pending: Pending) {
+        yieldToUi()
         val circleId = pending.circleId
         val matchSongs = pending.matchSongs
         val startAt = pending.done

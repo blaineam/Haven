@@ -3561,7 +3561,15 @@ function viewStories(list, startIndex = 0) {
   // Which of these are already kept — one call for the whole session, refreshed locally on toggle.
   invoke("kept_stories").then((ks) => { keptIds = new Set((ks || []).map((k) => k.id)); paintKeep(); }).catch(() => {});
 
-  const cleanup = () => { window.removeEventListener("keydown", onKey, true); mo.disconnect(); };
+  const cleanup = () => {
+    window.removeEventListener("keydown", onKey, true);
+    mo.disconnect();
+    // Closing the viewer must silence the clip that was on screen, for the same reason paging does:
+    // tearing the modal down detaches the element without stopping it.
+    slot.querySelectorAll("video").forEach((v) => {
+      try { v.pause(); v.removeAttribute("src"); v.load(); } catch (_) {}
+    });
+  };
   const done = () => { close(); cleanup(); };
 
   const show = () => {
@@ -3572,6 +3580,13 @@ function viewStories(list, startIndex = 0) {
     let runEnd = index; while (runEnd < stories.length - 1 && author(runEnd + 1) === author(index)) runEnd++;
     bars.replaceChildren(...Array.from({ length: runEnd - runStart + 1 }, (_, k) =>
       el("span", { class: "seg" + (runStart + k <= index ? " on" : "") })));
+    // STOP the outgoing clip before dropping it. Detaching a <video> from the DOM does NOT stop
+    // playback — the element keeps running (and keeps making noise) until it is paused and its
+    // source released. Paging through a run of stories therefore left every clip already visited
+    // still playing, which is why an import's worth of stories all sounded at once.
+    slot.querySelectorAll("video").forEach((v) => {
+      try { v.pause(); v.removeAttribute("src"); v.load(); } catch (_) {}
+    });
     slot.replaceChildren(storyContentNode(it));
     hydrateMedia(slot, it._circle || state.activeCircle || "default");
     paintKeep();   // the pill belongs to the story on screen, not to the viewer

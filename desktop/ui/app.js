@@ -90,6 +90,7 @@ function initials(name) {
 }
 
 function modal(node, opts = {}) {
+  setTimeout(() => Autoplay.schedule(), 0);   // an overlay covers the feed → it goes quiet
   // Anything presented over the feed silences what the feed was playing (iOS parity: a sheet or
   // cover stops the post soundtrack behind it). Runs BEFORE the overlay's own content is inserted,
   // so a story viewer's clip — created below — is untouched.
@@ -236,9 +237,10 @@ function icon(name, cls) {
 // ---- anchored menu (SwiftUI `Menu`) ------------------------------------------------------
 // The macOS build uses `Menu` for the circle switcher, the composer's `+`, and a post's `···`.
 // A full modal for those was the wrong weight entirely — this pops a small panel at the control.
-function closeMenu() { $("#menu-root").replaceChildren(); }
+function closeMenu() { $("#menu-root").replaceChildren(); setTimeout(() => Autoplay.schedule(), 0); }
 /** items: {label, icon, danger, head, sep, on} — `head` renders a section label, `sep` a rule. */
 function popMenu(anchor, items, opts = {}) {
+  setTimeout(() => Autoplay.schedule(), 0);
   const root = $("#menu-root");
   const menu = el("div", { class: "menu glass" });
   for (const it of items.filter(Boolean)) {
@@ -444,6 +446,9 @@ function switchView(view) {
   state.view = view;
   $$(".tab").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
+  // Leaving the feed has to silence it. `suspended()` knows the rule; nothing was asking it at the
+  // moment the view changed, so the centred post kept playing under the new tab.
+  Autoplay.schedule();
   render();
 }
 
@@ -6724,8 +6729,11 @@ const Autoplay = {
   suspended() {
     // A sheet, a story viewer, a live call or a recording all own the screen; the feed goes quiet
     // behind them exactly as `pauseFeedMedia` already does when they open.
+    // A tab that is not the feed counts as covered: switching to Messages or Settings left the
+    // centred post playing underneath, which is the same fault as an overlay not stopping it.
     return state.superDataSaver || callAudioActive() || captureUIOpen()
-      || !!$("#modal-root").firstChild || document.hidden;
+      || (state.view !== "circle" && state.view !== "you")
+      || !!$("#modal-root").firstChild || !!$("#menu-root").firstChild || document.hidden;
   },
   /** rAF-coalesced: scroll fires far faster than layout can be read, and reading rects per event
    *  is what turns a smooth fling into a stutter. */
@@ -6822,10 +6830,14 @@ const Autoplay = {
   // A TrackRef carries no preview URL (nothing about a preview belongs on a post), so it is resolved
   // by name and cached for the session, the same way Android's MusicSearch.resolve does it.
   song: {
-    audio: null, postId: null, cache: new Map(),
+    audio: null, postId: null, cache: new Map(), seq: 0,
     stop() {
-      if (this.audio) { try { this.audio.pause(); } catch (_) {} this.audio = null; }
+      if (this.audio) {
+        try { this.audio.pause(); this.audio.src = ""; } catch (_) {}
+        this.audio = null;
+      }
       this.postId = null;
+      this.seq++;              // invalidate anything still resolving
     },
     async sync(card) {
       if (!card) return this.stop();
@@ -6835,6 +6847,16 @@ const Autoplay = {
       if (!state.videoSoundOn && deviceLikelySilent()) return;
       const title = card.dataset.songTitle || "", artist = card.dataset.songArtist || "";
       if (!title) return;
+      // THE TOKEN IS WHY THIS CANNOT STACK.
+      //
+      // Resolving a preview URL is a network round trip, and scrolling starts one per post. Two
+      // could finish out of order, and the second `this.audio = new Audio(...)` overwrote the
+      // first's handle WITHOUT stopping it — leaving a looping clip with nothing left to reference
+      // it. That is the song that got stuck playing over everything, and every scroll past another
+      // song added one more.
+      //
+      // `stop()` bumps the token, so a resolve that started before it can never assign.
+      const token = ++this.seq;
       const key = title + "|" + artist;
       let url = this.cache.get(key);
       if (url === undefined) {
@@ -6842,11 +6864,9 @@ const Autoplay = {
         url = (hit && hit.preview_url) || null;
         this.cache.set(key, url);
       }
-      // The reader may have scrolled on while that resolved — only start if this post is STILL the
-      // centred one, or a fast scroll leaves a song playing for a card nobody is looking at.
-      // Checked against the CENTRED CARD, not the centred video: a photo post has no video, and
-      // testing for one meant its song never started at all.
-      if (!url || Autoplay.centeredCard !== card) return;
+      if (!url || token !== this.seq || Autoplay.centeredCard !== card) return;
+      this.stop();                               // belt and braces: never assign over a live one
+      this.seq = token;                          // stop() bumped it; this request is still current
       this.postId = id;
       this.audio = new Audio(url);
       this.audio.loop = true;

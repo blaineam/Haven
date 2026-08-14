@@ -557,6 +557,10 @@ input:focus, textarea:focus, select:focus {
 }
 .song-chip:active { transform: scale(0.99); }
 .song-chip .note { width: 22px; height: 22px; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; }
+/* An inline <svg> carries only a viewBox — every icon site in this file has to give it a size, or
+   it collapses and the control is invisible rather than broken. The note glyph was missing this
+   and had been rendering as an empty 22px gap for as long as the chip has used icon(). */
+.song-chip .note svg { width: 16px; height: 16px; display: block; }
 /* Cover art when the track carries any — same footprint as the note glyph it replaces, so a chip
    with art and one without are the same height. */
 .song-art {
@@ -569,6 +573,7 @@ input:focus, textarea:focus, select:focus {
   flex: 0 0 auto; background: transparent; border: 0; color: var(--muted);
   padding: 3px; border-radius: 8px; line-height: 0; cursor: pointer; transition: color .18s;
 }
+.song-sound svg, .song-open svg { width: 15px; height: 15px; display: block; }
 .song-sound:hover, .song-open:hover { color: var(--text); }
 .song-open { color: var(--brand-pink, #e0308a); }
 .kebab {

@@ -1713,12 +1713,15 @@ struct StoryComposerView: View {
         let s = Int(ms / 1000); return String(format: "%d:%02d", s / 60, s % 60)
     }
 
-    /// The track with the chosen section start baked in (artworkUrl = "start:<ms>").
+    /// The track with the chosen section start baked in — see `TrackRefFfi.withSongStart`.
+    ///
+    /// Goes through the helper rather than writing the field directly, because that overwrote any
+    /// artwork the track already carried: a song picked from the suggestions tab arrives WITH its
+    /// artwork URL in this same field, and choosing a section used to wipe it.
     private func trackForShare() -> TrackRefFfi? {
         guard let t = track else { return nil }
         guard musicStartMs > 0 else { return t }
-        return TrackRefFfi(catalogId: t.catalogId, title: t.title, artist: t.artist,
-                           artworkUrl: "start:\(Int(musicStartMs))", durationMs: t.durationMs)
+        return t.withSongStart(ms: musicStartMs)
     }
 
     private func nowPlayingChip(_ t: TrackRefFfi) -> some View {

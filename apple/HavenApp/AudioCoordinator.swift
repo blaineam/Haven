@@ -374,12 +374,8 @@ final class MusicPlayback {
         let ids = trackIds(track.catalogId)
         // macOS can only play catalog songs — a store id is required (no MPMediaItem library).
         guard let store = ids.store, !store.isEmpty else { return }
-        // Stories can pick a section of the song (start offset encoded as "start:<ms>").
-        let startSeconds: Double? = {
-            guard track.artworkUrl.hasPrefix("start:"),
-                  let ms = Double(track.artworkUrl.dropFirst(6)), ms > 0 else { return nil }
-            return ms / 1000
-        }()
+        // Stories can pick a section of the song — see TrackRefFfi.songStartMs for the encoding.
+        let startSeconds: Double? = track.songStartMs.map { $0 / 1000 }
         Task { @MainActor in
             // Catalog playback needs MusicKit authorization (requested once).
             if !authed {
@@ -503,12 +499,8 @@ final class MusicPlayback {
             MPMediaLibrary.requestAuthorization { _ in }
             authed = true
         }
-        // Stories can pick a section of the song (start offset encoded as "start:<ms>").
-        let startSeconds: Double? = {
-            guard track.artworkUrl.hasPrefix("start:"), let ms = Double(track.artworkUrl.dropFirst(6)), ms > 0
-            else { return nil }
-            return ms / 1000
-        }()
+        // Stories can pick a section of the song — see TrackRefFfi.songStartMs for the encoding.
+        let startSeconds: Double? = track.songStartMs.map { $0 / 1000 }
         let wanted = track
         // Probe the local library OFF the main thread — MPMediaQuery.items scans the whole songs table
         // synchronously, and doing it inline here (even behind the scroll debounce) was the residual "stick"

@@ -3,6 +3,50 @@ import MediaPlayer
 import MusicKit
 import SwiftUI
 
+extension TrackRefFfi {
+    /// `artworkUrl` carries TWO things, and used to carry only one at a time.
+    ///
+    /// Stories encode the chosen section start into this field as "start:<ms>", because TrackRef has
+    /// no field for it. That was harmless while suggestions did not exist — nothing else wrote here
+    /// — but the suggester now stores a real artwork URL, so picking a suggested song for a story
+    /// and then choosing a section silently destroyed the artwork, and the chip lost its image.
+    ///
+    /// The encoding is now composable, and every earlier form still reads correctly:
+    ///     "start:1200;https://…"   both
+    ///     "start:1200"             offset only (what stories used to write)
+    ///     "https://…"              artwork only (what the suggester writes)
+    ///     ""                       neither
+    ///
+    /// A URL cannot begin with "start:" and cannot contain an unescaped ";", so the split is
+    /// unambiguous in both directions.
+    private static let startTag = "start:"
+
+    /// The story section start in milliseconds, if one was chosen.
+    var songStartMs: Double? {
+        guard artworkUrl.hasPrefix(Self.startTag) else { return nil }
+        let body = artworkUrl.dropFirst(Self.startTag.count)
+        let value = body.prefix(while: { $0 != ";" })
+        guard let ms = Double(value), ms > 0 else { return nil }
+        return ms
+    }
+
+    /// The artwork URL, whether or not a start offset is riding along with it.
+    var artworkURLString: String {
+        guard artworkUrl.hasPrefix(Self.startTag) else { return artworkUrl }
+        guard let semi = artworkUrl.firstIndex(of: ";") else { return "" }
+        return String(artworkUrl[artworkUrl.index(after: semi)...])
+    }
+
+    /// This track with a section start applied, KEEPING whatever artwork it already had.
+    func withSongStart(ms: Double) -> TrackRefFfi {
+        let art = artworkURLString
+        let encoded = art.isEmpty ? "\(Self.startTag)\(Int(ms))"
+                                  : "\(Self.startTag)\(Int(ms));\(art)"
+        return TrackRefFfi(catalogId: catalogId, title: title, artist: artist,
+                           artworkUrl: encoded, durationMs: durationMs)
+    }
+}
+
 /// Parse a track's encoded id "<storeID>~<persistentID>" (either part may be absent).
 func trackIds(_ catalogId: String) -> (store: String?, pid: UInt64?) {
     let parts = catalogId.split(separator: "~", maxSplits: 1, omittingEmptySubsequences: false)
@@ -211,7 +255,7 @@ struct SongPicker: View {
     /// It was stubbed to EmptyView when this tab was built, which left the rows looking unfinished
     /// next to the catalog's.
     @ViewBuilder private func suggestedArtwork(_ t: TrackRefFfi) -> some View {
-        if let url = URL(string: t.artworkUrl), !t.artworkUrl.isEmpty {
+        if !t.artworkURLString.isEmpty, let url = URL(string: t.artworkURLString) {
             AsyncImage(url: url) { image in
                 image.resizable().scaledToFill()
             } placeholder: {

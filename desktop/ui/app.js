@@ -1240,6 +1240,11 @@ async function renderFeed() {
     // single burst. That is both "it isn't lazy loading" and a large part of the stall.
     // `feedNudge` re-arms it when a tail actually lands.
     if (rendered >= all.length) feedObserver?.disconnect();
+    // TEMPORARY: is this actually paging, or walking the whole feed?
+    invoke("ui_log", { line:
+      `page rendered=${rendered}/${all.length} cards=${list.querySelectorAll(".post").length}` +
+      ` sentinelTop=${Math.round(sentinel.getBoundingClientRect().top)} vh=${window.innerHeight}`,
+    }).catch(() => {});
   };
   // Page in a tail that arrived AFTER this feed was built, without a teardown.
   //
@@ -2639,12 +2644,19 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
     }
     const url = URL.createObjectURL(file);
     const video = document.createElement("video");
-    video.muted = true;            // let it autoplay through without audible playback
+    // NOT muted. `captureStream()` on a MUTED element yields no usable audio, so every clip this
+    // re-encoded came out silent — imports AND anything posted from the desktop composer, which
+    // runs this same function. Silence is instead achieved below by routing the audio into the
+    // RECORDER only and never to the speakers.
+    video.muted = false;
+    video.volume = 1;
     video.playsInline = true;
     video.preload = "auto";
-    let raf, rec, settled = false;
+    let raf, rec, settled = false, audioCtx = null;
+    const closeAudio = () => { if (audioCtx) { try { audioCtx.close(); } catch (_) {} audioCtx = null; } };
     const fail = (e) => {
       if (settled) return; settled = true;
+      closeAudio();
       if (raf) cancelAnimationFrame(raf);
       try { if (rec && rec.state !== "inactive") rec.stop(); } catch {}
       URL.revokeObjectURL(url);
@@ -2655,6 +2667,7 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
     // caller never reaches `add_media` and no ref is minted for bytes that were never stored.
     const refuse = (msg) => {
       if (settled) return; settled = true;
+      closeAudio();
       URL.revokeObjectURL(url);
       if (!mediaQuiet) toast(msg);
       rej(new Error(msg));
@@ -2677,11 +2690,28 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
       let capStream;
       try {
         capStream = c.captureStream(30);
-        // Carry the audio: capture the element's own stream and graft its audio tracks onto the canvas
-        // stream. The re-mux drops the audio's metadata too (fresh container).
-        const elStream = (video.captureStream && video.captureStream()) ||
-          (video.mozCaptureStream && video.mozCaptureStream());
-        if (elStream) elStream.getAudioTracks().forEach((t) => capStream.addTrack(t));
+        // CARRY THE AUDIO, through a Web Audio graph rather than the element's own stream.
+        //
+        // The element is the only source of the clip's audio, and reading it required the element
+        // to be audible — which is why this used to mute it and then wonder where the sound went.
+        // A MediaElementSource feeding a MediaStreamDestination gives the recorder a real track,
+        // and because nothing is connected to `ac.destination` the user hears nothing: the audio
+        // exists on the wire and never on the speakers.
+        try {
+          const AC = window.AudioContext || window.webkitAudioContext;
+          if (AC) {
+            audioCtx = new AC();
+            const srcNode = audioCtx.createMediaElementSource(video);
+            const dest = audioCtx.createMediaStreamDestination();
+            srcNode.connect(dest);                    // recorder only — deliberately NOT to output
+            dest.stream.getAudioTracks().forEach((t) => capStream.addTrack(t));
+          }
+        } catch (_) { /* no Web Audio: fall through to the element stream */ }
+        if (!capStream.getAudioTracks().length) {
+          const elStream = (video.captureStream && video.captureStream()) ||
+            (video.mozCaptureStream && video.mozCaptureStream());
+          if (elStream) elStream.getAudioTracks().forEach((t) => capStream.addTrack(t));
+        }
       } catch (e) { return fail(e); }
       const chunks = [];
       try {
@@ -2701,6 +2731,7 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
       rec.onstop = async () => {
         if (settled) return; settled = true;
         stopDraw();
+        closeAudio();
         try {
           const blob = new Blob(chunks, { type: rec.mimeType || "video/webm" });
           const b64 = await blobToBase64(blob);
@@ -2733,7 +2764,13 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
                                   MEDIA_TARGETS.MAX_DURATION_SEC * 1000);
       rec.addEventListener("stop", () => clearTimeout(capTimer));
       try { rec.start(); } catch (e) { clearTimeout(capTimer); return fail(e); }
-      video.play().catch(fail);
+      // An UNMUTED element can have playback refused by autoplay policy. Falling back to muted
+      // costs this clip its audio, which is bad — but it is far better than the alternative of
+      // failing the encode outright and losing the clip's optimization as well.
+      video.play().catch(() => {
+        video.muted = true;
+        video.play().catch(fail);
+      });
     };
     video.src = url;
   });
@@ -7478,8 +7515,13 @@ async function boot() {
   await refreshBadges();
   await render();
 
-  // First-run nudge to set a name.
-  if (!state.profile.name) switchView("you");
+  // First-run nudge to set a name — ONCE. This fired on every launch while the name was empty, so
+  // an account that simply has no display name got dropped onto the profile tab every single time
+  // instead of the feed it asked for.
+  if (!state.profile.name && !localStorage.getItem("haven-named-nudged")) {
+    localStorage.setItem("haven-named-nudged", "1");
+    switchView("you");
+  }
 
   try { state.contacts = await invoke("contacts"); } catch (_) {}
   try { state.videoSoundOn = await invoke("video_sound_on"); } catch (_) { state.videoSoundOn = false; }

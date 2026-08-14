@@ -1739,7 +1739,7 @@ pub async fn music_suggestions(
             artist: t.artist,
             artwork_url: t.artwork_url,
             duration_ms: t.duration_ms,
-            preview_url: String::new(), // suggestions come back in Haven's shape, which drops it
+            preview_url: t.preview_url,
         })
         .collect()
 }

@@ -463,6 +463,7 @@ pub async fn suggestions(
                 artist: t.artist,
                 artwork_url: t.artwork_url,
                 duration_ms: t.duration_ms,
+                preview_url: t.preview_url,
             };
             if exclude.contains(&id) {
                 reused.push(ref_);
@@ -505,6 +506,11 @@ pub struct HavenTrack {
     pub artist: String,
     pub artwork_url: String,
     pub duration_ms: u64,
+    /// The 30-second clip, carried so the PICKER can audition a suggestion. A `TrackRef` has no
+    /// field for it and does not need one — nothing is stored on the post — but dropping it here
+    /// meant a suggested song could only be heard by attaching it first, which made every audition
+    /// a commitment the user then had to undo.
+    pub preview_url: String,
 }
 
 /// Prefer releases near the post's year — but only as a preference, and the iTunes API gives NO

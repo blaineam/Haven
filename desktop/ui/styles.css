@@ -256,6 +256,26 @@ svg { width: 16px; height: 16px; }
 .empty .big svg { width: 34px; height: 34px; }          /* matches the 34px font-size it replaced */
 .story-ph { width: 22px; height: 22px; }                /* the ring's own add-glyph is 21px */
 
+
+/* ---- Song picker ---- */
+/* NOT `.tabs`: that is the floating header control and is position:absolute, so borrowing it took
+   the strip out of flow and the results list drew straight over it. */
+.picker-tabs {
+  display: flex; align-items: center; gap: 2px; padding: 3px; width: max-content;
+  border-radius: 999px; background: rgba(127, 127, 127, 0.14); margin-bottom: 12px;
+}
+/* The cover art doubles as the play control. */
+.song-art-btn { position: relative; width: 26px; height: 26px; flex: 0 0 auto; display: block; }
+.song-art-btn.playable { cursor: pointer; }
+.song-art-glyph {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  border-radius: 6px; background: rgba(0, 0, 0, 0.42); color: #fff; opacity: 0; transition: opacity .15s;
+}
+.song-art-btn.playable:hover .song-art-glyph { opacity: 1; }
+.song-art-glyph svg { width: 12px; height: 12px; }
+/* While it is playing the glyph stays up — it is the only thing saying which row you are hearing. */
+.song-art-btn.playable .song-art-glyph:has(svg[data-playing]) { opacity: 1; }
+
 /* ---- Content ---- */
 .content { position: relative; height: 100vh; }
 .view {

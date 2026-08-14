@@ -56,6 +56,8 @@ import uniffi.haven_ffi.TrackRefFfi
 import com.blaineam.haven.core.SongSuggester
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.foundation.layout.Arrangement
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 
 /** Tiny remote-image cache for album artwork (fetch + decode off-main). */
 private val artCache = mutableStateMapOf<String, ImageBitmap?>()
@@ -201,6 +203,70 @@ object MusicPlayer : com.blaineam.haven.core.AudioFocus.Holder {
     }
 }
 
+
+/** Album art that IS the play control — tap to audition the 30-second clip, tap again to stop.
+ *
+ *  A song is going onto the family's feed; hearing it first is the difference between choosing and
+ *  guessing, and requiring the user to ATTACH a song in order to hear it made every audition a
+ *  commitment they then had to undo.
+ *
+ *  Suggestions need [resolve] because they arrive as Haven TrackRefs, which carry no preview URL —
+ *  only a title and an artist. `MusicSearch.resolve` looks the clip up and caches it (misses too),
+ *  so the lookup happens once per song and only for the ones actually tapped.
+ *
+ *  [MusicPlayer.toggle] replaces whatever was playing, so moving between songs never stacks them.
+ */
+@Composable
+private fun PreviewArtwork(
+    artworkUrl: String,
+    previewUrl: String?,
+    size: androidx.compose.ui.unit.Dp = 48.dp,
+    resolve: (suspend () -> String?)? = null,
+) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var resolved by remember(artworkUrl, previewUrl) { mutableStateOf(previewUrl) }
+    var loading by remember(artworkUrl) { mutableStateOf(false) }
+    val playing = resolved != null && MusicPlayer.playingUrl == resolved
+    val art = rememberArtwork(artworkUrl)
+
+    Box(
+        Modifier.size(size).clip(RoundedCornerShape(8.dp)).background(HavenTheme.card)
+            .clickable {
+                val url = resolved
+                if (url != null) { MusicPlayer.toggle(ctx, url); return@clickable }
+                if (resolve == null || loading) return@clickable
+                loading = true
+                scope.launch {
+                    val found = withContext(Dispatchers.IO) { resolve() }
+                    loading = false
+                    resolved = found
+                    if (found != null) MusicPlayer.toggle(ctx, found)
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (art != null) Image(art, null, Modifier.size(size), contentScale = ContentScale.Crop)
+        else Icon(Icons.Filled.MusicNote, null, tint = HavenTheme.textSecondary)
+        // Scrim + glyph, over the art rather than beside it: the art is the target, and the glyph
+        // has to stay legible on a bright cover.
+        Box(
+            Modifier.size(size).background(Color.Black.copy(alpha = if (playing) 0.5f else 0.28f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (loading) {
+                CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
+            } else {
+                Icon(
+                    if (playing) Icons.Filled.PauseCircle else Icons.Filled.PlayCircle,
+                    stringResource(R.string.music_cd_preview),
+                    tint = Color.White, modifier = Modifier.size(size * 0.46f),
+                )
+            }
+        }
+    }
+}
+
 /** Search-and-pick a song (iTunes Search), with a SUGGESTED tab driven by what the post says.
  *
  *  [caption] is the post being composed or edited. `SongSuggester` has existed here since the
@@ -290,12 +356,11 @@ fun MusicSearchSheet(
                                     .padding(vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                val art = rememberArtwork(trk.artworkUrl)
-                                Box(Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(HavenTheme.card),
-                                    contentAlignment = Alignment.Center) {
-                                    if (art != null) Image(art, null, Modifier.size(48.dp), contentScale = ContentScale.Crop)
-                                    else Icon(Icons.Filled.MusicNote, null, tint = HavenTheme.textSecondary)
-                                }
+                                PreviewArtwork(
+                                    artworkUrl = trk.artworkUrl,
+                                    previewUrl = null,
+                                    resolve = { MusicSearch.resolve(trk.title, trk.artist)?.previewUrl },
+                                )
                                 Spacer(Modifier.size(12.dp))
                                 Column(Modifier.weight(1f)) {
                                     Text(trk.title, color = HavenTheme.textPrimary, fontSize = 14.sp,
@@ -328,12 +393,7 @@ fun MusicSearchSheet(
                         }.padding(vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        val art = rememberArtwork(t.artworkUrl)
-                        Box(Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(HavenTheme.card),
-                            contentAlignment = Alignment.Center) {
-                            if (art != null) Image(art, null, Modifier.size(48.dp), contentScale = ContentScale.Crop)
-                            else Icon(Icons.Filled.MusicNote, null, tint = HavenTheme.textSecondary)
-                        }
+                        PreviewArtwork(artworkUrl = t.artworkUrl, previewUrl = t.previewUrl)
                         Spacer(Modifier.size(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(t.title, color = HavenTheme.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)

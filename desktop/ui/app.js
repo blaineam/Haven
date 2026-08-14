@@ -89,13 +89,13 @@ function initials(name) {
   return (p[0][0] + (p[1] ? p[1][0] : "")).toUpperCase();
 }
 
-function modal(node) {
+function modal(node, opts = {}) {
   // Anything presented over the feed silences what the feed was playing (iOS parity: a sheet or
   // cover stops the post soundtrack behind it). Runs BEFORE the overlay's own content is inserted,
   // so a story viewer's clip — created below — is untouched.
   pauseFeedMedia();
   const root = $("#modal-root");
-  const backdrop = el("div", { class: "modal-backdrop", onclick: (e) => { if (e.target === backdrop) root.replaceChildren(); } }, node);
+  const backdrop = el("div", { class: "modal-backdrop", onclick: (e) => { if (e.target === backdrop) closeModal(); } }, node);
   node.classList.add("modal", "plain");
   // A VISIBLE way out. Every dialog built on modal() — edit post, the song picker, new circle, the
   // small confirmations — offered only Esc or a click on the backdrop, both of which are invisible
@@ -103,12 +103,20 @@ function modal(node) {
   // the same affordance, added once here so no dialog can be built without one.
   node.prepend(el("button", {
     class: "icon-btn glass modal-x", title: t("close"), "aria-label": t("close"),
-    onclick: () => root.replaceChildren(),
+    onclick: () => closeModal(),
   }, icon("xmark")));
+  // A dialog opened OVER another (the song picker over the post editor) has to give the first one
+  // back rather than clear the root, which took the editor — and everything typed into it — with it.
+  state.modalOnClose = opts.onClose || null;
   root.replaceChildren(backdrop);
-  return () => root.replaceChildren();
+  return () => closeModal();
 }
-const closeModal = () => $("#modal-root").replaceChildren();
+const closeModal = () => {
+  const back = state.modalOnClose;
+  state.modalOnClose = null;
+  if (back) back();                       // hand the covered dialog back
+  else $("#modal-root").replaceChildren();
+};
 
 /** A sheet the Haven way — the port of `HavenMacSheet` (apple/HavenApp/Theme.swift). The brand
  *  gradient runs to the sheet's EXTREME edges (never a grey band above or below), the title sits
@@ -151,6 +159,8 @@ const ICONS = {
   // entry here is an invisible button, not a broken one.
   "arrow.up.forward.app": { d: "M14 4H6a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-8", extra: "M14 10l6.5-6.5M15 3h6v6" },
   // "Keep on this device" — a pushpin, matching Apple's `pin` on the same action.
+  "play.fill": { fill: true, d: "M8 5.4v13.2L19 12z" },
+  "pause.fill": { fill: true, d: "M8 5h3.2v14H8zM12.8 5H16v14h-3.2z" },
   "pin": { d: "M9 4h6l-1 5 3 3v2h-5m0 0v5m0-5H7v-2l3-3-1-5" },
   // "Message …" in the post menu. `bubble.left` on Apple; the tail hangs left, which is what
   // distinguishes it from the reaction bubble.
@@ -1573,42 +1583,62 @@ function openExternal(url) {
 function musicDialog(onPick, ctx = {}) {
   let tab = "search";
   let preview = null;                       // one <audio> at a time; auditioning is a comparison
+  let playingUrl = null;
   const results = el("div", { class: "col", style: "gap:6px;max-height:46vh;overflow-y:auto" });
   const input = el("input", { placeholder: t("search_songs"), style: "flex:1" });
   const searchRow = el("div", { class: "row", style: "gap:8px" }, input);
-  const tabs = el("div", { class: "tabs", style: "margin-bottom:10px" });
+  const tabs = el("div", { class: "picker-tabs" });
 
-  const stopPreview = () => { if (preview) { preview.pause(); preview = null; } };
+  const stopPreview = () => { if (preview) { preview.pause(); preview = null; } playingUrl = null; };
+
+  // Every row registers how to redraw its own glyph, so starting one preview visibly stops the last.
+  const syncs = [];
+  const syncAll = () => syncs.forEach((f) => f());
+
+  const toggle = (url) => {
+    if (playingUrl === url) return stopPreview(), syncAll();
+    stopPreview();
+    playingUrl = url;
+    preview = new Audio(url);
+    preview.addEventListener("ended", () => { playingUrl = null; preview = null; syncAll(); });
+    preview.play().catch(() => { playingUrl = null; preview = null; syncAll(); });
+    syncAll();
+  };
 
   const row = (trk) => {
-    const art = trk.artwork_url
-      ? el("img", { src: trk.artwork_url, class: "song-art", loading: "lazy", decoding: "async", alt: "" })
-      : el("span", { class: "note" }, icon("music.note"));
-    const pick = el("button", { class: "song-chip glass", style: "width:100%;text-align:left;cursor:pointer",
+    // THE ART IS THE BUTTON. Auditioning used to mean attaching the song first — every listen was a
+    // commitment the user then had to undo. Tapping the cover plays the 30 seconds iTunes gives,
+    // tapping again stops, and starting another stops the first.
+    const art = el("span", { class: "song-art-btn", title: trk.preview_url ? t("preview") : "" });
+    if (trk.artwork_url) art.append(el("img", { src: trk.artwork_url, class: "song-art", loading: "lazy", decoding: "async", alt: "" }));
+    else art.append(el("span", { class: "note" }, icon("music.note")));
+    if (trk.preview_url) {
+      const glyph = el("span", { class: "song-art-glyph" });
+      const sync = () => {
+        const on = playingUrl === trk.preview_url;
+        glyph.replaceChildren(icon(on ? "pause.fill" : "play.fill"));
+        // Hover reveals the glyph; PLAYING pins it, since it is the only mark of which row you hear.
+        glyph.style.opacity = on ? "1" : "";
+      };
+      sync(); syncs.push(sync);
+      art.append(glyph);
+      art.classList.add("playable");
+      art.addEventListener("click", (e) => { e.stopPropagation(); toggle(trk.preview_url); });
+    }
+    return el("button", { class: "song-chip glass", style: "width:100%;text-align:left;cursor:pointer",
       onclick: () => {
         stopPreview();
         onPick({ catalog_id: trk.catalog_id, title: trk.title, artist: trk.artist,
                  artwork_url: trk.artwork_url || "", duration_ms: trk.duration_ms || 0 });
-        closeModal();
+        closeModal();   // hands the post editor back, rather than clearing it
       } },
       art,
       el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
         el("strong", {}, trk.title), trk.artist ? " · " + trk.artist : ""));
-    // Audition before attaching, where iTunes gives a clip. A song is going on the family's feed;
-    // hearing 30 seconds first is the difference between choosing and guessing.
-    if (trk.preview_url) {
-      pick.append(el("button", { class: "song-sound", title: t("preview"), onclick: (e) => {
-        e.stopPropagation();
-        if (preview && preview.src === trk.preview_url) return stopPreview();
-        stopPreview();
-        preview = new Audio(trk.preview_url);
-        preview.play().catch(() => {});
-      } }, icon("speaker")));
-    }
-    return pick;
   };
 
   const show = (list, emptyKey) => {
+    syncs.length = 0;
     results.replaceChildren();
     if (!list.length) { results.append(el("div", { class: "muted small", style: "padding:10px" }, t(emptyKey))); return; }
     list.forEach((trk) => results.append(row(trk)));
@@ -1650,10 +1680,15 @@ function musicDialog(onPick, ctx = {}) {
   input.addEventListener("input", () => { clearTimeout(debounce); debounce = setTimeout(runSearch, 300); });
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); clearTimeout(debounce); runSearch(); } });
 
+  // Restore, don't clear: opened from the post editor, closing has to return there with the
+  // selection applied — not drop the user back to the feed with their edit thrown away.
+  const root0 = $("#modal-root");
+  const covered = Array.from(root0.childNodes);
   const close = modal(el("div", {},
     el("h2", {}, t("attach_a_song")),
     tabs, searchRow, results,
-    el("div", { class: "muted small", style: "margin-top:8px" }, t("song_picker_hint"))));
+    el("div", { class: "muted small", style: "margin-top:8px" }, t("song_picker_hint"))),
+    covered.length ? { onClose: () => { stopPreview(); root0.replaceChildren(...covered); } } : {});
   // Auditioning must not outlive the dialog.
   const root = $("#modal-root");
   new MutationObserver(() => { if (!root.contains(results)) stopPreview(); }).observe(root, { childList: true, subtree: true });

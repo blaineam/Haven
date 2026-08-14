@@ -62,11 +62,26 @@ enum SongSuggester {
                              scheme: .lexicalClass, options: [.omitPunctuation, .omitWhitespace]) { tag, range in
             guard let tag, tag == .noun || tag == .adjective else { return true }
             let w = String(cleaned[range]).lowercased()
-            if w.count > 3 && !words.contains(w) { words.append(w) }
+            if w.count > 3 && !words.contains(w) && !Self.blandWords.contains(w) { words.append(w) }
             return words.count < limit * 3
         }
         return Array(words.prefix(limit))
     }
+
+    /// Nouns and adjectives that carry no subject — the words a caption uses to be a sentence.
+    ///
+    /// These reliably come FIRST ("Tonight is fun…", "This morning I got to…", "My second book…"),
+    /// so without this the generic word wins and the one that actually says what the post is about
+    /// — halloween, condors, eclipse, the dog's name — never gets used.
+    private static let blandWords: Set<String> = [
+        "today", "tonight", "yesterday", "tomorrow", "morning", "afternoon", "evening", "night",
+        "time", "year", "week", "month", "day", "days", "weeks", "years", "hours", "minutes",
+        "thing", "things", "stuff", "some", "more", "most", "much", "many", "lot", "lots",
+        "best", "better", "good", "great", "nice", "cool", "fun", "last", "first", "next",
+        "second", "third", "little", "long", "short", "here", "there", "everyone", "everything",
+        "people", "someone", "something", "anything", "photo", "photos", "picture", "pictures",
+        "video", "videos", "post", "instagram", "sure", "able", "back", "really", "very",
+    ]
 
     // MARK: - Suggesting
 
@@ -76,13 +91,13 @@ enum SongSuggester {
     /// importer accumulates every catalog id it has attached and passes them back in, so each post
     /// takes the best song not yet spoken for. It is a preference, not a hard rule — if a search
     /// only returns songs already used, reusing one still beats leaving the post silent.
-    static func suggestions(themes: [String], genre: String?, year: Int,
+    static func suggestions(themes: [String], genre: String?, year: Int, month: Int = 0,
                             exclude: Set<String> = [], limit: Int = 5) async -> [TrackRefFfi] {
         var seen = Set<String>()
         var fresh: [TrackRefFfi] = []
         var reused: [TrackRefFfi] = []
 
-        for term in terms(themes: themes, genre: genre, year: year) {
+        for term in terms(themes: themes, genre: genre, year: year, month: month) {
             guard let songs = try? await catalog(term) else { continue }
             for song in rankedByEra(songs, year: year) {
                 let id = "\(song.id.rawValue)~"
@@ -101,29 +116,49 @@ enum SongSuggester {
     }
 
     /// One song for a post — the importer's entry point.
-    static func song(themes: [String], genre: String?, year: Int,
+    ///
+    /// Asks for a HANDFUL and picks among them at random rather than taking the single best. The
+    /// ranking below is a soft preference (era, then catalog popularity), and treating it as an
+    /// order rather than a winner is most of what stops an archive sounding like one playlist on
+    /// repeat: with no caption and no strong visual subject, two posts from the same year search
+    /// identically, so if the top result always won they would always match.
+    static func song(themes: [String], genre: String?, year: Int, month: Int = 0,
                      exclude: Set<String>) async -> TrackRefFfi? {
-        await suggestions(themes: themes, genre: genre, year: year, exclude: exclude, limit: 1).first
+        let pool = await suggestions(themes: themes, genre: genre, year: year, month: month,
+                                     exclude: exclude, limit: 8)
+        return pool.randomElement()
     }
 
-    /// Search terms, most specific first, so the most post-specific result wins when one exists.
+    /// Search terms, most specific first.
     ///
-    /// Several terms rather than one is the other half of the variety fix: two posts from the same
-    /// year now differ by subject and caption, and only fall back to the generic year search when
-    /// there is nothing else to go on.
-    static func terms(themes: [String], genre: String?, year: Int) -> [String] {
+    /// KEEP THESE THEMATIC AND SHORT. Apple Music search is lexical — it matches song titles and
+    /// artist names, not meaning — so "beautiful" finds songs with "beautiful" in the title, which
+    /// is exactly the association wanted. Padding that into "beautiful songs 2023" hands the
+    /// matcher two generic tokens to chew on, and every post's query converges on the same popular
+    /// results however distinct its theme was. Caption themes were varied all along (61 distinct
+    /// across 40 real captions); the query around them was throwing that variety away.
+    ///
+    /// Era is deliberately NOT in the query. `rankedByEra` re-orders results by release date after
+    /// the fact, which gets the same effect without polluting the search.
+    static func terms(themes: [String], genre: String?, year: Int, month: Int = 0) -> [String] {
         let genreHead = genre?.split(separator: ",").first.map(String.init)?
             .trimmingCharacters(in: .whitespaces)
             .replacingOccurrences(of: " Music", with: "")
         var out: [String] = []
         for theme in themes {
+            out.append(theme)                                             // purely thematic
             if let g = genreHead, !g.isEmpty { out.append("\(theme) \(g)") }
-            out.append("\(theme) songs \(year)")
         }
-        if let g = genreHead, !g.isEmpty { out.append("\(g) \(year)") }
+        if let g = genreHead, !g.isEmpty { out.append(g) }
+        // Last resorts, for a post with no caption and no recognisable subject. The month is here
+        // so that even those don't all issue one identical query across a whole archive.
+        if (1...12).contains(month) { out.append("\(Self.monthNames[month - 1]) \(year)") }
         out.append("\(year) hits")
         return out
     }
+
+    private static let monthNames = ["January", "February", "March", "April", "May", "June",
+                                     "July", "August", "September", "October", "November", "December"]
 
     /// Is this song fit to be attached to someone's post WITHOUT them hearing it first?
     ///
@@ -223,19 +258,26 @@ enum SongSuggester {
 
     private static func catalog(_ term: String) async throws -> [MusicKit.Song] {
         var req = MusicCatalogSearchRequest(term: term, types: [MusicKit.Song.self])
-        req.limit = 25
+        // A wider net, because the pool is shared across an entire archive: 25 was barely more
+        // than the exclude set could burn through in a single year's worth of posts.
+        req.limit = 50
         return Array(try await req.response().songs)
     }
 
-    /// Prefer releases near the post's year; ties keep catalog order, which reflects popularity.
+    /// Prefer releases near the post's year — but only as a PREFERENCE.
+    ///
+    /// Songs the same distance from the target year are interchangeable for this purpose, so their
+    /// order is shuffled rather than fixed by catalog rank. Sorting them deterministically meant one
+    /// song was permanently "the best 2023 indie track" and won every single time that search ran.
+    /// Era still dominates; which of the equally-close songs surfaces does not.
     private static func rankedByEra(_ songs: [MusicKit.Song], year: Int) -> [MusicKit.Song] {
         func distance(_ s: MusicKit.Song) -> Int {
             guard let d = s.releaseDate else { return 999 }
             return abs(Calendar.current.component(.year, from: d) - year)
         }
-        return songs.enumerated()
-            .sorted { (distance($0.element), $0.offset) < (distance($1.element), $1.offset) }
-            .map(\.element)
+        return Dictionary(grouping: songs, by: distance)
+            .sorted { $0.key < $1.key }
+            .flatMap { $0.value.shuffled() }
     }
 
     // MARK: - Audio presence (used to decide suggest-vs-identify)

@@ -220,10 +220,12 @@ final class InstagramImporter: ObservableObject {
                         if hasAudio {
                             music = detected
                         } else {
-                            let year = Calendar.current.component(
-                                .year, from: Date(timeIntervalSince1970: TimeInterval(at) / 1000))
+                            let when = Date(timeIntervalSince1970: TimeInterval(at) / 1000)
+                            let parts = Calendar.current.dateComponents([.year, .month], from: when)
                             music = await SongSuggester.song(themes: themes, genre: item.musicGenre,
-                                                             year: year, exclude: usedSongs)
+                                                             year: parts.year ?? 2024,
+                                                             month: parts.month ?? 0,
+                                                             exclude: usedSongs)
                             if let id = music?.catalogId { usedSongs.insert(id) }
                         }
                     }

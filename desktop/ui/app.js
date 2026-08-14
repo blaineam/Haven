@@ -1126,6 +1126,9 @@ async function renderFeed() {
   // rebuilds an IDENTICAL feed; replacing the DOM anyway re-lays-out the list, nudges the scroll offset
   // (the "position jumps around before settling" on a fast fling) and restarts every video. So we hash
   // what actually drives the feed and leave the DOM untouched when nothing changed.
+  // Declared here rather than at the paginator below: the signature has to hash the same window
+  // the paginator renders.
+  const FEED_PAGE = 25;
   const sig = JSON.stringify({
     c: state.activeCircle, name: state.activeCircleName,
     hidden: Hidden.showHidden, snd: state.videoSoundOn, status: connectionText(state.status),
@@ -1133,14 +1136,30 @@ async function renderFeed() {
     pending: pending.length,
     upgrades: theirUpgrades.map((o) => o.new_circle_id).join(",") + "|" + (canOfferUpgrade ? 1 : 0),
     sens: [...state.sensitive].sort().join(","),
-    items: items.map((i) => [i.id, i.body, (i.media || []).join("|"), i.unsent ? 1 : 0, i.edited ? 1 : 0,
+    // ONLY THE ITEMS ACTUALLY ON SCREEN.
+    //
+    // Hashing the whole array meant an archive import busted the signature on every single post —
+    // and those posts are BACKDATED, so they sort below everything visible and change nothing the
+    // reader can see. The result was a full teardown and rebuild of the 25 on-screen cards, with
+    // every image re-hydrated through the main-thread scheme handler, once per imported item. That
+    // is the flashing.
+    //
+    // The tail is not ignored, it simply does not force a repaint: `state.feedItems` (refreshed
+    // below whether or not the DOM is touched) is what the paginator reads, so scrolling reaches
+    // everything that has landed.
+    items: items.slice(0, Math.max(state.feedRendered || 0, FEED_PAGE)).map((i) => [i.id, i.body, (i.media || []).join("|"), i.unsent ? 1 : 0, i.edited ? 1 : 0,
       (i.reactions || []).map((r) => r.emoji + r.count + (r.mine ? "1" : "0")).join(","),
       (i.comments || []).map((c) => (c.author_name || "") + c.created_at + (c.body || "")).join("~"),
       i.music ? i.music.title + "·" + i.music.artist : "",
       (reportsByTarget[i.id] || []).length]),
     stories: storyItems.map((s) => [s.id, s.author_name, (s.media || []).join("|"), s.created_at]),
   });
-  if (state.feedSig === sig && !state.focusPost && root.querySelector(".feed-list")) return;
+  // Refreshed even on the early-out: the reader scrolls into these without a repaint.
+  state.feedItems = items;
+  if (state.feedSig === sig && !state.focusPost && root.querySelector(".feed-list")) {
+    state.feedNudge?.();   // head unchanged, but a tail may have landed — append, never repaint
+    return;
+  }
   state.feedSig = sig;
 
   const list = el("div", { class: "feed-list" });
@@ -1170,17 +1189,31 @@ async function renderFeed() {
   // The sentinel appends the next page as it comes into view, so scrolling stays continuous and no
   // "show more" button is needed. rootMargin starts the work a screen early, so the next page is
   // usually already there by the time it would be reached.
-  const FEED_PAGE = 25;
   let rendered = 0;
   const sentinel = el("div", { style: "height:1px" });
   const renderPage = () => {
-    const next = items.slice(rendered, rendered + FEED_PAGE);
+    // Reads state.feedItems, NOT the `items` captured when this feed was built: a refresh that
+    // left the DOM alone still replaced that array, and the next page has to come from the fresh
+    // one or posts that arrived mid-scroll are unreachable until something forces a rebuild.
+    const all = state.feedItems || items;
+    const next = all.slice(rendered, rendered + FEED_PAGE);
     rendered += next.length;
+    state.feedRendered = rendered;      // the window the signature above hashes
     for (const it of next) {
       list.insertBefore(postCard(it, state.activeCircle, reportsByTarget[it.id] || []), sentinel);
     }
     hydrateMedia(list, state.activeCircle);   // only the cards just added resolve their refs
-    if (rendered >= items.length) { sentinel.remove(); feedObserver?.disconnect(); }
+  };
+  // Page in a tail that arrived AFTER this feed was built, without a teardown.
+  //
+  // The sentinel used to be removed and the observer disconnected once everything was rendered.
+  // With the DOM now left alone for tail-only changes, that combination stranded them: a short
+  // feed rendered fully, the observer went away, and the posts an import appended afterwards had
+  // nothing left to page them in and nothing to force a rebuild either. The sentinel now stays,
+  // and this runs the same "is it near the viewport" test its rootMargin does.
+  state.feedNudge = () => {
+    if ((state.feedItems || []).length <= rendered) return;
+    if (sentinel.getBoundingClientRect().top < window.innerHeight + 800) renderPage();
   };
   let feedObserver = null;
   if (items.length) {
@@ -1760,6 +1793,18 @@ const ThumbIndex = {
   },
   thumbFor(ref) { return this.map.get(ref) || null; },
 };
+
+/** The poster STILL that rides with `videoRef`, from the same media array — `poster:<video>:<image>`.
+ *  displayMediaRefs strips these from the carousel, so anywhere that wants a picture of a video
+ *  rather than the video itself (story rings, tiles) has to read it back out. */
+function posterRefFor(media, videoRef) {
+  for (const r of media || []) {
+    if (!r.startsWith("poster:")) continue;
+    const rest = r.slice(7), c = rest.lastIndexOf(":");
+    if (c > 0 && rest.slice(0, c) === videoRef) return rest.slice(c + 1);
+  }
+  return null;
+}
 
 function mediaNode(ref, imgStyle) {
   // Videos start muted unless the global "play video sound" toggle is on (iOS parity); native controls
@@ -4699,8 +4744,17 @@ async function renderYou() {
     const tray = el("div", { class: "story-tray" });
     gallery.forEach((s, idx) => {
       const inner = el("div", {});
-      const cover = displayMediaRefs(s.media || []).find((r) => !r.startsWith("geo:") && !isAudioRef(r));
-      if (cover) inner.append(el("img", { "data-ref": cover }));
+      // A RING IS ALWAYS A STILL.
+      //
+      // displayMediaRefs deliberately drops poster stills ("they ride with the video page"), so for
+      // a video story the first ref it returns is the CLIP. Handing that to the ring made a wall of
+      // 56px circles each loading and playing its own video — every one of them decoding at once,
+      // for a thumbnail. The poster companion is the right picture and is already in the media
+      // array; the tiny `thumb:` is the fallback, and the placeholder glyph is the last resort.
+      // Never a <video>.
+      let cover = displayMediaRefs(s.media || []).find((r) => !r.startsWith("geo:") && !isAudioRef(r));
+      if (cover && isVideoRef(cover)) cover = posterRefFor(s.media, cover) || ThumbIndex.thumbFor(cover);
+      if (cover && !isVideoRef(cover)) inner.append(el("img", { "data-ref": cover }));
       else inner.append(icon("photo", "story-ph"));
       tray.append(el("button", { class: "story-ring cover", onclick: () => viewStories(gallery, idx) }, el("div", { class: "ring" }, inner)));
     });

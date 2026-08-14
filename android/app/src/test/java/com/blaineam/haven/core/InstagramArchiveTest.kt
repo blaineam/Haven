@@ -18,6 +18,12 @@ import org.junit.Assert.assertTrue
  */
 class InstagramArchiveTest {
 
+    /** The archive the exact counts below were derived from. Pinned BY NAME on purpose: the test
+     *  used to take whatever `instagram-*.zip` in Downloads was newest, so the moment a second,
+     *  larger export was downloaded the fixed expectations described a different file and the test
+     *  went red without a line of parser code changing. */
+    private val validatedArchive = "instagram-helloblainemiller-2026-08-13-aMY9uKNj.zip"
+
     private fun archive(): File? {
         val explicit = System.getProperty("haven.ig.archive")
         if (explicit != null) return File(explicit).takeIf { it.isFile }
@@ -26,10 +32,34 @@ class InstagramArchiveTest {
             ?.maxByOrNull { it.lastModified() }
     }
 
+    /** The pinned archive, or null. Only the count assertions need this one specific file. */
+    private fun validated(): File? {
+        val explicit = System.getProperty("haven.ig.archive")
+        if (explicit != null) return File(explicit).takeIf { it.isFile }
+        return File(File(System.getProperty("user.home"), "Downloads"), validatedArchive).takeIf { it.isFile }
+    }
+
+    /** Holds for ANY export, so a fresh download is still checked: every referenced file resolves,
+     *  and carousels expand (media outnumber items). These are the invariants that actually break
+     *  an import, and they do not depend on which archive is present. */
     @Test
-    fun `parses a real export the same way Apple does`() {
+    fun `any export parses coherently`() {
         val file = archive()
         assumeTrue("no Instagram archive present", file != null)
+        val s = InstagramArchive.read(file!!)
+        assertEquals("unresolved media references", 0, s.missing.size)
+        assertTrue("carousels expand", s.mediaCount > s.items.size)
+        // 1e12 ms is 2001, and any Instagram post is later than that; the same instant in SECONDS
+        // would be ~1.5e9, three orders of magnitude below. This discriminates the two units, which
+        // is what the check is for — the pinned test's tighter 1.6e12 bound describes ITS archive,
+        // and a fresh export that reaches further back is not a parser fault.
+        assertTrue("timestamps are ms", s.earliest!! > 1_000_000_000_000L)
+    }
+
+    @Test
+    fun `parses a real export the same way Apple does`() {
+        val file = validated()
+        assumeTrue("validated archive ($validatedArchive) not present", file != null)
 
         val s = InstagramArchive.read(file!!)
 

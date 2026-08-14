@@ -934,8 +934,13 @@ fun ComposerAttachmentTile(
 
 @Composable
 fun MediaImage(circleId: String, id: String, modifier: Modifier = Modifier,
-               contentScale: ContentScale = ContentScale.FillWidth) {
-    val (bmp, done) = rememberMediaBitmap(circleId, id)
+               contentScale: ContentScale = ContentScale.FillWidth,
+               // Longest edge to decode to. The default is sized for a phone screen, NOT for the
+               // source: a 4032px import decoded at 2048 costs ~17MB of heap per copy, and the
+               // story viewer holds several at once. Callers that only need a blurred wash pass
+               // something tiny.
+               reqDim: Int = 1280) {
+    val (bmp, done) = rememberMediaBitmap(circleId, id, reqDim = reqDim)
     MediaBitmapContent(circleId, id, bmp, done, modifier, contentScale)
 }
 
@@ -944,7 +949,8 @@ fun MediaImage(circleId: String, id: String, modifier: Modifier = Modifier,
  *  asking again. Returns the bitmap (null = nothing to show) plus a done flag, so a caller can tell
  *  "still loading" from "there is no bitmap". */
 @Composable
-private fun rememberMediaBitmap(circleId: String, ref: String, reloadKey: Any? = null): Pair<ImageBitmap?, Boolean> {
+private fun rememberMediaBitmap(circleId: String, ref: String, reloadKey: Any? = null,
+                                reqDim: Int = 1280): Pair<ImageBitmap?, Boolean> {
     var bmp by remember(ref, circleId) { mutableStateOf<ImageBitmap?>(null) }
     var done by remember(ref, circleId) { mutableStateOf(false) }
     // Re-attempt whenever the feed bumps WHILE we still have nothing to show — this is how a tile
@@ -959,7 +965,7 @@ private fun rememberMediaBitmap(circleId: String, ref: String, reloadKey: Any? =
         if (bmp != null) return@LaunchedEffect   // already have pixels — a feed bump is a no-op here
         val b = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             val raw = if (LocalMedia.isVideo(ref)) LocalMedia.videoPoster(circleId, ref)
-                      else LocalMedia.imageBitmap(circleId, ref)
+                      else LocalMedia.imageBitmap(circleId, ref, reqDim)
             raw?.asImageBitmap()
         }
         if (b != null || !done) bmp = b

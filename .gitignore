@@ -65,3 +65,12 @@ desktop/src-tauri/binaries/*.version
 
 # QA harness artifacts + local build scratch
 build/
+
+# iCloud CONFLICT COPIES. This repo lives under ~/Documents, which iCloud syncs, and it resolves a
+# conflict by duplicating the entry with " 2" appended — "target 2/", "foo 2.dex", and so on. Those
+# names match no existing ignore rule, so `git add -A` swept a 15GB copy of the Rust build directory
+# into a commit and the push was rejected for exceeding GitHub's 2GiB pack limit. They are never
+# source, on any platform.
+* [0-9]
+* [0-9].*
+*/* [0-9]

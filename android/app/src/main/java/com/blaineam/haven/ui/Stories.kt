@@ -339,8 +339,12 @@ fun StoryViewer(groups: List<StoryGroup>, startGroup: Int, onClose: () -> Unit, 
             // sit over its own colors rather than over black bars. Only drawn when it can actually be
             // seen — at scale >= 1 the media covers it and this would be a wasted second decode.
             if (tf.mediaScale < 1f && !com.blaineam.haven.core.LocalMedia.isVideo(mediaId)) {
+                // 256px: this is blurred by 36dp and drawn at 60% alpha, so decoding it at full
+                // size bought nothing and cost a SECOND multi-megabyte bitmap of the same image —
+                // the story viewer was holding two per page, which is what pushed an imported
+                // story past the heap and got the app killed by the low-memory killer.
                 MediaImage(DEFAULT_CIRCLE, mediaId,
-                    Modifier.fillMaxSize().blur(36.dp).alpha(0.6f), ContentScale.Crop)
+                    Modifier.fillMaxSize().blur(36.dp).alpha(0.6f), ContentScale.Crop, reqDim = 256)
             }
             Box(
                 Modifier.fillMaxSize().graphicsLayer {

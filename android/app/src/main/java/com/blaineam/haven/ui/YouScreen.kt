@@ -103,7 +103,10 @@ fun YouScreen(onAddFriend: () -> Unit) {
                     poll = null,
                 )
             }
-        (live + revived).sortedBy { it.createdAt }
+        // NEWEST FIRST — the row reads left to right, so the most recent story is the one under
+        // your thumb. Apple sorts `createdAt >` and desktop the same; this was `sortedBy`, i.e.
+        // ascending, so the same profile listed its stories backwards on Android alone.
+        (live + revived).sortedByDescending { it.createdAt }
     }
 
     // A profile post's video AUTO-PLAYS when it's centered, exactly like the main feed

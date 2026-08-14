@@ -278,37 +278,20 @@ function fmtBytes(n) {
 // two cases (iOS MissingMediaPlaceholder parity): a ref the user DELIBERATELY evicted (#3 cleanup /
 // #4 limit sweep) renders a "Download N" affordance (re-fetch on tap — never auto-refetched, or the
 // cleanup would silently undo itself); anything else is simply still syncing.
-/** The streaming URL for a stored ref. See the `havenmedia` scheme in lib.rs: WebKit fetches the
- *  bytes itself, so nothing is base64'd, nothing crosses IPC as a string, and the decode happens off
- *  the thread that paints. */
-function mediaUrl(circleId, ref) {
-  const c = encodeURIComponent(circleId || "");
-  const r = encodeURIComponent(ref);
-  // Windows serves custom schemes over http://<scheme>.localhost; everything else uses the scheme.
-  return (navigator.userAgent.includes("Windows"))
-    ? `http://havenmedia.localhost/${c}/${r}`
-    : `havenmedia://localhost/${c}/${r}`;
-}
-
 async function loadMedia(node, circleId, ref) {
   try {
-    // Hand it straight to WebKit and let the element report failure — a 404 from the scheme means
-    // the same thing the old null data URL did: evicted, or not synced yet.
-    const streamed = await new Promise((res) => {
-      const ok = () => { cleanup(); res(true); };
-      const bad = () => { cleanup(); res(false); };
-      const cleanup = () => {
-        node.removeEventListener("loadeddata", ok);
-        node.removeEventListener("load", ok);
-        node.removeEventListener("error", bad);
-      };
-      node.addEventListener("loadeddata", ok, { once: true });
-      node.addEventListener("load", ok, { once: true });
-      node.addEventListener("error", bad, { once: true });
-      node.src = mediaUrl(circleId, ref);
-    });
-    if (streamed) return;
-    node.removeAttribute("src");
+    // BACK TO A COMMAND, deliberately. A `havenmedia://` scheme handler streamed the bytes and
+    // avoided base64 — and cost far more than it saved: the synchronous form runs on the UI thread
+    // (a full AEAD open per tile froze the window at launch), and the ASYNCHRONOUS form finishes
+    // after WebKit has cancelled the request, where responding to a stopped task throws an uncaught
+    // ObjC exception and aborts the process. A command has neither failure mode: it already runs on
+    // Tauri's thread pool, and a cancelled caller just drops the value.
+    //
+    // The original motivation has also mostly gone: imported stills are optimized now (~100KB
+    // median rather than multi-megabyte originals), so the base64 copy this makes is a fraction of
+    // what it used to be.
+    const url = await invoke("media_data_url", { circleId, reference: ref });
+    if (url) { node.src = url; return; }
     const isVideo = isVideoRef(ref);
     // Which post this tile sits in, if any — read off the card rather than threaded through every
     // gallery/pager helper in between. Absent for a tile that isn't inside a post (a DM attachment,
@@ -2129,11 +2112,14 @@ function applyBackdrop(p) {
   //
   // That still was produced by drawing the decoded image to a canvas on the MAIN thread, once per
   // photo, and whenever it failed or had not run yet the page letterboxed onto flat black instead
-  // of extending. Pointing a second <img> at the same URL costs almost nothing now that media
-  // streams through havenmedia:// — the bytes are fetched and decoded already, so the webview
-  // reuses them — and it can never be missing, which is what a blur extension has to be to read as
-  // deliberate rather than as a fault.
-  const src = p.poster || p.node.currentSrc || p.node.src || "";
+  // of extending. A second <img> at the same data URL reuses the bytes the webview already holds,
+  // and it can never be missing — which is what a blur extension has to be to read as deliberate
+  // rather than as a fault.
+  // IMAGES ONLY. `p.node` is a <video> on a video page, and pointing an <img> at an mp4 sends
+  // WebKit down RemoteImageDecoderAVF — a synchronous decode through AVFoundation that never
+  // completes for a video stream, wedging the web process's main thread. That is a hung window
+  // with 0% CPU: not a loop, a wait. A video's extension comes from its poster still or not at all.
+  const src = p.poster || (p.node.tagName === "IMG" ? (p.node.currentSrc || p.node.src) : "");
   if (!src) return;
   p.backdrop = el("img", { class: "media-backdrop", src, alt: "", "aria-hidden": "true" });
   p.page.prepend(p.backdrop);

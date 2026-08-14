@@ -446,7 +446,12 @@ input:focus, textarea:focus, select:focus {
 .post-head .when { font-size: 11px; color: var(--muted); }
 .post-body { white-space: pre-wrap; word-break: break-word; line-height: 1.5; font-size: 15px; }
 .post-media { margin-top: 12px; display: grid; gap: 7px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
-.post-media img, .post-media video { width: 100%; border-radius: var(--r-md); max-height: 380px; object-fit: cover; background: #000; }
+/* CONTAIN, not cover. This is the fallback every media tile lands on when it is not inside a
+   fitted .media-page, and `cover` CROPS — a portrait photo lost its top and bottom to a 380px box.
+   The page-based paths have always fitted; this rule is why some posts still came out filled, and
+   Apple's gallery preserves aspect everywhere, so cropping was never right here either. The black
+   background then reads as the letterbox rather than as a missing image. */
+.post-media img, .post-media video { width: 100%; border-radius: var(--r-md); max-height: 380px; object-fit: contain; background: #000; }
 /* Masonry for multi-photo posts — mirrors the iOS aspect-preserving gallery. */
 .post-media.masonry { display: block; column-count: 2; column-gap: 7px; }
 .post-media.masonry img, .post-media.masonry video { margin-bottom: 7px; max-height: none; height: auto; object-fit: cover; break-inside: avoid; }

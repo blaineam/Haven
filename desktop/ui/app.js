@@ -2478,6 +2478,32 @@ async function mintThumb(b64, circleId) {
   } catch (_) { return null; }
 }
 
+/** Is this clip bigger than what we would produce anyway? Reads dimensions and duration from the
+ *  decoder's metadata — no frames decoded, no encoding — so the answer costs milliseconds against
+ *  the seconds a needless re-encode costs. Null when the metadata cannot be read, which is treated
+ *  as "re-encode it", since an unreadable clip is exactly the one worth normalising. */
+function videoTargetProbe(file) {
+  return new Promise((res) => {
+    const url = URL.createObjectURL(file);
+    const v = document.createElement("video");
+    v.preload = "metadata";
+    const done = (out) => { URL.revokeObjectURL(url); res(out); };
+    v.addEventListener("loadedmetadata", () => {
+      const long = Math.max(v.videoWidth || 0, v.videoHeight || 0);
+      const bitrate = v.duration > 0 ? (file.size * 8) / v.duration : Infinity;
+      done({
+        // A slack factor, so a 1088px clip is not re-encoded to 1080 for a 1% saving that costs
+        // its whole duration in main-thread time.
+        oversized: long > MEDIA_TARGETS.VIDEO_LONG_EDGE * 1.05
+          || bitrate > MEDIA_TARGETS.VIDEO_BITRATE_BPS * 1.5,
+      });
+    }, { once: true });
+    v.addEventListener("error", () => done(null), { once: true });
+    setTimeout(() => done(null), 8000);
+    v.src = url;
+  });
+}
+
 /** A POSTER STILL for an already-sealed clip, as bare base64 JPEG — or null.
  *
  *  Reads the sealed bytes back through `media_data_url` rather than being handed the clip, so a
@@ -7466,6 +7492,19 @@ async function boot() {
         const buf = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
         const file = new File([buf], "import.mp4", { type: "video/mp4" });
+        // ONLY RE-ENCODE WHAT IS ACTUALLY OVERSIZED.
+        //
+        // The re-encode plays the clip through a canvas in REAL TIME on the main thread — there is
+        // no faster path in a WebView — so a 30-second reel is 30 seconds of sustained main-thread
+        // work. Doing that to every clip is what made the window beachball for the length of an
+        // import. And it is mostly wasted: an Instagram export is already Instagram's own re-encode
+        // at ≤1080p, so the great majority of clips are within target before we touch them.
+        //
+        // Under target, answering null seals the original bytes and still mints a poster — the
+        // fallback path was already built for the over-cap case. Over target, the work is real and
+        // worth its cost.
+        const probe = await videoTargetProbe(file);
+        if (probe && !probe.oversized) return answer(null);
         mediaQuiet = true;
         let b64;
         try { b64 = await sanitizeMediaFile(file, true); } finally { mediaQuiet = false; }

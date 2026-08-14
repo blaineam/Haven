@@ -193,6 +193,7 @@ final class InstagramImporter: ObservableObject {
             // post takes the best song NOT yet spoken for — without this, one search term per year
             // meant one song for every silent post in that year.
             var usedSongs = Set<String>()
+            var audible = 0, identified = 0
             HavenLog.sync("ig-import: starting \(items.count) items from \(startAt)")
             for (idx, item) in items.enumerated() {
                 if idx < startAt { continue }   // already imported on a previous run
@@ -200,6 +201,8 @@ final class InstagramImporter: ObservableObject {
                 let began = Date()
                 let (refs, hasAudio, detected, themes) = await Self.stage(item, zip: zip, byName: byName,
                                                                          identify: matchSongs)
+                if hasAudio { audible += 1 }
+                if detected != nil { identified += 1 }
                 if refs.isEmpty {
                     skipped += 1
                 } else {
@@ -262,6 +265,7 @@ final class InstagramImporter: ObservableObject {
                     if var p = self.loadPending() { p.done = done; self.savePending(p) }
                 }
             }
+            HavenLog.sync("ig-import: done — \(identified)/\(audible) posts with audio were identified by Shazam")
             let finalImported = imported, finalSkipped = skipped
             let stopped = await MainActor.run(body: { [weak self] in self?.cancelled ?? false })
             await MainActor.run { [weak self] in
@@ -317,7 +321,14 @@ final class InstagramImporter: ObservableObject {
                     // Identify from the FIRST audible clip only. A carousel shows one chip, and
                     // Shazam-ing every clip in a 20-video album is work with nowhere to go.
                     if identify, detected == nil {
-                        detected = await withTimeout(20) { await ShazamDetector.identify(scratch) } ?? nil
+                        // 45s, not 20. Generating the signature reads and decodes seconds of audio
+                        // before the catalog is even called, and on a device busy transcoding an
+                        // archive that is not instant — a too-tight bound turns a would-be match
+                        // into a silent miss, which looks exactly like "Shazam didn't run".
+                        let began = Date()
+                        detected = await withTimeout(45) { await ShazamDetector.identify(scratch) } ?? nil
+                        HavenLog.sync("ig-import: shazam \(detected == nil ? "no match" : "MATCHED \(detected!.title)") "
+                            + "in \(String(format: "%.1f", Date().timeIntervalSince(began)))s — \(name)")
                     }
                 }
                 // forceOptimize: an import is bulk media at someone else's encoder settings —

@@ -32,11 +32,14 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Launch sale — 50% off through September 30: $4.99, then $9.99. A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer.
 
 ## whats_new
-1.4.5 — Feed blur + story replies in DMs.
+1.5.0 — Bring your Instagram archive with you.
 
-• Feed videos keep their soft blurred edge wash for the whole loop (same look as photo posts).
-• Replying to a story attaches a story reference in the DM: tall portrait crop, tap opens the real story with progress and music.
-• When a story expires, the DM tile becomes “Story no longer available” (unless the author kept it). Older story replies get the same treatment.
+• Import from Instagram, in Settings. Ask Instagram for your export, then hand Haven the .zip when it arrives days later. Nothing publishes until you have confirmed a preview of exactly what was found — how many posts, the dates they span, the total size, and anything the archive references but is missing.
+• Your history arrives as history. Posts and reels keep their original dates and go up silently, so nobody's feed is flooded with years of your past. A carousel stays one post rather than becoming twenty. Stories are off by default, and turned on they are kept on your own profile instead of published to your circle.
+• Imported photos and videos go through Haven's usual optimizer, with a poster still cut for every clip, so they behave like media you posted by hand. The import runs in the background, survives the app being killed, and resumes where it left off.
+• Song suggestions. Open the song picker with nothing typed and the top tab suggests tracks drawn from what the photo shows and what the caption says — in the composer, the post editor, DMs and stories. A reel that shipped with its soundtrack gets the real song named on it.
+• Feed videos keep their soft blurred edge wash for the whole loop, matching photo posts.
+• Replying to a story attaches a story reference in the DM: tall portrait crop, tap opens the real story with progress and music. Expired ones become "Story no longer available".
 
 ## whats_new_previous
 1.4.2 — Battery: stop multi-hour Background drain.

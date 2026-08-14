@@ -9,69 +9,59 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-### Added — Apple (Instagram importer)
+## [1.5.0] — 2026-08-13
+
+### Added — Apple (bring your Instagram archive over)
 
 - **Import from Instagram**, in Settings. A guided walkthrough — open Instagram's download page,
   request the export, come back days later and hand Haven the `.zip` — because there is no API for
-  this and the user has to wait on Instagram either way. The one irreversible mistake (choosing
-  Instagram's HTML format, which contains no importable data and cannot be converted) is called out
-  at the step where it is made rather than in the error afterwards.
+  this and the wait is on Instagram either way. The one irreversible mistake (choosing their HTML
+  format, which contains no importable data and cannot be converted) is called out at the step
+  where it is made rather than in the error afterwards.
 
-  Nothing publishes until a preview is confirmed: it shows what was found, the date span, the total
-  size, and any files referenced but missing from the archive. Posts and reels arrive backdated and
-  silently; photos/videos are re-encoded through Haven's usual optimizer with a poster still cut for
-  every video, so imported media behaves like media posted by hand. Carousels stay a single post.
-
-  **Stories are skipped unless asked for.** Instagram archives every story automatically, so the
-  export holds all of them rather than the ones added to a Highlight — and it carries no marker for
-  which were highlighted, so they cannot be told apart. Importing them by default would resurrect
-  years of stories the user deliberately let expire. Opted in, they are saved as kept stories: a
-  personal snapshot with its media pinned, on the user's profile, never published to the circle.
-  Keyed on the archive entry, so re-importing the same export does not duplicate them.
+  Nothing publishes until a preview is confirmed: what was found, the date span, the total size,
+  and any files referenced but missing from the archive. Posts and reels arrive **backdated** and
+  **silently**; photos and videos are re-encoded through Haven's usual optimizer with a poster still
+  cut for every video, so imported media behaves like media posted by hand. Carousels stay a single
+  post. The import runs in the background with a progress banner, survives the app being killed, and
+  resumes where it left off.
 
   Verified end to end against a real 1.28 GB export: 372 items (203 posts, 85 reels, 84 stories),
-  1129 media files, zero unresolved references, and a 21-photo carousel preserved as one post.
+  1129 media files, zero unresolved references.
 
-### Changed — all platforms (backfill media is lazy)
+- **Stories are opt-in and off by default.** Instagram archives *every* story automatically, so an
+  export holds all of them rather than the ones added to a Highlight — and it records no marker
+  distinguishing them. Turned on, they are saved as **kept stories** on your profile, never
+  published to the circle.
 
-- **Backfilled media no longer downloads eagerly.** A post whose creation date is far older than
-  now did not just happen — it arrived from an archive import or a history sync — so its full-size
-  media is now fetched on demand rather than prefetched. Thumbnails and video posters still
-  prefetch (≤32 KB by contract), so backfilled history renders immediately as browsable tiles and
-  the full photo or video downloads when it is actually opened.
+- **Song suggestions.** Open the song picker with nothing typed and the top tab suggests tracks
+  drawn from what the photo shows and what the caption says. Available in the feed composer, the
+  post editor, DMs and the story composer. Explicit tracks are never suggested, and neither are
+  songs in a language you don't read.
 
-  Silence alone did not protect members here. An imported post carries no sender retention, and the
-  default viewer retention is `0` (keep forever), so `is_expired` dropped nothing: every member on
-  the default setting would have eagerly pulled the entire archive — for the test archive, 1129
-  files and 1.24 GB — the moment they opened the circle. Only members who had set a keep threshold
-  shorter than the post's age were protected, because those posts never entered their feed at all.
+- **Shazam song credits.** A reel that shipped with its soundtrack gets the real song named on it.
+  The credit never becomes a second audio source — the video keeps its own sound — and requests
+  that Shazam declines are retried later in their own queue rather than lost.
 
-  Fresh posts are unaffected: real news still arrives eagerly, which is what keeps media instant in
-  a live circle.
+### Changed
 
-### Added — all platforms (silent archive import)
+- **Nobody is notified by an import, and nobody is made to download it.** Several hundred posts
+  would otherwise mean several hundred notifications for content that is often years old. Members
+  fetch only thumbnails and video posters until they actually open something, so a large import
+  costs the rest of your circle almost nothing.
 
-- **Silent posting for archive imports**, the groundwork the Instagram importer needs. Importing a
-  back-catalogue republishes hundreds of posts at once, and every one of them would have fired a
-  lock-screen banner at every member of the circle — a 900-post archive means 900 banners for
-  content that is often years old. Imported posts now publish over the existing silent path: the
-  event still delivers, still syncs, and still reaches offline members through the mailbox — only
-  the banner is suppressed.
+- Relative times roll over to years — a 2023 post reads "2y", not "32mo".
 
-  Deliberately a **separate authoring entry point** on each platform (`FeedStore.postImported`,
-  `HavenNet.postImported`, `Engine::post_imported`) rather than a `silent` flag on the normal post
-  path or a user-facing setting: silence is a property of *importing*, not a mode anyone can leave
-  switched on, so no ordinary post can be published without notifying its circle. Each takes the
-  original capture time so an imported archive slots into history by its real date instead of
-  landing in a heap at today's.
+### Fixed
 
-### Fixed — Android (build)
+- **The feed no longer moves under you while posts arrive.** Two independent causes: cards changed
+  height as their media landed (a card is sized by its media's shape, which was re-guessed on every
+  render), and imported posts were being inserted above whatever you were reading. Media shape is
+  now remembered from first sight, and imports fill in from the bottom.
+- Story songs stop when the story is skipped or dismissed, and a story silences the feed behind it.
+- Song previews play without an Apple Music subscription.
+- Android compiled again (broken since 1.4.5 by a duplicate accessor).
 
-- **Android has not compiled since 1.4.5.** That release landed a second `KeptStoriesStore.all()`
-  alongside the existing one; the ambiguous overload cascaded into `MessagesScreen`, `YouScreen` and
-  `StoryLinkScreen` (20+ errors). The two accessors wanted the same thing — a stable snapshot of the
-  kept stories — so they are now one, sorted newest-first. Two `nowMs()` subtractions in the same
-  release also mixed `ULong` with `Long` and are now done in `Long`.
 
 ## [1.4.7] — 2026-08-12
 

@@ -87,6 +87,7 @@ enum SongSuggester {
             for song in rankedByEra(songs, year: year) {
                 let id = "\(song.id.rawValue)~"
                 guard seen.insert(id).inserted else { continue }
+                guard isSuitable(song) else { continue }
                 let ref = TrackRefFfi(catalogId: id, title: song.title, artist: song.artistName,
                                       artworkUrl: song.artwork?.url(width: 120, height: 120)?.absoluteString ?? "",
                                       durationMs: UInt64((song.duration ?? 0) * 1000))
@@ -123,6 +124,102 @@ enum SongSuggester {
         out.append("\(year) hits")
         return out
     }
+
+    /// Is this song fit to be attached to someone's post WITHOUT them hearing it first?
+    ///
+    /// A suggestion is different from a search result. The user picked a search result on purpose;
+    /// a suggestion is something Haven put on their family's feed on their behalf, so the bar is
+    /// "safe to attach unheard", not "plausibly relevant".
+    static func isSuitable(_ song: MusicKit.Song) -> Bool {
+        // Never suggest explicit content. Haven circles are family and close friends, and an import
+        // attaches hundreds of these at once — nobody is auditioning them one by one.
+        if song.contentRating == .explicit { return false }
+        return isLikelyInUsersLanguage("\(song.title) \(song.artistName)")
+    }
+
+    /// Reject songs that look like they are in a language the user does not read.
+    ///
+    /// Apple Music does not expose a song's language, so this infers from the title and artist. Two
+    /// signals, because one is not enough:
+    ///
+    ///   SCRIPT is decisive. "夜に駆ける" is unmistakably not English no matter what a statistical
+    ///   language model says about it — and NLLanguageRecognizer called that one *Hungarian* at 0.28,
+    ///   which is exactly how a Japanese song slipped through a language-only check.
+    ///
+    ///   LANGUAGE is a tiebreak for same-script cases ("Bailando", "La Vie En Rose"), where script
+    ///   tells us nothing. Song titles are short, so detection rarely gets very confident; the
+    ///   threshold is set where real English titles from a real library still pass ("Beautiful
+    ///   Things" scores 0.70) but confident foreign ones do not.
+    ///
+    /// Ambiguous stays KEPT. A false reject costs a suggestion nobody misses; a false accept puts a
+    /// song the user cannot read onto their own post.
+    static func isLikelyInUsersLanguage(_ text: String) -> Bool {
+        if usesForeignScript(text) { return false }
+        // Very short strings ("Halo", "SZA") detect essentially at random.
+        guard text.count >= 12 else { return true }
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(text)
+        guard let (language, confidence) = recognizer.languageHypotheses(withMaximum: 1).first,
+              confidence >= 0.65 else { return true }
+        return userLanguages.contains(language.rawValue)
+    }
+
+    /// Does the text lean on a script none of the user's languages are written in?
+    ///
+    /// Judged on the share of LETTERS rather than any single character, so one stray accented or
+    /// borrowed glyph in an otherwise readable title doesn't disqualify it.
+    static func usesForeignScript(_ text: String) -> Bool {
+        let letters = text.unicodeScalars.filter { CharacterSet.letters.contains($0) }
+        guard letters.count >= 3 else { return false }
+        let foreign = letters.filter { scalar in
+            guard let script = script(of: scalar) else { return false }
+            return !userScripts.contains(script)
+        }
+        return Double(foreign.count) / Double(letters.count) > 0.34
+    }
+
+    private static func script(of s: Unicode.Scalar) -> String? {
+        switch s.value {
+        case 0x0041...0x024F, 0x1E00...0x1EFF: return "latin"   // incl. accented Latin
+        case 0x0370...0x03FF:                  return "greek"
+        case 0x0400...0x04FF:                  return "cyrillic"
+        case 0x0590...0x05FF:                  return "hebrew"
+        case 0x0600...0x06FF:                  return "arabic"
+        case 0x0900...0x097F:                  return "devanagari"
+        case 0x0E00...0x0E7F:                  return "thai"
+        case 0x3040...0x30FF, 0x4E00...0x9FFF: return "cjk"      // kana + han
+        case 0xAC00...0xD7AF, 0x1100...0x11FF: return "hangul"
+        default:                               return nil        // digits, marks, unknown — ignored
+        }
+    }
+
+    /// Scripts the user's own languages are written in. Latin is always included: a device set to
+    /// any language still shows Latin-titled songs throughout Apple Music.
+    private static let userScripts: Set<String> = {
+        var out: Set<String> = ["latin"]
+        for code in userLanguages {
+            switch code {
+            case "ja", "zh":             out.insert("cjk")
+            case "ko":                   out.formUnion(["hangul", "cjk"])
+            case "ru", "uk", "bg", "sr": out.insert("cyrillic")
+            case "el":                   out.insert("greek")
+            case "he", "yi":             out.insert("hebrew")
+            case "ar", "fa", "ur":       out.insert("arabic")
+            case "hi", "mr", "ne":       out.insert("devanagari")
+            case "th":                   out.insert("thai")
+            default:                     break
+            }
+        }
+        return out
+    }()
+
+    /// The user's preferred language codes, reduced to their base ("en-US" → "en"), plus the region
+    /// locale's own language so a device set to one language in another country still matches.
+    private static let userLanguages: Set<String> = {
+        var codes = Locale.preferredLanguages.map { String($0.prefix(2)) }
+        if let mine = Locale.current.language.languageCode?.identifier { codes.append(mine) }
+        return Set(codes)
+    }()
 
     private static func catalog(_ term: String) async throws -> [MusicKit.Song] {
         var req = MusicCatalogSearchRequest(term: term, types: [MusicKit.Song.self])

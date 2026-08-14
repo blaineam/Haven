@@ -2922,6 +2922,9 @@ final class FeedStore: ObservableObject {
     private var refreshGeneration: UInt64 = 0
     func refresh() {
         guard let social else { items = []; return }
+        // See postImported: while a bulk import is writing hundreds of posts, rebuilding the feed
+        // makes it impossible to read. `importFinished()` does the one refresh that matters.
+        if InstagramImporter.shared.isRunning { return }
         // Snapshot the main-actor state, then run the engine read (`feed()` decodes + re-opens every
         // envelope — real CPU) and the O(posts) filter OFF the main actor. This used to run on main
         // on every 20s tick and every ingest burst — the single biggest source of feed jank.
@@ -2999,6 +3002,12 @@ final class FeedStore: ObservableObject {
     /// Coalesced refresh — collapses a BURST of refresh requests (many media chunks / events arriving during
     /// a sync) into a single feed rebuild ~250ms later, instead of rebuilding the whole feed per item (which
     /// janked the UI). Use this on the high-frequency inbound/sync paths; keep refresh() for user actions.
+    /// The single feed rebuild an archive import gets, once it has stopped writing.
+    func importFinished() {
+        refreshPending = false
+        refresh()
+    }
+
     func scheduleRefresh(after seconds: Double = 0.25) {
         guard !refreshPending else { return }
         refreshPending = true
@@ -3211,12 +3220,16 @@ final class FeedStore: ObservableObject {
                                                      muteVideo: false, createdAt: createdAt) else { return }
         broadcastEvent(circleId, env, silent: true)
         postTick += 1; publishedPostCount += 1
-        // COALESCED, and deliberately slow. `refresh()` re-reads the engine and re-opens every
-        // envelope in the circle — real CPU, and the single biggest source of feed jank. Calling it
-        // per imported post meant 372 full rebuilds of a list that grows the whole time, which is
-        // what made the feed jump around while an import ran. Once every few seconds is plenty:
-        // the posts are backdated history, not something anyone is waiting to see appear.
-        if circleId == activeCircleId { scheduleRefresh(after: 3) }
+        // NO refresh while an import runs — the feed is deliberately FROZEN.
+        //
+        // Coalescing this to every few seconds was still wrong. Any rebuild replaces the whole
+        // items array and re-diffs the list, and a LazyVStack re-measuring rows it had recycled
+        // shifts the scroll offset — so the page kept lurching under the reader no matter how
+        // rarely it happened. There is also nothing to be gained by streaming them in: these are
+        // backdated history posts landing at the BOTTOM of a newest-first feed, where nobody is
+        // watching them arrive.
+        //
+        // The banner reports progress; the feed updates once, when the import finishes.
         enqueueAuthoredMedia(media, circleId: circleId, social: social)
         if !media.isEmpty {
             Task { await SharedStore.publishDeviceRoster(social: social) }

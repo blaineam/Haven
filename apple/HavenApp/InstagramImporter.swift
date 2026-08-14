@@ -268,6 +268,9 @@ final class InstagramImporter: ObservableObject {
                 // importer offers to carry on. Finishing clears it.
                 if !stopped { self.clearPending() }
                 self.phase = .finished(imported: finalImported, skipped: finalSkipped)
+                // The feed was frozen for the whole run (see FeedStore.refresh) — bring it up to
+                // date now, in one rebuild, with everything in place.
+                FeedStore.shared.importFinished()
             }
         }
     }

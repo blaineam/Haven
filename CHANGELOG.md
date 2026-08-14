@@ -9,7 +9,35 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-## [1.5.0] — 2026-08-13
+## [1.5.0] — 2026-08-14
+
+### Fixed — desktop (the import shakedown)
+
+Running a real 1.28 GB archive end to end on desktop found a long tail of faults, several of them
+long-standing and only exposed by the volume:
+
+- **Nothing was optimized.** The importer runs headless in Rust and the only encoder this app has
+  lives in the WebView, so archive bytes were sealed exactly as they came out of the zip. It asks
+  the WebView now, over a job-id bridge, and falls back to the raw seal whenever that cannot answer.
+  Stills are encoded in a worker, off the thread that paints.
+- **Video re-encode wrote SILENT clips** — imports *and* anything posted from the desktop composer,
+  which shares that path. It muted the element to keep playback quiet and then took the audio from
+  its `captureStream`, which carries nothing usable when muted. Audio is decoded from the source
+  bytes now and mixed straight into the recorder.
+- **Only oversized clips are re-encoded.** The encode plays a clip through a canvas in real time on
+  the main thread, so doing it to every video cost each clip its own duration — the beachballing.
+  An Instagram export is already ≤1080p, so most clips need nothing.
+- **Media was clipped, not cropped.** A percentage `max-height` resolved against the page's
+  aspect-ratio height rather than its capped one, so a 9:16 clip laid out 1229px tall inside a 460px
+  page and `overflow: hidden` cut the rest.
+- **Neither feed paged.** The You tab appended every post — hundreds of cards with their own media.
+- **The feed re-read every envelope in the circle** on each of the engine's frequent change events.
+
+Also on desktop: autoplay follows the centred post (video and its song, one at a time, super data
+saver the only kill switch); clips have a mute control; stories auto-advance, play their attached
+song, and layer their chrome over the story rather than around it; the song picker searches the
+catalog and auditions a track before attaching it; the post editor changes media, song and location;
+and every dialog has a visible way out.
 
 ### Added — all platforms (bring your Instagram archive over)
 

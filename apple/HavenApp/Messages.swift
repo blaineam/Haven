@@ -1065,7 +1065,10 @@ struct DMThreadView: View {
         // contentShape keeps the whole bar tappable without one.
         .contentShape(Rectangle())
         .sheet(isPresented: $showMedia) { MediaPicker { refs in attachedMedia.append(contentsOf: refs) }.macSheetFrame() }
-        .sheet(isPresented: $showSongs) { SongPicker { t in attachedTrack = t }.macSheetFrame() }
+        .sheet(isPresented: $showSongs) {
+            SongPicker(onPick: { t in attachedTrack = t },
+                       suggestFor: (media: attachedMedia, caption: text)).macSheetFrame()
+        }
         .sheet(isPresented: $showAudio) { AudioRecorderView { ref in attachedMedia.append(ref) }.macSheetFrame() }
     }
 

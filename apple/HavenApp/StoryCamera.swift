@@ -1419,7 +1419,8 @@ struct StoryComposerView: View {
         // change meant our play() ran first and the older stop() landed on top of it, which is exactly
         // the "music starts during the dismiss animation, then goes silent" behaviour.
         .sheet(isPresented: $showSongs, onDismiss: { startPreviewForCurrentTrack() }) {
-            SongPicker { t in track = t }
+            SongPicker(onPick: { t in track = t },
+                       suggestFor: (media: draft.refs, caption: caption))
         }
         #if os(iOS)
         // Whatever post was playing on the screen we opened over must go quiet: the editor's own sound

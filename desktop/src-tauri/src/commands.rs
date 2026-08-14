@@ -1669,6 +1669,81 @@ pub fn instagram_run(
     );
 }
 
+// ---- Song picker -----------------------------------------------------------------------------
+//
+// `songsuggest` has carried a full iTunes-backed search and a caption-driven suggester since the
+// importer needed one — and NONE of it was exposed to the frontend, so the desktop picker was three
+// text boxes asking the user to type a title, an artist and paste a link by hand. Apple and Android
+// both have real pickers; this is the wiring that was simply never done.
+
+#[derive(Serialize)]
+pub struct SongDto {
+    pub catalog_id: String,
+    pub title: String,
+    pub artist: String,
+    pub artwork_url: String,
+    pub duration_ms: u64,
+    /// Thirty-second clip for audition-before-attach. Empty when iTunes offers none.
+    pub preview_url: String,
+}
+
+/// Free-text song search (iTunes Search API — no key, no account, same source Android uses).
+#[tauri::command]
+pub async fn music_search(query: String, limit: Option<usize>) -> Vec<SongDto> {
+    let hits = crate::songsuggest::search(&query, limit.unwrap_or(25)).await.unwrap_or_default();
+    hits.into_iter()
+        .filter(crate::songsuggest::is_suitable)
+        .map(|t| SongDto {
+            catalog_id: t.catalog_id(),
+            title: t.title.clone(),
+            artist: t.artist.clone(),
+            artwork_url: t.artwork_url.clone(),
+            duration_ms: t.duration_ms,
+            preview_url: t.preview_url,
+        })
+        .collect()
+}
+
+/// Songs for what the post is ABOUT — its caption and when it was taken. The same suggester the
+/// importer scores hundreds of silent posts with, offered to the composer as a tab.
+#[tauri::command]
+pub async fn music_suggestions(
+    caption: String,
+    genre: Option<String>,
+    created_at_ms: Option<u64>,
+    limit: Option<usize>,
+) -> Vec<SongDto> {
+    let themes = crate::songsuggest::caption_themes(&caption, 2);
+    let (year, month) = crate::songsuggest::year_month(
+        created_at_ms.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+        }),
+    );
+    let picked = crate::songsuggest::suggestions(
+        &themes,
+        genre.as_deref(),
+        year,
+        month,
+        &std::collections::HashSet::new(),
+        limit.unwrap_or(12),
+    )
+    .await;
+    picked
+        .into_iter()
+        .map(|t| SongDto {
+            catalog_id: t.catalog_id,
+            title: t.title,
+            artist: t.artist,
+            artwork_url: t.artwork_url,
+            duration_ms: t.duration_ms,
+            preview_url: String::new(), // suggestions come back in Haven's shape, which drops it
+        })
+        .collect()
+}
+
 /// The frontend answering an `haven:ig-encode` request (see `igencode`).
 ///
 /// `refs` absent or null means "could not" — the import seals the raw archive bytes instead, which

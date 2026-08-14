@@ -853,6 +853,11 @@ button.set-row:hover { background: var(--panel); }
 /* Dialogs that predate the sheet scaffold (report, edit, scan…) still pass a bare node — they get
    the same gradient shell, just self-padded. */
 .modal.plain { display: block; padding: 22px; overflow-y: auto; overflow-x: hidden; }
+/* Floats over the dialog's own content rather than displacing it, so every existing modal keeps
+   its layout and simply gains the button. */
+.modal.plain { position: relative; }
+.modal-x { position: absolute; top: 12px; right: 12px; z-index: 2; }
+.modal.plain > h2 { padding-right: 40px; }
 .modal.plain > h2:first-child { margin-top: 0; }
 .modal-head { display: flex; align-items: center; gap: 12px; padding: 18px 18px 10px 22px; flex: 0 0 auto; }
 .modal-head h2 { margin: 0; font-size: 19px; font-weight: 600; flex: 1; }

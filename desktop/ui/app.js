@@ -97,6 +97,14 @@ function modal(node) {
   const root = $("#modal-root");
   const backdrop = el("div", { class: "modal-backdrop", onclick: (e) => { if (e.target === backdrop) root.replaceChildren(); } }, node);
   node.classList.add("modal", "plain");
+  // A VISIBLE way out. Every dialog built on modal() — edit post, the song picker, new circle, the
+  // small confirmations — offered only Esc or a click on the backdrop, both of which are invisible
+  // and neither of which is discoverable. `sheet()` has always had its glass close circle; this is
+  // the same affordance, added once here so no dialog can be built without one.
+  node.prepend(el("button", {
+    class: "icon-btn glass modal-x", title: t("close"), "aria-label": t("close"),
+    onclick: () => root.replaceChildren(),
+  }, icon("xmark")));
   root.replaceChildren(backdrop);
   return () => root.replaceChildren();
 }
@@ -1502,7 +1510,10 @@ function buildComposer(onPost, placeholder = t("share_something"), opts = {}) {
     { label: t("photo_or_video"), icon: "photo", on: () => fileInput.click() },
     { label: t("camera"), icon: "camera.fill", on: async () => { const r = await cameraDialog(circleId); if (r) addAttachment(r.ref, r.isVideo, false); } },
     { label: t("voice"), icon: "mic", on: async () => { const r = await recordVoice(circleId); if (r) addAttachment(r, false, true); } },
-    { label: t("add_a_song"), icon: "music.note", on: () => musicDialog((m) => { music = m; drawMusic(); }) },
+    // The caption is read WHEN THE PICKER OPENS, not when this menu was built — the user usually
+    // types the post first and reaches for a song after.
+    { label: t("add_a_song"), icon: "music.note", on: () => musicDialog((m) => { music = m; drawMusic(); },
+      { caption: () => ta.value }) },
     { sep: true },
     { label: t("disappears_after"), icon: "timer", on: () => popMenu(plus, [
       { label: t("off"), on: () => { retentionSecs = null; drawRetention(); } },
@@ -1547,25 +1558,107 @@ function openExternal(url) {
   window.open(url, "_blank");
 }
 
-// Attach a song as a portable music reference: paste a streaming link (Apple Music / Spotify /
-// YouTube / etc.) + title + artist. Viewers tap the chip to open it in their own player — the
-// portable model the Android/desktop redesign uses where there's no universal catalog API.
-function musicDialog(onPick) {
-  const link = el("input", { placeholder: t("paste_song_link") });
-  const title = el("input", { placeholder: t("song_title_ph") });
-  const artist = el("input", { placeholder: t("artist_ph") });
-  modal(el("div", {},
+/** SONG PICKER — search the catalog, or take a suggestion based on what the post says.
+ *
+ *  This used to be three text boxes: paste a link, type a title, type an artist. Meanwhile
+ *  `songsuggest.rs` had carried a full iTunes-backed search AND a caption-driven suggester since
+ *  the importer needed one — none of it exposed to the frontend. Apple and Android both have real
+ *  pickers; this is the wiring that was never done, not a new capability.
+ *
+ *  `ctx` supplies what the suggestions are FOR: `{ caption, createdAt, genre }`. Without it the tab
+ *  is still offered (the composer's field may be empty when the picker opens) and simply leans on
+ *  the date. Same source on every platform — the free, unauthenticated iTunes Search API — so a
+ *  song attached here is the same TrackRef a phone would attach.
+ */
+function musicDialog(onPick, ctx = {}) {
+  let tab = "search";
+  let preview = null;                       // one <audio> at a time; auditioning is a comparison
+  const results = el("div", { class: "col", style: "gap:6px;max-height:46vh;overflow-y:auto" });
+  const input = el("input", { placeholder: t("search_songs"), style: "flex:1" });
+  const searchRow = el("div", { class: "row", style: "gap:8px" }, input);
+  const tabs = el("div", { class: "tabs", style: "margin-bottom:10px" });
+
+  const stopPreview = () => { if (preview) { preview.pause(); preview = null; } };
+
+  const row = (trk) => {
+    const art = trk.artwork_url
+      ? el("img", { src: trk.artwork_url, class: "song-art", loading: "lazy", decoding: "async", alt: "" })
+      : el("span", { class: "note" }, icon("music.note"));
+    const pick = el("button", { class: "song-chip glass", style: "width:100%;text-align:left;cursor:pointer",
+      onclick: () => {
+        stopPreview();
+        onPick({ catalog_id: trk.catalog_id, title: trk.title, artist: trk.artist,
+                 artwork_url: trk.artwork_url || "", duration_ms: trk.duration_ms || 0 });
+        closeModal();
+      } },
+      art,
+      el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
+        el("strong", {}, trk.title), trk.artist ? " · " + trk.artist : ""));
+    // Audition before attaching, where iTunes gives a clip. A song is going on the family's feed;
+    // hearing 30 seconds first is the difference between choosing and guessing.
+    if (trk.preview_url) {
+      pick.append(el("button", { class: "song-sound", title: t("preview"), onclick: (e) => {
+        e.stopPropagation();
+        if (preview && preview.src === trk.preview_url) return stopPreview();
+        stopPreview();
+        preview = new Audio(trk.preview_url);
+        preview.play().catch(() => {});
+      } }, icon("speaker")));
+    }
+    return pick;
+  };
+
+  const show = (list, emptyKey) => {
+    results.replaceChildren();
+    if (!list.length) { results.append(el("div", { class: "muted small", style: "padding:10px" }, t(emptyKey))); return; }
+    list.forEach((trk) => results.append(row(trk)));
+  };
+
+  const busy = () => results.replaceChildren(el("div", { class: "row", style: "gap:8px;padding:10px" },
+    el("div", { class: "spinner" }), el("span", { class: "muted small" }, t("searching"))));
+
+  let seq = 0;                              // late responses must not overwrite a newer query
+  const runSearch = async () => {
+    const q = input.value.trim();
+    if (!q) { results.replaceChildren(); return; }
+    const mine = ++seq;
+    busy();
+    const hits = await invoke("music_search", { query: q, limit: 25 }).catch(() => []);
+    if (mine === seq) show(hits, "no_songs_found");
+  };
+  const runSuggest = async () => {
+    const mine = ++seq;
+    busy();
+    const hits = await invoke("music_suggestions", {
+      caption: (typeof ctx.caption === "function" ? ctx.caption() : ctx.caption) || "",
+      genre: ctx.genre || null,
+      createdAtMs: ctx.createdAt || null,
+      limit: 12,
+    }).catch(() => []);
+    if (mine === seq) show(hits, "no_suggestions");
+  };
+
+  const drawTabs = () => {
+    tabs.replaceChildren(
+      el("button", { class: "tab" + (tab === "search" ? " active" : ""), onclick: () => { tab = "search"; drawTabs(); searchRow.style.display = ""; runSearch(); } }, t("search")),
+      el("button", { class: "tab" + (tab === "suggest" ? " active" : ""), onclick: () => { tab = "suggest"; drawTabs(); searchRow.style.display = "none"; runSuggest(); } }, t("suggested")),
+    );
+  };
+  drawTabs();
+
+  let debounce;
+  input.addEventListener("input", () => { clearTimeout(debounce); debounce = setTimeout(runSearch, 300); });
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); clearTimeout(debounce); runSearch(); } });
+
+  const close = modal(el("div", {},
     el("h2", {}, t("attach_a_song")),
-    el("div", { class: "col" },
-      link, el("div", { class: "row" }, title, artist),
-      el("div", { class: "muted small" }, t("song_link_hint")),
-      el("div", { class: "row", style: "justify-content:flex-end" },
-        el("button", { class: "btn primary", onclick: () => {
-          const catalog_id = link.value.trim();
-          if (!catalog_id || !title.value.trim()) { toast(t("add_link_and_title")); return; }
-          onPick({ catalog_id, title: title.value.trim(), artist: artist.value.trim() || t("unknown_artist") });
-          $("#modal-root").replaceChildren();
-        } }, t("attach"))))));
+    tabs, searchRow, results,
+    el("div", { class: "muted small", style: "margin-top:8px" }, t("song_picker_hint"))));
+  // Auditioning must not outlive the dialog.
+  const root = $("#modal-root");
+  new MutationObserver(() => { if (!root.contains(results)) stopPreview(); }).observe(root, { childList: true, subtree: true });
+  setTimeout(() => input.focus(), 30);
+  return close;
 }
 
 // Secret-message marker — byte-identical to iOS SecretMessages.marker ("\u{2}").
@@ -2363,7 +2456,7 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
       if (raf) cancelAnimationFrame(raf);
       try { if (rec && rec.state !== "inactive") rec.stop(); } catch {}
       URL.revokeObjectURL(url);
-      toast(t("video_meta_failed"));
+      if (!mediaQuiet) toast(t("video_meta_failed"));
       rej(e instanceof Error ? e : new Error(String(e)));
     };
     // A refusal (as opposed to a failure) has its own message and, like `fail`, rejects — so the
@@ -2371,7 +2464,7 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
     const refuse = (msg) => {
       if (settled) return; settled = true;
       URL.revokeObjectURL(url);
-      toast(msg);
+      if (!mediaQuiet) toast(msg);
       rej(new Error(msg));
     };
     video.onerror = () => fail(new Error("video decode failed"));
@@ -2400,10 +2493,16 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
       } catch (e) { return fail(e); }
       const chunks = [];
       try {
-        rec = new MediaRecorder(capStream, {
+        // H.264 in MP4 is what every other Haven client expects, and WebKit's MediaRecorder can
+        // produce it. Asking explicitly (rather than taking the platform default) means macOS
+        // stops depending on an implementation detail; Chromium-backed WebViews support neither
+        // type string and fall through to their own default, exactly as before.
+        const want = ["video/mp4;codecs=h264,mp4a.40.2", "video/mp4"]
+          .find((m) => { try { return MediaRecorder.isTypeSupported(m); } catch (_) { return false; } });
+        rec = new MediaRecorder(capStream, Object.assign({
           videoBitsPerSecond: MEDIA_TARGETS.VIDEO_BITRATE_BPS,
           audioBitsPerSecond: MEDIA_TARGETS.VIDEO_AUDIO_BITRATE_BPS,
-        });
+        }, want ? { mimeType: want } : {}));
       } catch (e) { return fail(e); }
       const stopDraw = () => { if (raf) cancelAnimationFrame(raf); raf = null; };
       rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
@@ -3224,7 +3323,8 @@ function editPostDialog(it, circleId) {
   modal(el("div", {}, el("h2", {}, t("edit_post")), ta, strip, musicRow,
     el("div", { class: "row wrap", style: "gap:8px;margin-top:10px" },
       el("button", { class: "btn", onclick: () => fileInput.click() }, icon("photo"), t("photo_or_video")),
-      el("button", { class: "btn", onclick: () => musicDialog((m) => { music = m; draw(); }) },
+      el("button", { class: "btn", onclick: () => musicDialog((m) => { music = m; draw(); },
+        { caption: () => ta.value, createdAt: it.created_at }) },
         icon("music.note"), music ? t("change") : t("add_a_song")),
       muteBtn, fileInput),
     el("div", { class: "row", style: "margin-top:12px;justify-content:flex-end" },
@@ -7031,6 +7131,22 @@ async function boot() {
         const ref = await invoke("add_media", { circleId: p.circleId, dataBase64: b64, isVideo: false });
         const thumb = await mintThumb(b64, p.circleId);      // null when the photo is already tiny
         return answer(thumb ? [ref, `thumb:${ref}:${thumb}`] : [ref]);
+      }
+      if (p.kind === "video") {
+        const bin = atob(p.dataBase64 || "");
+        const buf = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+        const file = new File([buf], "import.mp4", { type: "video/mp4" });
+        mediaQuiet = true;
+        let b64;
+        try { b64 = await sanitizeMediaFile(file, true); } finally { mediaQuiet = false; }
+        if (!b64) return answer(null);                      // too long/large or undecodable → raw
+        const ref = await invoke("add_media", { circleId: p.circleId, dataBase64: b64, isVideo: true });
+        // Poster from the OPTIMIZED clip, so the still matches the bytes members actually fetch.
+        const still = await posterFromVideoRef(p.circleId, ref);
+        if (!still) return answer([ref]);
+        const pref = await invoke("add_media", { circleId: p.circleId, dataBase64: still, isVideo: false });
+        return answer([ref, `poster:${ref}:${pref}`]);
       }
       if (p.kind === "poster") {
         const still = await posterFromVideoRef(p.circleId, p.ref);

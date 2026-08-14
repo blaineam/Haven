@@ -601,6 +601,8 @@ pub fn run() {
             commands::instagram_resume,
             commands::instagram_reset,
             commands::instagram_encoded,
+            commands::music_search,
+            commands::music_suggestions,
             commands::set_foreground,
             commands::reset,
         ])

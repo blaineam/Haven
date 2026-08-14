@@ -15,12 +15,16 @@
 //!
 //!   * **Stills go out as bytes.** They are small, and the WebView has to hold the pixels to
 //!     downscale them and mint the ≤32 KB `thumb:` companion.
-//!   * **Video is sealed FIRST and only then asked about.** A reel can be hundreds of megabytes and
-//!     base64 inflates it by a third; the file→file seal exists specifically so that never becomes
-//!     a string in this process. The WebView reads the sealed ref back through `media_data_url` and
-//!     returns only a POSTER. The clip itself is never re-encoded — the WebView's encoder emits
-//!     VP8/Opus in WebM, which Apple's player cannot decode, so re-encoding would replace playable
-//!     media with media the rest of the circle cannot open.
+//!   * **Video is optimized under a size cap, and sealed raw above it.** Under the cap the clip
+//!     crosses as bytes and comes back downscaled and re-encoded — the SAME treatment a video
+//!     dragged into the composer has always had, which is the point: imports were the one video
+//!     path in this app that stored source bytes untouched, and that was an inconsistency rather
+//!     than a principle. Above the cap base64's one-third inflation outweighs the saving, so the
+//!     file→file seal stands and the WebView is asked only for a POSTER.
+//!
+//!     The container is whatever `MediaRecorder` gives this platform, exactly as for the composer:
+//!     MP4/H.264 on macOS's WebKit, WebM elsewhere. That divergence is pre-existing and applies to
+//!     every desktop-posted video; imports are now no different from anything else this app sends.
 //!
 //! FAILURE IS ALWAYS FINE. Every request has a timeout and every caller falls back to the raw seal.
 //! A closed window, a refused file, a decode error or a quit frontend degrades the import to
@@ -58,6 +62,30 @@ pub fn image(engine: &Engine, circle_id: &str, bytes: &[u8]) -> Option<Refs> {
         Duration::from_secs(45),
     )
 }
+
+/// Optimize a CLIP and store it, exactly as the composer does for a picked video: downscaled,
+/// re-encoded, capture metadata stripped by virtue of being a brand-new container, and given a
+/// poster. `None` = seal the archive bytes instead.
+///
+/// Capped, and that is the only reason this is not the path for every video: the bytes cross as
+/// base64, which inflates them by a third, and the whole point of the file→file seal is that a
+/// large reel never becomes a string in this process. Under the cap the round trip is worth it;
+/// over it, the raw seal plus a poster is the better trade.
+pub fn video(engine: &Engine, circle_id: &str, bytes: &[u8]) -> Option<Refs> {
+    use base64::Engine as _;
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    request(
+        engine,
+        serde_json::json!({ "kind": "video", "circleId": circle_id, "dataBase64": data }),
+        // Video re-encode plays the clip through a canvas in real time, so the floor is the clip's
+        // own duration. The importer's own cap is 5 minutes.
+        Duration::from_secs(600),
+    )
+}
+
+/// The largest source clip worth sending across the bridge. Above this the base64 copy costs more
+/// than the optimization saves.
+pub const MAX_BRIDGE_VIDEO_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Mint a poster still for a video that is ALREADY sealed. `None` = the video simply has no poster,
 /// which is what imported video had in every build before this.

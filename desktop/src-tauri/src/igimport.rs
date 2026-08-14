@@ -497,6 +497,23 @@ fn stage(
             if songsuggest::mp4_file_has_audio_track(&scratch) != Some(false) {
                 any_audio = true;
             }
+            // OPTIMIZE THE CLIP, same as the composer does for a picked video — under the size
+            // cap, where shipping the bytes is worth it. Imports were the one video path in the
+            // app that sealed source bytes untouched, which was inconsistent rather than principled.
+            let size = std::fs::metadata(&scratch).map(|m| m.len()).unwrap_or(u64::MAX);
+            let bridged = if size <= crate::igencode::MAX_BRIDGE_VIDEO_BYTES {
+                std::fs::read(&scratch)
+                    .ok()
+                    .and_then(|b| crate::igencode::video(engine, circle_id, &b))
+                    .filter(|r| !r.is_empty())
+            } else {
+                None
+            };
+            if let Some(encoded) = bridged {
+                refs.extend(encoded);
+                let _ = std::fs::remove_file(&scratch);
+                continue;
+            }
             if let Some(r) = engine.add_local_media_file(circle_id, &scratch.to_string_lossy(), true)
             {
                 // POSTER. Sealed first, asked about second — see `igencode`: the clip is never

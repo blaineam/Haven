@@ -145,10 +145,7 @@ final class InstagramImporter: ObservableObject {
 
     // MARK: - Import
 
-    /// Publish every parsed item into `circleId`, oldest first.
-    ///
-    /// Oldest-first matters: the feed orders by creation date, so importing chronologically means
-    /// anyone watching it happen sees history fill in forwards rather than as a shuffled heap.
+    /// Publish every parsed item into `circleId`, NEWEST first — see the ordering note in the body.
     /// `includeStories` is OFF by default, and that default is load-bearing.
     ///
     /// Instagram archives EVERY story you post, automatically — `stories.json` is not "the ones you
@@ -161,7 +158,21 @@ final class InstagramImporter: ObservableObject {
     func run(into circleId: String, includeStories: Bool = false,
              matchSongs: Bool = false, startAt: Int = 0) {
         guard let summary, let url = archiveURL, case .previewing = phase else { return }
-        let items = includeStories ? summary.items : summary.items.filter { $0.kind != .story }
+        // NEWEST FIRST — the opposite of what reads naturally, and the reason the feed stopped
+        // jumping.
+        //
+        // The feed is newest-first (haven-p2p `map_feed` ends with `order.iter().rev()`). Importing
+        // oldest-first therefore meant every post published was NEWER than all the ones before it,
+        // so each one was inserted at the TOP of the list — directly above whatever the reader was
+        // looking at, shoving the page down, hundreds of times. No amount of refresh throttling or
+        // scroll anchoring fixes that; the content genuinely is arriving above them.
+        //
+        // Reversed, each post is OLDER than the last and lands at the BOTTOM, below the reader,
+        // where new arrivals cost them nothing. The feed grows downwards and their position is
+        // untouched — which is the behaviour wanted, achieved by the ordering rather than by
+        // fighting the scroll view.
+        let ordered = includeStories ? summary.items : summary.items.filter { $0.kind != .story }
+        let items = ordered.reversed().map { $0 }
         phase = .importing(done: min(startAt, items.count), total: items.count)
         cancelled = false
 

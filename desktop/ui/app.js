@@ -1135,7 +1135,39 @@ async function renderFeed() {
       el("div", { class: "h" }, t("nothing_here_yet")),
       el("div", {}, t("feed_empty_sub"))));
   }
-  for (const it of items) list.append(postCard(it, state.activeCircle, reportsByTarget[it.id] || []));
+  // RENDER IN PAGES, not all at once.
+  //
+  // This built a card for every post in the circle, which was fine while a circle held a few dozen
+  // and became the reason the window stopped responding once it held a few hundred: an archive
+  // import turns a 20-post feed into a 372-post one, and each card carries its own media elements.
+  // WebKit then has to lay out and paint the lot before anything can scroll. Apple's feed is a
+  // LazyVStack and only ever builds what is visible; this is the same idea with the tools a webview
+  // has.
+  //
+  // The sentinel appends the next page as it comes into view, so scrolling stays continuous and no
+  // "show more" button is needed. rootMargin starts the work a screen early, so the next page is
+  // usually already there by the time it would be reached.
+  const FEED_PAGE = 25;
+  let rendered = 0;
+  const sentinel = el("div", { style: "height:1px" });
+  const renderPage = () => {
+    const next = items.slice(rendered, rendered + FEED_PAGE);
+    rendered += next.length;
+    for (const it of next) {
+      list.insertBefore(postCard(it, state.activeCircle, reportsByTarget[it.id] || []), sentinel);
+    }
+    hydrateMedia(list, state.activeCircle);   // only the cards just added resolve their refs
+    if (rendered >= items.length) { sentinel.remove(); feedObserver?.disconnect(); }
+  };
+  let feedObserver = null;
+  if (items.length) {
+    list.append(sentinel);
+    feedObserver = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) renderPage();
+    }, { rootMargin: "800px 0px" });
+    feedObserver.observe(sentinel);
+    renderPage();
+  }
 
   const composer = buildComposer(
     (body, music, muteVideo, retentionSecs) => invoke("post", { circleId: state.activeCircle, body, media: withThumbMarkers(state.attachments), music, muteVideo, retentionSecs }),
@@ -3057,7 +3089,16 @@ async function manageCircleDialog(circle) {
 }
 
 function hydrateMedia(root, circleId) {
-  $$("[data-ref]", root).forEach((node) => loadMedia(node, circleId, node.dataset.ref));
+  // Skip anything already resolved. A node keeps its data-ref after loading (the toggle and the
+  // evicted/retry paths look it up), so a second hydrate over the same subtree would re-invoke
+  // media_data_url for every tile it already has. That was harmless while a feed was hydrated once;
+  // with the feed now rendering in pages it would re-resolve every earlier page on each new one —
+  // O(n^2) IPC and decodes, which is precisely the cost paging exists to avoid.
+  $$("[data-ref]", root).forEach((node) => {
+    if (node.dataset.hydrated === "1") return;
+    node.dataset.hydrated = "1";
+    loadMedia(node, circleId, node.dataset.ref);
+  });
 }
 
 // ---- Stories ---------------------------------------------------------------------------

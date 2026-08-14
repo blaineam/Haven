@@ -1907,6 +1907,7 @@ function isSyntheticMedia(ref) {
 }
 function displayMediaRefs(media) {
   ThumbIndex.learn(media);
+  PosterIndex.learn(media);
   const originals = new Set();
   const posterImages = new Set();
   const thumbImages = new Set();
@@ -1945,6 +1946,22 @@ const ThumbIndex = {
     }
   },
   thumbFor(ref) { return this.map.get(ref) || null; },
+};
+
+/** videoRef -> its poster STILL, learned from every media list that passes through
+ *  displayMediaRefs — the same trick ThumbIndex plays, and for the same reason: the marker is
+ *  stripped before the carousel sees it, so anything wanting a PICTURE of a video (rather than the
+ *  video) has no way back to it otherwise. */
+const PosterIndex = {
+  map: new Map(),
+  learn(media) {
+    for (const r of media || []) {
+      if (!r.startsWith("poster:")) continue;
+      const rest = r.slice(7), c = rest.lastIndexOf(":");
+      if (c > 0) this.map.set(rest.slice(0, c), rest.slice(c + 1));
+    }
+  },
+  posterFor(ref) { return this.map.get(ref) || null; },
 };
 
 /** The poster STILL that rides with `videoRef`, from the same media array — `poster:<video>:<image>`.
@@ -2118,14 +2135,37 @@ function applyBackdrop(p) {
   // of extending. A second <img> at the same data URL reuses the bytes the webview already holds,
   // and it can never be missing — which is what a blur extension has to be to read as deliberate
   // rather than as a fault.
-  // IMAGES ONLY. `p.node` is a <video> on a video page, and pointing an <img> at an mp4 sends
-  // WebKit down RemoteImageDecoderAVF — a synchronous decode through AVFoundation that never
-  // completes for a video stream, wedging the web process's main thread. That is a hung window
-  // with 0% CPU: not a loop, a wait. A video's extension comes from its poster still or not at all.
-  const src = p.poster || (p.node.tagName === "IMG" ? (p.node.currentSrc || p.node.src) : "");
-  if (!src) return;
-  p.backdrop = el("img", { class: "media-backdrop", src, alt: "", "aria-hidden": "true" });
-  p.page.prepend(p.backdrop);
+  // NEVER an <img> pointed at video bytes: that sends WebKit down RemoteImageDecoderAVF, a
+  // synchronous AVFoundation decode that never completes for a video stream and wedges the web
+  // process — a hung window at 0% CPU, a wait rather than a loop.
+  //
+  // A photo can therefore use its own URL, and a video needs a picture of itself. Two sources, in
+  // order: the still grabbed off the first decoded frame (may not exist yet, or at all — the seek
+  // dance is best-effort), then the POSTER COMPANION the media array already carries. Relying on
+  // the frame grab alone is why video had no extension while photos did.
+  const isVideo = p.node.tagName === "VIDEO";
+  const src = p.poster || (isVideo ? null : (p.node.currentSrc || p.node.src));
+  if (src) {
+    p.backdrop = el("img", { class: "media-backdrop", src, alt: "", "aria-hidden": "true" });
+    p.page.prepend(p.backdrop);
+    return;
+  }
+  if (!isVideo) return;
+  const posterRef = PosterIndex.posterFor(p.ref);
+  if (!posterRef || p.backdropPending) return;
+  p.backdropPending = true;
+  const img = el("img", { class: "media-backdrop", alt: "", "aria-hidden": "true" });
+  invoke("media_data_url", { circleId: state.activeCircle, reference: posterRef })
+    .then((url) => {
+      // The page may have been rebuilt while this resolved; adding to a detached node is harmless
+      // but pointless, and a second backdrop would stack.
+      if (!url || p.backdrop || !p.page.isConnected) return;
+      img.src = url;
+      p.backdrop = img;
+      p.page.prepend(img);
+    })
+    .catch(() => {})
+    .finally(() => { p.backdropPending = false; });
 }
 
 // Build the fitted pages for `refs`. `onAspects` fires as items decode, so the caller can settle the

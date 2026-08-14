@@ -1669,6 +1669,23 @@ pub fn instagram_run(
     );
 }
 
+/// The numeric track id in an iTunes URL: `?i=123` for a track within an album, else the trailing
+/// `/id123`. Returns None for anything that is not an iTunes link (a pasted Spotify URL, say).
+fn itunes_track_id(url: &str) -> Option<String> {
+    if !url.contains("music.apple.com") && !url.contains("itunes.apple.com") {
+        return None;
+    }
+    if let Some(rest) = url.split("?i=").nth(1) {
+        let id: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+    let tail = url.split("/id").last()?;
+    let id: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if id.is_empty() { None } else { Some(id) }
+}
+
 // ---- Song picker -----------------------------------------------------------------------------
 //
 // `songsuggest` has carried a full iTunes-backed search and a caption-driven suggester since the
@@ -1710,7 +1727,23 @@ pub async fn music_search(query: String, limit: Option<usize>) -> Vec<SongDto> {
 /// about a preview belongs on a post. The feed still has to be able to PLAY the attached song, so it
 /// looks one up by name, exactly as Android's `MusicSearch.resolve` does.
 #[tauri::command]
-pub async fn music_resolve(title: String, artist: String) -> Option<SongDto> {
+pub async fn music_resolve(title: String, artist: String, catalog_id: Option<String>) -> Option<SongDto> {
+    // BY ID FIRST, when the ref carries one. A TrackRef's catalog id IS the store URL, and every
+    // iTunes URL ends in `/id<digits>` (or carries `?i=<digits>` for a track inside an album). A
+    // text search for "New Beginnings Shah Feryan" can simply miss — obscure titles are exactly
+    // where it fails, and a missed lookup means the story plays nothing at all.
+    if let Some(id) = catalog_id.as_deref().and_then(itunes_track_id) {
+        if let Some(hit) = crate::songsuggest::lookup(&id).await {
+            return Some(SongDto {
+                catalog_id: hit.catalog_id(),
+                title: hit.title.clone(),
+                artist: hit.artist.clone(),
+                artwork_url: hit.artwork_url.clone(),
+                duration_ms: hit.duration_ms,
+                preview_url: hit.preview_url,
+            });
+        }
+    }
     let q = format!("{title} {artist}");
     let hit = crate::songsuggest::search(q.trim(), 1).await.unwrap_or_default().into_iter().next()?;
     Some(SongDto {

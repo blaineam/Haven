@@ -546,14 +546,13 @@ input:focus, textarea:focus, select:focus {
 }
 /* The media fills the stage and keeps its shape; the gesture layer is the whole surface, so a tap
    anywhere pages — as it does everywhere else. */
-/* The bottom chrome (Keep, reply, hint) floats over this layer, so anything the story appends
-   BELOW its media — the song pill, the location chip — has to end above it or it is clipped. The
-   inset is the bottom layer's own height, not a guess: 96px covers the pill row, the reply field
-   and the hint line at their natural sizes. */
-.story-canvas { position: absolute; inset: 0 0 96px 0; justify-content: center; }
-/* Media still fills the WHOLE stage — the inset above is for the chips, not the picture. */
-.story-canvas img[data-ref], .story-canvas video[data-ref],
-.story-canvas img[data-story-media], .story-canvas video[data-story-media] { margin-bottom: -96px; }
+.story-canvas { position: absolute; inset: 0; justify-content: center; }
+/* The song and location pills FLOAT ON the story, like every other platform — they are chrome, not
+   content. Insetting the canvas to make room for them shrank the picture into a black frame, which
+   is the opposite of what a full-bleed story should look like. */
+.story-canvas .song-chip, .story-canvas > .col > .song-chip {
+  position: absolute; left: 14px; right: 14px; bottom: 92px; z-index: 2; margin: 0;
+}
 /* [data-ref] is the STORY'S OWN media. Without that qualifier this also caught the attached song's
    cover art, which sits inside the same canvas — and blew a 26px thumbnail up to the full stage. */
 .story-canvas img[data-ref], .story-canvas video[data-ref],

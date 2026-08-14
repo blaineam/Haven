@@ -3411,6 +3411,7 @@ function postCard(it, circleId, reports = []) {
   // <video> through this card rather than by threading the item down every gallery helper.
   return el("div", { class: "card post", "data-post": it.id, "data-author": it.author_short || "", "data-mine": it.is_me ? "1" : "", "data-song": (it.music || it.mute_video) ? "1" : "",
     "data-song-title": it.music ? it.music.title : "", "data-song-artist": it.music ? it.music.artist : "",
+    "data-song-catalog": it.music ? (it.music.catalog_id || "") : "",
     "data-muted-by-author": it.mute_video ? "1" : "" }, head, banner, body, media.children.length ? media : null, geoNode, audio.children.length ? audio : null, song, actions, comments);
 }
 
@@ -4444,7 +4445,9 @@ function viewStories(list, startIndex = 0) {
     const key = m.title + "|" + (m.artist || "");
     let url = Autoplay.song.cache.get(key);      // shared with the feed: resolve each song once
     if (url === undefined) {
-      const hit = await invoke("music_resolve", { title: m.title, artist: m.artist || "" }).catch(() => null);
+      const hit = await invoke("music_resolve", {
+        title: m.title, artist: m.artist || "", catalogId: m.catalog_id || "",
+      }).catch(() => null);
       url = (hit && hit.preview_url) || null;
       Autoplay.song.cache.set(key, url);
     }
@@ -6984,7 +6987,9 @@ const Autoplay = {
       const key = title + "|" + artist;
       let url = this.cache.get(key);
       if (url === undefined) {
-        const hit = await invoke("music_resolve", { title, artist }).catch(() => null);
+        const hit = await invoke("music_resolve", {
+          title, artist, catalogId: card.dataset.songCatalog || "",
+        }).catch(() => null);
         url = (hit && hit.preview_url) || null;
         this.cache.set(key, url);
       }

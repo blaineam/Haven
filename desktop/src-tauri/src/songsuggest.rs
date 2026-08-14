@@ -524,6 +524,16 @@ fn ranked_by_era(mut hits: Vec<Track>) -> Vec<Track> {
     hits
 }
 
+/// One track by its iTunes id, through the same free API's `lookup` endpoint.
+///
+/// Exact where `search` is approximate: a TrackRef carries the store URL it came from, so the id is
+/// already known and a text search for its title is a worse question with a worse answer.
+pub async fn lookup(id: &str) -> Option<Track> {
+    let url = format!("https://itunes.apple.com/lookup?id={id}&entity=song");
+    let body = http().get(&url).send().await.ok()?.text().await.ok()?;
+    parse_results(&body).into_iter().next()
+}
+
 /// Search songs by free text through the free, unauthenticated iTunes Search API.
 pub async fn search(query: &str, limit: usize) -> Option<Vec<Track>> {
     let q = query.trim();

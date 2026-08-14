@@ -526,6 +526,34 @@ input:focus, textarea:focus, select:focus {
 }
 .post-media .media-page > .media-sound svg { width: 15px; height: 15px; display: block; }
 
+/* ---- Story viewer: chrome ON the story, never around it ---- */
+/* The shell is the modal's body; it carries no padding of its own so the picture reaches the
+   edges, which is the whole difference from the column this replaced. */
+.story-shell { padding: 0; background: transparent; }
+.story-stage {
+  position: relative; width: min(92vw, 460px); height: min(86vh, 820px);
+  border-radius: var(--r-lg); overflow: hidden; background: #000;
+  display: flex; align-items: center; justify-content: center;
+}
+/* The media fills the stage and keeps its shape; the gesture layer is the whole surface, so a tap
+   anywhere pages — as it does everywhere else. */
+.story-canvas { position: absolute; inset: 0; justify-content: center; }
+.story-canvas img, .story-canvas video {
+  width: 100%; height: 100%; object-fit: contain; border-radius: 0;
+}
+/* Scrims, so white text stays legible over a bright story — the same gradient Apple floats its
+   controls on. */
+.story-top, .story-bottom {
+  position: absolute; left: 0; right: 0; z-index: 2;
+  display: flex; flex-direction: column; gap: 8px; padding: 12px 14px;
+  pointer-events: none;   /* the surface below stays tappable; controls re-enable it themselves */
+}
+.story-top { top: 0; background: linear-gradient(rgba(0,0,0,.55), transparent); }
+.story-bottom { bottom: 0; gap: 10px; background: linear-gradient(transparent, rgba(0,0,0,.6)); }
+.story-top > *, .story-bottom > * { pointer-events: auto; }
+.story-top h2 { margin: 0; font-size: 15px; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.6); }
+.story-bottom .muted { color: rgba(255,255,255,.75); text-align: center; }
+
 /* ---- Sensitive content (see app.js ▸ sensitiveGuard) ---- */
 /* Honors a SensitiveFlag federated by a member whose platform HAS an analyzer (Apple's SCA). The
    look is iOS's `.ultraThinMaterial` cover: frosted, centred label, click to reveal.

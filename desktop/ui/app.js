@@ -4274,7 +4274,7 @@ function viewStories(list, startIndex = 0) {
 
   const title = el("h2", { style: "margin:6px 0 0" });
   const bars = el("div", { class: "story-progress" });
-  const slot = el("div", { class: "col", style: "align-items:center;min-width:min(88vw,420px)" });
+  const slot = el("div", { class: "col story-canvas", style: "align-items:center" });
   const hint = el("div", { class: "muted small", style: "text-align:center;margin-top:8px" },
     t("story_viewer_hint"));
   // KEEP — a TOGGLE that holds this story on MY PROFILE past the 24h window. It does NOT re-publish
@@ -4357,8 +4357,18 @@ function viewStories(list, startIndex = 0) {
     replyInput.value = "";
     toast(t("story_sent_privately"));
   });
-  const actions = el("div", { class: "row", style: "justify-content:center;margin-top:8px" }, keepBtn);
-  const card = el("div", { style: "min-width:min(88vw,420px)" }, bars, title, slot, actions, replyRow, hint);
+  const actions = el("div", { class: "row", style: "justify-content:center" }, keepBtn);
+  // LAYERED OVER THE STORY, not stacked around it.
+  //
+  // Every other platform puts the story full-bleed and floats its chrome on top — Apple builds it
+  // as a ZStack with the content ignoring the safe area and the controls in an `.overlay`. Desktop
+  // laid the same pieces out in a COLUMN, so the progress bars, the name, the Keep button and the
+  // reply field all sat outside the picture in a card. Same parts, wrong plane.
+  const stage = el("div", { class: "story-stage" },
+    slot,
+    el("div", { class: "story-top" }, bars, title),
+    el("div", { class: "story-bottom" }, actions, replyRow, hint));
+  const card = el("div", { class: "story-shell" }, stage);
   const close = modal(card);
   // Which of these are already kept — one call for the whole session, refreshed locally on toggle.
   invoke("kept_stories").then((ks) => { keptIds = new Set((ks || []).map((k) => k.id)); paintKeep(); }).catch(() => {});

@@ -620,6 +620,7 @@ pub fn run() {
             commands::instagram_resume,
             commands::instagram_reset,
             commands::instagram_encoded,
+            commands::ui_log,
             commands::music_search,
             commands::music_suggestions,
             commands::music_resolve,

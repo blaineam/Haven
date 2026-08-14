@@ -473,7 +473,10 @@ input:focus, textarea:focus, select:focus {
    when the cap binds, the page just gets wider than the media and the backdrop covers the sides. */
 .post-media .media-page {
   position: relative; overflow: hidden; background: #000;
-  max-height: 460px;   /* PostCard.singleMediaMaxHeight on wide layouts (macOS/iPad) */
+  /* One number, used by the page AND by the media inside it — see the max-height note below for
+     why the child cannot simply say 100%. */
+  --page-cap: 460px;
+  max-height: var(--page-cap);   /* PostCard.singleMediaMaxHeight on wide layouts (macOS/iPad) */
   display: flex; align-items: center; justify-content: center;
 }
 /* width: the page must stay card-WIDE. Without it, `aspect-ratio` resolves against the height cap and
@@ -489,10 +492,18 @@ input:focus, textarea:focus, select:focus {
    object-fit. A <video> paints its own opaque black into any part of its box the frame doesn't
    cover — no CSS background can clear it — so a page-sized video box would black out the backdrop
    it's meant to sit on. Fitting the box to the frame leaves the gap to the backdrop instead. */
+/* max-height is the PAGE CAP IN PIXELS, not 100%, and that distinction was the whole bug.
+   A percentage max-height resolves against the parent's SPECIFIED height — here that comes from
+   `aspect-ratio`, so a 9:16 clip in a 1030px-wide page computes 1830px — and NOT against the used
+   height after `max-height: 460px` clamps it. The child therefore sized itself to 1280px inside a
+   460px box and `overflow: hidden` clipped the rest, which reads exactly like a crop. Measured:
+   natural 720x1280, box 691x1229, page 1030x460.
+   object-fit is irrelevant here (the box is sized BY the media, never stretched to the page), which
+   is why changing it three times moved nothing. */
 .post-media .media-page > img:not(.media-backdrop), .post-media .media-page > video,
 .post-media .media-page > img[data-ref], .post-media .media-page > video[data-ref] {
   position: relative; z-index: 1;
-  width: auto; height: auto; max-width: 100%; max-height: 100%;
+  width: auto; height: auto; max-width: 100%; max-height: var(--page-cap);
   border-radius: 0; background: transparent;
 }
 /* A blurred, cropped-to-fill copy of the SAME media behind the fitted one, so the letterboxed gap

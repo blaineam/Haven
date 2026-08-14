@@ -1763,6 +1763,13 @@ pub async fn music_suggestions(
         .collect()
 }
 
+/// Let the frontend write to the app log. Debug-level questions about what the DOM actually did
+/// ("which render path did this post take?") are otherwise invisible from outside the webview.
+#[tauri::command]
+pub fn ui_log(line: String) {
+    log::info!("ui: {line}");
+}
+
 /// The frontend answering an `haven:ig-encode` request (see `igencode`).
 ///
 /// `refs` absent or null means "could not" — the import seals the raw archive bytes instead, which

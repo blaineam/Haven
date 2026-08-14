@@ -23,6 +23,15 @@ function toBase64(buf) {
   return btoa(s);
 }
 
+/** Base64 → bytes, HERE rather than on the main thread. An archive import runs this hundreds of
+ *  times and the cost scales with the photo, which is what made the importer hitch between items. */
+function fromBase64(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
 async function draw(buf, type, maxDim) {
   const bitmap = await createImageBitmap(new Blob([buf], { type: type || "image/jpeg" }));
   const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
@@ -35,9 +44,9 @@ async function draw(buf, type, maxDim) {
 }
 
 self.onmessage = async (e) => {
-  const { id, buf, type, maxDim, quality, mode, maxBytes } = e.data;
+  const { id, buf, b64, type, maxDim, quality, mode, maxBytes } = e.data;
   try {
-    const canvas = await draw(buf, type, maxDim);
+    const canvas = await draw(buf || fromBase64(b64), type, maxDim);
     if (mode === "thumb") {
       // Walk the quality down until it fits, exactly as the main-thread version did — a "thumb"
       // that isn't tiny is just a second copy of the photo.

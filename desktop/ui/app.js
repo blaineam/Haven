@@ -1293,6 +1293,9 @@ async function renderFeed() {
   Autoplay.schedule();
 }
 
+
+
+
 /** Pending connection requests — macOS `pendingBanner`: a brand-gradient card at the top of the
  *  feed that opens the Connect sheet. This is Connect's discovery path now that it isn't a tab. */
 async function pendingBanner(prefetched) {
@@ -2732,6 +2735,17 @@ const ImgWorker = {
       w.postMessage(Object.assign({ id, buf, type: blob.type }, opts), [buf]);
     });
   },
+  /** Base64 in, base64 out — the importer's path, where the bytes arrive as a string and there is
+   *  no reason for this thread to ever hold them as pixels. */
+  runB64(b64, opts) {
+    const w = this.get();
+    if (!w) return Promise.resolve(null);
+    const id = ++this.seq;
+    return new Promise((res, rej) => {
+      this.waiting.set(id, { res, rej });
+      w.postMessage(Object.assign({ id, b64, type: "image/jpeg" }, opts));
+    });
+  },
 };
 
 async function imageToJpegBase64(file, maxDim = MEDIA_TARGETS.STILL_LONG_EDGE, quality = MEDIA_TARGETS.STILL_JPEG_QUALITY) {
@@ -3113,11 +3127,6 @@ function postCard(it, circleId, reports = []) {
   const media = el("div", { class: "post-media" + (carousel ? " carousel" : mediaCount > 1 ? " masonry" : mediaCount === 1 ? " single" : ""), style: "position:relative" });
   if (carousel) mediaCarousel(visualRefs, media);
   else if (mediaCount === 1) mediaSingle(visualRefs[0], media);
-  // The masonry column tiles are width-driven with `height: auto`, so an un-decoded one lays out at
-  // ZERO height and then shoves the rest of the feed down as it lands. Reserve each tile's shape up
-  // front from the remembered pixel size (iOS parity: the grid gets its aspect from the persisted
-  // map rather than from a main-thread decode).
-  else for (const ref of visualRefs) media.append(guardSensitive(reserveAspect(mediaNode(ref), ref), ref));
   const audio = el("div", {});
   for (const ref of audioRefs) audio.append(mediaNode(ref));
   // Double-tap a photo to ❤️ it (Instagram-style), like the iOS gesture.
@@ -7496,15 +7505,31 @@ async function boot() {
     const answer = (refs) => invoke("instagram_encoded", { job: p.job, refs: refs || null }).catch(() => {});
     try {
       if (p.kind === "image") {
-        // A File, because sanitizeMediaFile enforces the size/type policy on one — the same gate a
-        // dropped or picked photo passes through.
-        const bin = atob(p.dataBase64 || "");
-        const buf = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-        const file = new File([buf], "import.jpg", { type: "image/jpeg" });
+        // STRING STRAIGHT TO THE WORKER. Decoding the base64 and building a File here was the last
+        // per-item main-thread cost, proportional to the photo's size — which is exactly the hitch
+        // felt as the importer moves between items. The worker does the decode now, so this thread
+        // hands over a string and does nothing else.
+        //
+        // The size gate still runs first: base64 is 4 bytes per 3, so the source size is known
+        // without decoding anything.
+        const raw = p.dataBase64 || "";
         mediaQuiet = true;
-        let b64;
-        try { b64 = await sanitizeMediaFile(file, false); } finally { mediaQuiet = false; }
+        let b64 = null;
+        try {
+          if (mediaSourceAllowed(Math.floor(raw.length * 0.75), false, "import.jpg")) {
+            b64 = await ImgWorker.runB64(raw, {
+              maxDim: MEDIA_TARGETS.STILL_LONG_EDGE, quality: MEDIA_TARGETS.STILL_JPEG_QUALITY,
+            }).catch(() => null);
+            // Older WebView, or a decode the worker refused: fall back to the main-thread path
+            // rather than importing the photo unoptimized.
+            if (!b64) {
+              const bin = atob(raw);
+              const buf = new Uint8Array(bin.length);
+              for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+              b64 = await sanitizeMediaFile(new File([buf], "import.jpg", { type: "image/jpeg" }), false);
+            }
+          }
+        } finally { mediaQuiet = false; }
         if (!b64) return answer(null);                      // refused (oversize/unreadable) → raw
         const ref = await invoke("add_media", { circleId: p.circleId, dataBase64: b64, isVideo: false });
         const thumb = await mintThumb(b64, p.circleId);      // null when the photo is already tiny

@@ -17,6 +17,8 @@ struct InstagramImportView: View {
     @State private var step = 0
     @State private var picking = false
     @State private var includeStories = false
+    /// Off by default — it attaches a GUESS, so it should be asked for, not assumed.
+    @State private var matchSongs = false
 
     private let exportURL = URL(string: "https://accountscenter.instagram.com/info_and_permissions/dyi/")!
 
@@ -252,8 +254,20 @@ struct InstagramImportView: View {
                 }
 
                 Section {
+                    Toggle("Suggest a song for silent posts", isOn: $matchSongs)
+                        .tint(HavenTheme.pink)
+                        .onChange(of: matchSongs) { _, on in
+                            // Ask once, here — not 300 times during the run.
+                            guard on else { return }
+                            Task { if !(await ImportSongMatcher.authorize()) { matchSongs = false } }
+                        }
+                } footer: {
+                    Text("Instagram's export doesn't say which song a post used, so this picks one from Apple Music of roughly the right genre and era instead — a guess, not the original. **Anything with its own sound keeps it**: a reel's soundtrack is part of the video, so only silent posts get one.")
+                }
+
+                Section {
                     Button {
-                        importer.run(into: circleId, includeStories: includeStories)
+                        importer.run(into: circleId, includeStories: includeStories, matchSongs: matchSongs)
                     } label: {
                         Label("Import \(importCount(s))", systemImage: "square.and.arrow.down")
                             .frame(maxWidth: .infinity)

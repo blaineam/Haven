@@ -12,8 +12,13 @@ import UIKit
 import AppKit
 #endif
 
-/// Short relative time ("now", "5m", "3h", "2d") from a unix-millis SENT timestamp —
+/// Short relative time ("now", "5m", "3h", "2d", "8mo", "2y") from a unix-millis SENT timestamp —
 /// so people see when something was sent, not when it reached them.
+///
+/// Months stop at a year. Counting them forever produced "32mo" for a post from 2023, which is a
+/// number nobody converts on sight — the unit has to keep getting coarser or it stops being a
+/// glance. Archive imports made this constant rather than a curiosity, since they backdate posts
+/// years into the past.
 func relativeTimeShort(_ ms: UInt64) -> String {
     let secs = Date().timeIntervalSince1970 - Double(ms) / 1000
     switch secs {
@@ -23,7 +28,8 @@ func relativeTimeShort(_ ms: UInt64) -> String {
     case ..<86_400: return "\(Int(secs / 3600))h"
     case ..<604_800: return "\(Int(secs / 86_400))d"
     case ..<2_592_000: return "\(Int(secs / 604_800))w"
-    default: return "\(Int(secs / 2_592_000))mo"
+    case ..<31_536_000: return "\(Int(secs / 2_592_000))mo"
+    default: return "\(Int(secs / 31_536_000))y"
     }
 }
 
@@ -7695,6 +7701,9 @@ struct FeedView: View {
     @ObservedObject private var connections = ConnectionsStore.shared
     @FocusState private var composeFocused: Bool
     @State private var commentingActive = false   // a post's comment field is focused → hide composer
+    /// The post currently at the top edge — see `.scrollPosition` below. Nil while the header is on
+    /// screen, which is what lets new posts appear normally when you are already at the top.
+    @State private var anchoredPostId: String?
 
     struct TrimTarget: Identifiable { let id = UUID(); let ref: String }
 
@@ -7811,10 +7820,24 @@ struct FeedView: View {
                                 removal: .opacity))
                         }
                     }
+                    .scrollTargetLayout()
                     .animation(HavenTheme.bouncy, value: store.items.count)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 130)
                 }
+                // KEEP THE READER'S PLACE when posts arrive.
+                //
+                // The feed is newest-first, so anything new — a peer's post, a mailbox pull landing
+                // a batch, an archive import writing 300 of them — is INSERTED ABOVE whatever is
+                // being read. A plain ScrollView holds its content offset, not its content, so
+                // every insertion shoved the page down and the reader lost their spot. An import
+                // made that constant.
+                //
+                // Binding the scroll position to the post at the top edge pins that post instead of
+                // the offset: content grows above it and the reader does not move. The binding is
+                // nil while the header/stories tray is on screen, which is exactly right — at the
+                // top of the feed new posts SHOULD appear in front of you.
+                .scrollPosition(id: $anchoredPostId, anchor: .top)
                 .scrollDismissesKeyboard(.immediately)
                 .onPreferenceChange(PostCenterKey.self) { centers in
                     // The post nearest the vertical center of the screen becomes active.
@@ -9773,6 +9796,8 @@ struct UserProfileView: View {
     @State private var showStories = false
     @State private var showNickname = false
     @State private var nicknameDraft = ""
+    /// Post at the top edge — pinned so arriving posts don't shove the page (see `.scrollPosition`).
+    @State private var anchoredPostId: String?
 
     /// Reflects a nickname edit live (the passed `name` is a snapshot).
     private var resolvedName: String { contacts.name(forNodePrefix: authorHex) ?? name }
@@ -9861,8 +9886,14 @@ struct UserProfileView: View {
                         }
                     }
                 }
+                .scrollTargetLayout()
                 .padding(16)
             }
+            // Hold the reader's place when posts arrive — same reasoning as the main feed: this
+            // list is newest-first, so anything new is inserted ABOVE what is being read, and a
+            // plain ScrollView keeps its offset rather than its content. Pinning the post at the
+            // top edge means the page grows above it instead of under the reader.
+            .scrollPosition(id: $anchoredPostId, anchor: .top)
             .onPreferenceChange(PostCenterKey.self) { centers in
                 // The profile post nearest the vertical center becomes active → its video plays + loops.
                 let target = PlatformScreen.contentCenterY

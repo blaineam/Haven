@@ -49,6 +49,8 @@ final class InstagramImporter: ObservableObject {
         var bookmark: Data
         var circleId: String
         var includeStories: Bool
+        /// Defaulted so a checkpoint written before song matching existed still decodes.
+        var matchSongs: Bool = false
         var done: Int
     }
 
@@ -84,7 +86,8 @@ final class InstagramImporter: ObservableObject {
             self.archiveURL = url
             self.summary = s
             self.phase = .previewing          // `run` requires this state
-            self.run(into: p.circleId, includeStories: p.includeStories, startAt: p.done)
+            self.run(into: p.circleId, includeStories: p.includeStories,
+                     matchSongs: p.matchSongs, startAt: p.done)
         }
     }
 
@@ -155,7 +158,8 @@ final class InstagramImporter: ObservableObject {
     /// something they ask for, having been told what the archive actually contains.
     /// `startAt` resumes a previous run, skipping items already imported. Only `resumeIfNeeded`
     /// passes it; a fresh import starts at 0.
-    func run(into circleId: String, includeStories: Bool = false, startAt: Int = 0) {
+    func run(into circleId: String, includeStories: Bool = false,
+             matchSongs: Bool = false, startAt: Int = 0) {
         guard let summary, let url = archiveURL, case .previewing = phase else { return }
         let items = includeStories ? summary.items : summary.items.filter { $0.kind != .story }
         phase = .importing(done: min(startAt, items.count), total: items.count)
@@ -166,7 +170,7 @@ final class InstagramImporter: ObservableObject {
         if let bookmark = try? url.bookmarkData(options: bookmarkCreationOptions,
                                                 includingResourceValuesForKeys: nil, relativeTo: nil) {
             savePending(Pending(bookmark: bookmark, circleId: circleId,
-                                includeStories: includeStories, done: startAt))
+                                includeStories: includeStories, matchSongs: matchSongs, done: startAt))
         }
 
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -188,11 +192,17 @@ final class InstagramImporter: ObservableObject {
             for (idx, item) in items.enumerated() {
                 if idx < startAt { continue }   // already imported on a previous run
                 if await MainActor.run(body: { [weak self] in self?.cancelled ?? true }) { break }
-                let refs = await Self.stage(item, zip: zip, byName: byName)
+                let (refs, hasAudio) = await Self.stage(item, zip: zip, byName: byName)
                 if refs.isEmpty {
                     skipped += 1
                 } else {
                     let body = item.body, at = item.createdAt, kind = item.kind
+                    // Suggest a song ONLY into silence. A reel that shipped with its soundtrack
+                    // keeps it — that audio is baked into the video and is what the user actually
+                    // chose; layering a guess over it would be worse than adding nothing.
+                    let music: TrackRefFfi? = (matchSongs && !hasAudio)
+                        ? await ImportSongMatcher.song(for: at, genre: item.musicGenre)
+                        : nil
                     // Stories, when the user opted in, land as KEPT stories rather than feed posts:
                     // a personal snapshot on their profile with its media pinned. Keeping
                     // deliberately does not republish (see KeptStoriesStore), which is what makes
@@ -204,10 +214,10 @@ final class InstagramImporter: ObservableObject {
                     await MainActor.run {
                         if kind == .story {
                             KeptStoriesStore.shared.keep(id: identity, body: body, media: refs,
-                                                         createdAt: at, music: nil)
+                                                         createdAt: at, music: music)
                         } else {
                             FeedStore.shared.postImported(circleId: circleId, body: body, media: refs,
-                                                          music: nil, story: false, createdAt: at)
+                                                          music: music, story: false, createdAt: at)
                         }
                     }
                     imported += 1
@@ -243,8 +253,11 @@ final class InstagramImporter: ObservableObject {
     /// `MediaStore` calls hop onto it.
     private nonisolated static func stage(_ item: InstagramArchive.Item,
                                           zip: ZipReader,
-                                          byName: [String: ZipReader.Entry]) async -> [String] {
+                                          byName: [String: ZipReader.Entry]) async -> ([String], Bool) {
         var refs: [String] = []
+        /// Does ANY of this post's media make sound? One song plays per post, so a carousel with a
+        /// single talking video should not get one layered on top of it.
+        var anyAudio = false
         for name in item.mediaNames {
             guard let entry = byName[name] else { continue }
             // Disk read + CRC over the entry — the expensive part, and the reason this is detached.
@@ -257,6 +270,10 @@ final class InstagramImporter: ObservableObject {
                     .appendingPathComponent("igimport_\(UUID().uuidString).\(ext(name))")
                 guard (try? bytes.write(to: scratch)) != nil else { continue }
                 defer { try? FileManager.default.removeItem(at: scratch) }
+                // Asked of the real file, before transcoding — "is it a video" and "does it make
+                // sound" are different questions. A screen recording, a time-lapse or a clip muted
+                // before posting is a silent video, and deserves a song as much as a photo does.
+                if await ImportSongMatcher.hasAudio(scratch) { anyAudio = true }
                 // forceOptimize: an import is bulk media at someone else's encoder settings —
                 // running it through Haven's ladder is what stops a 1.2 GB archive from landing on
                 // the relay as-is. alsoOriginal: false — shipping the originals too would double an
@@ -277,7 +294,7 @@ final class InstagramImporter: ObservableObject {
                 if let ref { refs.append(ref) }
             }
         }
-        return refs
+        return (refs, anyAudio)
     }
 
     /// Stable id for a kept story, derived from the archive entry it came from.

@@ -234,6 +234,28 @@ button { font-family: inherit; cursor: pointer; }
 }
 .badge.show { display: inline-flex; }
 
+/* ---- Icons ----
+   BASE SIZE FOR EVERY icon() GLYPH.
+
+   `icon()` builds a bare <svg> carrying only a viewBox. An <svg> with no width/height of its own
+   does NOT fall back to something sensible — it takes the replaced-element default and, inside the
+   flex rows icons actually live in, collapses to nothing. The control is then perfectly wired,
+   focusable, and completely invisible.
+
+   Every icon site used to need its own `… svg { width; height }` line, and the ones that were
+   forgotten were silently blank: the post kebab, every menu item's glyph, the settings-row icons,
+   the story placeholder and the empty-state sparkle. This one rule ends that whole failure mode.
+   It is an ELEMENT selector, so every class-based rule below still wins, and inline sizes (the
+   66px call badge) win over both. */
+svg { width: 16px; height: 16px; }
+
+/* Sites where the base size is deliberately wrong. */
+.kebab svg { width: 17px; height: 17px; display: block; }
+.mi-svg { width: 15px; height: 15px; display: block; }
+.set-row .ri svg, .set-row .chev svg { width: 15px; height: 15px; display: block; }
+.empty .big svg { width: 34px; height: 34px; }          /* matches the 34px font-size it replaced */
+.story-ph { width: 22px; height: 22px; }                /* the ring's own add-glyph is 21px */
+
 /* ---- Content ---- */
 .content { position: relative; height: 100vh; }
 .view {

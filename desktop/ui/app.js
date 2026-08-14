@@ -142,6 +142,11 @@ const ICONS = {
   // version turns to mush. `icon()` returns an EMPTY svg for a name it doesn't know, so a missing
   // entry here is an invisible button, not a broken one.
   "arrow.up.forward.app": { d: "M14 4H6a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-8", extra: "M14 10l6.5-6.5M15 3h6v6" },
+  // "Keep on this device" — a pushpin, matching Apple's `pin` on the same action.
+  "pin": { d: "M9 4h6l-1 5 3 3v2h-5m0 0v5m0-5H7v-2l3-3-1-5" },
+  // "Message …" in the post menu. `bubble.left` on Apple; the tail hangs left, which is what
+  // distinguishes it from the reaction bubble.
+  "bubble.left": { d: "M20 12a7 7 0 01-7 7H8l-4 3v-4.5A7 7 0 018 5h5a7 7 0 017 7z" },
   "square.and.pencil": { d: "M20 10.5V19a2 2 0 01-2 2H6a2 2 0 01-2-2V7a2 2 0 012-2h8.5", extra: "M18.4 3.6a2 2 0 012.8 2.8L13 14.6l-3.6.9.9-3.6 8.1-8.3z" },
   "phone.fill": { fill: true, d: "M6.6 3.5c.6-.1 1.2.2 1.5.8l1.3 2.6c.3.6.2 1.3-.3 1.7l-1.2 1a12 12 0 005.5 5.5l1-1.2c.4-.5 1.1-.6 1.7-.3l2.6 1.3c.6.3.9.9.8 1.5l-.4 2.3c-.1.7-.7 1.2-1.4 1.2C9.9 20 4 14.1 3.1 5.3c0-.7.5-1.3 1.2-1.4l2.3-.4z" },
   "video.fill": { fill: true, d: "M3 7.5A2.5 2.5 0 015.5 5h7A2.5 2.5 0 0115 7.5v9a2.5 2.5 0 01-2.5 2.5h-7A2.5 2.5 0 013 16.5v-9zm14 2.3l3.3-2.2c.6-.4 1.4 0 1.4.8v7.2c0 .8-.8 1.2-1.4.8L17 14.2V9.8z" },

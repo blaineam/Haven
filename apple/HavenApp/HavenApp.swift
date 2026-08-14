@@ -503,7 +503,12 @@ struct RootView: View {
             }
             // Pick up an import the app was killed in the middle of. No-op when there is nothing
             // pending, so this costs a UserDefaults read on a normal launch.
-            .task { InstagramImporter.shared.resumeIfNeeded() }
+            .task {
+                InstagramImporter.shared.resumeIfNeeded()
+                // Identifications refused on a previous run are still worth asking about — "later"
+                // is exactly when Shazam is willing to talk.
+                ShazamRetryQueue.shared.start()
+            }
     }
 
     private var tabsCore: some View {

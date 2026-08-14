@@ -3016,6 +3016,8 @@ final class FeedStore: ObservableObject {
     /// janked the UI). Use this on the high-frequency inbound/sync paths; keep refresh() for user actions.
     /// Last feed rebuild performed while an import was running — see the throttle in `refresh`.
     private var lastImportRefreshAt: TimeInterval = 0
+    /// Id of the most recent imported post, so a deferred song credit can be attached to it.
+    private(set) var lastImportedPostId: String?
 
     /// The final rebuild once an import stops writing, with everything in place.
     func importFinished() {
@@ -3212,6 +3214,22 @@ final class FeedStore: ObservableObject {
         }
     }
 
+    /// Attach an identified song CREDIT to a post that already published.
+    ///
+    /// Identification is slow and frequently refused, so a credit often arrives long after the post
+    /// did. Re-emitting the post as an edit is how it catches up — the same mechanism the
+    /// re-optimize pass uses, and silent for the same reason: re-pointing an existing post at a
+    /// song nobody wrote is not news.
+    func attachSongCredit(postId: String, circleId: String, track: TrackRefFfi) {
+        guard let social, let item = items.first(where: { $0.id == postId }) else { return }
+        guard item.music == nil else { return }   // don't stomp a song already there
+        guard let env = try? social.edit(circleId: circleId, target: postId, body: item.body,
+                                         media: item.media, music: track,
+                                         muteVideo: item.muteVideo, createdAt: now()) else { return }
+        broadcastEvent(circleId, env, silent: true)
+        scheduleRefresh()
+    }
+
     /// Author a post that came from an ARCHIVE IMPORT (Instagram et al) — silent by construction.
     ///
     /// An import republishes a whole back-catalogue at once: a 900-post Instagram archive would fire
@@ -3234,6 +3252,9 @@ final class FeedStore: ObservableObject {
         guard let social, let env = try? social.post(circleId: circleId, body: body, media: media,
                                                      music: music, retentionSecs: nil, story: story,
                                                      muteVideo: false, createdAt: createdAt) else { return }
+        // The engine derives ids at author time; read it back so a deferred song credit can find
+        // this exact post later (see ShazamRetryQueue).
+        lastImportedPostId = social.lastAuthoredEventId(circleId: circleId, createdAt: createdAt)
         broadcastEvent(circleId, env, silent: true)
         postTick += 1; publishedPostCount += 1
         // Deliberately does NOT schedule a refresh. The slow floor in `refresh()` governs how

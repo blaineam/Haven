@@ -199,7 +199,7 @@ final class InstagramImporter: ObservableObject {
                 if idx < startAt { continue }   // already imported on a previous run
                 if await MainActor.run(body: { [weak self] in self?.cancelled ?? true }) { break }
                 let began = Date()
-                let (refs, hasAudio, detected, themes) = await Self.stage(
+                let (refs, hasAudio, detected, themes, retryRef) = await Self.stage(
                     item, zip: zip, byName: byName, identify: matchSongs,
                     isCancelled: { await MainActor.run { [weak self] in self?.cancelled ?? true } })
                 // Stop means STOP. Staging an item can take a minute (a video transcode), and the
@@ -252,6 +252,13 @@ final class InstagramImporter: ObservableObject {
                         } else {
                             FeedStore.shared.postImported(circleId: circleId, body: body, media: refs,
                                                           music: music, story: false, createdAt: at)
+                            // Shazam refused rather than answered — ask again later, against the
+                            // post that now exists, instead of losing the credit entirely.
+                            if let retryRef, music == nil,
+                               let newId = FeedStore.shared.lastImportedPostId {
+                                ShazamRetryQueue.shared.enqueue(postId: newId, circleId: circleId,
+                                                                videoRef: retryRef)
+                            }
                         }
                     }
                     imported += 1
@@ -288,6 +295,9 @@ final class InstagramImporter: ObservableObject {
                 // The feed was frozen for the whole run (see FeedStore.refresh) — bring it up to
                 // date now, in one rebuild, with everything in place.
                 FeedStore.shared.importFinished()
+                // Now that the import has stopped competing for Shazam, work through everything it
+                // was refused on.
+                ShazamRetryQueue.shared.start()
             }
         }
     }
@@ -303,7 +313,7 @@ final class InstagramImporter: ObservableObject {
                                           zip: ZipReader,
                                           byName: [String: ZipReader.Entry],
                                           identify: Bool,
-                                          isCancelled: @Sendable () async -> Bool) async -> ([String], Bool, TrackRefFfi?, [String]) {
+                                          isCancelled: @Sendable () async -> Bool) async -> ([String], Bool, TrackRefFfi?, [String], String?) {
         var refs: [String] = []
         /// Temp clips, removed once identification has finished with them.
         var scratchFiles: [URL] = []
@@ -314,6 +324,8 @@ final class InstagramImporter: ObservableObject {
         var shazamTask: Task<Void, Never>?
         /// Where that task deposits its answer, if it finishes in time.
         let shazamResult = ShazamResultBox()
+        /// The staged clip a retry would re-read — temp files are gone by then, this is not.
+        var firstVideoRef: String?
         /// What the post is ABOUT — Vision labels off the first photo, plus caption words. This is
         /// what makes one silent post's suggestion differ from the next one's.
         var themes: [String] = SongSuggester.captionThemes(item.body)
@@ -362,6 +374,14 @@ final class InstagramImporter: ObservableObject {
                             let began = Date()
                             let outcome = await ShazamDetector.identifyDetailed(clip)
                             await box.set(outcome.track)
+                            // A REFUSAL is not an answer. Rate limits accounted for 50 of 81
+                            // attempts in a real run, and dropping them threw away most of the
+                            // credits this feature exists to produce — so park it for a retry
+                            // instead of losing it.
+                            if outcome.track == nil,
+                               outcome.reason.contains("201") || outcome.reason.contains("no result") {
+                                await box.setRetryable(true)
+                            }
                             HavenLog.sync("ig-import: shazam \(outcome.reason) in "
                                 + "\(String(format: "%.1f", Date().timeIntervalSince(began)))s — \(label)")
                         }
@@ -381,7 +401,10 @@ final class InstagramImporter: ObservableObject {
                 // mediaRefs already carries poster + poster marker + clip in the order the feed
                 // expects (poster first — MediaVariants.composeVideoMedia), so a video tile has its
                 // still from the moment it arrives.
-                if let prepared, !prepared.isEmpty { refs.append(contentsOf: prepared.mediaRefs) }
+                if let prepared, !prepared.isEmpty {
+                    refs.append(contentsOf: prepared.mediaRefs)
+                    if firstVideoRef == nil { firstVideoRef = prepared.videoRef }
+                }
             } else {
                 // Read the subject off the FIRST photo only — one song per post, so one look is
                 // enough, and Vision on every frame of a 20-photo carousel is work with nowhere
@@ -411,9 +434,12 @@ final class InstagramImporter: ObservableObject {
         // deadlocked an entire import. The box holds whatever finished in time; anything slower is
         // abandoned, which is the stated contract — identification must not gate the import.
         let detected = await shazamResult.value()
-        shazamTask?.cancel()
+        // Not cancelled if it may still yield: an abandoned-but-live task can still deposit an
+        // answer, and if it was refused the retry queue wants to know.
+        let retryable = await shazamResult.shouldRetry()
+        if detected != nil || !retryable { shazamTask?.cancel() }
         for f in scratchFiles { try? FileManager.default.removeItem(at: f) }
-        return (refs, anyAudio, detected, themes)
+        return (refs, anyAudio, detected, themes, retryable ? firstVideoRef : nil)
     }
 
     /// Stable id for a kept story, derived from the archive entry it came from.
@@ -428,8 +454,13 @@ final class InstagramImporter: ObservableObject {
     /// Holds an identification result for collection without ever blocking on it.
     actor ShazamResultBox {
         private var track: TrackRefFfi?
+        private var retryable = false
         func set(_ t: TrackRefFfi?) { track = t }
+        func setRetryable(_ v: Bool) { retryable = v }
         func value() -> TrackRefFfi? { track }
+        /// True when identification was REFUSED (rate limited) rather than answered — worth asking
+        /// again later, unlike "not in catalog" which will never change.
+        func shouldRetry() -> Bool { retryable }
     }
 
     /// Run `work`, giving up after `seconds`.

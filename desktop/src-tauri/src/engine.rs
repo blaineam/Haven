@@ -3665,7 +3665,7 @@ impl Engine {
         // this to false, so editing a caption silently un-muted the post's video for the whole
         // circle — a setting the author chose, changed by an edit that never mentioned it.
         mute_video: Option<bool>,
-    ) {
+    ) -> Result<(), String> {
         // `reoptimize_targets` lists every one of my items that carries media (it is NOT filtered to
         // oversized ones — that happens later), so "absent" genuinely means "carries none".
         let looked_up = self
@@ -3683,10 +3683,18 @@ impl Engine {
             }
             (None, None) => (vec![], None, mute_video.unwrap_or(false)),
         };
-        if let Ok(env) =
-            self.social.edit(circle_id.clone(), target, body, media, music, mute_video, now_ms())
-        {
-            self.after_author(&circle_id, &env, None, None); // edits keep their place — no banner
+        match self.social.edit(circle_id.clone(), target, body, media, music, mute_video, now_ms()) {
+            Ok(env) => {
+                self.after_author(&circle_id, &env, None, None); // edits keep their place — no banner
+                Ok(())
+            }
+            // Surfaced rather than swallowed. An edit that fails looked EXACTLY like one that
+            // worked — the dialog closed either way — so a save that did nothing was indis-
+            // tinguishable from a save that did. The caller toasts this.
+            Err(e) => {
+                log::error!("edit_post failed: {e}");
+                Err(format!("{e}"))
+            }
         }
     }
 

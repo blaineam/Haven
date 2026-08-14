@@ -109,6 +109,25 @@ fn ensure_seed() -> Result<[u8; 32]> {
 
 /// When matrix QA injects a seed, force THAT account (not the prior active roster entry).
 /// Uses a dedicated `qa-matrix` data dir so we never clobber the user's daily-driver identity state.
+/// Minimal percent-decoding for the two path segments — refs can contain ':' (legacy `v:`/`a:`).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn force_qa_seed_identity() -> Result<Option<([u8; 32], Paths)>> {
     let Some(seed) = store::qa_seed_override()? else {
         return Ok(None);
@@ -322,6 +341,56 @@ pub fn run() {
     let existing = startup_identity().expect("resolve identity");
 
     let builder = tauri::Builder::default()
+        // MEDIA AS A STREAM, NOT A STRING.
+        //
+        // Every tile used to arrive through the `media_data_url` COMMAND: decrypt, base64 (one third
+        // bigger), then ship that as a JSON string across IPC for WebKit to parse and decode on the
+        // main thread. Per post. Scrolling into a card therefore cost a multi-megabyte string
+        // round trip, which is exactly the periodic lock-up — "every other post" is every other
+        // card coming into view.
+        //
+        // A URI scheme hands WebKit the raw bytes instead: no base64, no IPC string, and the decode
+        // happens on its own media pipeline rather than in JS. The command stays for the callers
+        // that genuinely want bytes in hand (thumb minting, the poster round trip).
+        .register_uri_scheme_protocol("havenmedia", |ctx, req| {
+            use tauri::http::{Response, StatusCode};
+            // havenmedia://localhost/<circle>/<ref>  — the host is meaningless on macOS/Linux and
+            // mandatory on Windows, so the path is read from the END rather than by position.
+            let path = req.uri().path().trim_start_matches('/').to_string();
+            let (circle, reference) = match path.split_once('/') {
+                Some((c, r)) => (
+                    percent_decode(c),
+                    percent_decode(r),
+                ),
+                None => return Response::builder().status(StatusCode::BAD_REQUEST).body(Vec::new()).unwrap(),
+            };
+            let engine = ctx.app_handle().state::<std::sync::Arc<crate::engine::Engine>>();
+            let cid = if circle.is_empty() { crate::engine::DEFAULT_CIRCLE.to_string() } else { circle };
+            match engine.media_bytes(&cid, &reference) {
+                Some(bytes) => {
+                    let mime = if crate::localmedia::LocalMedia::is_video(&reference) {
+                        "video/mp4".to_string()
+                    } else if crate::localmedia::LocalMedia::is_audio(&reference) {
+                        crate::localmedia::audio_mime(&bytes).to_string()
+                    } else if crate::localmedia::LocalMedia::is_file_ref(&reference) {
+                        "application/zip".to_string()
+                    } else {
+                        crate::localmedia::image_mime(&bytes).to_string()
+                    };
+                    Response::builder()
+                        .header("Content-Type", mime)
+                        // Content-addressed: the ref IS the sha-256 of the plaintext, so a URL can
+                        // never point at different bytes and this is safe to cache hard.
+                        .header("Cache-Control", "public, max-age=31536000, immutable")
+                        .header("Accept-Ranges", "bytes")
+                        .body(bytes)
+                        .unwrap()
+                }
+                // Absent (evicted, or still syncing) — the frontend's `onerror` falls back to the
+                // placeholder path, which is the same branch the null data URL used to take.
+                None => Response::builder().status(StatusCode::NOT_FOUND).body(Vec::new()).unwrap(),
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
@@ -603,6 +672,7 @@ pub fn run() {
             commands::instagram_encoded,
             commands::music_search,
             commands::music_suggestions,
+            commands::music_resolve,
             commands::set_foreground,
             commands::reset,
         ])

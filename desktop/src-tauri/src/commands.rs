@@ -402,8 +402,8 @@ pub fn edit_post(
     music: Option<TrackInput>,
     // Absent = keep the post's current choice.
     mute_video: Option<bool>,
-) {
-    engine.edit_post(circle_id, target, body, media, music.map(|m| m.into_ffi()), mute_video);
+) -> Result<(), String> {
+    engine.edit_post(circle_id, target, body, media, music.map(|m| m.into_ffi()), mute_video)
 }
 
 #[tauri::command]
@@ -1702,6 +1702,25 @@ pub async fn music_search(query: String, limit: Option<usize>) -> Vec<SongDto> {
             preview_url: t.preview_url,
         })
         .collect()
+}
+
+/// The 30-second clip for a song a POST already carries.
+///
+/// A TrackRef stores catalog id, title, artist and artwork — never a preview URL, because nothing
+/// about a preview belongs on a post. The feed still has to be able to PLAY the attached song, so it
+/// looks one up by name, exactly as Android's `MusicSearch.resolve` does.
+#[tauri::command]
+pub async fn music_resolve(title: String, artist: String) -> Option<SongDto> {
+    let q = format!("{title} {artist}");
+    let hit = crate::songsuggest::search(q.trim(), 1).await.unwrap_or_default().into_iter().next()?;
+    Some(SongDto {
+        catalog_id: hit.catalog_id(),
+        title: hit.title.clone(),
+        artist: hit.artist.clone(),
+        artwork_url: hit.artwork_url.clone(),
+        duration_ms: hit.duration_ms,
+        preview_url: hit.preview_url,
+    })
 }
 
 /// Songs for what the post is ABOUT — its caption and when it was taken. The same suggester the

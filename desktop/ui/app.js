@@ -278,10 +278,37 @@ function fmtBytes(n) {
 // two cases (iOS MissingMediaPlaceholder parity): a ref the user DELIBERATELY evicted (#3 cleanup /
 // #4 limit sweep) renders a "Download N" affordance (re-fetch on tap — never auto-refetched, or the
 // cleanup would silently undo itself); anything else is simply still syncing.
+/** The streaming URL for a stored ref. See the `havenmedia` scheme in lib.rs: WebKit fetches the
+ *  bytes itself, so nothing is base64'd, nothing crosses IPC as a string, and the decode happens off
+ *  the thread that paints. */
+function mediaUrl(circleId, ref) {
+  const c = encodeURIComponent(circleId || "");
+  const r = encodeURIComponent(ref);
+  // Windows serves custom schemes over http://<scheme>.localhost; everything else uses the scheme.
+  return (navigator.userAgent.includes("Windows"))
+    ? `http://havenmedia.localhost/${c}/${r}`
+    : `havenmedia://localhost/${c}/${r}`;
+}
+
 async function loadMedia(node, circleId, ref) {
   try {
-    const url = await invoke("media_data_url", { circleId, reference: ref });
-    if (url) { node.src = url; return; }
+    // Hand it straight to WebKit and let the element report failure — a 404 from the scheme means
+    // the same thing the old null data URL did: evicted, or not synced yet.
+    const streamed = await new Promise((res) => {
+      const ok = () => { cleanup(); res(true); };
+      const bad = () => { cleanup(); res(false); };
+      const cleanup = () => {
+        node.removeEventListener("loadeddata", ok);
+        node.removeEventListener("load", ok);
+        node.removeEventListener("error", bad);
+      };
+      node.addEventListener("loadeddata", ok, { once: true });
+      node.addEventListener("load", ok, { once: true });
+      node.addEventListener("error", bad, { once: true });
+      node.src = mediaUrl(circleId, ref);
+    });
+    if (streamed) return;
+    node.removeAttribute("src");
     const isVideo = isVideoRef(ref);
     // Which post this tile sits in, if any — read off the card rather than threaded through every
     // gallery/pager helper in between. Absent for a tile that isn't inside a post (a DM attachment,
@@ -1937,12 +1964,42 @@ function posterRefFor(media, videoRef) {
   return null;
 }
 
+// The bottom strip of a video that belongs to its scrub bar rather than to the carousel. Matches
+// the native control's own height, so the line the reader feels is the line they can see.
+const SCRUB_ZONE_PX = 44;
+
 function mediaNode(ref, imgStyle) {
   // Videos start muted unless the global "play video sound" toggle is on (iOS parity); native controls
   // still let the user override per-video. data-video lets the toggle re-apply across all of them.
   // While a call is ringing/connecting/live — or while any capture UI is up — they render muted
   // regardless (call/capture audio priority).
-  if (isVideoRef(ref)) return el("video", Object.assign({ "data-ref": ref, "data-video": "1", controls: "" }, state.videoSoundOn && !callAudioActive() && !captureUIOpen() && !state.superDataSaver ? {} : { muted: "" }));
+  if (isVideoRef(ref)) {
+    const v = el("video", Object.assign({ "data-ref": ref, "data-video": "1", controls: "" },
+      state.videoSoundOn && !callAudioActive() && !captureUIOpen() && !state.superDataSaver ? {} : { muted: "" }));
+    // TAP A MUTED CLIP TO HEAR IT. When a song owns the post the clip plays silent, and the tap is
+    // how the reader says "this one instead" — the song ducks out and the clip's own audio takes
+    // over. The video itself is the target, exactly as on iOS, so there is no extra control.
+    v.addEventListener("click", () => { if (v.muted) Autoplay.duck(v); });
+    // SCRUBBING vs PAGING. The bottom strip of a video is its scrub bar; the carousel is a
+    // scroll-snap track, so a horizontal drag anywhere over the clip pages the carousel instead of
+    // seeking — the control is there and cannot be used. A drag that STARTS low belongs to the
+    // video (iOS draws the same line), so the track stops scrolling for the length of that gesture.
+    v.addEventListener("pointerdown", (e) => {
+      const track = v.closest(".track");
+      if (!track) return;
+      const r = v.getBoundingClientRect();
+      if (e.clientY < r.bottom - SCRUB_ZONE_PX) return;   // high enough → let the carousel page
+      track.style.overflowX = "hidden";
+      const release = () => {
+        track.style.overflowX = "";
+        window.removeEventListener("pointerup", release);
+        window.removeEventListener("pointercancel", release);
+      };
+      window.addEventListener("pointerup", release);
+      window.addEventListener("pointercancel", release);
+    });
+    return v;
+  }
   if (isAudioRef(ref)) return el("audio", { "data-ref": ref, controls: "", style: "width:100%;margin-top:6px;display:block" });
   if (isFileRef(ref)) return el("div", { class: "tag", "data-ref": ref, style: "padding:12px;margin-top:6px" }, "📎 " + t("attachment_chip"));
   // decoding="async" keeps the decode off the thread that's scrolling: a data-URL image decodes
@@ -3141,7 +3198,9 @@ function postCard(it, circleId, reports = []) {
   // by then, and galleries and pagers have no business carrying a post id through.
   // data-song: the autoplay coordinator mutes a clip whose post carries a song, and it reaches the
   // <video> through this card rather than by threading the item down every gallery helper.
-  return el("div", { class: "card post", "data-post": it.id, "data-author": it.author_short || "", "data-mine": it.is_me ? "1" : "", "data-song": (it.music || it.mute_video) ? "1" : "" }, head, banner, body, media.children.length ? media : null, geoNode, audio.children.length ? audio : null, song, actions, comments);
+  return el("div", { class: "card post", "data-post": it.id, "data-author": it.author_short || "", "data-mine": it.is_me ? "1" : "", "data-song": (it.music || it.mute_video) ? "1" : "",
+    "data-song-title": it.music ? it.music.title : "", "data-song-artist": it.music ? it.music.artist : "",
+    "data-muted-by-author": it.mute_video ? "1" : "" }, head, banner, body, media.children.length ? media : null, geoNode, audio.children.length ? audio : null, song, actions, comments);
 }
 
 // ---- Reports (decentralized moderation) --------------------------------------------------
@@ -3436,12 +3495,22 @@ function editPostDialog(it, circleId) {
         icon("music.note"), music ? t("change") : t("add_a_song")),
       muteBtn, fileInput),
     el("div", { class: "row", style: "margin-top:12px;justify-content:flex-end" },
-      el("button", { class: "btn primary", onclick: async () => {
-        await invoke("edit_post", {
-          circleId, target: it.id, body: ta.value.trim(),
-          media, music, muteVideo,
-        });
-        $("#modal-root").replaceChildren();
+      el("button", { class: "btn primary", onclick: async (e) => {
+        // A failed edit used to close the dialog exactly like a successful one, so "save" could be
+        // a silent no-op — which is what it looked like while an import held the engine busy.
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        try {
+          await invoke("edit_post", {
+            circleId, target: it.id, body: ta.value.trim(),
+            media, music, muteVideo,
+          });
+          closeModal();
+          toast(t("saved"));
+        } catch (err) {
+          btn.disabled = false;
+          toast(t("couldnt_save", err));   // dialog STAYS open, with the edit intact
+        }
       } }, t("save")))));
 }
 
@@ -6483,12 +6552,84 @@ const Autoplay = {
     // the song is what you hear, matching Apple and matching what Stories already did here. The card
     // is the nearest ancestor that knows, so it is marked at build time.
     const card = best.closest("[data-post]");
-    const hasSong = card ? card.dataset.song === "1" : false;
+    const postId = card ? card.dataset.post : null;
+    // DUCKED: the reader tapped this clip to hear ITS audio instead of the song. Sticky per post
+    // for the session, so scrolling away and back does not silently undo the choice they made.
+    const ducked = postId && this.ducked.has(postId);
+    const hasSong = card ? card.dataset.song === "1" && !ducked : false;
     best.muted = hasSong || callAudioActive() || captureUIOpen() || !state.videoSoundOn;
     best.loop = true;
     if (best.paused) best.play().catch(() => {});   // a refused autoplay is not an error
+    this.song.sync(hasSong ? card : null);
+  },
+
+  /** Posts whose clip the reader chose over the attached song. */
+  ducked: new Set(),
+
+  /** Tapping a MUTED clip means "let me hear this one" — Apple's behaviour, and the reason the tap
+   *  target is the video rather than a separate control. Only for a clip actually carrying audio and
+   *  not muted by its author: for those two there is nothing to duck TO, and stopping the song would
+   *  leave the post silent. */
+  duck(video) {
+    const card = video.closest("[data-post]");
+    if (!card || card.dataset.song !== "1") return false;
+    if (card.dataset.mutedByAuthor === "1") return false;
+    if (!videoHasAudio(video)) return false;
+    this.ducked.add(card.dataset.post);
+    this.song.stop();
+    video.muted = false;
+    return true;
+  },
+
+  // The attached song itself. Desktop never played one in the feed — the chip was a link with a
+  // sound toggle that governed the VIDEO — so "the song owns the audio" would have meant silence.
+  // A TrackRef carries no preview URL (nothing about a preview belongs on a post), so it is resolved
+  // by name and cached for the session, the same way Android's MusicSearch.resolve does it.
+  song: {
+    audio: null, postId: null, cache: new Map(),
+    stop() {
+      if (this.audio) { try { this.audio.pause(); } catch (_) {} this.audio = null; }
+      this.postId = null;
+    },
+    async sync(card) {
+      if (!card) return this.stop();
+      const id = card.dataset.post;
+      if (this.postId === id) return;            // already this post's song
+      this.stop();
+      if (!state.videoSoundOn && deviceLikelySilent()) return;
+      const title = card.dataset.songTitle || "", artist = card.dataset.songArtist || "";
+      if (!title) return;
+      const key = title + "|" + artist;
+      let url = this.cache.get(key);
+      if (url === undefined) {
+        const hit = await invoke("music_resolve", { title, artist }).catch(() => null);
+        url = (hit && hit.preview_url) || null;
+        this.cache.set(key, url);
+      }
+      // The reader may have scrolled on while that resolved — only start if this post is STILL the
+      // centred one, or a fast scroll leaves a song playing for a card nobody is looking at.
+      if (!url || !Autoplay.current || Autoplay.current.closest("[data-post]") !== card) return;
+      this.postId = id;
+      this.audio = new Audio(url);
+      this.audio.loop = true;
+      this.audio.play().catch(() => { this.stop(); });
+    },
   },
 };
+
+/** Does this clip actually carry an audio track? Used to decide whether ducking has anywhere to go.
+ *  `webkitAudioDecodedByteCount` is the only reliable read in this WebView; absent metadata is
+ *  treated as "yes", so the ambiguous case still lets the reader hear the clip. */
+function videoHasAudio(v) {
+  if (typeof v.webkitAudioDecodedByteCount === "number") return v.webkitAudioDecodedByteCount > 0;
+  if (typeof v.mozHasAudio === "boolean") return v.mozHasAudio;
+  return true;
+}
+
+/** A WebView cannot read the system mute state, so this is deliberately conservative: it never
+ *  claims the device is silent. The in-app toggle is the real control on desktop, and this exists
+ *  so the rule reads the same on both platforms. */
+function deviceLikelySilent() { return false; }
 window.addEventListener("scroll", () => Autoplay.schedule(), true);
 window.addEventListener("resize", () => Autoplay.schedule());
 document.addEventListener("visibilitychange", () => Autoplay.schedule());

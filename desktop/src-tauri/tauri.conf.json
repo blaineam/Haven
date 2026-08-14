@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: blob: https:; media-src 'self' data: blob: mediastream:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost https:"
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost havenmedia: http://havenmedia.localhost data: blob: https:; media-src 'self' havenmedia: http://havenmedia.localhost data: blob: mediastream: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost https:"
     }
   },
   "bundle": {

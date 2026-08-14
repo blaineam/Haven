@@ -484,6 +484,7 @@ input:focus, textarea:focus, select:focus {
    object-fit. A <video> paints its own opaque black into any part of its box the frame doesn't
    cover — no CSS background can clear it — so a page-sized video box would black out the backdrop
    it's meant to sit on. Fitting the box to the frame leaves the gap to the backdrop instead. */
+.post-media .media-page > img:not(.media-backdrop), .post-media .media-page > video,
 .post-media .media-page > img[data-ref], .post-media .media-page > video[data-ref] {
   position: relative; z-index: 1;
   width: auto; height: auto; max-width: 100%; max-height: 100%;

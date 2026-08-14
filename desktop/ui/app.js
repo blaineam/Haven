@@ -5225,11 +5225,31 @@ function igMonth(ms) {
 
 // ---- Running / done / failed ----
 
+/** Update the OPEN running sheet in place. Returns false when it isn't showing (caller redraws).
+ *
+ *  `sheet()` replaces the whole modal — backdrop, card and all — and the import emits a progress
+ *  event for EVERY item, so redrawing the sheet per event tore down and rebuilt the overlay
+ *  hundreds of times over a run. That is the flashing, and it is per-item rather than on the
+ *  feed's 2s cadence, which is what distinguished it from the feed repaint fixed earlier.
+ *  Three nodes actually change; only those are touched. */
+function igUpdateRunning(s) {
+  const root = $("#modal-root");
+  const count = root.querySelector(".ig-big");
+  const bar = root.querySelector(".ig-bar i");
+  if (!count || !bar) return false;
+  const total = Math.max(s.total || 1, 1);
+  count.textContent = String(s.done || 0);
+  bar.style.width = `${Math.round(((s.done || 0) / total) * 100)}%`;
+  const of = root.querySelector(".ig-of");
+  if (of) of.textContent = t("ig_of_n_imported", s.total || 0);
+  return true;
+}
+
 function igRunning(s) {
   const total = Math.max(s.total || 1, 1);
   return el("div", { class: "col", style: "gap:14px;align-items:center;text-align:center;padding:12px 0" },
     el("div", { class: "ig-big" }, String(s.done || 0)),
-    el("div", { class: "muted" }, t("ig_of_n_imported", s.total || 0)),
+    el("div", { class: "muted ig-of" }, t("ig_of_n_imported", s.total || 0)),
     el("div", { class: "ig-bar" }, el("i", { style: `width:${Math.round(((s.done || 0) / total) * 100)}%` })),
     el("div", { class: "muted small", style: "max-width:34ch" }, t("ig_encrypted_here")),
     // The import does not need this screen — it runs on its own thread, keeps going while Haven is
@@ -6840,9 +6860,14 @@ async function boot() {
   // thing the frontend does is reflect it: keep the floating pill current, and redraw the importer
   // sheet if that is what the user happens to be looking at.
   listen("haven:import", (e) => {
+    const prevPhase = IG.status && IG.status.phase;
     IG.status = e.payload || null;
     renderImportPill(IG.status);
-    if (igSheetOpen()) drawInstagramSheet();
+    if (!igSheetOpen()) return;
+    // Progress ticks update the open sheet IN PLACE; only a phase change earns a rebuild.
+    if (IG.status && IG.status.phase === "importing" && prevPhase === "importing"
+        && igUpdateRunning(IG.status)) return;
+    drawInstagramSheet();
   });
   // A resumed import (see igimport::resume_if_needed) starts before this webview exists, so the
   // first event can land with nobody listening — ask once at boot rather than showing nothing.

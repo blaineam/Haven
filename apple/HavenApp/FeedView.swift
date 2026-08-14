@@ -2929,12 +2929,14 @@ final class FeedStore: ObservableObject {
         // the entire import and the app looked broken. Never seeing your posts arrive is worse
         // than the list moving occasionally.
         //
-        // A slow floor keeps both: content appears, and it re-diffs a handful of times a minute
-        // instead of once per imported post (which is what made it jump). Arrival animations stay
-        // suppressed for the same reason — see `bulkArriving`.
+        // The floor is now about CPU, not about jumping. `refresh()` re-opens every envelope in the
+        // circle, so doing it per imported post is genuinely expensive — but it was never what moved
+        // the content under the reader. That was cards CHANGING HEIGHT as their media arrived (see
+        // MediaAspectStore and postSingleAspect), which throttling could only make less frequent,
+        // never fix. With heights stable, this can be tight enough that posts appear as they land.
         if InstagramImporter.shared.isRunning {
             let now = Date().timeIntervalSince1970
-            guard now - lastImportRefreshAt > 10 else { return }
+            guard now - lastImportRefreshAt > 2 else { return }
             lastImportRefreshAt = now
         }
         // Snapshot the main-actor state, then run the engine read (`feed()` decodes + re-opens every
@@ -9298,6 +9300,7 @@ struct PostCarouselDots: View {
     // Read pixel dimensions from the file header (ImageIO) — NOT item()?.image.size, which decoded the
     // whole bitmap on the main thread just to get an aspect ratio (a scroll hitch per single-media post).
     if let sz = MediaStore.shared.pixelSize(ref), sz.width > 0, sz.height > 0 {
+        MediaAspectStore.shared.record(ref, aspect: sz.width / sz.height)
         return sz.width / sz.height
     }
     // Full bytes not here yet, but the tiny thumb companion may be — same aspect as the
@@ -9305,8 +9308,21 @@ struct PostCarouselDots: View {
     // the full-size media lands.
     if let t = MediaVariants.thumb(for: ref, in: media),
        let sz = MediaStore.shared.pixelSize(t), sz.width > 0, sz.height > 0 {
+        MediaAspectStore.shared.record(ref, aspect: sz.width / sz.height)
         return sz.width / sz.height
     }
+    // REMEMBERED shape, before the 4:3 guess.
+    //
+    // This function decides a card's HEIGHT, and it used to answer differently over time for the
+    // same post: 4:3 while nothing was on disk, then the true shape once a thumb landed. A card
+    // that changes height is a card that shoves everything below it — and while media is arriving
+    // (an import, a mailbox pull, a fresh join) that is happening constantly, ABOVE the reader as
+    // well as below. That is the feed "jumping around", and no amount of throttling refreshes
+    // addresses it, because the rebuild was never the thing moving the content.
+    //
+    // So once a ref's real shape is known it is remembered, and every later render agrees with the
+    // first one — including after the blob is evicted, which used to snap the card back to 4:3.
+    if let remembered = MediaAspectStore.shared.aspect(ref) { return remembered }
     return 4.0 / 3.0
     }
 

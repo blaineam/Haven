@@ -57,11 +57,18 @@ function toast(msg, onClick) {
   toast._t = setTimeout(() => t.classList.remove("show"), onClick ? 6000 : 2200);
 }
 
+/** Short relative age — "now", "5m", "3h", "2d", "3w", "8mo", "2y". Apple parity
+ *  (relativeTimeShort in FeedView.swift) and Android's the same.
+ *
+ *  This used to fall back to an absolute toLocaleDateString() after a week, which was tolerable
+ *  when a feed only held recent posts and wrong the moment archive imports existed: every one of
+ *  several hundred backdated posts printed a full date while the same post on a phone read "2y".
+ *  The unit keeps getting coarser instead, and months roll over to years at twelve — "32mo" is a
+ *  number nobody converts on sight. */
 function relTime(ms) {
   const n = Number(ms);
   if (!n) return "";
-  const diff = Date.now() - n;
-  const s = Math.floor(diff / 1000);
+  const s = Math.floor((Date.now() - n) / 1000);
   if (s < 60) return t("just_now");
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m`;
@@ -69,7 +76,11 @@ function relTime(ms) {
   if (h < 24) return `${h}h`;
   const d = Math.floor(h / 24);
   if (d < 7) return `${d}d`;
-  return new Date(n).toLocaleDateString();
+  const w = Math.floor(d / 7);
+  if (d < 30) return `${w}w`;
+  const mo = Math.floor(d / 30);
+  if (d < 365) return `${mo}mo`;
+  return `${Math.floor(d / 365)}y`;
 }
 
 function initials(name) {
@@ -2710,13 +2721,43 @@ function postCard(it, circleId, reports = []) {
   }
 
   // NowPlayingPill: a full-width pink-tinted glass capsule under the media.
-  const song = it.music ? el("a", {
-    class: "song-chip glass tint-pink",
-    title: t("open_in_music_app"),
-    onclick: () => { const u = musicLink(it.music); if (u) openExternal(u); },
-  }, el("span", { class: "note" }, icon("music.note")),
-     el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
-       el("strong", {}, it.music.title), " · ", it.music.artist)) : null;
+  //
+  // Matches Apple's pill rather than being a bare link: cover art when the track carries any, the
+  // title/artist, a speaker reflecting the global sound setting, and a SMALL dedicated button to
+  // open the song. The open action is deliberately not the whole chip — on Apple that is explicitly
+  // so a stray click mutes instead of yanking the user out to another app.
+  const song = it.music ? (() => {
+    const art = musicArtwork(it.music);
+    const chip = el("div", { class: "song-chip glass tint-pink" });
+    chip.append(art
+      ? el("img", { src: art, class: "song-art", alt: "", loading: "lazy", decoding: "async" })
+      : el("span", { class: "note" }, icon("music.note")));
+    chip.append(el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
+      el("strong", {}, it.music.title), it.music.artist ? " · " + it.music.artist : ""));
+    // Sound toggle. Desktop does not play the song itself (see storySongChip), so this governs what
+    // you can actually hear from a post — its video's audio — and the glyph says which way it is.
+    const sound = el("button", {
+      class: "song-sound",
+      title: state.videoSoundOn ? t("mute_all_videos") : t("unmute_all_videos"),
+      onclick: async (e) => {
+        e.stopPropagation();
+        state.videoSoundOn = !state.videoSoundOn;
+        await invoke("set_video_sound", { on: state.videoSoundOn }).catch(() => {});
+        syncFeedVideoSound();
+        renderFeed();
+      },
+    }, icon(state.videoSoundOn ? "speaker" : "speaker.slash"));
+    chip.append(sound);
+    const url = musicLink(it.music);
+    if (url) {
+      chip.append(el("button", {
+        class: "song-open",
+        title: t("open_in_music_app"),
+        onclick: (e) => { e.stopPropagation(); openExternal(url); },
+      }, icon("arrow.up.forward.app")));
+    }
+    return chip;
+  })() : null;
 
   // macOS `reactionsRow`: chips left (glass capsules, pink-tinted when they're yours, capped at
   // four so a post can't flood the row), quick-react emoji + `＋` pinned right.
@@ -3406,6 +3447,21 @@ function addStoryDialog() {
  *  tested for `^https?:` and gave up otherwise were therefore DEAD on every iPhone-authored post —
  *  the majority of them. A catalog id we can't linkify falls back to a search for title + artist,
  *  which is what Android's "Listen on" menu already does. */
+/** The artwork URL for a track, ignoring anything else riding in that field.
+ *
+ *  TrackRef has no field for a story's chosen section, so Apple encodes it into artwork_url as
+ *  "start:<ms>" — and, since suggestions started carrying real artwork, as "start:<ms>;<url>". A URL
+ *  can neither begin with "start:" nor contain an unescaped ";", so the split is unambiguous. Without
+ *  this, a story song authored on an iPhone hands desktop a string that is not a URL and the chip
+ *  renders no art at all.
+ */
+function musicArtwork(m) {
+  const raw = (m && m.artwork_url) || "";
+  if (!raw.startsWith("start:")) return raw;
+  const semi = raw.indexOf(";");
+  return semi > 0 ? raw.slice(semi + 1) : "";
+}
+
 function musicLink(m) {
   if (!m) return null;
   if (m.catalog_id && /^https?:/.test(m.catalog_id)) return m.catalog_id;

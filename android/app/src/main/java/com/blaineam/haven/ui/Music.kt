@@ -58,7 +58,17 @@ import uniffi.haven_ffi.TrackRefFfi
 private val artCache = mutableStateMapOf<String, ImageBitmap?>()
 
 @Composable
-fun rememberArtwork(url: String?): ImageBitmap? {
+fun rememberArtwork(raw: String?): ImageBitmap? {
+    // TrackRef has no field for a story's chosen section, so Apple encodes it into artworkUrl as
+    // "start:<ms>" — and, since suggestions started carrying real artwork, as "start:<ms>;<url>".
+    // A URL can neither begin with "start:" nor contain an unescaped ";", so the split is
+    // unambiguous. Stripped HERE because every caller goes through this one function: without it a
+    // story song authored on an iPhone hands us a string that is not a URL, URL() throws, and the
+    // chip silently shows no art.
+    val url = raw?.let {
+        if (!it.startsWith("start:")) it
+        else it.substringAfter(';', "")
+    }
     if (url.isNullOrBlank()) return null
     var bmp by remember(url) { mutableStateOf(artCache[url]) }
     LaunchedEffect(url) {

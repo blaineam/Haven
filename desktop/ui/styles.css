@@ -557,6 +557,20 @@ input:focus, textarea:focus, select:focus {
 }
 .song-chip:active { transform: scale(0.99); }
 .song-chip .note { width: 22px; height: 22px; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; }
+/* Cover art when the track carries any — same footprint as the note glyph it replaces, so a chip
+   with art and one without are the same height. */
+.song-art {
+  width: 26px; height: 26px; flex: 0 0 auto; border-radius: 6px; object-fit: cover;
+  background: rgba(127, 127, 127, 0.18);
+}
+/* The two small controls. Deliberately small and separate: the chip's own surface stays a safe
+   place to click, so a stray click never yanks the user out to another app. */
+.song-sound, .song-open {
+  flex: 0 0 auto; background: transparent; border: 0; color: var(--muted);
+  padding: 3px; border-radius: 8px; line-height: 0; cursor: pointer; transition: color .18s;
+}
+.song-sound:hover, .song-open:hover { color: var(--text); }
+.song-open { color: var(--brand-pink, #e0308a); }
 .kebab {
   margin-left: auto; background: transparent; border: 0; color: var(--muted); font-size: 17px;
   padding: 4px 8px; border-radius: 8px; line-height: 1; transition: color .2s;

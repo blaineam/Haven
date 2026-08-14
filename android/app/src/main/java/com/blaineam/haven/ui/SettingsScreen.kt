@@ -115,15 +115,20 @@ fun SettingsScreen(onBack: () -> Unit) {
         // "Manage media" owns its own LazyColumn scroll, so it must NOT sit inside this verticalScroll
         // (nesting a lazy list in a scrollable column throws on the infinite-height constraint).
         val manageMedia = section == "managemedia"
-        // Insets BEFORE the scroll, so they shrink the viewport rather than pad the content: the
-        // last row then scrolls fully clear of the gesture bar instead of stopping underneath it.
-        // This Dialog sets decorFitsSystemWindows=false (see FullScreenOverlay), which is what makes
-        // these requests audible at all — without that they are silent no-ops.
+        // Bottom padding on the CONTENT (after the scroll), not on the viewport.
+        //
+        // navigationBarsPadding() before verticalScroll was tried and did nothing: inside a Dialog
+        // the reported inset is frequently zero, so shrinking the viewport by it shrinks it by
+        // nothing and the last row still ends under the gesture bar. Padding the scrollable content
+        // is scrollable space regardless of what the inset reports, which is the property needed
+        // here. navigationBarsPadding() stays as well, so a device that DOES report a taller bar
+        // (three-button nav) gets that too.
         Column(Modifier.fillMaxSize()
             .statusBarsPadding()
-            .navigationBarsPadding()
             .then(if (manageMedia) Modifier else Modifier.verticalScroll(rememberScrollState()))
-            .padding(20.dp)) {
+            .navigationBarsPadding()
+            .padding(20.dp)
+            .padding(bottom = 56.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable {
                     // "Manage media" is nested under Connection — back returns there, not to the top.

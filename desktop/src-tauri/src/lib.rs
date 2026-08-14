@@ -11,6 +11,7 @@ mod demo;
 mod engine;
 // The Instagram "Download your information" importer: archive parser, song suggester, runner.
 // Apple parity — apple/HavenApp/Instagram{Archive,Importer,ImportView}.swift.
+mod igencode;
 mod igimport;
 mod instagram;
 mod localmedia;
@@ -599,6 +600,7 @@ pub fn run() {
             commands::instagram_cancel,
             commands::instagram_resume,
             commands::instagram_reset,
+            commands::instagram_encoded,
             commands::set_foreground,
             commands::reset,
         ])

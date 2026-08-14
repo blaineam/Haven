@@ -2062,10 +2062,15 @@ const fmtMB = (b) => (b >= 1024 * 1024 * 1024 ? (b / 1024 / 1024 / 1024).toFixed
 
 /** Gate a source file BEFORE anything is sealed. Returns true to proceed; toasts and returns false
  *  to refuse. Size only — duration needs the decoder, so it's checked inside the video re-encode. */
+// Set while the importer is driving these helpers. A refusal is per-FILE, and an archive holds
+// hundreds — toasting each one would bury the screen in notices about photos the user never picked
+// and cannot act on. The import's own reporting (skipped counts) is the right channel for that.
+let mediaQuiet = false;
+
 function mediaSourceAllowed(sizeBytes, isVideo, label) {
   const cap = isVideo ? MEDIA_TARGETS.MAX_SOURCE_BYTES_VIDEO : MEDIA_TARGETS.MAX_SOURCE_BYTES_STILL;
   if (sizeBytes > cap) {
-    toast(t("file_too_large", label || t("that_file"), fmtMB(sizeBytes), isVideo ? t("videos_word") : t("photos_word"), fmtMB(cap)));
+    if (!mediaQuiet) toast(t("file_too_large", label || t("that_file"), fmtMB(sizeBytes), isVideo ? t("videos_word") : t("photos_word"), fmtMB(cap)));
     return false;
   }
   return true;
@@ -2234,7 +2239,7 @@ async function sanitizeMediaFile(f, isVideo) {
     return isVideo ? await optimizeVideoStrippingMetadata(f) : await imageToJpegBase64(f);
   } catch (e) {
     // optimizeVideoStrippingMetadata already toasted its own reason for refusing/failing.
-    if (!isVideo) toast(t("couldnt_attach", e));
+    if (!isVideo && !mediaQuiet) toast(t("couldnt_attach", e));
     return null;
   }
 }
@@ -2274,6 +2279,51 @@ async function mintThumb(b64, circleId) {
     if (data.length * 0.75 > 48 * 1024) return null;
     return await invoke("add_media", { circleId, dataBase64: data.split(",")[1], isVideo: false });
   } catch (_) { return null; }
+}
+
+/** A POSTER STILL for an already-sealed clip, as bare base64 JPEG — or null.
+ *
+ *  Reads the sealed bytes back through `media_data_url` rather than being handed the clip, so a
+ *  large reel never crosses the bridge (see igencode.rs). Seeking is what makes a frame drawable:
+ *  `loadeddata` promises decoded data, not painted data, and drawing there yields a BLACK
+ *  rectangle — the same trap `stillFrom` documents for feed backdrops. 0.1s rather than 0 because
+ *  the very first frame of a phone video is often black while exposure settles.
+ *
+ *  Everything is torn down on the way out, including on failure: this runs once per imported video,
+ *  and a leaked <video> holding a multi-megabyte object URL would accumulate across a whole run. */
+async function posterFromVideoRef(circleId, ref) {
+  const url = await invoke("media_data_url", { circleId, reference: ref }).catch(() => null);
+  if (!url) return null;
+  const v = el("video", { src: url, muted: "", playsinline: "", preload: "auto" });
+  v.style.cssText = "position:fixed;left:-9999px;top:0;width:2px;height:2px";
+  document.body.append(v);
+  try {
+    await new Promise((res, rej) => {
+      const done = () => { v.removeEventListener("seeked", done); res(); };
+      v.addEventListener("seeked", done);
+      v.addEventListener("error", rej, { once: true });
+      v.addEventListener("loadedmetadata", () => {
+        // Clamp: a clip shorter than the seek target never fires `seeked` at all.
+        v.currentTime = Math.min(0.1, Math.max(0, (v.duration || 0) - 0.05));
+      }, { once: true });
+      setTimeout(rej, 20000);   // a codec this WebView cannot decode simply yields no poster
+    });
+    const w = v.videoWidth, h = v.videoHeight;
+    if (!w || !h) return null;
+    const scale = Math.min(1, 1080 / Math.max(w, h));
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(w * scale));
+    c.height = Math.max(1, Math.round(h * scale));
+    c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+    return c.toDataURL("image/jpeg", 0.72).split(",")[1] || null;
+  } catch (_) {
+    return null;
+  } finally {
+    v.pause();
+    v.removeAttribute("src");
+    v.load();          // drops the decoder's hold on the data URL
+    v.remove();
+  }
 }
 
 /** The composed media array for a post/DM: attachment refs in order, then a `thumb:<ref>:<thumbRef>`
@@ -3080,14 +3130,111 @@ function postMenu(anchor, it, circleId) {
   ], { align: "right" });
 }
 
+/** FULL post editor — text, attachments, song and location. Apple parity: `EditPost.swift`.
+ *
+ *  Desktop's editor used to be a bare textarea that passed the post's media and music straight back
+ *  untouched. That was deliberate and defensive (an edit REPLACES the arrays rather than merging, so
+ *  omitting them deletes everyone's copies) but it left desktop unable to do things Apple has always
+ *  offered: drop a photo from a post, add one, swap the song, or take the location off.
+ *
+ *  Companion markers are the sharp edge here. `thumb:`/`poster:`/`orig:` name their parent ref, so
+ *  removing a photo without removing its markers leaves entries pointing at media the post no longer
+ *  carries — `dropRef` is what keeps the array honest. */
 function editPostDialog(it, circleId) {
-  const ta = el("textarea", {}, );
-  ta.value = it.body;
-  modal(el("div", {}, el("h2", {}, t("edit_post")), ta,
+  let media = [...(it.media || [])];
+  let music = it.music || null;
+  let muteVideo = !!it.mute_video;
+
+  const ta = el("textarea", { class: "composer-field glass", rows: 3, style: "width:100%" });
+  ta.value = it.body || "";
+  const strip = el("div", { class: "attach-preview" });
+  const musicRow = el("div", {});
+  const fileInput = el("input", { type: "file", accept: "image/*,video/*", multiple: "", style: "display:none" });
+
+  // A ref and everything that rides with it. Markers are `scheme:<parent>:<child>`, so both the
+  // parent and any marker naming it go — and the child blob is dropped from the array too.
+  const dropRef = (ref) => {
+    const doomed = new Set([ref]);
+    for (const r of media) {
+      const i = r.indexOf(":");
+      if (i <= 1) continue;                       // not a marker (a bare ref has no scheme)
+      const rest = r.slice(i + 1), c = rest.lastIndexOf(":");
+      if (c > 0 && rest.slice(0, c) === ref) { doomed.add(r); doomed.add(rest.slice(c + 1)); }
+    }
+    media = media.filter((r) => !doomed.has(r));
+    draw();
+  };
+
+  const draw = () => {
+    strip.replaceChildren();
+    for (const ref of media) {
+      const geo = parseGeo(ref);
+      if (geo) {
+        // The location is a synthetic `geo:` ref rather than a file, so it gets a chip — otherwise
+        // there is no way to take a location back off a post.
+        strip.append(el("div", { class: "chip", style: "width:auto;padding:0 8px" },
+          el("span", { class: "muted small" }, "📍 " + (geo.label || t("location"))),
+          el("span", { class: "x", onclick: () => dropRef(ref) }, "×")));
+        continue;
+      }
+      if (isSyntheticMedia(ref)) continue;        // markers ride with their parent, never shown
+      const node = isVideoRef(ref)
+        ? el("video", { "data-ref": ref, muted: "" })
+        : el("img", { "data-ref": ref });
+      strip.append(el("div", { class: "chip" }, node, el("span", { class: "x", onclick: () => dropRef(ref) }, "×")));
+    }
+    hydrateMedia(strip, circleId);
+    const hasVideo = media.some(isVideoRef);
+    muteBtn.style.display = hasVideo && !music ? "" : "none";
+    musicRow.replaceChildren(music
+      ? el("div", { class: "song-chip", style: "margin-top:0" },
+          el("span", { class: "note" }, icon("music.note")),
+          el("div", { style: "flex:1;min-width:0" }, el("strong", {}, music.title), " — ", music.artist),
+          el("span", { class: "x", style: "position:static;cursor:pointer",
+                       onclick: () => { music = null; draw(); } }, "×"))
+      : null);
+  };
+
+  const muteBtn = el("button", { class: "btn small ghost", style: "display:none", onclick: () => {
+    muteVideo = !muteVideo;
+    muteBtn.textContent = muteVideo ? t("video_muted") : t("mute_video");
+    muteBtn.classList.toggle("primary", muteVideo);
+  } }, muteVideo ? t("video_muted") : t("mute_video"));
+  if (muteVideo) muteBtn.classList.add("primary");
+
+  fileInput.addEventListener("change", async (e) => {
+    for (const f of e.target.files) {
+      const isVideo = f.type.startsWith("video");
+      const b64 = await sanitizeMediaFile(f, isVideo);
+      if (b64 === null) continue;
+      try {
+        const ref = await invoke("add_media", { circleId, dataBase64: b64, isVideo });
+        media.push(ref);
+        if (!isVideo) {
+          const th = await mintThumb(b64, circleId);
+          if (th) media.push(`thumb:${ref}:${th}`);
+        }
+        draw();
+      } catch (err) { toast(t("couldnt_attach", err)); }
+    }
+    fileInput.value = "";
+  });
+
+  draw();
+  modal(el("div", {}, el("h2", {}, t("edit_post")), ta, strip, musicRow,
+    el("div", { class: "row wrap", style: "gap:8px;margin-top:10px" },
+      el("button", { class: "btn", onclick: () => fileInput.click() }, icon("photo"), t("photo_or_video")),
+      el("button", { class: "btn", onclick: () => musicDialog((m) => { music = m; draw(); }) },
+        icon("music.note"), music ? t("change") : t("add_a_song")),
+      muteBtn, fileInput),
     el("div", { class: "row", style: "margin-top:12px;justify-content:flex-end" },
-      // media/music are passed back UNCHANGED: an edit replaces the arrays rather than merging, so
-      // omitting them here deleted every photo and song off the post for the whole circle.
-      el("button", { class: "btn primary", onclick: async () => { await invoke("edit_post", { circleId, target: it.id, body: ta.value.trim(), media: it.media || [], music: it.music || null }); $("#modal-root").replaceChildren(); } }, t("save")))));
+      el("button", { class: "btn primary", onclick: async () => {
+        await invoke("edit_post", {
+          circleId, target: it.id, body: ta.value.trim(),
+          media, music, muteVideo,
+        });
+        $("#modal-root").replaceChildren();
+      } }, t("save")))));
 }
 
 function newCircleDialog() {
@@ -6856,6 +7003,47 @@ async function boot() {
   };
   listen("haven:deep-link", drainDeepLinks);
   drainDeepLinks();
+  // THE IMPORTER BORROWING THIS WEBVIEW'S ENCODER (see src-tauri/src/igencode.rs).
+  //
+  // The import thread has no codec — this process's only one is here — so it hands stills over to
+  // be optimized and asks for a poster for each sealed clip. Both go through the SAME helpers the
+  // composer uses, so imported media ends up indistinguishable from media posted by hand: the same
+  // downscale, the same metadata-stripping re-encode, the same `thumb:`/`poster:` companions.
+  //
+  // Answering is mandatory. The import thread is blocked on a channel until this replies, and every
+  // path below — refusal, decode failure, an exception — answers with `refs: null`, which tells it
+  // to seal the raw archive bytes and carry on. Never leave the thread waiting on silence.
+  listen("haven:ig-encode", async (e) => {
+    const p = e.payload || {};
+    const answer = (refs) => invoke("instagram_encoded", { job: p.job, refs: refs || null }).catch(() => {});
+    try {
+      if (p.kind === "image") {
+        // A File, because sanitizeMediaFile enforces the size/type policy on one — the same gate a
+        // dropped or picked photo passes through.
+        const bin = atob(p.dataBase64 || "");
+        const buf = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+        const file = new File([buf], "import.jpg", { type: "image/jpeg" });
+        mediaQuiet = true;
+        let b64;
+        try { b64 = await sanitizeMediaFile(file, false); } finally { mediaQuiet = false; }
+        if (!b64) return answer(null);                      // refused (oversize/unreadable) → raw
+        const ref = await invoke("add_media", { circleId: p.circleId, dataBase64: b64, isVideo: false });
+        const thumb = await mintThumb(b64, p.circleId);      // null when the photo is already tiny
+        return answer(thumb ? [ref, `thumb:${ref}:${thumb}`] : [ref]);
+      }
+      if (p.kind === "poster") {
+        const still = await posterFromVideoRef(p.circleId, p.ref);
+        if (!still) return answer(null);
+        const ref = await invoke("add_media", { circleId: p.circleId, dataBase64: still, isVideo: false });
+        return answer([`poster:${p.ref}:${ref}`]);
+      }
+      answer(null);
+    } catch (_) {
+      answer(null);
+    }
+  });
+
   // Instagram archive import progress. The run lives in Rust and outlives every view, so the ONLY
   // thing the frontend does is reflect it: keep the floating pill current, and redraw the importer
   // sheet if that is what the user happens to be looking at.

@@ -400,8 +400,10 @@ pub fn edit_post(
     // attachments up instead, so a caller that forgets cannot destroy anyone's media.
     media: Option<Vec<String>>,
     music: Option<TrackInput>,
+    // Absent = keep the post's current choice.
+    mute_video: Option<bool>,
 ) {
-    engine.edit_post(circle_id, target, body, media, music.map(|m| m.into_ffi()));
+    engine.edit_post(circle_id, target, body, media, music.map(|m| m.into_ffi()), mute_video);
 }
 
 #[tauri::command]
@@ -1665,6 +1667,16 @@ pub fn instagram_run(
         match_songs.unwrap_or(false),
         0,
     );
+}
+
+/// The frontend answering an `haven:ig-encode` request (see `igencode`).
+///
+/// `refs` absent or null means "could not" — the import seals the raw archive bytes instead, which
+/// is what it did before the WebView was ever asked. Never an error path: a frontend that is busy,
+/// closed, or refused the file must degrade the import, not fail it.
+#[tauri::command]
+pub fn instagram_encoded(job: u64, refs: Option<Vec<String>>) {
+    crate::igencode::fulfill(job, refs);
 }
 
 /// Stop — really "pause". The checkpoint is KEPT, so reopening the importer carries on from here.

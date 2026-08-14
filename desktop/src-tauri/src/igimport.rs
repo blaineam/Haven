@@ -499,14 +499,31 @@ fn stage(
             }
             if let Some(r) = engine.add_local_media_file(circle_id, &scratch.to_string_lossy(), true)
             {
+                // POSTER. Sealed first, asked about second — see `igencode`: the clip is never
+                // shipped to the WebView (a reel would become a base64 string a third larger than
+                // itself) and is never re-encoded. The WebView reads the sealed ref back and
+                // returns a still, which is what a story ring and a video tile draw before play.
+                // Without it, imported video reaches every platform with nothing to show.
+                let poster = crate::igencode::poster(engine, circle_id, &r);
                 refs.push(r);
+                if let Some(extra) = poster {
+                    refs.extend(extra);
+                }
             } else {
                 log::warn!("ig-import: video stage failed for {name}");
             }
             let _ = std::fs::remove_file(&scratch);
         } else {
             let Some(bytes) = zip.read(name) else { continue };
-            refs.push(engine.add_local_media(circle_id, &bytes, false));
+            // AUTO-OPTIMIZE. The WebView owns the only encoder this app has, so the still goes
+            // there to be downscaled, re-encoded and given its ≤32 KB `thumb:` companion, exactly
+            // as a photo dropped into the composer is. It comes back as refs already stored.
+            // Falling back to sealing the archive bytes is the old behaviour, and is what happens
+            // if the window is closed or the frontend refuses the file.
+            match crate::igencode::image(engine, circle_id, &bytes) {
+                Some(encoded) if !encoded.is_empty() => refs.extend(encoded),
+                _ => refs.push(engine.add_local_media(circle_id, &bytes, false)),
+            }
         }
     }
     (refs, any_audio)

@@ -133,6 +133,8 @@
     "write_something_first": "Write something first",
     "scheduled_toast": "Scheduled",
     "photo_or_video": "Photo or Video",
+    "change": "Change",
+    "location": "Location",
     "camera": "Camera",
     "voice": "Voice",
     "add_a_song": "Add a song",

@@ -3661,6 +3661,10 @@ impl Engine {
         body: String,
         media: Option<Vec<String>>,
         music: Option<TrackRefFfi>,
+        // None = keep whatever the post already had. Passing an explicit media array used to force
+        // this to false, so editing a caption silently un-muted the post's video for the whole
+        // circle — a setting the author chose, changed by an edit that never mentioned it.
+        mute_video: Option<bool>,
     ) {
         // `reoptimize_targets` lists every one of my items that carries media (it is NOT filtered to
         // oversized ones — that happens later), so "absent" genuinely means "carries none".
@@ -3669,9 +3673,15 @@ impl Engine {
             .into_iter()
             .find(|t| t.circle_id == circle_id && t.event_id == target);
         let (media, music, mute_video) = match (media, looked_up) {
-            (Some(m), found) => (m, music.or_else(|| found.and_then(|t| t.music)), false),
-            (None, Some(t)) => (t.media, t.music, t.mute_video),
-            (None, None) => (vec![], None, false),
+            (Some(m), found) => {
+                let carried = found.as_ref().map(|t| t.mute_video).unwrap_or(false);
+                (m, music.or_else(|| found.and_then(|t| t.music)), mute_video.unwrap_or(carried))
+            }
+            (None, Some(t)) => {
+                let carried = t.mute_video;
+                (t.media, t.music, mute_video.unwrap_or(carried))
+            }
+            (None, None) => (vec![], None, mute_video.unwrap_or(false)),
         };
         if let Ok(env) =
             self.social.edit(circle_id.clone(), target, body, media, music, mute_video, now_ms())

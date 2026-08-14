@@ -352,7 +352,7 @@ pub fn run() {
         // A URI scheme hands WebKit the raw bytes instead: no base64, no IPC string, and the decode
         // happens on its own media pipeline rather than in JS. The command stays for the callers
         // that genuinely want bytes in hand (thumb minting, the poster round trip).
-        .register_uri_scheme_protocol("havenmedia", |ctx, req| {
+        .register_asynchronous_uri_scheme_protocol("havenmedia", |ctx, req, responder| {
             use tauri::http::{Response, StatusCode};
             // havenmedia://localhost/<circle>/<ref>  — the host is meaningless on macOS/Linux and
             // mandatory on Windows, so the path is read from the END rather than by position.
@@ -362,11 +362,27 @@ pub fn run() {
                     percent_decode(c),
                     percent_decode(r),
                 ),
-                None => return Response::builder().status(StatusCode::BAD_REQUEST).body(Vec::new()).unwrap(),
+                // The closure returns () now that the response goes through the responder.
+                None => {
+                    responder.respond(
+                        Response::builder().status(StatusCode::BAD_REQUEST).body(Vec::new()).unwrap(),
+                    );
+                    return;
+                }
             };
-            let engine = ctx.app_handle().state::<std::sync::Arc<crate::engine::Engine>>();
+            // OFF THE MAIN THREAD. The synchronous form of this hook runs on the UI thread, and
+            // `media_bytes` is a full AEAD open of the whole blob — so hydrating a page of media
+            // froze the window outright, worst of all at launch when the first cards all resolve at
+            // once. The asynchronous form lets the decrypt happen on a worker and the response come
+            // back whenever it is ready, which is what a media fetch should always have been.
+            let engine = ctx
+                .app_handle()
+                .state::<std::sync::Arc<crate::engine::Engine>>()
+                .inner()
+                .clone();
             let cid = if circle.is_empty() { crate::engine::DEFAULT_CIRCLE.to_string() } else { circle };
-            match engine.media_bytes(&cid, &reference) {
+            std::thread::spawn(move || {
+            let out = match engine.media_bytes(&cid, &reference) {
                 Some(bytes) => {
                     let mime = if crate::localmedia::LocalMedia::is_video(&reference) {
                         "video/mp4".to_string()
@@ -389,7 +405,9 @@ pub fn run() {
                 // Absent (evicted, or still syncing) — the frontend's `onerror` falls back to the
                 // placeholder path, which is the same branch the null data URL used to take.
                 None => Response::builder().status(StatusCode::NOT_FOUND).body(Vec::new()).unwrap(),
-            }
+            };
+            responder.respond(out);
+            });
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())

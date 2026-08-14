@@ -1117,7 +1117,8 @@ async function renderFeed() {
     // Global video mute — macOS puts this on the media itself; on a pointer-driven desktop feed a
     // single always-visible control beats a per-card overlay. Circular, like every other control.
     el("button", {
-      class: "icon-btn glass", title: state.videoSoundOn ? t("mute_all_videos") : t("unmute_all_videos"),
+      class: "icon-btn glass", "data-sound-toggle": "1",
+      title: state.videoSoundOn ? t("mute_all_videos") : t("unmute_all_videos"),
       onclick: async () => {
         state.videoSoundOn = !state.videoSoundOn;
         await invoke("set_video_sound", { on: state.videoSoundOn }).catch(() => {});
@@ -1991,7 +1992,21 @@ function mediaNode(ref, imgStyle) {
     // TAP A MUTED CLIP TO HEAR IT. When a song owns the post the clip plays silent, and the tap is
     // how the reader says "this one instead" — the song ducks out and the clip's own audio takes
     // over. The video itself is the target, exactly as on iOS, so there is no extra control.
-    v.addEventListener("click", () => { if (v.muted) Autoplay.duck(v); });
+    v.addEventListener("click", () => {
+      if (!v.muted) return;
+      // A song post DUCKS to the clip. A post without one has nothing to duck from, and `duck`
+      // returned false there — so tapping a muted video on an ordinary post did nothing at all,
+      // while its controls showed full volume (the element is MUTED; the slider reads `volume`,
+      // which never moved). Turn the sound on instead, which is what a tap plainly means.
+      if (Autoplay.duck(v)) return;
+      Autoplay.enableSound(v);
+    });
+    // The native controls carry their own mute button. Without this the coordinator re-asserted
+    // `muted` on the next scroll and silently undid it a frame later.
+    v.addEventListener("volumechange", () => {
+      if (adoptingSound || v.muted || state.videoSoundOn) return;
+      Autoplay.enableSound(v);
+    });
     // SCRUBBING vs PAGING. The bottom strip of a video is its scrub bar; the carousel is a
     // scroll-snap track, so a horizontal drag anywhere over the clip pages the carousel instead of
     // seeking — the control is there and cannot be used. A drag that STARTS low belongs to the
@@ -6589,6 +6604,10 @@ function beginCapture(onDismiss) {
 // SUPER DATA SAVER IS THE ONLY KILL SWITCH, matching Apple: it never autoplays anything and only
 // loads the poster still. Everything else — the sound toggle, a call, a capture — controls whether
 // the clip is AUDIBLE, not whether it moves.
+// Set while WE are changing `muted`, so the volumechange listener above can tell the user's
+// intent from our own bookkeeping — ducking unmutes one clip and must not be read as "sound on".
+let adoptingSound = false;
+
 const Autoplay = {
   current: null,
   suspended() {
@@ -6645,6 +6664,18 @@ const Autoplay = {
   /** Posts whose clip the reader chose over the attached song. */
   ducked: new Set(),
 
+  /** Unmute — globally, matching Apple, where unmuting one post unmutes the feed. Persisted, so it
+   *  survives a relaunch the way the header toggle does. */
+  async enableSound(video) {
+    state.videoSoundOn = true;
+    adoptingSound = true;
+    try {
+      await invoke("set_video_sound", { on: true }).catch(() => {});
+      syncFeedVideoSound();
+      if (video) video.muted = false;
+    } finally { adoptingSound = false; }
+  },
+
   /** Tapping a MUTED clip means "let me hear this one" — Apple's behaviour, and the reason the tap
    *  target is the video rather than a separate control. Only for a clip actually carrying audio and
    *  not muted by its author: for those two there is nothing to duck TO, and stopping the song would
@@ -6656,7 +6687,9 @@ const Autoplay = {
     if (!videoHasAudio(video)) return false;
     this.ducked.add(card.dataset.post);
     this.song.stop();
+    adoptingSound = true;
     video.muted = false;
+    adoptingSound = false;
     return true;
   },
 
@@ -6725,6 +6758,13 @@ function pauseFeedMedia() {
  *  transition, when capture opens/closes, and by mediaNode for newly-rendered videos. */
 function syncFeedVideoSound() {
   document.querySelectorAll("video[data-video]").forEach((v) => { v.muted = callAudioActive() || captureUIOpen() || !state.videoSoundOn; });
+  // The header speaker has to agree. Sound can now be turned on by tapping a clip or by its own
+  // native control, and re-rendering the whole feed just to repaint one glyph would restart every
+  // video on the screen.
+  document.querySelectorAll("[data-sound-toggle]").forEach((b) => {
+    b.title = state.videoSoundOn ? t("mute_all_videos") : t("unmute_all_videos");
+    b.replaceChildren(icon(state.videoSoundOn ? "speaker" : "speaker.slash"));
+  });
 }
 
 const invitees = () => [...call.roster].filter((h) => h !== call.me).sort();

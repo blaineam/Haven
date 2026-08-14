@@ -5018,6 +5018,14 @@ final class FeedStore: ObservableObject {
         social.setMlsKeying(on: true)
         // §4 seed-drop retirement — PRIMARY only (a seedless device holds no bare account key to drop).
         if !seedless { social.setSeedDropRetire(on: true) }
+        // MY OWN posts are exempt from the auto-delete window. That window exists so a member's disk
+        // is not filled by OTHER people's history — my own feed is my archive, and aging it out is
+        // data loss rather than a storage policy. The core has always honoured this in
+        // `purge_expired`, and documents the app as owning the toggle, but no platform ever called
+        // it, so it was false everywhere. Apple only escaped the consequence because its retention
+        // is per-circle and defaults to off; desktop applies one global window and silently ate an
+        // entire backdated Instagram import.
+        social.setKeepOwnPosts(on: true)
         // §2 creator authority root + §5 DM live-ratchet lanes, re-marked for every current circle.
         let myHex = social.myNodeHex()
         for c in social.circles() {

@@ -547,6 +547,11 @@ object HavenNet : InboundListener {
         // retirement switch, but every device mirrors the self-sync rotation intent (a reader-side op).
         SelfSyncKeyStore.retireSwitchOn = true
         if (!core.seedless) runCatching { social.setSeedDropRetire(true) }
+        // My OWN posts are exempt from the auto-delete window: that window is there so a member's
+        // disk is not filled by OTHER people's history, and my own feed is my archive. Honoured by
+        // `purge_expired` in core since forever, owned by the app — and never once set by any
+        // platform, which is how a backdated archive import could be purged the moment it landed.
+        runCatching { social.setKeepOwnPosts(true) }
         // §2 + §5 — per-circle re-application.
         val created = createdCircles()
         for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {

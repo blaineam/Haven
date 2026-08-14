@@ -1064,6 +1064,9 @@ const Hidden = {
  *  and the composer floats over the lot as a pill pinned to the bottom (FeedView ▸ composerBar). */
 async function renderFeed() {
   const root = $("#view-circle");
+  // Read BEFORE any await: this function rebuilds the scroller's contents wholesale, and the
+  // position has to be captured while the old content is still there.
+  const keepScroll = root.scrollTop;
   const circles = await invoke("circles");
   const active = circles.find((c) => c.id === state.activeCircle);
   if (!active) state.activeCircle = "default";
@@ -1197,6 +1200,18 @@ async function renderFeed() {
   root.replaceChildren(el("div", { class: "col-wrap" }, list));
   $("#composer-slot").replaceChildren(composer);
   hydrateMedia(root, state.activeCircle);
+  // Put the reader back where they were. `.view` is the scroller and this function replaces its
+  // entire contents, so without this every background refresh — a sync landing, and during an
+  // import a nudge every couple of seconds — throws the reader back to the top. Pages have to be
+  // built back up first: only the first 25 cards exist right after the rebuild, so a deep offset
+  // would otherwise clamp to the bottom of a short list and read as a jump of its own.
+  if (keepScroll > 0) {
+    let guard = 0;
+    while (root.scrollHeight < keepScroll + root.clientHeight && rendered < items.length && guard++ < 60) {
+      renderPage();
+    }
+    root.scrollTop = keepScroll;
+  }
   if (state.focusPost) focusPostCard(root, state.focusPost);   // arrived here from a post link
 }
 
@@ -6699,6 +6714,17 @@ async function boot() {
     state.superDataSaver = !!(pp && pp.super_data_saver);
   } catch (_) { state.superDataSaver = false; }
   listen("haven:changed", async () => {
+    // DURING AN IMPORT, refresh the feed and nothing else.
+    //
+    // The importer nudges roughly every two seconds so the feed visibly fills in. The full path
+    // below re-renders the ENTIRE app — titlebar, tabs, the active view — behind four more
+    // `invoke`s, and paying that ~180 times over a 372-item import is what made the window flash
+    // and stutter for the whole run. None of those four can change because of an import: the posts
+    // are mine, so no status, badge, pin or contact moves. The feed is the only thing that does.
+    if (IG.status && IG.status.running) {
+      if (state.view === "circle") await renderFeed();
+      return; // any other view shows nothing an import changes; rebuilding it is pure flicker
+    }
     await refreshStatus(); await refreshBadges();
     await Pins.load();   // a pin made on the phone lands via self-sync — reflect it live
     try { state.contacts = await invoke("contacts"); } catch (_) {}

@@ -644,6 +644,9 @@ impl Engine {
         // `reapply_crypto_switches` (start()). Docs: `docs/SWITCH-FLIP-1.0.7.md` §3/§4.
         social.set_mls_keying(true);
         social.set_seed_drop_retire(true);
+        // See `reapply_crypto_switches`: my own posts are exempt from the auto-delete window. Set
+        // here too so no feed refresh can run against a false default before `start()`.
+        social.set_keep_own_posts(true);
         let app_activity = load_app_activity(&paths);
         let dyn_state = DynState {
             seen_mailbox: load_seen_mailbox(&paths),
@@ -750,6 +753,9 @@ impl Engine {
         // primary-only op — no `register_device`, `retire_account_leaf`, or roster re-sign.
         social.set_mls_keying(true);
         social.set_seed_drop_retire(true);
+        // See `reapply_crypto_switches`: my own posts are exempt from the auto-delete window. Set
+        // here too so no feed refresh can run against a false default before `start()`.
+        social.set_keep_own_posts(true);
         let prefs = Prefs::load(&paths);
         let media = LocalMedia::new(paths.media_dir());
         let scheduled = crate::scheduled::ScheduledStore::load(&paths.scheduled_file());
@@ -1398,6 +1404,17 @@ impl Engine {
     /// circle is fully capable. Called on every launch (start()) and after create/DM-open.
     fn reapply_crypto_switches(self: &Arc<Self>) {
         self.social.set_mls_keying(true);
+        // MY OWN posts are never aged out by the auto-delete window. The window exists so a member's
+        // disk is not filled by OTHER people's history; my own feed is my archive, and deleting it
+        // is not a storage policy, it is data loss. The core has always supported this
+        // (`keep_own_posts`, honoured by `purge_expired`) and documents the app as owning the
+        // toggle — but no client ever called it, so it sat false everywhere.
+        //
+        // That is what ate the Instagram import: every imported post is backdated years, so the
+        // first feed refresh after publishing purged the lot and freed their blobs. Kept stories
+        // survived only because pinning exempts them, which is exactly why stories were the one
+        // thing that appeared.
+        self.social.set_keep_own_posts(true);
         // Retirement is a fleet-wide gate; a seedless device flips it too (it never runs a
         // primary-only op). Both switches are inert until every member is affirmatively capable.
         self.social.set_seed_drop_retire(true);

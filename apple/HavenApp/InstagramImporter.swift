@@ -184,6 +184,17 @@ final class InstagramImporter: ObservableObject {
                                 includeStories: includeStories, matchSongs: matchSongs, done: startAt))
         }
 
+        // ONE cancellation probe, built HERE rather than inside the task. Written inline at each
+        // call site — or even once inside the detached closure — it captured the task's own weak
+        // `self` binding, which is a mutable local: a warning today, an error under Swift 6. Built
+        // out here it closes over this method's immutable `self`, and the task captures a finished
+        // `let`.
+        let isCancelled: @Sendable () async -> Bool = { [weak self] in
+            // `self` here is the weak BINDING, which counts as a mutable local; the inner
+            // main-actor closure has to capture an immutable copy of it instead.
+            let me = self
+            return await MainActor.run { me?.cancelled ?? true }
+        }
         Task.detached(priority: .userInitiated) { [weak self] in
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -208,15 +219,15 @@ final class InstagramImporter: ObservableObject {
             HavenLog.sync("ig-import: starting \(items.count) items from \(startAt)")
             for (idx, item) in items.enumerated() {
                 if idx < startAt { continue }   // already imported on a previous run
-                if await MainActor.run(body: { [weak self] in self?.cancelled ?? true }) { break }
+                if await isCancelled() { break }
                 let began = Date()
                 let (refs, hasAudio, detected, themes, retryRef) = await Self.stage(
                     item, zip: zip, byName: byName, identify: matchSongs,
-                    isCancelled: { await MainActor.run { [weak self] in self?.cancelled ?? true } })
+                    isCancelled: isCancelled)
                 // Stop means STOP. Staging an item can take a minute (a video transcode), and the
                 // check above happened before all of it — so hitting Stop used to finish the clip
                 // AND publish it, which is not what "stop" looks like from the outside.
-                if await MainActor.run(body: { [weak self] in self?.cancelled ?? true }) { break }
+                if await isCancelled() { break }
                 if hasAudio { audible += 1 }
                 if detected != nil { identified += 1 }
                 if refs.isEmpty {
@@ -256,16 +267,19 @@ final class InstagramImporter: ObservableObject {
                     //
                     // Posts and reels ARE feed content and publish normally (silent + backdated).
                     let identity = Self.keptIdentity(item)
+                    // Frozen before the hop: `music` is a var, and capturing a mutable local in
+                    // concurrently-executing code is a Swift 6 error.
+                    let picked = music
                     await MainActor.run {
                         if kind == .story {
                             KeptStoriesStore.shared.keep(id: identity, body: body, media: refs,
-                                                         createdAt: at, music: music)
+                                                         createdAt: at, music: picked)
                         } else {
                             FeedStore.shared.postImported(circleId: circleId, body: body, media: refs,
-                                                          music: music, story: false, createdAt: at)
+                                                          music: picked, story: false, createdAt: at)
                             // Shazam refused rather than answered — ask again later, against the
                             // post that now exists, instead of losing the credit entirely.
-                            if let retryRef, music == nil,
+                            if let retryRef, picked == nil,
                                let newId = FeedStore.shared.lastImportedPostId {
                                 ShazamRetryQueue.shared.enqueue(postId: newId, circleId: circleId,
                                                                 videoRef: retryRef)
@@ -502,7 +516,9 @@ final class InstagramImporter: ObservableObject {
     /// How long one video may take to stage before the import moves on. Generous — a large clip on a
     /// slow device legitimately takes a while, and skipping a post the user wanted is worse than
     /// waiting — but bounded, which is the part that was missing.
-    private static let videoStageTimeout: Double = 180
+    /// `nonisolated`: read from the nonisolated `stage`, and an implicitly main-actor-isolated
+    /// static cannot be touched from outside the actor.
+    private nonisolated static let videoStageTimeout: Double = 180
 
     private nonisolated static func ext(_ name: String) -> String {
         let e = (name as NSString).pathExtension.lowercased()

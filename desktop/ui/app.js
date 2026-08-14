@@ -1250,6 +1250,12 @@ async function renderFeed() {
     }
     hydrateMedia(list, state.activeCircle);   // only the cards just added resolve their refs
     Autoplay.schedule();                      // a new page may hold the centred post
+    // STOP once everything is rendered. Dropping the old disconnect (so a late tail could still
+    // page in) left the observer live with the sentinel pinned at the end of the list — each
+    // appended page left it in view, so it fired again at once and walked the WHOLE feed in a
+    // single burst. That is both "it isn't lazy loading" and a large part of the stall.
+    // `feedNudge` re-arms it when a tail actually lands.
+    if (rendered >= all.length) feedObserver?.disconnect();
   };
   // Page in a tail that arrived AFTER this feed was built, without a teardown.
   //
@@ -1260,6 +1266,9 @@ async function renderFeed() {
   // and this runs the same "is it near the viewport" test its rootMargin does.
   state.feedNudge = () => {
     if ((state.feedItems || []).length <= rendered) return;
+    // Items exist beyond what is rendered: re-arm the observer (disconnected when the list ran out)
+    // and only page one in if the sentinel is genuinely near the viewport.
+    if (feedObserver) feedObserver.observe(sentinel);
     if (sentinel.getBoundingClientRect().top < window.innerHeight + 800) renderPage();
   };
   let feedObserver = null;
@@ -2115,9 +2124,18 @@ function applyBackdrop(p) {
     if (p.backdrop) { p.backdrop.remove(); p.backdrop = null; }
     return;
   }
-  // The still is produced once (p.poster). A video's may not exist yet — a later trigger retries it.
-  if (!p.poster || p.backdrop) return;
-  p.backdrop = el("img", { class: "media-backdrop", src: p.poster, alt: "", "aria-hidden": "true" });
+  if (p.backdrop) return;
+  // The SAME image, blurred and cropped to fill — not a canvas-derived still.
+  //
+  // That still was produced by drawing the decoded image to a canvas on the MAIN thread, once per
+  // photo, and whenever it failed or had not run yet the page letterboxed onto flat black instead
+  // of extending. Pointing a second <img> at the same URL costs almost nothing now that media
+  // streams through havenmedia:// — the bytes are fetched and decoded already, so the webview
+  // reuses them — and it can never be missing, which is what a blur extension has to be to read as
+  // deliberate rather than as a fault.
+  const src = p.poster || p.node.currentSrc || p.node.src || "";
+  if (!src) return;
+  p.backdrop = el("img", { class: "media-backdrop", src, alt: "", "aria-hidden": "true" });
   p.page.prepend(p.backdrop);
 }
 
@@ -7394,7 +7412,26 @@ async function boot() {
     const pp = await invoke("privacy_prefs");
     state.superDataSaver = !!(pp && pp.super_data_saver);
   } catch (_) { state.superDataSaver = false; }
-  listen("haven:changed", async () => {
+  // Coalesced, and never overlapping. `render()` starts with `invoke("feed")`, which re-opens EVERY
+  // envelope in the circle — with a few hundred imported posts that is seconds of work, and the
+  // engine emits this event from every sync pass, contact greet and media sweep. Firing a fresh
+  // feed read on each one is why the window stalled every couple of seconds with nothing running.
+  //
+  // A trailing debounce collapses a burst into one read, and the in-flight flag stops a slow read
+  // from being overtaken by the next — two concurrent decrypt passes over the same circle was the
+  // worst case and the easiest to hit.
+  let changePending = null, changeRunning = false;
+  const onChanged = async () => {
+    if (changeRunning) { changePending = changePending || setTimeout(fireChanged, 1200); return; }
+    changeRunning = true;
+    try { await applyChanged(); } finally { changeRunning = false; }
+  };
+  const fireChanged = () => { changePending = null; onChanged(); };
+  listen("haven:changed", () => {
+    if (changePending) return;                 // already scheduled — one read will cover both
+    changePending = setTimeout(fireChanged, 400);
+  });
+  const applyChanged = async () => {
     // DURING AN IMPORT, refresh the feed and nothing else.
     //
     // The importer nudges roughly every two seconds so the feed visibly fills in. The full path
@@ -7414,7 +7451,7 @@ async function boot() {
     const ae = document.activeElement;
     if (state.view === "you" && ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA") && $("#view-you").contains(ae)) return;
     await render();
-  });
+  };
   // Haven fabric: circle-hosted DERP (+ TURN for WebRTC media; else STUN). Signaling uses fabric.
   // rebindPending: soft rebind in progress (Engine stops + restarts HavenNode onto Haven RelayMap).
   listen("haven-fabric", (e) => {

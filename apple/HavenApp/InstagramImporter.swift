@@ -299,11 +299,13 @@ final class InstagramImporter: ObservableObject {
                                           identify: Bool,
                                           isCancelled: @Sendable () async -> Bool) async -> ([String], Bool, TrackRefFfi?, [String]) {
         var refs: [String] = []
+        /// Temp clips, removed once identification has finished with them.
+        var scratchFiles: [URL] = []
         /// Does ANY of this post's media make sound? One song plays per post, so a carousel with a
         /// single talking video should not get one layered on top of it.
         var anyAudio = false
-        /// The song Shazam recognised inside that audio, if any — attached as a credit, not a track.
-        var detected: TrackRefFfi?
+        /// Identification running alongside the staging work — see where it is started.
+        var shazamTask: Task<TrackRefFfi?, Never>?
         /// What the post is ABOUT — Vision labels off the first photo, plus caption words. This is
         /// what makes one silent post's suggestion differ from the next one's.
         var themes: [String] = SongSuggester.captionThemes(item.body)
@@ -320,7 +322,9 @@ final class InstagramImporter: ObservableObject {
                 let scratch = FileManager.default.temporaryDirectory
                     .appendingPathComponent("igimport_\(UUID().uuidString).\(ext(name))")
                 guard (try? bytes.write(to: scratch)) != nil else { continue }
-                defer { try? FileManager.default.removeItem(at: scratch) }
+                // NOT removed here: the identification task started below reads this file, and it
+                // outlives this iteration. Cleaned up at the end of the post instead.
+                scratchFiles.append(scratch)
                 // Asked of the real file, before transcoding — "is it a video" and "does it make
                 // sound" are different questions. A screen recording, a time-lapse or a clip muted
                 // before posting is a silent video, and deserves a song as much as a photo does.
@@ -328,20 +332,23 @@ final class InstagramImporter: ObservableObject {
                     anyAudio = true
                     // Identify from the FIRST audible clip only. A carousel shows one chip, and
                     // Shazam-ing every clip in a 20-video album is work with nowhere to go.
-                    if identify, detected == nil {
-                        // 45s, not 20. Generating the signature reads and decodes seconds of audio
-                        // before the catalog is even called, and on a device busy transcoding an
-                        // archive that is not instant — a too-tight bound turns a would-be match
-                        // into a silent miss, which looks exactly like "Shazam didn't run".
-                        let began = Date()
-                        // A real match comes back in about a second; the 45s bound only ever bought
-                        // 11 timeouts and eight wasted minutes in one run. The throttle inside the
-                        // detector may hold a request for its gap, so allow for that plus the work.
-                        let outcome = await withTimeout(40) { await ShazamDetector.identifyDetailed(scratch) }
-                        detected = outcome?.track
-                        let why = outcome?.reason ?? "timed out"
-                        HavenLog.sync("ig-import: shazam \(why) in "
-                            + "\(String(format: "%.1f", Date().timeIntervalSince(began)))s — \(name)")
+                    //
+                    // STARTED HERE, COLLECTED LATER. Identification must never gate the import: it
+                    // is a network call behind a back-off throttle, so on a bad stretch it can sit
+                    // for tens of seconds, and the credit it produces is a nicety while the post
+                    // itself is the point. Kicking it off before the transcode means it runs
+                    // alongside the expensive work and is usually finished for free by the time the
+                    // clip is encoded — and if it isn't, it gets abandoned rather than waited on.
+                    if identify, shazamTask == nil {
+                        let clip = scratch
+                        let label = name
+                        shazamTask = Task.detached(priority: .utility) {
+                            let began = Date()
+                            let outcome = await ShazamDetector.identifyDetailed(clip)
+                            HavenLog.sync("ig-import: shazam \(outcome.reason) in "
+                                + "\(String(format: "%.1f", Date().timeIntervalSince(began)))s — \(label)")
+                            return outcome.track
+                        }
                     }
                 }
                 // forceOptimize: an import is bulk media at someone else's encoder settings —
@@ -375,6 +382,14 @@ final class InstagramImporter: ObservableObject {
                 if let ref { refs.append(ref) }
             }
         }
+        // Collect identification only if it is ready or nearly so. The import does not wait on it:
+        // a missing credit costs a chip, whereas waiting costs every remaining post.
+        var detected: TrackRefFfi?
+        if let shazamTask {
+            detected = await withTimeout(3) { await shazamTask.value } ?? nil
+            if detected == nil { shazamTask.cancel() }
+        }
+        for f in scratchFiles { try? FileManager.default.removeItem(at: f) }
         return (refs, anyAudio, detected, themes)
     }
 

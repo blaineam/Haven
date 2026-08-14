@@ -334,7 +334,10 @@ final class InstagramImporter: ObservableObject {
                         // archive that is not instant — a too-tight bound turns a would-be match
                         // into a silent miss, which looks exactly like "Shazam didn't run".
                         let began = Date()
-                        let outcome = await withTimeout(45) { await ShazamDetector.identifyDetailed(scratch) }
+                        // A real match comes back in about a second; the 45s bound only ever bought
+                        // 11 timeouts and eight wasted minutes in one run. The throttle inside the
+                        // detector may hold a request for its gap, so allow for that plus the work.
+                        let outcome = await withTimeout(40) { await ShazamDetector.identifyDetailed(scratch) }
                         detected = outcome?.track
                         let why = outcome?.reason ?? "timed out"
                         HavenLog.sync("ig-import: shazam \(why) in "

@@ -108,6 +108,7 @@ enum SongSuggester {
                 HavenLog.sync("song search failed for '\(term)': \(error.localizedDescription)")
                 continue
             }
+            HavenLog.sync("song-suggest   term '\(term)' -> \(songs.count) results")
             for song in rankedByEra(songs, year: year) {
                 let id = "\(song.id.rawValue)~"
                 guard seen.insert(id).inserted else { continue }
@@ -138,7 +139,14 @@ enum SongSuggester {
                      exclude: Set<String>) async -> TrackRefFfi? {
         let pool = await suggestions(themes: themes, genre: genre, year: year, month: month,
                                      exclude: exclude, limit: 8)
-        return pool.randomElement()
+        let pick = pool.randomElement()
+        // The whole point of theming is that the choice should be explicable. Without this the
+        // only way to judge "is it matching on content?" is to stare at chips in the feed and
+        // guess — so log what it had to work with and what it did with it.
+        HavenLog.sync("song-suggest themes=\(themes.isEmpty ? "[none]" : themes.joined(separator: "+")) "
+            + "genre=\(genre?.split(separator: ",").first.map(String.init) ?? "-") "
+            + "pool=\(pool.count) -> \(pick.map { "\($0.title) — \($0.artist)" } ?? "NOTHING")")
+        return pick
     }
 
     /// Search terms, most specific first.

@@ -46,6 +46,7 @@ enum ShazamDetector {
         guard let signature = await signature(for: url) else {
             return (nil, await signatureFailureReason(url))
         }
+        await Throttle.shared.waitForTurn()
         let session = SHSession()
         // `results` is an AsyncSequence property on the modern SDK; `match` feeds it. (There is no
         // `results(from:)` — that shape does not compile.)
@@ -56,10 +57,19 @@ enum ShazamDetector {
         session.match(signature)
         let result = await first
         switch result {
-        case .noMatch:            return (nil, "not in catalog")
-        case .error(let e, _):    return (nil, "shazam error: \(e.localizedDescription)")
-        case .none:               return (nil, "no result")
-        case .match: break
+        case .noMatch:
+            await Throttle.shared.succeeded()
+            return (nil, "not in catalog")
+        case .error(let e, _):
+            // 201 (matchAttemptFailed) is overwhelmingly a RATE LIMIT here: 50 of 81 attempts in a
+            // single import run came back with it in 0.0s. Back off rather than keep hammering.
+            await Throttle.shared.failed(rateLimited: (e as NSError).code == 201)
+            return (nil, "shazam error: \(e.localizedDescription)")
+        case .none:
+            await Throttle.shared.failed(rateLimited: false)
+            return (nil, "no result")
+        case .match:
+            await Throttle.shared.succeeded()
         }
         guard case .match(let m) = result, let item = m.mediaItems.first,
               let title = item.title else { return (nil, "match had no title") }
@@ -124,6 +134,38 @@ enum ShazamDetector {
         return sig.duration >= minimumSeconds ? sig : nil
     }
 }
+
+/// Paces catalog requests so an import doesn't get itself throttled.
+///
+/// Shazam is built for a person tapping a button, not a loop asking 372 times as fast as it can.
+/// Hammering it earned error 201 on 50 of 81 attempts in one run — the audio was fine and was never
+/// even looked at. A gap between requests, widening whenever we're refused, converts most of those
+/// into real answers.
+actor ShazamThrottle {
+    static let shared = ShazamThrottle()
+
+    private var lastAttempt = Date.distantPast
+    private var gap: TimeInterval = 2.0
+    private static let minGap: TimeInterval = 2.0
+    private static let maxGap: TimeInterval = 30.0
+
+    func waitForTurn() async {
+        let due = lastAttempt.addingTimeInterval(gap)
+        let wait = due.timeIntervalSinceNow
+        if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+        lastAttempt = Date()
+    }
+
+    /// Ease back toward the floor — the service is answering again.
+    func succeeded() { gap = max(Self.minGap, gap * 0.7) }
+
+    /// Widen after a refusal. Doubling on a rate limit is the whole point; other failures nudge.
+    func failed(rateLimited: Bool) {
+        gap = min(Self.maxGap, rateLimited ? gap * 2 : gap * 1.2)
+    }
+}
+
+private typealias Throttle = ShazamThrottle
 
 extension TrackRefFfi {
     /// Marks a track as CREDIT ONLY — "this is what's playing in the video", not "play this".

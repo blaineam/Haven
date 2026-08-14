@@ -166,6 +166,9 @@ dependencies {
 
     // --- Tests ---
     testImplementation("junit:junit:4.13.2")
+    // Android stubs org.json in unit tests (every method throws), so the archive parser — which is
+    // pure JSON walking and the part most worth testing off-device — needs the real thing.
+    testImplementation("org.json:json:20240303")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

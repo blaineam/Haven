@@ -25,6 +25,7 @@ import uniffi.haven_ffi.HavenNode
 import uniffi.haven_ffi.HavenSocial
 import uniffi.haven_ffi.InboundListener
 import uniffi.haven_ffi.RelayClient
+import uniffi.haven_ffi.TrackRefFfi
 import uniffi.haven_ffi.httpAuthHeader
 import uniffi.haven_ffi.parseLink
 import java.io.File
@@ -3303,6 +3304,30 @@ object HavenNet : InboundListener {
      *
      * Blocking (feed() re-opens every envelope in the circle) — same as the other author paths.
      */
+    /**
+     * Edit a post's FULL contents — text, attachments, song and video-sound choice.
+     *
+     * The text-only [editPost] above carries the old attachments through [EditCarry] precisely so a
+     * caller cannot lose them by forgetting. This overload is for the editor that means to change
+     * them, and it is explicit for the same reason: passing every field is what makes "this edit
+     * intends to replace the media" a statement rather than an oversight.
+     *
+     * Blocking, like every other author path here.
+     */
+    fun editPostFull(
+        circleId: String,
+        postId: String,
+        body: String,
+        media: List<String>,
+        music: TrackRefFfi?,
+        muteVideo: Boolean,
+    ) {
+        val env = runCatching {
+            social.edit(circleId, postId, body, media, music, muteVideo, nowMs())
+        }.getOrNull() ?: return
+        afterAuthor(circleId, env)
+    }
+
     fun editPost(circleId: String, postId: String, body: String) {
         // viewerRetentionSecs null: retention only hides items from MY feed. Resolving through a
         // filtered feed would miss an item the viewer can no longer see and fall back to "wipe".

@@ -2359,6 +2359,15 @@ async function handleFiles(files, after) {
 async function mintThumb(b64, circleId) {
   try {
     if (b64.length * 0.75 < 64 * 1024) return null;   // already small — a thumb saves nothing
+    // Off-thread first. This runs once per imported photo, so it is on the same hot path.
+    try {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const small = await ImgWorker.run(new Blob([bytes], { type: "image/jpeg" }),
+        { mode: "thumb", maxDim: 256, quality: 0.6, maxBytes: 32 * 1024 });
+      if (small) return await invoke("add_media", { circleId, dataBase64: small, isVideo: false });
+    } catch (_) { /* fall through */ }
     const img = new Image();
     await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/jpeg;base64," + b64; });
     if (!img.width || !img.height) return null;
@@ -2549,7 +2558,66 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
 
 // Re-encode a still to the STILL target. The canvas round-trip is also what drops EXIF/GPS — a
 // canvas has no metadata to write back out, so the JPEG we emit is unconditionally clean.
-function imageToJpegBase64(file, maxDim = MEDIA_TARGETS.STILL_LONG_EDGE, quality = MEDIA_TARGETS.STILL_JPEG_QUALITY) {
+// ---- Still encoding, off the main thread -------------------------------------------------
+//
+// One worker, one job at a time. Both callers are already sequential (a picker loop, and the
+// importer, which blocks on each item), so a pool would add contention for no throughput — and a
+// second decoder running against the first is what made the UI stutter in the first place.
+//
+// EVERY path here falls back to the main-thread version: an older WebView without OffscreenCanvas,
+// a worker that fails to construct under CSP, a decode the worker cannot do. Slower is fine;
+// refusing to attach a photo is not.
+const ImgWorker = {
+  w: null, seq: 0, waiting: new Map(), dead: false,
+  get() {
+    if (this.dead) return null;
+    if (this.w) return this.w;
+    try {
+      if (typeof Worker === "undefined" || typeof OffscreenCanvas === "undefined") throw new Error("unsupported");
+      this.w = new Worker("imgworker.js");
+      this.w.onmessage = (e) => {
+        const { id, ok, b64, err } = e.data || {};
+        const slot = this.waiting.get(id);
+        if (!slot) return;
+        this.waiting.delete(id);
+        ok ? slot.res(b64) : slot.rej(new Error(err || "encode failed"));
+      };
+      // A worker that dies takes every in-flight job with it; reject them rather than leaving the
+      // import blocked on a promise that can never settle.
+      this.w.onerror = () => {
+        this.dead = true;
+        for (const [, slot] of this.waiting) slot.rej(new Error("worker died"));
+        this.waiting.clear();
+        this.w = null;
+      };
+    } catch (_) {
+      this.dead = true;
+      return null;
+    }
+    return this.w;
+  },
+  async run(blob, opts) {
+    const w = this.get();
+    if (!w) return null;
+    const buf = await blob.arrayBuffer();
+    const id = ++this.seq;
+    return new Promise((res, rej) => {
+      this.waiting.set(id, { res, rej });
+      // Transferred, not copied: the bytes leave this thread entirely.
+      w.postMessage(Object.assign({ id, buf, type: blob.type }, opts), [buf]);
+    });
+  },
+};
+
+async function imageToJpegBase64(file, maxDim = MEDIA_TARGETS.STILL_LONG_EDGE, quality = MEDIA_TARGETS.STILL_JPEG_QUALITY) {
+  try {
+    const b64 = await ImgWorker.run(file, { maxDim, quality });
+    if (b64) return b64;
+  } catch (_) { /* fall through to the main thread */ }
+  return imageToJpegBase64OnMainThread(file, maxDim, quality);
+}
+
+function imageToJpegBase64OnMainThread(file, maxDim = MEDIA_TARGETS.STILL_LONG_EDGE, quality = MEDIA_TARGETS.STILL_JPEG_QUALITY) {
   return new Promise((res, rej) => {
     const img = new Image();
     img.onload = () => {

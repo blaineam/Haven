@@ -53,6 +53,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.URL
 import uniffi.haven_ffi.TrackRefFfi
+import com.blaineam.haven.core.SongSuggester
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.layout.Arrangement
 
 /** Tiny remote-image cache for album artwork (fetch + decode off-main). */
 private val artCache = mutableStateMapOf<String, ImageBitmap?>()
@@ -198,13 +201,44 @@ object MusicPlayer : com.blaineam.haven.core.AudioFocus.Holder {
     }
 }
 
-/** Search-and-pick a song (iTunes Search). Replaces the old paste-a-link dialog. */
+/** Search-and-pick a song (iTunes Search), with a SUGGESTED tab driven by what the post says.
+ *
+ *  [caption] is the post being composed or edited. `SongSuggester` has existed here since the
+ *  importer needed it — scoring hundreds of silent posts on caption + date — and the picker never
+ *  offered it, so the only way to reach a song was to already know its name. Apple has had the tab
+ *  for a while; this is parity, not a new capability, and it runs on the same free iTunes source
+ *  both platforms search, so a song picked here is the same TrackRef a phone would attach.
+ *
+ *  [createdAtMs] lets an EDIT suggest for when the post was actually taken rather than for today —
+ *  which matters most for imported posts, where those are years apart.
+ */
 @Composable
-fun MusicSearchSheet(onPick: (TrackRefFfi) -> Unit, onDismiss: () -> Unit) {
+fun MusicSearchSheet(
+    onPick: (TrackRefFfi) -> Unit,
+    onDismiss: () -> Unit,
+    caption: String = "",
+    createdAtMs: Long? = null,
+) {
     val sheetContext = LocalContext.current
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<MusicSearch.Track>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
+    var suggestTab by remember { mutableStateOf(false) }
+    var suggestions by remember { mutableStateOf<List<TrackRefFfi>>(emptyList()) }
+    var suggesting by remember { mutableStateOf(false) }
+
+    // Only when the tab is actually opened: this is a handful of network searches, and paying for
+    // them on every composer open — when most posts get no song at all — would be rude.
+    LaunchedEffect(suggestTab) {
+        if (!suggestTab || suggestions.isNotEmpty()) return@LaunchedEffect
+        suggesting = true
+        suggestions = withContext(Dispatchers.IO) {
+            val themes = SongSuggester.captionThemes(caption, 2)
+            val (year, month) = SongSuggester.yearMonth(createdAtMs ?: System.currentTimeMillis())
+            SongSuggester.suggestions(themes, null, year, month, emptySet(), limit = 12)
+        }
+        suggesting = false
+    }
 
     LaunchedEffect(query) {
         if (query.isBlank()) { results = emptyList(); return@LaunchedEffect }
@@ -222,6 +256,58 @@ fun MusicSearchSheet(onPick: (TrackRefFfi) -> Unit, onDismiss: () -> Unit) {
                 Text(stringResource(R.string.common_done), color = HavenTheme.textSecondary, modifier = Modifier.clickable { onDismiss() }.padding(8.dp))
             }
             Spacer(Modifier.height(12.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(false to R.string.music_tab_search, true to R.string.music_tab_suggested).forEach { (isSuggest, label) ->
+                    val on = suggestTab == isSuggest
+                    Text(
+                        stringResource(label),
+                        color = if (on) HavenTheme.textPrimary else HavenTheme.textSecondary,
+                        fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
+                        fontSize = 14.sp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (on) HavenTheme.card else androidx.compose.ui.graphics.Color.Transparent)
+                            .clickable { suggestTab = isSuggest }
+                            .padding(horizontal = 14.dp, vertical = 7.dp),
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            if (suggestTab) {
+                if (suggesting) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(16.dp), color = HavenTheme.pink, strokeWidth = 2.dp)
+                        Spacer(Modifier.size(10.dp))
+                        Text(stringResource(R.string.music_finding_songs), color = HavenTheme.textSecondary, fontSize = 13.sp)
+                    }
+                } else if (suggestions.isEmpty()) {
+                    Text(stringResource(R.string.music_no_suggestions), color = HavenTheme.textSecondary, fontSize = 13.sp)
+                } else {
+                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 460.dp)) {
+                        items(suggestions) { trk ->
+                            Row(
+                                Modifier.fillMaxWidth().clickable { MusicPlayer.stop(); onPick(trk) }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                val art = rememberArtwork(trk.artworkUrl)
+                                Box(Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(HavenTheme.card),
+                                    contentAlignment = Alignment.Center) {
+                                    if (art != null) Image(art, null, Modifier.size(48.dp), contentScale = ContentScale.Crop)
+                                    else Icon(Icons.Filled.MusicNote, null, tint = HavenTheme.textSecondary)
+                                }
+                                Spacer(Modifier.size(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(trk.title, color = HavenTheme.textPrimary, fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium, maxLines = 1)
+                                    Text(trk.artist, color = HavenTheme.textSecondary, fontSize = 12.sp, maxLines = 1)
+                                }
+                            }
+                        }
+                    }
+                }
+                return@Column
+            }
             OutlinedTextField(
                 value = query, onValueChange = { query = it },
                 placeholder = { Text(stringResource(R.string.music_search_placeholder)) }, singleLine = true,

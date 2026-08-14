@@ -2410,21 +2410,12 @@ fun PostCard(
                     modifier = Modifier.size(20.dp))
             }
         }
+        // The full editor (text + attachments + song + location), not the old inline text field —
+        // which could change a caption and nothing else. Presented as an overlay so its media
+        // picker exists only while it is open, rather than one launcher per card in the feed.
         if (showEdit) {
-            var editText by remember(item.id) { mutableStateOf(item.body) }
-            Spacer(Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(value = editText, onValueChange = { editText = it },
-                    modifier = Modifier.weight(1f), shape = RoundedCornerShape(18.dp),
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink))
-                Text(stringResource(R.string.common_save), color = HavenTheme.pink, fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable {
-                        // Text only — editPost carries the post's photos, video mute flag and
-                        // track through itself, because an edit REPLACES them rather than
-                        // merging and dropping them here would delete them for the whole circle.
-                        HavenNet.editPost(circleId, item.id, editText.trim())
-                        showEdit = false
-                    }.padding(10.dp))
+            FullScreenOverlay(onDismiss = { showEdit = false }) {
+                EditPostSheet(item = item, circleId = circleId, onDismiss = { showEdit = false })
             }
         }
         if (showPicker) {

@@ -806,4 +806,14 @@
     <string name="ig_try_another">Try another file</string>
     <string name="ig_banner_title">Importing from Instagram</string>
     <string name="ig_banner_progress_fmt">%1$d of %2$d</string>
+    <string name="music_tab_search">Search</string>
+    <string name="music_tab_suggested">Suggested</string>
+    <string name="music_finding_songs">Finding songs for this post…</string>
+    <string name="music_no_suggestions">No suggestions for this post yet.</string>
+    <string name="edit_post_title">Edit post</string>
+    <string name="edit_post_photos">Photos</string>
+    <string name="edit_post_song">Song</string>
+    <string name="edit_post_change_song">Change</string>
+    <string name="edit_post_video_muted">Video muted</string>
+    <string name="edit_post_video_sound">Play video sound</string>
 </resources>

@@ -192,14 +192,55 @@ struct SongPicker: View {
                 Section {
                     ForEach(suggested, id: \.catalogId) { t in
                         songRow(title: t.title, artist: t.artist, key: t.catalogId,
-                                artwork: { EmptyView() },
-                                onPreview: { }, onUse: { stopPreview(); onPick(t); dismiss() })
+                                artwork: { suggestedArtwork(t) },
+                                onPreview: { togglePreviewSuggested(t) },
+                                onUse: { stopPreview(); onPick(t); dismiss() })
                     }
                 } footer: {
                     Text("Picked from what's in the photo and what your caption says. Guesses — tap Apple Music to search yourself.")
                 }
             }
             .scrollContentBackground(.hidden)
+        }
+    }
+
+    /// Artwork for a suggestion.
+    ///
+    /// A suggestion is a TrackRefFfi, not a MusicKit.Song, so `ArtworkImage` is not available — but
+    /// the suggester already stores the artwork URL on the ref, so the image is one AsyncImage away.
+    /// It was stubbed to EmptyView when this tab was built, which left the rows looking unfinished
+    /// next to the catalog's.
+    @ViewBuilder private func suggestedArtwork(_ t: TrackRefFfi) -> some View {
+        if let url = URL(string: t.artworkUrl), !t.artworkUrl.isEmpty {
+            AsyncImage(url: url) { image in
+                image.resizable().scaledToFill()
+            } placeholder: {
+                artworkPlaceholder
+            }
+            .frame(width: 44, height: 44)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        } else {
+            artworkPlaceholder
+        }
+    }
+
+    /// Preview a suggestion, resolving the clip on demand.
+    ///
+    /// The catalog rows hold a MusicKit.Song and can read `previewAssets` straight off it; a
+    /// suggestion only carries its id, so the song is fetched when the row is actually tapped.
+    /// One request per preview, and only for a row someone asked to hear.
+    private func togglePreviewSuggested(_ t: TrackRefFfi) {
+        let key = t.catalogId
+        if previewing == key { stopPreview(); return }
+        stopPreview()
+        guard let store = trackIds(t.creditFreeCatalogId).store else { return }
+        Task {
+            guard let song = try? await MusicCatalogResourceRequest<MusicKit.Song>(
+                    matching: \.id, equalTo: MusicItemID(store)).response().items.first,
+                  let url = song.previewAssets?.first?.url else { return }
+            macPreviewPlayer.replaceCurrentItem(with: AVPlayerItem(url: url))
+            macPreviewPlayer.play()
+            previewing = key
         }
     }
 

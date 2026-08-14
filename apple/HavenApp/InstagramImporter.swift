@@ -189,11 +189,17 @@ final class InstagramImporter: ObservableObject {
             // Counters stay in THIS task's scope and are never touched from inside a hop — the
             // main actor only ever receives already-computed values.
             var imported = 0, skipped = 0
+            // Every catalog id already attached this run. Passed back into the suggester so each
+            // post takes the best song NOT yet spoken for — without this, one search term per year
+            // meant one song for every silent post in that year.
+            var usedSongs = Set<String>()
+            HavenLog.sync("ig-import: starting \(items.count) items from \(startAt)")
             for (idx, item) in items.enumerated() {
                 if idx < startAt { continue }   // already imported on a previous run
                 if await MainActor.run(body: { [weak self] in self?.cancelled ?? true }) { break }
-                let (refs, hasAudio, detected) = await Self.stage(item, zip: zip, byName: byName,
-                                                                  identify: matchSongs)
+                let began = Date()
+                let (refs, hasAudio, detected, themes) = await Self.stage(item, zip: zip, byName: byName,
+                                                                         identify: matchSongs)
                 if refs.isEmpty {
                     skipped += 1
                 } else {
@@ -209,9 +215,18 @@ final class InstagramImporter: ObservableObject {
                     //   silent     → SUGGEST one (Apple Music, by genre + era). A guess, and the
                     //                only case where a guess is harmless, because the alternative
                     //                is silence.
-                    let music: TrackRefFfi? = matchSongs
-                        ? (hasAudio ? detected : await ImportSongMatcher.song(for: at, genre: item.musicGenre))
-                        : nil
+                    var music: TrackRefFfi? = nil
+                    if matchSongs {
+                        if hasAudio {
+                            music = detected
+                        } else {
+                            let year = Calendar.current.component(
+                                .year, from: Date(timeIntervalSince1970: TimeInterval(at) / 1000))
+                            music = await SongSuggester.song(themes: themes, genre: item.musicGenre,
+                                                             year: year, exclude: usedSongs)
+                            if let id = music?.catalogId { usedSongs.insert(id) }
+                        }
+                    }
                     // Stories, when the user opted in, land as KEPT stories rather than feed posts:
                     // a personal snapshot on their profile with its media pinned. Keeping
                     // deliberately does not republish (see KeptStoriesStore), which is what makes
@@ -235,6 +250,10 @@ final class InstagramImporter: ObservableObject {
                 // cost is the item in flight — and re-importing that one item is the failure mode
                 // we accept, rather than re-importing all 300.
                 let done = idx + 1, total = items.count
+                let secs = Date().timeIntervalSince(began)
+                if secs > 5 {
+                    HavenLog.sync("ig-import: item \(done)/\(total) took \(String(format: "%.1f", secs))s (\(item.mediaNames.count) media)")
+                }
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.phase = .importing(done: done, total: total)
@@ -263,13 +282,16 @@ final class InstagramImporter: ObservableObject {
     private nonisolated static func stage(_ item: InstagramArchive.Item,
                                           zip: ZipReader,
                                           byName: [String: ZipReader.Entry],
-                                          identify: Bool) async -> ([String], Bool, TrackRefFfi?) {
+                                          identify: Bool) async -> ([String], Bool, TrackRefFfi?, [String]) {
         var refs: [String] = []
         /// Does ANY of this post's media make sound? One song plays per post, so a carousel with a
         /// single talking video should not get one layered on top of it.
         var anyAudio = false
         /// The song Shazam recognised inside that audio, if any — attached as a credit, not a track.
         var detected: TrackRefFfi?
+        /// What the post is ABOUT — Vision labels off the first photo, plus caption words. This is
+        /// what makes one silent post's suggestion differ from the next one's.
+        var themes: [String] = SongSuggester.captionThemes(item.body)
         for name in item.mediaNames {
             guard let entry = byName[name] else { continue }
             // Disk read + CRC over the entry — the expensive part, and the reason this is detached.
@@ -285,23 +307,36 @@ final class InstagramImporter: ObservableObject {
                 // Asked of the real file, before transcoding — "is it a video" and "does it make
                 // sound" are different questions. A screen recording, a time-lapse or a clip muted
                 // before posting is a silent video, and deserves a song as much as a photo does.
-                if await ImportSongMatcher.hasAudio(scratch) {
+                if await SongSuggester.hasAudio(scratch) {
                     anyAudio = true
                     // Identify from the FIRST audible clip only. A carousel shows one chip, and
                     // Shazam-ing every clip in a 20-video album is work with nowhere to go.
-                    if identify, detected == nil { detected = await ShazamDetector.identify(scratch) }
+                    if identify, detected == nil {
+                        detected = await withTimeout(20) { await ShazamDetector.identify(scratch) } ?? nil
+                    }
                 }
                 // forceOptimize: an import is bulk media at someone else's encoder settings —
                 // running it through Haven's ladder is what stops a 1.2 GB archive from landing on
                 // the relay as-is. alsoOriginal: false — shipping the originals too would double an
                 // already large import, for bytes that are themselves a compressed re-encode.
-                let prepared = await MediaStore.shared.prepareVideo(url: scratch, forceOptimize: true,
-                                                                    alsoOriginal: false)
+                let prepared = await withTimeout(videoStageTimeout) {
+                    await MediaStore.shared.prepareVideo(url: scratch, forceOptimize: true,
+                                                         alsoOriginal: false)
+                }
+                if prepared == nil {
+                    HavenLog.sync("ig-import: video staging TIMED OUT after \(Int(videoStageTimeout))s — skipping \(name)")
+                }
                 // mediaRefs already carries poster + poster marker + clip in the order the feed
                 // expects (poster first — MediaVariants.composeVideoMedia), so a video tile has its
                 // still from the moment it arrives.
-                if !prepared.isEmpty { refs.append(contentsOf: prepared.mediaRefs) }
+                if let prepared, !prepared.isEmpty { refs.append(contentsOf: prepared.mediaRefs) }
             } else {
+                // Read the subject off the FIRST photo only — one song per post, so one look is
+                // enough, and Vision on every frame of a 20-photo carousel is work with nowhere
+                // to go.
+                if themes.count < 3, refs.isEmpty {
+                    themes += SongSuggester.visualThemes(bytes)
+                }
                 // Decode + re-encode are MainActor work (MediaStore is main-isolated), and the
                 // encoded bytes are what the content ref is minted from.
                 let ref = await MainActor.run { () -> String? in
@@ -311,7 +346,7 @@ final class InstagramImporter: ObservableObject {
                 if let ref { refs.append(ref) }
             }
         }
-        return (refs, anyAudio, detected)
+        return (refs, anyAudio, detected, themes)
     }
 
     /// Stable id for a kept story, derived from the archive entry it came from.
@@ -322,6 +357,36 @@ final class InstagramImporter: ObservableObject {
     private nonisolated static func keptIdentity(_ item: InstagramArchive.Item) -> String {
         "ig:" + (item.mediaNames.first ?? "\(item.createdAt)")
     }
+
+    /// Run `work`, giving up after `seconds`.
+    ///
+    /// One item must never be able to wedge a 372-item import. Video staging is the risk: the
+    /// encoder ladder can fall back through several export presets, and poster generation waits on
+    /// a semaphore with a 15s timeout PER config — so a clip AVFoundation dislikes can sit there for
+    /// a minute or more, and a clip it hangs on sits there forever. The simulator's software
+    /// encoder makes both far likelier than on a device.
+    ///
+    /// Losing the race does not kill the underlying work (an AVAssetExportSession does not
+    /// meaningfully honour cancellation) — it just stops the LOOP waiting on it, so the import
+    /// continues and the offending post is skipped rather than taking everything else down with it.
+    private nonisolated static func withTimeout<T: Sendable>(
+        _ seconds: Double, _ work: @escaping @Sendable () async -> T?) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask { await work() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// How long one video may take to stage before the import moves on. Generous — a large clip on a
+    /// slow device legitimately takes a while, and skipping a post the user wanted is worse than
+    /// waiting — but bounded, which is the part that was missing.
+    private static let videoStageTimeout: Double = 180
 
     private nonisolated static func ext(_ name: String) -> String {
         let e = (name as NSString).pathExtension.lowercased()

@@ -269,7 +269,7 @@ struct InstagramImportView: View {
                         .onChange(of: matchSongs) { _, on in
                             // Ask once, here — not 300 times during the run.
                             guard on else { return }
-                            Task { if !(await ImportSongMatcher.authorize()) { matchSongs = false } }
+                            Task { if !(await SongSuggester.authorize()) { matchSongs = false } }
                         }
                 } footer: {
                     Text("Instagram's export doesn't say which song a post used, so this picks one from Apple Music of roughly the right genre and era instead — a guess, not the original. **Anything with its own sound keeps it**: a reel's soundtrack is part of the video, so only silent posts get one.")

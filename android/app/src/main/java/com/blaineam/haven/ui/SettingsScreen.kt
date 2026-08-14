@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -113,7 +115,13 @@ fun SettingsScreen(onBack: () -> Unit) {
         // "Manage media" owns its own LazyColumn scroll, so it must NOT sit inside this verticalScroll
         // (nesting a lazy list in a scrollable column throws on the infinite-height constraint).
         val manageMedia = section == "managemedia"
+        // Insets BEFORE the scroll, so they shrink the viewport rather than pad the content: the
+        // last row then scrolls fully clear of the gesture bar instead of stopping underneath it.
+        // This Dialog sets decorFitsSystemWindows=false (see FullScreenOverlay), which is what makes
+        // these requests audible at all — without that they are silent no-ops.
         Column(Modifier.fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .then(if (manageMedia) Modifier else Modifier.verticalScroll(rememberScrollState()))
             .padding(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

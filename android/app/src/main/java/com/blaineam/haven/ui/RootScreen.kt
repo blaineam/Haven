@@ -237,7 +237,20 @@ private fun MainScaffold() {
                 .getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
             val inCall by com.blaineam.haven.core.CallManager.inCall
             val callMinimized by com.blaineam.haven.core.CallManager.minimized
-            if (!imeUp) NavigationBar(containerColor = HavenTheme.card) {
+            // "Still importing" pill, STACKED ABOVE the tab bar rather than floated over the
+            // content.
+            //
+            // Bottom-aligning it inside the content box put it straight on top of the composer —
+            // "Share with…", the camera/photo/song row, the send button — which is the same mistake
+            // in a different place as Apple's first attempt covering the tab bar. A progress
+            // indicator must not eat the controls it is reporting progress next to.
+            //
+            // In the bottomBar the Scaffold measures it, so the content inset grows by exactly its
+            // height and the composer sits above it. That is the Compose equivalent of the
+            // safeAreaInset Apple ended up with. Draws nothing when no import is running.
+            androidx.compose.foundation.layout.Column {
+                ImportBanner(Modifier.align(androidx.compose.ui.Alignment.CenterHorizontally))
+                if (!imeUp) NavigationBar(containerColor = HavenTheme.card) {
                 val navColors = NavigationBarItemDefaults.colors(
                     selectedIconColor = HavenTheme.pink,
                     selectedTextColor = HavenTheme.pink,
@@ -306,6 +319,7 @@ private fun MainScaffold() {
                         label = { Text(stringResource(R.string.root_call_tab_label), color = HavenTheme.pink) },
                         colors = navColors,
                     )
+                    }
                 }
             }
         },
@@ -316,11 +330,6 @@ private fun MainScaffold() {
                 Tab.Messages -> MessagesScreen()
                 Tab.You -> YouScreen(onAddFriend = { showConnect = true })
             }
-            // "Still importing" pill. INSIDE the content box on purpose — that box is already inset
-            // for the navigation bar, so the strip floats above the tabs and can never cover the
-            // app's own navigation (the mistake Apple made first; see ImportBanner). Draws nothing
-            // when no import is running.
-            ImportBanner(Modifier.align(androidx.compose.ui.Alignment.BottomCenter))
         }
     }
 

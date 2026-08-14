@@ -359,6 +359,8 @@ enum DeskFrontDoor {
 }
 
 pub struct Engine {
+    /// A coalesced state write is already scheduled — see `persist_coalesced`.
+    persist_pending: std::sync::atomic::AtomicBool,
     /// The account master seed — `Some` on a primary/legacy device, `None` on a SEEDLESS device
     /// (seed-drop S4). Making it an `Option` turns every account-key use into a compile-checked
     /// decision, so a missed seedless guard is a build error, not a runtime forge/panic.
@@ -670,6 +672,7 @@ impl Engine {
             ..DynState::default()
         };
         Ok(Arc::new(Self {
+            persist_pending: std::sync::atomic::AtomicBool::new(false),
             seed: Some(seed),
             social,
             paths,
@@ -780,6 +783,7 @@ impl Engine {
             ..DynState::default()
         };
         Ok(Arc::new(Self {
+            persist_pending: std::sync::atomic::AtomicBool::new(false),
             seed: None,
             social,
             paths,
@@ -3566,7 +3570,7 @@ impl Engine {
         }
         match self.social.post(circle_id.clone(), body, media.clone(), music, None, story, false, created_at) {
             Ok(env) => {
-                self.after_author(&circle_id, &env, None, None); // None banner → silent wake
+                self.after_author_bulk(&circle_id, &env, None, None); // silent wake, coalesced write
                 self.upload_authored_media(circle_id, media);
             }
             Err(e) => log::error!("imported post failed: {e}"),
@@ -3735,6 +3739,20 @@ impl Engine {
     /// `post_id` is the banner's `p` deep-link tag — the authored post's engine-derived id (read
     /// back via `last_authored_event_id`, Apple parity) or the reaction/comment's PARENT post — so
     /// the recipient's tap opens THAT item. Best-effort: `None` keeps the legacy circle route.
+    /// `bulk` = one of MANY posts authored back to back (an archive import).
+    ///
+    /// Two things that are right for one post are ruinous three hundred times over:
+    ///
+    ///   `persist()` serialises the ENTIRE engine state and writes it. Per post that is O(n^2)
+    ///   across an import — by the last one it re-writes all 372 posts' worth of state, having
+    ///   already done so 371 times. That is the work that made the window beachball.
+    ///
+    ///   `emit_changed()` tells the webview to rebuild the feed. Per post that is 372 rebuilds
+    ///   racing the user's own scrolling and clicking.
+    ///
+    /// Bulk coalesces the write and leaves the UI nudge to the importer, which throttles it. Safe
+    /// because the importer checkpoints separately: a crash between writes costs at most the last
+    /// couple of seconds, and re-authored events dedupe by id.
     fn after_author(
         self: &Arc<Self>,
         circle_id: &str,
@@ -3742,9 +3760,34 @@ impl Engine {
         banner: Option<haven_p2p::pushbanner::BannerCopy>,
         post_id: Option<String>,
     ) {
+        self.after_author_inner(circle_id, env, banner, post_id, false)
+    }
+
+    fn after_author_bulk(
+        self: &Arc<Self>,
+        circle_id: &str,
+        env: &[u8],
+        banner: Option<haven_p2p::pushbanner::BannerCopy>,
+        post_id: Option<String>,
+    ) {
+        self.after_author_inner(circle_id, env, banner, post_id, true)
+    }
+
+    fn after_author_inner(
+        self: &Arc<Self>,
+        circle_id: &str,
+        env: &[u8],
+        banner: Option<haven_p2p::pushbanner::BannerCopy>,
+        post_id: Option<String>,
+        bulk: bool,
+    ) {
         self.bump_activity(); // I just posted/messaged → keep sync tight
-        self.persist();
-        self.emit_changed();
+        if bulk {
+            self.persist_coalesced();
+        } else {
+            self.persist();
+            self.emit_changed();
+        }
         let payload = wire::event_payload(circle_id, env);
         let members = self.social.contact_node_ids(circle_id.to_string());
         for id_hex in &members {
@@ -10351,6 +10394,23 @@ impl Engine {
     }
 
     // ---- persistence --------------------------------------------------------------------
+
+    /// Write the engine state at most once every few seconds instead of once per authored post.
+    ///
+    /// Only ever used for bulk authoring — see `after_author_inner`. The flag is the whole
+    /// mechanism: a write is already scheduled, so this call is a no-op rather than another
+    /// full serialisation of a state that is growing with every post.
+    fn persist_coalesced(self: &Arc<Self>) {
+        if self.persist_pending.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let me = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            me.persist_pending.store(false, std::sync::atomic::Ordering::SeqCst);
+            me.persist();
+        });
+    }
 
     fn persist(&self) {
         if let Err(e) = store::write_state(&self.paths, &self.social.export_state()) {

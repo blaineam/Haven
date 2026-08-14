@@ -3,6 +3,7 @@ package com.blaineam.haven.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -67,7 +68,11 @@ fun ActivityScreen(onDone: () -> Unit, onConnect: () -> Unit) {
     LaunchedEffect(Unit) { ActivityStore.markSeen() }
 
     HavenBackground {
-        Column(Modifier.fillMaxSize()) {
+        // statusBarsPadding on the CONTENT, not the background: the glow should still run
+        // edge-to-edge, but the header must not sit under the status bar. Drawn under it, the
+        // system bar's window swallows taps — which is why the close button here looked dead
+        // (CircleScreen's fullscreen viewer already carries the same note).
+        Column(Modifier.fillMaxSize().statusBarsPadding()) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,

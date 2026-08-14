@@ -6,6 +6,8 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -80,7 +82,9 @@ fun InstagramImportScreen(onDone: () -> Unit) {
     }
 
     HavenBackground {
-        Column(Modifier.fillMaxSize().padding(20.dp)) {
+        // See ActivityScreen: content insets for the status bar, the glow does not. Without this
+        // the close button is under the system bar, which eats the tap.
+        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier.size(40.dp).clip(CircleShape).clickable {

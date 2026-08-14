@@ -3155,7 +3155,7 @@ object HavenNet : InboundListener {
         val env = runCatching {
             social.post(circleId, body, withThumbs, music, null, story, false, createdAt)
         }.getOrNull() ?: return
-        afterAuthor(circleId, env, banner = null)   // null banner → silent wake (see afterAuthor)
+        afterAuthor(circleId, env, banner = null, bulk = true)   // null banner → silent wake
         enqueueAuthoredMedia(circleId, withThumbs)
         // Coalesce the feed's recompose. afterAuthor bumps feedVersion per post, which is right for
         // one post and wrong for three hundred: an import would recompose the circle screen 372
@@ -3163,6 +3163,26 @@ object HavenNet : InboundListener {
         // for the same reason. The bump is not skipped, only slowed — posts still appear as they
         // land, roughly twice a second instead of as fast as the importer can write.
         importFeedBump()
+    }
+
+    /** Whether a coalesced state write is already scheduled. */
+    private var persistPending = false
+
+    /**
+     * Write the engine state at most once every few seconds instead of once per authored post.
+     *
+     * Safe precisely because the importer checkpoints its own progress separately: if the app dies
+     * between writes, the resume picks up from the last completed item and re-authors at most a
+     * couple of posts, which the engine dedupes by event id anyway.
+     */
+    private fun persistCoalesced() {
+        if (persistPending) return
+        persistPending = true
+        scope.launch(Dispatchers.IO) {
+            kotlinx.coroutines.delay(PERSIST_COALESCE_MS)
+            persistPending = false
+            persist()
+        }
     }
 
     /** Last coalesced import bump, and whether one is already pending. */
@@ -3401,10 +3421,25 @@ object HavenNet : InboundListener {
     /** Persist, bump the feed, and broadcast a freshly-authored sealed envelope to members.
      *  [banner] = the kind-aware push copy for members' lock screens (null → a silent
      *  content-available wake only, e.g. an edit/unsend that carries no news). */
-    private fun afterAuthor(circleId: String, env: ByteArray, banner: PushBanner.Copy? = null) {
+    /**
+     * [bulk] = one of MANY posts being authored back to back (an archive import).
+     *
+     * Two things that are correct for a single post are ruinous three hundred times over:
+     *
+     *   persist() serialises the ENTIRE engine state and writes it. Per post that is O(n^2) across
+     *   an import — by the last one it is re-writing all 372 posts' worth of state, having already
+     *   done so 371 times. Bulk coalesces it instead, and the checkpointed importer can afford to,
+     *   since a crash costs at most the last couple of seconds of work.
+     *
+     *   The feedVersion bump recomposes the whole circle screen. Per post that is 372 recompositions
+     *   competing with the user's own scrolling — which is exactly why Settings would not scroll and
+     *   the feed felt stuck. Bulk leaves the bump to the caller, which throttles it.
+     */
+    private fun afterAuthor(circleId: String, env: ByteArray, banner: PushBanner.Copy? = null,
+                            bulk: Boolean = false) {
         bumpActivity()   // I just posted/messaged → keep sync tight
-        persist()
-        scope.launch(Dispatchers.Main) { feedVersion.value++ }
+        if (bulk) persistCoalesced() else persist()
+        if (!bulk) scope.launch(Dispatchers.Main) { feedVersion.value++ }
         val payload = Wire.eventPayload(circleId, env)
         for (idHex in dialTargets(circleId)) sendFrame(Wire.EVENT, payload, idHex)
         // Live delivery (D16 Phase 4b): dialTargets deliberately excludes us, so my OTHER devices only
@@ -5691,6 +5726,8 @@ object HavenNet : InboundListener {
     private val FRESH_EVENT_MS = 5 * 60_000L
     /** Feed recompose floor while a bulk import writes — see [importFeedBump]. */
     private val IMPORT_BUMP_MS = 500L
+    /** State-write floor while a bulk import runs — see [persistCoalesced]. */
+    private val PERSIST_COALESCE_MS = 3_000L
     /** Older than this and a newly-ingested post is BACKFILL (archive import / history sync), not
      *  news — its full-size media prefetch becomes lazy. See the `backfill` gate in
      *  [requestMissingMedia]. A week is well past anything the live feed treats as recent, so

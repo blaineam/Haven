@@ -950,3 +950,59 @@ body.drop-target::after {
   gap: 8px; min-height: 120px; padding: 18px; text-align: center;
   background: var(--panel2); border: 1px solid var(--line); border-radius: 16px;
 }
+
+/* ---- Instagram archive import (app.js instagramImportSheet / renderImportPill) --------
+   Apple parity: InstagramImportView.swift + ImportBanner.swift. The walkthrough is one step at a
+   time with a dot rail above it, because the user is reading this while looking at Instagram's own
+   form on another screen — a page of prose would not survive that. */
+.ig-dots { display: flex; gap: 7px; justify-content: center; padding: 2px 0 10px; }
+.ig-dot {
+  width: 7px; height: 7px; border-radius: 4px; background: var(--line-strong);
+  transition: width .25s var(--spring), background .25s;
+}
+.ig-dot.on { width: 22px; background: var(--pink); }
+
+.ig-step {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  text-align: center; padding: 6px 2px 2px;
+}
+.ig-step-icon { color: var(--pink); }
+.ig-step-icon svg { width: 40px; height: 40px; }
+.ig-step-title { font-size: 19px; font-weight: 700; }
+.ig-step-blurb { font-size: 13px; color: var(--muted); line-height: 1.5; max-width: 42ch; }
+/* The one value the user genuinely cannot get wrong (JSON, not HTML) is the only one drawn hot. */
+.ig-critical { color: var(--amber); font-weight: 700; }
+.ig-warn {
+  display: flex; gap: 8px; align-items: flex-start; font-size: 12px; line-height: 1.45;
+  color: var(--amber); text-align: left;
+}
+.ig-warn svg { width: 16px; height: 16px; flex: 0 0 auto; margin-top: 1px; }
+.ig-bullet { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; line-height: 1.5; }
+.ig-bullet i { width: 5px; height: 5px; border-radius: 50%; background: var(--pink); margin-top: 7px; flex: 0 0 auto; }
+
+.ig-big { font-size: 54px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
+.ig-bar { width: 100%; max-width: 340px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.ig-bar i { display: block; height: 100%; background: var(--grad-h); transition: width .3s var(--spring); }
+.ig-done-icon { color: var(--ok); }
+.ig-done-icon svg { width: 46px; height: 46px; }
+.ig-fail-icon { color: var(--amber); }
+.ig-fail-icon svg { width: 42px; height: 42px; }
+
+/* The app-wide "still importing" pill. Bottom-LEFT on purpose: the composer floats bottom-centre
+   and the toast lands bottom-centre too, so anywhere else would cover the app's own controls with
+   a background task's progress. */
+.import-pill {
+  position: fixed; left: 16px; bottom: 16px; z-index: 40;
+  display: flex; align-items: center; gap: 11px; padding: 9px 14px;
+  border-radius: 999px; background: var(--panel-solid); color: var(--text);
+  border: 1px solid rgba(236, 72, 153, 0.35);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+  animation: cardIn .35s var(--spring) both;
+}
+.import-pill:hover { border-color: var(--pink); }
+.ip-ring { width: 34px; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; flex: 0 0 auto; }
+.ip-ring i { display: block; height: 100%; background: var(--grad-h); transition: width .3s var(--spring); }
+.ip-title { font-size: 12px; font-weight: 600; }
+.ip-count { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ip-chev { color: var(--muted); display: flex; }
+.ip-chev svg { width: 12px; height: 12px; transform: rotate(-90deg); }

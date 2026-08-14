@@ -11,7 +11,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.5.0] — 2026-08-13
 
-### Added — Apple (bring your Instagram archive over)
+### Added — all platforms (bring your Instagram archive over)
 
 - **Import from Instagram**, in Settings. A guided walkthrough — open Instagram's download page,
   request the export, come back days later and hand Haven the `.zip` — because there is no API for
@@ -42,6 +42,54 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **Shazam song credits.** A reel that shipped with its soundtrack gets the real song named on it.
   The credit never becomes a second audio source — the video keeps its own sound — and requests
   that Shazam declines are retried later in their own queue rather than lost.
+
+### Added — Desktop (Instagram archive import)
+
+- **Import from Instagram** on Windows, Linux and the desktop Mac build, in Settings — the same
+  guided walkthrough Apple ships. Three steps (ask Instagram, wait for their email, pick the `.zip`),
+  the JSON-not-HTML warning at the step where that mistake is made, then a preview of exactly what
+  was found — posts, reels, photos and videos, total size, date span, and any file the archive
+  references but does not contain — with nothing published until it is confirmed.
+
+  Posts and reels land **backdated** and **silently**, newest first so the feed grows downwards and
+  never jumps under whoever is reading it. Carousels stay a single post. The run lives on its own
+  thread in the Rust backend, so closing the sheet does not stop it, a floating pill keeps the
+  progress visible wherever you browse, Stop takes effect immediately (mid-album, not at the end of
+  it), and quitting Haven resumes from the last completed item on the next launch.
+
+  The parser is verified against the same real 1.28 GB export the Apple build was: 372 items
+  (203 posts, 85 reels, 84 stories), 1129 media files, zero unresolved references.
+
+- **Stories are opt-in and off by default here too**, and land as kept stories on your own profile —
+  never published to the circle.
+
+- **Song suggestions for silent posts**, from the free iTunes Search API (the source Android already
+  uses), chosen from the caption's subject words and the post's era. A post that already makes a
+  sound keeps its own audio and is never given one — desktop reads the MP4 track table directly to
+  tell a muted clip from an audible one. Explicit tracks are never suggested, songs in a script you
+  don't read are rejected while accented Latin titles are kept, and no track is attached twice in
+  one run.
+
+### Known gaps — Desktop
+
+- **Imported media is not re-encoded, and videos get no poster still.** `desktop/src-tauri` carries
+  no encoder by design: the only one a WebView exposes emits VP8/Opus in WebM, which no other Haven
+  client can play, so transcoding an Instagram export here would replace working H.264 with video an
+  iPhone cannot decode. The bytes are imported as Instagram already encoded them (≤1080p), and the
+  re-optimize scan still reports anything genuinely oversized. Apple's build does re-encode and does
+  cut a poster.
+- **No Shazam song credits.** Identifying the song already playing in a reel is Apple-only; desktop
+  only ever *suggests*, and only into silence.
+- The importer's UI strings are English-only for now; the six shipped languages fall back to English
+  until the generated dictionaries catch up.
+
+### Added — Android (Instagram archive import)
+
+- The same importer on Android: walkthrough, preview, background progress banner and resume. Media
+  goes through Android's normal optimize-and-poster ladder, stories are opt-in and kept to your
+  profile, and the feed's recompose is coalesced so a several-hundred-post import doesn't thrash it.
+  No Shazam credits (that is Apple-only), though a credit attached on an Apple device still syncs
+  here and shows on the post.
 
 ### Changed
 

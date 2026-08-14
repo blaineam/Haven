@@ -51,6 +51,8 @@ The email contains a download link that **expires after a few days**, so downloa
 Download the `.zip` (do **not** unzip it — Haven reads the archive directly), then in Haven:
 
 > **You** → **Import from Instagram** → **Choose archive…**
+>
+> (On Windows, Linux and the desktop app: the gear in the **You** tab → **Import from Instagram**.)
 
 Pick the `instagram-<username>-<date>-<code>.zip` file. Haven reads it on your device; the archive
 is never uploaded anywhere.
@@ -83,8 +85,16 @@ circle, so nobody else's feed fills up with years of your old stories.
 Re-importing the same export won't duplicate them — a kept story is recorded against the archive
 entry it came from, so importing twice is harmless.
 
-Photos and videos are re-encoded through Haven's usual optimizer on the way in, and every video
-gets a poster still cut for it, so imported media behaves exactly like media you posted by hand.
+On **iPhone, iPad and the Mac app**, photos and videos are re-encoded through Haven's usual
+optimizer on the way in and every video gets a poster still cut for it, so imported media behaves
+exactly like media you posted by hand.
+
+On **Windows, Linux and the desktop build**, the photos and videos are imported exactly as
+Instagram encoded them (already ≤1080p) and videos arrive without a poster still. That is
+deliberate, not unfinished: the desktop app carries no video encoder — the only one a browser engine
+offers produces a format Haven's phone apps cannot play — so re-encoding here would turn a clip your
+circle can watch into one they cannot. Anything genuinely oversized is still picked up later by
+**Settings → Manage media → Re-optimize**.
 
 **Your circle is not notified, and nobody is made to download it.** Importing publishes silently —
 several hundred posts would otherwise mean several hundred notifications for content that is often
@@ -99,6 +109,12 @@ So a large import costs the people in your circle almost nothing until they choo
   reel — only a broad genre, and only on some of them. The *music itself* is part of the video file,
   so your stories still play their song; there is just no song credit to display next to it. Nothing
   Haven can do changes this; the information is not in the file Instagram gives you.
+
+  You can optionally have Haven **suggest** a song for the posts that are *silent* — a guess of
+  roughly the right genre and era, drawn from what the caption says, never anything explicit and
+  never a track it has already used elsewhere in the same import. Anything that already makes a
+  sound keeps its own audio and is never given one. (On iPhone and iPad, a reel that shipped with a
+  recognisable soundtrack additionally gets the real song *named* on it.)
 - **Likes, comments, and followers** — Haven has no equivalent of a follower count, and other
   people's comments are theirs, not yours to republish.
 - **Direct messages** — the export contains them, but importing other people's messages into a
@@ -116,3 +132,8 @@ copies.
 
 **The import is slow.** A large archive is well over a gigabyte of photos and video, all of which is
 encrypted on your device as it is imported. It runs in the background — you can keep using Haven.
+
+**Can I stop it and come back?** Yes. **Stop** takes effect immediately, keeps everything already
+imported, and remembers where it got to; picking the import back up carries on from there rather
+than starting again. Quitting Haven mid-import does the same thing — it resumes itself on the next
+launch, as long as the `.zip` is still where you left it.

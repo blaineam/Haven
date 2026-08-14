@@ -9,6 +9,10 @@ mod commands;
 #[cfg(debug_assertions)]
 mod demo;
 mod engine;
+// The Instagram "Download your information" importer: archive parser, song suggester, runner.
+// Apple parity — apple/HavenApp/Instagram{Archive,Importer,ImportView}.swift.
+mod igimport;
+mod instagram;
 mod localmedia;
 mod mediaresume;
 // qa-cmd v2 driver (docs/QA.md) — same rule as demo: `cfg`, not a runtime check, so no release
@@ -22,6 +26,7 @@ mod scheduled;
 mod secret;
 mod selfsync;
 mod selfsyncrot;
+mod songsuggest;
 mod store;
 mod wire;
 
@@ -402,6 +407,10 @@ pub fn run() {
                     if e.host_on_launch() {
                         let _ = e.start_hosting().await;
                     }
+                    // Pick a half-finished Instagram import back up. Silent when there is nothing
+                    // pending, and silent when the archive has moved — an import they can simply
+                    // run again is not worth nagging about on every cold start.
+                    crate::igimport::resume_if_needed(e.clone());
                 });
 
                 // System tray: show the window, toggle the relay, or quit. The relay keeps running
@@ -584,6 +593,12 @@ pub fn run() {
             commands::set_relay_media_limits,
             commands::get_media_limits,
             commands::set_media_limits,
+            commands::instagram_read,
+            commands::instagram_status,
+            commands::instagram_run,
+            commands::instagram_cancel,
+            commands::instagram_resume,
+            commands::instagram_reset,
             commands::set_foreground,
             commands::reset,
         ])

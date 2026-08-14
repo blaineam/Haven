@@ -166,6 +166,10 @@ const ICONS = {
   "questionmark.circle": { d: "M12 21a9 9 0 100-18 9 9 0 000 18z", extra: "M9.6 9.2a2.5 2.5 0 114.2 1.8c-.8.7-1.8 1.3-1.8 2.5M12 16.8h.01" },
   "character.bubble": { d: "M4 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2h-5l-4 4v-4H6a2 2 0 01-2-2V6z", extra: "M9.2 13l2.1-6h1.4l2.1 6M10 11h4" },
   "square.grid.2x2": { d: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" },
+  "square.and.arrow.down": { d: "M12 3v12M7.5 10.5L12 15l4.5-4.5", extra: "M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3" },
+  "exclamationmark.triangle": { d: "M10.3 4.2L2.8 17.3A2 2 0 004.5 20.3h15a2 2 0 001.7-3L13.7 4.2a2 2 0 00-3.4 0z", extra: "M12 9v4.5M12 17h.01" },
+  "play.rectangle": { d: "M3 6a2 2 0 012-2h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6z", extra: "M10 9l5 3-5 3V9z" },
+  "calendar": { d: "M4 7a2 2 0 012-2h12a2 2 0 012 2v12a2 2 0 01-2 2H6a2 2 0 01-2-2V7z", extra: "M8 3v4M16 3v4M4 10h16" },
 };
 /** One glyph as an <svg>. `cls` lands on the element so callers can size it. */
 function icon(name, cls) {
@@ -4823,9 +4827,286 @@ async function settingsSheet() {
       settingsSheet();
     }, { value: themeNow === "light" ? t("light") : t("dark") })),
 
+    group(row(t("import_from_instagram"), "square.and.arrow.down", () => instagramImportSheet())),
+    foot(t("import_ig_foot")),
+
     group(row(t("advanced"), "wrench", () => advancedSheet())),
     foot(t("advanced_foot")),
   ));
+}
+
+// ---- Instagram archive import ------------------------------------------------------------------
+//
+// The guided "bring your Instagram posts over" flow. Apple parity:
+// `apple/HavenApp/InstagramImportView.swift` + `ImportBanner.swift`.
+//
+// Shaped by the fact that the user cannot get their posts out on demand: they request an export,
+// wait hours or days, and come back. So this WALKS — one step on screen at a time, each with a
+// single action — rather than presenting the whole procedure as a page of prose. The settings
+// Instagram asks for are shown as a checklist of value rows, not sentences, because that is how
+// they will be read: glanced at while looking at Instagram's form on another screen.
+//
+// NOTHING here owns the import. The run lives on the Rust side (`igimport.rs`), on its own thread:
+// closing this sheet does not stop it, quitting Haven does not lose it, and reopening the sheet
+// simply re-reads `instagram_status`. That is the whole reason the progress screen's PRIMARY action
+// is to leave rather than to wait.
+
+const IG = {
+  step: 0,
+  includeStories: false,
+  // Off by default — it attaches a GUESS, so it should be asked for, not assumed.
+  matchSongs: false,
+  status: null,
+};
+
+const IG_EXPORT_URL = "https://accountscenter.instagram.com/info_and_permissions/dyi/";
+
+async function instagramImportSheet() {
+  IG.status = await invoke("instagram_status").catch(() => null);
+  // Land on the file step when there is nothing left to explain: a resumed or finished run has
+  // already been through the walkthrough.
+  if (IG.status && IG.status.phase !== "idle") IG.step = 2;
+  drawInstagramSheet();
+}
+
+/** True while THIS sheet is the one on screen — so a progress event redraws it without resurrecting
+ *  a sheet the user closed, and without stomping on some other sheet they opened since. */
+const igSheetOpen = () => !!$("#modal-root").querySelector(".ig-sheet");
+
+function drawInstagramSheet() {
+  const s = IG.status || { phase: "idle" };
+  const circleName = state.activeCircleName || circleDisplayName(state.activeCircle, "");
+  let body;
+  let foot = null;
+  switch (s.phase) {
+    case "previewing": [body, foot] = igPreview(s, circleName); break;
+    case "importing":  body = igRunning(s); break;
+    case "finished":   body = igFinished(s, circleName); break;
+    case "failed":     body = igFailure(s); break;
+    default:           body = igWalkthrough(s); break; // idle + reading
+  }
+  body.classList.add("ig-sheet");
+  sheet(t("import_from_instagram"), body, foot);
+}
+
+// ---- Walkthrough (3 steps, one at a time) ----
+
+function igWalkthrough(s) {
+  const dots = el("div", { class: "ig-dots" },
+    ...[0, 1, 2].map((i) => el("i", { class: "ig-dot" + (i === IG.step ? " on" : "") })));
+  const next = (label) => el("button", {
+    class: "btn", style: "width:100%;margin-top:6px",
+    onclick: () => { IG.step += 1; drawInstagramSheet(); },
+  }, label);
+
+  let step;
+  if (IG.step === 0) {
+    step = igStep("square.and.arrow.down", t("ig_step1_title"), t("ig_step1_blurb"),
+      el("button", { class: "btn primary", style: "width:100%", onclick: () => openExternal(IG_EXPORT_URL) }, t("ig_open_instagram")),
+      el("div", { class: "muted small", style: "font-weight:600;align-self:flex-start;margin-top:4px" }, t("ig_pick_these")),
+      el("div", { class: "set-group", style: "width:100%" },
+        igSetting(t("ig_format"), "JSON", true),
+        igSetting(t("ig_media_quality"), t("ig_high")),
+        igSetting(t("ig_date_range"), t("ig_all_time")),
+        igSetting(t("ig_include"), t("ig_include_value"))),
+      el("div", { class: "ig-warn" }, icon("exclamationmark.triangle"), el("span", {}, t("ig_json_warning"))),
+      next(t("ig_requested_it")));
+  } else if (IG.step === 1) {
+    step = igStep("clock", t("ig_step2_title"), t("ig_step2_blurb"),
+      el("div", { class: "col", style: "gap:12px;width:100%;text-align:left" },
+        igBullet(t("ig_step2_a")), igBullet(t("ig_step2_b")), igBullet(t("ig_step2_c"))),
+      next(t("ig_have_the_file")));
+  } else {
+    const reading = s.phase === "reading";
+    step = igStep("folder", t("ig_step3_title"), t("ig_step3_blurb"),
+      el("button", {
+        class: "btn primary", style: "width:100%", disabled: reading ? "" : null,
+        onclick: () => pickInstagramArchive(),
+      }, reading ? t("ig_reading") : t("ig_choose_file")),
+      el("div", { class: "muted small" }, t("ig_filename_hint")));
+  }
+  return el("div", { class: "col", style: "gap:0" }, dots, step);
+}
+
+/** Shared step chrome: icon, title, one line of context, then the step's own content. */
+function igStep(iconName, title, blurb, ...content) {
+  return el("div", { class: "ig-step" },
+    el("span", { class: "ig-step-icon" }, icon(iconName)),
+    el("div", { class: "ig-step-title" }, title),
+    el("div", { class: "ig-step-blurb" }, blurb),
+    ...content);
+}
+
+function igSetting(label, value, critical) {
+  return el("div", { class: "set-row" },
+    el("span", { style: "flex:1" }, label),
+    el("span", { class: critical ? "ig-critical" : "muted" }, value));
+}
+
+function igBullet(text) {
+  return el("div", { class: "ig-bullet" }, el("i", {}), el("span", {}, text));
+}
+
+/** The .zip picker. Desktop has real paths — the backend opens the archive itself, so nothing is
+ *  read into the WebView and a 1.28 GB file costs this process nothing. */
+async function pickInstagramArchive() {
+  const dlg = TAURI.dialog;
+  if (!dlg || !dlg.open) { toast(t("ig_no_picker")); return; }
+  let picked;
+  try {
+    picked = await dlg.open({ multiple: false, directory: false, filters: [{ name: "Zip", extensions: ["zip"] }] });
+  } catch (e) { toast("" + e); return; }
+  if (!picked) return;
+  const path = typeof picked === "string" ? picked : (picked.path || picked);
+  await invoke("instagram_read", { path }).catch((e) => toast("" + e));
+}
+
+// ---- Preview — nothing publishes until this is confirmed ----
+
+function igPreview(s, circleName) {
+  const a = s.summary || {};
+  const rows = el("div", { class: "set-group" },
+    igCount(t("ig_posts"), a.posts, "square.grid.2x2"),
+    igCount(t("ig_reels"), a.reels, "play.rectangle"),
+    igCount(t("ig_photos_videos"), a.mediaCount, "photo"),
+    igCount(t("ig_size"), fmtBytes(a.totalBytes || 0), "internaldrive"),
+    a.earliest && a.latest ? igCount(t("ig_spans"), `${igMonth(a.earliest)} – ${igMonth(a.latest)}`, "calendar") : null);
+
+  const missing = a.missing
+    ? el("div", { class: "col", style: "gap:4px" },
+        el("div", { class: "ig-warn" }, icon("exclamationmark.triangle"), el("span", {}, t("ig_missing", a.missing))),
+        el("div", { class: "set-foot" }, t("ig_missing_foot")))
+    : null;
+
+  const storiesBox = (a.stories || 0) > 0
+    ? el("div", { class: "col", style: "gap:4px" },
+        el("div", { class: "set-group" }, igToggle(t("ig_include_stories", a.stories), IG.includeStories, (on) => {
+          IG.includeStories = on; drawInstagramSheet();
+        })),
+        el("div", { class: "set-foot" }, t("ig_stories_foot", circleName)))
+    : null;
+
+  const songsBox = el("div", { class: "col", style: "gap:4px" },
+    el("div", { class: "set-group" }, igToggle(t("ig_suggest_songs"), IG.matchSongs, (on) => { IG.matchSongs = on; })),
+    el("div", { class: "set-foot" }, t("ig_songs_foot")));
+
+  const n = (a.items || 0) - (IG.includeStories ? 0 : (a.stories || 0));
+
+  const body = el("div", { class: "col", style: "gap:14px" },
+    el("div", { class: "muted small", style: "font-weight:600" }, t("ig_in_your_archive")),
+    rows, missing, storiesBox, songsBox,
+    el("div", { class: "set-foot" }, t("ig_import_foot", circleName)),
+    el("button", { class: "btn", style: "align-self:flex-start", onclick: () => {
+      IG.step = 2;   // straight back to the picker, not through the walkthrough again
+      invoke("instagram_reset").catch(() => {});
+    } }, t("ig_different_file")));
+
+  const foot = el("button", { class: "btn primary", onclick: async () => {
+    await invoke("instagram_run", {
+      circleId: state.activeCircle,
+      includeStories: IG.includeStories,
+      matchSongs: IG.matchSongs,
+    }).catch((e) => toast("" + e));
+  } }, n === 1 ? t("ig_import_one") : t("ig_import_n", n));
+
+  return [body, foot];
+}
+
+function igCount(label, value, iconName) {
+  return el("div", { class: "set-row" },
+    el("span", { class: "ri" }, icon(iconName)),
+    el("span", { style: "flex:1" }, label),
+    el("span", { class: "muted", style: "font-variant-numeric:tabular-nums" }, String(value == null ? "—" : value)));
+}
+
+function igToggle(label, on, onChange) {
+  const chk = el("input", { type: "checkbox", style: "width:auto" });
+  chk.checked = !!on;
+  chk.onchange = () => onChange(chk.checked);
+  return el("label", { class: "set-row", style: "cursor:pointer" },
+    el("span", { style: "flex:1" }, label), chk);
+}
+
+function igMonth(ms) {
+  return new Date(Number(ms)).toLocaleDateString(undefined, { year: "numeric", month: "short" });
+}
+
+// ---- Running / done / failed ----
+
+function igRunning(s) {
+  const total = Math.max(s.total || 1, 1);
+  return el("div", { class: "col", style: "gap:14px;align-items:center;text-align:center;padding:12px 0" },
+    el("div", { class: "ig-big" }, String(s.done || 0)),
+    el("div", { class: "muted" }, t("ig_of_n_imported", s.total || 0)),
+    el("div", { class: "ig-bar" }, el("i", { style: `width:${Math.round(((s.done || 0) / total) * 100)}%` })),
+    el("div", { class: "muted small", style: "max-width:34ch" }, t("ig_encrypted_here")),
+    // The import does not need this screen — it runs on its own thread, keeps going while Haven is
+    // used normally, and resumes itself if the app is quit. So the primary action here is to LEAVE.
+    el("button", { class: "btn primary", style: "min-width:220px", onclick: () => closeModal() }, t("ig_browse_while")),
+    el("div", { class: "muted small" }, t("ig_can_close")),
+    el("button", { class: "btn danger", onclick: () => {
+      // Stop is destructive and easy to hit by accident next to a progress bar — it confirms.
+      if (!confirm(t("ig_stop_confirm") + "\n\n" + t("ig_stop_body", s.done || 0))) return;
+      invoke("instagram_cancel").catch(() => {});
+    } }, t("ig_stop")));
+}
+
+function igFinished(s, circleName) {
+  // A Stop is really a PAUSE: the backend keeps the checkpoint, so offer to carry on here rather
+  // than making the user quit and relaunch to get the other resume door.
+  const canResume = typeof s.resumeFrom === "number";
+  return el("div", { class: "col", style: "gap:12px;align-items:center;text-align:center;padding:12px 0" },
+    el("span", { class: "ig-done-icon" }, icon("checkmark")),
+    el("div", { style: "font-size:19px;font-weight:700" }, t("ig_n_imported", s.imported || 0)),
+    el("div", { class: "muted" }, t("ig_in_date_order", circleName)),
+    (s.skipped || 0) > 0 ? el("div", { class: "muted small", style: "max-width:38ch" }, t("ig_n_skipped", s.skipped)) : null,
+    canResume ? el("div", { class: "muted small", style: "max-width:38ch" }, t("ig_resuming", s.resumeFrom)) : null,
+    canResume ? el("button", { class: "btn primary", style: "min-width:180px;margin-top:4px", onclick: () => {
+      invoke("instagram_resume").catch((e) => toast("" + e));
+    } }, t("ig_resume")) : null,
+    el("button", { class: canResume ? "btn" : "btn primary", style: "min-width:180px;margin-top:4px", onclick: async () => {
+      await invoke("instagram_reset").catch(() => {});
+      closeModal();
+    } }, t("done")));
+}
+
+function igFailure(s) {
+  return el("div", { class: "col", style: "gap:12px;align-items:center;text-align:center;padding:12px 0" },
+    el("span", { class: "ig-fail-icon" }, icon("exclamationmark.triangle")),
+    el("div", { style: "max-width:44ch;line-height:1.5" }, s.message || ""),
+    el("button", { class: "btn primary", style: "min-width:180px", onclick: () => {
+      // Step FIRST: the reset emits, and that event is what redraws this sheet.
+      IG.step = 2;
+      invoke("instagram_reset").catch(() => {});
+    } }, t("ig_try_another")));
+}
+
+// ---- The app-wide "still importing" pill ----
+//
+// An archive import takes a long time — hundreds of photos and videos, each sealed on this machine —
+// and holding the user on a modal progress bar for all of it is the wrong trade twice over: they
+// cannot use Haven, and they cannot watch the posts arriving, which is the whole point. So the run
+// is independent of any view and this pill is what remains on screen: small, clickable to reopen the
+// full sheet, and present wherever the user browses to — including after a relaunch, since the
+// import resumes itself.
+
+function renderImportPill(s) {
+  const existing = $("#import-pill");
+  if (!s || s.phase !== "importing") { if (existing) existing.remove(); return; }
+  const total = Math.max(s.total || 1, 1);
+  const pct = Math.round(((s.done || 0) / total) * 100);
+  if (existing) {
+    existing.querySelector(".ip-count").textContent = t("ig_x_of_y", s.done || 0, s.total || 0);
+    existing.querySelector(".ip-ring i").style.width = `${pct}%`;
+    return;
+  }
+  const pill = el("button", { class: "import-pill", id: "import-pill", onclick: () => instagramImportSheet() },
+    el("span", { class: "ip-ring" }, el("i", { style: `width:${pct}%` })),
+    el("span", { class: "col", style: "gap:1px;align-items:flex-start" },
+      el("span", { class: "ip-title" }, t("ig_importing_banner")),
+      el("span", { class: "ip-count" }, t("ig_x_of_y", s.done || 0, s.total || 0))),
+    el("span", { class: "ip-chev" }, icon("chevron.right")));
+  document.body.append(pill);
 }
 
 /** Privacy + media prefs (Apple Settings / Android SettingsScreen parity). Device-local. */
@@ -6352,6 +6633,17 @@ async function boot() {
   };
   listen("haven:deep-link", drainDeepLinks);
   drainDeepLinks();
+  // Instagram archive import progress. The run lives in Rust and outlives every view, so the ONLY
+  // thing the frontend does is reflect it: keep the floating pill current, and redraw the importer
+  // sheet if that is what the user happens to be looking at.
+  listen("haven:import", (e) => {
+    IG.status = e.payload || null;
+    renderImportPill(IG.status);
+    if (igSheetOpen()) drawInstagramSheet();
+  });
+  // A resumed import (see igimport::resume_if_needed) starts before this webview exists, so the
+  // first event can land with nobody listening — ask once at boot rather than showing nothing.
+  invoke("instagram_status").then((s) => { IG.status = s; renderImportPill(s); }).catch(() => {});
   listen("haven:call", (e) => onCallEvent(e.payload));
   // Drag photos/videos from the file manager onto the window → attach to the active composer.
   //

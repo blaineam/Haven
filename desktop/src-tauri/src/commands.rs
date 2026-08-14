@@ -1629,6 +1629,62 @@ pub fn switch_identity(app: tauri::AppHandle, engine: Eng, node_hex: String) -> 
     app.restart();
 }
 
+// ---- Instagram archive import ---------------------------------------------------------------
+//
+// Five thin commands over `igimport`, which owns the whole job: the run lives on its own thread,
+// survives the sheet being closed and the app being quit, and pushes progress on `haven:import`.
+// Nothing here blocks — `instagram_read` and `instagram_run` both return the moment the work is
+// handed off.
+
+/// Parse a picked `.zip` for the preview. Result arrives on `haven:import` (phase `previewing`, or
+/// `failed` with the message to show).
+#[tauri::command]
+pub fn instagram_read(engine: Eng, path: String) {
+    crate::igimport::read(engine.inner().clone(), path);
+}
+
+/// The whole importer state, for a view that mounts mid-import (or after a relaunch resumed one).
+#[tauri::command]
+pub fn instagram_status() -> serde_json::Value {
+    crate::igimport::status()
+}
+
+/// Start importing the previewed archive into `circle_id`. `include_stories` is OFF by default and
+/// that default is load-bearing — see the note in `igimport::run`.
+#[tauri::command]
+pub fn instagram_run(
+    engine: Eng,
+    circle_id: String,
+    include_stories: Option<bool>,
+    match_songs: Option<bool>,
+) {
+    crate::igimport::run(
+        engine.inner().clone(),
+        circle_id,
+        include_stories.unwrap_or(false),
+        match_songs.unwrap_or(false),
+        0,
+    );
+}
+
+/// Stop — really "pause". The checkpoint is KEPT, so reopening the importer carries on from here.
+#[tauri::command]
+pub fn instagram_cancel() {
+    crate::igimport::cancel();
+}
+
+/// Carry on from a Stop, without waiting for a relaunch to notice the checkpoint.
+#[tauri::command]
+pub fn instagram_resume(engine: Eng) {
+    crate::igimport::resume_now(engine.inner().clone());
+}
+
+/// Forget the previewed/finished archive. A no-op while a run is in flight.
+#[tauri::command]
+pub fn instagram_reset(engine: Eng) {
+    crate::igimport::reset(&engine);
+}
+
 // ---- misc --------------------------------------------------------------------------------
 
 #[tauri::command]

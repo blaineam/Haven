@@ -856,10 +856,25 @@ impl Engine {
         }
     }
 
-    fn emit_changed(&self) {
+    pub(crate) fn emit_changed(&self) {
         if let Some(app) = self.app.lock().unwrap().clone() {
             let _ = app.emit("haven:changed", ());
         }
+    }
+
+    /// Emit an arbitrary frontend event. The archive importer runs on its own thread for minutes at
+    /// a time and pushes progress with this rather than making the UI poll — and it is a no-op in
+    /// headless mode, where there is no window to tell.
+    pub(crate) fn emit_event(&self, name: &str, payload: serde_json::Value) {
+        if let Some(app) = self.app.lock().unwrap().clone() {
+            let _ = app.emit(name, payload);
+        }
+    }
+
+    /// This identity's data directory (the archive importer's resume checkpoint lives beside
+    /// `prefs.json` / `scheduled.json`).
+    pub(crate) fn paths(&self) -> &Paths {
+        &self.paths
     }
 
     /// [`Self::notify`] with an optional `haven://…` deep link describing what the notification is

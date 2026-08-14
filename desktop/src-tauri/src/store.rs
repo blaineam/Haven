@@ -64,6 +64,11 @@ impl Paths {
     pub fn scheduled_file(&self) -> PathBuf {
         self.root.join("scheduled.json")
     }
+    /// The half-finished Instagram import, so a relaunch can pick it back up. DEVICE-LOCAL and
+    /// never self-synced: it names a path on THIS machine's disk, which means nothing on a phone.
+    pub fn instagram_import_file(&self) -> PathBuf {
+        self.root.join("instagram-import.json")
+    }
     pub fn relay_dir(&self) -> PathBuf {
         self.root.join("relay")
     }

@@ -56,6 +56,12 @@ thiserror = "1"
 # Linux Secret Service) — keys never leave the device, same rule as iOS/Android.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
+# Random-access ZIP reader for the Instagram archive importer (`instagram.rs`). Deliberately a
+# crate rather than hand-rolled: the export is a 1.28 GB zip whose central directory must be seeked,
+# not streamed, and a half-correct local-header parser is exactly the kind of thing that silently
+# drops entries. `deflate-flate2` only — flate2 is already in the tree (via tauri), and we never
+# WRITE a zip, so zopfli's compressor would be dead weight.
+zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
 sha2 = "0.10"
 # Client for relays' plain-HTTP media interfaces (the default cross-NAT media transport) — same
 # version/features as haven-s3, so it's already in the dependency tree.

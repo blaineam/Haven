@@ -2999,11 +2999,11 @@ final class FeedStore: ObservableObject {
     /// Coalesced refresh — collapses a BURST of refresh requests (many media chunks / events arriving during
     /// a sync) into a single feed rebuild ~250ms later, instead of rebuilding the whole feed per item (which
     /// janked the UI). Use this on the high-frequency inbound/sync paths; keep refresh() for user actions.
-    func scheduleRefresh() {
+    func scheduleRefresh(after seconds: Double = 0.25) {
         guard !refreshPending else { return }
         refreshPending = true
         Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             refreshPending = false
             refresh()
         }
@@ -3211,7 +3211,12 @@ final class FeedStore: ObservableObject {
                                                      muteVideo: false, createdAt: createdAt) else { return }
         broadcastEvent(circleId, env, silent: true)
         postTick += 1; publishedPostCount += 1
-        if circleId == activeCircleId { refresh() }
+        // COALESCED, and deliberately slow. `refresh()` re-reads the engine and re-opens every
+        // envelope in the circle — real CPU, and the single biggest source of feed jank. Calling it
+        // per imported post meant 372 full rebuilds of a list that grows the whole time, which is
+        // what made the feed jump around while an import ran. Once every few seconds is plenty:
+        // the posts are backdated history, not something anyone is waiting to see appear.
+        if circleId == activeCircleId { scheduleRefresh(after: 3) }
         enqueueAuthoredMedia(media, circleId: circleId, social: social)
         if !media.isEmpty {
             Task { await SharedStore.publishDeviceRoster(social: social) }

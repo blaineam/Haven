@@ -481,6 +481,17 @@ final class MusicPlayback {
         guard !havenCameraIsOpen else { return }             // a viewfinder is up — never play a post's song
         let ids = trackIds(track.catalogId)
         guard ids.store != nil || ids.pid != nil else { return }
+        #if targetEnvironment(simulator)
+        // MPMusicPlayerController is a SYSTEM agent that does not exist in the simulator, so every
+        // song in the feed was silent there with nothing to indicate why — song work could not be
+        // tested at all without a device. Fall back to the catalog PREVIEW clip, which is a plain
+        // audio URL needing neither the system player nor a subscription.
+        //
+        // Simulator-only on purpose: on a real device the full track through the user's own Apple
+        // Music is the actual product, and this must not quietly downgrade it to 30 seconds.
+        if let store = ids.store { playPreviewFallback(track, store: store, gen: gen) }
+        return
+        #else
         // Playing through the system player needs media-library authorization.
         if !authed {
             MPMediaLibrary.requestAuthorization { _ in }
@@ -530,10 +541,37 @@ final class MusicPlayback {
                 }
             }
         }
+        #endif
     }
+
+    #if targetEnvironment(simulator)
+    /// Simulator stand-in for the system music player: play the catalog's 30-second preview clip.
+    /// Same generation guard as the real path, so a scroll or a duck still supersedes it.
+    private let previewPlayer = AVPlayer()
+    private func playPreviewFallback(_ track: TrackRefFfi, store: String, gen: Int) {
+        Task { @MainActor in
+            guard let id = MusicItemID(rawValue: store) as MusicItemID?,
+                  let song = try? await MusicCatalogResourceRequest<MusicKit.Song>(matching: \.id, equalTo: id)
+                                    .response().items.first,
+                  let url = song.previewAssets?.first?.url,
+                  // Same conditions the real path re-checks after its hop: a scroll, a duck, a
+                  // call or the camera opening while we were fetching all mean "no longer wanted".
+                  gen == self.generation, self.current?.catalogId == track.catalogId,
+                  self.appFrontmost, !SettingsStore.shared.silent, !self.callActive,
+                  !havenCameraIsOpen else { return }
+            self.previewPlayer.replaceCurrentItem(with: AVPlayerItem(url: url))
+            self.previewPlayer.play()
+        }
+    }
+    #endif
+
     func duck() {
         invalidate()   // kill any in-flight play() — pausing can't stop a song that hasn't started yet
+        #if targetEnvironment(simulator)
+        previewPlayer.pause()
+        #else
         if player.playbackState == .playing { player.pause() }
+        #endif
     }
     func unduck() {
         if current != nil, appFrontmost, !callActive, !SettingsStore.shared.silent, !havenCameraIsOpen { player.play() }

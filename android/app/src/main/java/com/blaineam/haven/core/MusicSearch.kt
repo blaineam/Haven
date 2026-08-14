@@ -19,6 +19,8 @@ object MusicSearch {
         val previewUrl: String,
         val storeUrl: String,
         val durationMs: Long,
+        /** iTunes `trackExplicitness`. The suggester never attaches an explicit track unheard. */
+        val explicit: Boolean = false,
     )
 
     /**
@@ -72,6 +74,7 @@ object MusicSearch {
                     previewUrl = preview,
                     storeUrl = o.optString("trackViewUrl"),
                     durationMs = o.optLong("trackTimeMillis", 0),
+                    explicit = o.optString("trackExplicitness") == "explicit",
                 )
             }
         }.getOrDefault(emptyList())

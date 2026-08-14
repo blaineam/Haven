@@ -88,18 +88,27 @@ enum SongSuggester {
     /// not the same as being a name.
     private static func plainWords(_ text: String, limit: Int) -> [String] {
         let raw = text.components(separatedBy: CharacterSet.alphanumerics.inverted)
-        var proper: [String] = []
+        // THREE tiers, not two. A capital mid-sentence is almost certainly a name and ranks first.
+        // A capital that OPENS the sentence is ambiguous — it may be a name ("Luma got cleaned up")
+        // or just the first word ("Merry Christmas") — so it ranks second rather than being demoted
+        // to ordinary, which is what made "Luma" lose to "groomers" and "cleaned".
+        var midSentence: [String] = []
+        var sentenceStart: [String] = []
         var ordinary: [String] = []
-        for (i, word) in raw.enumerated() {
+        var atStart = true
+        for word in raw {
+            guard !word.isEmpty else { continue }
             let lower = word.lowercased()
+            let startsSentence = atStart
+            atStart = false
             guard lower.count > 3, !blandWords.contains(lower), !stopWords.contains(lower) else { continue }
             let capitalised = word.first?.isUppercase == true
-            // `i > 0` alone is not enough — the word after a full stop starts a sentence too.
-            let startsSentence = i == 0 || raw[..<i].last(where: { !$0.isEmpty }) == nil
-            if capitalised && !startsSentence { proper.append(lower) } else { ordinary.append(lower) }
+            if capitalised && !startsSentence { midSentence.append(lower) }
+            else if capitalised { sentenceStart.append(lower) }
+            else { ordinary.append(lower) }
         }
         var seen = Set<String>()
-        return (proper + ordinary.sorted { $0.count > $1.count })
+        return (midSentence + sentenceStart + ordinary.sorted { $0.count > $1.count })
             .filter { seen.insert($0).inserted }
             .prefix(limit)
             .map { $0 }
@@ -129,6 +138,8 @@ enum SongSuggester {
         "second", "third", "little", "long", "short", "here", "there", "everyone", "everything",
         "people", "someone", "something", "anything", "photo", "photos", "picture", "pictures",
         "video", "videos", "post", "instagram", "sure", "able", "back", "really", "very",
+        "season", "seasons", "family", "friends", "everybody", "moment", "moments",
+        "weekend", "week", "today", "life", "world", "place", "home", "house",
     ]
 
     // MARK: - Suggesting

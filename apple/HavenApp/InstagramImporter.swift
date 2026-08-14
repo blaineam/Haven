@@ -192,7 +192,8 @@ final class InstagramImporter: ObservableObject {
             for (idx, item) in items.enumerated() {
                 if idx < startAt { continue }   // already imported on a previous run
                 if await MainActor.run(body: { [weak self] in self?.cancelled ?? true }) { break }
-                let (refs, hasAudio) = await Self.stage(item, zip: zip, byName: byName)
+                let (refs, hasAudio, detected) = await Self.stage(item, zip: zip, byName: byName,
+                                                                  identify: matchSongs)
                 if refs.isEmpty {
                     skipped += 1
                 } else {
@@ -200,8 +201,16 @@ final class InstagramImporter: ObservableObject {
                     // Suggest a song ONLY into silence. A reel that shipped with its soundtrack
                     // keeps it — that audio is baked into the video and is what the user actually
                     // chose; layering a guess over it would be worse than adding nothing.
-                    let music: TrackRefFfi? = (matchSongs && !hasAudio)
-                        ? await ImportSongMatcher.song(for: at, genre: item.musicGenre)
+                    // Two different jobs, and which one applies is decided by whether the post
+                    // already makes a sound:
+                    //
+                    //   has audio  → IDENTIFY it (Shazam) and attach the result as a CREDIT, so the
+                    //                chip names the real song while the video keeps its own audio.
+                    //   silent     → SUGGEST one (Apple Music, by genre + era). A guess, and the
+                    //                only case where a guess is harmless, because the alternative
+                    //                is silence.
+                    let music: TrackRefFfi? = matchSongs
+                        ? (hasAudio ? detected : await ImportSongMatcher.song(for: at, genre: item.musicGenre))
                         : nil
                     // Stories, when the user opted in, land as KEPT stories rather than feed posts:
                     // a personal snapshot on their profile with its media pinned. Keeping
@@ -253,11 +262,14 @@ final class InstagramImporter: ObservableObject {
     /// `MediaStore` calls hop onto it.
     private nonisolated static func stage(_ item: InstagramArchive.Item,
                                           zip: ZipReader,
-                                          byName: [String: ZipReader.Entry]) async -> ([String], Bool) {
+                                          byName: [String: ZipReader.Entry],
+                                          identify: Bool) async -> ([String], Bool, TrackRefFfi?) {
         var refs: [String] = []
         /// Does ANY of this post's media make sound? One song plays per post, so a carousel with a
         /// single talking video should not get one layered on top of it.
         var anyAudio = false
+        /// The song Shazam recognised inside that audio, if any — attached as a credit, not a track.
+        var detected: TrackRefFfi?
         for name in item.mediaNames {
             guard let entry = byName[name] else { continue }
             // Disk read + CRC over the entry — the expensive part, and the reason this is detached.
@@ -273,7 +285,12 @@ final class InstagramImporter: ObservableObject {
                 // Asked of the real file, before transcoding — "is it a video" and "does it make
                 // sound" are different questions. A screen recording, a time-lapse or a clip muted
                 // before posting is a silent video, and deserves a song as much as a photo does.
-                if await ImportSongMatcher.hasAudio(scratch) { anyAudio = true }
+                if await ImportSongMatcher.hasAudio(scratch) {
+                    anyAudio = true
+                    // Identify from the FIRST audible clip only. A carousel shows one chip, and
+                    // Shazam-ing every clip in a 20-video album is work with nowhere to go.
+                    if identify, detected == nil { detected = await ShazamDetector.identify(scratch) }
+                }
                 // forceOptimize: an import is bulk media at someone else's encoder settings —
                 // running it through Haven's ladder is what stops a 1.2 GB archive from landing on
                 // the relay as-is. alsoOriginal: false — shipping the originals too would double an
@@ -294,7 +311,7 @@ final class InstagramImporter: ObservableObject {
                 if let ref { refs.append(ref) }
             }
         }
-        return (refs, anyAudio)
+        return (refs, anyAudio, detected)
     }
 
     /// Stable id for a kept story, derived from the archive entry it came from.

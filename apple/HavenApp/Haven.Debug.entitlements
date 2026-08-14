@@ -4,13 +4,12 @@
 <dict>
 	<key>aps-environment</key>
 	<string>development</string>
-	<!-- Universal Links. `?mode=developer` lets a dev build match the AASA via the on-device
-	     developer-mode fetch, so links work before the file is live on the domain. -->
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>applinks:wemiller.com?mode=developer</string>
 	</array>
-	<!-- Shared with the broadcast upload extension so it can pipe screen frames to the app. -->
+	<key>com.apple.developer.shazamkit</key>
+	<true/>
 	<key>com.apple.security.application-groups</key>
 	<array>
 		<string>group.com.blaineam.kith</string>

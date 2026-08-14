@@ -13,19 +13,30 @@ struct NowPlayingPill: View {
     /// Apple Music deep link for the shared catalog song (nil for library-only items
     /// that have no store id).
     private var appleMusicURL: URL? {
-        guard let store = trackIds(track.catalogId).store else { return nil }
+        guard let store = trackIds(track.creditFreeCatalogId).store else { return nil }
         return URL(string: "https://music.apple.com/song/\(store)")
     }
 
     var body: some View {
         HStack(spacing: 8) {
-            EqualizerBars(animating: animating && !settings.silent)
+            // A CREDIT names the music already inside the video (identified by Shazam on import) —
+            // Haven is not playing it, the clip is. So the chip drops the equalizer and the mute
+            // glyph, both of which would claim a playback this chip does not control, and shows a
+            // recognition mark instead. Tapping through to Apple Music still works.
+            if track.isCreditOnly {
+                Image(systemName: "shazam.logo.fill")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                EqualizerBars(animating: animating && !settings.silent)
+            }
             Text("\(track.title) · \(track.artist)")
                 .font(.caption.weight(.medium))
                 .lineLimit(1)
             // A muted-speaker glyph makes it clear the chip is the mute control.
-            Image(systemName: settings.silent ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                .font(.caption2).foregroundStyle(.secondary)
+            if !track.isCreditOnly {
+                Image(systemName: settings.silent ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             Spacer(minLength: 0)
             // "Open in Music" is now a SMALL, explicit element within the chip — not the whole
             // chip's tap target — so a stray tap mutes rather than yanking the user into Music.

@@ -136,7 +136,12 @@ final class AudioCoordinator: ObservableObject {
         // Play the video's own audio only when there's no song, the author left it unmuted, the app
         // isn't globally silenced, AND the viewer's GLOBAL video-sound toggle is on. The global flag is
         // what makes "tap one video to unmute" carry to every other video + survive loops.
-        let playVideoAudio = (track == nil) && !muteVideo && !SettingsStore.shared.silent
+        // A CREDIT-ONLY track names the music already inside the video (see ShazamDetector) — it is
+        // attribution, not a second audio source. Treating it like a normal song would silence the
+        // clip and stream a copy of the same song over it, which is the one outcome nobody wants.
+        // So it counts as "no song" for playback while still riding along for the chip.
+        let creditOnly = track?.isCreditOnly ?? false
+        let playVideoAudio = (track == nil || creditOnly) && !muteVideo && !SettingsStore.shared.silent
             && SettingsStore.shared.videoSoundOn && !callActive
         videoUnmuted = playVideoAudio
         // THE RESOLVED PLAYER, not the parameter.
@@ -149,7 +154,7 @@ final class AudioCoordinator: ObservableObject {
         videoPlayer?.volume = playVideoAudio ? 1 : 0
         // Never auto-start the song while backgrounded (the system music player would play it audibly even
         // though the app isn't on screen). It resumes via ensureMusicPlaying when we're foreground again.
-        guard let track, !backgrounded else { return }
+        guard let track, !creditOnly, !backgrounded else { return }
         if immediateMusic {
             MusicPlayback.shared.play(track)
             return

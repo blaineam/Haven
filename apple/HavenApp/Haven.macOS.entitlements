@@ -2,39 +2,28 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Mac App Store requires the App Sandbox. iOS uses Haven.entitlements (no sandbox). -->
-	<key>com.apple.security.app-sandbox</key>
-	<true/>
-	<!-- iroh needs outbound + inbound UDP (hole-punching, and serving as the in-app relay). -->
-	<key>com.apple.security.network.client</key>
-	<true/>
-	<key>com.apple.security.network.server</key>
-	<true/>
-	<!-- Picking/saving media, capture, and Photos library access under the sandbox. -->
-	<key>com.apple.security.files.user-selected.read-write</key>
-	<true/>
-	<key>com.apple.security.device.camera</key>
-	<true/>
-	<key>com.apple.security.device.audio-input</key>
-	<true/>
-	<key>com.apple.security.personal-information.photos-library</key>
-	<true/>
-	<!--
-	  Push (APNs). iOS profiles grant this under the short key `aps-environment`.
-	  Native macOS App Store / Team Store profiles grant it under the long key
-	  `com.apple.developer.aps-environment`. codesign intersects the entitlements
-	  file with the profile and DROPS keys that don't match by name — so shipping
-	  the short iOS key on Mac silently stripped push from every TestFlight Mac
-	  build (profile had production push; signed app had none). Use the Mac form.
-	-->
 	<key>com.apple.developer.aps-environment</key>
 	<string>production</string>
-	<!-- Universal Links: invite + post links at wemiller.com/apps/haven/#… open the Mac app.
-	     See web/.well-known/apple-app-site-association. -->
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>applinks:wemiller.com</string>
 	</array>
+	<key>com.apple.developer.shazamkit</key>
+	<true/>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<key>com.apple.security.device.camera</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<key>com.apple.security.personal-information.photos-library</key>
+	<true/>
 	<key>keychain-access-groups</key>
 	<array>
 		<string>$(AppIdentifierPrefix)com.blaineam.kith</string>

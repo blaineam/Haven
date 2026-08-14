@@ -4376,6 +4376,7 @@ function viewStories(list, startIndex = 0) {
 
   const cleanup = () => {
     clearAdvance();
+    stopSong();
     window.removeEventListener("keydown", onKey, true);
     mo.disconnect();
     // Closing the viewer must silence the clip that was on screen, for the same reason paging does:
@@ -4417,7 +4418,41 @@ function viewStories(list, startIndex = 0) {
     paintKeep();   // the pill belongs to the story on screen, not to the viewer
     paintReply();
     armAdvance();
+    playStorySong(it);
 
+  };
+
+  // THE STORY'S SONG. Desktop showed the chip and never played it — the note on `storySongChip`
+  // says a half-working player would be worse than none, which was true while there was no way to
+  // resolve a TrackRef to something playable. `music_resolve` is that way, so the song plays here
+  // as it does on every other platform: the clip is already force-muted when a song is attached
+  // (see `songMuted`), so the song IS the story's audio rather than competing with it.
+  //
+  // The token guards the same race the feed player hit: resolving is a network round trip, stories
+  // advance every few seconds, and two resolves finishing out of order would leave one playing with
+  // nothing holding it.
+  let songAudio = null, songToken = 0;
+  const stopSong = () => {
+    if (songAudio) { try { songAudio.pause(); songAudio.src = ""; } catch (_) {} songAudio = null; }
+    songToken++;
+  };
+  const playStorySong = async (it) => {
+    stopSong();
+    const m = it && it.music;
+    if (!m || !m.title || state.superDataSaver) return;
+    const token = ++songToken;
+    const key = m.title + "|" + (m.artist || "");
+    let url = Autoplay.song.cache.get(key);      // shared with the feed: resolve each song once
+    if (url === undefined) {
+      const hit = await invoke("music_resolve", { title: m.title, artist: m.artist || "" }).catch(() => null);
+      url = (hit && hit.preview_url) || null;
+      Autoplay.song.cache.set(key, url);
+    }
+    // The reader may have advanced while that resolved.
+    if (!url || token !== songToken || !card.isConnected) return;
+    songAudio = new Audio(url);
+    songAudio.loop = true;
+    songAudio.play().catch(() => { songAudio = null; });
   };
 
   // AUTO-ADVANCE. Desktop never had any: a story sat there until tapped, and a video story was

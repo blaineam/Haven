@@ -4392,8 +4392,19 @@ function viewStories(list, startIndex = 0) {
     // One progress segment per story in THIS person's run, filled through the current one.
     let runStart = index; while (runStart > 0 && author(runStart - 1) === author(index)) runStart--;
     let runEnd = index; while (runEnd < stories.length - 1 && author(runEnd + 1) === author(index)) runEnd++;
-    bars.replaceChildren(...Array.from({ length: runEnd - runStart + 1 }, (_, k) =>
-      el("span", { class: "seg" + (runStart + k <= index ? " on" : "") })));
+    // WINDOWED. One segment per story is right for a normal run, and unreadable for a long one:
+    // a profile holding 84 kept stories drew 84 segments across ~430px — about a pixel each, which
+    // is why the bar looked missing rather than crowded. Beyond a couple of dozen it shows a window
+    // around the current story instead, which is what Instagram does for the same reason.
+    const runLen = runEnd - runStart + 1;
+    const MAX_SEGS = 24;
+    let from = runStart, count = runLen;
+    if (runLen > MAX_SEGS) {
+      count = MAX_SEGS;
+      from = Math.min(Math.max(runStart, index - Math.floor(MAX_SEGS / 2)), runEnd - MAX_SEGS + 1);
+    }
+    bars.replaceChildren(...Array.from({ length: count }, (_, k) =>
+      el("span", { class: "seg" + (from + k <= index ? " on" : "") })));
     // STOP the outgoing clip before dropping it. Detaching a <video> from the DOM does NOT stop
     // playback — the element keeps running (and keeps making noise) until it is paused and its
     // source released. Paging through a run of stories therefore left every clip already visited
@@ -4406,6 +4417,7 @@ function viewStories(list, startIndex = 0) {
     paintKeep();   // the pill belongs to the story on screen, not to the viewer
     paintReply();
     armAdvance();
+
   };
 
   // AUTO-ADVANCE. Desktop never had any: a story sat there until tapped, and a video story was

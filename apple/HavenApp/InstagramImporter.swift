@@ -305,7 +305,9 @@ final class InstagramImporter: ObservableObject {
         /// single talking video should not get one layered on top of it.
         var anyAudio = false
         /// Identification running alongside the staging work — see where it is started.
-        var shazamTask: Task<TrackRefFfi?, Never>?
+        var shazamTask: Task<Void, Never>?
+        /// Where that task deposits its answer, if it finishes in time.
+        let shazamResult = ShazamResultBox()
         /// What the post is ABOUT — Vision labels off the first photo, plus caption words. This is
         /// what makes one silent post's suggestion differ from the next one's.
         var themes: [String] = SongSuggester.captionThemes(item.body)
@@ -342,12 +344,13 @@ final class InstagramImporter: ObservableObject {
                     if identify, shazamTask == nil {
                         let clip = scratch
                         let label = name
+                        let box = shazamResult
                         shazamTask = Task.detached(priority: .utility) {
                             let began = Date()
                             let outcome = await ShazamDetector.identifyDetailed(clip)
+                            await box.set(outcome.track)
                             HavenLog.sync("ig-import: shazam \(outcome.reason) in "
                                 + "\(String(format: "%.1f", Date().timeIntervalSince(began)))s — \(label)")
-                            return outcome.track
                         }
                     }
                 }
@@ -384,11 +387,13 @@ final class InstagramImporter: ObservableObject {
         }
         // Collect identification only if it is ready or nearly so. The import does not wait on it:
         // a missing credit costs a chip, whereas waiting costs every remaining post.
-        var detected: TrackRefFfi?
-        if let shazamTask {
-            detected = await withTimeout(3) { await shazamTask.value } ?? nil
-            if detected == nil { shazamTask.cancel() }
-        }
+        // Take the result ONLY if it has already landed. Never await the task: awaiting a detached
+        // task inside a timeout does not bound anything (a task group waits for all its children,
+        // and cancelling the group cannot cancel a detached task), which is precisely how this
+        // deadlocked an entire import. The box holds whatever finished in time; anything slower is
+        // abandoned, which is the stated contract — identification must not gate the import.
+        let detected = await shazamResult.value()
+        shazamTask?.cancel()
         for f in scratchFiles { try? FileManager.default.removeItem(at: f) }
         return (refs, anyAudio, detected, themes)
     }
@@ -400,6 +405,13 @@ final class InstagramImporter: ObservableObject {
     /// runs, which makes re-importing the same export idempotent instead of doubling every story.
     private nonisolated static func keptIdentity(_ item: InstagramArchive.Item) -> String {
         "ig:" + (item.mediaNames.first ?? "\(item.createdAt)")
+    }
+
+    /// Holds an identification result for collection without ever blocking on it.
+    actor ShazamResultBox {
+        private var track: TrackRefFfi?
+        func set(_ t: TrackRefFfi?) { track = t }
+        func value() -> TrackRefFfi? { track }
     }
 
     /// Run `work`, giving up after `seconds`.

@@ -28,6 +28,10 @@ enum ShazamDetector {
     /// large part of why a personal archive matches sparsely.
     static let minimumSeconds: Double = 3
 
+    /// How long to give the catalog before giving up. Successful matches land in about a second;
+    /// anything past this is the session having quietly decided not to answer.
+    static let matchTimeout: Double = 12
+
     /// Identify the music in `url`, or nil if there's no audio, no match, or no entitlement.
     ///
     /// Never throws into the import: a failure here means a post without a song credit, which is
@@ -48,14 +52,26 @@ enum ShazamDetector {
         }
         await Throttle.shared.waitForTurn()
         let session = SHSession()
-        // `results` is an AsyncSequence property on the modern SDK; `match` feeds it. (There is no
-        // `results(from:)` — that shape does not compile.)
-        async let first: SHSession.Result? = {
-            for await r in session.results { return r }
-            return nil
-        }()
-        session.match(signature)
-        let result = await first
+        // HARD BOUND, enforced here rather than by a caller's timeout.
+        //
+        // `session.results` is an AsyncSequence that is not guaranteed to yield: when Shazam is
+        // unhappy it simply never produces a result, and awaiting it hangs forever. A caller
+        // wrapping this in a task group cannot save itself either — a group awaits ALL its children
+        // before returning, so cancelling the group does not unblock a child stuck on this. That is
+        // exactly how an import came to a complete stop.
+        //
+        // A continuation with its own timer always resumes, exactly once, whatever the session does.
+        let result: SHSession.Result? = await withCheckedContinuation { continuation in
+            let gate = ResumeOnce(continuation)
+            let watcher = Task {
+                for await r in session.results { gate.resume(r); break }
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + Self.matchTimeout) {
+                gate.resume(nil)
+                watcher.cancel()
+            }
+            session.match(signature)
+        }
         switch result {
         case .noMatch:
             await Throttle.shared.succeeded()
@@ -132,6 +148,27 @@ enum ShazamDetector {
         let sig = generator.signature()
         // Shazam needs a few seconds of audio; a sub-second stub only produces false negatives.
         return sig.duration >= minimumSeconds ? sig : nil
+    }
+}
+
+/// Resumes a continuation exactly once, from whichever of two racing paths gets there first.
+///
+/// Resuming a CheckedContinuation twice is a crash, and both the result handler and the timeout
+/// legitimately fire on their own schedules — so the race needs arbitrating rather than assuming.
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<SHSession.Result?, Never>?
+
+    init(_ continuation: CheckedContinuation<SHSession.Result?, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ value: SHSession.Result?) {
+        lock.lock()
+        let c = continuation
+        continuation = nil
+        lock.unlock()
+        c?.resume(returning: value)
     }
 }
 

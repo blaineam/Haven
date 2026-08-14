@@ -445,9 +445,21 @@ private fun ProviderItem(label: String, onClick: () -> Unit) {
     )
 }
 
+/** Device mute, the Android reading of Apple's silent switch.
+ *
+ *  Two signals, because Android splits what one iOS switch covers: the ringer being silenced, and
+ *  the media stream itself sitting at zero. Either means a phone the user has quietened, and
+ *  autoplay must not start making noise on it just because they scrolled.
+ */
+internal fun deviceSilenced(context: android.content.Context): Boolean = runCatching {
+    val am = context.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager
+    am.ringerMode == android.media.AudioManager.RINGER_MODE_SILENT ||
+        am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC) == 0
+}.getOrDefault(false)
+
 /** The song chip in the feed: artwork + title/artist, a play button (30s preview), open-in-store. */
 @Composable
-fun MusicChip(music: TrackRefFfi, modifier: Modifier = Modifier) {
+fun MusicChip(music: TrackRefFfi, modifier: Modifier = Modifier, autoPlay: Boolean = false) {
     val context = LocalContext.current
     var preview by remember(music.title, music.artist) { mutableStateOf<MusicSearch.Track?>(null) }
     LaunchedEffect(music.title, music.artist) {
@@ -456,6 +468,28 @@ fun MusicChip(music: TrackRefFfi, modifier: Modifier = Modifier) {
     val art = rememberArtwork(music.artworkUrl.ifBlank { preview?.artworkUrl })
     val previewUrl = preview?.previewUrl
     val isPlaying = previewUrl != null && MusicPlayer.playingUrl == previewUrl
+
+    // AUTOPLAY THE CENTRED POST'S SONG — the other half of Apple's rule. The video half was already
+    // ported (one clip at a time, nearest the viewport centre); the attached song was not, so a
+    // centred post with music sat silent until tapped. MusicPlayer replaces whatever was playing,
+    // so scrolling from one song to the next never stacks them, and leaving the centre stops this
+    // one rather than letting it follow the reader down the feed.
+    //
+    // Super data saver never autoplays anything (Apple parity), and a silenced device is left alone.
+    val profile = remember { com.blaineam.haven.core.ProfileStore.get(context) }
+    LaunchedEffect(autoPlay, previewUrl) {
+        val url = previewUrl
+        if (url == null) return@LaunchedEffect
+        if (!autoPlay) {
+            if (MusicPlayer.playingUrl == url) MusicPlayer.stop()
+            return@LaunchedEffect
+        }
+        // Hardware mute is the DEFAULT, not a veto — an explicit in-app unmute overrides it, which
+        // is the whole point of the app having its own control.
+        if (profile.superDataSaver || com.blaineam.haven.core.CallManager.callInProgress) return@LaunchedEffect
+        if (deviceSilenced(context) && !profile.videoSoundOn) return@LaunchedEffect
+        if (MusicPlayer.playingUrl != url) MusicPlayer.play(context, url)
+    }
 
     Row(
         modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(HavenTheme.background).padding(10.dp),

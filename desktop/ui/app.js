@@ -112,6 +112,7 @@ function modal(node, opts = {}) {
   return () => closeModal();
 }
 const closeModal = () => {
+  setTimeout(() => Autoplay.schedule(), 0);   // the feed is visible again
   const back = state.modalOnClose;
   state.modalOnClose = null;
   if (back) back();                       // hand the covered dialog back
@@ -1221,6 +1222,7 @@ async function renderFeed() {
       list.insertBefore(postCard(it, state.activeCircle, reportsByTarget[it.id] || []), sentinel);
     }
     hydrateMedia(list, state.activeCircle);   // only the cards just added resolve their refs
+    Autoplay.schedule();                      // a new page may hold the centred post
   };
   // Page in a tail that arrived AFTER this feed was built, without a teardown.
   //
@@ -1269,6 +1271,7 @@ async function renderFeed() {
     root.scrollTop = keepScroll;
   }
   if (state.focusPost) focusPostCard(root, state.focusPost);   // arrived here from a post link
+  Autoplay.schedule();
 }
 
 /** Pending connection requests — macOS `pendingBanner`: a brand-gradient card at the top of the
@@ -2992,7 +2995,7 @@ function postCard(it, circleId, reports = []) {
                      onclick: () => backupDetailSheet(circleId, ownBlobs) }, icon("icloud"))
     : null;
   const head = el("div", { class: "post-head" },
-    el("div", { class: "avatar", style: "width:34px;height:34px;font-size:14px" }, initials(it.author_name)),
+    el("div", { class: "avatar", style: "width:34px;height:34px;font-size:14px" }, avatarContent(it.is_me, it.author_name)),
     el("span", { class: "name" }, it.author_name),
     el("span", { class: "when" }, relTime(it.created_at) + (it.edited ? t("edited_suffix") : "")),
     storedBtn,
@@ -3105,7 +3108,7 @@ function postCard(it, circleId, reports = []) {
     const cl = el("div", { class: "comment-list" });
     for (const c of it.comments || []) {
       cl.append(el("div", { class: "comment" },
-        el("div", { class: "avatar", style: "width:26px;height:26px;font-size:11px" }, initials(c.author_name)),
+        el("div", { class: "avatar", style: "width:26px;height:26px;font-size:11px" }, avatarContent(c.is_me, c.author_name)),
         el("div", { class: "bubble" },
           el("div", { class: "row", style: "gap:6px" },
             el("span", { class: "who" + (c.is_me ? " me" : "") }, c.is_me ? t("you") : c.author_name),
@@ -3136,7 +3139,9 @@ function postCard(it, circleId, reports = []) {
   // data-author / data-mine ride alongside so a media tile that discovers its bytes are missing can
   // find out which post it belongs to and offer "Ask for it back" — the tile is several helpers deep
   // by then, and galleries and pagers have no business carrying a post id through.
-  return el("div", { class: "card post", "data-post": it.id, "data-author": it.author_short || "", "data-mine": it.is_me ? "1" : "" }, head, banner, body, media.children.length ? media : null, geoNode, audio.children.length ? audio : null, song, actions, comments);
+  // data-song: the autoplay coordinator mutes a clip whose post carries a song, and it reaches the
+  // <video> through this card rather than by threading the item down every gallery helper.
+  return el("div", { class: "card post", "data-post": it.id, "data-author": it.author_short || "", "data-mine": it.is_me ? "1" : "", "data-song": (it.music || it.mute_video) ? "1" : "" }, head, banner, body, media.children.length ? media : null, geoNode, audio.children.length ? audio : null, song, actions, comments);
 }
 
 // ---- Reports (decentralized moderation) --------------------------------------------------
@@ -6426,6 +6431,68 @@ function beginCapture(onDismiss) {
 // Deliberately scoped to `[data-video]` / `[data-ref]` — the feed's and thread's own media. The story
 // composer's preview clip carries neither, so it is exempt: a preview the author asked for is not
 // something an overlay or a capture should silence (iOS says the same with havenStoryPreviewActive).
+// ---- Autoplay: the post nearest the middle, and only that one --------------------------------
+//
+// Apple's rule, ported rather than reinvented: FeedView reports every post's centre through a
+// preference key, takes `min(abs(centre - screenCentre))`, and hands that ONE id to
+// AudioCoordinator. A single centred id is what guarantees one clip at a time — picking "whatever
+// is visible" plays three at once on a tall window, which is the noise this avoids.
+//
+// SUPER DATA SAVER IS THE ONLY KILL SWITCH, matching Apple: it never autoplays anything and only
+// loads the poster still. Everything else — the sound toggle, a call, a capture — controls whether
+// the clip is AUDIBLE, not whether it moves.
+const Autoplay = {
+  current: null,
+  suspended() {
+    // A sheet, a story viewer, a live call or a recording all own the screen; the feed goes quiet
+    // behind them exactly as `pauseFeedMedia` already does when they open.
+    return state.superDataSaver || callAudioActive() || captureUIOpen()
+      || !!$("#modal-root").firstChild || document.hidden;
+  },
+  /** rAF-coalesced: scroll fires far faster than layout can be read, and reading rects per event
+   *  is what turns a smooth fling into a stutter. */
+  scheduled: false,
+  schedule() {
+    if (this.scheduled) return;
+    this.scheduled = true;
+    requestAnimationFrame(() => { this.scheduled = false; this.apply(); });
+  },
+  apply() {
+    const vids = document.querySelectorAll("#view-circle video[data-video], #view-you video[data-video]");
+    if (!vids.length) { this.current = null; return; }
+    if (this.suspended()) {
+      vids.forEach((v) => { if (!v.paused) try { v.pause(); } catch (_) {} });
+      this.current = null;
+      return;
+    }
+    const mid = window.innerHeight / 2;
+    let best = null, bestDist = Infinity;
+    for (const v of vids) {
+      const r = v.getBoundingClientRect();
+      if (r.bottom <= 0 || r.top >= window.innerHeight) continue;   // off screen entirely
+      const d = Math.abs((r.top + r.bottom) / 2 - mid);
+      if (d < bestDist) { bestDist = d; best = v; }
+    }
+    for (const v of vids) {
+      if (v === best) continue;
+      if (!v.paused) try { v.pause(); } catch (_) {}
+    }
+    this.current = best;
+    if (!best) return;
+    // A SONG OWNS THE POST'S AUDIO. When the card carries a chip the clip still plays — muted — and
+    // the song is what you hear, matching Apple and matching what Stories already did here. The card
+    // is the nearest ancestor that knows, so it is marked at build time.
+    const card = best.closest("[data-post]");
+    const hasSong = card ? card.dataset.song === "1" : false;
+    best.muted = hasSong || callAudioActive() || captureUIOpen() || !state.videoSoundOn;
+    best.loop = true;
+    if (best.paused) best.play().catch(() => {});   // a refused autoplay is not an error
+  },
+};
+window.addEventListener("scroll", () => Autoplay.schedule(), true);
+window.addEventListener("resize", () => Autoplay.schedule());
+document.addEventListener("visibilitychange", () => Autoplay.schedule());
+
 function pauseFeedMedia() {
   document.querySelectorAll("video[data-video], audio[data-ref]").forEach((m) => {
     if (!m.paused) { try { m.pause(); } catch (_) {} }
@@ -6681,6 +6748,24 @@ function displayNameFor(hex) {
 
 /** The contact behind a feed item's SHORT (8-hex) author id, or undefined if we don't hold them.
  *  A post only carries the short id, so anything addressed to its author has to resolve it first. */
+/** The disc contents for a post/comment author: their picture, else their emoji, else initials.
+ *
+ *  Every avatar in the feed was `initials(name)` unconditionally, so the emoji or photo you chose
+ *  showed on the profile header and nowhere else — your own posts wore a letter.
+ *
+ *  Only MY OWN identity can be resolved here: ContactDto carries id/name/verify and no appearance
+ *  at all, so a peer's chosen emoji is not something this client currently holds. Their posts keep
+ *  initials until the roster carries it.
+ */
+function avatarContent(isMe, name) {
+  if (isMe) {
+    const p = state.profile || {};
+    if (p.avatar) return el("img", { src: p.avatar, alt: "" });
+    if (p.emoji) return p.emoji;
+  }
+  return initials(name);
+}
+
 function authorContact(authorShort) {
   if (!authorShort) return undefined;
   return (state.contacts || []).find((c) => (c.id_hex || "").startsWith(authorShort));

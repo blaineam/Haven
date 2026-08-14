@@ -1324,7 +1324,8 @@ private fun ImageBitmap.downscaled(maxDim: Int): ImageBitmap {
  * only ever playing the centred card's visible page. Everything else stays a poster + play glyph.
  */
 @Composable
-private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, playing: Boolean, onOpen: () -> Unit) {
+private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, playing: Boolean,
+                      forceMuted: Boolean = false, onOpen: () -> Unit) {
     // A document isn't media — there is nothing to decode, letterbox or autoplay, and everything
     // below assumes there is. It gets its own page, the same way Apple's pager hands a `file_` ref
     // to PostFileAttachmentPage.
@@ -1390,7 +1391,7 @@ private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, pl
                 // VideoTile fits the clip inside the bounds it's GIVEN (its own matrix transform), so
                 // handing it the page verbatim letterboxes the video onto the backdrop exactly like a
                 // photo — the page keeps its own pageHeight/pageAspect sizing either way.
-                VideoTile(circleId, ref, Modifier.matchParentSize(), resolved = vid)
+                VideoTile(circleId, ref, Modifier.matchParentSize(), resolved = vid, forceMuted = forceMuted)
             } else {
                 MediaBitmapContent(circleId, ref, bmp, done, Modifier.fillMaxSize(), ContentScale.Fit)
                 // Super data saver: always show a play affordance on a video still (poster) so the
@@ -1417,7 +1418,8 @@ private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, pl
 
 /** A full-width swipeable pager with page dots — the ≤10-item layout, any mix of aspect ratios. */
 @Composable
-private fun MediaCarousel(circleId: String, refs: List<String>, videoActive: Boolean, onOpen: (Int) -> Unit) {
+private fun MediaCarousel(circleId: String, refs: List<String>, videoActive: Boolean,
+                          forceMuted: Boolean = false, onOpen: (Int) -> Unit) {
     val aspects = refs.map { rememberAspect(circleId, it) ?: DEFAULT_ASPECT }
     val aspect = carouselAspect(aspects)
     val pager = androidx.compose.foundation.pager.rememberPagerState(initialPage = 0) { refs.size }
@@ -1431,7 +1433,8 @@ private fun MediaCarousel(circleId: String, refs: List<String>, videoActive: Boo
             androidx.compose.foundation.pager.HorizontalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
                 // Only the SETTLED page of an active card plays — the pager keeps neighbours composed
                 // mid-swipe, and currentPage flips only once a page has actually won the viewport.
-                MediaPage(circleId, refs[page], pageAspect, playing = videoActive && page == pager.currentPage) {
+                MediaPage(circleId, refs[page], pageAspect, playing = videoActive && page == pager.currentPage,
+                          forceMuted = forceMuted) {
                     onOpen(page)
                 }
             }
@@ -1452,7 +1455,8 @@ private fun MediaCarousel(circleId: String, refs: List<String>, videoActive: Boo
 }
 
 @Composable
-fun MediaGallery(circleId: String, refs: List<String>, videoActive: Boolean = false, onOpen: (Int) -> Unit) {
+fun MediaGallery(circleId: String, refs: List<String>, videoActive: Boolean = false,
+                 forceMuted: Boolean = false, onOpen: (Int) -> Unit) {
     // A location-only post has a non-empty `media` but NO real media — anything here would be an
     // empty grey box, so it must render nothing at all.
     if (refs.isEmpty()) return
@@ -1465,7 +1469,7 @@ fun MediaGallery(circleId: String, refs: List<String>, videoActive: Boolean = fa
         val cap = mediaMaxHeight()
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             Box(Modifier.fillMaxWidth().height(minOf(cap, maxWidth / aspect))) {
-                MediaPage(circleId, refs[0], null, playing = videoActive) { onOpen(0) }
+                MediaPage(circleId, refs[0], null, playing = videoActive, forceMuted = forceMuted) { onOpen(0) }
             }
         }
         return
@@ -1473,7 +1477,7 @@ fun MediaGallery(circleId: String, refs: List<String>, videoActive: Boolean = fa
     if (refs.size <= 10) {
         // Mixed aspects no longer force the grid — each page fits inside a shared shape and its own
         // blurred backdrop masks the difference, which beats a 2-photo masonry.
-        MediaCarousel(circleId, refs, videoActive, onOpen)
+        MediaCarousel(circleId, refs, videoActive, forceMuted, onOpen)
         return
     }
     androidx.compose.foundation.lazy.grid.LazyHorizontalGrid(
@@ -1913,6 +1917,10 @@ fun VideoTile(
 ) {
     val context = LocalContext.current
     val profile = remember { ProfileStore.get(context) }
+    // DEVICE MUTE IS HONORED, the way Apple honors the silent switch: a phone the user has silenced
+    // must not start making noise because they scrolled past a clip. Two signals, because Android
+    // splits what iOS's one switch covers — the ringer being silenced, and the media stream itself
+    // being at zero. Either means "not now".
     val soundOn = profile.videoSoundOn && !forceMuted
     var file by remember(ref) { mutableStateOf(resolved) }
     val player = remember(ref) { mutableStateOf<android.media.MediaPlayer?>(null) }
@@ -2366,6 +2374,11 @@ fun PostCard(
                     circleId,
                     mediaRefs,
                     videoActive = videoActive && viewerStart == null && !dataSaver,
+                    // A SONG OWNS THE POST'S AUDIO. The clip still plays — muted — and the chip is
+                    // what you hear, which is how Apple treats it and how Stories here already did
+                    // (Stories.kt passes exactly this). The feed did not, so a post with a song
+                    // played both at once.
+                    forceMuted = item.music != null || item.muteVideo,
                 ) { viewerStart = it }
             }
         }
@@ -2373,7 +2386,9 @@ fun PostCard(
         // Attached song — artwork + 30s preview playback, resolved via iTunes Search.
         item.music?.let { m ->
             Spacer(Modifier.height(10.dp))
-            MusicChip(m)
+            // Same centred flag the clip uses: one post is active, and its song and its video are
+            // the same post's audio.
+            MusicChip(m, autoPlay = videoActive)
         }
 
         // Reactions row (iOS `reactionsRow`): existing chips — tap toggles YOURS, long-press shows who

@@ -466,6 +466,9 @@ object HavenNet : InboundListener {
         // timer, no launch hook and no WorkManager job — a button is its only caller (see the
         // BOUNDING note in MediaReoptimizer).
         MediaReoptimizer.init(appContext)
+        // Context only — an interrupted archive import is RESUMED from RootScreen once the engine is
+        // actually up (publishing needs it), never from here.
+        InstagramImporter.init(appContext)
         ReassemblyStore.init(appContext)    // half-finished media transfers, so they resume not restart
         restoreReassemblies()
         restoreState()
@@ -3154,6 +3157,40 @@ object HavenNet : InboundListener {
         }.getOrNull() ?: return
         afterAuthor(circleId, env, banner = null)   // null banner → silent wake (see afterAuthor)
         enqueueAuthoredMedia(circleId, withThumbs)
+        // Coalesce the feed's recompose. afterAuthor bumps feedVersion per post, which is right for
+        // one post and wrong for three hundred: an import would recompose the circle screen 372
+        // times in a row. Apple hit exactly this and throttles its feed rebuild during an import
+        // for the same reason. The bump is not skipped, only slowed — posts still appear as they
+        // land, roughly twice a second instead of as fast as the importer can write.
+        importFeedBump()
+    }
+
+    /** Last coalesced import bump, and whether one is already pending. */
+    private var lastImportBumpMs = 0L
+    private var importBumpPending = false
+
+    /**
+     * Bump the feed at most ~2x/second while an import runs.
+     *
+     * A trailing bump is always scheduled when one is throttled away, so the LAST post of an import
+     * is never the one whose recompose gets dropped — which would leave the feed a post short until
+     * something else happened to touch it.
+     */
+    private fun importFeedBump() {
+        val now = System.currentTimeMillis()
+        if (now - lastImportBumpMs >= IMPORT_BUMP_MS) {
+            lastImportBumpMs = now
+            scope.launch(Dispatchers.Main) { feedVersion.value++ }
+            return
+        }
+        if (importBumpPending) return
+        importBumpPending = true
+        scope.launch(Dispatchers.Main) {
+            kotlinx.coroutines.delay(IMPORT_BUMP_MS)
+            importBumpPending = false
+            lastImportBumpMs = System.currentTimeMillis()
+            feedVersion.value++
+        }
     }
 
     /** Build a portable track reference from a shared streaming link (YouTube/Spotify/etc.). */
@@ -5652,6 +5689,8 @@ object HavenNet : InboundListener {
     // in seconds after the author's upload lands, instead of waiting out the flat 5-min throttle.
     // The fresh state is in-memory: freshness itself expires in minutes.
     private val FRESH_EVENT_MS = 5 * 60_000L
+    /** Feed recompose floor while a bulk import writes — see [importFeedBump]. */
+    private val IMPORT_BUMP_MS = 500L
     /** Older than this and a newly-ingested post is BACKFILL (archive import / history sync), not
      *  news — its full-size media prefetch becomes lazy. See the `backfill` gate in
      *  [requestMissingMedia]. A week is well past anything the live feed treats as recent, so

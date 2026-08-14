@@ -135,6 +135,15 @@ fun SettingsScreen(onBack: () -> Unit) {
                 SettingsCategory(stringResource(R.string.settings_section_privacy), stringResource(R.string.settings_category_privacy_subtitle)) { section = "privacy" }
                 SettingsCategory(stringResource(R.string.settings_section_relays), stringResource(R.string.settings_category_relays_subtitle)) { section = "relays" }
                 SettingsCategory(stringResource(R.string.settings_section_connection), stringResource(R.string.settings_category_connection_subtitle)) { section = "connection" }
+                // Not a nested section: the walkthrough is hosted by RootScreen (the progress banner
+                // has to be able to reopen it from any tab, long after Settings is gone), and this
+                // screen is a Dialog — anything raised behind it would be invisible. So the row
+                // raises the sheet and CLOSES Settings, which is also what the user wants: they are
+                // done with settings, they are importing now.
+                SettingsCategory(stringResource(R.string.ig_settings_row), stringResource(R.string.ig_settings_row_subtitle)) {
+                    com.blaineam.haven.core.InstagramImporter.showSheet.value = true
+                    onBack()
+                }
                 SettingsCategory(stringResource(R.string.settings_section_identity), stringResource(R.string.settings_category_identity_subtitle)) { section = "identity" }
                 SettingsCategory(stringResource(R.string.settings_section_diagnostics), stringResource(R.string.settings_category_diagnostics_subtitle)) { section = "diagnostics" }
                 SettingsCategory(stringResource(R.string.settings_section_blocked),

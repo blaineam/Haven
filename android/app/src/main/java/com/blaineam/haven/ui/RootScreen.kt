@@ -176,6 +176,10 @@ private fun MainScaffold() {
             com.blaineam.haven.core.CallManager.init(context, HavenNet.nodeIdHex)
             com.blaineam.haven.core.ConnectionService.restoreIfEnabled(context)
             HavenNet.restoreNearbyIfWanted()   // default-on; auto-starts when perms already granted
+            // Pick up an archive import the app was killed in the middle of. Costs one
+            // SharedPreferences read on a normal launch, and must run AFTER the engine is up —
+            // publishing a post needs it.
+            com.blaineam.haven.core.InstagramImporter.resumeIfNeeded()
         }
     }
     // Notification permission on Android 13+ (no-op below).
@@ -312,6 +316,11 @@ private fun MainScaffold() {
                 Tab.Messages -> MessagesScreen()
                 Tab.You -> YouScreen(onAddFriend = { showConnect = true })
             }
+            // "Still importing" pill. INSIDE the content box on purpose — that box is already inset
+            // for the navigation bar, so the strip floats above the tabs and can never cover the
+            // app's own navigation (the mistake Apple made first; see ImportBanner). Draws nothing
+            // when no import is running.
+            ImportBanner(Modifier.align(androidx.compose.ui.Alignment.BottomCenter))
         }
     }
 
@@ -323,6 +332,10 @@ private fun MainScaffold() {
     androidx.activity.compose.BackHandler(enabled = openStory != null) { openStory = null }
     androidx.activity.compose.BackHandler(enabled = shareRoute != null) {
         com.blaineam.haven.core.ShareInbox.clear(); shareRoute = null
+    }
+    val showImport by com.blaineam.haven.core.InstagramImporter.showSheet
+    androidx.activity.compose.BackHandler(enabled = showImport) {
+        com.blaineam.haven.core.InstagramImporter.showSheet.value = false
     }
 
     // Connect sheet (full-screen slide-up).
@@ -389,6 +402,18 @@ private fun MainScaffold() {
                 com.blaineam.haven.core.ShareInbox.clear(); shareRoute = null
             })
         }
+    }
+
+    // Instagram import walkthrough (same slide-up as Connect). Hosted HERE rather than inside
+    // Settings, because the progress banner — which lives in whatever tab the user wandered off to —
+    // has to be able to reopen it, and Settings may well be closed by then. Both entry points just
+    // raise `InstagramImporter.showSheet`.
+    AnimatedVisibility(
+        visible = showImport,
+        enter = slideInVertically { it },
+        exit = slideOutVertically { it },
+    ) {
+        InstagramImportScreen(onDone = { com.blaineam.haven.core.InstagramImporter.showSheet.value = false })
     }
 
     // Call overlay (incoming ring / in-call mesh grid) sits above everything.

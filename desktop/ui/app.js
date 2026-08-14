@@ -138,6 +138,10 @@ const ICONS = {
   "camera.fill": { fill: true, d: "M9.4 4.5l-1.2 2H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2v-9a2 2 0 00-2-2h-3.2l-1.2-2H9.4zM12 17.2a4.1 4.1 0 110-8.2 4.1 4.1 0 010 8.2z" },
   "ellipsis": { fill: true, d: "M6 10.2a1.8 1.8 0 100 3.6 1.8 1.8 0 000-3.6zm6 0a1.8 1.8 0 100 3.6 1.8 1.8 0 000-3.6zm6 0a1.8 1.8 0 100 3.6 1.8 1.8 0 000-3.6z" },
   "link": { d: "M9 15l6-6M11 6l1.5-1.5a3.5 3.5 0 015 5L17 11M13 18l-1.5 1.5a3.5 3.5 0 01-5-5L8 13" },
+  // Leaves the app — drawn as a box the arrow exits, which reads at 13px where SF's in-square
+  // version turns to mush. `icon()` returns an EMPTY svg for a name it doesn't know, so a missing
+  // entry here is an invisible button, not a broken one.
+  "arrow.up.forward.app": { d: "M14 4H6a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-8", extra: "M14 10l6.5-6.5M15 3h6v6" },
   "square.and.pencil": { d: "M20 10.5V19a2 2 0 01-2 2H6a2 2 0 01-2-2V7a2 2 0 012-2h8.5", extra: "M18.4 3.6a2 2 0 012.8 2.8L13 14.6l-3.6.9.9-3.6 8.1-8.3z" },
   "phone.fill": { fill: true, d: "M6.6 3.5c.6-.1 1.2.2 1.5.8l1.3 2.6c.3.6.2 1.3-.3 1.7l-1.2 1a12 12 0 005.5 5.5l1-1.2c.4-.5 1.1-.6 1.7-.3l2.6 1.3c.6.3.9.9.8 1.5l-.4 2.3c-.1.7-.7 1.2-1.4 1.2C9.9 20 4 14.1 3.1 5.3c0-.7.5-1.3 1.2-1.4l2.3-.4z" },
   "video.fill": { fill: true, d: "M3 7.5A2.5 2.5 0 015.5 5h7A2.5 2.5 0 0115 7.5v9a2.5 2.5 0 01-2.5 2.5h-7A2.5 2.5 0 013 16.5v-9zm14 2.3l3.3-2.2c.6-.4 1.4 0 1.4.8v7.2c0 .8-.8 1.2-1.4.8L17 14.2V9.8z" },
@@ -3483,7 +3487,9 @@ function storySongChip(m) {
     style: "margin-top:10px;max-width:min(420px,100%);cursor:pointer",
     title: t("open_in_music_app"),
     onclick: (e) => { e.stopPropagation(); if (url) openExternal(url); },
-  }, el("span", { class: "note" }, icon("music.note")),
+  }, (() => { const a = musicArtwork(m);
+       return a ? el("img", { src: a, class: "song-art", alt: "", loading: "lazy", decoding: "async" })
+                : el("span", { class: "note" }, icon("music.note")); })(),
      el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
        el("strong", {}, m.title || t("unknown_song")), m.artist ? ` · ${m.artist}` : ""));
 }

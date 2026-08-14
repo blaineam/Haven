@@ -2922,9 +2922,21 @@ final class FeedStore: ObservableObject {
     private var refreshGeneration: UInt64 = 0
     func refresh() {
         guard let social else { items = []; return }
-        // See postImported: while a bulk import is writing hundreds of posts, rebuilding the feed
-        // makes it impossible to read. `importFinished()` does the one refresh that matters.
-        if InstagramImporter.shared.isRunning { return }
+        // While a bulk import runs, rebuild SLOWLY — but do rebuild.
+        //
+        // This used to return outright, which was wrong in the worst way: on a fresh account the
+        // feed starts empty, so "freeze the list" meant the Circle and You tabs stayed blank for
+        // the entire import and the app looked broken. Never seeing your posts arrive is worse
+        // than the list moving occasionally.
+        //
+        // A slow floor keeps both: content appears, and it re-diffs a handful of times a minute
+        // instead of once per imported post (which is what made it jump). Arrival animations stay
+        // suppressed for the same reason — see `bulkArriving`.
+        if InstagramImporter.shared.isRunning {
+            let now = Date().timeIntervalSince1970
+            guard now - lastImportRefreshAt > 10 else { return }
+            lastImportRefreshAt = now
+        }
         // Snapshot the main-actor state, then run the engine read (`feed()` decodes + re-opens every
         // envelope — real CPU) and the O(posts) filter OFF the main actor. This used to run on main
         // on every 20s tick and every ingest burst — the single biggest source of feed jank.
@@ -3002,9 +3014,13 @@ final class FeedStore: ObservableObject {
     /// Coalesced refresh — collapses a BURST of refresh requests (many media chunks / events arriving during
     /// a sync) into a single feed rebuild ~250ms later, instead of rebuilding the whole feed per item (which
     /// janked the UI). Use this on the high-frequency inbound/sync paths; keep refresh() for user actions.
-    /// The single feed rebuild an archive import gets, once it has stopped writing.
+    /// Last feed rebuild performed while an import was running — see the throttle in `refresh`.
+    private var lastImportRefreshAt: TimeInterval = 0
+
+    /// The final rebuild once an import stops writing, with everything in place.
     func importFinished() {
         refreshPending = false
+        lastImportRefreshAt = 0   // the throttle must not swallow the last one
         refresh()
     }
 
@@ -3220,7 +3236,8 @@ final class FeedStore: ObservableObject {
                                                      muteVideo: false, createdAt: createdAt) else { return }
         broadcastEvent(circleId, env, silent: true)
         postTick += 1; publishedPostCount += 1
-        // NO refresh while an import runs — the feed is deliberately FROZEN.
+        // Deliberately does NOT schedule a refresh. The slow floor in `refresh()` governs how
+        // often the feed rebuilds during an import; asking per post is what made it thrash.
         //
         // Coalescing this to every few seconds was still wrong. Any rebuild replaces the whole
         // items array and re-diffs the list, and a LazyVStack re-measuring rows it had recycled

@@ -434,11 +434,14 @@ input:focus, textarea:focus, select:focus {
 }
 
 /* ---- Story viewer: per-person progress segments (Instagram/Apple-style) ---- */
+/* Over the story now, so the ticks are read against the picture rather than a panel: grey at 35%
+   vanished on the scrim. White is what iOS and macOS use, and for the same reason. */
 .story-progress { display: flex; gap: 4px; margin-bottom: 8px; }
 .story-progress .seg {
-  flex: 1; height: 3px; border-radius: 2px; background: rgba(128,128,128,.35);
+  flex: 1; height: 3px; border-radius: 2px; background: rgba(255,255,255,.35);
+  box-shadow: 0 1px 2px rgba(0,0,0,.35);
 }
-.story-progress .seg.on { background: var(--pink); }
+.story-progress .seg.on { background: #fff; }
 
 /* ---- Post card ---- */
 .post-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
@@ -529,7 +532,12 @@ input:focus, textarea:focus, select:focus {
 /* ---- Story viewer: chrome ON the story, never around it ---- */
 /* The shell is the modal's body; it carries no padding of its own so the picture reaches the
    edges, which is the whole difference from the column this replaced. */
-.story-shell { padding: 0; background: transparent; }
+/* `.modal.plain` (0,2,0) sets 22px of padding and a card surface, and beats a lone `.story-shell`
+   (0,1,0) — which is why the stage still sat inside a visible frame. Matched on both classes so the
+   story reaches the edges of its own container, with no second surface around it. */
+.modal.plain.story-shell {
+  padding: 0; background: transparent; border: 0; box-shadow: none; overflow: visible;
+}
 .story-stage {
   position: relative; width: min(92vw, 460px); height: min(86vh, 820px);
   border-radius: var(--r-lg); overflow: hidden; background: #000;
@@ -538,7 +546,10 @@ input:focus, textarea:focus, select:focus {
 /* The media fills the stage and keeps its shape; the gesture layer is the whole surface, so a tap
    anywhere pages — as it does everywhere else. */
 .story-canvas { position: absolute; inset: 0; justify-content: center; }
-.story-canvas img, .story-canvas video {
+/* [data-ref] is the STORY'S OWN media. Without that qualifier this also caught the attached song's
+   cover art, which sits inside the same canvas — and blew a 26px thumbnail up to the full stage. */
+.story-canvas img[data-ref], .story-canvas video[data-ref],
+.story-canvas img[data-story-media], .story-canvas video[data-story-media] {
   width: 100%; height: 100%; object-fit: contain; border-radius: 0;
 }
 /* Scrims, so white text stays legible over a bright story — the same gradient Apple floats its

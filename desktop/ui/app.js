@@ -1238,6 +1238,7 @@ async function renderFeed() {
       list.insertBefore(postCard(it, state.activeCircle, reportsByTarget[it.id] || []), sentinel);
     }
     hydrateMedia(list, state.activeCircle);   // only the cards just added resolve their refs
+    Autoplay.track(list);
     Autoplay.schedule();                      // a new page may hold the centred post
     // STOP once everything is rendered. Dropping the old disconnect (so a late tail could still
     // page in) left the observer live with the sentinel pinned at the end of the list — each
@@ -4374,6 +4375,7 @@ function viewStories(list, startIndex = 0) {
   invoke("kept_stories").then((ks) => { keptIds = new Set((ks || []).map((k) => k.id)); paintKeep(); }).catch(() => {});
 
   const cleanup = () => {
+    clearAdvance();
     window.removeEventListener("keydown", onKey, true);
     mo.disconnect();
     // Closing the viewer must silence the clip that was on screen, for the same reason paging does:
@@ -4403,6 +4405,30 @@ function viewStories(list, startIndex = 0) {
     hydrateMedia(slot, it._circle || state.activeCircle || "default");
     paintKeep();   // the pill belongs to the story on screen, not to the viewer
     paintReply();
+    armAdvance();
+  };
+
+  // AUTO-ADVANCE. Desktop never had any: a story sat there until tapped, and a video story was
+  // created with `loop`, so it played the same clip forever. Every other platform moves on by
+  // itself — a still after a few seconds, a clip when it ends — which is what makes a run of
+  // stories a run rather than a slideshow you have to click through.
+  let advanceTimer = null;
+  const STILL_MS = 5000;
+  const clearAdvance = () => { if (advanceTimer) { clearTimeout(advanceTimer); advanceTimer = null; } };
+  const armAdvance = () => {
+    clearAdvance();
+    const v = slot.querySelector("video");
+    if (v) {
+      // A clip runs to its own end. `loop` is dropped here rather than at creation so the story
+      // EDITOR's preview, which shares that builder, keeps looping as it should.
+      v.loop = false;
+      v.addEventListener("ended", () => { if (card.isConnected) nextStory(); }, { once: true });
+      // A clip that cannot report its end (unreadable duration) still must not strand the run.
+      const ms = Number.isFinite(v.duration) && v.duration > 0 ? v.duration * 1000 + 500 : 15000;
+      advanceTimer = setTimeout(() => { if (card.isConnected) nextStory(); }, ms);
+      return;
+    }
+    advanceTimer = setTimeout(() => { if (card.isConnected) nextStory(); }, STILL_MS);
   };
 
   const nextStory = () => { if (index < stories.length - 1) { index++; show(); } else done(); };
@@ -5409,7 +5435,28 @@ async function renderYou() {
       el("div", { class: "h" }, t("your_posts_here")),
       el("div", {}, t("your_posts_sub")))));
   } else {
-    for (const it of myPosts) body.append(postCard(it, it._circle));
+    // PAGED, exactly like the circle feed. This appended EVERY post — with an archive imported
+    // that is hundreds of cards, each with its own media, built in one go: the reason this tab's
+    // scrollbar was a sliver, the reason it was slow to open, and the reason scrolling stuttered
+    // (the autoplay pass measures each card, and there were hundreds of them).
+    const PAGE = 25;
+    let shown = 0;
+    const sentinel = el("div", { style: "height:1px" });
+    let observer = null;
+    const nextPage = () => {
+      const next = myPosts.slice(shown, shown + PAGE);
+      shown += next.length;
+      for (const it of next) body.insertBefore(postCard(it, it._circle), sentinel);
+      for (const c of circles) hydrateMedia(body, c.id);
+      Autoplay.track(body);
+      Autoplay.schedule();
+      if (shown >= myPosts.length) observer?.disconnect();
+    };
+    body.append(sentinel);
+    observer = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) nextPage(); },
+                                        { rootMargin: "800px 0px" });
+    observer.observe(sentinel);
+    nextPage();
   }
 
   root.replaceChildren(el("div", { class: "col-wrap" }, body));
@@ -6760,7 +6807,11 @@ const Autoplay = {
     // never the centre of anything — its song never started, and never stopped when scrolled past.
     // Apple picks the centred POST and then plays whatever that post has; this now does the same,
     // which is also why the video below is chosen through the card rather than beside it.
-    const cards = document.querySelectorAll("#view-circle [data-post], #view-you [data-post]");
+    // Only cards the viewport observer says are on screen. Measuring every card in the document
+    // meant a forced layout per card per scroll frame — cheap with 25, ruinous with hundreds.
+    const cards = this.onscreen.size
+      ? [...this.onscreen]
+      : document.querySelectorAll("#view-circle [data-post], #view-you [data-post]");
     const vids = document.querySelectorAll("#view-circle video[data-video], #view-you video[data-video]");
     if (this.suspended()) {
       vids.forEach((v) => { if (!v.paused) try { v.pause(); } catch (_) {} });
@@ -6805,6 +6856,22 @@ const Autoplay = {
 
   /** The post nearest the viewport centre — what "playing" is scoped to. */
   centeredCard: null,
+
+  /** Cards currently on screen, maintained by an observer so `apply` never has to measure the
+   *  whole document. Re-armed by `track` as each page of cards is built. */
+  onscreen: new Set(),
+  seen: null,
+  track(root) {
+    if (!this.seen) {
+      this.seen = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) this.onscreen.add(e.target); else this.onscreen.delete(e.target);
+        }
+        this.schedule();
+      }, { rootMargin: "200px 0px" });
+    }
+    root.querySelectorAll?.("[data-post]").forEach((c) => this.seen.observe(c));
+  },
 
   /** Unmute — globally, matching Apple, where unmuting one post unmutes the feed. Persisted, so it
    *  survives a relaunch the way the header toggle does. */

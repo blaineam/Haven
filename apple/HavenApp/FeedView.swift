@@ -7704,6 +7704,10 @@ struct FeedView: View {
     /// The post currently at the top edge — see `.scrollPosition` below. Nil while the header is on
     /// screen, which is what lets new posts appear normally when you are already at the top.
     @State private var anchoredPostId: String?
+    @ObservedObject private var importer = InstagramImporter.shared
+    /// Posts are arriving in bulk (an archive import) rather than one at a time — suppress the
+    /// arrival animation so the feed stays still enough to read while it fills in behind you.
+    private var bulkArriving: Bool { importer.isRunning }
 
     struct TrimTarget: Identifiable { let id = UUID(); let ref: String }
 
@@ -7815,13 +7819,18 @@ struct FeedView: View {
                                 Color.clear.preference(key: PostCenterKey.self,
                                                        value: [item.id: geo.frame(in: .global).midY])
                             })
-                            .transition(.asymmetric(
+                            // A bulk import writes hundreds of posts, and animating each arrival
+                            // means the whole stack springs on every one of them — the page visibly
+                            // bounces, and because the moving layout changes which post is nearest
+                            // the centre, the video you were watching keeps restarting. A single
+                            // post arriving is news worth animating; three hundred is not.
+                            .transition(bulkArriving ? .identity : .asymmetric(
                                 insertion: .move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.96)),
                                 removal: .opacity))
                         }
                     }
                     .scrollTargetLayout()
-                    .animation(HavenTheme.bouncy, value: store.items.count)
+                    .animation(bulkArriving ? nil : HavenTheme.bouncy, value: store.items.count)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 130)
                 }
@@ -7976,7 +7985,8 @@ struct FeedView: View {
                 CameraView { refs in attachedMedia.append(contentsOf: refs) }.ignoresSafeArea()
             }
             .sheet(isPresented: $showSongPicker) {
-                SongPicker { track in attachedTrack = track }.macSheetFrame()
+                SongPicker(onPick: { track in attachedTrack = track },
+                           suggestFor: (media: attachedMedia, caption: compose)).macSheetFrame()
             }
             .sheet(isPresented: $showSchedule) {
                 SchedulePicker(circleId: store.activeCircleId, isDM: false) { date in scheduleCurrentPost(at: date) }.macSheetFrame()

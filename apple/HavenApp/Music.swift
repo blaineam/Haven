@@ -44,6 +44,9 @@ nonisolated func librarySongExists(_ pid: UInt64) -> Bool {
 /// **Apple Music catalog**-only (search + pick; in-picker preview is an iOS feature).
 struct SongPicker: View {
     var onPick: (TrackRefFfi) -> Void
+    /// What the post is about, for the suggested-songs list. Media refs + caption; both optional,
+    /// so every existing caller keeps working and simply gets no suggestions.
+    var suggestFor: (media: [String], caption: String)? = nil
     @Environment(\.dismiss) private var dismiss
 
     enum Source: String, CaseIterable { case library = "Your Library", catalog = "Apple Music" }
@@ -57,9 +60,11 @@ struct SongPicker: View {
     @State private var catalog: [MusicKit.Song] = []
     @State private var catalogNote: String?
     @State private var searchTask: Task<Void, Never>?
-    #if os(macOS)
-    private let macPreviewPlayer = AVPlayer()   // catalog preview clips (no MPMusicPlayerController on Mac)
-    #endif
+    @State private var suggested: [TrackRefFfi] = []
+    @State private var loadingSuggestions = false
+    /// Catalog preview clips on BOTH platforms — see togglePreviewCatalog for why this replaced
+    /// MPMusicPlayerController on iOS too (subscription-gated, and absent in the simulator).
+    private let macPreviewPlayer = AVPlayer()
 
     #if os(iOS)
     @State private var libraryDenied = false
@@ -105,6 +110,7 @@ struct SongPicker: View {
             .searchable(text: $query, prompt: "Search Apple Music")
             #endif
             .onDisappear(perform: stopPreview)
+            .task { await loadSuggestions() }
             .onChange(of: source) { _, s in
                 stopPreview()
                 if s == .catalog && !query.isEmpty { scheduleCatalogSearch() }
@@ -144,17 +150,62 @@ struct SongPicker: View {
 
     // MARK: - Apple Music catalog (all platforms)
 
+    /// Songs suggested from the post itself — what's in the photo, what the caption says, and
+    /// roughly when. Shown only before the user types: the moment they search, they have something
+    /// in mind and a list of guesses is in the way.
+    @ViewBuilder private var suggestionsSection: some View {
+        if !suggested.isEmpty && query.isEmpty {
+            Section {
+                ForEach(suggested, id: \.catalogId) { t in
+                    songRow(title: t.title, artist: t.artist, key: t.catalogId,
+                            artwork: { EmptyView() },
+                            onPreview: { }, onUse: { stopPreview(); onPick(t); dismiss() })
+                }
+            } header: {
+                Label("Might suit this post", systemImage: "wand.and.stars")
+            }
+        } else if loadingSuggestions && query.isEmpty {
+            Section { HStack(spacing: 8) { ProgressView(); Text("Finding songs that suit this post…").font(.footnote) } }
+        }
+    }
+
+    /// Ask the shared suggester — the same engine the archive importer uses to score silent posts.
+    private func loadSuggestions() async {
+        guard let ctx = suggestFor, suggested.isEmpty, !loadingSuggestions else { return }
+        loadingSuggestions = true
+        defer { loadingSuggestions = false }
+        guard await SongSuggester.authorize() else { return }
+        var themes = SongSuggester.captionThemes(ctx.caption)
+        // The first photo tells us what the post is OF, which is what makes a suggestion feel
+        // chosen rather than random.
+        if let ref = ctx.media.first(where: { $0.hasPrefix("img_") }),
+           let data = MediaStore.shared.rawBytes(ref) {
+            themes += SongSuggester.visualThemes(data)
+        }
+        let year = Calendar.current.component(.year, from: Date())
+        suggested = await SongSuggester.suggestions(themes: themes, genre: nil, year: year, limit: 5)
+    }
+
     @ViewBuilder private var catalogList: some View {
         if let note = catalogNote {
             ContentUnavailableView("Apple Music", systemImage: "music.note", description: Text(note))
         } else if catalog.isEmpty {
-            ContentUnavailableView("Search Apple Music", systemImage: "magnifyingglass",
-                                   description: Text("Find any song in the catalog."))
+            if suggestFor != nil && (!suggested.isEmpty || loadingSuggestions) {
+                List { suggestionsSection }.scrollContentBackground(.hidden)
+            } else {
+                ContentUnavailableView("Search Apple Music", systemImage: "magnifyingglass",
+                                       description: Text("Find any song in the catalog."))
+            }
         } else {
-            List(catalog, id: \.id) { song in
-                songRow(title: song.title, artist: song.artistName, key: song.id.rawValue,
-                        artwork: { catalogArtwork(song) },
-                        onPreview: { togglePreviewCatalog(song) }, onUse: { chooseCatalog(song) })
+            List {
+                suggestionsSection
+                Section {
+                    ForEach(catalog, id: \.id) { song in
+                        songRow(title: song.title, artist: song.artistName, key: song.id.rawValue,
+                                artwork: { catalogArtwork(song) },
+                                onPreview: { togglePreviewCatalog(song) }, onUse: { chooseCatalog(song) })
+                    }
+                }
             }
             .scrollContentBackground(.hidden)
         }
@@ -274,13 +325,28 @@ struct SongPicker: View {
         if previewing == key { stopPreview() }
         else { preview.setQueue(with: MPMediaItemCollection(items: [item])); preview.play(); previewing = key }
     }
+    /// Catalog previews play the 30-second PREVIEW ASSET through AVPlayer, not the full track
+    /// through MPMusicPlayerController.
+    ///
+    /// Two reasons, and the second is why previews appeared broken:
+    ///   * MPMusicPlayerController plays the real track, which requires an active Apple Music
+    ///     subscription. Someone without one got silence and no explanation.
+    ///   * It does not work in the SIMULATOR at all — there is no music player there — so previews
+    ///     were dead for the whole of simulator testing.
+    /// The preview asset is a plain audio URL that needs neither, which is also exactly what a
+    /// picker wants: a short sample to choose by. macOS already did this; iOS now matches.
     private func togglePreviewCatalog(_ song: MusicKit.Song) {
         let key = song.id.rawValue
-        if previewing == key { stopPreview() }
-        else { preview.setQueue(with: [key]); preview.play(); previewing = key }
+        if previewing == key { stopPreview(); return }
+        guard let url = song.previewAssets?.first?.url else { return }
+        macPreviewPlayer.replaceCurrentItem(with: AVPlayerItem(url: url))
+        macPreviewPlayer.play()
+        previewing = key
     }
     private func stopPreview() {
         if previewing != nil { preview.stop() }
+        macPreviewPlayer.pause()
+        macPreviewPlayer.replaceCurrentItem(with: nil)
         previewing = nil
     }
     private func chooseLibrary(_ item: MPMediaItem) {

@@ -36,7 +36,9 @@ enum SongSuggester {
         let request = VNClassifyImageRequest()
         try? VNImageRequestHandler(cgImage: cg, options: [:]).perform([request])
         let hits = (request.results ?? [])
-            .filter { $0.confidence > 0.6 && !Self.uselessLabels.contains($0.identifier) }
+            // 0.6 was far too strict — VNClassifyImageRequest's confidences run low and it was
+            // yielding nothing at all, which is half of why suggestions had no themes to work with.
+            .filter { $0.confidence > 0.25 && !Self.uselessLabels.contains($0.identifier) }
             .prefix(limit)
         // Vision identifiers are lowercase, sometimes hyphenated compounds ("hot_air_balloon").
         return hits.map { $0.identifier.replacingOccurrences(of: "_", with: " ") }
@@ -65,8 +67,54 @@ enum SongSuggester {
             if w.count > 3 && !words.contains(w) && !Self.blandWords.contains(w) { words.append(w) }
             return words.count < limit * 3
         }
+        // NLTagger IS NOT AVAILABLE EVERYWHERE. `.lexicalClass` needs language assets that are
+        // present on macOS but frequently absent on iOS — where it does not fail, it simply returns
+        // no tags at all. Every suggestion in a real import run came through with no themes for
+        // exactly this reason, while the same captions tagged perfectly in a macOS test binary.
+        //
+        // So the tagger is an optimisation, not the mechanism. When it gives nothing, fall back to
+        // plain word splitting: it cannot tell a noun from a verb, but "Merry Christmas Eve
+        // Everyone!" still yields "christmas", which is the whole job.
+        if words.isEmpty { words = plainWords(cleaned, limit: limit) }
         return Array(words.prefix(limit))
     }
+
+    /// Content words with the grammar removed. No model, no assets, works anywhere.
+    ///
+    /// CAPITALISED WORDS FIRST. Length was the first heuristic and it was a poor one — it surfaced
+    /// "themselves", "encouragement" and "appreciation", which are long, abstract, and say nothing
+    /// about the post. In a caption the capitalised word is the subject: Christmas, Luma, Condors,
+    /// Jerusalem. Sentence-initial words are excluded from that preference, since being first is
+    /// not the same as being a name.
+    private static func plainWords(_ text: String, limit: Int) -> [String] {
+        let raw = text.components(separatedBy: CharacterSet.alphanumerics.inverted)
+        var proper: [String] = []
+        var ordinary: [String] = []
+        for (i, word) in raw.enumerated() {
+            let lower = word.lowercased()
+            guard lower.count > 3, !blandWords.contains(lower), !stopWords.contains(lower) else { continue }
+            let capitalised = word.first?.isUppercase == true
+            // `i > 0` alone is not enough — the word after a full stop starts a sentence too.
+            let startsSentence = i == 0 || raw[..<i].last(where: { !$0.isEmpty }) == nil
+            if capitalised && !startsSentence { proper.append(lower) } else { ordinary.append(lower) }
+        }
+        var seen = Set<String>()
+        return (proper + ordinary.sorted { $0.count > $1.count })
+            .filter { seen.insert($0).inserted }
+            .prefix(limit)
+            .map { $0 }
+    }
+
+    /// Grammar the tagger would have discarded for us.
+    private static let stopWords: Set<String> = [
+        "that", "this", "with", "from", "they", "them", "then", "than", "have", "has", "had",
+        "been", "being", "were", "was", "will", "would", "could", "should", "just", "only",
+        "about", "into", "over", "under", "after", "before", "when", "what", "where", "which",
+        "while", "your", "yours", "mine", "ours", "their", "there", "here", "also", "because",
+        "trying", "going", "getting", "doing", "make", "made", "take", "took", "come", "came",
+        "want", "need", "like", "love", "know", "think", "look", "looks", "looking", "glad",
+        "happy", "everyone", "everybody", "always", "never", "still", "even", "some", "such",
+    ]
 
     /// Nouns and adjectives that carry no subject — the words a caption uses to be a sentence.
     ///
@@ -170,15 +218,21 @@ enum SongSuggester {
             if let g = genreHead, !g.isEmpty { out.append("\(theme) \(g)") }
         }
         if let g = genreHead, !g.isEmpty { out.append(g) }
-        // Last resorts, for a post with no caption and no recognisable subject. The month is here
-        // so that even those don't all issue one identical query across a whole archive.
-        if (1...12).contains(month) { out.append("\(Self.monthNames[month - 1]) \(year)") }
+        // Last resort only. NOTE what NOT to put here: a bare date like "December 2023" is a
+        // lexical search, so it matches songs literally TITLED that — the observed results were
+        // "December 2023 — Hiimian" and "december 2023 - steady", which is noise dressed as a
+        // suggestion. A mood word gives the catalog something musical to match instead, and
+        // rotating it by month keeps same-year posts from all issuing one identical query.
+        if (1...12).contains(month) { out.append(Self.moodByMonth[month - 1]) }
         out.append("\(year) hits")
         return out
     }
 
-    private static let monthNames = ["January", "February", "March", "April", "May", "June",
-                                     "July", "August", "September", "October", "November", "December"]
+    /// Seasonal moods, used only when a post gives us nothing else to go on. These are words the
+    /// catalog can actually match against song titles, unlike a date.
+    private static let moodByMonth = ["new beginnings", "love songs", "spring", "sunshine",
+                                      "bloom", "summer nights", "summer", "golden hour",
+                                      "autumn", "cozy", "grateful", "winter"]
 
     /// Is this song fit to be attached to someone's post WITHOUT them hearing it first?
     ///

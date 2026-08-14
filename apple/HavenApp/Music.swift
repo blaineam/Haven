@@ -49,12 +49,31 @@ struct SongPicker: View {
     var suggestFor: (media: [String], caption: String)? = nil
     @Environment(\.dismiss) private var dismiss
 
-    enum Source: String, CaseIterable { case library = "Your Library", catalog = "Apple Music" }
-    #if os(iOS)
-    @State private var source: Source = .library
-    #else
-    @State private var source: Source = .catalog
-    #endif
+    enum Source: String, CaseIterable { case suggested = "For This Post", library = "Your Library", catalog = "Apple Music" }
+    /// Suggestions are their own tab, and the DEFAULT when there is a post to suggest for. Buried
+    /// at the top of the catalog list they were only reachable by opening a tab named "Apple Music"
+    /// and not typing — which is not somewhere anyone looks for "help me pick".
+    @State private var source: Source
+    /// Only offer the suggestions tab when there is actually a post to reason about.
+    private var sources: [Source] {
+        var all = Source.allCases
+        if suggestFor == nil { all.removeAll { $0 == .suggested } }
+        #if !os(iOS)
+        all.removeAll { $0 == .library }   // no MPMediaQuery on native macOS
+        #endif
+        return all
+    }
+
+    init(onPick: @escaping (TrackRefFfi) -> Void,
+         suggestFor: (media: [String], caption: String)? = nil) {
+        self.onPick = onPick
+        self.suggestFor = suggestFor
+        #if os(iOS)
+        _source = State(initialValue: suggestFor != nil ? .suggested : .library)
+        #else
+        _source = State(initialValue: suggestFor != nil ? .suggested : .catalog)
+        #endif
+    }
     @State private var query = ""
     @State private var previewing: String?          // unified key: persistentID or catalog id
     @State private var catalog: [MusicKit.Song] = []
@@ -86,17 +105,22 @@ struct SongPicker: View {
             ZStack {
                 HavenBackground()
                 VStack(spacing: 0) {
-                    #if os(iOS)
-                    Picker("", selection: $source) {
-                        ForEach(Source.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    if sources.count > 1 {
+                        Picker("", selection: $source) {
+                            ForEach(sources, id: \.self) { Text($0.rawValue).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        .padding(.horizontal).padding(.top, 8)
                     }
-                    .pickerStyle(.segmented)
-                    .padding(.horizontal).padding(.top, 8)
-
-                    if source == .library { libraryList } else { catalogList }
+                    switch source {
+                    case .suggested: suggestedList
+                    #if os(iOS)
+                    case .library:   libraryList
                     #else
-                    catalogList
+                    case .library:   catalogList
                     #endif
+                    case .catalog:   catalogList
+                    }
                 }
             }
             .navigationTitle("Pick a song")
@@ -153,19 +177,29 @@ struct SongPicker: View {
     /// Songs suggested from the post itself — what's in the photo, what the caption says, and
     /// roughly when. Shown only before the user types: the moment they search, they have something
     /// in mind and a list of guesses is in the way.
-    @ViewBuilder private var suggestionsSection: some View {
-        if !suggested.isEmpty && query.isEmpty {
-            Section {
-                ForEach(suggested, id: \.catalogId) { t in
-                    songRow(title: t.title, artist: t.artist, key: t.catalogId,
-                            artwork: { EmptyView() },
-                            onPreview: { }, onUse: { stopPreview(); onPick(t); dismiss() })
-                }
-            } header: {
-                Label("Might suit this post", systemImage: "wand.and.stars")
+    @ViewBuilder private var suggestedList: some View {
+        if loadingSuggestions {
+            VStack(spacing: 10) {
+                ProgressView()
+                Text("Finding songs that suit this post…").font(.footnote).foregroundStyle(.secondary)
             }
-        } else if loadingSuggestions && query.isEmpty {
-            Section { HStack(spacing: 8) { ProgressView(); Text("Finding songs that suit this post…").font(.footnote) } }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if suggested.isEmpty {
+            ContentUnavailableView("No suggestions", systemImage: "wand.and.stars",
+                                   description: Text("Nothing came back for this post — try Apple Music and search for something you have in mind."))
+        } else {
+            List {
+                Section {
+                    ForEach(suggested, id: \.catalogId) { t in
+                        songRow(title: t.title, artist: t.artist, key: t.catalogId,
+                                artwork: { EmptyView() },
+                                onPreview: { }, onUse: { stopPreview(); onPick(t); dismiss() })
+                    }
+                } footer: {
+                    Text("Picked from what's in the photo and what your caption says. Guesses — tap Apple Music to search yourself.")
+                }
+            }
+            .scrollContentBackground(.hidden)
         }
     }
 
@@ -190,15 +224,10 @@ struct SongPicker: View {
         if let note = catalogNote {
             ContentUnavailableView("Apple Music", systemImage: "music.note", description: Text(note))
         } else if catalog.isEmpty {
-            if suggestFor != nil && (!suggested.isEmpty || loadingSuggestions) {
-                List { suggestionsSection }.scrollContentBackground(.hidden)
-            } else {
-                ContentUnavailableView("Search Apple Music", systemImage: "magnifyingglass",
-                                       description: Text("Find any song in the catalog."))
-            }
+            ContentUnavailableView("Search Apple Music", systemImage: "magnifyingglass",
+                                   description: Text("Find any song in the catalog."))
         } else {
             List {
-                suggestionsSection
                 Section {
                     ForEach(catalog, id: \.id) { song in
                         songRow(title: song.title, artist: song.artistName, key: song.id.rawValue,

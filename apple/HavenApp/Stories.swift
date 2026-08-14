@@ -136,7 +136,14 @@ struct StoryViewer: View {
         .havenStatusBarHidden()
         // (Both gestures now live on the MEDIA layer — see the note there. Nothing gestural is
         // attached at this level, so the controls layer has no gesture-bearing ancestor at all.)
-        .onAppear { loadCurrent() }
+        .onAppear {
+            // Silence whatever the feed was playing UNDERNEATH. A story covers the feed completely
+            // and brings its own audio, so the post's video or song carrying on behind it means two
+            // things playing at once with only one of them visible. The viewer manages its own
+            // sound from here (see loadCurrent); this is only about what it is covering up.
+            AudioCoordinator.shared.stopPostAudioForOverlay()
+            loadCurrent()
+        }
         .onDisappear { teardown() }
         // A call starting MID-story mutes the clip's own audio immediately (call audio priority);
         // MusicPlayback ducks itself, but this player is view-local so it must react here.

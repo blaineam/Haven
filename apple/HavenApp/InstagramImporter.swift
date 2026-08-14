@@ -259,6 +259,12 @@ final class InstagramImporter: ObservableObject {
                 // Checkpoint after EVERY item. The unit of work is one post, so the most a kill can
                 // cost is the item in flight — and re-importing that one item is the failure mode
                 // we accept, rather than re-importing all 300.
+                // ASK for a rebuild as we go. The slow floor in FeedStore.refresh caps how often one
+                // actually happens, but a cap is not a trigger — with postImported no longer
+                // requesting anything, nothing was driving the feed at all and it sat unchanged for
+                // the whole import. Requesting per item and letting the floor throttle it gives a
+                // feed that fills in visibly without thrashing.
+                await MainActor.run { FeedStore.shared.scheduleRefresh(after: 1) }
                 let done = idx + 1, total = items.count
                 let secs = Date().timeIntervalSince(began)
                 if secs > 5 {
@@ -311,6 +317,13 @@ final class InstagramImporter: ObservableObject {
         /// What the post is ABOUT — Vision labels off the first photo, plus caption words. This is
         /// what makes one silent post's suggestion differ from the next one's.
         var themes: [String] = SongSuggester.captionThemes(item.body)
+        if themes.isEmpty && !item.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Every logged suggestion came through with no themes, while the archive shows 20 of 22
+            // silent posts DO have captions — so the input is not the problem and extraction is.
+            // Log the caption that produced nothing rather than reasoning about it again.
+            HavenLog.sync("song-suggest   caption gave NO themes (\(item.body.count) chars): "
+                + "\(item.body.prefix(60))")
+        }
         for name in item.mediaNames {
             // A 20-photo carousel is 20 encodes; a cancel should not have to wait out the album.
             if await isCancelled() { break }
@@ -374,7 +387,12 @@ final class InstagramImporter: ObservableObject {
                 // enough, and Vision on every frame of a 20-photo carousel is work with nowhere
                 // to go.
                 if themes.count < 3, refs.isEmpty {
-                    themes += SongSuggester.visualThemes(bytes)
+                    let seen = SongSuggester.visualThemes(bytes)
+                    // Every logged suggestion carried caption themes only, never a visual one — so
+                    // either Vision is contributing nothing or its labels are all being filtered.
+                    // Say which, rather than assume the on-device analysis is working.
+                    HavenLog.sync("song-suggest   vision -> \(seen.isEmpty ? "[nothing]" : seen.joined(separator: "+"))")
+                    themes += seen
                 }
                 // Decode + re-encode are MainActor work (MediaStore is main-isolated), and the
                 // encoded bytes are what the content ref is minted from.

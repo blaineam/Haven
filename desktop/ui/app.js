@@ -6736,44 +6736,57 @@ const Autoplay = {
     requestAnimationFrame(() => { this.scheduled = false; this.apply(); });
   },
   apply() {
+    // THE CENTRED POST, not the centred video.
+    //
+    // This scanned videos and bailed when there were none, so a PHOTO post carrying a song was
+    // never the centre of anything — its song never started, and never stopped when scrolled past.
+    // Apple picks the centred POST and then plays whatever that post has; this now does the same,
+    // which is also why the video below is chosen through the card rather than beside it.
+    const cards = document.querySelectorAll("#view-circle [data-post], #view-you [data-post]");
     const vids = document.querySelectorAll("#view-circle video[data-video], #view-you video[data-video]");
-    if (!vids.length) { this.current = null; return; }
     if (this.suspended()) {
       vids.forEach((v) => { if (!v.paused) try { v.pause(); } catch (_) {} });
       this.current = null;
+      this.centeredCard = null;
+      this.song.sync(null);
       return;
     }
     const mid = window.innerHeight / 2;
-    let best = null, bestDist = Infinity;
-    for (const v of vids) {
-      const r = v.getBoundingClientRect();
+    let card = null, bestDist = Infinity;
+    for (const c of cards) {
+      const r = c.getBoundingClientRect();
       if (r.bottom <= 0 || r.top >= window.innerHeight) continue;   // off screen entirely
       const d = Math.abs((r.top + r.bottom) / 2 - mid);
-      if (d < bestDist) { bestDist = d; best = v; }
+      if (d < bestDist) { bestDist = d; card = c; }
     }
+    const best = card ? card.querySelector("video[data-video]") : null;
     for (const v of vids) {
       if (v === best) continue;
       if (!v.paused) try { v.pause(); } catch (_) {}
     }
     this.current = best;
-    if (!best) return;
-    // A SONG OWNS THE POST'S AUDIO. When the card carries a chip the clip still plays — muted — and
-    // the song is what you hear, matching Apple and matching what Stories already did here. The card
-    // is the nearest ancestor that knows, so it is marked at build time.
-    const card = best.closest("[data-post]");
+    this.centeredCard = card;
+
+    // A SONG OWNS THE POST'S AUDIO. When the card carries a chip its clip still plays — muted — and
+    // the song is what you hear, matching Apple and matching what Stories already did here.
+    // DUCKED: the reader chose this clip's own audio over the song. Sticky per post for the
+    // session, so scrolling away and back does not quietly undo that.
     const postId = card ? card.dataset.post : null;
-    // DUCKED: the reader tapped this clip to hear ITS audio instead of the song. Sticky per post
-    // for the session, so scrolling away and back does not silently undo the choice they made.
     const ducked = postId && this.ducked.has(postId);
     const hasSong = card ? card.dataset.song === "1" && !ducked : false;
-    best.muted = hasSong || callAudioActive() || captureUIOpen() || !state.videoSoundOn;
-    best.loop = true;
-    if (best.paused) best.play().catch(() => {});   // a refused autoplay is not an error
+    if (best) {
+      best.muted = hasSong || callAudioActive() || captureUIOpen() || !state.videoSoundOn;
+      best.loop = true;
+      if (best.paused) best.play().catch(() => {});   // a refused autoplay is not an error
+    }
     this.song.sync(hasSong ? card : null);
   },
 
   /** Posts whose clip the reader chose over the attached song. */
   ducked: new Set(),
+
+  /** The post nearest the viewport centre — what "playing" is scoped to. */
+  centeredCard: null,
 
   /** Unmute — globally, matching Apple, where unmuting one post unmutes the feed. Persisted, so it
    *  survives a relaunch the way the header toggle does. */
@@ -6831,7 +6844,9 @@ const Autoplay = {
       }
       // The reader may have scrolled on while that resolved — only start if this post is STILL the
       // centred one, or a fast scroll leaves a song playing for a card nobody is looking at.
-      if (!url || !Autoplay.current || Autoplay.current.closest("[data-post]") !== card) return;
+      // Checked against the CENTRED CARD, not the centred video: a photo post has no video, and
+      // testing for one meant its song never started at all.
+      if (!url || Autoplay.centeredCard !== card) return;
       this.postId = id;
       this.audio = new Audio(url);
       this.audio.loop = true;

@@ -518,6 +518,14 @@ input:focus, textarea:focus, select:focus {
   transform: scale(1.1) translateZ(0); will-change: transform; contain: paint;
   border-radius: 0; pointer-events: none;
 }
+/* The clip's own mute control. Above the media and its backdrop, clear of the native controls at
+   the bottom, and out of the way of the scrub zone. */
+.post-media .media-page > .media-sound {
+  position: absolute; top: 10px; right: 10px; z-index: 3;
+  width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center;
+}
+.post-media .media-page > .media-sound svg { width: 15px; height: 15px; display: block; }
+
 /* ---- Sensitive content (see app.js ▸ sensitiveGuard) ---- */
 /* Honors a SensitiveFlag federated by a member whose platform HAS an analyzer (Apple's SCA). The
    look is iOS's `.ultraThinMaterial` cover: frosted, centred label, click to reveal.

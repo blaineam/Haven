@@ -1986,6 +1986,40 @@ function posterRefFor(media, videoRef) {
 // the native control's own height, so the line the reader feels is the line they can see.
 const SCRUB_ZONE_PX = 44;
 
+/** A VISIBLE mute control on the clip itself, as every other platform has.
+ *
+ *  Tapping the video was supposed to be this, iOS-style, but a <video> with native `controls` hands
+ *  its clicks to the control layer — so the tap never arrived and there was no other way to turn a
+ *  post's sound on. Until a song post was unmuted, every clip stayed silent with no visible reason.
+ *
+ *  Sound is a GLOBAL setting here (as on Apple, where unmuting one post unmutes the feed), so this
+ *  button reflects and drives that — except on a post whose song owns the audio, where it ducks to
+ *  the clip instead.
+ */
+function videoSoundButton(video) {
+  const btn = el("button", { class: "icon-btn glass media-sound" });
+  const sync = () => {
+    const on = !video.muted;
+    btn.title = on ? t("mute_all_videos") : t("unmute_all_videos");
+    btn.replaceChildren(icon(on ? "speaker" : "speaker.slash"));
+  };
+  btn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (video.muted) {
+      if (!Autoplay.duck(video)) await Autoplay.enableSound(video);
+    } else {
+      state.videoSoundOn = false;
+      await invoke("set_video_sound", { on: false }).catch(() => {});
+      syncFeedVideoSound();
+    }
+    sync();
+  });
+  video.addEventListener("volumechange", sync);
+  sync();
+  return btn;
+}
+
 function mediaNode(ref, imgStyle) {
   // Videos start muted unless the global "play video sound" toggle is on (iOS parity); native controls
   // still let the user override per-video. data-video lets the toggle re-apply across all of them.
@@ -2194,6 +2228,7 @@ function buildMediaPages(refs, container, onAspects) {
   const pages = refs.map((ref) => {
     const node = mediaNode(ref);
     const page = el("div", { class: "media-page" }, node);
+    if (node.tagName === "VIDEO") page.append(videoSoundButton(node));
     // .media-page is already position:relative + overflow:hidden — the cover goes straight in, over
     // both the fitted media and its backdrop (which is a blurred copy of the same flagged frame).
     guardSensitiveIn(page, node, ref);
@@ -2210,6 +2245,21 @@ function buildMediaPages(refs, container, onAspects) {
       const w = isVid ? p.node.videoWidth : p.node.naturalWidth;
       const h = isVid ? p.node.videoHeight : p.node.naturalHeight;
       if (w && h) { rememberMediaSize(p.ref, w, h); p.aspect = w / h; onAspects(pages.map((x) => x.aspect)); }
+      // UPSCALE A CLIP SMALLER THAN ITS PAGE. Media is sized by its own pixels, so a low-resolution
+      // item sat at natural size with the blurred backdrop filling all four sides — right by the
+      // rules, odd to look at, and only visible on the few items whose stored size is below the
+      // card width.
+      //
+      // Done here rather than in CSS on purpose: filling the page unconditionally would put a
+      // page-sized box under every video, and in the height-capped portrait case a <video> paints
+      // its own opaque black into the unfilled part, covering the very backdrop this exists to
+      // show. Only the genuinely-too-small case is changed.
+      const pw = p.page.clientWidth, ph = p.page.clientHeight;
+      if (pw > 0 && ph > 0 && w < pw && h < ph) {
+        p.node.style.width = "100%";
+        p.node.style.height = "100%";
+        p.node.style.objectFit = "contain";
+      }
       if (!isVid && !p.poster) p.poster = posterFor(p.ref, p.node);
       sync();
     }, { once: true });
@@ -2644,16 +2694,21 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
     }
     const url = URL.createObjectURL(file);
     const video = document.createElement("video");
-    // NOT muted. `captureStream()` on a MUTED element yields no usable audio, so every clip this
-    // re-encoded came out silent — imports AND anything posted from the desktop composer, which
-    // runs this same function. Silence is instead achieved below by routing the audio into the
-    // RECORDER only and never to the speakers.
-    video.muted = false;
-    video.volume = 1;
+    // MUTED, and that is now safe. Autoplay policy can refuse an unmuted element, and the previous
+    // attempt fell back to muted — which silently reinstated the very bug it was fixing, because
+    // `captureStream()` on a muted element carries no usable audio.
+    //
+    // So the audio no longer comes from the element at all: it is decoded from the SOURCE BYTES
+    // (see below) and mixed into the recorder directly. Playback and capture are now independent,
+    // which is what they should always have been.
+    video.muted = true;
     video.playsInline = true;
     video.preload = "auto";
-    let raf, rec, settled = false, audioCtx = null;
-    const closeAudio = () => { if (audioCtx) { try { audioCtx.close(); } catch (_) {} audioCtx = null; } };
+    let raf, rec, settled = false, audioCtx = null, audioBuffer = null, audioNode = null;
+    const closeAudio = () => {
+      if (audioNode) { try { audioNode.stop(); } catch (_) {} audioNode = null; }
+      if (audioCtx) { try { audioCtx.close(); } catch (_) {} audioCtx = null; }
+    };
     const fail = (e) => {
       if (settled) return; settled = true;
       closeAudio();
@@ -2672,6 +2727,33 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
       if (!mediaQuiet) toast(msg);
       rej(new Error(msg));
     };
+    /** The clip's audio, decoded from the SOURCE BYTES. Independent of the element entirely: no
+     *  autoplay policy, no muted-element captureStream quirk, no volume to get wrong. Returns false
+     *  when there is nothing decodable, which is the normal answer for a genuinely silent clip. */
+    const prepareAudio = async () => {
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return false;
+        audioCtx = new AC();
+        const bytes = await file.arrayBuffer();
+        audioBuffer = await audioCtx.decodeAudioData(bytes);
+        return !!(audioBuffer && audioBuffer.duration > 0 && audioBuffer.numberOfChannels > 0);
+      } catch (_) {
+        audioBuffer = null;
+        return false;
+      }
+    };
+    /** Attach it to the recorder and start it in step with playback. */
+    const startAudio = () => {
+      if (!audioCtx || !audioBuffer) return;
+      const dest = audioCtx.createMediaStreamDestination();
+      audioNode = audioCtx.createBufferSource();
+      audioNode.buffer = audioBuffer;
+      audioNode.connect(dest);          // recorder only — never `ac.destination`, so it stays silent
+      dest.stream.getAudioTracks().forEach((t) => capStream.addTrack(t));
+      audioNode.start();
+    };
+
     video.onerror = () => fail(new Error("video decode failed"));
     video.onloadedmetadata = () => {
       // Length cap, checked the moment the decoder knows the duration — before a single frame is
@@ -2697,17 +2779,11 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
         // A MediaElementSource feeding a MediaStreamDestination gives the recorder a real track,
         // and because nothing is connected to `ac.destination` the user hears nothing: the audio
         // exists on the wire and never on the speakers.
-        try {
-          const AC = window.AudioContext || window.webkitAudioContext;
-          if (AC) {
-            audioCtx = new AC();
-            const srcNode = audioCtx.createMediaElementSource(video);
-            const dest = audioCtx.createMediaStreamDestination();
-            srcNode.connect(dest);                    // recorder only — deliberately NOT to output
-            dest.stream.getAudioTracks().forEach((t) => capStream.addTrack(t));
-          }
-        } catch (_) { /* no Web Audio: fall through to the element stream */ }
-        if (!capStream.getAudioTracks().length) {
+        // The decoded audio is attached by `startAudio` below, once the recorder is about to run —
+        // it has to start in step with playback, not before it.
+        if (!capStream.getAudioTracks().length && !audioBuffer) {
+          // No decodable audio (a silent clip, or a codec Web Audio would not take): the element
+          // stream is the last resort, and a silent track is the honest outcome for a silent clip.
           const elStream = (video.captureStream && video.captureStream()) ||
             (video.mozCaptureStream && video.mozCaptureStream());
           if (elStream) elStream.getAudioTracks().forEach((t) => capStream.addTrack(t));
@@ -2767,12 +2843,10 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
       // An UNMUTED element can have playback refused by autoplay policy. Falling back to muted
       // costs this clip its audio, which is bad — but it is far better than the alternative of
       // failing the encode outright and losing the clip's optimization as well.
-      video.play().catch(() => {
-        video.muted = true;
-        video.play().catch(fail);
-      });
+      startAudio();
+      video.play().catch(fail);
     };
-    video.src = url;
+    prepareAudio().finally(() => { video.src = url; });
   });
 }
 

@@ -42,8 +42,26 @@ struct ImportBanner: View {
             }
             .buttonStyle(.plain)
             .padding(.horizontal, 16)
+            .padding(.bottom, 8)
             .transition(.move(edge: .bottom).combined(with: .opacity))
             .animation(.snappy, value: done)
+        }
+    }
+}
+
+extension View {
+    /// Float the import banner above this tab's content — ABOVE the tab bar, never over it.
+    ///
+    /// The first cut overlaid it on the `TabView`, which put the pill directly on top of the
+    /// Circle / Messages / You bar: the labels were behind it and the app's own navigation was the
+    /// thing the progress indicator covered up. A background task must not cost you the tab bar.
+    ///
+    /// `safeAreaInset` applied INSIDE a tab is what gets this right — the banner sits in that tab's
+    /// bottom safe area, above the tab bar, and the tab's scroll content insets around it so
+    /// nothing is hidden underneath either.
+    func havenImportBanner(onTap: @escaping () -> Void) -> some View {
+        safeAreaInset(edge: .bottom, spacing: 0) {
+            ImportBanner(onTap: onTap)
         }
     }
 }

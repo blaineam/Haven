@@ -494,13 +494,6 @@ struct RootView: View {
 
     private var tabs: some View {
         tabsCore
-            // An archive import runs on its own (InstagramImporter.shared, not tied to any view),
-            // so the user can browse Haven while it works — and watch the posts arrive, which is
-            // the point. This strip is what keeps it visible, and reopens the full sheet on tap.
-            .overlay(alignment: .bottom) {
-                ImportBanner { showImportSheet = true }
-                    .padding(.bottom, 6)
-            }
             .sheet(isPresented: $showImportSheet) {
                 let cid = FeedStore.shared.activeCircleId
                 InstagramImportView(
@@ -517,12 +510,14 @@ struct RootView: View {
         TabView(selection: $tab) {
             FeedView(account: accountStore.account, seed: accountStore.account.secretSeed(), friendName: "Friend")
                 .id(accountStore.account.nodeIdHex())
+                .havenImportBanner { showImportSheet = true }
                 .tag("circle")
                 .tabItem { Label("Circle", systemImage: "sparkles") }
                 // Pending circle-approval prompts surface on the Circle tab (that's where the
                 // banner lives), alongside unseen posts — NOT on You.
                 .badge(feedStore.unseenCircle + connections.pending.count)
             NavigationStack { MessagesView(account: accountStore.account) }
+                .havenImportBanner { showImportSheet = true }
                 .tag("messages")
                 .tabItem { Label("Messages", systemImage: "bubble.left.and.bubble.right.fill") }
                 .badge(feedStore.unseenMessages)
@@ -533,6 +528,7 @@ struct RootView: View {
                 contacts: contacts,
                 onReset: { accountStore.reset() }
             )
+            .havenImportBanner { showImportSheet = true }
             .tag("you")
             .tabItem { Label("You", systemImage: "person.crop.circle.fill") }
             // While a call is minimized, a green "Call" tab appears on the right — tap it to reopen

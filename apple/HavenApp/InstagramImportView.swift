@@ -19,6 +19,8 @@ struct InstagramImportView: View {
     @State private var includeStories = false
     /// Off by default — it attaches a GUESS, so it should be asked for, not assumed.
     @State private var matchSongs = false
+    /// Stop is destructive and easy to hit by accident next to a progress bar — it confirms.
+    @State private var confirmStop = false
 
     private let exportURL = URL(string: "https://accountscenter.instagram.com/info_and_permissions/dyi/")!
 
@@ -42,7 +44,15 @@ struct InstagramImportView: View {
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { importer.reset(); dismiss() }
+                    // Closing the sheet is NOT cancelling the import. The import lives on
+                    // InstagramImporter.shared and keeps running with the sheet gone — that is the
+                    // whole point of being able to browse — so `reset()` here would have thrown
+                    // away a running job's state just because the user tapped away from it. Only
+                    // Stop cancels, and only after confirming.
+                    Button("Close") {
+                        if !importer.isRunning { importer.reset() }
+                        dismiss()
+                    }
                 }
             }
             .fileImporter(isPresented: $picking, allowedContentTypes: [.zip]) { result in
@@ -339,8 +349,14 @@ struct InstagramImportView: View {
                 Text("You can close Haven too — it picks up where it left off.")
                     .font(.caption).foregroundStyle(.secondary)
 
-                Button("Stop", role: .destructive) { importer.cancel() }
+                Button("Stop", role: .destructive) { confirmStop = true }
                     .padding(.top, 6)
+                    .confirmationDialog("Stop importing?", isPresented: $confirmStop, titleVisibility: .visible) {
+                        Button("Stop importing", role: .destructive) { importer.cancel() }
+                        Button("Keep importing", role: .cancel) { }
+                    } message: {
+                        Text("The \(done) posts already brought over stay where they are. You can pick the rest up later from where it stopped.")
+                    }
             }
             .animation(.snappy, value: done)
         }

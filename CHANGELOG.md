@@ -11,6 +11,27 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.5.0] — 2026-08-14
 
+### Fixed — Apple (a post wider than the phone)
+
+- **One post in the feed rendered wider than the screen**, its picture cut off at both edges, while
+  the post directly below it was perfect. The cause was a single modifier. A post whose full-size
+  bytes have not landed yet draws its small `thumb:` companion instead, and that placeholder used
+  `.scaledToFill()` — which returns a size that COVERS its proposal rather than fitting inside it.
+  Nothing upstream shrinks an oversized child: the page's `.frame(maxWidth: .infinity)` grows to fit
+  it, and the `.clipShape` after that then clips to the grown width instead of the card's. Measured:
+  a 512×288 thumb inside a 325pt page claimed **1208pt**; a panorama claimed 2720pt.
+
+  It only ever hit posts still waiting on their media — once the bytes land, a different code path
+  draws them with `.fit` — which is why it struck one post and not its neighbour, and why it lasted
+  this long. The placeholder now fits, which is also what the full-size image cross-fading in over it
+  does, so the swap no longer re-frames the picture. The page additionally proposes its own size to
+  that branch (the one branch that wasn't given it), and the strip either side of a fitted thumb
+  carries the blurred wash rather than the card's flat surface.
+
+  Covered by `PostMediaPageWidthTests`, which asserts the invariant — a media page never claims more
+  width than the card offered it — rather than the modifier, so any future re-layout is held to the
+  same contract.
+
 ### Fixed — desktop (the import shakedown)
 
 Running a real 1.28 GB archive end to end on desktop found a long tail of faults, several of them

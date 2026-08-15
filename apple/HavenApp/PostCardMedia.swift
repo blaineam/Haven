@@ -409,7 +409,22 @@ struct PostMediaView: View {
             }
         } else {
             // Referenced but not here yet — it's still coming from the sender / mailbox.
+            //
+            // The same page contract every branch above keeps, and the one this branch was missing:
+            // the PAGE proposes the size and the content never dictates it. Without the frame, an
+            // oversized placeholder sized the page instead of the other way round — see the fill/fit
+            // note in `MissingMediaPlaceholder`, which is the defect this pairs with. Belt and
+            // braces: either half alone contains it, and a page that can be resized by its contents
+            // is a card that can break the feed's width.
+            //
+            // The backdrop comes from the THUMB companion, not the parent ref: the parent's bytes
+            // are by definition not on disk here, so blurring it would find nothing and the strip
+            // either side of a fitted thumb would be the card's flat surface. The thumb is what the
+            // placeholder is already drawing.
+            let waitingThumb = MediaVariants.thumb(for: ref, in: item.media)
             mediaLoadingPlaceholder(ref)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background { pageBackdrop(waitingThumb ?? ref, containerAspect: containerAspect) }
         }
     }
 

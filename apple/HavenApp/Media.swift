@@ -2167,7 +2167,23 @@ struct MissingMediaPlaceholder: View {
                 // look broken. It sits here until the full-res bytes cross-fade in over it
                 // (`FeedImage`), which is the whole progressive-loading story: small then big, never
                 // "obscured then revealed".
-                Image(platformImage: img).resizable().scaledToFill()
+                //
+                // FIT, NOT FILL — and that difference is a card wider than the phone.
+                //
+                // `.scaledToFill()` returns a size that COVERS its proposal, so for any thumb wider
+                // in aspect than the page it was handed it reported a width LARGER than that page.
+                // Nothing upstream shrinks an oversized child: the page's `.frame(maxWidth:
+                // .infinity)` grows to fit the child instead, and the `.clipShape` after it then
+                // clips to the grown width — so the whole POST rendered wider than the screen, with
+                // the thumb magnified and cut off at both edges. Only posts whose full-size bytes
+                // had not landed reached this branch (once they land `FeedImage` draws instead),
+                // which is why one post in a feed was broken and the post below it was fine.
+                //
+                // `.scaledToFit()` can never exceed its proposal. It is also what the full-res image
+                // cross-fading in over this one uses — every caller of this placeholder renders
+                // `contentMode: .fit` — so the small version now occupies exactly the rect the big
+                // one will, and the swap stops re-framing the picture.
+                Image(platformImage: img).resizable().scaledToFit()
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             } else {
                 RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(.secondarySystemFill))

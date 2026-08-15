@@ -1540,8 +1540,22 @@ final class MediaStore: ObservableObject {
     private func loadSizeCacheIfNeeded() {
         guard !sizeCacheLoaded else { return }
         sizeCacheLoaded = true
-        guard let data = try? Data(contentsOf: Self.sizeMapURL),
-              let raw = try? JSONDecoder().decode([String: [CGFloat]].self, from: data) else { return }
+        var raw = (try? Data(contentsOf: Self.sizeMapURL))
+            .flatMap { try? JSONDecoder().decode([String: [CGFloat]].self, from: $0) }
+        if raw == nil {
+            // MIGRATE THE v1 MAP, KEEPING PHOTOS.
+            //
+            // Only VIDEO entries were poisoned (a shape taken from an unrotated poster). Discarding
+            // the whole file made every photo re-probe as well, so a feed of hundreds re-rendered
+            // from the 4:3 fallback and every card resized as answers landed — the precise jank this
+            // map exists to prevent, inflicted to fix a video bug. Photo entries were always read
+            // from the image header with its EXIF orientation applied, so they are kept.
+            let v1 = Self.storageDir.appendingPathComponent("media-sizes.json")
+            raw = (try? Data(contentsOf: v1))
+                .flatMap { try? JSONDecoder().decode([String: [CGFloat]].self, from: $0) }
+                .map { $0.filter { MediaKind(ref: $0.key) == .image } }
+        }
+        guard let raw else { return }
         for (ref, wh) in raw where wh.count == 2 && wh[0] > 0 && wh[1] > 0 {
             if sizeCache[ref] == nil { sizeCache[ref] = CGSize(width: wh[0], height: wh[1]) }
         }

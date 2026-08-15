@@ -215,10 +215,26 @@ struct PostMediaView: View {
         return media.allSatisfy { abs(singleAspect($0) - a0) < 0.06 }
     }
 
+    /// The shape a carousel's pages take: the MEDIAN of what it holds, not a clamp around the
+    /// tallest.
+    ///
+    /// Taking the tallest and clamping to 0.8 gave a page that fitted NOTHING. Measured on a real
+    /// post — four 9:16 clips and one genuinely landscape one:
+    ///
+    ///     carousel: 5 items aspects=[0.56 0.56 0.56 0.56 1.78] chosen=0.80 pageH=465
+    ///
+    /// 0.80 is not 0.56 and it is not 1.78, so all five letterboxed: the four portrait clips drew as
+    /// slivers and the landscape one sat in a band, with blur everywhere. One odd item out of five
+    /// was dictating the shape of the other four.
+    ///
+    /// The median is the shape most pages actually want. Four of five fill the page edge to edge and
+    /// the outlier letterboxes over its own blurred copy — which is exactly what that backdrop is
+    /// for, and what a single-media post already does. A uniform set still keeps its exact aspect.
     func carouselAspect(_ media: [String]) -> CGFloat {
-        guard let tallest = media.map(singleAspect).min() else { return 4.0 / 3.0 }
-        if allSameAspect(media) { return tallest }
-        return min(1.91, max(0.8, tallest))
+        let aspects = media.map(singleAspect).filter { $0 > 0 }.sorted()
+        guard !aspects.isEmpty else { return 4.0 / 3.0 }
+        if allSameAspect(media) { return aspects[0] }
+        return aspects[aspects.count / 2]
     }
 
     /// DEBUG: what shape the carousel chose and why. Every "sizing is wrong" report on this view has

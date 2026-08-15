@@ -3001,6 +3001,10 @@ final class FeedStore: ObservableObject {
                 }
                 if self.items != deduped { self.items = deduped }
                 if self.hiddenInActiveCircle != hiddenHere { self.hiddenInActiveCircle = hiddenHere }
+                // First refresh that produced anything: repair an account that was imported into
+                // twice, without being asked. Guarded to once per launch, and a no-op when there is
+                // nothing duplicated — see `sweepDuplicateImports`.
+                self.sweepDuplicateImportsOnce()
                 self.sensitiveCache.removeAll()   // a refresh may have ingested new SensitiveFlag events
                 self.reportsCache.removeAll()     // …and new Report events
                 SpotlightIndex.reindexAll()       // no-op unless the user enabled Spotlight indexing
@@ -3026,6 +3030,59 @@ final class FeedStore: ObservableObject {
         refreshPending = false
         lastImportRefreshAt = 0   // the throttle must not swallow the last one
         refresh()
+        sweepDuplicateImports()
+    }
+
+    /// Whether this launch has already swept — the duplicates are historical, so once is enough.
+    private var sweptDuplicates = false
+
+    /// Unsend posts this device authored more than once, keeping one of each.
+    ///
+    /// The importer is idempotent NOW — it records every archive item it publishes and skips what it
+    /// has already done — but that arrived after an archive had already been imported twice, and
+    /// nothing about the ledger removes the copies that are already sitting in the feed. Asking
+    /// someone to delete two hundred posts by hand is not a fix.
+    ///
+    /// The key is deliberately strict: same capture time, same body, AND the same media refs. Media
+    /// refs are content hashes (sha-256 of the plaintext bytes), so two posts sharing them are
+    /// carrying the identical pictures — not similar ones. Add an identical backdated timestamp and
+    /// an identical caption on top of that and there is no reading under which these are two
+    /// different posts someone meant to make. A pair of genuinely separate posts cannot collide:
+    /// authoring two by hand gives them different `createdAt` values to the millisecond.
+    ///
+    /// Text-only posts are LEFT ALONE. With no media refs the key collapses to time plus body, which
+    /// is exactly the case where a duplicate might be deliberate ("gm" twice), and the whole point of
+    /// this is to clean up an import rather than to have an opinion about what someone posts.
+    ///
+    /// Unsend, not a local hide: the duplicates went out to the circle, so they have to be withdrawn
+    /// from it. That is what `unsend` is for, and members already handle the event.
+    @discardableResult
+    func sweepDuplicateImports() -> Int {
+        var keeperFor: [String: String] = [:]     // signature → the post id we keep
+        var doomed: [String] = []
+        // Oldest first, so the copy that has been in the circle longest is the one that stays and
+        // the later re-import is what gets withdrawn.
+        for item in items.sorted(by: { $0.createdAt < $1.createdAt })
+        where item.isMe && !item.unsent && !item.story {
+            let media = MediaVariants.displayRefs(item.media).sorted()
+            guard !media.isEmpty else { continue }   // text-only: never swept, see above
+            let signature = "\(item.createdAt)|\(item.body)|\(media.joined(separator: ","))"
+            if keeperFor[signature] != nil { doomed.append(item.id) } else { keeperFor[signature] = item.id }
+        }
+        guard !doomed.isEmpty else { return 0 }
+        HavenLog.sync("dedupe: withdrawing \(doomed.count) duplicate posts (\(keeperFor.count) originals kept)")
+        for id in doomed { unsend(id) }
+        refresh()
+        return doomed.count
+    }
+
+    /// Once per launch, after the feed actually has something to look at. Cheap when there is
+    /// nothing to do — one pass over the items already in memory — so it costs a normal launch
+    /// nothing and repairs an account that was imported into twice without being asked.
+    func sweepDuplicateImportsOnce() {
+        guard !sweptDuplicates, !items.isEmpty else { return }
+        sweptDuplicates = true
+        sweepDuplicateImports()
     }
 
     func scheduleRefresh(after seconds: Double = 0.25) {
@@ -10161,6 +10218,10 @@ struct ProfileView: View {
         }
         .navigationTitle("Your posts")
         .havenInlineNavTitle()
+        // DEBUG-only trace, because this screen is the one that gets the app killed and a memory
+        // kill leaves nothing behind to read. Says what it is holding and how much headroom is
+        // left, twice a second, so the last line before the process disappears is the evidence.
+        .memoryTrace { "you-tab \(store.myPosts.count) posts / \(store.myStories.count) stories" }
         .havenFullScreenCover(isPresented: $showStories) {
             StoryViewer(stories: store.myStories, index: storyIndex, friendName: friendName)
         }

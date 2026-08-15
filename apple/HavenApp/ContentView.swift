@@ -38,6 +38,11 @@ struct YouView: View {
                         if !feed.myStories.isEmpty { storiesRow }
                         postsSection
                     }
+                    // DEBUG-only trace, because this is the screen that gets the app killed and a
+                    // memory kill leaves nothing behind to read. Says what the app is holding and
+                    // how much headroom iOS will still give it, twice a second, so the last line
+                    // before the process disappears is evidence rather than a hypothesis.
+                    .memoryTrace { "you-tab \(feed.myPosts.count) posts / \(feed.myStories.count) stories" }
                     .padding(20)
                     // Pin the content lane to EXACTLY the viewport width. A vertical ScrollView proposes
                     // UNBOUNDED width to its content, so any child that reports an intrinsic width wider
@@ -157,7 +162,23 @@ struct YouView: View {
             }
             .frame(maxWidth: .infinity).padding(.vertical, 28).havenCard()
         } else {
-            VStack(spacing: 16) {
+            // LAZY — this is the screen that gets the app killed.
+            //
+            // A plain VStack builds EVERY post the moment the tab opens: each card's media, its
+            // blurred backdrop bitmap, and its own view graph. Worse than the memory, each card also
+            // carries a GeometryReader reporting its centre through PostCenterKey, so one layout pass
+            // costs a body evaluation PER POST and rebuilds a preference dictionary with an entry per
+            // post. On device that measured **245 PostCard.body evaluations per second** — the app
+            // was doing nothing but re-deriving a list it had already drawn.
+            //
+            // With a handful of posts none of this is visible. After an Instagram import there are
+            // hundreds, and the tab is a memory kill a second or two after it appears.
+            //
+            // LazyVStack builds the visible ones only, which bounds the bitmaps, the body
+            // evaluations and the preference dictionary in one move — and the nearest-to-centre
+            // calculation below is unaffected, because a card that is not on screen was never a
+            // candidate for being centred.
+            LazyVStack(spacing: 16) {
                 ForEach(feed.myPosts, id: \.id) { item in
                     PostCard(
                         item: item, friendName: "Friend",
@@ -167,6 +188,10 @@ struct YouView: View {
                         onEdit: { b in withAnimation(HavenTheme.smooth) { feed.edit(item.id, b) } },
                         onUnsend: { withAnimation(HavenTheme.smooth) { feed.unsend(item.id) } }
                     )
+                    // Skip the whole body when this row's item is unchanged — FeedStore republishes
+                    // constantly (measured at 5x in 5s here, with media backup running), and without
+                    // this every republish re-evaluates a ~1,500-line body for every card on screen.
+                    .equatable()
                     // Report center position so the You-page feed drives audio too — without this the
                     // centered post never became active, so songs animated but never actually played.
                     .background(GeometryReader { geo in
@@ -189,7 +214,10 @@ struct YouView: View {
             Text("Your stories").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
+                // Lazy for the same reason as the list below: an import that brought stories over as
+                // kept stories can leave dozens here, and an eager HStack decodes a thumbnail for
+                // every one of them — off-screen ones included — as the tab opens.
+                LazyHStack(spacing: 12) {
                     ForEach(Array(feed.myStories.enumerated()), id: \.element.id) { idx, s in
                         Button { storyIndex = idx; showStories = true } label: {
                             ZStack {

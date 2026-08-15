@@ -5409,10 +5409,16 @@ impl HavenSocial {
     /// not per-author), so a forwarded friend event still verifies + displays as theirs. `limit` caps to the
     /// most recent N events so this stays cheap when called periodically.
     fn epoch_sync_bundle_impl(&self, circle_id: &str, mine_only: bool, limit: u32) -> Vec<Vec<u8>> {
-        self.epoch_sync_bundle_inner(circle_id, mine_only, limit, false)
+        self.epoch_sync_bundle_inner(circle_id, mine_only, limit, false, 0)
     }
 
-    fn epoch_sync_bundle_inner(&self, circle_id: &str, mine_only: bool, limit: u32, head_only: bool) -> Vec<Vec<u8>> {
+    /// `before_ms` pages BACKWARDS through history: only events strictly older than it are
+    /// considered, and `limit` then keeps the newest of those. 0 means "from the top". Together they
+    /// are a cursor — a receiver asks for the page older than the oldest post it holds, and keeps
+    /// asking until a page comes back empty.
+    fn epoch_sync_bundle_inner(
+        &self, circle_id: &str, mine_only: bool, limit: u32, head_only: bool, before_ms: u64,
+    ) -> Vec<Vec<u8>> {
         let mut st = self.state.lock().unwrap();
         let me_hex = hex(&st.me().node_id_bytes());
         let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return vec![] };
@@ -5579,6 +5585,9 @@ impl HavenSocial {
             .events
             .iter()
             .filter(|e| !mine_only || e.author == me_hex)
+            // The paging cursor. Strictly older, so a receiver can pass the created_at of the
+            // oldest post it holds and never be handed that same post back forever.
+            .filter(|e| before_ms == 0 || e.created_at < before_ms)
             .cloned()
             .collect();
         if limit > 0 {
@@ -5611,7 +5620,7 @@ impl HavenSocial {
     /// a relay-only peer could otherwise receive an event sealed under a fresh epoch long before the
     /// commit that opens it arrives (the event would sit in `pending_epoch` until the next backfill).
     pub fn export_epoch_head(&self, circle_id: String) -> Vec<Vec<u8>> {
-        self.epoch_sync_bundle_inner(&circle_id, true, 0, true)
+        self.epoch_sync_bundle_inner(&circle_id, true, 0, true, 0)
     }
 
     /// TreeKEM M2 SHADOW telemetry (`docs/TREEKEM-DESIGN.md` §9 row M2). Resolves this device's
@@ -5730,6 +5739,50 @@ impl HavenSocial {
     /// connected. Only my own events (relaying others' would forge authorship).
     pub fn sync_envelopes(&self, circle_id: String) -> Vec<Vec<u8>> {
         self.epoch_sync_bundle(&circle_id)
+    }
+
+    /// One PAGE of what I authored, for history that is fetched as it is looked at rather than
+    /// blasted the moment someone is added.
+    ///
+    /// Adding a friend used to hand them everything: `sync_envelopes` re-seals my entire history —
+    /// real cryptography per event — and sends the lot. For an account carrying an imported archive
+    /// that is hundreds of envelopes on the sender, hundreds of unseals on the receiver, and the
+    /// whole media backlog pulled behind it, all before the new member has looked at anything. The
+    /// first screenful is what they actually need; the rest is a backlog they may never scroll to.
+    ///
+    /// So: `limit` newest events older than `before_ms` (0 = from the top). The receiver asks for
+    /// the page older than the oldest post it holds and keeps asking as it scrolls back, exactly the
+    /// way media is already fetched only when a tile appears. An empty page means it has reached the
+    /// beginning.
+    ///
+    /// Every page still carries the roster, the key commit and the tree wires, so a page is
+    /// self-sufficient: a receiver can open it without having seen any other page. `sync_envelopes`
+    /// stays as it is, and stays the eventual-consistency backstop — nothing here can strand a peer,
+    /// because the periodic full re-send still reconciles anything the paging missed.
+    pub fn sync_envelopes_page(&self, circle_id: String, before_ms: u64, limit: u32) -> Vec<Vec<u8>> {
+        self.epoch_sync_bundle_inner(&circle_id, true, limit, false, before_ms)
+    }
+
+    /// The oldest event I authored in a circle, in ms — 0 when I have authored none.
+    ///
+    /// A receiver cannot otherwise tell "you have reached the beginning of their history" from "the
+    /// page was dropped", and would either stop early or ask forever. Cheap: one pass over the
+    /// circle's events, no sealing.
+    pub fn my_oldest_event_ms(&self, circle_id: String) -> u64 {
+        let st = self.state.lock().unwrap();
+        let me_hex = hex(&st.me().node_id_bytes());
+        st.circles
+            .iter()
+            .find(|c| c.id == circle_id)
+            .map(|c| {
+                c.events
+                    .iter()
+                    .filter(|e| e.author == me_hex)
+                    .map(|e| e.created_at)
+                    .min()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
     }
 
     pub fn feed(&self, circle_id: String, now_ms: u64, viewer_retention_secs: Option<u64>) -> Vec<FeedItemFfi> {

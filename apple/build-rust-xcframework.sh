@@ -27,6 +27,48 @@ if [[ "$DUPES" != "0" ]]; then
     -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/target/*' -print0 2>/dev/null | xargs -0 rm -rf
 fi
 
+# BUILD OUTSIDE iCLOUD DRIVE.
+#
+# This repo lives in iCloud Drive, and cargo's target/ is the worst possible thing to put there:
+# hundreds of megabytes of short-lived binaries, rewritten constantly. iCloud syncs them mid-write
+# and hands back bytes that are subtly not what cargo wrote — which surfaces as PROC-MACRO DYLIBS
+# THAT WILL NOT LOAD:
+#
+#   error: dlopen(.../libdarling_macro-….dylib): mis-aligned LINKEDIT string pool, fileOffset=0x29399C
+#   error[E0463]: can't find crate for `time_macros`
+#
+# Both mean the same thing — the file on disk is corrupt — and the second says so badly enough to
+# send you hunting a toolchain problem that isn't there. Deleting the individual artifact "fixes" it
+# until the next sync mangles a different one, so the whole build is intermittently broken in a way
+# that looks like a different bug every time.
+#
+# CARGO_TARGET_DIR moves the whole lot to a cache directory macOS already excludes from sync and
+# from backups. Nothing in the repo needs target/ to be next to the source. Honours a value the
+# caller already set (CI sets its own).
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/Library/Caches/haven-cargo-target}"
+TARGET="$CARGO_TARGET_DIR"
+mkdir -p "$TARGET"
+
+# LINK THE RUST BUILD WITH A RELEASED XCODE, NOT THE BETA.
+#
+# Xcode-beta's linker (ld-27037) emits proc-macro dylibs that dyld will not load:
+#
+#   error: dlopen(.../libserde_derive-….dylib): mis-aligned LINKEDIT string pool, fileOffset=0x2C2CD4
+#
+# rustc loads proc macros into ITSELF to run them, so a dylib dyld rejects means the crate that
+# needs it cannot compile at all — and rustc reports most of them as the far less obvious
+# `error[E0463]: can't find crate for `time_macros``, which reads like a missing dependency and
+# sends you hunting a toolchain that is fine. It is deterministic (serialising with
+# CARGO_BUILD_JOBS=1 changes nothing) and it takes out serde_derive, darling_macro, zeroize_derive
+# and friends — i.e. most of the tree.
+#
+# Only the RUST build is pinned. The app itself still builds against whatever Xcode is selected,
+# which is the beta for the current SDK — so this does not quietly downgrade what ships.
+if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app/Contents/Developer ]]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+  echo "▸ Linking Rust with released Xcode ($DEVELOPER_DIR) — the beta's ld emits unloadable proc-macro dylibs"
+fi
+
 echo "▸ Ensuring Apple targets (iOS device + sim + Mac Catalyst + native macOS)…"
 # aarch64-apple-darwin = native macOS (Apple Silicon). Used by the native-macOS port (see
 # docs/MACOS-NATIVE-PORT.md); harmless for the Catalyst build.
@@ -47,7 +89,7 @@ echo "▸ Generating Swift bindings…"
 ( cd "$CORE" && "$CARGO" build -q -p haven_ffi --lib )   # host dylib for the generator
 rm -rf "$HERE/Generated"; mkdir -p "$HERE/Generated"
 ( cd "$CORE" && "$CARGO" run -q -p haven_ffi --bin uniffi-bindgen -- \
-    generate --library target/debug/libhaven_ffi.dylib --language swift --out-dir "$HERE/Generated" )
+    generate --library "$TARGET/debug/libhaven_ffi.dylib" --language swift --out-dir "$HERE/Generated" )
 
 echo "▸ Assembling HavenFFI.xcframework…"
 rm -rf "$HERE/HavenFFI.xcframework" "$HERE/build/headers"
@@ -55,10 +97,10 @@ mkdir -p "$HERE/build/headers"
 cp "$HERE/Generated/haven_ffiFFI.h" "$HERE/build/headers/"
 cp "$HERE/Generated/haven_ffiFFI.modulemap" "$HERE/build/headers/module.modulemap"
 xcodebuild -create-xcframework \
-  -library "$CORE/target/aarch64-apple-ios/release/libhaven_ffi.a" -headers "$HERE/build/headers" \
-  -library "$CORE/target/aarch64-apple-ios-sim/release/libhaven_ffi.a" -headers "$HERE/build/headers" \
-  -library "$CORE/target/aarch64-apple-ios-macabi/release/libhaven_ffi.a" -headers "$HERE/build/headers" \
-  -library "$CORE/target/aarch64-apple-darwin/release/libhaven_ffi.a" -headers "$HERE/build/headers" \
+  -library "$TARGET/aarch64-apple-ios/release/libhaven_ffi.a" -headers "$HERE/build/headers" \
+  -library "$TARGET/aarch64-apple-ios-sim/release/libhaven_ffi.a" -headers "$HERE/build/headers" \
+  -library "$TARGET/aarch64-apple-ios-macabi/release/libhaven_ffi.a" -headers "$HERE/build/headers" \
+  -library "$TARGET/aarch64-apple-darwin/release/libhaven_ffi.a" -headers "$HERE/build/headers" \
   -output "$HERE/HavenFFI.xcframework" >/dev/null
 
 echo "✓ Done. Next:  cd apple && xcodegen generate && open Haven.xcodeproj"

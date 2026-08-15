@@ -5007,8 +5007,71 @@ final class FeedStore: ObservableObject {
         case 31: handleMediaWanted(payload)                          // someone wants media I authored, that a relay swept
         case 32: handleMediaAvailable(payload)                       // media I asked about is back on a relay
         case 33: handleMediaResumeRequest(payload)                   // re-request carrying a bitmap of what they already have
+        case 34: handleHistoryRequest(payload)                       // "send me the page of your history before X"
         default: break
         }
+    }
+
+    // MARK: - Lazy history (wire 34)
+    //
+    // Adding someone used to hand them EVERYTHING. `sync_envelopes` re-seals my whole history — real
+    // cryptography per event — and every envelope goes out, gets unsealed on their side, and drags
+    // its media behind it. On an account carrying an imported archive that is hundreds of envelopes
+    // and a gigabyte of media, delivered before the new member has looked at a single post.
+    //
+    // The first screenful is what they need. The rest is a backlog they may never scroll to — so it
+    // is fetched the way media already is: when they get there.
+    //
+    // The reply is ordinary Event frames (type 1), NOT a new response type, so the receiving path is
+    // the one that already ingests and dedupes envelopes. Only the ASK is new.
+    //
+    // The periodic full re-send stays exactly as it was and remains the backstop: paging can drop a
+    // page, be answered by nobody, or stop early, and history still reconciles on its own. Nothing
+    // here can strand a peer — the worst case is that they wait for the backstop instead of getting
+    // it on demand.
+
+    /// Events a new member is given up front, and the size of each page fetched afterwards. Sized to
+    /// comfortably overfill a screen so the common case never needs a second round trip.
+    static let historyPageSize: UInt32 = 60
+
+    /// The cursor last asked for per circle — scrolling past the end repeatedly must not re-ask.
+    private var historyAskedBefore: [String: UInt64] = [:]
+
+    /// Ask this circle's members for the page of history older than the oldest post we hold.
+    ///
+    /// Idempotent per cursor: asking again only happens once an older page has actually arrived and
+    /// moved the cursor. If nobody answers, the cursor stays put and the periodic full re-send
+    /// eventually delivers it anyway.
+    func requestOlderHistory(circleId: String? = nil) {
+        let cid = circleId ?? activeCircleId
+        guard let social else { return }
+        guard let oldest = items.map(\.createdAt).min(), oldest > 0 else { return }
+        guard historyAskedBefore[cid] != oldest else { return }
+        historyAskedBefore[cid] = oldest
+        var payload = Data(social.myNodeHex().utf8)
+        withUnsafeBytes(of: oldest.littleEndian) { payload.append(contentsOf: $0) }
+        payload.append(contentsOf: Array(cid.utf8))
+        for contact in ContactsStore.shared.contacts { sendIroh(34, payload, to: contact.idHex) }
+        HavenLog.sync("history: asked for the page before \(oldest) in \(cid)")
+    }
+
+    /// Someone asked for the page of MY history older than their cursor. Answer with events only —
+    /// authorship is unchanged, because `sync_envelopes_page` re-seals only what I authored.
+    private func handleHistoryRequest(_ payload: Data) {
+        guard payload.count > 72, let social else { return }
+        guard let requesterHex = String(data: payload.prefix(64), encoding: .utf8),
+              requesterHex.count == 64,
+              let cid = String(data: payload.dropFirst(72), encoding: .utf8), !cid.isEmpty,
+              circles.contains(where: { $0.id == cid }) else { return }
+        // Only a member of that circle may page through it. Everything below re-seals to the
+        // circle's epoch anyway, so a stranger could not open it — but there is no reason to spend
+        // the sealing on them, and an unbounded stranger-triggered re-seal is a free CPU drain.
+        guard ContactsStore.shared.contacts.contains(where: { $0.idHex == requesterHex }) else { return }
+        var before: UInt64 = 0
+        for (i, byte) in payload.dropFirst(64).prefix(8).enumerated() { before |= UInt64(byte) << (8 * i) }
+        let page = social.syncEnvelopesPage(circleId: cid, beforeMs: before, limit: Self.historyPageSize)
+        HavenLog.sync("history: serving \(page.count) envelopes before \(before) in \(cid) to \(requesterHex.prefix(8))")
+        for env in page { sendIroh(1, eventPayload(cid, env), to: requesterHex) }
     }
 
     /// A friend announced their signed device roster (type 27). Ingest it so we learn their DEVICE node
@@ -7439,7 +7502,20 @@ final class FeedStore: ObservableObject {
             let meHex = social.myNodeHex()
             Task { await SharedStore.putHello(circleId: circleId, toHex: idHex, fromHex: meHex, hello: hello, force: true) }
         }
-        for env in social.syncEnvelopes(circleId: circleId) {
+        // A PAGE, not the whole history — see "Lazy history (wire 34)".
+        //
+        // This is the moment someone is added, and it used to re-seal and ship every event I have
+        // ever authored to the circle. For an account carrying an imported archive that is hundreds
+        // of envelopes and the entire media backlog behind them, before the new member has looked at
+        // anything. They get the newest screenful now and ask for older pages as they scroll, the
+        // same way media is fetched only when a tile appears.
+        //
+        // DMs are exempt: a conversation is read from the beginning and is small enough that paging
+        // it would cost a round trip to save nothing.
+        let firstPage = isDM
+            ? social.syncEnvelopes(circleId: circleId)
+            : social.syncEnvelopesPage(circleId: circleId, beforeMs: 0, limit: Self.historyPageSize)
+        for env in firstPage {
             sendIroh(1, eventPayload(circleId, env), to: idHex)
             if !isDM { nearbyBroadcast(1, eventPayload(circleId, env)) }
             Task { await SharedStore.uploadEvent(circleId: circleId, env: env) }
@@ -7942,6 +8018,12 @@ struct FeedView: View {
                                 Color.clear.preference(key: PostCenterKey.self,
                                                        value: [item.id: geo.frame(in: .global).midY])
                             })
+                            // Reaching the oldest post we hold is the cue to ask its author for the
+                            // page before it — history arrives as it is looked at, not all at once
+                            // when someone is added. No-op once we've asked for this cursor.
+                            .onAppear {
+                                if item.id == store.feedItems.last?.id { store.requestOlderHistory() }
+                            }
                             // A bulk import writes hundreds of posts, and animating each arrival
                             // means the whole stack springs on every one of them — the page visibly
                             // bounces, and because the moving layout changes which post is nearest

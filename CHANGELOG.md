@@ -11,6 +11,27 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.5.0] — 2026-08-14
 
+### Changed — Apple (history arrives as it is read)
+
+- **Adding someone no longer hands them your whole history at once.** It used to re-seal every event
+  you had ever authored to that circle — real cryptography per event — send the lot, and drag the
+  entire media backlog behind it, all before the new member had looked at anything. On an account
+  carrying an imported archive that is hundreds of envelopes and a gigabyte of media for a first
+  screenful nobody had scrolled past yet.
+
+  They now get the newest 60 up front and ask for the page before their oldest post as they scroll
+  back — the same way media has always been fetched only when a tile appears. The reply is ordinary
+  event frames, so the receiving side is the path that already ingests and deduplicates; only the
+  ask is new. Requests are membership-checked, so a stranger cannot make you re-seal anything.
+
+  The periodic full re-send is unchanged and remains the backstop: a page can be dropped, or
+  answered by nobody, and history still reconciles on its own. Direct messages are exempt — a
+  conversation is read from the beginning and is small enough that paging it would cost a round trip
+  to save nothing.
+
+  Apple only in this release; the core API it rests on (`sync_envelopes_page`) is shared, so Android
+  and desktop need the request handler and the scroll trigger to follow.
+
 ### Fixed — Apple (the You tab after an import, and importing twice)
 
 - **The You tab built every post at once and the app was killed for memory.** Both profile lists —

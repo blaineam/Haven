@@ -30,15 +30,26 @@ enum MemoryProbe {
         return Double(info.phys_footprint) / 1_048_576
     }
 
-    /// Megabytes this process may still allocate before iOS kills it.
-    static func availableMB() -> Double {
-        Double(os_proc_available_memory()) / 1_048_576
+    /// Megabytes this process may still allocate before iOS kills it — nil where the question does
+    /// not apply.
+    ///
+    /// `os_proc_available_memory` is iOS-family only; on macOS it does not exist at all, and the
+    /// concept barely does — a Mac app has no fixed per-process allotment to count down from. This
+    /// compiled fine locally for iOS and took out the macOS archive in Xcode Cloud, which is the
+    /// whole reason the platform gate is spelled out rather than assumed.
+    static func availableMB() -> Double? {
+        #if os(iOS) || os(tvOS) || os(watchOS) || targetEnvironment(macCatalyst)
+        return Double(os_proc_available_memory()) / 1_048_576
+        #else
+        return nil
+        #endif
     }
 
     /// One line: `note — 512 MB used, 900 MB headroom`.
     static func line(_ note: String) -> String {
         let used = footprintMB().map { String(format: "%.0f MB used", $0) } ?? "footprint unknown"
-        return String(format: "%@ — %@, %.0f MB headroom", note, used, availableMB())
+        guard let headroom = availableMB() else { return "\(note) — \(used)" }
+        return String(format: "%@ — %@, %.0f MB headroom", note, used, headroom)
     }
 }
 

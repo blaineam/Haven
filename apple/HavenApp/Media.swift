@@ -629,6 +629,7 @@ final class MediaStore: ObservableObject {
         let cutoff = Date().addingTimeInterval(-graceSeconds)
         var bytes: Int64 = 0
         var files = 0
+        var skippedFresh = 0
         for url in items {
             let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey])
             if vals?.isDirectory == true { continue }
@@ -641,6 +642,11 @@ final class MediaStore: ObservableObject {
             files += 1
             try? fm.removeItem(at: url)
         }
+        // SAY WHY A SWEEP FOUND NOTHING. A zero result was indistinguishable from a sweep that never
+        // looked, which is exactly how a 48h grace hid gigabytes of orphans behind "Nothing to clean
+        // up" for two rounds — the bytes were three hours old and every one was skipped as too fresh.
+        HavenLog.sync("media GC: freed \(files), skipped \(skippedFresh) newer than "
+            + "\(Int(graceSeconds / 3600))h, \(inUse.count) refs in use")
         return (bytes, files)
     }
 

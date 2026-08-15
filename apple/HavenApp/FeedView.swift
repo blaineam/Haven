@@ -1686,7 +1686,18 @@ final class FeedStore: ObservableObject {
 
     /// Walk haven-media and delete every blob no event anywhere references (Settings' "Clean up
     /// unused media" and the weekly sweep). Returns what was freed.
-    func cleanupUnusedMedia() async -> (bytes: Int64, files: Int) {
+    /// `grace` protects bytes that may belong to work in progress — a video mid-export, a download
+    /// mid-reassembly, media staged in a composer that has not been posted yet.
+    ///
+    /// The WEEKLY sweep keeps 48 hours, which is right for something that runs unasked. Tapping
+    /// "Clean up unused media" is not that: it is a person asking now, about blobs the app has
+    /// already decided nothing references. Your orphans were three hours old, so a 48h grace skipped
+    /// every one of them and reported "Nothing to clean up" over 11 GB — twice, because the message
+    /// is identical whether the sweep found nothing or never looked.
+    ///
+    /// An hour still covers an export or a download in flight, and it is the same judgement
+    /// `sweepStaleScratch` already makes about what counts as live work.
+    func cleanupUnusedMedia(grace: TimeInterval = 3600) async -> (bytes: Int64, files: Int) {
         guard let social, !DemoEnv.isDemo else { return (0, 0) }
         let scheduledRefs = ScheduledStore.shared.items.flatMap(\.media)
         let pinnedStems = PinnedMediaStore.shared.inUseStems()   // device-pinned blobs are cleanup-exempt
@@ -1697,7 +1708,7 @@ final class FeedStore: ObservableObject {
                 inUse.formUnion(pinnedStems)
                 return inUse
             }
-            return MediaStore.performOrphanSweep(inUse: inUse)
+            return MediaStore.performOrphanSweep(inUse: inUse, graceSeconds: grace)
         }.value
         if result.1 > 0 {
             MediaStore.shared.clearMemoryCache()   // deleted files may still be decoded in the caches
@@ -1715,7 +1726,7 @@ final class FeedStore: ObservableObject {
         guard Date().timeIntervalSince1970 - last > 7 * 24 * 3600 else { return }
         weeklySweepInFlight = true
         Task { @MainActor in
-            _ = await self.cleanupUnusedMedia()
+            _ = await self.cleanupUnusedMedia(grace: 48 * 3600)   // unasked: keep the long grace
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: key)
             self.weeklySweepInFlight = false
         }

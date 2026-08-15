@@ -248,7 +248,16 @@ struct StoryViewer: View {
                     //
                     // (I had this globally FIT for one build, which fixed the imported case by
                     // shrinking every story the author had deliberately framed full-bleed.)
-                    let fills = StoryCaptions.hasSpec(StoryEmbed.strip(s.body))
+                    //
+                    // ORIGIN IS READ FROM THE ID, NOT THE CAPTION. My first attempt asked whether the
+                    // story carried a caption spec, on the assumption that the composer always writes
+                    // one. It does not: `StoryCaptions.encode` returns "" when there is no caption AND
+                    // no reframing, so a story shot in Haven and posted without a caption is
+                    // indistinguishable from an import by that test — which is exactly why one of two
+                    // stories was fixed and the other stayed small. An imported story's kept identity
+                    // is the archive's own entry path ("ig:…", see InstagramImporter.keptIdentity),
+                    // which is never empty and owes nothing to what the author typed.
+                    let fills = !wasImported(s)
                     framingProbe(s, fills: fills)
                     //
                     // Fill crops to the SCREEN's shape, and a phone is much taller than a story. An
@@ -313,13 +322,19 @@ struct StoryViewer: View {
     /// delete and close at the TOP of it do not — which can only mean the stack is taller than the
     /// space it was given and is overflowing upward, off the screen. Guessing at that twice is
     /// enough; this reports the geometry so the next change is aimed at a number.
+    /// Did this story come from an archive import rather than Haven's own composer?
+    ///
+    /// Kept stories carry the identity they were kept under, and the importer keeps each one under
+    /// its archive entry path. Nothing else in the app mints an id in that shape.
+    private func wasImported(_ s: FeedItemFfi) -> Bool { s.id.hasPrefix("ig:") }
+
     /// DEBUG: which framing a story got, and why — so "too small" or "cut off" is answerable
     /// without another round trip.
     @ViewBuilder private func framingProbe(_ s: FeedItemFfi, fills: Bool) -> some View {
         #if DEBUG
         Color.clear.onAppear {
-            HavenLog.sync("story-framing: \(fills ? "FILL (composed here)" : "FIT (no spec — imported)")"
-                + " body=\(s.body.prefix(24).replacingOccurrences(of: "\u{1}", with: "<spec>"))")
+            HavenLog.sync("story-framing: \(fills ? "FILL (composed here)" : "FIT (imported)")"
+                + " id=\(s.id.prefix(28))")
         }
         #else
         EmptyView()

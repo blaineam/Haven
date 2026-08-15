@@ -1527,7 +1527,11 @@ final class MediaStore: ObservableObject {
     private var sizeCacheSavePending = false
     /// Where the ref→pixel-size map is persisted. Knowing a video's shape BEFORE its poster is (re)generated
     /// is what keeps the feed from resizing a card mid-scroll.
-    nonisolated static var sizeMapURL: URL { storageDir.appendingPathComponent("media-sizes.json") }
+    /// v2: the v1 map holds video sizes taken from UNROTATED posters — a portrait clip written down
+    /// as 1920x1080 — and `pixelSize` consults this map FIRST, so correcting the source without
+    /// dropping the file would keep serving the wrong shape forever. A new name discards them once;
+    /// each ref re-probes from its track, which is authoritative, and the old file is harmless.
+    nonisolated static var sizeMapURL: URL { storageDir.appendingPathComponent("media-sizes-v2.json") }
 
     /// Load the persisted size map once. Without this, a video whose poster had been evicted from the
     /// NSCache (or any video after a relaunch) reported NO size, so the feed laid its card out at the 4:3
@@ -1587,8 +1591,29 @@ final class MediaStore: ObservableObject {
             recordPixelSize(ref, s); return s
         }
         if kind == .video {
+            // THE POSTER IS NOT AUTHORITATIVE ABOUT SHAPE, and recording it as if it were is what
+            // broke carousel sizing.
+            //
+            // Poster generation walks a fallback ladder and its last rung is `transform: false` —
+            // no rotation — because applying the transform is one of the things a clip AVFoundation
+            // dislikes can fail on (the -11800/-12433 pairs all over an import log). A portrait phone
+            // video is stored 1920x1080 with a 90° transform, so a poster cut on that rung comes back
+            // LANDSCAPE, and taking its size recorded the clip as 1.778 when it is 0.562:
+            //
+            //   vid-aspect: vid_0146de sized=1.778 actual=0.562 (1080x1920)
+            //   carousel: 5 items aspects=[1.78 1.78 0.56 0.56 0.56] chosen=0.80 uniform=no
+            //
+            // Two clips of five recorded backwards was enough to make the set look mixed, which
+            // clamped the page shape, and to size the player 16:9 around a 9:16 frame — so the clip
+            // drew as a sliver in the middle of a page shaped for nothing in particular.
+            //
+            // The TRACK is authoritative: `probeVideoSize` applies preferredTransform and records
+            // that. So probe (cheap, async, once), and use the poster only as an interim hint for
+            // this render — never written down, because MediaAspectStore is first-writer-wins and a
+            // wrong first answer is permanent.
+            probeVideoSize(ref, url)
             if let poster = cacheGet(ref)?.image, poster.size.width > 0 {
-                recordPixelSize(ref, poster.size); return poster.size
+                return poster.size
             }
             // No poster yet (never viewed on this device). Reading the track's natural size is far cheaper
             // than generating a poster, so probe it off-main and record it — the card settles on its true

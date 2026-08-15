@@ -17,7 +17,11 @@ import CoreGraphics
 final class MediaAspectStore {
     static let shared = MediaAspectStore()
 
-    private static let key = "haven.media.aspects"
+    /// v2: v1 entries were poisoned by video aspects derived from UNROTATED posters (see
+    /// `MediaStore.pixelSize`) — a portrait clip remembered as 1.778 forever, because this store is
+    /// deliberately first-writer-wins. Bumping the key drops them once; every ref re-records from the
+    /// track, which is authoritative. Losing the remembered shapes costs one first render per item.
+    private static let key = "haven.media.aspects.v2"
     /// Bounded: this is a layout hint, not a record. Old entries lose nothing but a first render.
     private static let maxEntries = 4000
 

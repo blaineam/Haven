@@ -3040,37 +3040,62 @@ final class FeedStore: ObservableObject {
     ///
     /// The importer is idempotent NOW — it records every archive item it publishes and skips what it
     /// has already done — but that arrived after an archive had already been imported twice, and
-    /// nothing about the ledger removes the copies that are already sitting in the feed. Asking
-    /// someone to delete two hundred posts by hand is not a fix.
+    /// nothing about the ledger removes the copies already sitting in the feed. Asking someone to
+    /// delete two hundred posts by hand is not a fix.
     ///
-    /// The key is deliberately strict: same capture time, same body, AND the same media refs. Media
-    /// refs are content hashes (sha-256 of the plaintext bytes), so two posts sharing them are
-    /// carrying the identical pictures — not similar ones. Add an identical backdated timestamp and
-    /// an identical caption on top of that and there is no reading under which these are two
-    /// different posts someone meant to make. A pair of genuinely separate posts cannot collide:
-    /// authoring two by hand gives them different `createdAt` values to the millisecond.
+    /// THE KEY IS CAPTURE TIME + CAPTION + HOW MANY ITEMS, **NOT MEDIA REFS**.
     ///
-    /// Text-only posts are LEFT ALONE. With no media refs the key collapses to time plus body, which
-    /// is exactly the case where a duplicate might be deliberate ("gm" twice), and the whole point of
-    /// this is to clean up an import rather than to have an opinion about what someone posts.
+    /// My first attempt keyed on the media refs, reasoning that a ref is a sha-256 of the bytes so
+    /// two posts sharing one carry the identical picture. That is true and it is useless here: the
+    /// importer RE-ENCODES everything it stages (`forceOptimize`), and re-encoding is not
+    /// reproducible. A video goes through AVAssetExportSession, which stamps its own timestamps, and
+    /// every clip gets a freshly generated poster still. The second import therefore mints DIFFERENT
+    /// refs for the same photo, the signatures never matched, and the sweep quietly found nothing —
+    /// it "ran" perfectly and did nothing at all.
+    ///
+    /// What survives re-import unchanged is what came out of the ARCHIVE: the capture time, which is
+    /// backdated from the export and identical on every run, and the caption, which is copied
+    /// verbatim. Item count separates a single photo from a carousel that happens to share a second.
+    ///
+    /// Captions are compared after normalising whitespace and case — the same text through two
+    /// import runs is byte-identical, so this is not fuzzy matching, just insensitivity to the ways
+    /// the same string can be spelled. Deliberately NOT a similarity score: two posts from the same
+    /// day with similar captions are two posts, and a threshold that merges them destroys content.
+    ///
+    /// Residual risk, stated plainly: Instagram exports capture times in SECONDS, so two genuinely
+    /// different posts made in the same second, with the same caption, carrying the same number of
+    /// items, would be treated as one. Text-only posts are excluded for the same reason — with no
+    /// media the key is weakest exactly where a repeat is most likely deliberate ("gm" twice).
     ///
     /// Unsend, not a local hide: the duplicates went out to the circle, so they have to be withdrawn
     /// from it. That is what `unsend` is for, and members already handle the event.
     @discardableResult
     func sweepDuplicateImports() -> Int {
-        var keeperFor: [String: String] = [:]     // signature → the post id we keep
-        var doomed: [String] = []
         // Oldest first, so the copy that has been in the circle longest is the one that stays and
         // the later re-import is what gets withdrawn.
-        for item in items.sorted(by: { $0.createdAt < $1.createdAt })
-        where item.isMe && !item.unsent && !item.story {
-            let media = MediaVariants.displayRefs(item.media).sorted()
-            guard !media.isEmpty else { continue }   // text-only: never swept, see above
-            let signature = "\(item.createdAt)|\(item.body)|\(media.joined(separator: ","))"
-            if keeperFor[signature] != nil { doomed.append(item.id) } else { keeperFor[signature] = item.id }
+        let candidates = items
+            .filter { $0.isMe && !$0.unsent && !$0.story }
+            .sorted { $0.createdAt < $1.createdAt }
+            .map { item -> PostDedupe.Candidate in
+                let refs = MediaVariants.displayRefs(item.media)
+                // The 64px thumbnail, PEEKED only — never decoded here. A dHash is computed from a
+                // 9x8 downsample, so the tiniest cached bitmap is already more detail than it needs,
+                // and forcing a decode per post would put hundreds of them on the main thread at the
+                // exact moment the feed is being built. A miss simply leaves the hash unknown and the
+                // caption decides, which is the pre-visual behaviour.
+                let hash = refs.first
+                    .flatMap { MediaStore.shared.cachedThumbnail($0, maxDimension: 64) }
+                    .flatMap { $0.cgImage }
+                    .flatMap { PerceptualHash.dHash($0) }
+                return PostDedupe.Candidate(id: item.id, createdAt: item.createdAt, body: item.body,
+                                            mediaCount: refs.count, mediaHash: hash)
+            }
+        let doomed = PostDedupe.duplicates(candidates)
+        guard !doomed.isEmpty else {
+            HavenLog.sync("dedupe: nothing duplicated across \(candidates.count) of my posts")
+            return 0
         }
-        guard !doomed.isEmpty else { return 0 }
-        HavenLog.sync("dedupe: withdrawing \(doomed.count) duplicate posts (\(keeperFor.count) originals kept)")
+        HavenLog.sync("dedupe: withdrawing \(doomed.count) duplicate posts of \(candidates.count)")
         for id in doomed { unsend(id) }
         refresh()
         return doomed.count

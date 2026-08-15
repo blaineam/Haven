@@ -59,6 +59,43 @@ object Wire {
      *  buy nothing while making it fail exactly where its own frame-3 fallback still works. */
     const val MEDIA_RESUME_REQ: Int = 33
 
+    /** 34 — "send me the page of your history before this timestamp".
+     *  `[hex64 requester][u64 LE beforeMs][circleId utf8]`.
+     *
+     *  Adding someone used to hand them EVERY event the adder had authored to that circle, re-sealed
+     *  one by one, with the media backlog following. This asks for a page instead, and the reply is
+     *  ordinary EVENT frames — so only the ask is new and the receiving side is the path that
+     *  already ingests and deduplicates envelopes.
+     *
+     *  Plain path, like frame 3: it asks for a strict subset of history the requester is already
+     *  entitled to as a circle member, and the reply is sealed to the circle epoch regardless, so a
+     *  stranger who forged one would receive bytes they cannot open. The responder still checks
+     *  membership before spending the sealing. */
+    const val HISTORY_REQ: Int = 34
+
+    /** HISTORY_REQ payload = [hex64 requester][u64 LE beforeMs][circleId utf8]. */
+    fun historyReqPayload(requesterHex: String, beforeMs: ULong, circleId: String): ByteArray {
+        val out = ArrayList<Byte>(64 + 8 + circleId.length)
+        requesterHex.toByteArray(Charsets.UTF_8).forEach { out.add(it) }
+        for (i in 0 until 8) out.add(((beforeMs shr (8 * i)) and 0xFFuL).toByte())
+        circleId.toByteArray(Charsets.UTF_8).forEach { out.add(it) }
+        return out.toByteArray()
+    }
+
+    data class HistoryReq(val requesterHex: String, val beforeMs: ULong, val circleId: String)
+
+    /** Parse a HISTORY_REQ payload; null if malformed (matches the iOS guards). */
+    fun parseHistoryReq(payload: ByteArray): HistoryReq? {
+        if (payload.size <= 72) return null
+        val requester = String(payload.copyOfRange(0, 64), Charsets.UTF_8)
+        if (requester.length != 64) return null
+        var before = 0uL
+        for (i in 0 until 8) before = before or ((payload[64 + i].toULong() and 0xFFuL) shl (8 * i))
+        val cid = String(payload.copyOfRange(72, payload.size), Charsets.UTF_8)
+        if (cid.isEmpty()) return null
+        return HistoryReq(requester, before, cid)
+    }
+
     /** Prepend the one-byte frame type. */
     fun frame(type: Int, payload: ByteArray): ByteArray =
         ByteArray(1 + payload.size).also {

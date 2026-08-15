@@ -72,6 +72,26 @@ enum MediaVariants {
     // MARK: - Lookups
 
     /// Poster image ref for a given video, if the post/DM declared one.
+    /// Everything that must leave WITH `ref` — its poster/thumb/original companions and the markers
+    /// that name them.
+    ///
+    /// Removing only the parent leaves the post pointing at media it no longer carries: an orphaned
+    /// `poster:` still names a video that is gone, and the poster IMAGE is itself a real ref that
+    /// keeps drawing. In the editor that reads as "I tapped the x and nothing happened" — the tile
+    /// did leave, and its poster took its place.
+    ///
+    /// Android has had this since its editor was written (`MediaVariants.companionRefs`); Apple's
+    /// editor removed the bare ref and left the rest behind.
+    static func companionRefs(_ ref: String, in media: [String]) -> Set<String> {
+        var out: Set<String> = [ref]
+        for m in media {
+            if let p = parsePoster(m), p.video == ref { out.insert(m); out.insert(p.poster) }
+            if let t = parseThumb(m), t.content == ref { out.insert(m); out.insert(t.thumb) }
+            if let o = parseOriginal(m), o.optimized == ref { out.insert(m); out.insert(o.original) }
+        }
+        return out
+    }
+
     static func poster(for video: String, in media: [String]) -> String? {
         for r in media {
             if let p = parsePoster(r), p.video == video { return p.poster }

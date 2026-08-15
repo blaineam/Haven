@@ -89,7 +89,20 @@ struct EditPostSheet: View {
             if !media.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 10) {
-                        ForEach(media, id: \.self) { ref in
+                        // DISPLAY refs, indexed.
+                        //
+                        // Iterating raw `media` drew a tile per REF, and a video contributes two of
+                        // them — `composeVideoMedia` publishes [poster, posterMarker, clip], and the
+                        // poster is a real image, so one clip appeared twice. `displayRefs` drops
+                        // posters, thumbs, originals and markers and leaves exactly the items the
+                        // post carries.
+                        //
+                        // Indexed rather than `id: \.self`, because refs are content hashes: the same
+                        // photo attached twice IS the same ref, and duplicate ids make SwiftUI drop
+                        // rows. Between that and the doubled videos, the tray showed neither the
+                        // right number of items nor the right ones.
+                        let shown = MediaVariants.displayRefs(media)
+                        ForEach(Array(shown.enumerated()), id: \.offset) { _, ref in
                             if let img = MediaStore.shared.item(ref)?.image {
                                 ZStack(alignment: .topTrailing) {
                                     Image(platformImage: img).resizable().scaledToFill()
@@ -104,6 +117,27 @@ struct EditPostSheet: View {
                                     VStack(spacing: 2) {
                                         Image(systemName: "mappin.circle.fill").font(.title3).foregroundStyle(HavenTheme.pink)
                                         Text("Location").font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                    .frame(width: 84, height: 84)
+                                    .background(Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+                                    removeButton(ref)
+                                }
+                            } else {
+                                // DRAW SOMETHING FOR EVERY ITEM, always.
+                                //
+                                // This branch did not exist, so an attachment with no decodable
+                                // preview — bytes still arriving, a video whose poster failed to
+                                // generate, an evicted blob — simply vanished from the tray. The post
+                                // still carried it, and saving still kept it, but the editor showed
+                                // fewer items than the post had: "it does not show all media". A tile
+                                // you cannot see is an attachment you cannot remove. (Android's
+                                // ComposerAttachmentTile has drawn this case from the start.)
+                                ZStack(alignment: .topTrailing) {
+                                    VStack(spacing: 2) {
+                                        Image(systemName: MediaKind(ref: ref) == .video ? "video.fill" : "photo.fill")
+                                            .font(.title3).foregroundStyle(.secondary)
+                                        Text(MediaKind(ref: ref) == .video ? "Video" : "Photo")
+                                            .font(.caption2).foregroundStyle(.secondary)
                                     }
                                     .frame(width: 84, height: 84)
                                     .background(Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
@@ -146,7 +180,11 @@ struct EditPostSheet: View {
     /// the system gives it no glass of its own (and the old hand-rolled black disc was the
     /// "recreation" we're replacing). One surface, and .plain so macOS adds no bezel behind it.
     private func removeButton(_ ref: String) -> some View {
-        Button { media.removeAll { $0 == ref } } label: { Image(systemName: "xmark") }
+        // Take the companions with it. Removing the bare ref left the `poster:`/`thumb:` markers and
+        // the poster IMAGE behind — and the poster is a real ref that keeps drawing, so the tile you
+        // deleted was immediately replaced by its own still and the x looked like it had not taken.
+        Button { let doomed = MediaVariants.companionRefs(ref, in: media); media.removeAll { doomed.contains($0) } }
+            label: { Image(systemName: "xmark") }
             .buttonStyle(GlassIconButtonStyle(size: 22, tint: .white))
             .padding(3)
     }

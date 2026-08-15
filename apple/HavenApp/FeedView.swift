@@ -1661,6 +1661,20 @@ final class FeedStore: ObservableObject {
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         for c in social.circles() {
             for item in social.feed(circleId: c.id, nowMs: nowMs, viewerRetentionSecs: nil) {
+                // AN UNSENT POST DOES NOT KEEP ITS MEDIA ALIVE.
+                //
+                // `feed()` still returns a withdrawn post — as a tombstone carrying its original ref
+                // list — and this walked every item, so those refs counted as IN USE and their bytes
+                // could never be swept. Nothing displays them, nothing can restore them, and unsend
+                // is not reversible; they are dead weight that the cleanup was structurally unable
+                // to see.
+                //
+                // It showed up the moment the duplicate sweep withdrew 81 posts: Manage media listed
+                // their blobs as "Unused — not linked to any post" (that screen skips unsent), beside
+                // an identical live copy of the same size and timestamp, while "Clean up unused
+                // media" answered "Nothing to clean up". Two code paths, two answers, and the one
+                // that could free the space was wrong.
+                if item.unsent { continue }
                 for r in item.media { stems.formUnion(MediaStore.storedStems(for: r)) }
                 for cm in item.comments {
                     for r in cm.media { stems.formUnion(MediaStore.storedStems(for: r)) }

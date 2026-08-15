@@ -59,6 +59,7 @@ struct StoryViewer: View {
     @State private var confirmDeleteStory = false   // confirm unsending your own story
     @State private var heldPaused = false            // press-and-hold pauses the timer + video
     @FocusState private var replyFocused: Bool
+    @Environment(\.scenePhase) private var scenePhase
     private let tick = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
 
     struct StoryProfile: Identifiable { let id = UUID(); let hex: String; let name: String }
@@ -145,6 +146,32 @@ struct StoryViewer: View {
             loadCurrent()
         }
         .onDisappear { teardown() }
+        // STOP WHEN THE APP IS NOT IN FRONT.
+        //
+        // `onDisappear` covers closing the viewer, but not leaving the app with it open — and a
+        // story is a video plus, often, a song, so walking away left both running with nothing on
+        // screen. The progress timer kept ticking too, so the story advanced through the whole
+        // tray unwatched and the sound followed you out of the app.
+        //
+        // Reactivating resumes rather than restarting: `paused` is the viewer's own flag (a sheet, a
+        // long-press), so it is respected here instead of being cleared.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                // Re-arm the current story rather than nudging a player whose song was stopped:
+                // `MusicPlayback.stop()` clears the queued track, so there is nothing to resume.
+                // Restarting the slide you were on is also the honest thing to show — you did not
+                // watch the part that played while you were away.
+                paused = false
+                loadCurrent()
+            } else {
+                // MusicPlayback gates STARTING on `appFrontmost`, but nothing stopped what was
+                // already running — so leaving the app with a story open left the clip and its song
+                // playing to nobody, and the tick kept advancing the tray behind your back.
+                paused = true
+                player?.pause()
+                MusicPlayback.shared.stop()
+            }
+        }
         // A call starting MID-story mutes the clip's own audio immediately (call audio priority);
         // MusicPlayback ducks itself, but this player is view-local so it must react here.
         .onReceive(CallManager.shared.objectWillChange) { _ in
@@ -205,13 +232,26 @@ struct StoryViewer: View {
                             .frame(width: geo.size.width, height: geo.size.height)
                             .blur(radius: 28).overlay(Color.black.opacity(0.28))
                     }
+                    // FIT, NOT FILL — show the whole story, over its own blurred copy.
+                    //
+                    // Fill crops to the SCREEN's shape, and a phone is much taller than a story. An
+                    // Instagram story is 9:16; this phone is roughly 9:19.5. Covering that height
+                    // overflows the width by about a fifth, taken off both sides — which quietly
+                    // slices the ends off any text baked into the picture, and Instagram stories are
+                    // mostly text baked into the picture. Reported as the story being "expanded
+                    // beyond the size of my iPhone".
+                    //
+                    // The blurred backdrop above exists precisely to fill what the media does not,
+                    // and this is what the feed already does with an off-ratio post. The author's
+                    // own framing (mediaScale) still applies on top, so a story deliberately zoomed
+                    // in the editor still looks the way it was composed.
                     Group {
                         if let player {
-                            VideoSurface(player: player, fill: true)   // full-bleed, matching the editor
+                            VideoSurface(player: player, fill: false)
                         } else if let ref = displayRef(s),
                                   let img = MediaStore.shared.item(ref)?.image
                                       ?? posterRef(s).flatMap({ MediaStore.shared.item($0)?.image }) {
-                            Image(platformImage: img).resizable().scaledToFill()
+                            Image(platformImage: img).resizable().scaledToFit()
                         } else {
                             missing
                         }

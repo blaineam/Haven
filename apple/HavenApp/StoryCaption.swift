@@ -97,6 +97,14 @@ enum StoryCaptions {
                            s.x, s.y, s.size, s.mediaScale, s.mediaOffX, s.mediaOffY, s.mediaRotation)
         return "\u{1}\(s.color),\(s.font),\(s.styleRaw),\(extra)\u{1}\(t)"
     }
+    /// Was this story COMPOSED IN HAVEN?
+    ///
+    /// The composer always encodes a spec — it carries the media framing even when there is no
+    /// caption — so the marker's presence is a reliable "an author framed this against our canvas".
+    /// A story that arrived any other way (an Instagram import) never was, which is the difference
+    /// that decides whether the viewer may crop it. See `StoryViewer.fillsCanvas`.
+    static func hasSpec(_ body: String) -> Bool { body.hasPrefix("\u{1}") }
+
     static func decode(_ body: String) -> (text: String, spec: Spec) {
         if body.hasPrefix("\u{1}") {
             let parts = body.dropFirst().split(separator: "\u{1}", maxSplits: 1, omittingEmptySubsequences: false)

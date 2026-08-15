@@ -232,7 +232,24 @@ struct StoryViewer: View {
                             .frame(width: geo.size.width, height: geo.size.height)
                             .blur(radius: 28).overlay(Color.black.opacity(0.28))
                     }
-                    // FIT, NOT FILL — show the whole story, over its own blurred copy.
+                    // FILL WHAT WAS FRAMED HERE; FIT WHAT WAS NOT.
+                    //
+                    // The composer draws the media full-bleed and the player has always matched it —
+                    // that parity is the point, it is how an author frames a story and knows what
+                    // viewers will see. So a story composed in Haven fills the canvas, edge to edge,
+                    // exactly as its author left it.
+                    //
+                    // An IMPORTED story was never framed against this canvas. It is 9:16 out of
+                    // Instagram, the phone is nearer 9:19.5, and filling that height overflows the
+                    // width by about a fifth — taken off both sides, which slices the ends off text
+                    // baked into the picture, and an Instagram story is mostly text baked into the
+                    // picture. Nobody chose that crop, so it is not honoured: those fit, over their
+                    // own blurred copy, the way the feed shows an off-ratio post.
+                    //
+                    // (I had this globally FIT for one build, which fixed the imported case by
+                    // shrinking every story the author had deliberately framed full-bleed.)
+                    let fills = StoryCaptions.hasSpec(StoryEmbed.strip(s.body))
+                    framingProbe(s, fills: fills)
                     //
                     // Fill crops to the SCREEN's shape, and a phone is much taller than a story. An
                     // Instagram story is 9:16; this phone is roughly 9:19.5. Covering that height
@@ -247,11 +264,12 @@ struct StoryViewer: View {
                     // in the editor still looks the way it was composed.
                     Group {
                         if let player {
-                            VideoSurface(player: player, fill: false)
+                            VideoSurface(player: player, fill: fills)
                         } else if let ref = displayRef(s),
                                   let img = MediaStore.shared.item(ref)?.image
                                       ?? posterRef(s).flatMap({ MediaStore.shared.item($0)?.image }) {
-                            Image(platformImage: img).resizable().scaledToFit()
+                            Image(platformImage: img).resizable()
+                                .aspectRatio(contentMode: fills ? .fill : .fit)
                         } else {
                             missing
                         }
@@ -295,6 +313,19 @@ struct StoryViewer: View {
     /// delete and close at the TOP of it do not — which can only mean the stack is taller than the
     /// space it was given and is overflowing upward, off the screen. Guessing at that twice is
     /// enough; this reports the geometry so the next change is aimed at a number.
+    /// DEBUG: which framing a story got, and why — so "too small" or "cut off" is answerable
+    /// without another round trip.
+    @ViewBuilder private func framingProbe(_ s: FeedItemFfi, fills: Bool) -> some View {
+        #if DEBUG
+        Color.clear.onAppear {
+            HavenLog.sync("story-framing: \(fills ? "FILL (composed here)" : "FIT (no spec — imported)")"
+                + " body=\(s.body.prefix(24).replacingOccurrences(of: "\u{1}", with: "<spec>"))")
+        }
+        #else
+        EmptyView()
+        #endif
+    }
+
     @ViewBuilder private func hudProbe() -> some View {
         #if DEBUG
         GeometryReader { g in

@@ -38,8 +38,15 @@ enum PostDedupe {
     }
 
     /// The coarse bucket: two posts can only be the same post if they were captured at the same
-    /// moment and carry the same number of items. Cheap, and it does the elimination.
-    static func bucket(_ c: Candidate) -> String { "\(c.createdAt)|\(c.mediaCount)" }
+    /// moment. Cheap, and it does the elimination.
+    ///
+    /// ITEM COUNT IS NOT PART OF THIS, and that was a real bug: it caught only 30 duplicates out of
+    /// an archive imported twice. A post's ref count is not stable across imports — a video
+    /// contributes a poster ref only if poster generation SUCCEEDS, and it demonstrably does not
+    /// always ("poster generation FAILED for … in EVERY config" appears throughout an import). One
+    /// run yields two refs for a reel, the next yields one, the buckets differ, and the duplicate is
+    /// invisible. Count survives as a confirmation signal below, where being wrong is safe.
+    static func bucket(_ c: Candidate) -> String { "\(c.createdAt)" }
 
     /// Are these the same post published twice?
     ///
@@ -55,7 +62,10 @@ enum PostDedupe {
         if let ha = a.mediaHash, let hb = b.mediaHash {
             return PerceptualHash.looksLikeTheSamePicture(ha, hb)
         }
-        return normalizedCaption(a.body) == normalizedCaption(b.body)
+        // Nothing to look at — the caption has to carry it, and it is weak enough that the item
+        // count is required to agree too. That pairing is why count is not in the bucket: here a
+        // mismatch merely declines to merge, whereas in the bucket it hid the duplicate entirely.
+        return normalizedCaption(a.body) == normalizedCaption(b.body) && a.mediaCount == b.mediaCount
     }
 
     /// Ids to withdraw, keeping the FIRST of each group — callers pass oldest-first so the copy that

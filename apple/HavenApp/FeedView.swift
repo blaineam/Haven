@@ -3083,10 +3083,19 @@ final class FeedStore: ObservableObject {
                 // and forcing a decode per post would put hundreds of them on the main thread at the
                 // exact moment the feed is being built. A miss simply leaves the hash unknown and the
                 // caption decides, which is the pre-visual behaviour.
-                let hash = refs.first
-                    .flatMap { MediaStore.shared.cachedThumbnail($0, maxDimension: 64) }
-                    .flatMap { $0.cgImage }
-                    .flatMap { PerceptualHash.dHash($0) }
+                //
+                // EVERY ref is tried, not just the first, and a video's POSTER stands in for it.
+                // Looking only at `refs.first` meant a reel — whose first display ref is the clip,
+                // which has no thumbnail of its own — never got a hash at all, so exactly the posts
+                // an Instagram archive is full of fell back to comparing captions, and imported
+                // captions are frequently empty. The poster is a real image sitting in the same
+                // cache; ask for it.
+                let hash = refs.lazy.compactMap { ref -> UInt64? in
+                    let imageRef = MediaVariants.poster(for: ref, in: item.media) ?? ref
+                    return MediaStore.shared.cachedThumbnail(imageRef, maxDimension: 64)
+                        .flatMap { $0.cgImage }
+                        .flatMap { PerceptualHash.dHash($0) }
+                }.first
                 return PostDedupe.Candidate(id: item.id, createdAt: item.createdAt, body: item.body,
                                             mediaCount: refs.count, mediaHash: hash)
             }

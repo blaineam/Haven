@@ -129,3 +129,33 @@ extension PostDedupeTests {
         XCTAssertEqual(PostDedupe.duplicates(posts), ["b"])
     }
 }
+
+// MARK: - What an unstable ref count must not hide
+
+extension PostDedupeTests {
+
+    /// THE BUG THAT LET MOST DUPLICATES THROUGH: only 30 of a doubled archive were caught, because
+    /// item count was part of the bucket. A reel contributes a poster ref only when poster
+    /// generation SUCCEEDS, and it does not always — so one import yields two refs and the next
+    /// yields one, the buckets differ, and the duplicate is invisible. The pictures still match.
+    func testAPosterThatFailedToGenerateDoesNotHideTheDuplicate() {
+        let posts = [
+            PostDedupe.Candidate(id: "first", createdAt: 1_600_000_000_000, body: "",
+                                 mediaCount: 2, mediaHash: 0x0F0F_0F0F_0F0F_0F0F),
+            PostDedupe.Candidate(id: "reimport", createdAt: 1_600_000_000_000, body: "",
+                                 mediaCount: 1, mediaHash: 0x0F0F_0F0F_0F0F_0F0F),
+        ]
+        XCTAssertEqual(PostDedupe.duplicates(posts), ["reimport"],
+                       "the same picture at the same instant is the same post, whether or not its "
+                       + "poster was generated that run")
+    }
+
+    /// With no pictures to compare, the count still has to agree — the caption alone is too weak.
+    func testWithoutHashesTheCountMustAgree() {
+        let posts = [
+            PostDedupe.Candidate(id: "a", createdAt: 1_600_000_000_000, body: "trip", mediaCount: 1, mediaHash: nil),
+            PostDedupe.Candidate(id: "b", createdAt: 1_600_000_000_000, body: "trip", mediaCount: 4, mediaHash: nil),
+        ]
+        XCTAssertTrue(PostDedupe.duplicates(posts).isEmpty)
+    }
+}

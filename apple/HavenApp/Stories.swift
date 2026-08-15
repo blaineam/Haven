@@ -289,10 +289,69 @@ struct StoryViewer: View {
         }
     }
 
+    /// DEBUG probe: where the HUD actually lands.
+    ///
+    /// The song chip at the BOTTOM of this same VStack draws while the progress bars, avatar, keep,
+    /// delete and close at the TOP of it do not — which can only mean the stack is taller than the
+    /// space it was given and is overflowing upward, off the screen. Guessing at that twice is
+    /// enough; this reports the geometry so the next change is aimed at a number.
+    @ViewBuilder private func hudProbe() -> some View {
+        #if DEBUG
+        GeometryReader { g in
+            Color.clear.onAppear {
+                let f = g.frame(in: .global)
+                HavenLog.sync(String(format: "story-hud: y=%.0f h=%.0f (screen h=%.0f) safeTop=%.0f safeBottom=%.0f",
+                                     f.minY, f.height, PlatformScreen.bounds.height,
+                                     g.safeAreaInsets.top, g.safeAreaInsets.bottom))
+            }
+        }
+        #else
+        EmptyView()
+        #endif
+    }
+
+    /// DEBUG: where one HUD row lands, and how wide its pieces are.
+    @ViewBuilder private func rowProbe(_ label: String, extra: String) -> some View {
+        #if DEBUG
+        GeometryReader { g in
+            Color.clear.onAppear {
+                let f = g.frame(in: .global)
+                HavenLog.sync(String(format: "story-hud %@: x=%.0f y=%.0f w=%.0f h=%.0f  %@",
+                                     label, f.minX, f.minY, f.width, f.height, extra))
+            }
+        }
+        #else
+        EmptyView()
+        #endif
+    }
+
+    /// The most progress segments ever drawn, however many stories the tray holds.
+    ///
+    /// 225 of them is not a hypothetical: an imported archive puts every kept story in one tray, and
+    /// at 4pt of spacing 225 segments need 896pt of SPACING ALONE. The HStack cannot be narrower
+    /// than that, so it forced the whole HUD stack to 928pt on a 440pt screen — centred, which put
+    /// x=-244 and hung the profile off the left edge and keep/delete/close off the right, while the
+    /// segments themselves came out a seventh of a point wide. That is the entire "no story HUD"
+    /// report: nothing was hidden or mispositioned, one row was simply too wide to fit and took the
+    /// rest of the header with it. (Desktop hit exactly this and was windowed; iOS never was.)
+    ///
+    /// A window around the current story instead. Beyond a couple of dozen a progress bar has
+    /// stopped conveying position anyway — the segments end up thinner than the gaps between them.
+    private static let maxProgressSegments = 24
+
+    /// The slice of stories the progress bar draws, kept centred on where you are.
+    private var progressWindow: Range<Int> {
+        let n = stories.count
+        guard n > Self.maxProgressSegments else { return 0..<n }
+        let half = Self.maxProgressSegments / 2
+        let lo = max(0, min(index - half, n - Self.maxProgressSegments))
+        return lo..<(lo + Self.maxProgressSegments)
+    }
+
     private func overlay(_ s: FeedItemFfi) -> some View {
         VStack {
             HStack(spacing: 4) {
-                ForEach(stories.indices, id: \.self) { i in
+                ForEach(progressWindow, id: \.self) { i in
                     GeometryReader { geo in
                         Capsule().fill(.white.opacity(0.3))
                             .overlay(alignment: .leading) {
@@ -304,6 +363,7 @@ struct StoryViewer: View {
                 }
             }
             .padding(.horizontal).padding(.top, 12)
+            .background(rowProbe("progress", extra: "segments=\(stories.count)"))
             HStack(spacing: 8) {
                 if s.isMe {
                     sharerAvatar(s)
@@ -410,6 +470,7 @@ struct StoryViewer: View {
                     .buttonStyle(GlassIconButtonStyle(size: 30, tint: .white))
             }
             .padding(.horizontal).padding(.top, 4)
+            .background(rowProbe("header", extra: "isMe=\(s.isMe)"))
             .confirmationDialog("Delete this story?", isPresented: $confirmDeleteStory, titleVisibility: .visible) {
                 Button("Delete story", role: .destructive) {
                     FeedStore.shared.unsend(s.id)
@@ -453,6 +514,16 @@ struct StoryViewer: View {
                     .allowsHitTesting(false)
             )
         }
+        // CLAMP TO THE CONTAINER. `frame(maxWidth:)` only permits growth; it does not stop a child
+        // whose minimum width exceeds the screen from widening the stack and pushing its own ends
+        // off both edges — which is exactly what 225 progress segments did. containerRelativeFrame
+        // imposes the container's width regardless of what the children would like, so no future row
+        // can take the header off-screen again. (The same modifier, for the same reason, is on the
+        // You tab's content lane.)
+        #if os(iOS)
+        .containerRelativeFrame(.horizontal)
+        #endif
+        .background(hudProbe())
     }
 
     /// "View post" — shown when this story was shared FROM a post, and taps through to that post.

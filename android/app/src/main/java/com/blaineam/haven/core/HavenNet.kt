@@ -1075,6 +1075,7 @@ object HavenNet : InboundListener {
                 // spend upload bandwidth and the other triggers a notification and a fetch.
                 Wire.MEDIA_WANTED -> handleMediaWanted(body)
                 Wire.MEDIA_AVAILABLE -> withContext(Dispatchers.Main) { handleMediaAvailable(body) }
+                Wire.HISTORY_REQ -> handleHistoryRequest(body)
                 else -> Log.d(TAG, "ignoring frame type $type (not yet handled)")
             }
         }
@@ -2514,7 +2515,18 @@ object HavenNet : InboundListener {
         val acct = runCatching { social.accountForDevice(toNodeHex) }.getOrNull() ?: toNodeHex
         scope.launch { runCatching { putHelloMailbox(circleId, acct, hello) } }
         if (resendHistory) {
-            val envs = runCatching { social.syncEnvelopes(circleId) }.getOrDefault(emptyList())
+            // A PAGE, not the whole history — parity with iOS "Lazy history (wire 34)".
+            //
+            // This used to re-seal and ship EVERY event authored to the circle: real cryptography
+            // per event on the sender, an unseal per event on the receiver, and the media backlog
+            // dragged along behind it. On an account carrying an imported archive that is hundreds
+            // of envelopes before the peer has looked at anything. They get the newest page now and
+            // ask for older ones (Wire.HISTORY_REQ) as they scroll, the way media is already fetched
+            // only when a tile appears. DMs are read from the beginning, so they keep the full send.
+            val envs = runCatching {
+                if (circleId.startsWith("dm:")) social.syncEnvelopes(circleId)
+                else social.syncEnvelopesPage(circleId, 0uL, HISTORY_PAGE_SIZE)
+            }.getOrDefault(emptyList())
             for (env in envs) sendFrame(Wire.EVENT, Wire.eventPayload(circleId, env), toNodeHex)
         }
         // Tell this peer about the circle relays WE have proof of life for (a successful op within
@@ -3418,6 +3430,47 @@ object HavenNet : InboundListener {
     }
 
     /** Unsend (delete) your own post; broadcasts the unsend event. */
+    // MARK: - Lazy history (Wire.HISTORY_REQ), parity with iOS
+    //
+    // Adding someone used to hand them everything. The first page is what they need; the rest is a
+    // backlog they may never scroll to, so it is fetched when they get there. The reply is ordinary
+    // EVENT frames, so only the ask is new and the receiving side is the path that already ingests
+    // and deduplicates. The periodic full re-send stays as the backstop — a dropped or unanswered
+    // page cannot strand anyone.
+
+    /** Events a new member gets up front, and the size of each page fetched afterwards. */
+    val HISTORY_PAGE_SIZE: UInt = 60u
+
+    /** Cursor last asked for per circle — scrolling past the end must not re-ask the same page. */
+    private val historyAskedBefore = HashMap<String, ULong>()
+
+    /** Ask this circle's members for the page of history older than the oldest post we hold. */
+    fun requestOlderHistory(circleId: String, oldestCreatedAt: ULong) {
+        if (oldestCreatedAt == 0uL) return
+        synchronized(historyAskedBefore) {
+            if (historyAskedBefore[circleId] == oldestCreatedAt) return
+            historyAskedBefore[circleId] = oldestCreatedAt
+        }
+        val me = runCatching { social.myNodeHex() }.getOrNull() ?: return
+        val payload = Wire.historyReqPayload(me, oldestCreatedAt, circleId)
+        for (c in contacts) sendFrame(Wire.HISTORY_REQ, payload, c.idHex)
+        Log.d(TAG, "history: asked for the page before $oldestCreatedAt in $circleId")
+    }
+
+    /** Someone asked for the page of MY history older than their cursor. */
+    private fun handleHistoryRequest(body: ByteArray) {
+        val req = Wire.parseHistoryReq(body) ?: return
+        // Members only. The reply is sealed to the circle epoch regardless, so a stranger could not
+        // open it — but there is no reason to spend the sealing on them, and an unbounded
+        // stranger-triggered re-seal is a free CPU drain.
+        if (!isContact(req.requesterHex)) return
+        val page = runCatching {
+            social.syncEnvelopesPage(req.circleId, req.beforeMs, HISTORY_PAGE_SIZE)
+        }.getOrDefault(emptyList())
+        Log.d(TAG, "history: serving ${page.size} envelopes before ${req.beforeMs} in ${req.circleId}")
+        for (env in page) sendFrame(Wire.EVENT, Wire.eventPayload(req.circleId, env), req.requesterHex)
+    }
+
     fun unsendPost(circleId: String, postId: String) {
         val env = runCatching { social.unsend(circleId, postId, nowMs()) }.getOrNull() ?: return
         afterAuthor(circleId, env)

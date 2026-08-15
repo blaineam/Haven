@@ -28,15 +28,27 @@ final class PostMediaPageWidthTests: XCTestCase {
     /// 18pt, both sides.
     private let pageWidth: CGFloat = 325
     /// `singleMediaMaxHeight` on a portrait phone.
-    private let pageHeight: CGFloat = 680
+    private let maxPageHeight: CGFloat = 680
+    /// `minPageAspect` on a portrait phone.
+    private let minPageAspect: CGFloat = 0.8
 
     /// Thumbnails are capped on their LARGER axis, so these are the shapes a 512px thumb takes for a
-    /// tall phone screenshot, a landscape photo, a square crop and a panorama. The tall case never
-    /// overflowed — which is why eyeballing one post was not enough to find this.
+    /// tall phone screenshot, a landscape photo, a square crop and a panorama.
     private let thumbShapes: [(name: String, w: Int, h: Int)] = [
         ("tall", 236, 512), ("wide", 512, 288), ("square", 512, 512), ("panorama", 512, 128),
     ]
 
+    /// `PostMediaView.pageHeight` — the page is as tall as the media wants until it would be taller
+    /// than `minPageAspect`, capped. A tall shot gets 406pt, NOT the 680 cap, and that difference is
+    /// why the width check below passes for a tall thumb: it was never the axis that broke.
+    private func pageHeight(_ aspect: CGFloat) -> CGFloat {
+        min(maxPageHeight, pageWidth / max(aspect, minPageAspect))
+    }
+
+    /// THE WIDTH CONTRACT: the page never claims more width than the card offered it.
+    ///
+    /// This is what let a card render past the screen edge. It fires on wide, square and panorama
+    /// thumbs — measured at 1208pt, 680pt and 2720pt inside a 325pt card.
     func testMediaPageNeverExceedsTheWidthItWasOffered() {
         for shape in thumbShapes {
             let claimed = claimedSize(for: swatch(shape.w, shape.h))
@@ -48,6 +60,36 @@ final class PostMediaPageWidthTests: XCTestCase {
         }
     }
 
+    /// THE PICTURE CONTRACT: the placeholder shows the WHOLE photo, never a slice of it.
+    ///
+    /// The width contract above is not enough, and the reported post proved it. For a TALL source —
+    /// a cropped screenshot — the page's width came out correct while the picture was still drawn
+    /// 325x705 inside a 325x406 page and clipped to a blown-up vertical slice. Same modifier, same
+    /// fix, but a width-only assertion is green for it.
+    ///
+    /// Measured on the IMAGE, not on the frame around it — and that distinction is the whole test.
+    /// `PostMediaPlaceholder`'s `.frame(maxWidth: .infinity, minHeight: 160)` reports a clamped size
+    /// however big the picture inside it goes, so asking the container is green for the tall case
+    /// while the viewer is looking at a magnified slice. The image is what decides the framing, so
+    /// the image is what gets asked.
+    func testPlaceholderShowsTheWholePictureRatherThanASlice() {
+        for shape in thumbShapes {
+            let aspect = CGFloat(shape.w) / CGFloat(shape.h)
+            let page = CGSize(width: pageWidth, height: pageHeight(aspect))
+            let drawn = render(thumbPicture(swatch(shape.w, shape.h)), proposal: page)
+            XCTAssertLessThanOrEqual(
+                drawn.height, page.height + 0.5,
+                "a \(shape.name) \(shape.w)x\(shape.h) thumb is drawn \(Int(drawn.width))x"
+                + "\(Int(drawn.height)) in a \(Int(page.width))x\(Int(page.height)) page — it is "
+                + "clipped, so the viewer sees a magnified slice of the photo instead of the photo")
+            XCTAssertLessThanOrEqual(
+                drawn.width, page.width + 0.5,
+                "a \(shape.name) \(shape.w)x\(shape.h) thumb is drawn \(Int(drawn.width))x"
+                + "\(Int(drawn.height)) in a \(Int(page.width))x\(Int(page.height)) page — the sides "
+                + "are cut off")
+        }
+    }
+
     /// The page the feed builds around a not-yet-downloaded ref, reproduced: PostMediaView's
     /// single-media branch wrapping PostMediaPlaceholder's frame around the placeholder's thumb.
     ///
@@ -55,18 +97,27 @@ final class PostMediaPageWidthTests: XCTestCase {
     /// contract under test belongs to SwiftUI's layout, not to Haven's image plumbing, so the test
     /// should not go red because that plumbing moved.
     private func claimedSize(for img: TestImage) -> CGSize {
-        let placeholder = ZStack {
-            testImage(img).resizable().scaledToFit()
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        }
-        .frame(maxWidth: .infinity, minHeight: 160)
-
-        let page = ZStack { placeholder }
+        let page = ZStack { placeholderView(img) }
             .frame(maxWidth: .infinity)
-            .frame(height: pageHeight)
+            .frame(height: maxPageHeight)
+        return render(page, proposal: CGSize(width: pageWidth, height: maxPageHeight))
+    }
 
-        let renderer = ImageRenderer(content: page)
-        renderer.proposedSize = ProposedViewSize(width: pageWidth, height: pageHeight)
+    /// MissingMediaPlaceholder's thumb branch inside PostMediaPlaceholder's frame.
+    private func placeholderView(_ img: TestImage) -> some View {
+        ZStack { thumbPicture(img) }
+            .frame(maxWidth: .infinity, minHeight: 160)
+    }
+
+    /// Just the picture — the one modifier this whole file exists for.
+    private func thumbPicture(_ img: TestImage) -> some View {
+        testImage(img).resizable().scaledToFit()
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func render(_ view: some View, proposal: CGSize) -> CGSize {
+        let renderer = ImageRenderer(content: view)
+        renderer.proposedSize = ProposedViewSize(width: proposal.width, height: proposal.height)
         #if os(macOS)
         return renderer.nsImage?.size ?? .zero
         #else

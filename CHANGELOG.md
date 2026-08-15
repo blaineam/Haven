@@ -21,6 +21,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   it, and the `.clipShape` after that then clips to the grown width instead of the card's. Measured:
   a 512×288 thumb inside a 325pt page claimed **1208pt**; a panorama claimed 2720pt.
 
+  A **tall** source — a cropped screenshot, which is what was reported — breaks differently and just
+  as visibly: there the page's width comes out correct, and the picture is instead drawn 325×705
+  inside a 325×406 page and clipped to a magnified vertical slice. One modifier, two symptoms,
+  depending only on whether the photo is taller or wider than the page it lands in.
+
   It only ever hit posts still waiting on their media — once the bytes land, a different code path
   draws them with `.fit` — which is why it struck one post and not its neighbour, and why it lasted
   this long. The placeholder now fits, which is also what the full-size image cross-fading in over it
@@ -28,9 +33,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   that branch (the one branch that wasn't given it), and the strip either side of a fitted thumb
   carries the blurred wash rather than the card's flat surface.
 
-  Covered by `PostMediaPageWidthTests`, which asserts the invariant — a media page never claims more
-  width than the card offered it — rather than the modifier, so any future re-layout is held to the
-  same contract.
+  Covered by `PostMediaPageWidthTests`, which asserts two invariants rather than the modifier — a
+  page never claims more width than the card offered it, and the placeholder shows the whole photo
+  rather than a slice of it. The second exists because the first is green for the tall case: the
+  frame around the picture reports a clamped size however big the picture inside it goes, so the test
+  has to measure the image, not its container.
 
 ### Fixed — desktop (the import shakedown)
 

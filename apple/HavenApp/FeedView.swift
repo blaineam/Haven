@@ -9904,7 +9904,9 @@ struct UserProfileView: View {
         ZStack {
             HavenBackground()
             ScrollView {
-                VStack(spacing: 16) {
+                // Lazy — see the note on ProfileView. A member who imported their own archive has as
+                // many posts on this screen as you have on yours, and this list built all of them.
+                LazyVStack(spacing: 16) {
                     VStack(spacing: 8) {
                         // Use the contact's real signed avatar/emoji (PeerAvatar resolves it from their
                         // card), falling back to the initial — not a hardcoded initial circle.
@@ -9967,6 +9969,7 @@ struct UserProfileView: View {
                                 onEdit: { _ in },
                                 onUnsend: { }
                             )
+                            .equatable()
                             // Report center position so a profile post's video AUTO-PLAYS when centered,
                             // exactly like the main feed (the profile list was missing this, so videos here
                             // only ever played on a manual scrub).
@@ -10114,7 +10117,19 @@ struct ProfileView: View {
         ZStack {
             HavenBackground()
             ScrollView {
-                VStack(spacing: 16) {
+                // LAZY, and on this screen that is the difference between working and being killed.
+                //
+                // This was a plain VStack, so opening the You tab BUILT EVERY POST AT ONCE — each
+                // with its media, its blurred backdrop bitmap and its own view graph. With a handful
+                // of posts nobody noticed. After an Instagram import there are hundreds, and the tab
+                // spent ~59% CPU for two and a half minutes (a cpu_resource report whose samples are
+                // 254 SwiftUICore / 160 UIKitCore / 103 QuartzCore / 43 AttributeGraph against 33 in
+                // Haven's own code — a view graph being built, not work being done) and then the app
+                // was killed for memory shortly after the tab appeared.
+                //
+                // The circle feed has been lazy all along; these two profile lists were simply never
+                // given the same treatment, and no ordinary account had enough posts to expose it.
+                LazyVStack(spacing: 16) {
                     header
                     if !store.myStories.isEmpty { storiesRow }
                     if store.myPosts.isEmpty {
@@ -10134,6 +10149,10 @@ struct ProfileView: View {
                                 onEdit: { b in withAnimation(HavenTheme.smooth) { store.edit(item.id, b) } },
                                 onUnsend: { withAnimation(HavenTheme.smooth) { store.unsend(item.id) } }
                             )
+                            // Same reason the circle feed does it: FeedStore republishes constantly,
+                            // and without this every republish re-evaluates a ~1,500-line body for
+                            // every card on screen.
+                            .equatable()
                         }
                     }
                 }
@@ -10152,7 +10171,10 @@ struct ProfileView: View {
             Text("Your stories").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
+                // Lazy for the same reason as the list below it: an import that brought stories over
+                // as kept stories can leave dozens here, and an eager HStack decodes a thumbnail for
+                // every one of them the moment the tab opens — off-screen ones included.
+                LazyHStack(spacing: 12) {
                     ForEach(Array(store.myStories.enumerated()), id: \.element.id) { idx, s in
                         Button { storyIndex = idx; showStories = true } label: {
                             ZStack {

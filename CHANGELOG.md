@@ -11,6 +11,35 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.5.0] — 2026-08-14
 
+### Fixed — Apple (the You tab after an import, and importing twice)
+
+- **The You tab built every post at once and the app was killed for memory.** Both profile lists —
+  your own and a circle member's — used a plain `VStack`, so opening the tab instantiated every card
+  with its media, its blurred backdrop bitmap and its own view graph. With a handful of posts nobody
+  noticed; after an Instagram import there are hundreds. A device report caught it at 59% CPU
+  sustained for two and a half minutes, its samples 254 SwiftUICore / 160 UIKitCore / 103 QuartzCore
+  / 43 AttributeGraph against 33 in Haven's own code — a view graph being built, not work being done
+  — with the app dying shortly after the tab appeared. Both lists are `LazyVStack` now, the stories
+  strip is a `LazyHStack`, and the cards are `.equatable()` so a feed republish doesn't re-evaluate
+  every one of them. The circle feed had been lazy all along; these two were simply never given the
+  same treatment, and no ordinary account had enough posts to expose it.
+
+- **Importing the same archive twice imported everything twice.** Resuming by index only ever helped
+  the run it was written for: pick the same export again — because the first attempt was killed, or
+  to bring over the stories you skipped the first time — and every post landed a second time.
+  Imported items are now recorded against an identity taken from the archive itself (the media
+  entry's path plus its capture time), checked *before* anything is read, so a re-import skips what
+  is already here without decoding, transcoding or identifying its way through it again. The preview
+  screen says how many will be skipped, so a re-import that finds nothing new doesn't look like an
+  import that silently failed.
+
+- **An interrupted import couldn't resume.** The checkpoint is keyed on a security-scoped bookmark of
+  the archive, and that bookmark was being taken *outside* the file's security scope, where the
+  system needn't allow it — written with `try?`, so when it failed no checkpoint was recorded at all
+  and the per-item checkpointing that depends on it never ran either. The bookmark is now taken
+  inside the scope, and every path that abandons a pending import says so in the log instead of
+  failing invisibly.
+
 ### Fixed — Apple (a post wider than the phone)
 
 - **One post in the feed rendered wider than the screen**, its picture cut off at both edges, while

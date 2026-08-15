@@ -254,6 +254,19 @@ struct InstagramImportView: View {
                     }
                 }
 
+                // Say so BEFORE the run. Re-picking the same archive now skips what is already here
+                // rather than duplicating it — which, unannounced, looks identical to an import that
+                // did nothing at all.
+                let already = importer.alreadyImportedCount(s, includeStories: includeStories)
+                if already > 0 {
+                    Section {
+                        Label("\(already) already imported", systemImage: "checkmark.circle")
+                            .foregroundStyle(.secondary)
+                    } footer: {
+                        Text("You've imported these before, so they're skipped — nothing is read or published twice. Only the \(max(0, s.count(.post) + s.count(.reel) + (includeStories ? s.count(.story) : 0) - already)) remaining items are imported.")
+                    }
+                }
+
                 if s.count(.story) > 0 {
                     Section {
                         Toggle("Include \(s.count(.story)) stories", isOn: $includeStories)

@@ -77,11 +77,20 @@ final class InstagramImporter: ObservableObject {
         guard let url = try? URL(resolvingBookmarkData: p.bookmark,
                                  options: bookmarkResolutionOptions,
                                  relativeTo: nil, bookmarkDataIsStale: &stale) else {
+            // Quiet for the user (the archive may simply be gone), but never quiet in the log — an
+            // import that stops resuming is otherwise indistinguishable from one that never had a
+            // checkpoint. Re-running the import is now cheap regardless: the ledger skips everything
+            // already published, so a lost bookmark costs a file pick rather than the whole import.
+            HavenLog.sync("ig-import: pending import at \(p.done) DROPPED — bookmark no longer resolves")
             clearPending(); return
         }
+        HavenLog.sync("ig-import: resuming a pending import from item \(p.done)")
         Task { [weak self] in
             let parsed = await Task.detached(priority: .utility) { Self.parse(url) }.value
-            guard let self, case .success(let s) = parsed else { self?.clearPending(); return }
+            guard let self, case .success(let s) = parsed else {
+                HavenLog.sync("ig-import: pending import DROPPED — archive no longer parses")
+                self?.clearPending(); return
+            }
             guard p.done < s.items.count else { self.clearPending(); return }
             self.archiveURL = url
             self.summary = s
@@ -177,12 +186,27 @@ final class InstagramImporter: ObservableObject {
         cancelled = false
 
         // Record the job BEFORE any work, so a crash on the very first item still resumes.
-        // Best-effort: without a bookmark the import runs fine, it just won't survive a relaunch.
-        if let bookmark = try? url.bookmarkData(options: bookmarkCreationOptions,
-                                                includingResourceValuesForKeys: nil, relativeTo: nil) {
+        //
+        // INSIDE THE SECURITY SCOPE. The archive comes from `.fileImporter`, so its URL is
+        // security-scoped and only readable between start/stopAccessingSecurityScopedResource.
+        // Taking a bookmark of it outside that window is not reliably permitted — and this was
+        // written with `try?`, so when it failed the app recorded no checkpoint at all, silently.
+        // With no checkpoint `loadPending()` returns nil forever, which takes the per-item
+        // checkpoint below out with it, and the import cannot resume even in principle. That is the
+        // "it doesn't resume on relaunch" report, and it left no trace to find it by.
+        //
+        // Logged either way now: a resume that cannot work should say so once, not fail invisibly.
+        let scopedForBookmark = url.startAccessingSecurityScopedResource()
+        do {
+            let bookmark = try url.bookmarkData(options: bookmarkCreationOptions,
+                                                includingResourceValuesForKeys: nil, relativeTo: nil)
             savePending(Pending(bookmark: bookmark, circleId: circleId,
                                 includeStories: includeStories, matchSongs: matchSongs, done: startAt))
+        } catch {
+            HavenLog.sync("ig-import: NO checkpoint — bookmark failed (\(error.localizedDescription)); "
+                + "this run cannot resume if the app is killed")
         }
+        if scopedForBookmark { url.stopAccessingSecurityScopedResource() }
 
         // ONE cancellation probe, built HERE rather than inside the task. Written inline at each
         // call site — or even once inside the detached closure — it captured the task's own weak
@@ -217,9 +241,25 @@ final class InstagramImporter: ObservableObject {
             var usedSongs = Set<String>()
             var audible = 0, identified = 0
             HavenLog.sync("ig-import: starting \(items.count) items from \(startAt)")
+            var alreadyHad = 0
             for (idx, item) in items.enumerated() {
                 if idx < startAt { continue }   // already imported on a previous run
                 if await isCancelled() { break }
+                // ALREADY PUBLISHED BY THIS DEVICE → nothing to do, and crucially nothing to READ:
+                // this comes before `stage`, so a re-run does not decode, transcode or Shazam its way
+                // through an archive it has already imported. That is the difference between a
+                // re-import taking seconds and taking the same hour as the first one.
+                let identity = Self.importIdentity(item)
+                if Ledger.contains(identity) {
+                    alreadyHad += 1
+                    skipped += 1
+                    await MainActor.run { [weak self] in
+                        guard let self else { return }
+                        self.phase = .importing(done: idx + 1, total: items.count)
+                        if var p = self.loadPending() { p.done = idx + 1; self.savePending(p) }
+                    }
+                    continue
+                }
                 let began = Date()
                 let (refs, hasAudio, detected, themes, retryRef) = await Self.stage(
                     item, zip: zip, byName: byName, identify: matchSongs,
@@ -266,13 +306,13 @@ final class InstagramImporter: ObservableObject {
                     // circle is not asked to carry them at all.
                     //
                     // Posts and reels ARE feed content and publish normally (silent + backdated).
-                    let identity = Self.keptIdentity(item)
+                    let keptId = Self.keptIdentity(item)
                     // Frozen before the hop: `music` is a var, and capturing a mutable local in
                     // concurrently-executing code is a Swift 6 error.
                     let picked = music
                     await MainActor.run {
                         if kind == .story {
-                            KeptStoriesStore.shared.keep(id: identity, body: body, media: refs,
+                            KeptStoriesStore.shared.keep(id: keptId, body: body, media: refs,
                                                          createdAt: at, music: picked)
                         } else {
                             FeedStore.shared.postImported(circleId: circleId, body: body, media: refs,
@@ -286,6 +326,9 @@ final class InstagramImporter: ObservableObject {
                             }
                         }
                     }
+                    // AFTER the post exists, never before: a kill between staging and authoring must
+                    // re-import this item, not skip it forever.
+                    Ledger.record(identity)
                     imported += 1
                 }
                 // Checkpoint after EVERY item. The unit of work is one post, so the most a kill can
@@ -308,7 +351,8 @@ final class InstagramImporter: ObservableObject {
                     if var p = self.loadPending() { p.done = done; self.savePending(p) }
                 }
             }
-            HavenLog.sync("ig-import: done — \(identified)/\(audible) posts with audio were identified by Shazam")
+            HavenLog.sync("ig-import: done — \(identified)/\(audible) posts with audio were identified by Shazam"
+                + (alreadyHad > 0 ? "; \(alreadyHad) items were already imported and were skipped without reading them" : ""))
             let finalImported = imported, finalSkipped = skipped
             let stopped = await MainActor.run(body: { [weak self] in self?.cancelled ?? false })
             await MainActor.run { [weak self] in
@@ -465,6 +509,77 @@ final class InstagramImporter: ObservableObject {
         if detected != nil || !retryable { shazamTask?.cancel() }
         for f in scratchFiles { try? FileManager.default.removeItem(at: f) }
         return (refs, anyAudio, detected, themes, retryable ? firstVideoRef : nil)
+    }
+
+    /// Every archive item this device has already published, so importing the same export twice is a
+    /// no-op instead of a duplicate feed.
+    ///
+    /// Resuming by INDEX was the only guard before this, and an index only helps the one run it was
+    /// written for: pick the same archive again — because the first attempt was killed, or because
+    /// the bookmark did not survive, or simply to import the stories you skipped the first time —
+    /// and every post lands a second time. There is nothing on a published post that says which
+    /// archive entry it came from, so nothing downstream can deduplicate it either.
+    ///
+    /// Identity is the archive's own: the first media entry's path plus the capture time. Both are
+    /// properties of the export, so the same export yields the same identity on every run and on
+    /// every device, and two genuinely different posts cannot collide (entry paths are unique within
+    /// the zip; the timestamp disambiguates the no-media case).
+    ///
+    /// Recorded only AFTER the post is authored, so a kill mid-item re-imports that item rather than
+    /// losing it — the same trade the per-item checkpoint already makes.
+    enum Ledger {
+        private static let key = "haven.instagram.imported.ids"
+        private static let lock = NSLock()
+        nonisolated(unsafe) private static var cache: Set<String>?
+
+        private static func load() -> Set<String> {
+            if let c = cache { return c }
+            let c = Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+            cache = c
+            return c
+        }
+
+        static func contains(_ id: String) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            return load().contains(id)
+        }
+
+        static func record(_ id: String) {
+            lock.lock(); defer { lock.unlock() }
+            var c = load()
+            guard c.insert(id).inserted else { return }
+            cache = c
+            UserDefaults.standard.set(Array(c), forKey: key)
+        }
+
+        /// How many of these the device has already published — what the preview screen reports so
+        /// "nothing happened" is never the whole message.
+        static func alreadyImported(_ ids: [String]) -> Int {
+            lock.lock(); defer { lock.unlock() }
+            let c = load()
+            return ids.reduce(0) { $0 + (c.contains($1) ? 1 : 0) }
+        }
+
+        /// Deliberate re-import: forget this archive's items so they publish again.
+        static func forget(_ ids: [String]) {
+            lock.lock(); defer { lock.unlock() }
+            var c = load()
+            for id in ids { c.remove(id) }
+            cache = c
+            UserDefaults.standard.set(Array(c), forKey: key)
+        }
+    }
+
+    /// Identity for the ledger — see `Ledger`. Distinct from `keptIdentity`, which is a KeptStories
+    /// key and must keep its existing shape or every already-kept story would be kept again.
+    nonisolated static func importIdentity(_ item: InstagramArchive.Item) -> String {
+        "ig:\(item.mediaNames.first ?? "-"):\(item.createdAt)"
+    }
+
+    /// How many items of `summary` this device has already imported, for the preview screen.
+    func alreadyImportedCount(_ summary: InstagramArchive.Summary, includeStories: Bool) -> Int {
+        let items = includeStories ? summary.items : summary.items.filter { $0.kind != .story }
+        return Ledger.alreadyImported(items.map(Self.importIdentity))
     }
 
     /// Stable id for a kept story, derived from the archive entry it came from.

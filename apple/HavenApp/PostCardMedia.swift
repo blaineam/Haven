@@ -644,6 +644,21 @@ struct PostMediaView: View {
         // session once, off the main thread, and skip entirely when it's already set up.
         if let visibleRef, isVideo(visibleRef) { ensureHavenPlaybackSession() }
         #endif
+        // HAND THE COORDINATOR THE PLAYER YOU ARE ACTUALLY LOOKING AT.
+        //
+        // `videoByPost` is ONE slot per post, and a carousel builds a player per page — every
+        // `playerFor` overwrites the last, so the coordinator ended up holding whichever page was
+        // built most recently rather than the visible one. Tapping to unmute then raised the volume
+        // of an off-screen, paused player while the clip on screen stayed at zero: a post whose files
+        // all carry audio, playing silent, with the speaker reading unmuted.
+        //
+        //   post-audio: muteVideo=false song=false silent=false
+        //               [vid_dfe56e=1track … ×5]   ← nothing muted, five real audio tracks
+        //
+        // This runs on every page change, so the visible page always gets the last word.
+        if let visibleRef, isVideo(visibleRef) {
+            AudioCoordinator.shared.registerVideo(bag.players[visibleRef], for: item.id)
+        }
         for (ref, player) in bag.players {
             if ref == visibleRef && isVideo(ref) {
                 player.seek(to: .zero)

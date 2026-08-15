@@ -118,17 +118,52 @@ struct PostMediaView: View {
         MediaVariants.displayRefs(item.media).filter { SharedLocation.parse($0) == nil }
     }
 
-    /// `max(aspect, minPageAspect)`, NOT the raw aspect: a page is allowed to be as tall as the media
-    /// wants right up to the point where it would be taller than `minPageAspect` — so anything wider
-    /// than that fills the card edge to edge and never pillarboxes. See `minPageAspect`.
+    /// THE PAGE TAKES THE MEDIA'S OWN SHAPE, capped in height. Nothing else.
+    ///
+    /// This used to clamp with `max(aspect, minPageAspect)`: any page that wanted to be taller than
+    /// 0.8 was shortened to 0.8 — and media cannot fill a page shaped differently from itself, so it
+    /// pillarboxed instead. Measured on a real 5-photo carousel of 9:16 shots:
+    ///
+    ///     carousel: 5 items aspects=[0.56 …] chosen=0.56 uniform=yes width=372 pageH=465
+    ///
+    /// 372/0.56 is 664, but the clamp forced 465, so each photo drew 260pt wide inside a 372pt card
+    /// with 56pt of blur down each side — a third of the card's width spent blurring a photo it could
+    /// have been showing. Portrait is the common shape for phone photos and for everything an
+    /// Instagram archive brings over, so this was most of a feed.
+    ///
+    /// `singleMediaMaxHeight` is the real bound and always was: at 372pt wide a 9:16 page is 664pt,
+    /// inside the 680 cap, so the clamp was not protecting against a post that fills the screen.
+    /// Only genuinely extreme media letterboxes now, which is the case the cap exists for.
     func pageHeight(_ aspect: CGFloat) -> CGFloat {
-        guard mediaWidth > 0 else { return singleMediaMaxHeight }
-        return min(singleMediaMaxHeight, mediaWidth / max(aspect, minPageAspect))
+        guard mediaWidth > 0, aspect > 0 else { return singleMediaMaxHeight }
+        return min(singleMediaMaxHeight, mediaWidth / aspect)
     }
 
     func pageAspect(_ aspect: CGFloat) -> CGFloat {
         guard mediaWidth > 0 else { return aspect }
         return mediaWidth / pageHeight(aspect)
+    }
+
+    /// DEBUG: why a post is silent. There are four different reasons a video plays without sound and
+    /// they are indistinguishable from the outside — the author muted it, a song owns the post's
+    /// audio, the app is globally silenced, or the file genuinely has no audio track. Guessing which
+    /// costs a build; asking costs a line.
+    @ViewBuilder func audioProbe(_ refs: [String]) -> some View {
+        #if DEBUG
+        Color.clear.onAppear {
+            let vids = refs.filter { isVideo($0) }
+            guard !vids.isEmpty else { return }
+            let tracks = vids.map { ref -> String in
+                guard let url = MediaStore.shared.storagePath(for: ref) else { return "no-file" }
+                let n = AVURLAsset(url: url).tracks(withMediaType: .audio).count
+                return "\(ref.prefix(10))=\(n)track"
+            }.joined(separator: " ")
+            HavenLog.sync("post-audio: muteVideo=\(item.muteVideo) song=\(item.music != nil) "
+                + "silent=\(SettingsStore.shared.silent) [\(tracks)]")
+        }
+        #else
+        EmptyView()
+        #endif
     }
 
     @ViewBuilder var mediaView: some View {
@@ -168,6 +203,7 @@ struct PostMediaView: View {
         .background(GeometryReader { g in
             Color.clear.preference(key: MediaWidthKey.self, value: g.size.width)
         })
+        .background(audioProbe(realMedia))
         .onPreferenceChange(MediaWidthKey.self) { w in
             // Remember it for the NEXT card to be created, so it never has to lay out at zero width first.
             if w > 0 { mediaWidth = w; lastKnownMediaWidth = w }
@@ -183,6 +219,24 @@ struct PostMediaView: View {
         guard let tallest = media.map(singleAspect).min() else { return 4.0 / 3.0 }
         if allSameAspect(media) { return tallest }
         return min(1.91, max(0.8, tallest))
+    }
+
+    /// DEBUG: what shape the carousel chose and why. Every "sizing is wrong" report on this view has
+    /// been a disagreement between the PAGE's shape and the MEDIA's, and guessing which of the two is
+    /// wrong has cost more round trips than measuring it.
+    @ViewBuilder func carouselProbe(_ media: [String], aspect: CGFloat) -> some View {
+        #if DEBUG
+        Color.clear.onAppear {
+            let each = media.map { String(format: "%.2f", singleAspect($0)) }.joined(separator: " ")
+            HavenLog.sync(String(format: "carousel: %d items aspects=[%@] chosen=%.2f uniform=%@ "
+                                 + "width=%.0f pageH=%.0f",
+                                 media.count, each, aspect,
+                                 allSameAspect(media) ? "yes" : "no",
+                                 mediaWidth, pageHeight(aspect)))
+        }
+        #else
+        EmptyView()
+        #endif
     }
 
     @ViewBuilder func mediaCarousel(_ media: [String]) -> some View {
@@ -247,6 +301,7 @@ struct PostMediaView: View {
             // Dots hide while scrubbing so the scrub bar doesn't collide with them.
             if media.count > 1 && !carouselScrubbing { carouselDots(media.count) }
         }
+        .background(carouselProbe(media, aspect: aspect))
     }
 
     var masonry: some View {

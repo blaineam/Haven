@@ -3471,6 +3471,57 @@ object HavenNet : InboundListener {
         for (env in page) sendFrame(Wire.EVENT, Wire.eventPayload(req.circleId, env), req.requesterHex)
     }
 
+    // MARK: - Duplicate import cleanup (parity with iOS FeedStore.sweepDuplicateImports)
+
+    /// Whether this app session has already swept — the duplicates are historical, so once is enough.
+    private var sweptDuplicates = false
+
+    /// Withdraw posts this device published more than once, keeping the oldest of each.
+    ///
+    /// The importer is idempotent now, but that does nothing about copies already in the feed, and
+    /// asking someone to delete two hundred posts by hand is not a fix. The RULE lives in
+    /// [PostDedupe] and is shared with iOS byte for byte — both platforms sweep the same circle, so a
+    /// disagreement would have one device withdrawing posts the other keeps.
+    ///
+    /// Unsend rather than a local hide: the duplicates went out to the circle, so they have to be
+    /// withdrawn from it.
+    fun sweepDuplicateImportsOnce(circleId: String) {
+        if (sweptDuplicates) return
+        sweptDuplicates = true
+        scope.launch(Dispatchers.IO) {
+            val feed = runCatching { social.feed(circleId, nowMs(), null) }.getOrDefault(emptyList())
+            val mine = feed.filter { it.isMe && !it.unsent && !it.story }.sortedBy { it.createdAt }
+            if (mine.isEmpty()) { sweptDuplicates = false; return@launch }   // nothing loaded yet — try again
+            val candidates = mine.map { item ->
+                val refs = MediaVariants.displayRefs(item.media)
+                PostDedupe.Candidate(
+                    id = item.id,
+                    createdAt = item.createdAt,
+                    body = item.body,
+                    mediaCount = refs.size,
+                    mediaHash = refs.firstNotNullOfOrNull { visualHash(it, item.media) },
+                )
+            }
+            val doomed = PostDedupe.duplicates(candidates)
+            if (doomed.isEmpty()) {
+                Log.d(TAG, "dedupe: nothing duplicated across ${candidates.size} of my posts")
+                return@launch
+            }
+            Log.d(TAG, "dedupe: withdrawing ${doomed.size} duplicate posts of ${candidates.size}")
+            for (id in doomed) runCatching { unsendPost(circleId, id) }
+        }
+    }
+
+    /// What a post's first picture LOOKS like, or null when it cannot be read.
+    ///
+    /// A VIDEO's own ref has no still, so its poster stands in — without that, exactly the posts an
+    /// archive is full of fall back to comparing captions, and imported captions are often empty.
+    private fun visualHash(ref: String, media: List<String>): ULong? {
+        val imageRef = MediaVariants.posterFor(ref, media) ?: ref
+        val bmp = runCatching { LocalMedia.thumbnail(imageRef, 64) }.getOrNull() ?: return null
+        return PerceptualHash.dHash(bmp)
+    }
+
     fun unsendPost(circleId: String, postId: String) {
         val env = runCatching { social.unsend(circleId, postId, nowMs()) }.getOrNull() ?: return
         afterAuthor(circleId, env)

@@ -143,6 +143,9 @@ fun CircleScreen(onAddFriend: () -> Unit) {
     // Viewing a circle's feed is the purge hook: really drop expired events + GC their media blobs
     // (throttled inside — once per circle per app session).
     LaunchedEffect(active) { HavenNet.maybePurgeExpiredMedia(active) }
+    // Repair an account that was imported into twice, without being asked. Once per session, and a
+    // no-op when nothing is duplicated — the rule is shared with iOS (PostDedupe).
+    LaunchedEffect(active, version) { HavenNet.sweepDuplicateImportsOnce(active) }
     val items: List<FeedItemFfi> = remember(version, active, profile.retentionDays, circleSettingsVersion, circlesVersion, HavenNet.blocked.size, showHidden, hiddenCount) {
         // Per-circle auto-delete override (falls back to the app-wide retention default).
         val raw = runCatching { HavenNet.engine.feed(active, nowMs(), com.blaineam.haven.core.CircleSettings.retentionSecs(active)) }.getOrDefault(emptyList())
@@ -313,8 +316,16 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                                 color = HavenTheme.textSecondary, fontSize = 14.sp, textAlign = TextAlign.Center,
                             )
                         }
-                    } else items(posts, key = { it.id }) {
-                        PostCard(it, active, reportsByTarget[it.id].orEmpty(), videoActive = it.id == centeredPost)
+                    } else items(posts, key = { it.id }) { post ->
+                        // Reaching the OLDEST post we hold asks its author for the page before it —
+                        // history arrives as it is read rather than all at once when someone is
+                        // added. No-op once that cursor has been asked for (HavenNet keeps it).
+                        if (post.id == posts.lastOrNull()?.id) {
+                            LaunchedEffect(post.id) {
+                                HavenNet.requestOlderHistory(active, post.createdAt)
+                            }
+                        }
+                        PostCard(post, active, reportsByTarget[post.id].orEmpty(), videoActive = post.id == centeredPost)
                     }
                 }
             }

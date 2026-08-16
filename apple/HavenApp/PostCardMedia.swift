@@ -442,18 +442,6 @@ struct PostMediaView: View {
                 // never letterboxes, and the wash lives in the strips the same way photos do.
                 let poster = MediaVariants.poster(for: ref, in: item.media)
                 let videoAspect = singleAspect(ref)
-                // DEBUG: the aspect we SIZE the player with, beside the one the file actually has.
-                // A clip drawing at half the size of a correct fit means these disagree, and
-                // singleAspect is remembered permanently (MediaAspectStore is first-writer-wins), so a
-                // value recorded from a half-arrived file never corrects itself.
-                let _ = { if let url = MediaStore.shared.storagePath(for: ref) {
-                    let t = AVURLAsset(url: url).tracks(withMediaType: .video).first
-                    let n = t.map { $0.naturalSize.applying($0.preferredTransform) }
-                    HavenLog.sync(String(format: "vid-aspect: %@ sized=%.3f actual=%.3f (%.0fx%.0f)",
-                                         String(ref.prefix(10)), videoAspect,
-                                         n.map { abs($0.width) / max(abs($0.height), 1) } ?? -1,
-                                         n.map { abs($0.width) } ?? 0, n.map { abs($0.height) } ?? 0))
-                } }()
                 GestureVideoPlayer(player: player,
                                    onTap: { dataSaverVideoTap(ref, player) },
                                    onDoubleTap: { heartIt() },

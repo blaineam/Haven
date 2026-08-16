@@ -206,6 +206,20 @@ pub fn bootstrap(engine: Eng) -> BootstrapDto {
     }
 }
 
+/// Repair an account that was imported into twice. Idempotent and a no-op when nothing is
+/// duplicated; the UI calls it once per session on the first non-empty feed.
+#[tauri::command]
+pub fn sweep_duplicate_imports(engine: Eng, circle_id: String) -> usize {
+    engine.sweep_duplicate_imports(&circle_id)
+}
+
+/// "Send me the page of your history before this timestamp" — the ask half of lazy history. The UI
+/// calls it when the reader reaches the oldest post it holds.
+#[tauri::command]
+pub fn request_older_history(engine: Eng, circle_id: String, oldest_created_at: u64) {
+    engine.request_older_history(circle_id, oldest_created_at);
+}
+
 #[tauri::command]
 pub fn self_test() -> serde_json::Value {
     let r = haven_ffi::self_test();

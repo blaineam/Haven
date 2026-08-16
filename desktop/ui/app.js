@@ -1101,6 +1101,17 @@ const Hidden = {
 /** The Circle feed. Column order is the macOS LazyVStack's, exactly:
  *    banner → pending requests → circle upgrade → relay nudge → STORIES TRAY → posts
  *  and the composer floats over the lot as a pill pinned to the bottom (FeedView ▸ composerBar). */
+/// Repair an account imported into twice — once per app session, on the first feed that has posts.
+/// A no-op when nothing is duplicated; the rule lives in Rust and is shared with iOS and Android.
+let sweptDuplicates = false;
+function sweepDuplicateImportsOnce() {
+  if (sweptDuplicates || !(state.feedItems || []).length) return;
+  sweptDuplicates = true;
+  invoke("sweep_duplicate_imports", { circleId: state.activeCircle })
+    .then((n) => { if (n > 0) renderFeed(); })
+    .catch(() => {});
+}
+
 async function renderFeed() {
   const root = $("#view-circle");
   // Read BEFORE any await: this function rebuilds the scroller's contents wholesale, and the
@@ -1237,6 +1248,7 @@ async function renderFeed() {
     for (const it of next) {
       list.insertBefore(postCard(it, state.activeCircle, reportsByTarget[it.id] || []), sentinel);
     }
+    sweepDuplicateImportsOnce();              // first page with posts → repair a doubled import
     hydrateMedia(list, state.activeCircle);   // only the cards just added resolve their refs
     Autoplay.track(list);
     Autoplay.schedule();                      // a new page may hold the centred post
@@ -1245,12 +1257,16 @@ async function renderFeed() {
     // appended page left it in view, so it fired again at once and walked the WHOLE feed in a
     // single burst. That is both "it isn't lazy loading" and a large part of the stall.
     // `feedNudge` re-arms it when a tail actually lands.
-    if (rendered >= all.length) feedObserver?.disconnect();
-    // TEMPORARY: is this actually paging, or walking the whole feed?
-    invoke("ui_log", { line:
-      `page rendered=${rendered}/${all.length} cards=${list.querySelectorAll(".post").length}` +
-      ` sentinelTop=${Math.round(sentinel.getBoundingClientRect().top)} vh=${window.innerHeight}`,
-    }).catch(() => {});
+    if (rendered >= all.length) {
+      feedObserver?.disconnect();
+      // REACHED THE END OF WHAT WE HOLD → ask the authors for the page before it.
+      //
+      // Lazy history: adding someone no longer ships their whole backlog, so the tail of the feed is
+      // the cue to fetch more, exactly the way media is fetched when a tile appears. Idempotent per
+      // cursor on the Rust side, so paging to the end repeatedly does not re-ask.
+      const oldest = all.length ? all[all.length - 1].createdAt : 0;
+      if (oldest) invoke("request_older_history", { circleId: state.activeCircle, oldestCreatedAt: oldest }).catch(() => {});
+    }
   };
   // Page in a tail that arrived AFTER this feed was built, without a teardown.
   //

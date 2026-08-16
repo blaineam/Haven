@@ -70,6 +70,44 @@ pub const MEDIA_RESUME_REQ: u8 = 33;
 /// The largest chunk count a resume frame may declare — 4M × 32 KB ≈ 128 GB, far past any real
 /// media. The bound is the whole point: `total` is peer-controlled and sizes a bitmap allocation, so
 /// an unbounded one lets a single 70-byte frame ask us for half a gigabyte of `Vec` (`u32::MAX / 8`).
+/// 34 — "send me the page of your history before this timestamp".
+/// `[hex64 requester][u64 LE before_ms][circle_id utf8]`, byte-identical to iOS/Android.
+///
+/// Adding someone used to hand them EVERY event the adder had authored to that circle, re-sealed one
+/// by one, with the media backlog following behind. This asks for a page instead, and the reply is
+/// ordinary EVENT frames — so only the ask is new and the receiving side is the path that already
+/// ingests and deduplicates envelopes.
+pub const HISTORY_REQ: u8 = 34;
+
+/// Events a new member is given up front, and the size of each page fetched afterwards.
+pub const HISTORY_PAGE: u32 = 60;
+
+/// Build a HISTORY_REQ payload.
+pub fn history_req_payload(requester_hex: &str, before_ms: u64, circle_id: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64 + 8 + circle_id.len());
+    out.extend_from_slice(requester_hex.as_bytes());
+    out.extend_from_slice(&before_ms.to_le_bytes());
+    out.extend_from_slice(circle_id.as_bytes());
+    out
+}
+
+/// Parse a HISTORY_REQ payload; None if malformed (matches the iOS/Android guards).
+pub fn parse_history_req(payload: &[u8]) -> Option<(String, u64, String)> {
+    if payload.len() <= 72 {
+        return None;
+    }
+    let requester = std::str::from_utf8(&payload[..64]).ok()?.to_string();
+    if requester.len() != 64 {
+        return None;
+    }
+    let before = u64::from_le_bytes(payload[64..72].try_into().ok()?);
+    let cid = std::str::from_utf8(&payload[72..]).ok()?.to_string();
+    if cid.is_empty() {
+        return None;
+    }
+    Some((requester, before, cid))
+}
+
 pub const MAX_RESUME_CHUNKS: u32 = 4_000_000;
 
 /// Pack held chunk indices into a bitmap: bit `i` of byte `i / 8` set means chunk `i` is on disk.

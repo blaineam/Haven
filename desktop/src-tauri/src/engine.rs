@@ -372,6 +372,9 @@ pub struct Engine {
     node: StdMutex<Option<Arc<HavenNode>>>,
     /// Accounts we have asked the public directory about, and when (`resolve_missing_device_ids`).
     discovery_asked: StdMutex<HashMap<String, u64>>,
+    /// Cursor last asked for per circle (lazy history) — scrolling past the end must not re-ask the
+    /// same page. Session-scoped, like the rest of the sync bookkeeping.
+    history_asked_before: StdMutex<HashMap<String, u64>>,
     relay_host: StdMutex<Option<Arc<RelayServerHandle>>>,
     /// Live cloudflared process (quick or named) for the **public front door** (media, or
     /// path-router when fabric is unified). Dropped when hosting stops. Manual never sets this.
@@ -683,6 +686,7 @@ impl Engine {
             app: StdMutex::new(None),
             node: StdMutex::new(None),
             discovery_asked: StdMutex::new(HashMap::new()),
+            history_asked_before: StdMutex::new(HashMap::new()),
             relay_host: StdMutex::new(None),
             quick_tunnel: StdMutex::new(None),
             derp_tunnel: StdMutex::new(None),
@@ -797,6 +801,7 @@ impl Engine {
             app: StdMutex::new(None),
             node: StdMutex::new(None),
             discovery_asked: StdMutex::new(HashMap::new()),
+            history_asked_before: StdMutex::new(HashMap::new()),
             relay_host: StdMutex::new(None),
             quick_tunnel: StdMutex::new(None),
             derp_tunnel: StdMutex::new(None),
@@ -3698,6 +3703,89 @@ impl Engine {
         }
     }
 
+    /// Someone asked for the page of MY history older than their cursor. Answer with ordinary EVENT
+    /// frames — `sync_envelopes_page` re-seals only what I authored, so authorship is unchanged.
+    fn handle_history_request(self: &Arc<Self>, body: &[u8]) {
+        let Some((requester, before_ms, cid)) = wire::parse_history_req(body) else { return };
+        // Members only. The reply is sealed to the circle epoch regardless, so a stranger could not
+        // open it — but there is no reason to spend the sealing on them, and an unbounded
+        // stranger-triggered re-seal is a free CPU drain.
+        if !self.contacts().iter().any(|c| c.id_hex.eq_ignore_ascii_case(&requester)) {
+            return;
+        }
+        let page = self.social.sync_envelopes_page(cid.clone(), before_ms, wire::HISTORY_PAGE);
+        log::info!("history: serving {} envelopes before {} in {}", page.len(), before_ms, cid);
+        for env in page {
+            self.send_frame(wire::EVENT, &wire::event_payload(&cid, &env), &requester);
+        }
+    }
+
+    /// Ask this circle's members for the page of history older than the oldest post we hold.
+    ///
+    /// Idempotent per cursor: asking again only happens once an older page has actually arrived and
+    /// moved it. If nobody answers, the periodic full re-send still reconciles.
+    pub fn request_older_history(self: &Arc<Self>, circle_id: String, oldest_created_at: u64) {
+        if oldest_created_at == 0 {
+            return;
+        }
+        {
+            let mut asked = self.history_asked_before.lock().unwrap();
+            if asked.get(&circle_id) == Some(&oldest_created_at) {
+                return;
+            }
+            asked.insert(circle_id.clone(), oldest_created_at);
+        }
+        let me = self.social.my_node_hex();
+        let payload = wire::history_req_payload(&me, oldest_created_at, &circle_id);
+        for c in self.contacts() {
+            self.send_frame(wire::HISTORY_REQ, &payload, &c.id_hex);
+        }
+        log::info!("history: asked for the page before {} in {}", oldest_created_at, circle_id);
+    }
+
+    /// Withdraw posts this device published more than once, keeping the oldest of each — the repair
+    /// for an archive imported twice. Parity with iOS `sweepDuplicateImports` and Android
+    /// `sweepDuplicateImportsOnce`, and it MUST agree with them: all three sweep the same circle, so
+    /// a rule that differs would have one device withdrawing posts another keeps.
+    ///
+    /// The key is what an import cannot change — the backdated capture time, the caption, and how
+    /// many items the post carries. Deliberately NOT the media refs: the importer re-encodes what it
+    /// stages and re-encoding is not reproducible, so the same photo gets a different content hash on
+    /// the second run. That is what made the first version of this find nothing at all.
+    ///
+    /// Desktop has no perceptual hash yet, so it uses the caption+count fallback that the other two
+    /// use when a picture cannot be read — strictly more conservative: it merges less, never more.
+    pub fn sweep_duplicate_imports(self: &Arc<Self>, circle_id: &str) -> usize {
+        let mut mine: Vec<FeedItemFfi> = self
+            .feed(circle_id)
+            .into_iter()
+            .filter(|i| i.is_me && !i.unsent && !i.story)
+            .collect();
+        mine.sort_by_key(|i| i.created_at);
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut doomed: Vec<String> = vec![];
+        for item in &mine {
+            let count = haven_p2p::mediavariants::display_refs(&item.media).len();
+            if count == 0 {
+                continue; // text-only: the key is weakest exactly where a repeat may be deliberate
+            }
+            let caption = item.body.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+            let signature = format!("{}|{}|{}", item.created_at, count, caption);
+            if !seen.insert(signature) {
+                doomed.push(item.id.clone());
+            }
+        }
+        if doomed.is_empty() {
+            log::info!("dedupe: nothing duplicated across {} of my posts", mine.len());
+            return 0;
+        }
+        log::info!("dedupe: withdrawing {} duplicate posts of {}", doomed.len(), mine.len());
+        for id in &doomed {
+            self.clone().unsend_post(circle_id.to_string(), id.clone());
+        }
+        doomed.len()
+    }
+
     pub fn unsend_post(self: &Arc<Self>, circle_id: String, target: String) {
         if let Ok(env) = self.social.unsend(circle_id.clone(), target, now_ms()) {
             self.after_author(&circle_id, &env, None, None);
@@ -4444,7 +4532,19 @@ impl Engine {
                 me.offer_hello_mailbox(&cid, &to, &hello).await;
             });
         }
-        for env in self.social.sync_envelopes(circle_id.to_string()) {
+        // A PAGE, not the whole history — parity with iOS/Android "lazy history".
+        //
+        // This is the moment someone is added, and it used to re-seal and ship every event ever
+        // authored to the circle: real cryptography per event here, an unseal per event there, and
+        // the media backlog dragged along behind it. They get the newest page now and ask for older
+        // ones (wire::HISTORY_REQ) as they scroll. DMs are read from the beginning and small, so they
+        // keep the full send.
+        let first_page = if circle_id.starts_with("dm:") {
+            self.social.sync_envelopes(circle_id.to_string())
+        } else {
+            self.social.sync_envelopes_page(circle_id.to_string(), 0, wire::HISTORY_PAGE)
+        };
+        for env in first_page {
             self.send_frame(wire::EVENT, &wire::event_payload(circle_id, &env), to_node_hex);
         }
         // Tell this peer about every relay I know for the circle, so we share all mailboxes.
@@ -4683,7 +4783,7 @@ impl Engine {
         // 33 (resume) sits here with frame 3 rather than in the sealed call-frame set below: it asks
         // for a strict SUBSET of what frame 3 already asks for in the clear, so sealing it would buy
         // nothing while making it fail in exactly the places its own frame-3 fallback still works.
-        if matches!(t, wire::MEDIA_REQ | wire::MEDIA_RESUME_REQ | wire::CALL_INVITE | wire::CALL_ACCEPT | wire::CALL_HANGUP | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE | wire::GROUP_INVITE | wire::CALL_CAMERA | wire::MEDIA_WANTED | wire::MEDIA_AVAILABLE) {
+        if matches!(t, wire::MEDIA_REQ | wire::HISTORY_REQ | wire::MEDIA_RESUME_REQ | wire::CALL_INVITE | wire::CALL_ACCEPT | wire::CALL_HANGUP | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE | wire::GROUP_INVITE | wire::CALL_CAMERA | wire::MEDIA_WANTED | wire::MEDIA_AVAILABLE) {
             if body.len() >= 64 {
                 let head = String::from_utf8_lossy(&body[..64]).into_owned();
                 if head.len() == 64 && self.prefs.lock().unwrap().blocked.contains(&head) {
@@ -4710,6 +4810,7 @@ impl Engine {
                 // emitted to the UI — but they borrow the call path's sealing, because one asks an
                 // author to spend upload bandwidth and the other triggers a notification and a fetch.
                 wire::MEDIA_WANTED => me.handle_media_wanted(&body).await,
+                wire::HISTORY_REQ => me.handle_history_request(&body),
                 wire::MEDIA_AVAILABLE => me.handle_media_available(&body),
                 wire::DEVICE_ENROLL => me.handle_enrollment_request(&body),
                 wire::DEVICE_GRANT => me.handle_device_grant(&body),

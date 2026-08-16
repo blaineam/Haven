@@ -482,6 +482,8 @@ pub fn run() {
             commands::onboard_link,
             commands::bootstrap,
             commands::self_test,
+            commands::sweep_duplicate_imports,
+            commands::request_older_history,
             commands::get_profile,
             commands::set_profile,
             commands::circles,

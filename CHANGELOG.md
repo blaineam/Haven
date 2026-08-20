@@ -9,6 +9,39 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Core (low-data mode, stage S0)
+
+- **A Haven message is about to stop costing thirteen kilobytes to send a word.** The envelope every
+  message travels in was still serialised as JSON, which renders each byte of ciphertext as three or
+  four characters of ASCII. Measured on a one-word direct message: **12,953 bytes on the wire, of
+  which 3,632 are real** — the other nine and a third kilobytes are decimal digits and commas
+  describing them. The same waste was found and fixed for sealed media envelopes, where it had been
+  turning a 48 MB video into a 167 MB blob, but the epoch envelope never got the same treatment.
+
+  It now has a compact binary container alongside the JSON one, tagged so the two can never be
+  confused, and it is **3.57x smaller across every message size measured**.
+
+  Nothing about the encryption changes, and there is a test that says so rather than a comment
+  claiming it. The hybrid Ed25519 and ML-DSA-65 signature is computed over a transcript that hashes
+  the envelope's *fields*, never their serialised form, so the identical envelope in either container
+  carries the identical signature bytes and verifies identically. The test asserts that equality
+  directly, then opens a compact-encoded envelope through the real verify-and-decrypt path, then
+  flips a bit in its signature and requires the open to fail. Post-quantum protection is exactly what
+  it was on both containers; only the packaging got smaller.
+
+  **Nothing sends the new container yet, deliberately.** Reading it ships first. The mailbox key is a
+  SHA-256 over the envelope's exact bytes, so a client that started emitting the compact form would
+  both move every key in every mailbox and hand un-upgraded members a body their parser cannot read.
+  So this release only learns to *read* both, and the send path is unchanged and byte-identical —
+  pinned by a test, because that hash is load-bearing. Writing flips in a later release once a circle
+  is known to be fully capable, the same staged pattern the seed-drop and MLS gates already use.
+
+  One trap worth recording: postcard is non-self-describing, so struct fields are positional with no
+  names on the wire. The ratchet index is `skip_serializing_if` — correct and byte-saving for JSON —
+  which would have written six fields and then expected seven back. The compact form uses an explicit
+  wire struct that always encodes it, costing one byte, with a regression test covering both the
+  absent and present cases.
+
 ### Docs
 
 - **A design plan for carrying Haven over carrier satellite data.**

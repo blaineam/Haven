@@ -128,6 +128,30 @@ fn derive_event_key(epoch_key: &[u8; 32], salt: &[u8], circle_id: &str, epoch: u
     okm
 }
 
+/// Container tag for the compact binary [`EpochEnvelope`] encoding. Distinct from `social::HVE1`
+/// (the sealed-media envelope) so a blob is never parsed as the wrong type, and it cannot collide
+/// with legacy JSON, which always starts with `{`.
+const EPOCH_ENVELOPE_MAGIC: &[u8; 5] = b"HVEP1";
+
+/// The compact container's wire shape.
+///
+/// Deliberately a SEPARATE type from [`EpochEnvelope`] rather than a `#[derive]` on it. postcard is
+/// non-self-describing — struct fields are positional with no names on the wire — so the
+/// `skip_serializing_if` that keeps `ratchet` off the JSON wire when absent would emit six fields
+/// here and then expect seven on the way back in. Encoding `ratchet` unconditionally costs one byte
+/// for the `None` case and makes the round-trip total. `postcard_wire_survives_an_absent_ratchet`
+/// is the regression test.
+#[derive(Serialize, Deserialize)]
+struct EpochEnvelopeWire {
+    circle_id: String,
+    epoch: u64,
+    salt: Vec<u8>,
+    sender: Vec<u8>,
+    ciphertext: Vec<u8>,
+    signature: Vec<u8>,
+    ratchet: Option<u32>,
+}
+
 /// An event sealed under a circle epoch key. No per-recipient wrapping — any holder of the epoch key
 /// opens it; a member excluded from that epoch cannot. Opaque to relays.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -157,10 +181,72 @@ impl EpochEnvelope {
     pub fn ratchet_index(&self) -> Option<u32> {
         self.ratchet
     }
+    /// Serialize in the LEGACY JSON container.
+    ///
+    /// Still the default on every send path this release. `serde_json` renders each `Vec<u8>` as an
+    /// array of decimal numbers, so the ~3.6 KB of real bytes in an envelope reach the wire as
+    /// ~12-13 KB of ASCII — see [`Self::to_bytes_compact`] for the fix and `docs/SATELLITE-DESIGN.md`
+    /// §6 for why it matters. Kept byte-for-byte as it was: the mailbox key is `SHA256` over exactly
+    /// these bytes, so changing what this emits moves every key in every mailbox.
     pub fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("epoch envelope serializes")
     }
+
+    /// Serialize in the COMPACT binary container (tagged postcard) — same envelope, ~3.5x fewer bytes.
+    ///
+    /// This is the [`crate::social::SealedEnvelope`] treatment applied to the container that never
+    /// got it. It is purely an encoding change:
+    ///
+    /// * **The cryptography is untouched.** The hybrid Ed25519 + ML-DSA-65 signature is computed over
+    ///   [`Self::transcript`], which hashes the FIELDS, not their serialized form. The same envelope
+    ///   encoded either way therefore carries the SAME signature bytes and verifies identically —
+    ///   `compact_container_does_not_touch_the_signature` proves it. Nothing here weakens, skips or
+    ///   re-derives any key; the ciphertext is copied across verbatim.
+    /// * **It is not yet emitted.** Callers keep using [`Self::to_bytes`] until every member of a
+    ///   circle can read this container (the `circle_fully_*_capable` pattern in
+    ///   `crate::device`). [`Self::from_bytes`] accepts it from today, which is what makes that
+    ///   later flip safe: read support ships first, write support follows.
+    pub fn to_bytes_compact(&self) -> Vec<u8> {
+        let wire = EpochEnvelopeWire {
+            circle_id: self.circle_id.clone(),
+            epoch: self.epoch,
+            salt: self.salt.clone(),
+            sender: self.sender.clone(),
+            ciphertext: self.ciphertext.clone(),
+            signature: self.signature.clone(),
+            ratchet: self.ratchet,
+        };
+        let mut out = Vec::with_capacity(EPOCH_ENVELOPE_MAGIC.len() + 96 + self.ciphertext.len());
+        out.extend_from_slice(EPOCH_ENVELOPE_MAGIC);
+        out.extend_from_slice(&postcard::to_allocvec(&wire).expect("epoch envelope serializes"));
+        out
+    }
+
+    /// Serialize under an explicit container choice. `compact = false` is byte-identical to
+    /// [`Self::to_bytes`] — the no-regression guarantee for the release that ships this OFF.
+    pub fn to_bytes_gated(&self, compact: bool) -> Vec<u8> {
+        if compact { self.to_bytes_compact() } else { self.to_bytes() }
+    }
+
+    /// Parse either container — compact if tagged, else legacy JSON.
+    ///
+    /// A JSON envelope always begins with `{`, which the tag never does, and the tag is checked
+    /// first. Every envelope already sitting in a mailbox or a local store is JSON and stays
+    /// readable forever.
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
+        if let Some(rest) = b.strip_prefix(EPOCH_ENVELOPE_MAGIC) {
+            let w: EpochEnvelopeWire =
+                postcard::from_bytes(rest).map_err(|_| CoreError::Encoding("malformed epoch envelope"))?;
+            return Ok(Self {
+                circle_id: w.circle_id,
+                epoch: w.epoch,
+                salt: w.salt,
+                sender: w.sender,
+                ciphertext: w.ciphertext,
+                signature: w.signature,
+                ratchet: w.ratchet,
+            });
+        }
         serde_json::from_slice(b).map_err(|_| CoreError::Encoding("malformed epoch envelope"))
     }
     /// Transcript the signature covers: binds circle + epoch + salt + sender + ciphertext.
@@ -398,6 +484,142 @@ mod tests {
             t,
             EventKind::Message { body: body.into() },
         )
+    }
+
+    #[test]
+    #[ignore = "measurement, not an assertion: cargo test -p haven-p2p --lib -- --ignored --nocapture"]
+    fn measure_container_sizes() {
+        let alice = member(1);
+        let key = new_epoch_key();
+        for (label, body) in [
+            ("one word", "hi"),
+            ("short DM", "running late, be there in ten"),
+            ("long DM", &"x".repeat(500)[..]),
+        ] {
+            let ev = post(&alice, 100, body);
+            let env = seal_event_in_epoch(&alice, "c1", 0, &key, &ev).unwrap();
+            let (j, c) = (env.to_bytes().len(), env.to_bytes_compact().len());
+            println!("{label:>9}: json {j:>6} B   compact {c:>6} B   ratio {:.2}x   saved {} B",
+                     j as f64 / c as f64, j - c);
+        }
+    }
+
+    // ── Compact container (docs/SATELLITE-DESIGN.md §6, stage S0) ────────────────────────────────
+
+    /// The whole safety argument for S0 in one test: re-encoding the container does not touch the
+    /// hybrid post-quantum signature, because the transcript hashes fields and not their serialized
+    /// form. Same envelope, two containers, identical signature bytes — and the compact one still
+    /// opens and authenticates under the real verify path.
+    #[test]
+    fn compact_container_does_not_touch_the_signature() {
+        let alice = member(1);
+        let key = new_epoch_key();
+        let ev = post(&alice, 100, "hello circle");
+        let env = seal_event_in_epoch(&alice, "c1", 0, &key, &ev).unwrap();
+
+        let via_json = EpochEnvelope::from_bytes(&env.to_bytes()).unwrap();
+        let via_compact = EpochEnvelope::from_bytes(&env.to_bytes_compact()).unwrap();
+
+        // The signed transcript — and therefore the Ed25519 ‖ ML-DSA-65 signature over it — is
+        // identical across containers. The container is not an input to signing.
+        assert_eq!(via_json.transcript(), via_compact.transcript());
+        assert_eq!(via_json.signature, via_compact.signature);
+        assert_eq!(via_json.signature, env.signature);
+        assert_eq!(via_json.ciphertext, via_compact.ciphertext);
+
+        // And the full verify+decrypt path accepts the compact-encoded envelope unchanged.
+        assert_eq!(
+            open_event_in_epoch(&alice.public(), &key, &via_compact, false).unwrap(),
+            ev
+        );
+
+        // A forged signature is still rejected through the compact container — the container is not
+        // a way around authentication.
+        let mut tampered = via_compact.clone();
+        tampered.signature[0] ^= 0xff;
+        assert!(open_event_in_epoch(&alice.public(), &key, &tampered, false).is_err());
+    }
+
+    /// postcard is non-self-describing, so an omitted field desynchronises every field after it.
+    /// `ratchet` is `skip_serializing_if` on the JSON wire; the compact wire must encode it always.
+    /// Both the absent and present cases have to survive a round trip.
+    #[test]
+    fn postcard_wire_survives_an_absent_ratchet() {
+        let alice = member(1);
+        let key = new_epoch_key();
+        let ev = post(&alice, 7, "no ratchet here");
+
+        // Absent (feed / legacy / re-seal backstop).
+        let plain = seal_event_in_epoch(&alice, "c1", 0, &key, &ev).unwrap();
+        assert_eq!(plain.ratchet_index(), None);
+        let back = EpochEnvelope::from_bytes(&plain.to_bytes_compact()).unwrap();
+        assert_eq!(back.ratchet_index(), None);
+        assert_eq!(back.circle_id, plain.circle_id);
+        assert_eq!(back.epoch, plain.epoch);
+        assert_eq!(back.signature, plain.signature);
+        assert_eq!(back.ciphertext, plain.ciphertext);
+
+        // Present (the ratcheting DM lane).
+        let mut mk = [9u8; 32];
+        let ratcheted = seal_event_ratcheted(&alice, "c1", 0, &mk, 5, &ev).unwrap();
+        mk = [0u8; 32];
+        let _ = mk;
+        assert_eq!(ratcheted.ratchet_index(), Some(5));
+        let back = EpochEnvelope::from_bytes(&ratcheted.to_bytes_compact()).unwrap();
+        assert_eq!(back.ratchet_index(), Some(5));
+        assert_eq!(back.signature, ratcheted.signature);
+    }
+
+    /// The point of the exercise. Also pins the legacy container byte-for-byte: the mailbox key is
+    /// `SHA256` over these bytes, so `to_bytes()` drifting would silently move every mailbox key.
+    #[test]
+    fn compact_container_is_much_smaller_and_legacy_is_unchanged() {
+        let alice = member(1);
+        let key = new_epoch_key();
+        let ev = post(&alice, 100, "hi");
+        let env = seal_event_in_epoch(&alice, "c1", 0, &key, &ev).unwrap();
+
+        let json = env.to_bytes();
+        let compact = env.to_bytes_compact();
+
+        // Legacy is still exactly what serde_json produces — no accidental reformat.
+        assert_eq!(json, serde_json::to_vec(&env).unwrap(), "legacy container must not drift");
+        // The gate defaults to the legacy container.
+        assert_eq!(env.to_bytes_gated(false), json);
+        assert_eq!(env.to_bytes_gated(true), compact);
+
+        assert!(compact.starts_with(EPOCH_ENVELOPE_MAGIC), "compact envelopes carry the tag");
+        assert_eq!(json[0], b'{', "legacy envelopes are JSON objects");
+
+        // A one-word DM: ~12 KB of ASCII becomes ~3.6 KB of binary. Assert a conservative 3x so the
+        // test pins the property rather than an exact build-dependent size.
+        assert!(
+            compact.len() * 3 < json.len(),
+            "compact {} B should be >3x smaller than json {} B",
+            compact.len(),
+            json.len()
+        );
+    }
+
+    /// Read support has to land before write support, or an upgraded sender breaks delivery to
+    /// everyone still on the old container. Both directions must parse, today.
+    #[test]
+    fn both_containers_parse_after_the_change() {
+        let alice = member(1);
+        let key = new_epoch_key();
+        let ev = post(&alice, 42, "either container");
+        let env = seal_event_in_epoch(&alice, "c1", 3, &key, &ev).unwrap();
+
+        for wire in [env.to_bytes(), env.to_bytes_compact()] {
+            let parsed = EpochEnvelope::from_bytes(&wire).unwrap();
+            assert_eq!(open_event_in_epoch(&alice.public(), &key, &parsed, false).unwrap(), ev);
+        }
+
+        // Garbage that merely starts with the tag is a clean error, not a panic.
+        let mut junk = EPOCH_ENVELOPE_MAGIC.to_vec();
+        junk.extend_from_slice(b"not postcard");
+        assert!(EpochEnvelope::from_bytes(&junk).is_err());
+        assert!(EpochEnvelope::from_bytes(b"").is_err());
     }
 
     #[test]

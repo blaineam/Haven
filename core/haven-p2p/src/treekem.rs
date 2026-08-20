@@ -3418,7 +3418,7 @@ mod m1_tests {
 
         // Helper: member `sender` commits a path at `epoch`; every other tracked private
         // decrypts, agrees on the commit secret, and merges.
-        let mut commit_path = |tree: &mut RatchetTree,
+        let commit_path = |tree: &mut RatchetTree,
                                privs: &mut BTreeMap<u32, TreePrivate>,
                                sender: u32,
                                epoch: u64| {
@@ -4202,7 +4202,7 @@ mod m1_tests {
         let mut replicas: Vec<Replica> = (0..POOL).map(|_| Replica { known: BTreeMap::new(), inbox: Vec::new() }).collect();
         let mut partitioned = vec![false; POOL];
 
-        let mut publish = |world: &World, replicas: &mut Vec<Replica>, author: usize, h: [u8; 32]| {
+        let publish = |world: &World, replicas: &mut Vec<Replica>, author: usize, h: [u8; 32]| {
             replicas[author].known.insert(h, world.commits[&h].clone());
             for (r, rep) in replicas.iter_mut().enumerate() {
                 if r != author {

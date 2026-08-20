@@ -639,7 +639,7 @@ mod tests {
     /// device, while an authorized device (holding the CURRENT key) converges normally.
     #[test]
     fn rotation_cuts_a_revoked_device_from_self_sync() {
-        let seed_key = [9u8; 32]; // the account's v0 seed-derived key
+        let _seed_key = [9u8; 32]; // the account's v0 seed-derived key
         let epoch1 = [11u8; 32]; // key granted at epoch 1 (revoked device also held this)
         let epoch2 = [22u8; 32]; // key minted on revocation; granted ONLY to still-authorized devices
 

@@ -24,7 +24,8 @@ final class PerceptualHashTests: XCTestCase {
     /// A gradient with structure — the sort of thing a photo is, as far as a 9x8 downsample cares.
     private func photo(seed: Int) -> CGImage {
         image(64, 64) { x, y in
-            UInt8((x &* 3 &+ y &* 5 &+ seed &* 37) % 256)
+            let v: Int = x &* 3 &+ y &* 5 &+ seed &* 37
+            return UInt8(v % 256)
         }
     }
 
@@ -38,8 +39,17 @@ final class PerceptualHashTests: XCTestCase {
     /// THE CASE THE WHOLE THING EXISTS FOR: the same picture at a different SIZE — which is what a
     /// re-encode through the importer's optimizer produces, and where a byte hash gives up.
     func testTheSamePictureAtADifferentScaleStillMatches() {
-        let big = image(128, 128) { x, y in UInt8((x / 2 &* 3 &+ y / 2 &* 5) % 256) }
-        let small = image(64, 64) { x, y in UInt8((x &* 3 &+ y &* 5) % 256) }
+        // Written as typed statements rather than one expression on purpose: the single-expression
+        // form mixed `/`, `&*`, `&+` and `%` inside a `UInt8` init, and the compiler gave up
+        // type-checking it in reasonable time — which failed the whole test target in CI.
+        let big = image(128, 128) { x, y in
+            let v: Int = (x / 2) &* 3 &+ (y / 2) &* 5
+            return UInt8(v % 256)
+        }
+        let small = image(64, 64) { x, y in
+            let v: Int = x &* 3 &+ y &* 5
+            return UInt8(v % 256)
+        }
         guard let a = PerceptualHash.dHash(big), let b = PerceptualHash.dHash(small) else {
             return XCTFail("hashing failed")
         }
@@ -50,7 +60,10 @@ final class PerceptualHashTests: XCTestCase {
 
     func testDifferentPicturesDoNotMatch() {
         guard let a = PerceptualHash.dHash(photo(seed: 1)),
-              let b = PerceptualHash.dHash(image(64, 64) { x, y in UInt8((x &* 11 &+ y &* 2) % 256) })
+              let b = PerceptualHash.dHash(image(64, 64) { x, y in
+                  let v: Int = x &* 11 &+ y &* 2
+                  return UInt8(v % 256)
+              })
         else { return XCTFail("hashing failed") }
         XCTAssertFalse(PerceptualHash.looksLikeTheSamePicture(a, b),
                        "two different images matched at \(PerceptualHash.distance(a, b)) bits")

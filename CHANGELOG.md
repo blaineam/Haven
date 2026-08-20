@@ -9,6 +9,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Apple logic-test suite compiles again in CI.** It had been failing on every push since the
+  carousel work — not a failing assertion, but the Swift type checker giving up on a single
+  expression in the perceptual-hash tests: one `UInt8(…)` initialiser wrapping a mix of `/`, `&*`,
+  `&+` and `%`, which leaves it enumerating integer overloads until it times out. The whole target
+  fails to build, so all 81 tests were cancelled rather than run, and a red suite that stays red
+  stops being read.
+
+  Rewritten as typed statements. Worth recording that this does **not** reproduce on a fast local
+  machine — the suite passed there both before and after — so the fix was verified against CI, not
+  against a green run locally that proved nothing.
+
 ### Added — all platforms (low data mode)
 
 - **Android now declares itself satellite-optimised.** A one-line manifest declaration is what gets

@@ -9,6 +9,29 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Docs
+
+- **A design spike for carrying Haven over LoRa radio.** [`docs/LORA-DESIGN.md`](docs/LORA-DESIGN.md)
+  works out what off-grid text messaging between two people with no internet, no cellular and no
+  Wi-Fi would actually take. Nothing is implemented; the document exists because the arithmetic
+  decides the feature, and the arithmetic is unflattering.
+
+  A one-word direct message is about twelve kilobytes on the wire. A radio packet carries roughly
+  two hundred bytes. Two things account for almost all of the difference: the epoch envelope is
+  still serialised as JSON, which renders every byte of ciphertext as three or four characters of
+  ASCII — the same waste that was found and fixed for sealed media envelopes but never for this one
+  — and ninety-three percent of what remains is the post-quantum half of the signature. Fixing the
+  encoding is worth doing on its own, for every message on every transport, and the spike proposes
+  it as a stage that ships independently of any radio.
+
+  The rest of the document is honest about what the link cannot do rather than optimistic about what
+  it might. You cannot meet someone new out there — an identity is thirty-two hundred bytes and
+  buying the post-quantum property is exactly what makes it too large to send. If a circle rotated
+  its keys while you were away, that conversation stays dark until someone reaches the internet.
+  And a radio transmitting is a beacon that anyone within kilometres can hear, which is a worse
+  position than any transport Haven has today and belongs in front of the user before they switch
+  it on, not in a support thread afterwards.
+
 ## [1.5.0] — 2026-08-14
 
 ### Changed — Apple (history arrives as it is read)

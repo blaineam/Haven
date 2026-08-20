@@ -744,7 +744,7 @@ object HavenNet : InboundListener {
                 android.os.PowerManager.THERMAL_STATUS_MODERATE -> mult = (mult * 3) / 2
             }
         }
-        if (runCatching { ProfileStore.get(appContext).superDataSaver }.getOrDefault(false)) {
+        if (runCatching { ProfileStore.get(appContext).dataSaverActive }.getOrDefault(false)) {
             mult = (mult * 3) / 2
         }
         return base * mult.coerceAtLeast(1L)
@@ -1394,7 +1394,7 @@ object HavenNet : InboundListener {
             // banner is the news; this is just its media arriving on time. Apple parity.
             if (LocalMedia.isSynthetic(f.ref) || LocalMedia.has(f.ref) ||
                 EvictedMediaStore.contains(f.ref)) return
-            val saver = runCatching { ProfileStore.get(appContext).superDataSaver }.getOrDefault(false)
+            val saver = runCatching { ProfileStore.get(appContext).dataSaverActive }.getOrDefault(false)
             if (saver && !(f.ref.startsWith("img_") || f.ref.startsWith("i:") ||
                     f.ref.startsWith("aud_") || f.ref.startsWith("a:") || f.ref.startsWith("file_"))) return
             val now = System.currentTimeMillis()
@@ -1943,7 +1943,7 @@ object HavenNet : InboundListener {
         // banner. Concurrent with the notify below (the restore queue drains off this thread);
         // covers both the FGS ingest path (handleEvent → here) and the SyncWorker poll.
         run {
-            val saver = runCatching { ProfileStore.get(appContext).superDataSaver }.getOrDefault(false)
+            val saver = runCatching { ProfileStore.get(appContext).dataSaverActive }.getOrDefault(false)
             val wanted = if (saver) MediaVariants.dataSaverPrefetchRefs(newest.media) else newest.media
             val ordered = MediaVariants.allThumbs(newest.media) +
                 newest.media.mapNotNull { MediaVariants.parsePoster(it)?.second } + wanted

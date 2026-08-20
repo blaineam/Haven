@@ -52,6 +52,19 @@ class ProfileStore private constructor(context: Context) {
         get() = _superDataSaver.value
         set(v) { _superDataSaver.value = v; prefs.edit().putBoolean(KEY_DATA_SAVER, v).apply() }
 
+    /**
+     * The data-saver state the feed and media layers should actually obey (iOS
+     * `SettingsStore.dataSaverActive`).
+     *
+     * `superDataSaver` is the manual switch; this ORs it with what the network is doing. On a
+     * metered, bandwidth-constrained or satellite link the core's policy table says media may not be
+     * fetched without an explicit tap (`docs/SATELLITE-DESIGN.md` §5), and that has to bind whether
+     * or not the user ever found the switch. Read THIS, never `superDataSaver`, wherever the
+     * decision is "should I pull bytes".
+     */
+    val dataSaverActive: Boolean
+        get() = superDataSaver || LowDataMonitor.mediaNeedsExplicitTap
+
     /** Also keep camera original beside optimized video (iOS sendOriginal). Device-local. */
     private val _sendOriginal = mutableStateOf(prefs.getBoolean(KEY_SEND_ORIGINAL, false))
     var sendOriginal: Boolean

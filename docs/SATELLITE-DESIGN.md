@@ -52,6 +52,29 @@ it is measurable, and it is what makes a carrier submission a data-backed pitch 
 ask. Admission to T-Satellite is then a separate negotiation that Haven either wins or does not,
 with the engineering already banked either way.
 
+### 0.2 What has landed (as of 1.6.0)
+
+The mode exists and is on by default in its automatic setting. Concretely:
+
+* **The compact container (S0), read-side.** Measured **12,953 B → 3,632 B**, a 3.57x reduction, on
+  a one-word DM. Nothing emits it yet — see the table in §8 for why that ordering is mandatory.
+* **The constraint signal (S3).** `haven_p2p::transport::LinkConstraint` — normal / low / ultra —
+  fed by `NWPath.isUltraConstrained` + `linkQuality` on Apple and
+  `NET_CAPABILITY_NOT_BANDWIDTH_CONSTRAINED` + `TRANSPORT_SATELLITE` on Android, both behind
+  availability gates against the iOS 17 / `minSdk` 29 floors.
+* **The policy table (S4).** `haven_p2p::transport::allowance` is §5 as code, and it is the *single*
+  table all three clients consult. Apple and Android reach it over UniFFI; the Tauri desktop links
+  `haven-p2p` directly and calls it with no FFI hop at all. A test sweeps every link-by-traffic cell
+  and requires the FFI mirror to agree with the source, because a hand-written mirror is the one
+  thing that can silently rot.
+* **User control.** A three-way preference — automatic (follow the network), always on, off — on all
+  three platforms. "Off" is honoured everywhere except a genuinely ultra-constrained bearer, which
+  is not a preference: the OS will refuse the traffic regardless, so the mode stays on and the UI
+  explains rather than letting sends fail mysteriously.
+
+Still open: the governor (§6.3), the write-side flip of S0 behind a fully-capable-circle gate, and
+the push question in §7.
+
 ---
 
 ## 1. Goal and non-goals
@@ -265,12 +288,19 @@ This is a maker call, not an engineering default. If the answer is no, S0–S3 s
 Modelled directly on [`LORA-DESIGN.md` §6](LORA-DESIGN.md). These are hard rejections at the policy
 layer, not rate limits, because a rate-limited 8 MiB chunk is still an 8 MiB chunk eventually.
 
+The table below is the **`Ultra`** tier — a satellite bearer. The implementation also has a softer
+**`Low`** tier for a metered hotspot or a bandwidth-constrained cell, where a conversation still
+feels like a conversation: text, reactions, typing and calls all continue, thumbnails still load,
+and what stops is the speculative and the bulky (stories, link previews, history backfill,
+self-sync). `haven_p2p::transport::allowance` is the authoritative version of both tiers; a test
+asserts the policy can never be *more* permissive at `Ultra` than at `Low`.
+
 | Traffic | On satellite | Why |
 |---|---|---|
 | Text messages (send + receive) | **Allowed** | The entire point. |
 | Reactions, read receipts, typing indicators | **Rejected** | Typing indicators in particular are the worst byte-per-meaning ratio Haven has. |
 | Media upload / download (photo, video, voice note) | **Rejected**, with explicit per-item override | 8 MiB chunks (`apple/HavenApp/SharedStore.swift:543`); `MAX_BLOB` is 256 MB. |
-| Thumbnails and avatars | **Rejected** | Cache before departure; show initials. |
+| Thumbnails and avatars | **Rejected** | Cache before departure; show initials. **Allowed on the softer `Low` tier** — they are small, and a feed with no pictures is a broken feed rather than a thrifty one. The aggregate only matters at satellite scale. |
 | Link previews | **Rejected** | Already tap-to-load by design. |
 | Stories | **Rejected** | Media by definition. |
 | Calls (WebRTC) | **Rejected** | Pass-scale availability is not a call. |
@@ -369,11 +399,11 @@ Test this before writing any of S4.
 
 | Stage | What | Proof obligation | Ships alone? |
 |---|---|---|---|
-| **S0** | Postcard the `EpochEnvelope` container (= LoRa L0) | Round-trip tests across versions; measured wire size before/after on a real DM; no change to sealed-payload bytes | **Yes** — do this regardless |
+| **S0** ✅ | Postcard the `EpochEnvelope` container (= LoRa L0) — **landed, read-side** | Done: 12,953 B → 3,632 B measured (3.57x); `compact_container_does_not_touch_the_signature` proves the hybrid signature is byte-identical across containers; `to_bytes()` pinned byte-identical because the mailbox key hashes it | **Yes** — done |
 | **S1** | Signature profile decision (= LoRa L1) | Not recommended for satellite; see §6.2 | Deferred |
 | **S2** | Container elision + trial decryption (= LoRa L2) | Trial-decrypt cost bounded at realistic circle sizes | Yes |
-| **S3** | Constrained-path signal into core | `NWPath.isUltraConstrained` + `linkQuality` (iOS 26+, guarded) and `NET_CAPABILITY_NOT_BANDWIDTH_CONSTRAINED` + `TRANSPORT_SATELLITE` (API 36+, guarded) plumbed through FFI to a single `TransportConstraint` in `haven-net`; unit tests for the pre-26 / pre-36 fallback paths | Yes — useful on bad cellular immediately |
-| **S4** | Satellite-mode policy layer (§5) | Every rejected category has a test proving it does not emit bytes when the constraint is set; the media override shows a cost estimate before sending | No — needs S3 |
+| **S3** ✅ | Constrained-path signal into core — **landed** | `NWPath.isUltraConstrained` + `linkQuality` (iOS 26+, guarded) and `NET_CAPABILITY_NOT_BANDWIDTH_CONSTRAINED` + `TRANSPORT_SATELLITE` (API 36+, guarded) plumbed through FFI to a single `TransportConstraint` in `haven-net`; unit tests for the pre-26 / pre-36 fallback paths | Yes — useful on bad cellular immediately |
+| **S4** ✅ | Satellite-mode policy layer (§5) — **landed** | Every rejected category has a test proving it does not emit bytes when the constraint is set; the media override shows a cost estimate before sending | No — needs S3 |
 | **S5** | The governor (§6.3) | Measured bytes per pass against a hard ceiling; conditional LIST verified to produce `204` on an unchanged mailbox; no keepalives observed across an idle window | No — needs S4 |
 | **S6** | Platform opt-in + UI | `nw_parameters_set_allow_ultra_constrained` set only on satellite-approved connections; Android manifest `PROPERTY_SATELLITE_DATA_OPTIMIZED`; a banner stating the mode and a live byte counter; `NSURLErrorNetworkUnavailableReasonUltraConstrained` handled as a real state, not a generic failure | No — last |
 

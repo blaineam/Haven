@@ -328,7 +328,7 @@ final class FeedStore: ObservableObject {
         #if os(iOS)
         mult *= ThermalPolicy.intervalMultiplier   // .fair ×2 / .serious+ ×4 — centralized policy
         #endif
-        if SettingsStore.shared.superDataSaver { mult = mult * 2 }
+        if SettingsStore.shared.dataSaverActive { mult = mult * 2 }
         return base * max(1, mult)
     }
 
@@ -4723,7 +4723,7 @@ final class FeedStore: ObservableObject {
     @MainActor func requestMissingDMMedia(_ circleId: String) {
         let recent = messages(in: circleId).sorted { $0.createdAt > $1.createdAt }.prefix(8)
         var budget = 4
-        let dataSaver = SettingsStore.shared.superDataSaver
+        let dataSaver = SettingsStore.shared.dataSaverActive
         for item in recent {
             let candidates = dataSaver
                 ? MediaVariants.dataSaverPrefetchRefs(item.media)
@@ -6295,7 +6295,7 @@ final class FeedStore: ObservableObject {
             // the POST's banner is the news; this is just its media arriving on time.
             guard !MediaStore.isSynthetic(ref), !MediaStore.shared.has(ref),
                   !EvictedMediaStore.shared.contains(ref) else { return }
-            if SettingsStore.shared.superDataSaver,
+            if SettingsStore.shared.dataSaverActive,
                !(ref.hasPrefix("img_") || ref.hasPrefix("i:") || ref.hasPrefix("aud_")
                  || ref.hasPrefix("a:") || ref.hasPrefix("file_")) { return }
             let nowMs = now()
@@ -6662,7 +6662,7 @@ final class FeedStore: ObservableObject {
         // "Download" tap (downloadEvicted clears the eviction first). Still fetch media never seen yet.
         // Skip session-unopenable refs: the bytes ARE on a relay and can't be decrypted — re-pulling
         // the same bad blob every sweep repaired nothing and cost a full download each time.
-        let dataSaver = SettingsStore.shared.superDataSaver
+        let dataSaver = SettingsStore.shared.dataSaverActive
         var missing: [String: (circleId: String, fresh: Bool)] = [:]
         var thumbs: [String: String] = [:]   // thumb image ref → circle (prefetched unconditionally)
         func scan(_ item: FeedItemFfi, circleId: String) {

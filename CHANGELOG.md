@@ -9,6 +9,41 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — all platforms (low data mode)
+
+- **Haven now notices when the network can't afford what it was about to do.** On a metered hotspot,
+  a bandwidth-constrained cell, or a satellite bearer, it sends your text and holds the rest back
+  until you ask. There is a three-way switch in Settings — automatic, always on, off — and automatic
+  is the default, so it works without anyone finding it.
+
+  What each level does is a deliberate choice rather than a slider. On a merely metered link a
+  conversation still feels like a conversation: text, reactions, typing and calls all carry on, and
+  thumbnails still load, because a feed with no pictures in it is a broken feed and not a thrifty
+  one. What stops is the speculative and the bulky — stories, link previews, older history you
+  haven't scrolled to, and syncing with your own other devices. On a satellite link only text moves,
+  plus the key material needed to decrypt it. Photos and videos sit between the two at both levels:
+  never fetched behind your back, never silently dropped, always available if you tap them. Silent
+  refusal is worse than an informed expensive choice.
+
+  **Nothing about the encryption changes at any level.** Every message is sealed exactly as before,
+  with the same hybrid Ed25519 and ML-DSA-65 post-quantum protection, whether it crosses fibre or a
+  satellite. Low data mode decides *whether* to send bytes, never how they are protected.
+
+  "Off" is honoured everywhere except a genuinely ultra-constrained bearer, where it stays on and the
+  UI says why — the operating system will refuse that traffic regardless, and an explanation beats a
+  send that fails for no visible reason.
+
+  The detection uses what Apple and Google actually shipped rather than what was announced. Apple's
+  is the ultra-constrained path family from iOS 26 — there is no satellite framework, and the one
+  reported for iOS 27 is not in the beta SDK. Android's is the API 36 bandwidth-constrained
+  capability plus the satellite transport. Both sit behind availability gates, so the iOS 17 and
+  Android 10 floors are untouched.
+
+  The rule for what may cross lives in the shared Rust core, and all three clients ask the same
+  function: iPhone and Android over the FFI, the Tauri desktop by linking the core directly. That is
+  the point — a policy written three times is three policies. A test sweeps every combination of
+  link and traffic kind and requires the FFI mirror to agree with the source on all of them.
+
 ### Core (low-data mode, stage S0)
 
 - **One policy table, consulted by both platforms.** Low-data mode now has a definition rather than

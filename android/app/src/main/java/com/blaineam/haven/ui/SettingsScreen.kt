@@ -208,6 +208,41 @@ fun SettingsScreen(onBack: () -> Unit) {
                 SettingSwitch(stringResource(R.string.settings_also_send_original), profile.sendOriginal) { profile.sendOriginal = it }
                 SettingSwitch(stringResource(R.string.settings_super_data_saver), profile.superDataSaver) { profile.superDataSaver = it }
                 Spacer(Modifier.height(8.dp))
+                Text(stringResource(R.string.settings_low_data_header), color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Spacer(Modifier.height(4.dp))
+                Text(stringResource(R.string.settings_low_data_desc), color = HavenTheme.textSecondary, fontSize = 12.sp)
+                Spacer(Modifier.height(4.dp))
+                // The picker mirrors iOS `LowDataMonitor.Preference`; the POLICY it feeds lives in
+                // the shared Rust core, so the two clients cannot disagree about what it means.
+                val lowDataOptions = listOf(
+                    com.blaineam.haven.core.LowDataMonitor.Preference.AUTOMATIC to stringResource(R.string.settings_low_data_automatic),
+                    com.blaineam.haven.core.LowDataMonitor.Preference.ALWAYS to stringResource(R.string.settings_low_data_always),
+                    com.blaineam.haven.core.LowDataMonitor.Preference.OFF to stringResource(R.string.settings_low_data_off),
+                )
+                var lowDataPref by remember { mutableStateOf(com.blaineam.haven.core.LowDataMonitor.preference) }
+                lowDataOptions.forEach { (value, label) ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        androidx.compose.material3.RadioButton(
+                            selected = lowDataPref == value,
+                            onClick = {
+                                com.blaineam.haven.core.LowDataMonitor.preference = value
+                                lowDataPref = value
+                            },
+                        )
+                        Text(label, color = HavenTheme.textPrimary, fontSize = 14.sp)
+                    }
+                }
+                when (com.blaineam.haven.core.LowDataMonitor.effective.value) {
+                    uniffi.haven_ffi.LinkConstraint.ULTRA ->
+                        Text(stringResource(R.string.settings_low_data_now_ultra), color = HavenTheme.textSecondary, fontSize = 12.sp)
+                    uniffi.haven_ffi.LinkConstraint.LOW ->
+                        Text(stringResource(R.string.settings_low_data_now_low), color = HavenTheme.textSecondary, fontSize = 12.sp)
+                    else -> {}
+                }
+                Spacer(Modifier.height(8.dp))
                 Text(stringResource(R.string.settings_notification_previews), color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                 Spacer(Modifier.height(4.dp))
                 Text(stringResource(R.string.settings_notification_previews_desc), color = HavenTheme.textSecondary, fontSize = 12.sp)

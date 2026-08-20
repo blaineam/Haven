@@ -333,6 +333,13 @@ pub struct Prefs {
     /// Super data saver — device-local (Apple parity).
     #[serde(default)]
     pub super_data_saver: bool,
+    /// Low-data level: `"normal"` | `"low"` | `"ultra"` (docs/SATELLITE-DESIGN.md §5). Device-local.
+    ///
+    /// Desktop has no path monitor, so this is chosen rather than detected — see
+    /// `commands::low_data_state`. `None` means never set, which resolves to `"normal"` unless
+    /// [`Self::super_data_saver`] is on.
+    #[serde(default)]
+    pub low_data_level: Option<String>,
     /// Also send original media companions when attaching (Apple parity).
     #[serde(default)]
     pub send_original: bool,

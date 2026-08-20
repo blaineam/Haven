@@ -1352,7 +1352,7 @@ private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, pl
     val dataSaver = runCatching {
         com.blaineam.haven.core.ProfileStore.get(
             androidx.compose.ui.platform.LocalContext.current
-        ).superDataSaver
+        ).dataSaverActive
     }.getOrDefault(false)
     // Observe download progress so a super-data-saver poster tap re-renders into play once bytes land.
     com.blaineam.haven.core.HavenNet.downloadingMedia
@@ -2385,7 +2385,7 @@ fun PostCard(
                 val dataSaver = runCatching {
                     com.blaineam.haven.core.ProfileStore.get(
                         androidx.compose.ui.platform.LocalContext.current
-                    ).superDataSaver
+                    ).dataSaverActive
                 }.getOrDefault(false)
                 MediaGallery(
                     circleId,

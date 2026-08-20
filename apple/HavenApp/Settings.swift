@@ -22,6 +22,17 @@ final class SettingsStore: ObservableObject {
     /// "Show original" in a post's menu downloads the uncompressed companion if the author sent one.
     /// Not synced: data saver is about *this* device's radio and storage, not the account.
     @Published var superDataSaver: Bool { didSet { d.set(superDataSaver, forKey: kDataSaver) } }
+
+    /// The data-saver state the FEED and media layers should actually obey.
+    ///
+    /// `superDataSaver` above is the manual switch; this ORs it with what the network is doing. When
+    /// the path is metered, in Low Data Mode, or on a satellite bearer, the core's policy table says
+    /// media may not be fetched without an explicit tap (`docs/SATELLITE-DESIGN.md` §5) — and that
+    /// has to bind whether or not the user ever found the switch. Read this, never `superDataSaver`,
+    /// at any call site deciding whether to pull bytes.
+    var dataSaverActive: Bool {
+        superDataSaver || LowDataMonitor.shared.mediaNeedsExplicitTap
+    }
     #if os(macOS)
     /// Hold a power assertion while hosting a relay so the Mac doesn't sleep out from under the
     /// circle (Power Nap can't keep third-party sockets alive). DEVICE-LOCAL, default ON.
@@ -215,6 +226,7 @@ enum PhotoSaver {
 }
 
 struct SettingsView: View {
+    @ObservedObject private var lowData = LowDataMonitor.shared
     let account: Account
     let accountStore: AccountStore
     var onReset: () -> Void
@@ -270,6 +282,26 @@ struct SettingsView: View {
                         .tint(HavenTheme.pink)
                 } footer: {
                     Text("Shares a smaller copy by default and always strips location.")
+                }
+                Section {
+                    Picker("Low data mode", selection: $lowData.preference) {
+                        ForEach(LowDataMonitor.Preference.allCases) { p in
+                            Text(p.label).tag(p)
+                        }
+                    }
+                    if lowData.effective != .normal {
+                        Label(lowData.statusDescription,
+                              systemImage: lowData.isUltraConstrained
+                                  ? "antenna.radiowaves.left.and.right"
+                                  : "tortoise")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } header: { Text("Low data") }
+                footer: {
+                    Text(lowData.effective == .normal
+                         ? lowData.statusDescription
+                         : "On a metered or satellite link Haven sends text and holds everything else back. Photos and videos still go through when you tap them — you'll see what they cost first. Messages stay end-to-end encrypted with the same post-quantum protection either way.")
                 }
                 Section {
                     Button {

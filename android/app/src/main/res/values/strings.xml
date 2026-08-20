@@ -346,6 +346,13 @@
     <string name="settings_auto_optimize_media">Auto-optimize media (smaller, faster)</string>
     <string name="settings_also_send_original">Also send original</string>
     <string name="settings_super_data_saver">Super data saver</string>
+    <string name="settings_low_data_header">Low data</string>
+    <string name="settings_low_data_desc">On a metered or satellite link Haven sends text and holds everything else back. Photos and videos still go through when you tap them. Messages stay end-to-end encrypted with the same post-quantum protection either way.</string>
+    <string name="settings_low_data_automatic">Automatic — follow the network</string>
+    <string name="settings_low_data_always">Always on</string>
+    <string name="settings_low_data_off">Off</string>
+    <string name="settings_low_data_now_low">This network is metered or bandwidth-constrained.</string>
+    <string name="settings_low_data_now_ultra">Satellite or ultra-constrained link — text only.</string>
     <string name="settings_notification_previews">Notification previews</string>
     <string name="settings_notification_previews_desc">How much detail banners show on the lock screen (iOS parity).</string>
     <string name="settings_notif_full_previews">Full previews</string>

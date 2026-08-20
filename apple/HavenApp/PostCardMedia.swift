@@ -365,7 +365,7 @@ struct PostMediaView: View {
         // Decide from the REF + a cheap file check, never `item(ref)`: that decodes the bitmap / generates
         // the video poster ON THE MAIN THREAD on a cache miss, and this runs for every page of every media
         // post — a 3-video carousel paid three decodes per layout pass, which is the carousel/grid jitter.
-        let dataSaver = SettingsStore.shared.superDataSaver
+        let dataSaver = SettingsStore.shared.dataSaverActive
         let hasVideo = MediaStore.shared.hasLocalFile(ref)
         // Super data saver + video not yet downloaded: show the poster still (if we have one) with a
         // play affordance. Tapping play requests the video bytes and only then builds an AVPlayer.
@@ -500,7 +500,7 @@ struct PostMediaView: View {
     }
 
     func dataSaverVideoTap(_ ref: String, _ player: AVPlayer) {
-        if SettingsStore.shared.superDataSaver, player.rate == 0 {
+        if SettingsStore.shared.dataSaverActive, player.rate == 0 {
             startDataSaverPlayback(ref, player)
             return
         }
@@ -608,9 +608,9 @@ struct PostMediaView: View {
     func syncPlayback() {
         if isActive {
             // Super data saver: no autoplay of attached music either — only the poster still loads.
-            let track = SettingsStore.shared.superDataSaver ? nil : item.music
+            let track = SettingsStore.shared.dataSaverActive ? nil : item.music
             audio.start(postId: item.id, track: track, video: nil, muteVideo: item.muteVideo)
-            if !SettingsStore.shared.superDataSaver {
+            if !SettingsStore.shared.dataSaverActive {
                 audio.ensureMusicPlaying()   // resume the song if a video had paused it
             }
             playVisibleVideo()
@@ -638,7 +638,7 @@ struct PostMediaView: View {
             : media[min(max(currentPage, 0), media.count - 1)]
         // Super data saver: never autoplay *unless* the user explicitly tapped play on this ref
         // (poster → download → pending). Keep a clip they already started; pause everything else.
-        if SettingsStore.shared.superDataSaver {
+        if SettingsStore.shared.dataSaverActive {
             for (ref, player) in bag.players {
                 let isVisible = ref == visibleRef
                 if isVisible, dataSaverPendingPlay.contains(ref) {

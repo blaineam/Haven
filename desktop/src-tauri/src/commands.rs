@@ -596,6 +596,90 @@ pub fn set_privacy_prefs(
     engine.set_privacy_prefs(notification_detail, super_data_saver, send_original);
 }
 
+// ---- low data mode (docs/SATELLITE-DESIGN.md §5) -------------------------------------------------
+//
+// The desktop backend links `haven-p2p` directly, so it reaches the SAME policy table the iPhone and
+// Android clients reach over UniFFI — no mirror to keep in step here.
+//
+// What desktop does NOT have is Apple's `NWPath.isUltraConstrained` or Android's
+// `NET_CAPABILITY_NOT_BANDWIDTH_CONSTRAINED`. Tauri runs on three OSes whose metered-network APIs
+// disagree, and a laptop on Ethernet is the common case, so detection here is the user's preference
+// rather than the network's opinion. That is an honest limitation, not a stub: a desktop on a phone
+// hotspot or a satellite terminal is a real scenario, and the switch covers it.
+
+/// The low-data preference, as chosen by the user. Mirrors `LowDataMonitor.Preference` on the
+/// mobile clients, minus `automatic` — there is nothing to automate from without a path monitor.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct LowDataDto {
+    /// `"normal"`, `"low"` or `"ultra"` — the constraint currently in force.
+    pub level: String,
+    /// True when anything is being held back.
+    pub active: bool,
+    /// One line for the UI.
+    pub description: String,
+}
+
+fn level_of(name: &str) -> haven_p2p::transport::LinkConstraint {
+    match name {
+        "ultra" => haven_p2p::transport::LinkConstraint::Ultra,
+        "low" => haven_p2p::transport::LinkConstraint::Low,
+        _ => haven_p2p::transport::LinkConstraint::Normal,
+    }
+}
+
+#[tauri::command]
+pub fn low_data_state(engine: Eng) -> LowDataDto {
+    let level = engine.low_data_level();
+    let parsed = level_of(&level);
+    LowDataDto {
+        active: parsed != haven_p2p::transport::LinkConstraint::Normal,
+        description: match parsed {
+            haven_p2p::transport::LinkConstraint::Ultra =>
+                "Satellite profile — text only. Photos and videos go through only when you ask for them."
+                    .into(),
+            haven_p2p::transport::LinkConstraint::Low =>
+                "Low data — stories, link previews, older history and device sync are paused.".into(),
+            haven_p2p::transport::LinkConstraint::Normal =>
+                "Full speed. Nothing is being held back.".into(),
+        },
+        level,
+    }
+}
+
+/// Set the low-data level: `"normal"`, `"low"` or `"ultra"`.
+#[tauri::command]
+pub fn set_low_data_level(engine: Eng, level: String) {
+    engine.set_low_data_level(&level);
+}
+
+/// What the shared policy permits for a traffic kind at the current level. Returns `"allow"`,
+/// `"ask_first"` or `"deny"` — the UI uses `ask_first` to offer an explicit "get it anyway".
+#[tauri::command]
+pub fn low_data_allowance(engine: Eng, traffic: String) -> String {
+    use haven_p2p::transport::Traffic::*;
+    let t = match traffic.as_str() {
+        "text" => Text,
+        "key_convergence" => KeyConvergence,
+        "presence" => Presence,
+        "media" => Media,
+        "thumbnail" => Thumbnail,
+        "link_preview" => LinkPreview,
+        "story" => Story,
+        "call" => Call,
+        "history_backfill" => HistoryBackfill,
+        "self_sync" => SelfSync,
+        "enrollment" => Enrollment,
+        // An unknown category must not silently become "allow" — treat it as media, the strictest
+        // thing a caller is plausibly asking about.
+        _ => Media,
+    };
+    match haven_p2p::transport::allowance(level_of(&engine.low_data_level()), t) {
+        haven_p2p::transport::Allowance::Allow => "allow".into(),
+        haven_p2p::transport::Allowance::AskFirst => "ask_first".into(),
+        haven_p2p::transport::Allowance::Deny => "deny".into(),
+    }
+}
+
 // ---- multi-device roster ----------------------------------------------------------------
 
 #[derive(serde::Serialize)]

@@ -1912,6 +1912,32 @@ impl Engine {
         )
     }
 
+    /// The low-data level in force (`"normal"` / `"low"` / `"ultra"`).
+    ///
+    /// Desktop has no path monitor (see `commands::low_data_state`), so this is the user's choice,
+    /// held in the same device-local prefs as the manual data saver. `super_data_saver` still forces
+    /// at least the `low` profile, so the existing switch keeps working and the two cannot disagree.
+    pub fn low_data_level(self: &Arc<Self>) -> String {
+        let p = self.prefs.lock().unwrap();
+        let chosen = p.low_data_level.clone().unwrap_or_else(|| "normal".into());
+        if chosen == "normal" && p.super_data_saver {
+            "low".into()
+        } else {
+            chosen
+        }
+    }
+
+    pub fn set_low_data_level(self: &Arc<Self>, level: &str) {
+        let normalized = match level {
+            "ultra" => "ultra",
+            "low" => "low",
+            _ => "normal",
+        };
+        let mut p = self.prefs.lock().unwrap();
+        p.low_data_level = Some(normalized.into());
+        let _ = p.save(&self.paths);
+    }
+
     pub fn set_privacy_prefs(
         self: &Arc<Self>,
         notification_detail: Option<String>,
@@ -10179,13 +10205,26 @@ impl Engine {
         {
             return;
         }
-        if self.prefs.lock().unwrap().super_data_saver
-            && !(reference.starts_with("img_")
-                || reference.starts_with("i:")
-                || reference.starts_with("aud_")
-                || reference.starts_with("a:")
-                || reference.starts_with("file_"))
-        {
+        // Ask the SHARED policy table, not a local bool — this is the same ruling the iPhone and
+        // Android clients get for the same link (docs/SATELLITE-DESIGN.md §5). A speculative
+        // prefetch is exactly the traffic low-data mode exists to stop, so anything short of a
+        // plain `Allow` means don't.
+        let level = match self.low_data_level().as_str() {
+            "ultra" => haven_p2p::transport::LinkConstraint::Ultra,
+            "low" => haven_p2p::transport::LinkConstraint::Low,
+            _ => haven_p2p::transport::LinkConstraint::Normal,
+        };
+        let small = reference.starts_with("img_")
+            || reference.starts_with("i:")
+            || reference.starts_with("aud_")
+            || reference.starts_with("a:")
+            || reference.starts_with("file_");
+        let kind = if small {
+            haven_p2p::transport::Traffic::Thumbnail
+        } else {
+            haven_p2p::transport::Traffic::Media
+        };
+        if haven_p2p::transport::allowance(level, kind) != haven_p2p::transport::Allowance::Allow {
             return;
         }
         {

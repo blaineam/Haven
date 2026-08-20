@@ -192,8 +192,12 @@ pub fn allowance(link: LinkConstraint, traffic: Traffic) -> Allowance {
     match link {
         Normal => Allow,
         Low => match traffic {
-            Text | KeyConvergence | Presence | Call => Allow,
-            Media | Thumbnail => AskFirst,
+            // Thumbnails and avatars stay ALLOWED here on purpose. They are small, and a feed with
+            // no pictures in it is a broken feed, not a thrifty one — the win on a metered link is
+            // stopping autoplaying video, not starving the layout. They are denied at Ultra, where
+            // the aggregate genuinely matters.
+            Text | KeyConvergence | Presence | Call | Thumbnail => Allow,
+            Media => AskFirst,
             // Enrolment on a merely-metered link is fine: it is a one-off the user initiated.
             Enrollment => Allow,
             LinkPreview | Story | HistoryBackfill | SelfSync => Deny,
@@ -296,9 +300,12 @@ mod low_data_tests {
     #[test]
     fn low_keeps_conversation_intact_and_stops_the_speculative() {
         assert!(LinkConstraint::Low.is_saving());
-        for t in [Traffic::Text, Traffic::Presence, Traffic::Call] {
+        for t in [Traffic::Text, Traffic::Presence, Traffic::Call, Traffic::Thumbnail] {
             assert_eq!(allowance(LinkConstraint::Low, t), Allowance::Allow, "{t:?}");
         }
+        // Thumbnails survive a metered link and do NOT survive a satellite one. Pinning both ends
+        // keeps a future tidy-up from collapsing them into one rule.
+        assert_eq!(allowance(LinkConstraint::Ultra, Traffic::Thumbnail), Allowance::Deny);
         for t in [Traffic::Story, Traffic::HistoryBackfill, Traffic::SelfSync, Traffic::LinkPreview] {
             assert_eq!(allowance(LinkConstraint::Low, t), Allowance::Deny, "{t:?}");
         }

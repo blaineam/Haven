@@ -486,7 +486,7 @@ fun MusicChip(music: TrackRefFfi, modifier: Modifier = Modifier, autoPlay: Boole
         }
         // Hardware mute is the DEFAULT, not a veto — an explicit in-app unmute overrides it, which
         // is the whole point of the app having its own control.
-        if (profile.superDataSaver || com.blaineam.haven.core.CallManager.callInProgress) return@LaunchedEffect
+        if (profile.dataSaverActive || com.blaineam.haven.core.CallManager.callInProgress) return@LaunchedEffect
         if (deviceSilenced(context) && !profile.videoSoundOn) return@LaunchedEffect
         if (MusicPlayer.playingUrl != url) MusicPlayer.play(context, url)
     }

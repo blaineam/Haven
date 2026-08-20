@@ -234,6 +234,10 @@ struct HavenApp: App {
         // Register the background-refresh task at launch (required before didFinishLaunching).
         NotificationManager.shared.registerBackgroundTask()
         NotificationManager.shared.registerTapRouting()   // notification taps route to what they're about
+        // Start watching the path BEFORE anything can send: the core answers every "may I send
+        // this?" against the constraint reported here, and an unseeded monitor would answer the
+        // first few as if the link were unconstrained.
+        LowDataMonitor.shared.start()
     }
 
     var body: some Scene {

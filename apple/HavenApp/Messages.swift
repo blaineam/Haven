@@ -1127,7 +1127,7 @@ struct DMThreadView: View {
     /// storm on a long history.
     private func fetchMissingThreadMedia() {
         var budget = 6
-        let dataSaver = SettingsStore.shared.superDataSaver
+        let dataSaver = SettingsStore.shared.dataSaverActive
         for item in ordered.reversed() {
             let candidates = dataSaver
                 ? MediaVariants.dataSaverPrefetchRefs(item.media)

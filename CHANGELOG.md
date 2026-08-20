@@ -11,6 +11,28 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Core (low-data mode, stage S0)
 
+- **One policy table, consulted by both platforms.** Low-data mode now has a definition rather than
+  an implementation: `haven_p2p::transport` gained a three-level link constraint — normal, low,
+  ultra — and a table saying what each level permits for each kind of traffic. Apple detects the
+  level with `NWPath` and Android with `NetworkCapabilities`, but both then ask the same Rust
+  function what may cross, so the two clients cannot drift into different ideas of what the mode
+  means. That drift is exactly what the parity rule exists to prevent, and mirroring the enums
+  across the FFI boundary would have reintroduced it, so a test sweeps all thirty-three
+  link-by-traffic cells and requires the mirror to agree with the source on every one.
+
+  The shape is deliberate. Low Data Mode keeps a conversation feeling like a conversation — text,
+  reactions, typing, calls all still work — and stops what is speculative or bulky: stories, link
+  previews, history you have not scrolled to, and syncing with your own other devices. An
+  ultra-constrained link, which is what a satellite bearer reports, keeps only text and the key
+  material needed to decrypt it. Media is the one thing that sits between allowed and refused at
+  both levels: never fetched in the background, never silently dropped, but always available if you
+  ask for it and accept the cost. Silent refusal is worse than an informed expensive choice.
+
+  Two invariants are pinned by tests rather than intent. Text and key convergence are permitted at
+  every level, because the moment either becomes conditional this has stopped being a messaging
+  feature. And tightening the link may never loosen the policy — a sweep asserts that every category
+  is at least as strict on ultra as on low, so a future row cannot be added the wrong way round.
+
 - **A Haven message is about to stop costing thirteen kilobytes to send a word.** The envelope every
   message travels in was still serialised as JSON, which renders each byte of ciphertext as three or
   four characters of ASCII. Measured on a one-word direct message: **12,953 bytes on the wire, of

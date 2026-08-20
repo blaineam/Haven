@@ -18,6 +18,7 @@ use haven_p2p::device::{
     CircleUpgrade, ContactDevices, DeviceCredential, DeviceList, SeedDropCapability,
 };
 use haven_p2p::treekem;
+use haven_p2p::transport;
 use haven_p2p::identity::{Identity, HavenId};
 use haven_p2p::link::HavenLink;
 use haven_p2p::social::{
@@ -145,6 +146,139 @@ pub fn haven_fabric_active() -> bool {
 #[uniffi::export]
 pub fn active_derp_urls() -> Vec<String> {
     haven_net::active_derp_urls()
+}
+
+// ── Low-data mode (docs/SATELLITE-DESIGN.md §5) ──────────────────────────────────────────────────
+//
+// The policy lives in `haven_p2p::transport` and is mirrored here rather than reimplemented on each
+// client. Apple detects the constraint with `NWPath` and Android with `NetworkCapabilities`, but
+// BOTH then ask `low_data_allowance` what may cross — so the two platforms cannot drift into
+// different ideas of what low-data mode means, which is the failure mode the parity rule exists to
+// prevent.
+
+/// How little bandwidth the current path can be trusted with. Mirrors
+/// [`haven_p2p::transport::LinkConstraint`].
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LinkConstraint {
+    /// Ordinary Wi-Fi or cellular — nothing is withheld.
+    Normal,
+    /// Low Data Mode, a metered hotspot, or a bandwidth-constrained cell.
+    Low,
+    /// A carrier satellite bearer or anything else the OS calls ultra-constrained.
+    Ultra,
+}
+
+/// A kind of traffic the app is about to generate. Mirrors [`haven_p2p::transport::Traffic`].
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Traffic {
+    Text,
+    KeyConvergence,
+    Presence,
+    Media,
+    Thumbnail,
+    LinkPreview,
+    Story,
+    Call,
+    HistoryBackfill,
+    SelfSync,
+    Enrollment,
+}
+
+/// What the policy permits. Mirrors [`haven_p2p::transport::Allowance`].
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Allowance {
+    /// Proceed.
+    Allow,
+    /// Proceed only behind an explicit per-item user action, having shown the cost.
+    AskFirst,
+    /// Emit no bytes. A refusal, not a throttle.
+    Deny,
+}
+
+impl From<LinkConstraint> for transport::LinkConstraint {
+    fn from(v: LinkConstraint) -> Self {
+        match v {
+            LinkConstraint::Normal => transport::LinkConstraint::Normal,
+            LinkConstraint::Low => transport::LinkConstraint::Low,
+            LinkConstraint::Ultra => transport::LinkConstraint::Ultra,
+        }
+    }
+}
+
+impl From<Traffic> for transport::Traffic {
+    fn from(v: Traffic) -> Self {
+        match v {
+            Traffic::Text => transport::Traffic::Text,
+            Traffic::KeyConvergence => transport::Traffic::KeyConvergence,
+            Traffic::Presence => transport::Traffic::Presence,
+            Traffic::Media => transport::Traffic::Media,
+            Traffic::Thumbnail => transport::Traffic::Thumbnail,
+            Traffic::LinkPreview => transport::Traffic::LinkPreview,
+            Traffic::Story => transport::Traffic::Story,
+            Traffic::Call => transport::Traffic::Call,
+            Traffic::HistoryBackfill => transport::Traffic::HistoryBackfill,
+            Traffic::SelfSync => transport::Traffic::SelfSync,
+            Traffic::Enrollment => transport::Traffic::Enrollment,
+        }
+    }
+}
+
+impl From<transport::Allowance> for Allowance {
+    fn from(v: transport::Allowance) -> Self {
+        match v {
+            transport::Allowance::Allow => Allowance::Allow,
+            transport::Allowance::AskFirst => Allowance::AskFirst,
+            transport::Allowance::Deny => Allowance::Deny,
+        }
+    }
+}
+
+/// The process-wide current link constraint, as last reported by the platform. `u8` so the read is
+/// a relaxed atomic load: core paths (self-sync scheduling, history backfill) consult it often and
+/// must never take a lock to do it.
+static LINK_CONSTRAINT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Report the current path constraint. Called by the platform's path monitor whenever it changes:
+/// `NWPathMonitor` on Apple, a `ConnectivityManager.NetworkCallback` on Android.
+#[uniffi::export]
+pub fn set_link_constraint(link: LinkConstraint) {
+    let v = match link {
+        LinkConstraint::Normal => 0,
+        LinkConstraint::Low => 1,
+        LinkConstraint::Ultra => 2,
+    };
+    LINK_CONSTRAINT.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The constraint last reported by the platform.
+#[uniffi::export]
+pub fn link_constraint() -> LinkConstraint {
+    match LINK_CONSTRAINT.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => LinkConstraint::Low,
+        2 => LinkConstraint::Ultra,
+        _ => LinkConstraint::Normal,
+    }
+}
+
+/// What the policy permits for this traffic kind on the link the platform last reported.
+///
+/// This is the call sites' entry point: ask before generating traffic, not after.
+#[uniffi::export]
+pub fn low_data_allowance(traffic: Traffic) -> Allowance {
+    transport::allowance(link_constraint().into(), traffic.into()).into()
+}
+
+/// [`low_data_allowance`] against an explicitly supplied link, for callers that already hold one
+/// (and for tests that must not depend on process state).
+#[uniffi::export]
+pub fn low_data_allowance_on(link: LinkConstraint, traffic: Traffic) -> Allowance {
+    transport::allowance(link.into(), traffic.into()).into()
+}
+
+/// True when low-data behaviour applies at all right now — for the UI banner.
+#[uniffi::export]
+pub fn low_data_active() -> bool {
+    !matches!(link_constraint(), LinkConstraint::Normal)
 }
 
 /// Multi-device (D16): device-credential + account-state self-sync FFI surface.
@@ -1564,6 +1698,61 @@ fn now_secs() -> u64 {
 }
 
 /// Test-only clock offset in seconds — lets the rotation tests advance time deliberately.
+#[cfg(test)]
+mod low_data_ffi_tests {
+    use super::*;
+
+    const LINKS: [LinkConstraint; 3] =
+        [LinkConstraint::Normal, LinkConstraint::Low, LinkConstraint::Ultra];
+    const TRAFFIC: [Traffic; 11] = [
+        Traffic::Text,
+        Traffic::KeyConvergence,
+        Traffic::Presence,
+        Traffic::Media,
+        Traffic::Thumbnail,
+        Traffic::LinkPreview,
+        Traffic::Story,
+        Traffic::Call,
+        Traffic::HistoryBackfill,
+        Traffic::SelfSync,
+        Traffic::Enrollment,
+    ];
+
+    /// The FFI enums are a hand-written mirror of `haven_p2p::transport`, so the one thing that can
+    /// rot is the mapping. Sweep the whole cross-product and require the mirror to agree with the
+    /// source table on every cell — a mis-wired `From` arm cannot survive this.
+    #[test]
+    fn the_ffi_mirror_agrees_with_the_core_table_on_every_cell() {
+        for link in LINKS {
+            for t in TRAFFIC {
+                let via_ffi = low_data_allowance_on(link, t);
+                let via_core: Allowance = transport::allowance(link.into(), t.into()).into();
+                assert_eq!(via_ffi, via_core, "{link:?} x {t:?}");
+            }
+        }
+    }
+
+    /// The reported constraint round-trips, and drives the no-argument entry point the call sites
+    /// actually use.
+    #[test]
+    fn reported_constraint_drives_the_default_entry_point() {
+        set_link_constraint(LinkConstraint::Normal);
+        assert_eq!(link_constraint(), LinkConstraint::Normal);
+        assert!(!low_data_active());
+        assert_eq!(low_data_allowance(Traffic::Story), Allowance::Allow);
+
+        set_link_constraint(LinkConstraint::Ultra);
+        assert_eq!(link_constraint(), LinkConstraint::Ultra);
+        assert!(low_data_active());
+        assert_eq!(low_data_allowance(Traffic::Story), Allowance::Deny);
+        assert_eq!(low_data_allowance(Traffic::Text), Allowance::Allow);
+        assert_eq!(low_data_allowance(Traffic::Media), Allowance::AskFirst);
+
+        // Leave the process as we found it — this is global state shared with every other test.
+        set_link_constraint(LinkConstraint::Normal);
+    }
+}
+
 #[cfg(test)]
 static TEST_CLOCK_SKEW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 

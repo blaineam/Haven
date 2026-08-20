@@ -169,7 +169,10 @@ pub struct Node {
     /// Keeping the client alive lets the connection live long enough to hole-punch, which is the entire
     /// point of the NAT traversal this project is built on — no public endpoint, no port-forward.
     blob_clients: Arc<tokio::sync::Mutex<HashMap<EndpointId, Arc<crate::blobstore::BlobClient>>>>,
-    secret: [u8; 32], // this node's key — also the in-process relay's identity (one shared node)
+    // This node's key — also the in-process relay's identity (one shared node). Held so the
+    // endpoint and the relay provably share one identity; read by neither today.
+    #[allow(dead_code)]
+    secret: [u8; 32],
 }
 
 impl Node {

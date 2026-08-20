@@ -700,6 +700,31 @@ pub fn circle_fully_seed_drop_capable(
         })
 }
 
+/// Is EVERY member of a circle able to READ the compact binary envelope container?
+/// (`docs/SATELLITE-DESIGN.md` §6, stage S0 write-side.)
+///
+/// The same **all-present positive** computation as [`circle_fully_seed_drop_capable`], and the same
+/// reading of silence: a member missing from `capable` is legacy, never downgraded, so a single
+/// unknown member keeps the whole circle on the JSON container. That asymmetry is the safety
+/// property — emitting the compact container to a client that cannot parse it costs that client the
+/// message, and there is no negotiation to fall back to after the bytes are in the mailbox.
+///
+/// Deliberately NOT composed with seed-drop or device-roster capability: reading a container is a
+/// property of the app build, not of key management, and requiring a roster would keep every legacy
+/// circle on the wasteful encoding forever for no safety gain.
+///
+/// The known limitation, stated rather than hidden: the marker is an ACCOUNT claim carried in the
+/// account-signed profile card, so an account whose devices straddle an upgrade can advertise from a
+/// new device while an old one is still on JSON-only. That stale device errors the envelope per
+/// envelope and misses the message; it does not corrupt anything. This is the identical exposure the
+/// shipped `sd` and `ml` markers already carry, and it closes as the fleet converges.
+pub fn circle_fully_compact_wire_capable(
+    members: &[HavenId],
+    capable: &std::collections::HashSet<[u8; 32]>,
+) -> bool {
+    !members.is_empty() && members.iter().all(|m| capable.contains(&m.node_id_bytes()))
+}
+
 /// Is EVERY member of a circle MLS(TreeKEM)-capable? (TreeKEM M0, `docs/TREEKEM-DESIGN.md` §7.2.)
 ///
 /// The same **all-present positive** computation as [`circle_fully_seed_drop_capable`], composed

@@ -899,6 +899,9 @@ fn write_media_horizon(root: &Path, mtime_secs: u64) {
 
 pub struct BlobServer {
     endpoint: Endpoint,
+    /// The server's own key. Retained so the server's identity is inspectable alongside its
+    /// endpoint; nothing reads it today.
+    #[allow(dead_code)]
     secret: [u8; 32],
     root: PathBuf,
     auth: Arc<Mutex<RelayAuth>>,

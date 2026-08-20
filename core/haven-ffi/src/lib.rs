@@ -13,7 +13,8 @@ use haven_net::blobstore::BlobClient;
 use std::path::PathBuf;
 use haven_p2p::crypto::{decapsulate, encapsulate_to, open, seal, Encapsulation};
 use haven_p2p::device::{
-    admin_closure, circle_fully_mls_capable, circle_fully_seed_drop_capable, circle_id_binds_creator,
+    admin_closure, circle_fully_compact_wire_capable, circle_fully_mls_capable,
+    circle_fully_seed_drop_capable, circle_id_binds_creator,
     mint_owned_circle_id, recipients_with_devices, recipients_with_devices_gated, AdminGrant,
     CircleUpgrade, ContactDevices, DeviceCredential, DeviceList, SeedDropCapability,
 };
@@ -43,6 +44,12 @@ const SEED_DROP_VERSION: u32 = 1;
 /// (`SeedDropCapability::from_bytes` consumes the rest as signature, so appending would break every
 /// existing peer's seed-drop verify mid-migration).
 const MLS_VERSION: u32 = 1;
+
+/// Compact-envelope capability version (`docs/SATELLITE-DESIGN.md` §6, S0 write-side). Advertised as
+/// `cw` in the account-signed profile card, exactly like `sd` and `ml`. `1` means "this build can
+/// READ the tagged binary `EpochEnvelope` container"; a circle whose every member advertises it
+/// starts being WRITTEN that container, which is ~3.5x smaller on the wire.
+const COMPACT_WIRE_VERSION: u32 = 1;
 
 /// Wire tags prefixed to an envelope so `receive` can route it. Legacy (untagged) envelopes are raw
 /// JSON beginning with `{` (0x7b), so any tag byte we choose that isn't `{` is unambiguous.
@@ -1998,6 +2005,14 @@ struct NetState {
     /// (`circle_fully_mls_capable` ships OFF); populated so the fleet's capability picture is already
     /// converged when a later release flips the gate. Not persisted — rebuilds as profiles re-sync.
     mls_capable: std::collections::HashSet<[u8; 32]>,
+    /// Accounts we have AFFIRMATIVELY verified as able to READ the compact envelope container —
+    /// their signed profile carried `cw >= 1` (docs/SATELLITE-DESIGN.md §6). Keyed by account node
+    /// id. **Monotonic — insert only, never remove**: a missing entry means "unknown, treat as
+    /// legacy," never "downgraded." Unlike `seed_drop_capable` / `mls_capable`, this one is LIVE:
+    /// `circle_fully_compact_wire_capable` consults it on every send, and a single unknown member
+    /// keeps that circle on JSON. Not persisted — it rebuilds as profiles re-sync, and rebuilding
+    /// empty is the safe direction (we fall back to the container everyone can read).
+    compact_wire_capable: std::collections::HashSet<[u8; 32]>,
     /// Viewer preference: keep MY OWN posts in the feed even when viewer auto-delete would age them
     /// out for others (my personal archive). Read by `feed`; set via `set_keep_own_posts`. Not
     /// persisted here — the app owns the toggle and re-applies it on launch.
@@ -2391,6 +2406,23 @@ fn circle_mls_accounts(st: &NetState, idx: usize) -> Vec<HavenId> {
 
 /// Does the all-present-positive MLS gate hold for this circle? (§7.2.) Composes seed-drop
 /// capability (nested) with `ml`-capability + a known roster for every member.
+/// Should this circle's outbound envelopes use the COMPACT container?
+///
+/// Only when every member has affirmatively advertised `cw` (docs/SATELLITE-DESIGN.md §6). One
+/// unknown member — a contact still on an older build, or one whose profile has not reached us yet —
+/// keeps the whole circle on JSON, because a client that cannot parse the container loses the
+/// message outright and there is no renegotiation once the bytes are in the mailbox.
+///
+/// Note this also moves the circle's mailbox keys, which are `SHA256` over the envelope's exact wire
+/// bytes. That is safe precisely BECAUSE the flip is all-or-nothing per circle: the author computes
+/// the key from the bytes it uploads and seals that key into the push hint, so author and reader
+/// agree, and event-id dedupe (`seen`) absorbs the one-time re-upload of anything re-sealed across
+/// the boundary.
+fn circle_is_compact_wire_capable(st: &NetState, idx: usize) -> bool {
+    let accounts: Vec<HavenId> = st.circles[idx].members.clone();
+    circle_fully_compact_wire_capable(&accounts, &st.compact_wire_capable)
+}
+
 fn circle_is_mls_capable(st: &NetState, idx: usize) -> bool {
     let accounts = circle_mls_accounts(st, idx);
     circle_fully_mls_capable(&accounts, &st.device_lists, &st.seed_drop_capable, &st.mls_capable)
@@ -3111,6 +3143,9 @@ struct KeyingState {
     joiner_secret: Option<[u8; 32]>,
     cth: [u8; 32],
     tip_hash: [u8; 32],
+    /// Set when a Remove in this chain targeted THIS device. Retained for diagnosis and for the
+    /// symmetry of the struct; nothing reads it yet.
+    #[allow(dead_code)]
     removed_me: bool,
     /// M4: device ids ever cut from this chain by a Remove (removal-STICKY, the LWW-removal shape the
     /// codebase uses elsewhere). The roster→Add automation skips these so a deliberately-removed device
@@ -4344,6 +4379,14 @@ impl HavenSocial {
                     s.insert(me_pub.node_id_bytes());
                     s
                 },
+                // This build reads the compact container, so my own account must count as capable or
+                // a circle containing me could never compute as fully capable and would stay on JSON
+                // forever.
+                compact_wire_capable: {
+                    let mut s = std::collections::HashSet::new();
+                    s.insert(me_pub.node_id_bytes());
+                    s
+                },
                 keep_own_posts: false,
                 retire_account_key: false,
                 shadow_trees: std::collections::HashMap::new(),
@@ -4389,6 +4432,13 @@ impl HavenSocial {
                     s
                 },
                 mls_capable: {
+                    let mut s = std::collections::HashSet::new();
+                    s.insert(account_id);
+                    s
+                },
+                // This build reads the compact container; self-seed so a circle containing this
+                // account can compute as fully capable (mirrors `Self::new`).
+                compact_wire_capable: {
                     let mut s = std::collections::HashSet::new();
                     s.insert(account_id);
                     s
@@ -4992,7 +5042,7 @@ impl HavenSocial {
         // a relay. An older client ignores the unknown JSON keys (proven in the field by `sd` shipping
         // the same way), so both are strictly additive; a missing marker always means "legacy," never
         // "downgraded."
-        let payload = serde_json::json!({ "n": name, "b": bio, "l": link, "a": avatar, "e": emoji, "sd": SEED_DROP_VERSION, "ml": MLS_VERSION }).to_string();
+        let payload = serde_json::json!({ "n": name, "b": bio, "l": link, "a": avatar, "e": emoji, "sd": SEED_DROP_VERSION, "ml": MLS_VERSION, "cw": COMPACT_WIRE_VERSION }).to_string();
         // Domain-separate so a profile signature can never be confused with another signed object
         // (audit H3). The tag is part of the SIGNED bytes; the wire blob still carries only `payload`.
         let sig = me.sign(&profile_signing_bytes(payload.as_bytes()));
@@ -5036,6 +5086,10 @@ impl HavenSocial {
         if !ok {
             return None;
         }
+        // The signature is good, so the markers inside are the account's own claim. Learning here —
+        // rather than only in `profile_seed_drop_version` — is what makes the compact-wire gate
+        // converge on iOS and Android, which call this entry point and not that one.
+        learn_capabilities(&mut self.state.lock().unwrap(), id.node_id_bytes(), payload);
         let text = String::from_utf8(payload.to_vec()).ok()?;
         // New card is JSON; anything else is a legacy name-only profile.
         match serde_json::from_str::<serde_json::Value>(&text) {
@@ -5087,6 +5141,16 @@ impl HavenSocial {
             .unwrap_or(0) as u32;
         if ml >= 1 {
             self.state.lock().unwrap().mls_capable.insert(id.node_id_bytes());
+        }
+        // `cw` — can this account's client READ the compact envelope container? Learned the same
+        // monotonic, affirmative-only way. Unlike `sd`/`ml` this one IS consumed in production: it
+        // gates what we WRITE, so a missing marker must keep us on JSON.
+        let cw = card
+            .as_ref()
+            .and_then(|v| v.get("cw").and_then(|x| x.as_u64()))
+            .unwrap_or(0) as u32;
+        if cw >= 1 {
+            self.state.lock().unwrap().compact_wire_capable.insert(id.node_id_bytes());
         }
         let version = card
             .as_ref()
@@ -5785,9 +5849,10 @@ impl HavenSocial {
                 events = events.split_off(events.len() - n); // keep the most recent N
             }
         }
+        let compact = circle_is_compact_wire_capable(&st, idx);
         for e in &events {
             if let Ok(env) = seal_event_in_epoch(signer_of(&st, author_under_device), circle_id, epoch, &key, e) {
-                out.push(tagged(TAG_EPOCH_EVENT, &env.to_bytes()));
+                out.push(tagged(TAG_EPOCH_EVENT, &env.to_bytes_gated(compact)));
             }
         }
         // Tree wires + join ack + admin grants (built up front). In M2/parked they ride ALONGSIDE the
@@ -6903,7 +6968,32 @@ impl HavenSocial {
         .map_err(|e| HavenError::Invalid { msg: format!("seal failed: {e}") })?;
         st.circles[idx].seen.insert(event.id.clone());
         st.circles[idx].events.push(event);
-        Ok(tagged(TAG_EPOCH_EVENT, &env.to_bytes()))
+        let compact = circle_is_compact_wire_capable(&st, idx);
+        Ok(tagged(TAG_EPOCH_EVENT, &env.to_bytes_gated(compact)))
+    }
+}
+
+/// Learn the capability markers from an ALREADY-SIGNATURE-VERIFIED profile payload.
+///
+/// Monotonic and affirmative-only: a marker present and >= 1 inserts, anything else does nothing, so
+/// absence is never read as a downgrade. Called from BOTH profile entry points —
+/// `verify_profile_card` (what the Apple and Android clients actually call) and
+/// `profile_seed_drop_version` (what desktop calls) — because a capability learned on only one of
+/// them is a capability that never converges on the platforms using the other. That split is exactly
+/// how the compact-wire gate would have shipped as a silent no-op on iOS and Android.
+///
+/// The caller MUST have verified the signature first; this trusts its input.
+fn learn_capabilities(st: &mut NetState, account: [u8; 32], payload: &[u8]) {
+    let Ok(card) = serde_json::from_slice::<serde_json::Value>(payload) else { return };
+    let marker = |k: &str| card.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    if marker("sd") >= 1 {
+        st.seed_drop_capable.insert(account);
+    }
+    if marker("ml") >= 1 {
+        st.mls_capable.insert(account);
+    }
+    if marker("cw") >= 1 {
+        st.compact_wire_capable.insert(account);
     }
 }
 
@@ -7210,6 +7300,137 @@ mod net_tests {
         for env in from.sync_envelopes(cid.to_string()) {
             let _ = to.receive(cid.to_string(), env);
         }
+    }
+
+    // ── Compact wire, write-side (docs/SATELLITE-DESIGN.md §6, S0) ───────────────────────────────
+
+    /// The safety property, and the reason the flip is gated at all: until every member has
+    /// affirmatively advertised `cw`, we keep emitting the container everyone can read. A client that
+    /// cannot parse what we send loses the message outright — there is no renegotiation once the
+    /// bytes are in the mailbox — so silence must mean JSON.
+    #[test]
+    fn a_circle_with_an_unadvertised_member_stays_on_json() {
+        let alice = HavenSocial::new([11u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([12u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+
+        // Alice has never seen Bob's profile card, so she knows nothing about what he can read.
+        let env = alice
+            .post(cid.clone(), "still json".into(), vec![], None, None, false, false, 1_000)
+            .unwrap();
+        assert_eq!(env[0], TAG_EPOCH_EVENT, "wire tag");
+        assert_eq!(env[1], b'{', "an unknown member must keep the circle on the JSON container");
+    }
+
+    /// Once every member has advertised, the circle flips and the savings are real — and the message
+    /// still arrives, decrypts and reads correctly on the far side.
+    #[test]
+    fn a_fully_advertised_circle_emits_the_compact_container_and_still_delivers() {
+        let alice = HavenSocial::new([13u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([14u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+
+        // Baseline: JSON before Alice learns anything about Bob.
+        let before = alice
+            .post(cid.clone(), "before".into(), vec![], None, None, false, false, 900)
+            .unwrap();
+        assert_eq!(before[1], b'{');
+
+        // Bob's SIGNED card carries `cw`; consuming it is what teaches Alice he can read the
+        // container. This is the same call the app already makes for `sd` and `ml`.
+        let card = bob.my_signed_profile("Bob".into(), String::new(), String::new(), String::new(), String::new());
+        alice.profile_seed_drop_version(bob.my_bundle(), card);
+
+        let after = alice
+            .post(cid.clone(), "after — compact".into(), vec![], None, None, false, false, 1_000)
+            .unwrap();
+        assert_eq!(after[0], TAG_EPOCH_EVENT, "wire tag is unchanged");
+        assert_eq!(&after[1..6], b"HVEP1", "a fully-capable circle emits the compact container");
+
+        // The whole point: materially fewer bytes for the same message.
+        assert!(
+            after.len() * 3 < before.len(),
+            "compact {} B should be >3x smaller than json {} B",
+            after.len(),
+            before.len()
+        );
+
+        // And it must actually arrive. Bob buffers until the key commit, then reads it.
+        assert!(!bob.receive(cid.clone(), after.clone()).unwrap());
+        sync(&alice, &bob, &cid);
+        let feed = bob.feed(cid.clone(), 2_000, None);
+        assert!(
+            feed.iter().any(|e| e.body == "after — compact"),
+            "the compact-container post must decrypt and land in the feed: {:?}",
+            feed.iter().map(|e| &e.body).collect::<Vec<_>>()
+        );
+    }
+
+    /// The gate has to open through the call the CLIENTS actually make.
+    ///
+    /// iOS and Android consume profiles via `verify_profile_card`; only desktop calls
+    /// `profile_seed_drop_version`. Learning the markers in just one of them means the compact
+    /// container never gets emitted on the two platforms that matter most, and it would fail
+    /// silently — the app works, it is merely 3.5x more expensive forever. Both paths must teach.
+    #[test]
+    fn both_profile_entry_points_open_the_gate() {
+        for use_card_path in [true, false] {
+            let seed = if use_card_path { 21u8 } else { 23u8 };
+            let alice = HavenSocial::new([seed; 32].to_vec()).unwrap();
+            let bob = HavenSocial::new([seed + 1; 32].to_vec()).unwrap();
+            let cid = DEFAULT_CIRCLE.to_string();
+            alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+
+            let card = bob.my_signed_profile("Bob".into(), String::new(), String::new(), String::new(), String::new());
+            if use_card_path {
+                // What iOS and Android call.
+                assert!(alice.verify_profile_card(bob.my_bundle(), card).is_some());
+            } else {
+                // What desktop calls.
+                alice.profile_seed_drop_version(bob.my_bundle(), card);
+            }
+
+            let env = alice
+                .post(cid.clone(), "compact?".into(), vec![], None, None, false, false, 1_000)
+                .unwrap();
+            assert_eq!(
+                &env[1..6],
+                b"HVEP1",
+                "the gate must open via {}",
+                if use_card_path { "verify_profile_card (iOS/Android)" } else { "profile_seed_drop_version (desktop)" }
+            );
+        }
+    }
+
+    /// The capability must ride the ACCOUNT-SIGNED payload, so a relay can neither forge it (which
+    /// would push a circle onto a container a member cannot read) nor strip it (which would only ever
+    /// cost bytes, never correctness).
+    #[test]
+    fn the_compact_marker_is_signed_and_a_forged_card_teaches_nothing() {
+        let alice = HavenSocial::new([15u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([16u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+
+        let card = bob.my_signed_profile("Bob".into(), String::new(), String::new(), String::new(), String::new());
+        let sig_len = u32::from_le_bytes([card[0], card[1], card[2], card[3]]) as usize;
+        let payload: serde_json::Value =
+            serde_json::from_slice(&card[4 + sig_len..]).expect("card payload is JSON");
+        assert_eq!(payload.get("cw").and_then(|x| x.as_u64()), Some(1), "`cw` rides the signed payload");
+
+        // A tampered card is rejected outright, so it cannot flip the circle.
+        let mut forged = card.clone();
+        let n = forged.len();
+        forged[n - 2] ^= 0xff;
+        alice.profile_seed_drop_version(bob.my_bundle(), forged);
+        let env = alice
+            .post(cid.clone(), "unchanged".into(), vec![], None, None, false, false, 1_100)
+            .unwrap();
+        assert_eq!(env[1], b'{', "a forged card must not flip the container");
     }
 
     #[test]
@@ -9673,8 +9894,7 @@ mod net_tests {
     /// Craft a Remove commit signed by a NON-admin (bypassing the committer-side authority check) to
     /// exercise the RECEIVER-side gate. Mirrors `mls_build_remove` minus the authority check.
     fn forge_remove_commit(inst: &HavenSocial, cid: &str, target_acct_hex: &str) -> Vec<u8> {
-        let mut st = inst.state.lock().unwrap();
-        let idx = st.circles.iter().position(|c| c.id == cid).unwrap();
+        let st = inst.state.lock().unwrap();
         let gid = cid.as_bytes().to_vec();
         let seed = st.device.as_ref().map(|d| d.secret_seed()).unwrap();
         let signer = Identity::from_seed(&seed);

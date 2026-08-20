@@ -11,6 +11,37 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added — all platforms (low data mode)
 
+- **Android now declares itself satellite-optimised.** A one-line manifest declaration is what gets
+  an app access to a carrier satellite network when it is the only network available, and what lists
+  it under the system's satellite settings. Without it the rest of low-data mode is a well-behaved
+  app that never gets offered the link it was built for.
+
+  The Apple equivalent is unresolved and is written down as unresolved: the opt-in Apple provides
+  governs Network.framework connections, and Haven's mailbox traffic is QUIC and HTTP from Rust over
+  ordinary sockets, with no object to set the flag on. Whether the restriction bites there too is a
+  question for a real bearer, not a guess, and `docs/SATELLITE-DESIGN.md` now says so plainly rather
+  than implying the box is ticked.
+
+- **The wire savings are now real, not just available.** The compact envelope container landed able
+  to be read but not written, because emitting it to a client that cannot parse it costs that client
+  the message outright and there is no renegotiation once the bytes are in a mailbox. Circles now
+  flip to it, and the trigger is unanimity: every member must have affirmatively advertised that
+  their build can read it before a single byte changes shape. One member on an older app, or one
+  whose profile has not reached you yet, keeps the whole circle on the old container. Silence always
+  means legacy, never downgraded — the same reading of absence the seed-drop and MLS gates use.
+
+  The capability rides inside the account-signed profile card, so a relay can neither forge it — which
+  would push a circle onto a container someone cannot read — nor strip it, which could only ever cost
+  bytes. A forged card teaches nothing and is covered by a test.
+
+  A real bug got caught on the way: the marker was being learned only in the call desktop makes, and
+  not in the one iOS and Android make. The gate would have opened on desktop and stayed shut forever
+  on the two platforms that matter, and it would have failed *silently* — everything working, simply
+  3.5 times more expensive for good. Both entry points now teach, and the test that covers it was
+  confirmed to fail without the fix rather than merely assumed to.
+
+  Measured end to end: the same message that took 12,953 bytes now takes 3,632.
+
 - **Haven now notices when the network can't afford what it was about to do.** On a metered hotspot,
   a bandwidth-constrained cell, or a satellite bearer, it sends your text and holds the rest back
   until you ask. There is a three-way switch in Settings — automatic, always on, off — and automatic

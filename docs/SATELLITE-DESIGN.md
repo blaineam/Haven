@@ -56,8 +56,19 @@ with the engineering already banked either way.
 
 The mode exists and is on by default in its automatic setting. Concretely:
 
-* **The compact container (S0), read-side.** Measured **12,953 B → 3,632 B**, a 3.57x reduction, on
-  a one-word DM. Nothing emits it yet — see the table in §8 for why that ordering is mandatory.
+* **The compact container (S0), read and write.** Measured **12,953 B → 3,632 B**, a 3.57x
+  reduction, on a one-word DM — and circles now actually emit it. The write is gated on
+  `circle_fully_compact_wire_capable`: every member must have affirmatively advertised `cw` in their
+  account-signed profile card before a circle flips, because a client that cannot parse the
+  container loses the message outright and there is no renegotiation once bytes are in the mailbox.
+  A single unadvertised member keeps the whole circle on JSON. Silence means legacy, never
+  downgraded.
+
+  The marker is learned from **both** profile entry points — `verify_profile_card`, which is what
+  iOS and Android call, and `profile_seed_drop_version`, which is what desktop calls. Learning it in
+  only one was a real bug caught in review: the gate would have opened on desktop and stayed shut
+  forever on the two platforms that matter, failing silently as a permanent 3.5x overspend rather
+  than as an error. `both_profile_entry_points_open_the_gate` is the regression test.
 * **The constraint signal (S3).** `haven_p2p::transport::LinkConstraint` — normal / low / ultra —
   fed by `NWPath.isUltraConstrained` + `linkQuality` on Apple and
   `NET_CAPABILITY_NOT_BANDWIDTH_CONSTRAINED` + `TRANSPORT_SATELLITE` on Android, both behind
@@ -72,8 +83,25 @@ The mode exists and is on by default in its automatic setting. Concretely:
   is not a preference: the OS will refuse the traffic regardless, so the mode stays on and the UI
   explains rather than letting sends fail mysteriously.
 
-Still open: the governor (§6.3), the write-side flip of S0 behind a fully-capable-circle gate, and
-the push question in §7.
+* **Android's satellite declaration.** `android.telephony.PROPERTY_SATELLITE_DATA_OPTIMIZED` is in
+  the manifest, which is what gets Haven access when satellite is the only network and what lists it
+  under the system's satellite-app settings.
+
+Still open, and one of them is load-bearing:
+
+* **The Apple opt-in does not obviously map onto Haven's data path.**
+  `nw_parameters_set_allow_ultra_constrained` governs `Network.framework` connections, and the
+  header is explicit that without it a connection *may not use* an ultra-constrained interface. But
+  Haven's mailbox traffic is iroh QUIC and HTTP from Rust over BSD sockets, not `NWConnection`, so
+  there is no `nw_parameters_t` to set the flag on. Whether the restriction is enforced at the
+  Network.framework layer only, or lower down where a raw socket would also hit it, is **not
+  established here and must not be assumed either way** — it decides whether Haven can move a single
+  byte over T-Satellite. The `URLSession` uses that do exist (`CallHairpin`, `RelayHost`,
+  `CloudflaredTunnel`) are peripheral to messaging. Resolve this by measurement on a real bearer
+  before believing any part of §9.
+* **The governor (§6.3)** — burst-and-idle scheduling, per-pass byte ceilings, quality-aware drain
+  depth.
+* **The push question in §7** — whether APNs reaches a third-party app over satellite at all.
 
 ---
 
@@ -399,7 +427,7 @@ Test this before writing any of S4.
 
 | Stage | What | Proof obligation | Ships alone? |
 |---|---|---|---|
-| **S0** ✅ | Postcard the `EpochEnvelope` container (= LoRa L0) — **landed, read-side** | Done: 12,953 B → 3,632 B measured (3.57x); `compact_container_does_not_touch_the_signature` proves the hybrid signature is byte-identical across containers; `to_bytes()` pinned byte-identical because the mailbox key hashes it | **Yes** — done |
+| **S0** ✅ | Postcard the `EpochEnvelope` container (= LoRa L0) — **landed, read AND write** | Done: 12,953 B → 3,632 B measured (3.57x); the hybrid signature is byte-identical across containers; writes gated on `circle_fully_compact_wire_capable` so one unadvertised member keeps the circle on JSON | **Yes** — done |
 | **S1** | Signature profile decision (= LoRa L1) | Not recommended for satellite; see §6.2 | Deferred |
 | **S2** | Container elision + trial decryption (= LoRa L2) | Trial-decrypt cost bounded at realistic circle sizes | Yes |
 | **S3** ✅ | Constrained-path signal into core — **landed** | `NWPath.isUltraConstrained` + `linkQuality` (iOS 26+, guarded) and `NET_CAPABILITY_NOT_BANDWIDTH_CONSTRAINED` + `TRANSPORT_SATELLITE` (API 36+, guarded) plumbed through FFI to a single `TransportConstraint` in `haven-net`; unit tests for the pre-26 / pre-36 fallback paths | Yes — useful on bad cellular immediately |

@@ -162,5 +162,13 @@
                 <action android:name="com.blaineam.haven.DECLINE_CALL" />
             </intent-filter>
         </receiver>
+
+        <!-- Declares Haven as optimised for carrier satellite data (docs/SATELLITE-DESIGN.md §2.2).
+             This is what gets the app access to a satellite network when it is the ONLY network
+             available, and what lists it under the system's satellite-app settings. The value is the
+             package name. Only an APP may declare this, never a library. -->
+        <meta-data
+            android:name="android.telephony.PROPERTY_SATELLITE_DATA_OPTIMIZED"
+            android:value="com.blaineam.haven" />
     </application>
 </manifest>

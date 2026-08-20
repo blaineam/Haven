@@ -11,6 +11,40 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Docs
 
+- **A design plan for carrying Haven over carrier satellite data.**
+  [`docs/SATELLITE-DESIGN.md`](docs/SATELLITE-DESIGN.md) works out what it would take for Haven to
+  be usable on T-Mobile's T-Satellite bearer, and on the direct-to-cell services arriving behind it.
+  Nothing is implemented. It is a sibling of the LoRa spike below and deliberately reuses that
+  document's byte-budget stages rather than restating them, because the two transports have the
+  same disease three orders of magnitude apart.
+
+  The platform half turned out to be easier than the reporting suggested. Apple did not ship a
+  satellite framework and the one rumoured for iOS 27 is not in the beta SDK — diffing the iOS 26.5
+  and 27.0 SDKs turns up two cosmetic lines in the networking headers and nothing else. What Apple
+  actually shipped, in iOS 26.0, is a third tier below expensive and constrained: a path can now
+  report itself ultra-constrained, and report a link quality of minimal, moderate or good. A
+  connection will not touch such a path unless the app explicitly asks for it, which is the whole of
+  the story about Apple discouraging satellite reliance, and is the right default. Android's
+  equivalent is older, wants a line in the manifest declaring the app satellite-optimised, and warns
+  that the system may cut off an app that transfers too much. Both are available today; there is
+  nothing to wait for.
+
+  The hard half is not code. A one-word Haven message is about twelve kilobytes on the wire, which
+  is survivable on a bearer that carries real IP where it was fatal on radio, but it is still mostly
+  waste and the fix is the same postcard encoding the LoRa spike already proposes. Past that, the
+  carrier admits apps by private allowlist, and the apps on it share a property Haven does not have:
+  a small fixed set of backend endpoints. Haven dials arbitrary peers and user-run relays that did
+  not exist when any list was written. Whether that matters depends on whether admission is enforced
+  by app identity or by destination, which is not publicly documented, and the document's first
+  recommendation is to ask before building anything that assumes an answer.
+
+  The rest is a policy table of what may cross the bearer — text yes, media and calls and stories and
+  history backfill and self-sync no, as hard refusals rather than throttles — a per-pass governor,
+  and an open question about whether push reaches a third-party app over satellite at all. If it
+  does, Haven is unusually well placed, because the ciphertext already rides inside the notification
+  and a delivered message costs almost nothing to receive. If it does not, off-grid Haven is a
+  foreground experience and should be designed as one rather than apologised for.
+
 - **A design spike for carrying Haven over LoRa radio.** [`docs/LORA-DESIGN.md`](docs/LORA-DESIGN.md)
   works out what off-grid text messaging between two people with no internet, no cellular and no
   Wi-Fi would actually take. Nothing is implemented; the document exists because the arithmetic

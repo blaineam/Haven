@@ -260,6 +260,9 @@ final class FeedStore: ObservableObject {
     static let shared = FeedStore()
 
     private var social: HavenSocial?
+    /// Floor between two epoch-change re-seals: each is a hybrid PQ signature per event, so a fleet
+    /// registering several devices at once must coalesce into one pass.
+    private var lastEpochReseal = Date.distantPast
     /// Is the engine actually up? Anything holding the only copy of something the user wants sent
     /// must check this before handing it over — `post`/`sendMessage` return quietly when it's nil,
     /// which reads as success to a caller that isn't looking.
@@ -698,6 +701,18 @@ final class FeedStore: ObservableObject {
         guard Date().timeIntervalSince1970 - UserDefaults.standard.double(forKey: backfillKey) > 86_400 else { return }
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: backfillKey)
         backfillMailbox(circleIds: circles.map(\.id))
+        // A roster change moves the circle epoch, and content sealed under the PREVIOUS one is
+        // unreadable to anyone who joins or advances past it. The full bundle re-seals my history
+        // under the new epoch — the mechanism already existed, nothing triggered it here, so the
+        // repair waited for the next periodic backfill (posts invisible to a peer for a whole run).
+        NotificationCenter.default.addObserver(forName: SharedStore.rosterEpochChangedNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            let now = Date()
+            guard now.timeIntervalSince(self.lastEpochReseal) > 30 else { return }   // coalesce bursts
+            self.lastEpochReseal = now
+            self.backfillMailbox(circleIds: (self.social?.circles() ?? []).map(\.id))
+        }
     }
 
     // MARK: - Demo seeding (HAVEN_DEMO=1 only — PII-free synthetic content for screenshots)

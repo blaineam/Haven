@@ -71,6 +71,32 @@ fn re_ingesting_a_roster_we_already_hold_is_a_no_op_not_a_refusal() {
 }
 
 #[test]
+fn the_status_api_separates_stored_from_already_current() {
+    // A bool cannot drive the two things a caller must decide: whether to keep asking OTHER relays
+    // for a newer roster, and whether the epoch moved (so history needs re-sealing under it).
+    let reader = account(14);
+    let author = account(15);
+    assert!(author.use_device_identity(vec![25u8; 32]));
+    reader.add_contact_bundle(DEFAULT_CIRCLE.into(), author.my_bundle()).unwrap();
+    author.add_contact_bundle(DEFAULT_CIRCLE.into(), reader.my_bundle()).unwrap();
+
+    let v1 = author.register_device(author.my_device_bundle(), "dev-a".into(), 0);
+    assert_eq!(reader.ingest_roster_wire_status(v1.clone()), 1, "a roster we did not have is STORED");
+    assert_eq!(reader.ingest_roster_wire_status(v1.clone()), 0,
+               "the same version again is ALREADY CURRENT — known, unchanged, and NOT a reason to \
+                stop asking other relays for a newer one");
+
+    let second = account(15);
+    assert!(second.use_device_identity(vec![26u8; 32]));
+    let v2 = author.register_device(second.my_device_bundle(), "dev-b".into(), 1);
+    assert_eq!(reader.ingest_roster_wire_status(v2), 1, "a newer roster is STORED");
+    assert_eq!(reader.ingest_roster_wire_status(v1), -1, "the older one is REFUSED");
+
+    // And the legacy bool still answers the question it always answered.
+    assert!(reader.ingest_roster_wire(author.my_device_roster_wire()), "known == not refused");
+}
+
+#[test]
 fn an_older_roster_is_still_refused() {
     // The rollback defense must survive the fix above: ONLY the equal-version case is a benign
     // no-op. A genuinely older roster is an attempted replay and still has to lose.

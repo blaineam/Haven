@@ -5358,18 +5358,34 @@ impl HavenSocial {
     }
 
     /// Ingest a contact's device roster from tagged wire (what `export_contact_rosters` produces). Same
-    /// verification as `receive`'s TAG_DEVICE_ROSTER path, but account-level so no circle context is needed.
-    /// Verified against the account bundle carried in the wire; false on a forged / stale (rolled-back) roster.
+    /// verification as `receive`'s TAG_DEVICE_ROSTER path, but account-level so no circle context is
+    /// needed. Verified against the account bundle carried in the wire.
+    ///
+    /// Answers only "does the engine now know this roster?". Callers that need to know whether it
+    /// CHANGED — to keep querying other relays for a newer copy, or to re-seal history under the new
+    /// epoch — must use [`Self::ingest_roster_wire_status`].
     pub fn ingest_roster_wire(&self, wire: Vec<u8>) -> bool {
+        self.ingest_roster_wire_status(wire) >= 0
+    }
+
+    /// As [`Self::ingest_roster_wire`], but says WHAT happened: `-1` refused (forged, or an attempted
+    /// rollback to an older version), `0` already current, `1` stored — the roster changed.
+    ///
+    /// The three cases drive different client behaviour, and collapsing them is how two separate bugs
+    /// got in. `0` must not read as failure (that made a healthy device log "INGEST REJECTED" on every
+    /// poll and skip its post-roster recovery), and `0` must not read as success-and-stop either (that
+    /// left a device pinned to a stale roster because the first relay it asked happened to hold the
+    /// same version, while its siblings had moved on). Only `1` means the circle's epoch moved.
+    pub fn ingest_roster_wire_status(&self, wire: Vec<u8>) -> i8 {
         if wire.first() != Some(&TAG_DEVICE_ROSTER) {
-            return false;
+            return RosterIngest::Refused.code();
         }
         let mut st = self.state.lock().unwrap();
         match decode_roster(&wire[1..]).and_then(|(acct, list, creds, trailer)| {
             HavenId::from_bytes(&acct).ok().map(|a| (a, list, creds, trailer))
         }) {
             Some((account, list, creds, trailer)) => {
-                let stored = verify_and_store_roster(&mut st, &account, &list, &creds);
+                let outcome = verify_and_store_roster(&mut st, &account, &list, &creds);
                 note_roster_capability(&mut st, &account, &trailer); // S0: learn capability, never infer absence
                 note_seedless_own_roster_wire(&mut st, &account, &wire); // A3: keep MY primary-signed wire verbatim
                 // PARITY with the mailbox arm (`receive` → TAG_DEVICE_ROSTER, which has always done
@@ -5379,9 +5395,9 @@ impl HavenSocial {
                 // is the only one a contact's roster ever takes on Android. Draining is idempotent
                 // and cheap: still-locked events go straight back into the buffer.
                 let drained = drain_all_pending(&mut st);
-                stored || drained
+                if drained { RosterIngest::Stored.code() } else { outcome.code() }
             }
-            None => false,
+            None => RosterIngest::Refused.code(),
         }
     }
 
@@ -5533,7 +5549,7 @@ impl HavenSocial {
     pub fn set_my_device_roster(&self, list: Vec<u8>, credentials: Vec<Vec<u8>>) -> bool {
         let mut st = self.state.lock().unwrap();
         let me_pub = st.me().clone();
-        verify_and_store_roster(&mut st, &me_pub, &list, &credentials)
+        verify_and_store_roster(&mut st, &me_pub, &list, &credentials).known()
     }
 
     /// Record a CONTACT's signed device roster (verified against their pinned account bundle) so I seal
@@ -5541,7 +5557,7 @@ impl HavenSocial {
     pub fn ingest_device_roster(&self, account_bundle: Vec<u8>, list: Vec<u8>, credentials: Vec<Vec<u8>>) -> bool {
         let Ok(account) = HavenId::from_bytes(&account_bundle) else { return false };
         let mut st = self.state.lock().unwrap();
-        verify_and_store_roster(&mut st, &account, &list, &credentials)
+        verify_and_store_roster(&mut st, &account, &list, &credentials).known()
     }
 
     /// My own device roster, wire-encoded for sharing with contacts (rides the sync bundle so peers
@@ -6296,12 +6312,39 @@ impl HavenSocial {
     /// Purely observational — it takes the lock, reads counters, and decides nothing.
     pub fn diag_delivery_json(&self) -> String {
         let st = self.state.lock().unwrap();
+        let st_me_id = st.me().node_id_bytes();
         let mut circles = Vec::with_capacity(st.circles.len());
         for c in st.circles.iter() {
             let peers: std::collections::BTreeSet<&String> =
                 c.peer_epoch_keys.keys().map(|(acct, _)| acct).collect();
+            // WHICH key is missing, not merely how many are parked. A parked envelope names the
+            // (author, epoch) slot that would open it; the held slots say whether we have it. Any
+            // parked slot absent from the held set is the exact key that never converged — the
+            // question every parked-buffer investigation actually needs answered.
+            let mut want: std::collections::BTreeSet<String> = Default::default();
+            for raw in c.pending_epoch.iter() {
+                if let Ok(env) = EpochEnvelope::from_bytes(raw) {
+                    let a = env.sender_hex();
+                    want.insert(format!("{}@{}", &a[..a.len().min(8)], env.epoch));
+                }
+            }
+            let mut held: std::collections::BTreeSet<String> = Default::default();
+            for (acct, ep) in c.peer_epoch_keys.keys() {
+                held.insert(format!("{}@{}", &acct[..acct.len().min(8)], ep));
+            }
+            let me_short = hex(&st_me_id);
+            for ep in c.my_epoch_keys.keys() {
+                held.insert(format!("{}@{}", &me_short[..me_short.len().min(8)], ep));
+            }
+            let missing: Vec<&String> = want.difference(&held).collect();
+            let q = |v: &std::collections::BTreeSet<String>| -> String {
+                v.iter().take(12).map(|x| format!("\"{x}\"")).collect::<Vec<_>>().join(",")
+            };
             circles.push(format!(
-                "{{\"id\":\"{}\",\"events\":{},\"parked\":{},\"my_epoch\":{},\"my_epoch_keys\":{},\"peer_epoch_keys\":{},\"peers_keyed\":{},\"members\":{}}}",
+                "{{\"parked_slots\":[{}],\"held_slots\":[{}],\"missing_keys\":[{}],\"id\":\"{}\",\"events\":{},\"parked\":{},\"my_epoch\":{},\"my_epoch_keys\":{},\"peer_epoch_keys\":{},\"peers_keyed\":{},\"members\":{}}}",
+                q(&want),
+                q(&held),
+                missing.iter().take(12).map(|x| format!("\"{x}\"")).collect::<Vec<_>>().join(","),
                 c.id.replace('"', ""),
                 c.events.len(),
                 c.pending_epoch.len(),
@@ -6796,7 +6839,7 @@ impl HavenSocial {
                     HavenId::from_bytes(&acct).ok().map(|a| (a, list, creds, trailer))
                 }) {
                     Some((account, list, creds, trailer)) => {
-                        let stored = verify_and_store_roster(&mut st, &account, &list, &creds);
+                        let stored = verify_and_store_roster(&mut st, &account, &list, &creds).known();
                         note_roster_capability(&mut st, &account, &trailer); // S0: learn capability (absence-safe)
                         note_seedless_own_roster_wire(&mut st, &account, envelope); // A3: verbatim primary wire
                         // A newly-learned roster may make a previously "unknown sender" event openable —
@@ -7070,16 +7113,52 @@ fn tagged(tag: u8, body: &[u8]) -> Vec<u8> {
 /// store it (higher-version-wins, rollback-defended), and rotate every circle epoch this account is in
 /// so the new device set takes effect — a revoked device can't open content sealed afterward, a new one
 /// can. Returns false on a forged or stale roster.
-fn verify_and_store_roster(st: &mut NetState, account: &HavenId, list_bytes: &[u8], cred_bytes: &[Vec<u8>]) -> bool {
-    let Ok(list) = DeviceList::from_bytes(list_bytes) else { return false };
+/// What ingesting a device roster actually DID. A bool could not say, and the difference matters
+/// in three separate places:
+///
+///   * `Refused` — forged, unverifiable, or an attempted ROLLBACK to an older version. Keep looking
+///     on other relays; this copy is worthless.
+///   * `AlreadyCurrent` — we hold exactly this version. The overwhelmingly common steady-state
+///     answer, and a SUCCESS: the roster is known, so post-roster recovery may run. But it is NOT a
+///     reason to stop querying other relays, which may hold a NEWER one, and it must NOT trigger the
+///     expensive re-seal below.
+///   * `Stored` — the roster CHANGED. This is the only outcome that means the circle's epoch moved,
+///     and therefore the only one that must re-seal history under the new epoch.
+///
+/// Collapsing the first two into `false` made a healthy device log "INGEST REJECTED" on every poll.
+/// Collapsing the last two into `true` made it stop at the first relay holding a stale-but-equal
+/// copy, so a device could sit a version behind forever while its siblings moved on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RosterIngest {
+    Refused,
+    AlreadyCurrent,
+    Stored,
+}
+
+impl RosterIngest {
+    /// Legacy bool: "does the engine now know this roster?"
+    fn known(self) -> bool {
+        !matches!(self, RosterIngest::Refused)
+    }
+    fn code(self) -> i8 {
+        match self {
+            RosterIngest::Refused => -1,
+            RosterIngest::AlreadyCurrent => 0,
+            RosterIngest::Stored => 1,
+        }
+    }
+}
+
+fn verify_and_store_roster(st: &mut NetState, account: &HavenId, list_bytes: &[u8], cred_bytes: &[Vec<u8>]) -> RosterIngest {
+    let Ok(list) = DeviceList::from_bytes(list_bytes) else { return RosterIngest::Refused };
     if list.verify(account).is_err() {
-        return false;
+        return RosterIngest::Refused;
     }
     let mut credentials = Vec::with_capacity(cred_bytes.len());
     for cb in cred_bytes {
-        let Ok(cred) = DeviceCredential::from_bytes(cb) else { return false };
+        let Ok(cred) = DeviceCredential::from_bytes(cb) else { return RosterIngest::Refused };
         if cred.verify(account).is_err() {
-            return false; // every credential must be signed by THIS account — no smuggling a rogue device.
+            return RosterIngest::Refused; // every credential must be signed by THIS account — no smuggling a rogue device.
         }
         credentials.push(cred);
     }
@@ -7114,7 +7193,7 @@ fn verify_and_store_roster(st: &mut NetState, account: &HavenId, list_bytes: &[u
                     for c in st.circles.iter_mut() {
                         c.rotate_epoch();
                     }
-                    true
+                    RosterIngest::Stored
                 }
                 None => {
                     if creds_grew {
@@ -7122,7 +7201,7 @@ fn verify_and_store_roster(st: &mut NetState, account: &HavenId, list_bytes: &[u
                             cd.credentials = creds;
                         }
                     }
-                    creds_grew
+                    if creds_grew { RosterIngest::Stored } else { RosterIngest::AlreadyCurrent }
                 }
             };
         }
@@ -7155,13 +7234,13 @@ fn verify_and_store_roster(st: &mut NetState, account: &HavenId, list_bytes: &[u
                 c.rotate_epoch();
             }
         }
-        return adopted || creds_grew;
+        return if adopted || creds_grew { RosterIngest::Stored } else { RosterIngest::AlreadyCurrent };
     }
 
     // A CONTACT's roster: they re-sign their own union, so higher-version-wins with rollback defense.
     if let Some(existing) = st.device_lists.get(&acct_id) {
         if existing.list.version > list.version {
-            return false; // rollback / replay of an OLDER roster — ignore.
+            return RosterIngest::Refused; // rollback / replay of an OLDER roster — ignore.
         }
         if existing.list.version == list.version {
             // ALREADY CURRENT — the overwhelmingly common case in steady state, and a SUCCESS, not a
@@ -7171,7 +7250,7 @@ fn verify_and_store_roster(st: &mut NetState, account: &HavenId, list_bytes: &[u
             // device logged "devroster INGEST REJECTED … the engine refused them" on EVERY poll and
             // skipped that recovery forever, which is how an Android leg sat on 8 parked envelopes
             // it already had the roster for.
-            return true;
+            return RosterIngest::AlreadyCurrent;
         }
     }
     st.device_lists.insert(acct_id, ContactDevices { list, credentials });
@@ -7187,7 +7266,7 @@ fn verify_and_store_roster(st: &mut NetState, account: &HavenId, list_bytes: &[u
     for i in 0..st.circles.len() {
         mls_sync_roster_to_tree(st, i);
     }
-    true
+    RosterIngest::Stored
 }
 
 /// Restore a persisted device roster on load: re-verify it against the carried account bundle and store

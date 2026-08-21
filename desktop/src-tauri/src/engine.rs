@@ -364,6 +364,8 @@ pub struct Engine {
     /// QA-visible call state pushed from the webview: bit0 = ringing, bit1 = in_call. See
     /// `set_qa_call_state` for why this exists.
     qa_call: std::sync::atomic::AtomicU8,
+    /// When the epoch-change re-seal last ran, so a burst of roster changes coalesces into one pass.
+    last_epoch_reseal: std::sync::Mutex<u64>,
     /// The account master seed — `Some` on a primary/legacy device, `None` on a SEEDLESS device
     /// (seed-drop S4). Making it an `Option` turns every account-key use into a compile-checked
     /// decision, so a missed seedless guard is a build error, not a runtime forge/panic.
@@ -683,6 +685,7 @@ impl Engine {
         Ok(Arc::new(Self {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
             qa_call: std::sync::atomic::AtomicU8::new(0),
+            last_epoch_reseal: std::sync::Mutex::new(0),
             seed: Some(seed),
             social,
             paths,
@@ -799,6 +802,7 @@ impl Engine {
         Ok(Arc::new(Self {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
             qa_call: std::sync::atomic::AtomicU8::new(0),
+            last_epoch_reseal: std::sync::Mutex::new(0),
             seed: None,
             social,
             paths,
@@ -6624,13 +6628,38 @@ impl Engine {
         let key = format!("haven/devroster/{acct}");
         let short = acct.chars().take(8).collect::<String>();
         let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
+        // -1 refused, 0 already current, 1 stored (changed). `known` records that we HAVE the
+        // roster while still letting the loop ask the remaining relays: stopping at the first one
+        // holding a stale-but-equal copy pins this device a version behind its siblings forever.
+        let mut known = false;
+        let mut ingest = |me: &Arc<Self>, w: Vec<u8>, node: Option<&str>| -> bool {
+            let status = me.social.ingest_roster_wire_status(w);
+            if status < 0 {
+                log::warn!("devroster REFUSED {short} — forged, or a rollback to an older version");
+                return false;
+            }
+            known = true;
+            if let Some(n) = node {
+                me.mark_relay_ok(n);
+            }
+            me.authorize_membership();
+            if status == 0 {
+                return false; // already current — keep looking for a NEWER copy
+            }
+            log::info!("devroster PULLED {short} — roster CHANGED");
+            // The roster changed, so the circle epoch moved. Content already sealed under the
+            // PREVIOUS epoch is unreadable to a member who joins or advances past it; the full
+            // bundle re-seals my history under the new one. The mechanism existed, nothing
+            // triggered it here, so the repair waited for the next periodic backfill.
+            me.reseal_after_epoch_change();
+            true
+        };
+
         // Our own hosted store first — no dial, and a relay-hosting device usually already holds it.
         if hosted.is_some() {
             let local = self.relay_host.lock().unwrap().as_ref().and_then(|h| h.local_get(key.clone()));
             if let Some(w) = local {
-                if !w.is_empty() && self.social.ingest_roster_wire(w) {
-                    log::info!("devroster PULLED {short} from own store — their devices are now resolvable");
-                    self.authorize_membership();
+                if !w.is_empty() && ingest(self, w, None) {
                     return true;
                 }
             }
@@ -6648,10 +6677,7 @@ impl Engine {
                 for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
                     match self.http_get(base, &token, &key).await {
                         Ok(Some(w)) => {
-                            if !w.is_empty() && self.social.ingest_roster_wire(w) {
-                                self.mark_relay_ok(&node_hex);
-                                log::info!("devroster PULLED {short} from relay {}", &node_hex.chars().take(8).collect::<String>());
-                                self.authorize_membership();
+                            if !w.is_empty() && ingest(self, w, Some(&node_hex)) {
                                 return true;
                             }
                         }
@@ -6665,16 +6691,34 @@ impl Engine {
             }
             if let Some(client) = self.relay_client_for(&node_hex).await {
                 if let Some(w) = client.get(key.clone()).await {
-                    if !w.is_empty() && self.social.ingest_roster_wire(w) {
-                        self.mark_relay_ok(&node_hex);
-                        log::info!("devroster PULLED {short} from relay {} (dial)", &node_hex.chars().take(8).collect::<String>());
-                        self.authorize_membership();
+                    if !w.is_empty() && ingest(self, w, Some(&node_hex)) {
                         return true;
                     }
                 }
             }
         }
-        false
+        known
+    }
+
+    /// Re-seal my history under the circle's NEW epoch after a roster change. Throttled: each pass
+    /// is a hybrid PQ signature per event, so a burst of roster changes coalesces into one.
+    fn reseal_after_epoch_change(self: &Arc<Self>) {
+        const MIN_INTERVAL_MS: u64 = 30_000;
+        {
+            let mut last = self.last_epoch_reseal.lock().unwrap();
+            let now = now_ms();
+            if now.saturating_sub(*last) < MIN_INTERVAL_MS {
+                return;
+            }
+            *last = now;
+        }
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let cids: Vec<String> = me.social.circles().into_iter().map(|c| c.id).collect();
+            for cid in cids {
+                me.backfill_mailbox(&cid).await;
+            }
+        });
     }
 
     /// Adopt a relay node for all circles (ADDED to the redundant set, not replacing existing

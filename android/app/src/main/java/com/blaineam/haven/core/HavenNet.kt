@@ -38,6 +38,9 @@ private const val TAG = "HavenNet"
  *  bounding note where the pull is kicked off. */
 private const val ROSTER_PULL_PER_PASS = 3
 private const val ROSTER_PULL_BACKOFF_MS = 600_000L   // 10 min
+/// Floor between two epoch-change re-seals. The re-seal is a hybrid PQ signature per event, so a
+/// burst of roster changes (a fleet all registering devices at once) must coalesce into one pass.
+private const val RESEAL_MIN_INTERVAL_MS = 30_000L
 
 /** How long before re-asking the public directory about the same account (`resolveMissingDeviceIds`).
  *  Most contacts have simply never published, so an unthrottled lookup would fire a DNS round-trip
@@ -2949,6 +2952,25 @@ object HavenNet : InboundListener {
      * that answer, so clear the parking lot and let the next sweep try again; anything genuinely
      * corrupt just fails once more and parks itself right back.
      */
+    /// A roster change moves the circle epoch. Re-seal my own history under the NEW epoch so members
+    /// who advanced (or joined) past the old one can still read what I already posted — the full
+    /// bundle is the documented mechanism for exactly this, it was simply never triggered here.
+    /// Throttled: the re-seal is a hybrid signature per event, so a roster that changes twice in
+    /// quick succession must not run it twice.
+    private var lastResealAt = 0L
+    private fun resealAfterEpochChange() {
+        val now = System.currentTimeMillis()
+        synchronized(this) {
+            if (now - lastResealAt < RESEAL_MIN_INTERVAL_MS) return
+            lastResealAt = now
+        }
+        scope.launch {
+            runCatching {
+                for (c in social.circles()) backfillMailbox(c.id, eventsToo = true)
+            }.onFailure { Log.w(TAG, "re-seal after epoch change failed", it) }
+        }
+    }
+
     private fun onRosterLearned() {
         val n = unopenableMedia.size
         if (n == 0) return
@@ -3003,15 +3025,35 @@ object HavenNet : InboundListener {
                     // completely different fixes.
                     if (wire == null || wire.isEmpty()) {
                         Log.i(TAG, "devroster MISS ${acct.take(8)} at ${nodeHex.take(8)} — relay has no roster for them")
-                    } else if (!runCatching { social.ingestRosterWire(wire) }.getOrDefault(false)) {
-                        Log.w(TAG, "devroster INGEST REJECTED ${acct.take(8)} from ${nodeHex.take(8)} (${wire.size} B) — bytes arrived but the engine refused them")
-                    }
-                    if (wire != null && wire.isNotEmpty() && runCatching { social.ingestRosterWire(wire) }.getOrDefault(false)) {
-                        markRelaySeen(nodeHex)
-                        Log.i(TAG, "devroster PULLED ${acct.take(8)} from relay ${nodeHex.take(8)}")
-                        authorizeMembership()
-                        onRosterLearned()
-                        return true
+                    } else {
+                        // -1 refused, 0 already current, 1 stored. Ingest ONCE and branch on the
+                        // answer: calling this twice used to do the whole verify + drain twice per
+                        // relay, and could not tell "already have it" from "refused" at all.
+                        when (runCatching { social.ingestRosterWireStatus(wire) }.getOrDefault((-1).toByte())) {
+                            (-1).toByte() -> Log.w(TAG, "devroster REFUSED ${acct.take(8)} from ${nodeHex.take(8)} (${wire.size} B) — forged, or a rollback to an older version")
+                            0.toByte() -> {
+                                // Known and unchanged. The roster IS learned, so run the recovery —
+                                // but keep asking the other relays, because one of them may hold a
+                                // NEWER roster and stopping here pins us a version behind forever.
+                                markRelaySeen(nodeHex)
+                                authorizeMembership()
+                                onRosterLearned()
+                            }
+                            else -> {
+                                markRelaySeen(nodeHex)
+                                Log.i(TAG, "devroster PULLED ${acct.take(8)} from relay ${nodeHex.take(8)} — roster CHANGED")
+                                authorizeMembership()
+                                onRosterLearned()
+                                // The roster changed, so the circle epoch moved. Content already
+                                // sealed under the PREVIOUS epoch is unreadable to anyone who joins
+                                // or advances past it, and the only thing that repairs that is a
+                                // full re-seal of my history under the new epoch. Without this the
+                                // repair waited for the next periodic backfill, which is how three
+                                // posts stayed invisible to a peer for an entire QA run.
+                                resealAfterEpochChange()
+                                return true
+                            }
+                        }
                     }
                 }
             }

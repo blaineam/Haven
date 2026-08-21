@@ -1395,16 +1395,46 @@ enum SharedStore {
         if rosterPullAt.count > 500 { rosterPullAt.removeAll() }
     }
 
+    /// Posted when a contact's roster CHANGED, which moves the circle epoch. The observer re-seals
+    /// my history under the new epoch (see `backfillMailbox`) — matching AccountStore's
+    /// `didAdoptSeedlessNotification` convention.
+    static let rosterEpochChangedNotification = Notification.Name("haven.rosterEpochChanged")
+
+    /// Learn a contact's device roster from any relay that has it.
+    ///
+    /// Returns true once the roster is KNOWN. Crucially it keeps asking the remaining relays when a
+    /// copy is merely already-current: stopping at the first relay holding the same version pins this
+    /// device to a stale roster while its siblings move on. Only a roster that actually CHANGED ends
+    /// the search — and that is also the only case that must re-seal history under the new epoch.
     @discardableResult
     static func fetchContactRoster(accountHex: String, social: HavenSocial) async -> Bool {
         let acct = accountHex.lowercased()
         guard acct.count == 64 else { return false }
         let key = "haven/devroster/\(acct)"
+        var known = false
+
+        // -1 refused, 0 already current, 1 stored (changed).
+        func ingest(_ wire: Data, from node: String?) -> Bool {
+            let status = social.ingestRosterWireStatus(wire: wire)
+            if status < 0 {
+                HavenLog.sync("devroster REFUSED \(acct.prefix(8)) — forged, or a rollback to an older version")
+                return false
+            }
+            known = true
+            if let node { RelayMailboxStore.shared.markSeen(node) }
+            guard status > 0 else { return false }   // already current: keep looking for a newer one
+            HavenLog.sync("devroster PULLED \(acct.prefix(8)) — roster CHANGED")
+            // The roster changed, so the circle epoch moved. Anything I already posted under the
+            // PREVIOUS epoch is unreadable to a member who joins or advances past it, and the full
+            // re-seal is the documented repair — it just was never triggered from here, so the fix
+            // waited on the next periodic backfill.
+            NotificationCenter.default.post(name: SharedStore.rosterEpochChangedNotification, object: nil)
+            return true
+        }
 
         // Our own hosted store first — no dial, and a relay-hosting device usually already holds it.
         if RelayHost.shared.serving, let wire = RelayHost.shared.localGet(key), !wire.isEmpty,
-           social.ingestRosterWire(wire: wire) {
-            HavenLog.sync("devroster PULLED \(acct.prefix(8)) from own store — their devices are now resolvable")
+           ingest(wire, from: nil) {
             return true
         }
         for node in RelayMailboxStore.shared.allRelays() where !node.hasPrefix("s3:") {
@@ -1413,11 +1443,7 @@ enum SharedStore {
                 for base in http.urls where !httpUrlBad(base) {
                     switch await httpGet(base, http.token, key) {
                     case .success(let wire):
-                        if let wire, !wire.isEmpty, social.ingestRosterWire(wire: wire) {
-                            RelayMailboxStore.shared.markSeen(node)
-                            HavenLog.sync("devroster PULLED \(acct.prefix(8)) from relay \(node.prefix(8))")
-                            return true
-                        }
+                        if let wire, !wire.isEmpty, ingest(wire, from: node) { return true }
                     case .failure(is RelayForbidden):
                         noteRefused(node, "devroster read for \(acct.prefix(8))")
                     case .failure:
@@ -1426,13 +1452,12 @@ enum SharedStore {
                 }
             }
             guard let c = await RelayClients.client(node) else { continue }
-            if let wire = await c.get(key: key), !wire.isEmpty, social.ingestRosterWire(wire: wire) {
-                RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
-                HavenLog.sync("devroster PULLED \(acct.prefix(8)) from relay \(node.prefix(8)) (dial)")
-                return true
+            if let wire = await c.get(key: key), !wire.isEmpty {
+                RelayHealth.shared.recordSuccess(node)
+                if ingest(wire, from: node) { return true }
             }
         }
-        return false
+        return known
     }
 
     /// The bucket used for MEDIA in this circle: the owner's own creds for a circle whose pre-signed

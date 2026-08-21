@@ -92,8 +92,11 @@ object LocalMedia {
         // (`thumb:<ref>:<thumbRef>`) joins the SIGNED media list at post time — see
         // HavenNet.withThumbMarkers — so old clients simply ignore it (synthetic scheme). Apple
         // MediaStore.addImage parity.
-        if (!isVideo && bytes.size > 64 * 1024) {
-            runCatching { mintThumbCompanion(circleId, ref, bytes) }
+        if (!isVideo && bytes.size > 64 * 1024) runCatching { mintThumbCompanion(circleId, ref, bytes) }
+        // A preview is worth minting as soon as the picture is meaningfully bigger than one. The
+        // thumb's 64 KB threshold is unrelated to this tier; tying the preview to it meant a 40 KB
+        // photo — far too big for a satellite pass — silently got no preview and could not cross.
+        if (!isVideo && bytes.size > PreviewCodec.MAX_BYTES * 2) {
             runCatching { mintPreviewCompanion(circleId, ref, bytes) }
         }
         return ref
@@ -114,6 +117,20 @@ object LocalMedia {
     /** True when [ref] IS a preview, rather than something that has one. */
     fun isPreviewRef(ref: String): Boolean =
         this::thumbPrefs.isInitialized && thumbPrefs.getBoolean("pr|$ref", false)
+
+    /**
+     * May this blob cross an ultra-constrained link?
+     *
+     * A preview always may. So does anything ALREADY within the preview budget — a small picture is
+     * its own preview, and no preview is minted for one. Without this a 5 KB photo had nothing small
+     * enough to send and so sent nothing at all, the opposite of the intent. Mirrors iOS
+     * `MediaStore.maySendOnUltraConstrained`.
+     */
+    fun maySendOnUltraConstrained(ref: String): Boolean {
+        if (isPreviewRef(ref)) return true
+        val f = runCatching { mediaFile(ref) }.getOrNull() ?: return false
+        return f.exists() && f.length() <= PreviewCodec.MAX_BYTES
+    }
 
     /**
      * Encode + store the ≤8KB, 512px AVIF preview for [ref] (docs/PREVIEW-TIER-DESIGN.md).

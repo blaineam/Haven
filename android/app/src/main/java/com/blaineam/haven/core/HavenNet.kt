@@ -5459,7 +5459,7 @@ object HavenNet : InboundListener {
         // them. Mirrors iOS MediaBackupQueue.drain.
         if (!force &&
             LowDataMonitor.effective.value == uniffi.haven_ffi.LinkConstraint.ULTRA &&
-            !LocalMedia.isPreviewRef(ref)
+            !LocalMedia.maySendOnUltraConstrained(ref)
         ) return
         val job = MediaJob.Backup(ref, circleId, force, priority,
             atMs = if (priority) System.currentTimeMillis() else 0L)

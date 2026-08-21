@@ -201,7 +201,7 @@ final class MediaBackupQueue {
             // @MainActor isolation, and both calls below are main-actor bound.
             let sendable: (Job) -> Bool = { job in
                 if MediaBackupBackoff.shouldSkip(job.ref) { return false }
-                return !previewsOnly || MediaStore.shared.isPreviewRef(job.ref)
+                return !previewsOnly || MediaStore.shared.maySendOnUltraConstrained(job.ref)
             }
             let hiWork = Array(priorityPending.filter(sendable).prefix(budget))
             let loWork = Array(pending.filter(sendable).prefix(budget - hiWork.count))

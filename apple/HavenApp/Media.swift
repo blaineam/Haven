@@ -729,8 +729,12 @@ final class MediaStore: ObservableObject {
         // blurred behind the loading placeholder long before the full bytes land. The pairing
         // marker (`thumb:<ref>:<thumbRef>`) joins the SIGNED media list at post time — see
         // FeedStore.withThumbMarkers — so old clients simply ignore it (synthetic scheme).
-        if data.count > 64 * 1024 {
-            mintThumbCompanion(for: ref, from: img)
+        if data.count > 64 * 1024 { mintThumbCompanion(for: ref, from: img) }
+        // A preview is worth minting as soon as the picture is meaningfully bigger than one. The
+        // thumb's 64 KB threshold is unrelated to this tier and left alone; tying the preview to it
+        // meant a 40 KB photo — far too big for a satellite pass — silently got no preview and so
+        // could not cross at all.
+        if data.count > PreviewCodec.maxBytes * 2 {
             mintPreviewCompanion(for: ref, from: img)
         }
         return ref
@@ -762,6 +766,20 @@ final class MediaStore: ObservableObject {
     /// previews this device minted, which is exactly right: a device only ever uploads its own
     /// authored media.
     func isPreviewRef(_ ref: String) -> Bool { previewRefs.contains(ref) }
+
+    /// May this blob cross an ultra-constrained link?
+    ///
+    /// A preview always may. So does anything ALREADY within the preview budget — a small picture is
+    /// its own preview, and no preview is minted for one. Without this a 5 KB photo had nothing
+    /// small enough to send and so sent nothing at all, which is the opposite of the intent: the
+    /// tier exists to get a picture through, and that one already fits.
+    func maySendOnUltraConstrained(_ ref: String) -> Bool {
+        if previewRefs.contains(ref) { return true }
+        guard let url = fileURL(ref),
+              let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int
+        else { return false }
+        return size <= PreviewCodec.maxBytes
+    }
 
     /// Reverse index of `previewCompanions`, kept in step on every mint. A `contains` on a Set
     /// rather than a linear scan of the dictionary's values, because the upload queue asks this for

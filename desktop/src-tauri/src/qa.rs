@@ -391,6 +391,11 @@ fn write_dump(engine: &Arc<Engine>) {
             None => serde_json::Value::Null,
         },
         "circles": circles,
+        // What the engine is HOLDING BACK: parked (received-but-unopenable) envelopes per circle,
+        // plus the rosters we know. A short feed alone cannot tell "never arrived" from "arrived and
+        // could not be opened", and those have opposite fixes.
+        "delivery": serde_json::from_str::<serde_json::Value>(&engine.diag_delivery_json())
+            .unwrap_or(serde_json::Value::Null),
     });
     let tmp = root.join("qa-dump.json.tmp");
     match serde_json::to_vec(&dump) {

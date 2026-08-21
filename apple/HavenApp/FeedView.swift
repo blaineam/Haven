@@ -2876,12 +2876,14 @@ final class FeedStore: ObservableObject {
             }
             await MainActor.run { [weak self] in
                 guard let self, self.qaDumpGeneration == gen else { return }
-                self.qaWriteDumpFile(snapshot, accountHex: social.myNodeHex(), tsMs: nowMs)
+                self.qaWriteDumpFile(snapshot, accountHex: social.myNodeHex(), tsMs: nowMs,
+                                     delivery: social.diagDeliveryJson())
             }
         }
     }
 
-    private func qaWriteDumpFile(_ snapshot: [QaCircleSnapshot], accountHex: String, tsMs: UInt64) {
+    private func qaWriteDumpFile(_ snapshot: [QaCircleSnapshot], accountHex: String, tsMs: UInt64,
+                                 delivery: String) {
         guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
         #if os(iOS)
         let device = "ios"
@@ -2959,6 +2961,10 @@ final class FeedStore: ObservableObject {
             // works — the field failure was both sides connected with zero audio either way — so QA
             // asserts on bytes actually received (CallManager.qaMediaSnapshot, refreshed per dump).
             "call": CallManager.shared.qaSnapshot(),
+            // What the engine is HOLDING BACK: parked (received-but-unopenable) envelopes per
+            // circle, plus the rosters we know. A short feed alone cannot tell "never arrived" from
+            // "arrived and could not be opened", and the two have opposite fixes.
+            "delivery": (try? JSONSerialization.jsonObject(with: Data(delivery.utf8))) ?? [:],
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: dump, options: [.sortedKeys]) else {
             HavenLog.net("matrix-qa dump: JSON encode failed")

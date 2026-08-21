@@ -5372,7 +5372,14 @@ impl HavenSocial {
                 let stored = verify_and_store_roster(&mut st, &account, &list, &creds);
                 note_roster_capability(&mut st, &account, &trailer); // S0: learn capability, never infer absence
                 note_seedless_own_roster_wire(&mut st, &account, &wire); // A3: keep MY primary-signed wire verbatim
-                stored
+                // PARITY with the mailbox arm (`receive` → TAG_DEVICE_ROSTER, which has always done
+                // this): a roster — freshly stored OR already held — may make a parked "unknown
+                // sender" envelope openable, so replay the durable buffer here too. Without it the
+                // two ways of learning the same bytes had different consequences, and the PULL arm
+                // is the only one a contact's roster ever takes on Android. Draining is idempotent
+                // and cheap: still-locked events go straight back into the buffer.
+                let drained = drain_all_pending(&mut st);
+                stored || drained
             }
             None => false,
         }
@@ -6272,6 +6279,54 @@ impl HavenSocial {
     ///     while we verify over our ACCOUNT hex — so a frame addressed to one of our DEVICE ids can
     ///     never verify here no matter how genuine it is. That asymmetry is a real bug, and this is
     ///     the string that proves it rather than inferring it.
+    /// Diagnostic: why a circle's feed is emptier than its traffic, as JSON.
+    ///
+    /// `pending_epoch` is a DURABLE buffer. An envelope that arrives before the key that opens it —
+    /// or before the roster that resolves its sender — parks there and waits to be replayed. The
+    /// mailbox drain deliberately marks such a key SEEN (the bytes are already held; re-fetching
+    /// identical bytes forever is the re-ingest storm this codebase has fought before), so from the
+    /// outside a PARKED envelope and one that NEVER ARRIVED look exactly alike: the feed is short
+    /// and nothing is logged. The two have opposite fixes — parked means "deliver the key/roster",
+    /// absent means "fix the transport" — and nothing exposed which one was happening.
+    ///
+    /// That gap is what made a QA leg sit on a full buffer while reading as a delivery failure: the
+    /// engine held 87 envelopes it could not open and reported a one-item feed, identically to a
+    /// device whose relay was simply dead.
+    ///
+    /// Purely observational — it takes the lock, reads counters, and decides nothing.
+    pub fn diag_delivery_json(&self) -> String {
+        let st = self.state.lock().unwrap();
+        let mut circles = Vec::with_capacity(st.circles.len());
+        for c in st.circles.iter() {
+            let peers: std::collections::BTreeSet<&String> =
+                c.peer_epoch_keys.keys().map(|(acct, _)| acct).collect();
+            circles.push(format!(
+                "{{\"id\":\"{}\",\"events\":{},\"parked\":{},\"my_epoch\":{},\"my_epoch_keys\":{},\"peer_epoch_keys\":{},\"peers_keyed\":{},\"members\":{}}}",
+                c.id.replace('"', ""),
+                c.events.len(),
+                c.pending_epoch.len(),
+                c.my_epoch,
+                c.my_epoch_keys.len(),
+                c.peer_epoch_keys.len(),
+                peers.len(),
+                c.members.len(),
+            ));
+        }
+        // Known device rosters, by account — an unresolvable sender is the OTHER reason an
+        // envelope parks, and it is invisible from the feed alone.
+        let mut rosters = Vec::with_capacity(st.device_lists.len());
+        for (acct, cd) in st.device_lists.iter() {
+            rosters.push(format!(
+                "{{\"account\":\"{}\",\"version\":{},\"devices\":{},\"credentials\":{}}}",
+                hex(acct),
+                cd.list.version,
+                cd.list.devices.len(),
+                cd.credentials.len(),
+            ));
+        }
+        format!("{{\"circles\":[{}],\"rosters\":[{}]}}", circles.join(","), rosters.join(","))
+    }
+
     pub fn diagnose_call_frame(&self, frame_type: u8, blob: Vec<u8>) -> String {
         if blob.len() < 4 {
             return "malformed:short".into();
@@ -7105,8 +7160,18 @@ fn verify_and_store_roster(st: &mut NetState, account: &HavenId, list_bytes: &[u
 
     // A CONTACT's roster: they re-sign their own union, so higher-version-wins with rollback defense.
     if let Some(existing) = st.device_lists.get(&acct_id) {
-        if existing.list.version >= list.version {
-            return false; // rollback / replay of an older roster — ignore.
+        if existing.list.version > list.version {
+            return false; // rollback / replay of an OLDER roster — ignore.
+        }
+        if existing.list.version == list.version {
+            // ALREADY CURRENT — the overwhelmingly common case in steady state, and a SUCCESS, not a
+            // refusal. Callers read this bool as "is this account's roster known to the engine?" and
+            // gate their post-roster recovery on it (re-opening quarantined media, replaying the
+            // durable `pending_epoch` buffer). Answering `false` here meant a perfectly healthy
+            // device logged "devroster INGEST REJECTED … the engine refused them" on EVERY poll and
+            // skipped that recovery forever, which is how an Android leg sat on 8 parked envelopes
+            // it already had the roster for.
+            return true;
         }
     }
     st.device_lists.insert(acct_id, ContactDevices { list, credentials });

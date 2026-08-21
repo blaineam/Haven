@@ -10609,6 +10609,13 @@ impl Engine {
     /// all — stale bundle, failed invoke, anything — indistinguishable from one that had cleanly hung
     /// up. The e2e assertion passed on desktop at the same moment desktop was visibly sitting in a
     /// live call. A default that reads as healthy turns "not measuring" into "working".
+    /// What the engine is HOLDING BACK — parked (received-but-unopenable) envelopes per circle plus
+    /// the rosters we know. A short feed alone cannot distinguish "never arrived" from "arrived and
+    /// could not be opened", and those have opposite fixes.
+    pub fn diag_delivery_json(&self) -> String {
+        self.social.diag_delivery_json()
+    }
+
     pub fn qa_call_state(&self) -> Option<(bool, bool)> {
         let v = self.qa_call.load(std::sync::atomic::Ordering::Relaxed);
         if v & 0b100 == 0 { return None; }

@@ -1702,7 +1702,10 @@ private fun CircleSwitcher(activeId: String, circlesVersion: Int, modifier: Modi
                 androidx.compose.material3.DropdownMenuItem(
                     // Through circleName, not c.name — the switcher is a display site, so a circle
                     // I've privately renamed must read the same here as it does in the header.
-                    text = { Text(stringResource(R.string.circle_name_member_count, HavenNet.circleName(c.id), c.memberCount), color = HavenTheme.textPrimary) },
+                    // memberCount is a uniffi u32 -> kotlin.UInt, which BOXES as kotlin.UInt and not as
+                    // Integer. Android's %d formatter rejects that with IllegalFormatConversionException,
+                    // so rendering this row crashed the app outright every time the switcher opened.
+                    text = { Text(stringResource(R.string.circle_name_member_count, HavenNet.circleName(c.id), c.memberCount.toInt()), color = HavenTheme.textPrimary) },
                     onClick = { HavenNet.setActiveCircle(c.id); menu = false },
                 )
             }

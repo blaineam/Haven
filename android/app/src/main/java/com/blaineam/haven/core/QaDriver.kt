@@ -424,6 +424,10 @@ object QaDriver {
             .put("ringing", runCatching { CallManager.ringing.value }.getOrDefault(false))
             .put("in_call", runCatching { CallManager.inCall.value }.getOrDefault(false)))
         o.put("circles", circles)
+        // What the engine is HOLDING BACK. A short feed alone cannot distinguish "never arrived"
+        // from "arrived and could not be opened", and those have opposite fixes — this leg once
+        // read as a delivery failure while sitting on 8 parked envelopes.
+        o.put("delivery", runCatching { JSONObject(social.diagDeliveryJson()) }.getOrNull())
 
         // App-owned file in Download/ (allowed on scoped storage); tmp+rename keeps reads whole.
         val tmp = File(downloads, dumpFile.name + ".tmp")

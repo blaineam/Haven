@@ -3375,7 +3375,14 @@ final class FeedStore: ObservableObject {
     /// backlog), thumbs first, then posters, then content — so the placeholder-feeding bytes land
     /// before the big blobs start.
     private func enqueueAuthoredMedia(_ media: [String], circleId: String, social: HavenSocial) {
-        for ref in MediaVariants.allThumbs(in: media) + MediaVariants.uploadOrder(media) {
+        // PREVIEWS FIRST, and explicitly — `uploadOrder` can only rank refs that are IN `media`, and
+        // the bare preview ref never is: a post lists the `preview:` MARKER and not the companion.
+        // So the preview was never enqueued for upload at all, and the one blob that must cross a
+        // satellite link was the one blob that never left. Android enqueues them explicitly for the
+        // same reason; iOS did not, which is exactly why android→ delivered a preview and ios→ did
+        // not, to the same stub.
+        for ref in MediaVariants.allPreviews(in: media) + MediaVariants.allThumbs(in: media)
+            + MediaVariants.uploadOrder(media) {
             MediaBackupQueue.shared.enqueue(ref, circleId: circleId, social: social, priority: true)
         }
     }

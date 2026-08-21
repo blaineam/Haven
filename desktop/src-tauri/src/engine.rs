@@ -10596,15 +10596,23 @@ impl Engine {
     /// That blind spot let an established call ended on iOS strand THIS leg in a dead call while the
     /// suite reported green; only someone looking at the screen could tell. Two bools close it.
     pub fn set_qa_call_state(self: &Arc<Self>, ringing: bool, in_call: bool) {
+        // bit2 = KNOWN. Set on the first push and never cleared.
         self.qa_call.store(
-            (ringing as u8) | ((in_call as u8) << 1),
+            0b100 | (ringing as u8) | ((in_call as u8) << 1),
             std::sync::atomic::Ordering::Relaxed,
         );
     }
 
-    pub fn qa_call_state(&self) -> (bool, bool) {
+    /// `None` until the webview has pushed at least once.
+    ///
+    /// This must NOT default to "not in a call". It did, and that made a leg which never reported at
+    /// all — stale bundle, failed invoke, anything — indistinguishable from one that had cleanly hung
+    /// up. The e2e assertion passed on desktop at the same moment desktop was visibly sitting in a
+    /// live call. A default that reads as healthy turns "not measuring" into "working".
+    pub fn qa_call_state(&self) -> Option<(bool, bool)> {
         let v = self.qa_call.load(std::sync::atomic::Ordering::Relaxed);
-        (v & 1 != 0, v & 2 != 0)
+        if v & 0b100 == 0 { return None; }
+        Some((v & 1 != 0, v & 2 != 0))
     }
 
     pub fn call_hangup(self: &Arc<Self>, to: Vec<String>, session_id: String) {

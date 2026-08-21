@@ -358,7 +358,11 @@ fn write_dump(engine: &Arc<Engine>) {
         "posts": posts,
         "dms": dms,
         "profile": { "name": engine.get_profile().name },
-        "call": { "ringing": engine.qa_call_state().0, "in_call": engine.qa_call_state().1 },
+        // null until the webview has reported — deliberately NOT a healthy-looking default.
+        "call": match engine.qa_call_state() {
+            Some((ringing, in_call)) => serde_json::json!({ "ringing": ringing, "in_call": in_call }),
+            None => serde_json::Value::Null,
+        },
         "circles": circles,
     });
     let tmp = root.join("qa-dump.json.tmp");

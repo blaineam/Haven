@@ -404,7 +404,11 @@ async function main() {
       // neither the Android nor the desktop dump reported call state at all, and the call step only
       // ever asserted on ios and stub — the two legs that DID hang up correctly. Both gaps are now
       // closed, so assert on all of them.
-      await convergeAll(all, (j) => !(j.call?.in_call || j.call?.ringing), BUDGET.text, 'call ended everywhere');
+      // A leg must REPORT that it left the call. `j.call` being absent or null means the leg never
+      // told us anything, which is NOT the same as having hung up — and treating it as a pass is
+      // exactly how this assertion went green while desktop sat in a visibly live call.
+      await convergeAll(all, (j) => j.call != null && !(j.call.in_call || j.call.ringing),
+        BUDGET.text, 'call ended everywhere');
     }
   }
 

@@ -7370,6 +7370,58 @@ mod net_tests {
         );
     }
 
+    /// A LEGACY circle — no MLS, no device rosters, no seed-drop capability, and no way to ever get
+    /// them — still gets the smaller wire.
+    ///
+    /// This is deliberate and load-bearing. `circle_fully_compact_wire_capable` is intentionally NOT
+    /// composed with `circle_fully_seed_drop_capable` or `circle_fully_mls_capable`, because being
+    /// able to parse a container is a property of the app BUILD, not of key management. Composing
+    /// them would have stranded every legacy circle on the 3.5x-larger encoding permanently, for no
+    /// safety gain — the circles least likely to ever upgrade their keying would have been the ones
+    /// paying the most bytes.
+    #[test]
+    fn a_legacy_non_mls_circle_still_gets_the_compact_container() {
+        let alice = HavenSocial::new([31u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([32u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+
+        // Establish that this really is a legacy circle: nobody has exchanged a device roster, so
+        // the MLS gate cannot hold and never will until rosters appear.
+        {
+            let st = alice.state.lock().unwrap();
+            let idx = st.circles.iter().position(|c| c.id == cid).unwrap();
+            assert!(st.device_lists.is_empty(), "no device rosters — this is a legacy circle");
+            assert!(!circle_is_mls_capable(&st, idx), "a roster-less circle is not MLS-capable");
+        }
+
+        // Only the compact-wire marker is exchanged. No roster, no seed-drop, no MLS.
+        let card = bob.my_signed_profile("Bob".into(), String::new(), String::new(), String::new(), String::new());
+        assert!(alice.verify_profile_card(bob.my_bundle(), card).is_some());
+
+        // Still not MLS-capable...
+        {
+            let st = alice.state.lock().unwrap();
+            let idx = st.circles.iter().position(|c| c.id == cid).unwrap();
+            assert!(!circle_is_mls_capable(&st, idx), "still not MLS-capable");
+            assert!(circle_is_compact_wire_capable(&st, idx), "...but compact-wire capable");
+        }
+
+        // ...and the wire is compact anyway, and the message still arrives.
+        let env = alice
+            .post(cid.clone(), "legacy circle, small wire".into(), vec![], None, None, false, false, 1_000)
+            .unwrap();
+        assert_eq!(&env[1..6], b"HVEP1", "a legacy circle must still get the compact container");
+
+        assert!(!bob.receive(cid.clone(), env).unwrap());
+        sync(&alice, &bob, &cid);
+        assert!(
+            bob.feed(cid.clone(), 2_000, None).iter().any(|e| e.body == "legacy circle, small wire"),
+            "and it must still decrypt on the far side"
+        );
+    }
+
     /// The gate has to open through the call the CLIENTS actually make.
     ///
     /// iOS and Android consume profiles via `verify_profile_card`; only desktop calls

@@ -294,13 +294,13 @@ object CallManager {
      * Sealed PER DEVICE rather than to my account, so a seedless device (which holds no account key)
      * can open it too. iOS CallManager.notifyOwnDevicesHandled parity.
      */
-    private fun notifyOwnDevicesHandled() {
+    private fun notifyOwnDevicesHandled(ended: Boolean = false) {
         if (sessionId.isEmpty()) return
         val others = runCatching { HavenNet.myOtherDeviceHexes() }.getOrDefault(emptyList())
         if (others.isEmpty()) return
         Log.i(TAG, "call ${sessionId.take(8)} handled here — standing down ${others.size} other device(s) of mine")
         val frame = CallWire.handledElsewhere(myHex, sessionId)
-        others.forEach { send(CallWire.HANDLED_ELSEWHERE, frame, it) }
+        others.forEach { send(if (ended) CallWire.ENDED_ELSEWHERE else CallWire.HANDLED_ELSEWHERE, frame, it) }
     }
 
     /**
@@ -324,6 +324,25 @@ object CallManager {
         teardown()
     }
 
+    /**
+     * My account ENDED this session on another device: tear down whatever state we are in — ringing
+     * OR already answered.
+     *
+     * [handleHandledElsewhere] deliberately ignores a device that has already answered, so that a
+     * late frame cannot kill a live conversation. That guard also meant an established call ended on
+     * one device left my OTHER devices sitting in a dead call with no way out. This frame is the
+     * explicit end, and is narrowly guarded the same way: my own account only, matching session only.
+     * iOS CallManager.handleEndedElsewhere parity.
+     */
+    private fun handleEndedElsewhere(body: ByteArray) {
+        val a = CallWire.parseAccept(body) ?: return
+        if (a.from != myHex) return                      // only MY account may end my call
+        if (a.sessionId != sessionId) return             // and only the session we are actually in
+        Log.i(TAG, "call ${a.sessionId.take(8)} ended on another of my devices — tearing down")
+        endedSessions[a.sessionId] = System.currentTimeMillis()
+        teardown()
+    }
+
     fun hangup() {
         // Declining counts as handling it: silence my other devices too, or they keep ringing after I
         // have dismissed the call here.
@@ -333,7 +352,7 @@ object CallManager {
         // and the Mac stub hung up while Android and desktop did not. The receiving side stays
         // narrow (it only silences a device still RINGING), so this cannot tear down a conversation
         // someone is actively having elsewhere. iOS CallManager.reallyEnd parity.
-        notifyOwnDevicesHandled()
+        notifyOwnDevicesHandled(ended = true)
         // The hangup is one fire-and-forget UDP frame; a single drop makes the far side wait out the
         // ICE timeout (~seconds) instead of ending promptly. Send it a few times — it's idempotent on
         // receipt. Capture targets before teardown clears the roster.
@@ -413,6 +432,7 @@ object CallManager {
             CallWire.ACCEPT -> handleAccept(body)
             CallWire.HANGUP -> handleHangup(body)
             CallWire.HANDLED_ELSEWHERE -> handleHandledElsewhere(body)
+            CallWire.ENDED_ELSEWHERE -> handleEndedElsewhere(body)
             CallWire.CAMERA -> handleCameraState(body)
             CallWire.OFFER -> handleOffer(body)
             CallWire.ANSWER -> handleAnswer(body)

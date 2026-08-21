@@ -28,6 +28,10 @@ object CallWire {
      *  CallManager.handleHandledElsewhere). Rides the sealed+signed call path: it can silence a
      *  ringing phone, so it must be no more forgeable than an invite. */
     const val HANDLED_ELSEWHERE = 30
+    /** My account ENDED this session on another device: tear down even if already answered here.
+     *  HANDLED_ELSEWHERE (30) deliberately only silences a device still RINGING, so an established
+     *  call ended elsewhere left this one in a dead call. iOS frame 35 parity. */
+    const val ENDED_ELSEWHERE = 35
 
     private fun hexHead(payload: ByteArray): String? {
         if (payload.size < 64) return null

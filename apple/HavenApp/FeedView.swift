@@ -5155,6 +5155,7 @@ final class FeedStore: ObservableObject {
         case 31: handleMediaWanted(payload)                          // someone wants media I authored, that a relay swept
         case 32: handleMediaAvailable(payload)                       // media I asked about is back on a relay
         case 33: handleMediaResumeRequest(payload)                   // re-request carrying a bitmap of what they already have
+        case 35: CallManager.shared.handleEndedElsewhere(payload)   // my account ENDED this call elsewhere
         case 34: handleHistoryRequest(payload)                       // "send me the page of your history before X"
         default: break
         }

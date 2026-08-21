@@ -732,14 +732,37 @@ final class CallManager: NSObject, ObservableObject {
     ///
     /// Sealed PER DEVICE rather than to my account, so a seedless device (which holds no account key)
     /// can open it too.
-    private func notifyOwnDevicesHandled() {
+    private func notifyOwnDevicesHandled(ended: Bool = false) {
         guard !sessionId.isEmpty else { return }
         var f = Data(myHex.utf8)
         CallManager.lpAppend(&f, Data(sessionId.utf8))
         let others = FeedStore.shared.myOtherDeviceHexes()
         guard !others.isEmpty else { return }
-        HavenLog.call("call \(sessionId.prefix(8)) handled here — standing down \(others.count) other device(s) of mine")
-        for dev in others { FeedStore.shared.sendCallFrame(30, f, to: dev) }
+        // 30 = "handled elsewhere": only silences a device still RINGING, deliberately, so a late
+        // frame cannot kill a conversation in progress.
+        // 35 = "ENDED elsewhere": the session is over, so a device that has already ANSWERED must
+        // tear down too. Without this an established call ended on one device left my other devices
+        // sitting in a dead call with no way out — 30 was ignored by exactly the devices that were
+        // stuck. Both carry the session id, so neither can affect a different call.
+        let type: UInt8 = ended ? 35 : 30
+        HavenLog.call("call \(sessionId.prefix(8)) \(ended ? "ended" : "handled") here — standing down \(others.count) other device(s) of mine")
+        for dev in others { FeedStore.shared.sendCallFrame(type, f, to: dev) }
+    }
+
+    /// My account ENDED this call session on another device. Tear down whatever state we are in —
+    /// ringing or answered. Narrowly guarded: the sender must be my own account (proven by the
+    /// frame's signature before dispatch) and the session id must match the one we are in.
+    func handleEndedElsewhere(_ payload: Data) {
+        guard payload.count > 64 else { return }
+        let from = String(decoding: payload.prefix(64), as: UTF8.self)
+        guard from.count == 64, from == myHex else { return }
+        var off = 0
+        let body = payload.dropFirst(64)
+        guard let sidData = CallManager.lpRead(body, &off) else { return }
+        let sid = String(decoding: sidData, as: UTF8.self)
+        guard active, sid == sessionId else { return }
+        HavenLog.call("call \(sid.prefix(8)) ended on another of my devices — tearing down here")
+        teardown("ended on another device")
     }
 
     /// Another of MY devices answered or declined this call: stop ringing and tear down.
@@ -1664,7 +1687,7 @@ final class CallManager: NSObject, ObservableObject {
         // Ending is at least as much "I have handled this" as declining is. The receiving side stays
         // deliberately narrow — it only silences a device still RINGING, never one already answered,
         // so this cannot tear down a conversation someone is actively having on another device.
-        notifyOwnDevicesHandled()
+        notifyOwnDevicesHandled(ended: true)
         for p in invitees() {
             var f = Data(myHex.utf8)
             CallManager.lpAppend(&f, Data(sessionId.utf8))

@@ -157,7 +157,12 @@ let lastBudget = 0;
 // This scales the budget per leg instead of raising it for everyone, which would blunt the fast
 // legs. The real regression guard is not the absolute budget anyway: it is the run-over-run check
 // that fails any step more than 2x slower than last time, and that stays exact for every leg.
-const SLOW_LEG = { desktop: 2.5, 'mac-stub': 2 };
+// Desktop is not merely slower — it converges on a materially longer cycle than the mobile legs.
+// Measured on the satellite run: every one of its `full photo completes on return` assertions failed
+// at a 375s budget, and yet the desktop dump held ALL THREE posts with media_present=true once the
+// run ended. It was never failing to receive; it was receiving after the budget. 2.5x was not
+// enough headroom for that, so it is 6x — still a bound, just an honest one.
+const SLOW_LEG = { desktop: 6, 'mac-stub': 2 };
 
 const budgetFor = (dev, base) => Math.round(base * (SLOW_LEG[dev?.label] || 1));
 

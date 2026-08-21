@@ -294,6 +294,20 @@ fn dm_peer(circle_id: &str, me: &str) -> String {
 /// Fetchable blobs only — `thumb:`/`poster:`-style synthetic markers aren't bytes and must not
 /// be able to fail the orchestrator's media-blob gate (Android `realRefs` / Apple FeedView dump
 /// parity: both reduce `media_refs` AND `media_present` to the real refs).
+/// `preview:<content>:<companion>` / `thumb:` / `poster:` / `orig:` -> the companion ref it names.
+fn parse_marker_companion(marker: &str) -> Option<String> {
+    for scheme in ["preview:", "thumb:", "poster:", "orig:"] {
+        if let Some(rest) = marker.strip_prefix(scheme) {
+            let colon = rest.rfind(':')?;
+            let companion = &rest[colon + 1..];
+            if !companion.is_empty() {
+                return Some(companion.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn real_refs(media: &[String]) -> Vec<String> {
     media.iter().filter(|r| !crate::localmedia::LocalMedia::is_synthetic(r)).cloned().collect()
 }
@@ -312,6 +326,19 @@ fn item_json(engine: &Arc<Engine>, circle_id: &str, it: &FeedItemFfi) -> Value {
         "caption": if it.story { Value::from(it.body.clone()) } else { Value::Null },
         "media_present": real.iter().map(|r| engine.media_present(r)).collect::<Vec<bool>>(),
         "media_refs": real,
+        // Companion MARKERS and whether the blobs they name are here.
+        //
+        // real_refs() drops synthetic refs and a post never lists the bare companion ref, so without
+        // these a preview is invisible to QA on this leg even when it has arrived — the satellite
+        // assertions could not pass against desktop no matter what the product did. Apple parity
+        // (FeedView qaWriteDump).
+        "media_markers": it.media.iter()
+            .filter(|r| crate::localmedia::LocalMedia::is_synthetic(r))
+            .cloned().collect::<Vec<String>>(),
+        "companions_present": it.media.iter().filter_map(|m| {
+            let companion = parse_marker_companion(m)?;
+            Some((companion.clone(), Value::from(engine.media_present(&companion))))
+        }).collect::<serde_json::Map<String, Value>>(),
         "reactions": reactions,
         "comments": it.comments.iter().map(|c| json!({ "id": c.id, "body": c.body })).collect::<Vec<Value>>(),
     })

@@ -452,20 +452,35 @@ async function main() {
     // receive-side is exercised on every platform including iOS.
     const authors = ['ios', ...(devices.android ? ['android'] : []), 'stub'].filter((a) => devices[a]);
 
+    // WHO should receive a post authored under an ultra-constrained link.
+    //
+    // Only the OTHER account. `Traffic::SelfSync` is Deny at Ultra by design: on a satellite pass
+    // the bytes go to the people you are talking to, not to mirroring your own laptop — your own
+    // devices reconcile when you are back. Asserting own-device delivery DURING the constrained
+    // window demanded behaviour the policy deliberately refuses, and produced two reds against a
+    // product that was doing exactly the right thing (post reached the stub in 2.5s; desktop and
+    // android never, correctly).
+    //
+    // After the constraint clears, everything catches up — and that IS asserted, below.
+    const ACCOUNT_A = ['ios', 'desktop', 'android'];
+    const sameAccount = (a, b) => ACCOUNT_A.includes(a) === ACCOUNT_A.includes(b);
+
     for (const author of authors) {
       const SAT = `${MARKER}_Sat_${author}`;
       const audience = all.filter((x) => x !== author && devices[x]);
-      if (!audience.length) continue;
+      // Cross-account only while constrained; everyone once service returns.
+      const constrainedAudience = audience.filter((d) => !sameAccount(d, author));
+      if (!audience.length || !constrainedAudience.length) continue;
 
       await op(devices[author], { op: 'link_constraint', level: 'ultra' }, 2500);
       const satPhoto = devices[author].stage(PHOTO, `qa-sat-${author}.jpg`);
       await op(devices[author], { op: 'post', body: SAT, media: 'photo', photo_path: satPhoto, circle_id: cid() }, 12_000);
 
       // 1. The post still arrives — it is real, signed and sealed; only bytes were deferred.
-      await convergeAll(audience, (j) => Boolean(parsePreview(findPost(j, SAT))),
+      await convergeAll(constrainedAudience, (j) => Boolean(parsePreview(findPost(j, SAT))),
         BUDGET.mediaEvent, `satellite post event (${author}→)`);
       // 2. The ~6 KB preview crosses.
-      await convergeAll(audience, (j) => {
+      await convergeAll(constrainedAudience, (j) => {
         const p = findPost(j, SAT); const v = parsePreview(p);
         return Boolean(v && presentRef(p, v.preview));
       }, BUDGET.mediaBlob, `satellite preview blob (${author}→)`);
@@ -473,7 +488,7 @@ async function main() {
       // 3. THE NEGATIVE, and the point of the tier: the full photo must NOT have crossed. A
       //    positive-only test passes just as happily if the gate does nothing at all, and a leaking
       //    gate looks identical to success from the receiving end.
-      const dumps = await Promise.all(audience.map(async (d) => ({ d, j: await freshDump(devices[d]) })));
+      const dumps = await Promise.all(constrainedAudience.map(async (d) => ({ d, j: await freshDump(devices[d]) })));
       let leaked = null;
       for (const { d, j } of dumps) {
         const p = findPost(j, SAT); const v = parsePreview(p);

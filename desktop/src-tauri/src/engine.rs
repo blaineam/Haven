@@ -4847,6 +4847,7 @@ impl Engine {
                 // device, so it must be no more forgeable than an invite or a hangup.
                 wire::CALL_INVITE | wire::GROUP_INVITE | wire::CALL_ACCEPT | wire::CALL_HANGUP
                 | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE | wire::CALL_HANDLED
+                | wire::CALL_ENDED_ELSEWHERE
                 | wire::CALL_CAMERA => me.handle_call(t, &body),
                 // 31/32 are media frames, not call signaling, so they're handled here rather than
                 // emitted to the UI — but they borrow the call path's sealing, because one asks an
@@ -9976,6 +9977,12 @@ impl Engine {
             }),
             wire::CALL_HANDLED => callwire::parse_accept(body).map(|a| {
                 serde_json::json!({ "kind": "handledElsewhere", "from": a.from, "sessionId": a.session_id })
+            }),
+            // 35: my account ENDED this session elsewhere. Distinct from handledElsewhere, which the
+            // UI deliberately applies only while still ringing — this one must also end a call this
+            // device has already answered, which is the case that left desktop in a dead call.
+            wire::CALL_ENDED_ELSEWHERE => callwire::parse_accept(body).map(|a| {
+                serde_json::json!({ "kind": "endedElsewhere", "from": a.from, "sessionId": a.session_id })
             }),
             wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE => callwire::parse_signal(body, "").map(|s| {
                 let kind = match t { wire::SDP_OFFER => "offer", wire::SDP_ANSWER => "answer", _ => "ice" };

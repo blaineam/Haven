@@ -41,6 +41,10 @@ pub const SEEDLESS_ENROLL_GRANT: u8 = 29; // the primary grants credential + ros
 /// sealed+signed call path: it can silence a ringing machine, so it must be no more forgeable than an
 /// invite. iOS/Android-compat.
 pub const CALL_HANDLED: u8 = 30;
+/// My account ENDED this call session on another device: tear down even if already answered here.
+/// CALL_HANDLED (30) deliberately only silences a device still RINGING, so an established call
+/// ended elsewhere left this one in a dead call. Apple/Android frame 35 parity.
+pub const CALL_ENDED_ELSEWHERE: u8 = 35;
 
 /// "Put this media back" — a reader asks a post's AUTHOR to re-upload a blob a relay has swept.
 /// `[hex64 sender][LP ref][LP circleId][LP postId]`. iOS/Android-compat.

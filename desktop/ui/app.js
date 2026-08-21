@@ -7279,6 +7279,17 @@ async function onCallEvent(payload) {
 
       break;
     }
+    // My account ENDED this session on another device (frame 35). Unlike handledElsewhere above,
+    // this must also end a call this device has already ANSWERED — that guard is exactly why an
+    // established call ended on the phone left this leg sitting in a dead call with no way out.
+    // Still narrow: only my own account (the frame's signature is checked before it reaches here)
+    // and only the session this device is actually in.
+    case "endedElsewhere": {
+      if (c.sessionId !== call.session) return;
+      if (!(call.ringing || call.connecting || call.inCall)) return;
+      teardownCall();
+      break;
+    }
     // A peer's camera went on or off (frame 22). Their track stops producing frames either way, so
     // without this their tile holds the last frame it received and looks like a live, frozen person.
     case "camera": {

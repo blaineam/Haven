@@ -138,3 +138,82 @@ final class MediaVariantsTests: XCTestCase {
         XCTAssertEqual(MediaVariants.displayRefs(["img_solo"]).first, "img_solo")
     }
 }
+
+// MARK: - The 512px AVIF preview tier (docs/PREVIEW-TIER-DESIGN.md)
+
+extension MediaVariantsTests {
+
+    /// A preview is a companion, not a slide. Rendering it as its own tile would show the same
+    /// picture twice — small, then full — the moment the real bytes landed.
+    func testPreviewsNeverRenderAsSlides() {
+        let media = [
+            "img_photo",
+            MediaVariants.previewMarker(content: "img_photo", preview: "img_prev"),
+            "img_prev",
+        ]
+        XCTAssertEqual(MediaVariants.displayRefs(media), ["img_photo"])
+    }
+
+    func testPreviewRoundTripsAndIsFound() {
+        let m = MediaVariants.previewMarker(content: "img_a", preview: "img_a_prev")
+        let parsed = MediaVariants.parsePreview(m)
+        XCTAssertEqual(parsed?.content, "img_a")
+        XCTAssertEqual(parsed?.preview, "img_a_prev")
+        XCTAssertEqual(MediaVariants.preview(for: "img_a", in: [m]), "img_a_prev")
+        XCTAssertEqual(MediaVariants.allPreviews(in: [m]), ["img_a_prev"])
+        // A thumb marker is not a preview marker and vice versa.
+        XCTAssertNil(MediaVariants.parsePreview(MediaVariants.thumbMarker(content: "x", thumb: "y")))
+        XCTAssertNil(MediaVariants.parseThumb(m))
+    }
+
+    /// The satellite contract: previews and nothing else. Everything heavier waits for service.
+    func testOnlyPreviewsCrossASatelliteLink() {
+        let media = [
+            "vid_clip",
+            MediaVariants.posterMarker(video: "vid_clip", poster: "img_poster"), "img_poster",
+            MediaVariants.thumbMarker(content: "vid_clip", thumb: "img_thumb"), "img_thumb",
+            MediaVariants.previewMarker(content: "vid_clip", preview: "img_prev"), "img_prev",
+            MediaVariants.originalMarker(optimized: "vid_clip", original: "vid_orig"), "vid_orig",
+        ]
+        XCTAssertEqual(MediaVariants.satelliteRefs(media), ["img_prev"],
+                       "only the preview may cross; poster, thumb, original and video must not")
+    }
+
+    /// On a constrained link the upload may only get through the first rank before the pass ends,
+    /// so rank order decides what a recipient can see at all. Preview must outrank everything.
+    func testUploadOrderPutsPreviewsFirst() {
+        let media = [
+            "vid_clip",
+            MediaVariants.posterMarker(video: "vid_clip", poster: "img_poster"), "img_poster",
+            MediaVariants.thumbMarker(content: "vid_clip", thumb: "img_thumb"), "img_thumb",
+            MediaVariants.previewMarker(content: "vid_clip", preview: "img_prev"), "img_prev",
+        ]
+        let order = MediaVariants.uploadOrder(media)
+        XCTAssertEqual(order.first, "img_prev", "preview uploads before anything else")
+        XCTAssertEqual(order, ["img_prev", "img_thumb", "img_poster", "vid_clip"])
+    }
+
+    /// Data saver renders the preview until a tap, so it must always be fetched — it is the
+    /// cheapest thing in the post at ≤8 KB.
+    func testDataSaverAlwaysFetchesThePreview() {
+        let media = [
+            "vid_clip",
+            MediaVariants.previewMarker(content: "vid_clip", preview: "img_prev"), "img_prev",
+        ]
+        XCTAssertTrue(MediaVariants.dataSaverPrefetchRefs(media).contains("img_prev"))
+        XCTAssertFalse(MediaVariants.dataSaverPrefetchRefs(media).contains("vid_clip"),
+                       "the video still waits for a tap")
+    }
+
+    /// Deleting a photo must take its preview with it, or the post keeps pointing at a picture it
+    /// no longer carries — the orphaned-companion bug the thumb/poster cases already cover.
+    func testRemovingContentTakesItsPreview() {
+        let media = [
+            "img_photo",
+            MediaVariants.previewMarker(content: "img_photo", preview: "img_prev"), "img_prev",
+        ]
+        let companions = MediaVariants.companionRefs("img_photo", in: media)
+        XCTAssertTrue(companions.contains("img_prev"))
+        XCTAssertTrue(companions.contains(MediaVariants.previewMarker(content: "img_photo", preview: "img_prev")))
+    }
+}

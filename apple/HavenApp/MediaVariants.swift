@@ -11,6 +11,8 @@ import Foundation
 ///   `poster:<videoRef>:<imageRef>`   — poster JPEG for a video
 ///   `orig:<optimizedRef>:<originalRef>` — uncompressed original sitting beside the optimized
 ///   `thumb:<contentRef>:<thumbRef>`  — tiny (~256px, ≤32KB) preview companion for a photo
+///   `preview:<contentRef>:<previewRef>` — 512px AVIF, ≤8KB: the ONLY media that crosses a
+///                                         satellite link (`docs/PREVIEW-TIER-DESIGN.md`)
 ///
 /// Display rules:
 /// - Posters are images; they may render as the video's still, or as their own slide.
@@ -32,6 +34,11 @@ enum MediaVariants {
 
     static func thumbMarker(content: String, thumb: String) -> String {
         "thumb:\(content):\(thumb)"
+    }
+
+    /// The 512px AVIF preview companion — the one media tier small enough for a satellite bearer.
+    static func previewMarker(content: String, preview: String) -> String {
+        "preview:\(content):\(preview)"
     }
 
     /// `poster:<video>:<image>` → (video, poster image).
@@ -69,6 +76,17 @@ enum MediaVariants {
         return (content, thumb)
     }
 
+    /// `preview:<content>:<preview>` → (content, preview image).
+    static func parsePreview(_ ref: String) -> (content: String, preview: String)? {
+        guard ref.hasPrefix("preview:") else { return nil }
+        let rest = String(ref.dropFirst("preview:".count))
+        guard let colon = rest.lastIndex(of: ":") else { return nil }
+        let content = String(rest[..<colon])
+        let preview = String(rest[rest.index(after: colon)...])
+        guard !content.isEmpty, !preview.isEmpty else { return nil }
+        return (content, preview)
+    }
+
     // MARK: - Lookups
 
     /// Poster image ref for a given video, if the post/DM declared one.
@@ -87,6 +105,7 @@ enum MediaVariants {
         for m in media {
             if let p = parsePoster(m), p.video == ref { out.insert(m); out.insert(p.poster) }
             if let t = parseThumb(m), t.content == ref { out.insert(m); out.insert(t.thumb) }
+            if let v = parsePreview(m), v.content == ref { out.insert(m); out.insert(v.preview) }
             if let o = parseOriginal(m), o.optimized == ref { out.insert(m); out.insert(o.original) }
         }
         return out
@@ -135,6 +154,28 @@ enum MediaVariants {
         media.compactMap { parseThumb($0)?.thumb }
     }
 
+    /// The 512px AVIF preview for a piece of content, if the post declared one.
+    static func preview(for content: String, in media: [String]) -> String? {
+        for r in media {
+            if let v = parsePreview(r), v.content == content { return v.preview }
+        }
+        return nil
+    }
+
+    /// Every preview image ref declared in the list.
+    static func allPreviews(in media: [String]) -> [String] {
+        media.compactMap { parsePreview($0)?.preview }
+    }
+
+    /// The ONLY refs that may cross an ultra-constrained link (`docs/PREVIEW-TIER-DESIGN.md` §4.1).
+    ///
+    /// Everything else in the post — the optimized copy, the original, thumbs, posters — stays
+    /// queued and uploads when service returns. The post itself is real, signed and sealed the
+    /// moment it goes; what is missing is bytes, not authenticity.
+    static func satelliteRefs(_ media: [String]) -> [String] {
+        allPreviews(in: media)
+    }
+
     // MARK: - Display filtering
 
     /// Refs the feed/DM bubble should actually render as slides.
@@ -148,13 +189,19 @@ enum MediaVariants {
         let originals = Set(allOriginals(in: media))
         let posterImages = Set(allPosters(in: media))
         let thumbImages = Set(allThumbs(in: media))
+        // Previews back the placeholder until the real bytes arrive; they are never their own
+        // slide. Without this a satellite post would render the same picture twice — once small,
+        // once full — the moment the full copy landed.
+        let previewImages = Set(allPreviews(in: media))
         return media.filter { ref in
             if parsePoster(ref) != nil { return false }
             if parseOriginal(ref) != nil { return false }
             if parseThumb(ref) != nil { return false }
+            if parsePreview(ref) != nil { return false }
             if originals.contains(ref) { return false }
             if posterImages.contains(ref) { return false }
             if thumbImages.contains(ref) { return false }
+            if previewImages.contains(ref) { return false }
             return true
         }
     }
@@ -180,18 +227,27 @@ enum MediaVariants {
         for p in allPosters(in: media) where !out.contains(p) { out.append(p) }
         // Thumbs are ≤32KB by contract — always worth fetching, data saver included.
         for t in allThumbs(in: media) where !out.contains(t) { out.append(t) }
+        // Previews are ≤8KB — cheaper still, and they are what data saver renders until a tap.
+        for v in allPreviews(in: media) where !out.contains(v) { out.append(v) }
         return out
     }
 
-    /// The relay-upload order for a media list's fetchable refs: thumbs first (tiny, unblock the
+    /// The relay-upload order for a media list's fetchable refs: **previews first** (≤8KB, and the
+    /// only thing that will cross a satellite link at all), then thumbs (tiny, unblock the
     /// placeholder), then posters, then everything else in list order. Synthetic markers dropped.
+    ///
+    /// Ordering matters beyond politeness now: on a constrained link the upload may only get
+    /// through the first rank before the pass ends, so the rank order decides what a recipient can
+    /// see at all.
     static func uploadOrder(_ media: [String]) -> [String] {
+        let previews = Set(allPreviews(in: media))
         let thumbs = Set(allThumbs(in: media))
         let posters = Set(allPosters(in: media))
         func rank(_ r: String) -> Int {
-            if thumbs.contains(r) { return 0 }
-            if posters.contains(r) { return 1 }
-            return 2
+            if previews.contains(r) { return 0 }
+            if thumbs.contains(r) { return 1 }
+            if posters.contains(r) { return 2 }
+            return 3
         }
         // Keep list order within a rank (stable sort) and skip markers — a ':' at index > 1 is a
         // synthetic scheme (mirror of MediaStore.isSynthetic, inlined so this file stays test-only).

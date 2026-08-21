@@ -30,15 +30,44 @@ object MediaVariants {
     fun allThumbs(media: List<String>): List<String> =
         media.mapNotNull { parseThumb(it)?.second }
 
+    /** `preview:<contentRef>:<previewRef>` — the 512px AVIF, ≤8KB, and the ONLY media that crosses
+     *  a satellite link (`docs/PREVIEW-TIER-DESIGN.md`). Same marker shape as `thumb:`, so old
+     *  clients ignore it. Apple parity. */
+    fun previewMarker(content: String, preview: String) = "preview:$content:$preview"
+
+    fun parsePreview(ref: String): Pair<String, String>? {
+        if (!ref.startsWith("preview:")) return null
+        val rest = ref.removePrefix("preview:")
+        val i = rest.lastIndexOf(':')
+        if (i <= 0 || i >= rest.length - 1) return null
+        return rest.substring(0, i) to rest.substring(i + 1)
+    }
+
+    /** The 512px AVIF preview for a content ref, if the post declared one. */
+    fun previewFor(content: String, media: List<String>): String? =
+        media.mapNotNull { parsePreview(it) }.firstOrNull { it.first == content }?.second
+
+    /** Every preview image ref declared in the list. */
+    fun allPreviews(media: List<String>): List<String> =
+        media.mapNotNull { parsePreview(it)?.second }
+
+    /** The ONLY refs that may cross an ultra-constrained link. Everything heavier stays queued and
+     *  uploads when service returns (docs/PREVIEW-TIER-DESIGN.md §4.1). */
+    fun satelliteRefs(media: List<String>): List<String> = allPreviews(media)
+
     /** The relay-upload order for a media list's fetchable refs: thumbs first (tiny, unblock the
      *  placeholder), then posters, then everything else in list order. Markers dropped. */
     fun uploadOrder(media: List<String>): List<String> {
+        val previews = allPreviews(media).toSet()
         val thumbs = allThumbs(media).toSet()
         val posters = media.mapNotNull { parsePoster(it)?.second }.toSet()
+        // Previews outrank everything: on a constrained link the upload may only get through the
+        // first rank before the pass ends, so rank order decides what a recipient can see at all.
         fun rank(r: String) = when {
-            r in thumbs -> 0
-            r in posters -> 1
-            else -> 2
+            r in previews -> 0
+            r in thumbs -> 1
+            r in posters -> 2
+            else -> 3
         }
         // Keep list order within a rank (stable sort) and skip markers — a ':' at index > 1 is a
         // synthetic scheme (mirror of LocalMedia.isSynthetic, inlined so this file stays test-only).
@@ -77,9 +106,14 @@ object MediaVariants {
         val originals = allOriginals(media).toSet()
         val posterImages = media.mapNotNull { parsePoster(it)?.second }.toSet()
         val thumbImages = allThumbs(media).toSet()
+        // Previews back the placeholder until the real bytes arrive; never their own slide, or a
+        // satellite post would render the same picture twice once the full copy landed.
+        val previewImages = allPreviews(media).toSet()
         return media.filter {
             parsePoster(it) == null && parseOriginal(it) == null && parseThumb(it) == null &&
-                it !in originals && it !in posterImages && it !in thumbImages
+                parsePreview(it) == null &&
+                it !in originals && it !in posterImages && it !in thumbImages &&
+                it !in previewImages
         }
     }
 
@@ -101,6 +135,9 @@ object MediaVariants {
             parseThumb(r)?.let { (content, thumb) ->
                 if (content == ref || thumb == ref) { out.add(r); out.add(thumb) }
             }
+            parsePreview(r)?.let { (content, preview) ->
+                if (content == ref || preview == ref) { out.add(r); out.add(preview) }
+            }
         }
         return out.toList()
     }
@@ -121,6 +158,8 @@ object MediaVariants {
         for (p in posters) if (p !in out) out.add(p)
         // Thumbs are ≤32KB by contract — always worth fetching, data saver included.
         for (t in allThumbs(media)) if (t !in out) out.add(t)
+        // Previews are ≤8KB — cheaper still, and what data saver renders until a tap.
+        for (v in allPreviews(media)) if (v !in out) out.add(v)
         return out
     }
 

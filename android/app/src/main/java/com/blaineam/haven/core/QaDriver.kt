@@ -196,6 +196,17 @@ object QaDriver {
             // QA: force the link constraint so the satellite path can be exercised off a satellite.
             // ULTRA is otherwise unreachable in an emulator — see LowDataMonitor.debugForced.
             // This whole driver is BuildConfig.DEBUG-gated already.
+            // QA: approve every pending connection request.
+            //
+            // Nothing in the driver could do this, so a fleet where account B reached A's OTHER
+            // devices as a stranger simply stopped — Android sat on an un-approvable "Matrix Stub
+            // Host" request forever and every assertion about B's content failed for a reason that
+            // had nothing to do with the product. An automated suite cannot wait for a tap.
+            "approve_connections" -> {
+                val reqs = HavenNet.pending.toList()
+                reqs.forEach { runCatching { HavenNet.approve(it) } }
+                Log.i("HavenQA", "approve_connections: approved ${reqs.size}")
+            }
             "link_constraint" -> LowDataMonitor.debugForced = when (cmd.optString("level").lowercase()) {
                 "ultra" -> LinkConstraint.ULTRA
                 "low" -> LinkConstraint.LOW

@@ -97,6 +97,14 @@ fn apply(engine: &Arc<Engine>, cmd: &Value) {
         // QA: force the link constraint so the satellite path can be exercised without a satellite.
         // Desktop has no path monitor at all (docs/PREVIEW-TIER-DESIGN.md §2), so this is also the
         // only way to put it into the Low/Ultra profiles from a test.
+        // QA: approve every pending connection request. Same reason as the mobile drivers — an
+        // automated fleet cannot depend on somebody clicking Approve, and without this the desktop
+        // leg stalls on an un-approvable request from the stub.
+        "approve_connections" => {
+            for req in engine.pending() {
+                engine.approve(req.id_hex.clone());
+            }
+        }
         "link_constraint" => {
             let level = cmd.get("level").and_then(|v| v.as_str()).unwrap_or("normal");
             engine.set_low_data_level(match level {

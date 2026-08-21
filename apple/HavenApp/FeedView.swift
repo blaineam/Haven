@@ -2636,6 +2636,19 @@ final class FeedStore: ObservableObject {
 
         switch op {
         #if DEBUG
+        case "approve_connections":
+            // QA: approve every pending connection request.
+            //
+            // Nothing in the driver could do this, so a fleet where B reached A's OTHER devices as
+            // a stranger simply stopped: Android and desktop sat on an un-approvable "Matrix Stub
+            // Host" request forever, and every assertion about B's content on those legs failed for
+            // a reason that had nothing to do with the product. An automated suite cannot depend on
+            // somebody tapping Approve.
+            let reqs = ConnectionsStore.shared.pending
+            for r in reqs { approveConnection(r) }
+            HavenLog.net("matrix-qa v2 approve_connections: approved \(reqs.count)")
+            qaWriteDump()
+            return
         case "link_constraint":
             // QA: force the link constraint so the satellite path can be exercised off a satellite.
             // `Ultra` is otherwise unreachable in a simulator — see LowDataMonitor.debugForce.

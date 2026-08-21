@@ -159,8 +159,10 @@ let lastBudget = 0;
 // that fails any step more than 2x slower than last time, and that stays exact for every leg.
 const SLOW_LEG = { desktop: 2.5, 'mac-stub': 2 };
 
-async function converge(dev, predicate, budgetMs, pollMs = 3000) {
-  budgetMs = Math.round(budgetMs * (SLOW_LEG[dev?.label] || 1));
+const budgetFor = (dev, base) => Math.round(base * (SLOW_LEG[dev?.label] || 1));
+
+async function converge(dev, predicate, budgetMs, pollMs = 1500) {
+  budgetMs = budgetFor(dev, budgetMs);
   lastBudget = budgetMs;
   const t0 = Date.now();
   while (Date.now() - t0 < budgetMs) {
@@ -169,6 +171,25 @@ async function converge(dev, predicate, budgetMs, pollMs = 3000) {
     await sleep(pollMs);
   }
   return -1;
+}
+
+/// Converge on EVERY device at once, then score them.
+///
+/// The suite used to await each device in turn, so the wall clock was the SUM of the legs — and a
+/// failing step burned its whole budget per device before moving on. With three devices at a 225s
+/// desktop budget that is eleven minutes for one red step, which is why a full run took long enough
+/// that nobody would sit through it. Convergence is independent per device (each just polls its own
+/// dump), so there is no reason to serialise it: the wall clock becomes the SLOWEST leg instead of
+/// the sum, and a red step costs one budget rather than N.
+async function convergeAll(names, predicate, base, step) {
+  const results = await Promise.all(names.map(async (d) => ({
+    d, ms: await converge(devices[d], predicate, base),
+  })));
+  let allOk = true;
+  for (const { d, ms } of results) {
+    if (!perfGate(step, d, ms, budgetFor(devices[d], base))) allOk = false;
+  }
+  return allOk;
 }
 
 function perfGate(step, dev, latency, budget = lastBudget) {
@@ -228,8 +249,7 @@ async function main() {
   if (STEPS.includes('profile')) {
     const nick = `${MARKER}_Nick`;
     await op(devices.ios, { op: 'profile', name: nick });
-    for (const d of fleet.filter((x) => x !== 'ios'))
-      perfGate('profile edit', d, await converge(devices[d], (j) => j.profile?.name === nick, BUDGET.settings));
+    await convergeAll(fleet.filter((x) => x !== 'ios'), (j) => j.profile?.name === nick, BUDGET.settings, 'profile edit');
   }
 
   // 2. circle create + invite friend B
@@ -246,9 +266,7 @@ async function main() {
       // + claim + reply), so give it two active-cadence polls, not one.
       perfGate('circle membership', 'stub', await converge(devices.stub,
         (j) => j.circles?.some((c) => c.name === cname), BUDGET.text * 2));
-      for (const d of fleet.filter((x) => x !== 'ios'))
-        perfGate('circle (own devices)', d, await converge(devices[d],
-          (j) => j.circles?.some((c) => c.name === cname), BUDGET.settings));
+      await convergeAll(fleet.filter((x) => x !== 'ios'), (j) => j.circles?.some((c) => c.name === cname), BUDGET.settings, 'circle (own devices)');
     }
   }
 
@@ -262,36 +280,24 @@ async function main() {
   // 3. posts: text + photo + video (author iOS; friend authors one from stub)
   if (STEPS.includes('post')) {
     await op(devices.ios, { op: 'post', body: `${MARKER}_Text`, circle_id: cid() });
-    for (const d of audienceFor(true).filter((x) => x !== 'ios'))
-      perfGate('text post', d, await converge(devices[d],
-        (j) => j.posts?.some((p) => p.body === `${MARKER}_Text`), BUDGET.text));
+    await convergeAll(audienceFor(true).filter((x) => x !== 'ios'), (j) => j.posts?.some((p) => p.body === `${MARKER}_Text`), BUDGET.text, 'text post');
 
     const photoPath = devices.ios.stage(PHOTO, 'qa-photo.jpg');
     await op(devices.ios, { op: 'post', body: `${MARKER}_Photo`, media: 'photo', photo_path: photoPath, circle_id: cid() });
-    for (const d of audienceFor(true).filter((x) => x !== 'ios')) {
-      perfGate('photo post event', d, await converge(devices[d],
-        (j) => j.posts?.some((p) => p.body === `${MARKER}_Photo`), BUDGET.mediaEvent));
+    await convergeAll(audienceFor(true).filter((x) => x !== 'ios'), (j) => j.posts?.some((p) => p.body === `${MARKER}_Photo`), BUDGET.mediaEvent, 'photo post event');
       if (STEPS.includes('media'))
-        perfGate('photo blob present', d, await converge(devices[d],
-          (j) => j.posts?.some((p) => p.body === `${MARKER}_Photo` && p.media_present?.length && p.media_present.every(Boolean)), BUDGET.mediaBlob));
-    }
+        await convergeAll(audienceFor(true).filter((x) => x !== 'ios'), (j) => j.posts?.some((p) => p.body === `${MARKER}_Photo` && p.media_present?.length && p.media_present.every(Boolean)), BUDGET.mediaBlob, 'photo blob present');
 
     const videoPath = devices.ios.stage(VIDEO, 'qa-clip.mp4');
     await op(devices.ios, { op: 'post', body: `${MARKER}_Video`, media: 'video', video_path: videoPath, circle_id: cid() }, 12_000);
-    for (const d of audienceFor(true).filter((x) => x !== 'ios')) {
-      perfGate('video post event', d, await converge(devices[d],
-        (j) => j.posts?.some((p) => p.body === `${MARKER}_Video`), BUDGET.mediaEvent));
+    await convergeAll(audienceFor(true).filter((x) => x !== 'ios'), (j) => j.posts?.some((p) => p.body === `${MARKER}_Video`), BUDGET.mediaEvent, 'video post event');
       if (STEPS.includes('media'))
-        perfGate('video blob present', d, await converge(devices[d],
-          (j) => j.posts?.some((p) => p.body === `${MARKER}_Video` && p.media_present?.length && p.media_present.every(Boolean)), BUDGET.mediaBlob));
-    }
+        await convergeAll(audienceFor(true).filter((x) => x !== 'ios'), (j) => j.posts?.some((p) => p.body === `${MARKER}_Video` && p.media_present?.length && p.media_present.every(Boolean)), BUDGET.mediaBlob, 'video blob present');
 
     // friend's post into the shared circle reaches all of A
     if (circleId && B) {
       await op(devices.stub, { op: 'post', body: `${MARKER}_FromB`, circle_id: cid() });
-      for (const d of fleet)
-        perfGate('friend post', d, await converge(devices[d],
-          (j) => j.posts?.some((p) => p.body === `${MARKER}_FromB`), BUDGET.text));
+      await convergeAll(fleet, (j) => j.posts?.some((p) => p.body === `${MARKER}_FromB`), BUDGET.text, 'friend post');
     } else {
       score('friend post (needs shared circle)', false, 'circle step skipped or B unknown');
     }
@@ -301,26 +307,20 @@ async function main() {
   if (STEPS.includes('story')) {
     const p = devices.ios.stage(PHOTO, 'qa-photo.jpg');
     await op(devices.ios, { op: 'story', caption: `${MARKER}_Cap`, media: 'photo', photo_path: p, circle_id: cid() });
-    for (const d of audienceFor(true).filter((x) => x !== 'ios'))
-      perfGate('story + caption', d, await converge(devices[d],
-        (j) => j.posts?.some((x) => x.story && x.caption === `${MARKER}_Cap`), BUDGET.mediaEvent));
+    await convergeAll(audienceFor(true).filter((x) => x !== 'ios'), (j) => j.posts?.some((x) => x.story && x.caption === `${MARKER}_Cap`), BUDGET.mediaEvent, 'story + caption');
   }
 
   // 5. file post
   if (STEPS.includes('file') && existsSync(PDF)) {
     const p = devices.ios.stage(PDF, 'qa-doc.pdf');
     await op(devices.ios, { op: 'file', body: `${MARKER}_File`, file_path: p, circle_id: cid() });
-    for (const d of audienceFor(true).filter((x) => x !== 'ios'))
-      perfGate('file post', d, await converge(devices[d],
-        (j) => j.posts?.some((x) => x.body === `${MARKER}_File`), BUDGET.mediaEvent));
+    await convergeAll(audienceFor(true).filter((x) => x !== 'ios'), (j) => j.posts?.some((x) => x.body === `${MARKER}_File`), BUDGET.mediaEvent, 'file post');
   }
 
   // 6. music card
   if (STEPS.includes('music')) {
     await op(devices.ios, { op: 'music_post', body: `${MARKER}_Song`, music: { title: 'QA Song', artist: 'The Fixtures' }, circle_id: cid() });
-    for (const d of audienceFor(true).filter((x) => x !== 'ios'))
-      perfGate('music post', d, await converge(devices[d],
-        (j) => j.posts?.some((x) => x.body === `${MARKER}_Song`), BUDGET.text));
+    await convergeAll(audienceFor(true).filter((x) => x !== 'ios'), (j) => j.posts?.some((x) => x.body === `${MARKER}_Song`), BUDGET.text, 'music post');
   }
 
   // 7. DMs both directions (with media one way)
@@ -329,16 +329,12 @@ async function main() {
     perfGate('dm A→B', 'stub', await converge(devices.stub,
       (j) => Object.values(j.dms || {}).flat().some((m) => m.body === `${MARKER}_DM_AB`), BUDGET.text));
     // own-device echo: the DM thread appears on A's other devices
-    for (const d of fleet.filter((x) => x !== 'ios'))
-      perfGate('dm echo (own devices)', d, await converge(devices[d],
-        (j) => Object.values(j.dms || {}).flat().some((m) => m.body === `${MARKER}_DM_AB`), BUDGET.text * 2));
+    await convergeAll(fleet.filter((x) => x !== 'ios'), (j) => Object.values(j.dms || {}).flat().some((m) => m.body === `${MARKER}_DM_AB`), BUDGET.text * 2, 'dm echo (own devices)');
     const iosDump = await freshDump(devices.ios);
     const A = iosDump?.account_hex || '';
     if (A) {
       await op(devices.stub, { op: 'dm', dm_to: A, body: `${MARKER}_DM_BA` });
-      for (const d of fleet)
-        perfGate('dm B→A', d, await converge(devices[d],
-          (j) => Object.values(j.dms || {}).flat().some((m) => m.body === `${MARKER}_DM_BA`), BUDGET.text * 2));
+      await convergeAll(fleet, (j) => Object.values(j.dms || {}).flat().some((m) => m.body === `${MARKER}_DM_BA`), BUDGET.text * 2, 'dm B→A');
     }
   }
 
@@ -408,23 +404,21 @@ async function main() {
       const satPhoto = devices[author].stage(PHOTO, `qa-sat-${author}.jpg`);
       await op(devices[author], { op: 'post', body: SAT, media: 'photo', photo_path: satPhoto, circle_id: cid() }, 12_000);
 
-      for (const d of audience) {
-        // 1. The post still arrives — it is real, signed and sealed; only bytes were deferred.
-        perfGate(`satellite post event (${author}→)`, d, await converge(devices[d],
-          (j) => Boolean(parsePreview(findPost(j, SAT))), BUDGET.mediaEvent));
-        // 2. The ~6 KB preview crosses.
-        perfGate(`satellite preview blob (${author}→)`, d, await converge(devices[d], (j) => {
-          const p = findPost(j, SAT); const v = parsePreview(p);
-          return Boolean(v && presentRef(p, v.preview));
-        }, BUDGET.mediaBlob));
-      }
+      // 1. The post still arrives — it is real, signed and sealed; only bytes were deferred.
+      await convergeAll(audience, (j) => Boolean(parsePreview(findPost(j, SAT))),
+        BUDGET.mediaEvent, `satellite post event (${author}→)`);
+      // 2. The ~6 KB preview crosses.
+      await convergeAll(audience, (j) => {
+        const p = findPost(j, SAT); const v = parsePreview(p);
+        return Boolean(v && presentRef(p, v.preview));
+      }, BUDGET.mediaBlob, `satellite preview blob (${author}→)`);
 
       // 3. THE NEGATIVE, and the point of the tier: the full photo must NOT have crossed. A
       //    positive-only test passes just as happily if the gate does nothing at all, and a leaking
       //    gate looks identical to success from the receiving end.
+      const dumps = await Promise.all(audience.map(async (d) => ({ d, j: await freshDump(devices[d]) })));
       let leaked = null;
-      for (const d of audience) {
-        const j = await freshDump(devices[d]);
+      for (const { d, j } of dumps) {
         const p = findPost(j, SAT); const v = parsePreview(p);
         if (v && presentRef(p, v.content)) leaked = d;
       }
@@ -433,12 +427,10 @@ async function main() {
 
       // 4. Back in coverage — the deferred half must complete ON ITS OWN, with no further action.
       await op(devices[author], { op: 'link_constraint', level: 'auto' }, 3000);
-      for (const d of audience) {
-        perfGate(`full photo completes on return (${author}→)`, d, await converge(devices[d], (j) => {
-          const p = findPost(j, SAT); const v = parsePreview(p);
-          return Boolean(v && presentRef(p, v.content));
-        }, BUDGET.mediaBlob));
-      }
+      await convergeAll(audience, (j) => {
+        const p = findPost(j, SAT); const v = parsePreview(p);
+        return Boolean(v && presentRef(p, v.content));
+      }, BUDGET.mediaBlob, `full photo completes on return (${author}→)`);
     }
   }
 

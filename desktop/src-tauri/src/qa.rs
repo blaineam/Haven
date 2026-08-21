@@ -94,6 +94,17 @@ fn content_circle(engine: &Arc<Engine>, cmd: &Value) -> String {
 fn apply(engine: &Arc<Engine>, cmd: &Value) {
     let op = field(cmd, "op");
     match op.as_str() {
+        // QA: force the link constraint so the satellite path can be exercised without a satellite.
+        // Desktop has no path monitor at all (docs/PREVIEW-TIER-DESIGN.md §2), so this is also the
+        // only way to put it into the Low/Ultra profiles from a test.
+        "link_constraint" => {
+            let level = cmd.get("level").and_then(|v| v.as_str()).unwrap_or("normal");
+            engine.set_low_data_level(match level {
+                "ultra" => "ultra",
+                "low" => "low",
+                _ => "normal",
+            });
+        }
         "post" => {
             let circle = content_circle(engine, cmd);
             let refs = stage_media(engine, &circle, cmd);

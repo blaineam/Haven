@@ -108,6 +108,12 @@ final class LowDataMonitor: ObservableObject {
 
     private func recompute() {
         let resolved: LinkConstraint
+        #if DEBUG
+        if let forced = debugForced {
+            applyResolved(forced)
+            return
+        }
+        #endif
         switch preference {
         case .automatic:
             resolved = detected
@@ -121,6 +127,12 @@ final class LowDataMonitor: ObservableObject {
             // UI explain rather than fail mysteriously.
             resolved = detected == .ultra ? .ultra : .normal
         }
+        applyResolved(resolved)
+    }
+
+    /// Publish a resolved constraint: tell the core, update the UI, and — when the link IMPROVED —
+    /// complete the work that was held back.
+    private func applyResolved(_ resolved: LinkConstraint) {
         let previous = effective
         effective = resolved
         isUltraConstrained = resolved == .ultra
@@ -135,6 +147,25 @@ final class LowDataMonitor: ObservableObject {
             FeedStore.shared.nudgeMediaPrefetchNow()
         }
     }
+
+    #if DEBUG
+    /// QA override for the link constraint (`docs/QA.md`, op `link_constraint`).
+    ///
+    /// The satellite tier is otherwise UNTESTABLE anywhere but a real satellite bearer: `Ultra`
+    /// comes only from `NWPath.isUltraConstrained`, which a simulator never reports, and the user
+    /// preference deliberately cannot escalate to it (§ "Off" is honoured except on a genuine
+    /// ultra-constrained link). Without this the preview tier would ship unverified on the exact
+    /// path it exists for.
+    ///
+    /// DEBUG-only by construction, so no release build can be pushed into a state the network is
+    /// not actually in.
+    private(set) var debugForced: LinkConstraint?
+
+    func debugForce(_ level: LinkConstraint?) {
+        debugForced = level
+        recompute()
+    }
+    #endif
 
     /// Ordering for "did the link improve?" — higher is more constrained.
     private static func severity(_ l: LinkConstraint) -> Int {

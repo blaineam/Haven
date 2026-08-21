@@ -135,6 +135,8 @@ object LowDataMonitor {
 
     private fun recompute() {
         val d = detected.value
+        val forced = debugForced
+        if (forced != null) { publish(forced); return }
         val resolved = when (preference) {
             Preference.AUTOMATIC -> d
             // "Always on" must never WEAKEN a genuinely ultra-constrained link down to Low.
@@ -143,6 +145,12 @@ object LowDataMonitor {
             // to stay at ultra and explain than to fail mysteriously.
             Preference.OFF -> if (d == LinkConstraint.ULTRA) LinkConstraint.ULTRA else LinkConstraint.NORMAL
         }
+        publish(resolved)
+    }
+
+    /** Publish a resolved constraint: tell the core, and when the link IMPROVED, complete the work
+     *  that was held back. */
+    private fun publish(resolved: LinkConstraint) {
         val previous = effective.value
         effective.value = resolved
         runCatching { setLinkConstraint(resolved) }
@@ -159,6 +167,18 @@ object LowDataMonitor {
             runCatching { HavenNet.drainPersistedBackups() }
         }
     }
+
+    /**
+     * QA override for the link constraint (docs/QA.md, op `link_constraint`).
+     *
+     * The satellite tier is otherwise UNTESTABLE off a real satellite bearer: ULTRA comes only from
+     * TRANSPORT_SATELLITE, which an emulator never reports, and the user preference deliberately
+     * cannot escalate to it. Without this the preview tier would ship unverified on the exact path
+     * it exists for. Guarded by BuildConfig.DEBUG at the call site (QaDriver), which is itself
+     * debug-only, so a release build can never be pushed into a state the network is not in.
+     */
+    var debugForced: LinkConstraint? = null
+        set(v) { field = v; recompute() }
 
     /** Ordering for "did the link improve?" — higher is more constrained. */
     private fun severity(l: LinkConstraint): Int = when (l) {

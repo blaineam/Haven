@@ -2635,6 +2635,19 @@ final class FeedStore: ObservableObject {
         }
 
         switch op {
+        #if DEBUG
+        case "link_constraint":
+            // QA: force the link constraint so the satellite path can be exercised off a satellite.
+            // `Ultra` is otherwise unreachable in a simulator — see LowDataMonitor.debugForce.
+            let level = str("level").lowercased()
+            let forced: LinkConstraint? = level == "ultra" ? .ultra
+                : level == "low" ? .low
+                : level == "normal" ? .normal
+                : nil     // anything else (or "auto") hands control back to the real path monitor
+            LowDataMonitor.shared.debugForce(forced)
+            qaWriteDump()
+            return
+        #endif
         case "post", "story", "dm":
             // Media-carrying ops share the async ref build (photo sync, video prepare hops a Task).
             let mediaKind = str("media").lowercased()

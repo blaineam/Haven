@@ -9,6 +9,7 @@ import com.blaineam.haven.BuildConfig
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import uniffi.haven_ffi.LinkConstraint
 
 /**
  * qa-cmd v2 — the Android leg of the cross-platform QA driver contract (docs/QA.md).
@@ -192,6 +193,15 @@ object QaDriver {
         val explicit = explicitCircle(cmd)
         val circle = explicit ?: HavenNet.activeCircle.value
         when (op) {
+            // QA: force the link constraint so the satellite path can be exercised off a satellite.
+            // ULTRA is otherwise unreachable in an emulator — see LowDataMonitor.debugForced.
+            // This whole driver is BuildConfig.DEBUG-gated already.
+            "link_constraint" -> LowDataMonitor.debugForced = when (cmd.optString("level").lowercase()) {
+                "ultra" -> LinkConstraint.ULTRA
+                "low" -> LinkConstraint.LOW
+                "normal" -> LinkConstraint.NORMAL
+                else -> null   // "auto" (or anything else) hands control back to the real monitor
+            }
             "post" -> HavenNet.post(circle, body, stageMedia(cmd, circle))
             "story" -> {
                 val caption = cmd.optString("caption").ifEmpty { body }

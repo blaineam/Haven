@@ -107,11 +107,20 @@ its account + device hexes to `/sdcard/Download/qa-device-hex.txt` for the
 stub-authorization step.
 
 ```json
-{"op":"post|story|dm|react|comment|profile|circle_create|circle_invite|file|music_post|dump|mark_read",
+{"op":"post|story|dm|react|comment|profile|circle_create|circle_invite|file|music_post|dump|mark_read|link_constraint",
  "body":"…","media":"photo|video","photo_path":"…","video_path":"…","file_path":"…",
  "target_id":"<event id>","emoji":"❤️","dm_to":"<64hex>","name":"…","circle_id":"…",
- "music":{"title":"…","artist":"…"},"caption":"…"}
+ "music":{"title":"…","artist":"…"},"caption":"…","level":"normal|low|ultra|auto"}
 ```
+
+**`link_constraint`** forces the low-data tier (`"level"`), because the satellite path is otherwise
+untestable anywhere but a real satellite bearer: `ultra` comes only from
+`NWPath.isUltraConstrained` / `TRANSPORT_SATELLITE`, which a simulator and an emulator never report,
+and the user preference deliberately cannot escalate to it. Without this the preview tier would ship
+unverified on the exact path it exists for. `"auto"` hands control back to the real path monitor.
+DEBUG-only on every client, so no release build can be pushed into a state the network is not in.
+Desktop accepts it too, and there it is the *only* way in — desktop has no path monitor at all.
+
 
 Every op (and `{"op":"dump"}`) refreshes `qa-dump.json` next to the drop file
 (Android: `/sdcard/Download/qa-dump-<pkg>.json`):

@@ -25,7 +25,10 @@ free_ports() {
 }
 
 [[ -d "$APP" ]] || { echo "error: missing $APP — build HavenStub first (see docs/QA.md)"; exit 1; }
-pkill -x HavenStub 2>/dev/null || true
+# Match by PATH, not process name: the stub's executable is `Haven` (the bundle directory is
+# renamed but the signed payload is left alone — see qa-e2e-build-stub.sh), and a bare
+# `pkill -x Haven` would take the real app down with it.
+pkill -f "matrix-haven-mac-stub.*HavenStub.app" 2>/dev/null || true
 sleep 1
 free_ports
 mkdir -p /tmp/haven-mac-stub-home/Library/Application\ Support /tmp/haven-mac-stub-tmp
@@ -41,7 +44,7 @@ for PREFS in \
   defaults write "$PREFS" "haven.relay.httpToken" -string "${HAVEN_STUB_TOKEN:-8e17157a4fd8f6eeef1c3accdd9fc1de}" 2>/dev/null || true
 done
 nohup env HOME=/tmp/haven-mac-stub-home HAVEN_SKIP_ONBOARDING=1 TMPDIR=/tmp/haven-mac-stub-tmp \
-  "$APP/Contents/MacOS/HavenStub" >"$OUT/stub-stdout.log" 2>&1 &
+  "$APP/Contents/MacOS/Haven" >"$OUT/stub-stdout.log" 2>&1 &
 echo $! >"$OUT/stub.pid"
 sleep 6
 if ! pgrep -x HavenStub >/dev/null; then

@@ -806,7 +806,16 @@ final class MediaStore: ObservableObject {
         guard previewCompanions[ref] == nil else { return }
         guard let data = PreviewCodec.encode(image) else { return }
         let previewRef = Self.contentRef(.image, data)
-        if let url = fileURL(previewRef) { try? data.write(to: url) }
+        // Record the pairing ONLY if the bytes actually landed. `try?` + an unconditional map write
+        // produces a phantom companion: the map names a blob that does not exist, `withPreviewMarkers`
+        // then correctly refuses to emit a marker (its `has` check fails), and the post ships with no
+        // preview at all — silently. Observed on the mac stub, whose posts carried `markers: []` while
+        // its companion maps held a perfectly-formed pairing.
+        guard let previewURL = fileURL(previewRef) else { return }
+        do { try data.write(to: previewURL) } catch {
+            HavenLog.net("preview companion write FAILED for \(ref.prefix(12)): \(error.localizedDescription)")
+            return
+        }
         previewCompanions[ref] = previewRef
         previewRefs.insert(previewRef)
         if previewCompanions.count > 2000 {   // same bound as thumbs: pairings matter until sealed
@@ -830,7 +839,13 @@ final class MediaStore: ObservableObject {
         }
         guard data.count <= 48 * 1024 else { return }
         let thumbRef = Self.contentRef(.image, data)
-        if let url = fileURL(thumbRef) { try? data.write(to: url) }
+        // Same hazard as the preview path above: a swallowed write left the map naming a blob that
+        // was never stored, so the post lost its thumb marker with no error anywhere.
+        guard let thumbURL = fileURL(thumbRef) else { return }
+        do { try data.write(to: thumbURL) } catch {
+            HavenLog.net("thumb companion write FAILED for \(ref.prefix(12)): \(error.localizedDescription)")
+            return
+        }
         thumbCompanions[ref] = thumbRef
         if thumbCompanions.count > 2000 {   // bound: old pairings only matter until the post is sealed
             thumbCompanions = Dictionary(uniqueKeysWithValues: Array(thumbCompanions.suffix(1000)))

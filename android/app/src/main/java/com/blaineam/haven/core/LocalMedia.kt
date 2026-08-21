@@ -166,15 +166,31 @@ object LocalMedia {
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }
         val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return null
 
-        val orientation = runCatching {
-            androidx.exifinterface.media.ExifInterface(java.io.ByteArrayInputStream(bytes))
-                .getAttributeInt(
-                    androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
-                    androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL,
-                )
-        }.getOrDefault(androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL)
+        return uprighted(decoded, bytes)
+    }
+
+    /** The EXIF orientation tag of [bytes], or NORMAL when absent/unreadable. */
+    private fun exifOrientation(bytes: ByteArray): Int = runCatching {
+        androidx.exifinterface.media.ExifInterface(java.io.ByteArrayInputStream(bytes))
+            .getAttributeInt(
+                androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
+                androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL,
+            )
+    }.getOrDefault(androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL)
+
+    /** True when the tag swaps width and height — the feed needs the SWAPPED size to lay the item out. */
+    private fun exifSwapsAxes(orientation: Int): Boolean = when (orientation) {
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90,
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270,
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_TRANSPOSE,
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_TRANSVERSE -> true
+        else -> false
+    }
+
+    /** [decoded], rotated/mirrored per the EXIF tag carried in [bytes]. All eight orientations. */
+    private fun uprighted(decoded: Bitmap, bytes: ByteArray): Bitmap {
         val m = android.graphics.Matrix()
-        when (orientation) {
+        when (exifOrientation(bytes)) {
             androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.postScale(-1f, 1f)
             androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
             androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> m.postScale(1f, -1f)
@@ -416,11 +432,20 @@ object LocalMedia {
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             // The header is already parsed — bank the TRUE dimensions (not the downsampled bitmap's,
             // whose power-of-two sampling rounds the aspect) so the feed never has to ask again.
-            recordPixelSize(ref, bounds.outWidth, bounds.outHeight)
+            //
+            // AFTER the EXIF swap. A rotated photo's header reports the SENSOR's width/height, so a
+            // portrait picture banks as landscape and the feed lays out a box of the wrong shape for
+            // it. Record what will actually be drawn.
+            val orientation = exifOrientation(bytes)
+            if (exifSwapsAxes(orientation)) recordPixelSize(ref, bounds.outHeight, bounds.outWidth)
+            else recordPixelSize(ref, bounds.outWidth, bounds.outHeight)
             var sample = 1
             while (max(bounds.outWidth, bounds.outHeight) / sample > reqDim) sample *= 2
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size,
-                BitmapFactory.Options().apply { inSampleSize = sample })
+            val raw = BitmapFactory.decodeByteArray(bytes, 0, bytes.size,
+                BitmapFactory.Options().apply { inSampleSize = sample }) ?: return@runCatching null
+            // BitmapFactory ignores EXIF, so this is where every rotated photo in the feed was being
+            // drawn on its side — including the author's own, straight off their own disk.
+            uprighted(raw, bytes)
         }.getOrNull()
     }
 

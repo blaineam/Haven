@@ -16,40 +16,20 @@ AND_PKG="${HAVEN_AND_PKG:-com.blaineam.haven}"
 
 log() { echo "[e2e-boot] $*"; }
 
-# The Tauri desktop leg ALWAYS starts from an empty dataset.
-#
-# `qa-matrix` is an isolated QA-only data dir (desktop force_qa_seed_identity pins it there and
-# refuses the personal root), so wiping it costs nothing and removes an entire class of false green:
-# a desktop that still holds a previous run's identity, contacts, seen-set and — now that the wire
-# format has a second envelope container and a new media tier — blobs and markers from a build that
-# no longer exists. A leg carrying yesterday's state can converge for reasons that have nothing to
-# do with the change under test.
-#
-# The other legs stay behind E2E_FRESH: their state lives in real app containers and re-minting an
-# identity on each is slow. This one is free.
-log "resetting the Tauri desktop dataset ($DATA_DIR)"
-pkill -f 'target/debug/haven-desktop' 2>/dev/null || true
-rm -rf "$DATA_DIR" 2>/dev/null || true
 
-# The stub's QA state is reset every run too, for the same reason and with more evidence behind it.
+# A HERMETIC FLEET IS THE DEFAULT. Every leg's QA state is wiped: identities re-mint, bundles
+# re-exchange, and no stale seen-set, contact, circle or blob from a prior run can leak in.
 #
-# The stub is account B in an isolated container (com.blaineam.kith.qa.stub). Nothing ever cleaned
-# it, so it accumulated ONE CIRCLE PER RUN indefinitely — 13 of them by the time anyone looked, each
-# still polled every cycle, with the poll set growing run over run (12 -> 14 across two consecutive
-# runs). A leg that gets monotonically slower every time the suite runs will eventually miss any
-# budget, and it will look like a product regression when it does.
+# This used to be opt-in (E2E_FRESH=1) and almost nobody set it, which produced two failures that
+# looked like product bugs and were not. The stub accumulated ONE CIRCLE PER RUN — 13 of them, all
+# still polled every cycle, so the leg got monotonically slower until it missed its budgets. And
+# wiping only SOME legs is worse than wiping none: emptying the relay store while the clients keep
+# their feeds leaves every older post rendering "media loading / not available" forever, because the
+# bytes those posts point at were served by a relay that has just been emptied underneath them.
 #
-# Identity is safe to drop: the bootstrap re-mints the stub seed and re-exchanges bundles on every
-# run anyway, which is why E2E_FRESH could already do this.
-STUB_AS_RESET="$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support"
-log "resetting the stub dataset ($STUB_AS_RESET)"
-pkill -f "HavenStub.app" 2>/dev/null || true
-rm -rf "$STUB_AS_RESET"/{haven-relay-store,haven-media,haven-feed.json,haven-mailbox-seen.txt,haven-selfsync.bin,qa-*} 2>/dev/null || true
-
-# E2E_FRESH=1 → hermetic fleet: wipe every leg's QA state (identities re-mint,
-# bundles re-exchange, no stale seen-sets/contacts from prior runs can leak in).
-if [[ "${E2E_FRESH:-0}" == "1" ]]; then
-  log "FRESH fleet requested — wiping QA state on all legs"
+# Set E2E_FRESH=0 to reuse a hot fleet when iterating locally. Anything else, including unset, wipes.
+if [[ "${E2E_FRESH:-1}" != "0" ]]; then
+  log "hermetic fleet — wiping QA state on all legs (E2E_FRESH=0 to reuse)"
   pkill -f "HavenStub.app" 2>/dev/null || true
   pkill -f 'target/debug/haven-desktop' 2>/dev/null || true
   sleep 1
@@ -65,6 +45,11 @@ if [[ "${E2E_FRESH:-0}" == "1" ]]; then
     adb shell rm -f /sdcard/Download/qa-seed.txt /sdcard/Download/qa-device-hex.txt "/sdcard/Download/qa-dump-$AND_PKG.json" 2>/dev/null || true
   fi
 fi
+
+# Bring up the Simulator window. simctl boots HEADLESSLY, so the iOS leg was running the whole time
+# with no way to watch it — every other leg has a visible window. Purely cosmetic, but a fleet you
+# cannot see is a fleet you cannot sanity-check.
+open -a Simulator 2>/dev/null || true
 
 # ── 1. iOS sim: booted + app installed ────────────────────────────────────────
 SIM="${HAVEN_IOS_UDID:-$(xcrun simctl list devices booted 2>/dev/null | grep -oE '[A-F0-9-]{36}' | head -1)}"

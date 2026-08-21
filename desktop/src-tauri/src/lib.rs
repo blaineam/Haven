@@ -525,6 +525,7 @@ pub fn run() {
             commands::privacy_prefs,
             commands::set_privacy_prefs,
             commands::mint_preview,
+            commands::qa_set_call_state,
             commands::low_data_state,
             commands::set_low_data_level,
             commands::low_data_allowance,

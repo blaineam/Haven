@@ -374,7 +374,15 @@ async function main() {
         perfGate('call video A→B (frames decoded)', 'stub', await converge(devices.stub,
           (j) => (j.call?.inbound_video_frames || 0) > 0, BUDGET.mediaEvent));
       }
-      await op(devices.ios, { op: 'call_end' });
+      await op(devices.ios, { op: 'call_end' }, 6000);
+      // EVERY leg must leave the call, not just the two the audio assertions cover.
+      //
+      // The hangup fans out to the roster minus my own account, so my OTHER devices were never told
+      // an established call had ended and sat in a dead one. That survived a green run because
+      // neither the Android nor the desktop dump reported call state at all, and the call step only
+      // ever asserted on ios and stub — the two legs that DID hang up correctly. Both gaps are now
+      // closed, so assert on all of them.
+      await convergeAll(all, (j) => !(j.call?.in_call || j.call?.ringing), BUDGET.text, 'call ended everywhere');
     }
   }
 

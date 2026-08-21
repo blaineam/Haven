@@ -416,6 +416,13 @@ object QaDriver {
         o.put("dms", dms)
 
         o.put("profile", JSONObject().put("name", ProfileStore.get(appContext).displayName))
+        // Call state. Absent until now, which is why a stuck call could never be caught here: the
+        // e2e call step only asserts on ios and stub, so this leg could sit in a DEAD call while the
+        // suite reported green. Exactly that happened — an established call ended on iOS left
+        // Android in a call with no way out, and only someone looking at the screen could tell.
+        o.put("call", JSONObject()
+            .put("ringing", runCatching { CallManager.ringing.value }.getOrDefault(false))
+            .put("in_call", runCatching { CallManager.inCall.value }.getOrDefault(false)))
         o.put("circles", circles)
 
         // App-owned file in Download/ (allowed on scoped storage); tmp+rename keeps reads whole.

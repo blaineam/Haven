@@ -361,6 +361,9 @@ enum DeskFrontDoor {
 pub struct Engine {
     /// A coalesced state write is already scheduled — see `persist_coalesced`.
     persist_pending: std::sync::atomic::AtomicBool,
+    /// QA-visible call state pushed from the webview: bit0 = ringing, bit1 = in_call. See
+    /// `set_qa_call_state` for why this exists.
+    qa_call: std::sync::atomic::AtomicU8,
     /// The account master seed — `Some` on a primary/legacy device, `None` on a SEEDLESS device
     /// (seed-drop S4). Making it an `Option` turns every account-key use into a compile-checked
     /// decision, so a missed seedless guard is a build error, not a runtime forge/panic.
@@ -679,6 +682,7 @@ impl Engine {
         };
         Ok(Arc::new(Self {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
+            qa_call: std::sync::atomic::AtomicU8::new(0),
             seed: Some(seed),
             social,
             paths,
@@ -794,6 +798,7 @@ impl Engine {
         };
         Ok(Arc::new(Self {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
+            qa_call: std::sync::atomic::AtomicU8::new(0),
             seed: None,
             social,
             paths,
@@ -10575,6 +10580,24 @@ impl Engine {
         for t in to {
             self.send_call_frame(wire::CALL_CAMERA, &frame, &t);
         }
+    }
+
+    /// QA-visible call state, pushed from the webview.
+    ///
+    /// Desktop's call UI lives entirely in JS, so the Rust-built qa-dump could not report whether
+    /// this leg was ringing or in a call — and the e2e call step only ever asserted on ios and stub.
+    /// That blind spot let an established call ended on iOS strand THIS leg in a dead call while the
+    /// suite reported green; only someone looking at the screen could tell. Two bools close it.
+    pub fn set_qa_call_state(self: &Arc<Self>, ringing: bool, in_call: bool) {
+        self.qa_call.store(
+            (ringing as u8) | ((in_call as u8) << 1),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub fn qa_call_state(&self) -> (bool, bool) {
+        let v = self.qa_call.load(std::sync::atomic::Ordering::Relaxed);
+        (v & 1 != 0, v & 2 != 0)
     }
 
     pub fn call_hangup(self: &Arc<Self>, to: Vec<String>, session_id: String) {

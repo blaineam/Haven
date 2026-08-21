@@ -358,6 +358,7 @@ fn write_dump(engine: &Arc<Engine>) {
         "posts": posts,
         "dms": dms,
         "profile": { "name": engine.get_profile().name },
+        "call": { "ringing": engine.qa_call_state().0, "in_call": engine.qa_call_state().1 },
         "circles": circles,
     });
     let tmp = root.join("qa-dump.json.tmp");

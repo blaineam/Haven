@@ -6822,6 +6822,14 @@ function recentlyEnded(sid) {
 /** Call audio priority: true from the first ring/dial until teardown. */
 function callAudioActive() { return call.ringing || call.connecting || call.inCall; }
 
+// Mirror the call's UI state down to Rust so the QA dump can report it. Desktop's call state lives
+// only here in JS, so the Rust-built qa-dump could not see it — and the e2e call step asserts on ios
+// and stub only. That blind spot let an established call ended on iOS strand THIS leg in a dead call
+// while the suite reported green. Cheap and idempotent; safe to call on every transition.
+function qaPushCallState() {
+  try { invoke("qa_set_call_state", { ringing: !!call.ringing, inCall: !!call.inCall }); } catch (_) {}
+}
+
 // ---- Capture owns the audio ---------------------------------------------------------------
 // How many capture surfaces (in-app camera, voice recorder, QR scanner) are on screen. While ANY is
 // up, feed/DM media stays silent: a post's soundtrack playing behind a viewfinder is never wanted,
@@ -7131,7 +7139,7 @@ function addToCallDialog() {
 
 async function callAccept() {
   clearTimeout(call.ringTimer); call.ringTimer = null;
-  call.ringing = false; call.inCall = true;
+  call.ringing = false; call.inCall = true; qaPushCallState();
   // Stop my OTHER devices ringing before they can join and take the audio. Every device of mine
   // rings (right), but nothing told the losers to stand down, so the one not answered on completed
   // signalling when the offer arrived and joined the mesh — audio jumping to whichever device was
@@ -7237,7 +7245,7 @@ async function onCallEvent(payload) {
         const a = (call.me || "").toLowerCase(), b = (c.from || "").toLowerCase();
         call.session = `glare:${a < b ? a : b}-${a < b ? b : a}`;
         members.forEach((m) => call.roster.add(m));
-        call.connecting = false; call.inCall = true;
+        call.connecting = false; call.inCall = true; qaPushCallState();
         clearTimeout(call.ringTimer); call.ringTimer = null;
         await invoke("call_accept", { sessionId: call.session, to: [c.from] }).catch(() => {});
         await startMesh(); connectPeerIfNeeded(c.from); renderCallOverlay();
@@ -7251,13 +7259,13 @@ async function onCallEvent(payload) {
       call.session = c.sessionId; call.roster = members; call.name = c.groupName || c.name || displayNameFor(c.from);
       // Answering must not switch our own camera on — audio-only, like Apple. `video` only means
       // the call supports video, which is now always true because the track is always published.
-      call.ringing = true; call.video = true; call.camOn = false;
+      call.ringing = true; call.video = true; call.camOn = false; qaPushCallState();
       startRingTimeout(); syncFeedVideoSound(); renderCallOverlay();
       break;
     }
     case "accept": {
       if (!validSession(c.sessionId)) return;
-      call.connecting = false; call.inCall = true; call.roster.add(c.from);
+      call.connecting = false; call.inCall = true; call.roster.add(c.from); qaPushCallState();
       await startMesh(); connectPeerIfNeeded(c.from); renderCallOverlay();
       break;
     }
@@ -7371,7 +7379,7 @@ function teardownCall() {
   call.pcs.forEach((pc) => pc.close()); call.pcs.clear();
   if (call.localStream) call.localStream.getTracks().forEach((t) => t.stop());
   call.localStream = null; call.remote = {};
-  call.roster.clear(); call.session = ""; call.ringing = false; call.connecting = false; call.inCall = false;
+  call.roster.clear(); call.session = ""; call.ringing = false; call.connecting = false; call.inCall = false; qaPushCallState();
   syncFeedVideoSound();   // restore the user's global video-sound choice now the call is over
   renderCallOverlay();
 }

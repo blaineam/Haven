@@ -1386,6 +1386,12 @@ pub fn add_media(engine: Eng, circle_id: String, data_base64: String, is_video: 
 /// bytes here, Rust re-encodes them, and JS then names the pairing with a `preview:` marker. The
 /// preview is the only media that will cross a satellite link, so a photo without one simply cannot
 /// be seen off-grid — but a null here is still fine, and never a reason to send the full copy.
+/// Push the webview's call state down so the QA dump can report it (see Engine::set_qa_call_state).
+#[tauri::command]
+pub fn qa_set_call_state(engine: Eng, ringing: bool, in_call: bool) {
+    engine.set_qa_call_state(ringing, in_call);
+}
+
 #[tauri::command]
 pub fn mint_preview(engine: Eng, circle_id: String, data_base64: String) -> Option<String> {
     let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };

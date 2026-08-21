@@ -92,7 +92,10 @@ object LocalMedia {
         // (`thumb:<ref>:<thumbRef>`) joins the SIGNED media list at post time — see
         // HavenNet.withThumbMarkers — so old clients simply ignore it (synthetic scheme). Apple
         // MediaStore.addImage parity.
-        if (!isVideo && bytes.size > 64 * 1024) runCatching { mintThumbCompanion(circleId, ref, bytes) }
+        if (!isVideo && bytes.size > 64 * 1024) {
+            runCatching { mintThumbCompanion(circleId, ref, bytes) }
+            runCatching { mintPreviewCompanion(circleId, ref, bytes) }
+        }
         return ref
     }
 
@@ -103,6 +106,43 @@ object LocalMedia {
     /** The thumb companion ref minted for a photo at compose time, if one exists. */
     fun thumbCompanion(ref: String): String? =
         if (this::thumbPrefs.isInitialized) thumbPrefs.getString("t|$ref", null) else null
+
+    /** The 512px AVIF preview minted for a photo at attach time, if one exists. */
+    fun previewCompanion(ref: String): String? =
+        if (this::thumbPrefs.isInitialized) thumbPrefs.getString("p|$ref", null) else null
+
+    /** True when [ref] IS a preview, rather than something that has one. */
+    fun isPreviewRef(ref: String): Boolean =
+        this::thumbPrefs.isInitialized && thumbPrefs.getBoolean("pr|$ref", false)
+
+    /**
+     * Encode + store the ≤8KB, 512px AVIF preview for [ref] (docs/PREVIEW-TIER-DESIGN.md).
+     *
+     * Minted at ATTACH time, before anyone knows what network the post will go out on — which is the
+     * only way it can be there when the network turns out to be satellite. A null from the encoder
+     * means "no preview for this item" and is never a reason to send the full media on a constrained
+     * link. Mirrors iOS `MediaStore.mintPreviewCompanion`.
+     */
+    private fun mintPreviewCompanion(circleId: String, ref: String, bytes: ByteArray) {
+        if (!this::thumbPrefs.isInitialized || previewCompanion(ref) != null) return
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return
+        // Power-of-two subsample close to the target, then let PreviewCodec do the exact fit —
+        // cheap and heap-bounded, the same shape the thumb path uses.
+        var sample = 1
+        while (max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= PreviewCodec.MAX_DIMENSION) sample *= 2
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return
+        val data = runCatching { PreviewCodec.encode(decoded) }.getOrNull()
+        decoded.recycle()
+        if (data == null) return
+        val previewRef = store(circleId, data, isVideo = false)
+        thumbPrefs.edit()
+            .putString("p|$ref", previewRef)
+            .putBoolean("pr|$previewRef", true)   // reverse index: the upload gate asks this per job
+            .apply()
+    }
 
     /**
      * Encode + store a ≤32KB, ~256px JPEG companion for [ref] and remember the pairing. Skipped

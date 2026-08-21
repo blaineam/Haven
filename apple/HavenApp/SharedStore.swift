@@ -186,8 +186,25 @@ final class MediaBackupQueue {
             // Filter rather than take the head, or a few permanently-stalled refs at the front
             // starve everything behind them (head-of-line blocking).
             let budget = 5
-            let hiWork = Array(priorityPending.filter { !MediaBackupBackoff.shouldSkip($0.ref) }.prefix(budget))
-            let loWork = Array(pending.filter { !MediaBackupBackoff.shouldSkip($0.ref) }.prefix(budget - hiWork.count))
+            // ULTRA-CONSTRAINED LINK: previews only (docs/PREVIEW-TIER-DESIGN.md §4.1).
+            //
+            // A ~6 KB preview is the one media that can actually cross a satellite bearer; the
+            // optimized copy and the original cannot, and attempting them would spend the whole
+            // pass failing. Filtered rather than dropped — an untaken job stays on its lane and
+            // persists, so the rest of the post uploads on its own when service returns (the
+            // improvement nudge in LowDataMonitor kicks this queue).
+            //
+            // The post itself has already gone: it is real, signed and sealed. What is deferred is
+            // bytes, not authenticity.
+            let previewsOnly = LowDataMonitor.shared.effective == .ultra
+            // A closure rather than a local func: local functions do not inherit the enclosing
+            // @MainActor isolation, and both calls below are main-actor bound.
+            let sendable: (Job) -> Bool = { job in
+                if MediaBackupBackoff.shouldSkip(job.ref) { return false }
+                return !previewsOnly || MediaStore.shared.isPreviewRef(job.ref)
+            }
+            let hiWork = Array(priorityPending.filter(sendable).prefix(budget))
+            let loWork = Array(pending.filter(sendable).prefix(budget - hiWork.count))
             guard !hiWork.isEmpty || !loWork.isEmpty else {
                 // Everything queued is inside its backoff window. Do NOT re-arm on a timer: the
                 // 2-minute backfill sweep already re-enqueues refs whose window has elapsed (it is

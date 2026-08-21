@@ -756,6 +756,21 @@ final class MediaStore: ObservableObject {
     /// The 512px AVIF preview minted for a photo at attach time, if one exists.
     func previewCompanion(_ ref: String) -> String? { previewCompanions[ref] }
 
+    /// True when `ref` IS a preview (rather than something that has one).
+    ///
+    /// Used by the upload queue to decide what may cross an ultra-constrained link. Only covers
+    /// previews this device minted, which is exactly right: a device only ever uploads its own
+    /// authored media.
+    func isPreviewRef(_ ref: String) -> Bool { previewRefs.contains(ref) }
+
+    /// Reverse index of `previewCompanions`, kept in step on every mint. A `contains` on a Set
+    /// rather than a linear scan of the dictionary's values, because the upload queue asks this for
+    /// every job in every pass.
+    private var previewRefs: Set<String> = {
+        let map = (UserDefaults.standard.dictionary(forKey: MediaStore.previewCompanionKey) as? [String: String]) ?? [:]
+        return Set(map.values)
+    }()
+
     /// Encode + store the ≤8KB, 512px AVIF preview for `ref` and remember the pairing.
     ///
     /// This is the only media that will cross a satellite link, so it is minted at ATTACH time —
@@ -775,8 +790,10 @@ final class MediaStore: ObservableObject {
         let previewRef = Self.contentRef(.image, data)
         if let url = fileURL(previewRef) { try? data.write(to: url) }
         previewCompanions[ref] = previewRef
+        previewRefs.insert(previewRef)
         if previewCompanions.count > 2000 {   // same bound as thumbs: pairings matter until sealed
             previewCompanions = Dictionary(uniqueKeysWithValues: Array(previewCompanions.suffix(1000)))
+            previewRefs = Set(previewCompanions.values)
         }
         UserDefaults.standard.set(previewCompanions, forKey: Self.previewCompanionKey)
     }
@@ -2226,8 +2243,18 @@ struct MissingMediaPlaceholder: View {
     @ObservedObject private var evicted = EvictedMediaStore.shared
     @ObservedObject private var wanted = MediaWantedStore.shared
 
-    /// The held thumb companion image, if the post declared one and its tiny bytes have arrived.
+    /// The held companion image behind the placeholder: the 512px AVIF preview if the post declared
+    /// one, else the ≤32KB thumb.
+    ///
+    /// Preview first on purpose. It is twice the thumb's resolution at a quarter of its bytes, and
+    /// on a constrained link it may be the ONLY thing that arrived — a photo sent from a dead zone
+    /// ships the preview and queues everything else (`docs/PREVIEW-TIER-DESIGN.md` §4.2), so this is
+    /// what the recipient looks at while the full copy is still on the sender's phone.
     private var thumbImage: PlatformImage? {
+        if let p = MediaVariants.preview(for: ref, in: mediaList),
+           let img = MediaStore.shared.thumbnail(p, maxDimension: 512) {
+            return img
+        }
         guard let t = MediaVariants.thumb(for: ref, in: mediaList) else { return nil }
         return MediaStore.shared.thumbnail(t, maxDimension: 512)
     }

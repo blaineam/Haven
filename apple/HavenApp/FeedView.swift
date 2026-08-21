@@ -1928,6 +1928,9 @@ final class FeedStore: ObservableObject {
     }
     /// The bytes for `ref` just landed — clear every transient placeholder state it held.
     private func mediaArrived(_ ref: String) {
+        // If someone reacted or replied to this post while this blob was still missing, tell them
+        // it is here now (docs/PREVIEW-TIER-DESIGN.md §4.4). No-op unless they actually engaged.
+        IncompleteInterestStore.shared.mediaArrived(ref)
         downloadingMedia.remove(ref)
         waitingForSenderMedia.remove(ref)
         unavailableMedia.remove(ref)
@@ -3475,15 +3478,38 @@ final class FeedStore: ObservableObject {
     /// The regular feed (stories live in the tray, not the main list). Unsent posts are gone —
     /// a "Message unsent" tombstone in the feed is clutter, not information.
     var feedItems: [FeedItemFfi] { items.filter { !$0.story && !$0.unsent } }
+    /// Media on `postId` that has NOT arrived on this device yet, excluding the companions that are
+    /// not meant to be shown on their own. Used to decide whether an interaction happened against an
+    /// incomplete post.
+    private func missingMediaFor(_ postId: String) -> [String] {
+        guard let item = items.first(where: { $0.id == postId }) else { return [] }
+        return MediaVariants.displayRefs(item.media).filter { ref in
+            !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref)
+        }
+    }
+
+    /// Record that this device engaged with a post whose pictures had not all arrived, so it can be
+    /// told when they do.
+    private func noteInterestIfIncomplete(_ postId: String) {
+        let missing = missingMediaFor(postId)
+        guard !missing.isEmpty else { return }
+        let cid = activeCircleId
+        let name = circles.first(where: { $0.id == cid })?.name ?? "your circle"
+        IncompleteInterestStore.shared.note(missing: missing, postId: postId, circleId: cid, circleName: name)
+    }
+
     func comment(_ id: String, _ body: String, _ media: [String] = []) {
         guard let social, let env = try? social.comment(circleId: activeCircleId, target: id, body: body, media: media, createdAt: now()) else { return }
         let cid = activeCircleId
         let name = circles.first(where: { $0.id == cid })?.name ?? "your circle"
-        broadcastEvent(cid, env, banner: .forComment(body: body, circleId: cid, circleName: name, postId: id)); refresh()
+        broadcastEvent(cid, env, banner: .forComment(body: body, circleId: cid, circleName: name, postId: id))
+        noteInterestIfIncomplete(id)
+        refresh()
     }
     func react(_ id: String, _ emoji: String) {
         guard let social, let env = try? social.react(circleId: activeCircleId, target: id, emoji: emoji, createdAt: now()) else { return }
         broadcastEvent(activeCircleId, env, banner: .forReaction(emoji: emoji, circleId: activeCircleId, postId: id))
+        noteInterestIfIncomplete(id)
         reactionTick += 1; refresh()
     }
     /// Remove my own reaction (emoji) from a post/comment in the active circle.
@@ -6670,6 +6696,12 @@ final class FeedStore: ObservableObject {
     /// or deliberately evicted.
     func nudgeMediaPrefetchNow() {
         requestMissingMedia()
+        // Both halves of a deferred post complete here. Receiving is `requestMissingMedia` above;
+        // SENDING is the backup queue, which holds everything but the preview while the link is
+        // ultra-constrained (`MediaBackupQueue.drain`). Without this kick the queue waits for its
+        // own next pass, and the photo someone sent from a dead zone stays half-delivered after
+        // they are plainly back on Wi-Fi.
+        if let social { MediaBackupQueue.shared.drainPersisted(social: social) }
     }
 
     private func requestMissingMedia() {

@@ -9,7 +9,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-### Added — the 512px preview tier (partial; Apple composes them)
+### Added — the 512px preview tier
 
 - **Photos now carry a picture small enough to cross a satellite link.** Attaching a photo mints a
   512-pixel AVIF beside it — about six kilobytes, under two text messages, against the ≤32 KB thumb
@@ -28,10 +28,23 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   All three platforms encode to the same **byte** budget rather than a shared quality number, which
   would have silently meant three different things — their encoders' scales do not line up.
 
-  **This is a foundation, not the finished feature.** Apple composes previews; Android and desktop
-  can read and write them but do not yet mint them at attach time. Sending only the preview while
-  off-grid and queueing the rest, rendering it in place of the full image until a tap, and telling
-  someone the picture they reacted to has finally arrived — all still to come.
+  **Off-grid, only the preview goes.** On a satellite link the upload queue sends the six-kilobyte
+  picture and holds everything else back — the optimized copy and the original cannot cross that
+  bearer, and trying would spend the whole pass failing. The post itself has already gone: it is
+  real, signed and sealed. What is deferred is bytes, not authenticity. Nothing is dropped, only
+  queued, and the moment service returns both halves finish on their own — the sender's remaining
+  blobs upload and the recipient's deferred fetches run.
+
+  **You can react to a picture before you can see it properly.** A post arrives complete in every
+  way that matters — readable, with a real if small photograph — while the full copy is still on the
+  sender's phone. Reactions and replies are text, and text crosses. What was missing is that the
+  full picture then lands silently and nobody tells the person who engaged with it. Now they get one
+  notification when it does. That is remembered entirely on the device; what you looked at and
+  reacted to is not something anyone else learns.
+
+  Apple and Android both mint previews at attach time and both hold back everything else on a
+  satellite link. Desktop can read and write the format and understands the marker; it does not mint
+  at attach yet.
 
 ### Docs
 

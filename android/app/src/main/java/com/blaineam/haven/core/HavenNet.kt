@@ -1809,7 +1809,7 @@ object HavenNet : InboundListener {
     fun sendDm(circleId: String, body: String, media: List<String> = emptyList(),
                music: uniffi.haven_ffi.TrackRefFfi? = null, retentionSecs: ULong? = null) {
         if (body.isBlank() && media.isEmpty() && music == null) return
-        val withThumbs = withThumbMarkers(media)
+        val withThumbs = withPreviewMarkers(withThumbMarkers(media))
         val ts = nowMs()
         // retentionSecs != null → a disappearing message (auto-expires in the feed reducer, iOS parity).
         val env = runCatching {
@@ -3116,6 +3116,27 @@ object HavenNet : InboundListener {
         return out
     }
 
+    /**
+     * Expand a compose-time media list with `preview:` markers for photos whose 512px AVIF was
+     * minted at attach time.
+     *
+     * Same shape and reasoning as [withThumbMarkers]: the marker joins the SIGNED list so old
+     * clients ignore it, and the bare preview ref is deliberately not listed so a legacy carousel
+     * never shows a duplicate slide. This is what makes a photo sendable off-grid at all — without
+     * the marker there is nothing small enough to cross. Apple `withPreviewMarkers` parity.
+     */
+    private fun withPreviewMarkers(media: List<String>): List<String> {
+        if (media.isEmpty()) return media
+        val out = ArrayList(media)
+        for (ref in media) {
+            if (!ref.startsWith("img_")) continue
+            if (MediaVariants.previewFor(ref, media) != null) continue
+            val p = LocalMedia.previewCompanion(ref) ?: continue
+            if (LocalMedia.has(p)) out.add(MediaVariants.previewMarker(ref, p))
+        }
+        return out
+    }
+
     /** Queue a just-authored event's media for relay backup: PRIORITY lane (ahead of any backfill
      *  backlog), thumbs first, then posters, then content — so the placeholder-feeding bytes land
      *  before the big blobs start. Apple FeedStore.enqueueAuthoredMedia parity. */
@@ -3129,7 +3150,7 @@ object HavenNet : InboundListener {
     fun post(circleId: String, body: String, media: List<String> = emptyList(),
              music: uniffi.haven_ffi.TrackRefFfi? = null, retentionSecs: ULong? = null) {
         if (body.isBlank() && media.isEmpty() && music == null) return
-        val withThumbs = withThumbMarkers(media)
+        val withThumbs = withPreviewMarkers(withThumbMarkers(media))
         val ts = nowMs()
         val env = runCatching {
             // retentionSecs != null → a disappearing post (auto-expires in the feed reducer, iOS parity).
@@ -3169,7 +3190,7 @@ object HavenNet : InboundListener {
                      music: uniffi.haven_ffi.TrackRefFfi? = null, story: Boolean = false,
                      createdAt: ULong) {
         if (body.isBlank() && media.isEmpty() && music == null) return
-        val withThumbs = withThumbMarkers(media)
+        val withThumbs = withPreviewMarkers(withThumbMarkers(media))
         val env = runCatching {
             social.post(circleId, body, withThumbs, music, null, story, false, createdAt)
         }.getOrNull() ?: return
@@ -3268,7 +3289,7 @@ object HavenNet : InboundListener {
     fun postStory(body: String, mediaId: String?, music: uniffi.haven_ffi.TrackRefFfi? = null,
                   circleId: String = DEFAULT_CIRCLE) {
         if (body.isBlank() && mediaId == null && music == null) return
-        val media = withPosterCompanions(circleId, withThumbMarkers(listOfNotNull(mediaId)))
+        val media = withPosterCompanions(circleId, withPreviewMarkers(withThumbMarkers(listOfNotNull(mediaId))))
         val ts = nowMs()
         val env = runCatching {
             social.post(circleId, body, media, music, 86_400UL, true, false, ts)
@@ -5428,6 +5449,18 @@ object HavenNet : InboundListener {
         // recovery-overwrite path (force) isn't persisted here: it has its own sticky latch
         // (mediaResealRefs) and must not resurrect across launches once done.
         if (!force) addPendingBackup(ref, circleId)
+        // ULTRA-CONSTRAINED LINK: previews only (docs/PREVIEW-TIER-DESIGN.md §4.1).
+        //
+        // A ~6 KB preview is the one media that can cross a satellite bearer; the optimized copy and
+        // the original cannot, and attempting them would spend the whole pass failing. Safe to return
+        // here because the job was just PERSISTED above — it is deferred, not dropped, and
+        // drainPersistedBackups re-offers it when the link improves (LowDataMonitor fires that on
+        // the transition). `force` jobs are exempt: they are not persisted, so skipping would lose
+        // them. Mirrors iOS MediaBackupQueue.drain.
+        if (!force &&
+            LowDataMonitor.effective.value == uniffi.haven_ffi.LinkConstraint.ULTRA &&
+            !LocalMedia.isPreviewRef(ref)
+        ) return
         val job = MediaJob.Backup(ref, circleId, force, priority,
             atMs = if (priority) System.currentTimeMillis() else 0L)
         if (!offerMediaJob(jobKey(job))) return

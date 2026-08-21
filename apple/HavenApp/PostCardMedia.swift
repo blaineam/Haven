@@ -492,7 +492,10 @@ struct PostMediaView: View {
             // are by definition not on disk here, so blurring it would find nothing and the strip
             // either side of a fitted thumb would be the card's flat surface. The thumb is what the
             // placeholder is already drawing.
-            let waitingThumb = MediaVariants.thumb(for: ref, in: item.media)
+            // Preview first, then thumb — the same order the placeholder itself uses, so the
+            // blurred backdrop and the fitted image on top are always the same picture.
+            let waitingThumb = MediaVariants.preview(for: ref, in: item.media)
+                ?? MediaVariants.thumb(for: ref, in: item.media)
             mediaLoadingPlaceholder(ref)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background { pageBackdrop(waitingThumb ?? ref, containerAspect: containerAspect) }

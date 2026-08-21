@@ -152,7 +152,11 @@ object LowDataMonitor {
         // walked back into coverage expects the full copy to follow on its own
         // (docs/PREVIEW-TIER-DESIGN.md §4.3). Mirrors iOS `LowDataMonitor.recompute`.
         if (severity(resolved) < severity(previous)) {
+            // Both halves of a deferred post complete here: RECEIVING is requestMissingMedia,
+            // SENDING is the backup queue, which held everything but the preview while the link was
+            // ultra-constrained (HavenNet.enqueueBackup).
             runCatching { HavenNet.requestMissingMedia() }
+            runCatching { HavenNet.drainPersistedBackups() }
         }
     }
 

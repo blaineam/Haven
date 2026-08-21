@@ -6813,6 +6813,15 @@ final class FeedStore: ObservableObject {
                 where !MediaStore.shared.has(t) && !unopenableMedia.contains(t) {
                 thumbs[t] = circleId
             }
+            // PREVIEWS ride the same priority lane, and must: a preview ref is named only INSIDE its
+            // marker and never listed in `item.media`, so nothing else ever asks for it. Without
+            // this a satellite post arrives with a `preview:` marker pointing at bytes the receiver
+            // never requests — observed exactly that, with the 8 KB preview absent while the 500 KB
+            // original had been served instead.
+            for v in MediaVariants.allPreviews(in: item.media)
+                where !MediaStore.shared.has(v) && !unopenableMedia.contains(v) {
+                thumbs[v] = circleId
+            }
             // POSTERS ride the same priority lane, for the same reason: a poster is a small still,
             // not a video. It used to queue in `missing` behind the full-size clips — so the tile
             // had no poster for as long as the video backlog took, and fell back to generating one
@@ -7001,6 +7010,18 @@ final class FeedStore: ObservableObject {
         guard requesterHex.count == 64, !ref.isEmpty else { return }
         let haveLocal = MediaStore.shared.storagePath(for: ref).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
         HavenLog.net("media REQ ref=\(ref.prefix(12)) have=\(haveLocal) from=\(requesterHex.prefix(8))")
+        // ULTRA-CONSTRAINED LINK: serve only what may cross it.
+        //
+        // The upload gate covered MediaBackupQueue — pushing blobs to relays — and nothing else. A
+        // peer that simply ASKS for media went through this path, which served whatever was on disk
+        // regardless of the link. On a forced satellite link the far side ended up with the 500 KB
+        // original and NOT the 8 KB preview: exactly the two things reversed. Refusing here is safe
+        // — the requester re-asks, and once the constraint clears the full copy goes as normal.
+        if LowDataMonitor.shared.effective == .ultra,
+           !MediaStore.shared.maySendOnUltraConstrained(ref) {
+            HavenLog.net("media REQ ref=\(ref.prefix(12)) — refused, link is ultra-constrained")
+            return
+        }
         if let url = MediaStore.shared.storagePath(for: ref), FileManager.default.fileExists(atPath: url.path) {
             // They had to come to US for bytes we already backed up — so a relay didn't serve them.
             // That is a signal about our own backup, not just a request to answer. See below.

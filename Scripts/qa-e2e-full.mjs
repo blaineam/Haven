@@ -170,9 +170,29 @@ async function converge(dev, predicate, budgetMs, pollMs = 1500) {
   budgetMs = budgetFor(dev, budgetMs);
   lastBudget = budgetMs;
   const t0 = Date.now();
+  // A FROZEN dump is not the same as undelivered content, and for a whole run they were
+  // indistinguishable: desktop's driver stopped writing its dump while the app stayed healthy, so
+  // every assertion against it read "never" — twelve minutes after the content had actually landed.
+  // Legs that publish `dump_seq` (strictly increasing per successful write) are checked for
+  // liveness, and a stall is reported as what it is instead of being scored as a product failure.
+  let firstSeq = null, lastSeq = null, seqStuckSince = null;
   while (Date.now() - t0 < budgetMs) {
     const d = await freshDump(dev);
     if (d && predicate(d)) return Date.now() - t0;
+    if (d && typeof d.dump_seq === 'number') {
+      if (firstSeq === null) firstSeq = d.dump_seq;
+      if (d.dump_seq === lastSeq) {
+        seqStuckSince ??= Date.now();
+        if (Date.now() - seqStuckSince > 30_000) {
+          log(`WARN ${dev.label}: dump_seq stuck at ${d.dump_seq} for ${((Date.now() - seqStuckSince) / 1000).toFixed(0)}s`
+              + ` — the driver is not writing, so this leg's result is about the HARNESS, not delivery`);
+          seqStuckSince = Date.now();   // re-arm so it reports periodically, not once
+        }
+      } else {
+        lastSeq = d.dump_seq;
+        seqStuckSince = null;
+      }
+    }
     await sleep(pollMs);
   }
   return -1;

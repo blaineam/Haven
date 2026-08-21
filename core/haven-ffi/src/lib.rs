@@ -6321,8 +6321,13 @@ impl HavenSocial {
             // (author, epoch) slot that would open it; the held slots say whether we have it. Any
             // parked slot absent from the held set is the exact key that never converged — the
             // question every parked-buffer investigation actually needs answered.
+            // Decode a BOUNDED prefix of the buffer. `parked` above is the exact count (a len());
+            // this only names the distinct slots, and the caps below print 12 of them. The buffer
+            // holds up to 512 envelopes and this runs on every QA dump, so decoding all of them
+            // under the state lock would make the dump itself the slow thing being measured.
+            const SLOTS_SCANNED: usize = 64;
             let mut want: std::collections::BTreeSet<String> = Default::default();
-            for raw in c.pending_epoch.iter() {
+            for raw in c.pending_epoch.iter().take(SLOTS_SCANNED) {
                 if let Ok(env) = EpochEnvelope::from_bytes(raw) {
                     let a = env.sender_hex();
                     want.insert(format!("{}@{}", &a[..a.len().min(8)], env.epoch));

@@ -20,13 +20,20 @@
 #[cfg(not(debug_assertions))]
 compile_error!("qa.rs must never be compiled into a release build (see the module docs)");
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use haven_ffi::{FeedItemFfi, TrackRefFfi};
 use serde_json::{json, Value};
 
 use crate::engine::{Engine, DEFAULT_CIRCLE};
+
+/// How many dumps this process has successfully written. Surfaced in the dump itself so the
+/// orchestrator can tell a FROZEN file apart from a leg that is merely slow: if the counter is not
+/// advancing between polls, the driver is stuck or its writes are failing — which previously looked
+/// exactly like "the content never arrived".
+static DUMP_WRITES: AtomicU64 = AtomicU64::new(0);
 
 /// 1×1 transparent PNG — the `media:"photo"` fallback when no `photo_path` is staged, so a driver
 /// can still exercise the media lanes without a fixture (desktop has no canvas to draw one).
@@ -50,19 +57,45 @@ pub fn start(engine: Arc<Engine>) {
         .spawn(move || {
             let cmd_path = engine.data_root().join("qa-cmd.json");
             write_dump(&engine);
+            let mut last_dump = Instant::now();
             loop {
                 std::thread::sleep(Duration::from_millis(1500));
-                let Ok(data) = std::fs::read(&cmd_path) else { continue };
-                let _ = std::fs::remove_file(&cmd_path); // one-shot: consume before acting
-                if data.is_empty() {
+                let data = match std::fs::read(&cmd_path) {
+                    Ok(d) => {
+                        let _ = std::fs::remove_file(&cmd_path); // one-shot: consume before acting
+                        d
+                    }
+                    Err(_) => Vec::new(), // no command pending — the common case
+                };
+                if !data.is_empty() {
+                    match serde_json::from_slice::<Value>(&data) {
+                        Ok(cmd) => {
+                            let t0 = Instant::now();
+                            apply(&engine, &cmd);
+                            write_dump(&engine); // every op refreshes the dump (spec)
+                            last_dump = Instant::now();
+                            // A dump that takes longer than the orchestrator's poll interval makes
+                            // this leg look slow-or-dead no matter how healthy the engine is, and it
+                            // is invisible without a number.
+                            let ms = t0.elapsed().as_millis();
+                            if ms > 2_000 {
+                                log::warn!("qa-cmd: op '{}' + dump took {ms} ms — slower than the orchestrator polls",
+                                           field(&cmd, "op"));
+                            }
+                        }
+                        Err(e) => log::warn!("qa-cmd: invalid JSON ({} B): {e}", data.len()),
+                    }
                     continue;
                 }
-                match serde_json::from_slice::<Value>(&data) {
-                    Ok(cmd) => {
-                        apply(&engine, &cmd);
-                        write_dump(&engine); // every op refreshes the dump (spec)
-                    }
-                    Err(e) => log::warn!("qa-cmd: invalid JSON: {e}"),
+                // HEARTBEAT. The dump must never be able to freeze just because a command went
+                // missing — and commands DO go missing: the orchestrator's writeFileSync truncates
+                // before it writes, so a read landing in that window returns an empty file which is
+                // then consumed and dropped. Previously that silently skipped the refresh. Refreshing
+                // on a timer decouples the orchestrator's view of this leg from command delivery
+                // entirely, so a lost command costs one interval instead of the whole step.
+                if last_dump.elapsed() >= Duration::from_secs(5) {
+                    write_dump(&engine);
+                    last_dump = Instant::now();
                 }
             }
         })
@@ -396,14 +429,30 @@ fn write_dump(engine: &Arc<Engine>) {
         // could not be opened", and those have opposite fixes.
         "delivery": serde_json::from_str::<serde_json::Value>(&engine.diag_delivery_json())
             .unwrap_or(serde_json::Value::Null),
+        // Liveness: strictly increasing while the driver is healthy. A stuck value means the file
+        // is frozen, not that the fleet is quiet.
+        "dump_seq": DUMP_WRITES.load(Ordering::Relaxed),
     });
     let tmp = root.join("qa-dump.json.tmp");
+    // EVERY failure here is reported. All three steps used to be able to fail silently — a failed
+    // `write` skipped the rename because it was wrapped in `if ... .is_ok()`, and the rename itself
+    // was `let _ =`. The result was a dump file frozen at its last good write while the app went on
+    // running perfectly: the orchestrator polls a stale file, every assertion against this leg reads
+    // "never", and nothing anywhere says why. That cost a full QA run — desktop had the content
+    // twelve minutes before the step it "failed" gave up.
     match serde_json::to_vec(&dump) {
         Ok(bytes) => {
-            if std::fs::write(&tmp, bytes).is_ok() {
-                let _ = std::fs::rename(&tmp, root.join("qa-dump.json"));
+            let n = bytes.len();
+            if let Err(e) = std::fs::write(&tmp, bytes) {
+                log::warn!("qa-dump: write of {n} B to {} failed: {e} — dump is now STALE", tmp.display());
+                return;
             }
+            if let Err(e) = std::fs::rename(&tmp, root.join("qa-dump.json")) {
+                log::warn!("qa-dump: rename into place failed: {e} — dump is now STALE");
+                return;
+            }
+            DUMP_WRITES.fetch_add(1, Ordering::Relaxed);
         }
-        Err(e) => log::warn!("qa-dump: serialize failed: {e}"),
+        Err(e) => log::warn!("qa-dump: serialize failed: {e} — dump is now STALE"),
     }
 }

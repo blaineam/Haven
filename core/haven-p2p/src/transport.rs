@@ -140,6 +140,10 @@ pub enum Traffic {
     KeyConvergence,
     /// Reactions, read receipts, typing indicators — conversational garnish.
     Presence,
+    /// The 512px AVIF preview tier (`docs/PREVIEW-TIER-DESIGN.md`) — ~6 KB, and the ONLY media
+    /// allowed to cross an ultra-constrained link. It is what makes a picture sendable off-grid at
+    /// all; the full copy follows when service returns.
+    Preview,
     /// Photo or video bytes, in either direction.
     Media,
     /// Thumbnails and avatars: small individually, unbounded in aggregate.
@@ -196,14 +200,16 @@ pub fn allowance(link: LinkConstraint, traffic: Traffic) -> Allowance {
             // no pictures in it is a broken feed, not a thrifty one — the win on a metered link is
             // stopping autoplaying video, not starving the layout. They are denied at Ultra, where
             // the aggregate genuinely matters.
-            Text | KeyConvergence | Presence | Call | Thumbnail => Allow,
+            Text | KeyConvergence | Presence | Call | Thumbnail | Preview => Allow,
             Media => AskFirst,
             // Enrolment on a merely-metered link is fine: it is a one-off the user initiated.
             Enrollment => Allow,
             LinkPreview | Story | HistoryBackfill | SelfSync => Deny,
         },
         Ultra => match traffic {
-            Text | KeyConvergence => Allow,
+            // Preview is the ONE media tier that crosses here. At ~6 KB it is under two messages,
+            // where the <=32 KB `thumb:` is nine and a screenful of them is a third of a megabyte.
+            Text | KeyConvergence | Preview => Allow,
             Media => AskFirst,
             Presence | Thumbnail | LinkPreview | Story | Call | HistoryBackfill | SelfSync
             | Enrollment => Deny,
@@ -216,10 +222,11 @@ mod low_data_tests {
     use super::*;
 
     /// Every traffic kind, so the sweeps below cannot silently miss one added later.
-    const ALL_TRAFFIC: [Traffic; 11] = [
+    const ALL_TRAFFIC: [Traffic; 12] = [
         Traffic::Text,
         Traffic::KeyConvergence,
         Traffic::Presence,
+        Traffic::Preview,
         Traffic::Media,
         Traffic::Thumbnail,
         Traffic::LinkPreview,
@@ -287,7 +294,7 @@ mod low_data_tests {
             .into_iter()
             .filter(|t| allowance(LinkConstraint::Ultra, *t).is_automatic())
             .collect();
-        assert_eq!(automatic, vec![Traffic::Text, Traffic::KeyConvergence]);
+        assert_eq!(automatic, vec![Traffic::Text, Traffic::KeyConvergence, Traffic::Preview]);
 
         assert_eq!(allowance(LinkConstraint::Ultra, Traffic::Media), Allowance::AskFirst);
         for t in [Traffic::Story, Traffic::Call, Traffic::HistoryBackfill, Traffic::SelfSync] {
@@ -310,6 +317,18 @@ mod low_data_tests {
             assert_eq!(allowance(LinkConstraint::Low, t), Allowance::Deny, "{t:?}");
         }
         assert_eq!(allowance(LinkConstraint::Low, Traffic::Media), Allowance::AskFirst);
+    }
+
+    /// The preview tier is the whole point of `docs/PREVIEW-TIER-DESIGN.md`: it must cross at EVERY
+    /// level, including satellite, or an off-grid user cannot send a picture at all. It is also the
+    /// only media that may — thumbnails and full media must not follow it through.
+    #[test]
+    fn preview_is_the_only_media_that_crosses_a_satellite_link() {
+        for link in [LinkConstraint::Normal, LinkConstraint::Low, LinkConstraint::Ultra] {
+            assert_eq!(allowance(link, Traffic::Preview), Allowance::Allow, "preview on {link}");
+        }
+        assert_eq!(allowance(LinkConstraint::Ultra, Traffic::Thumbnail), Allowance::Deny);
+        assert_eq!(allowance(LinkConstraint::Ultra, Traffic::Media), Allowance::AskFirst);
     }
 
     /// Media is never silently dropped and never silently sent, at any saving level — the user

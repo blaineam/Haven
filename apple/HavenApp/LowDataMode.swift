@@ -121,10 +121,28 @@ final class LowDataMonitor: ObservableObject {
             // UI explain rather than fail mysteriously.
             resolved = detected == .ultra ? .ultra : .normal
         }
+        let previous = effective
         effective = resolved
         isUltraConstrained = resolved == .ultra
         // Tell the core. Every allowance question is answered against this.
         setLinkConstraint(link: resolved)
+
+        // The link just got BETTER — this is the moment the media held back on a constrained link
+        // should complete itself, rather than waiting for whatever refreshes the feed next. Someone
+        // who posted a preview-only photo off-grid and walked back into coverage expects the full
+        // copy to follow on its own (`docs/PREVIEW-TIER-DESIGN.md` §4.3).
+        if Self.severity(resolved) < Self.severity(previous) {
+            FeedStore.shared.nudgeMediaPrefetchNow()
+        }
+    }
+
+    /// Ordering for "did the link improve?" — higher is more constrained.
+    private static func severity(_ l: LinkConstraint) -> Int {
+        switch l {
+        case .normal: return 0
+        case .low: return 1
+        case .ultra: return 2
+        }
     }
 
     // MARK: - Asking permission

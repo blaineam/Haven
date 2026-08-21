@@ -143,8 +143,24 @@ object LowDataMonitor {
             // to stay at ultra and explain than to fail mysteriously.
             Preference.OFF -> if (d == LinkConstraint.ULTRA) LinkConstraint.ULTRA else LinkConstraint.NORMAL
         }
+        val previous = effective.value
         effective.value = resolved
         runCatching { setLinkConstraint(resolved) }
+
+        // The link just got BETTER — complete the media that was held back, now, rather than when
+        // something else happens to refresh. Someone who posted a preview-only photo off-grid and
+        // walked back into coverage expects the full copy to follow on its own
+        // (docs/PREVIEW-TIER-DESIGN.md §4.3). Mirrors iOS `LowDataMonitor.recompute`.
+        if (severity(resolved) < severity(previous)) {
+            runCatching { HavenNet.requestMissingMedia() }
+        }
+    }
+
+    /** Ordering for "did the link improve?" — higher is more constrained. */
+    private fun severity(l: LinkConstraint): Int = when (l) {
+        LinkConstraint.NORMAL -> 0
+        LinkConstraint.LOW -> 1
+        LinkConstraint.ULTRA -> 2
     }
 
     /** May this traffic go out right now with no further prompting? */

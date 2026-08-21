@@ -1933,9 +1933,20 @@ impl Engine {
             "low" => "low",
             _ => "normal",
         };
-        let mut p = self.prefs.lock().unwrap();
-        p.low_data_level = Some(normalized.into());
-        let _ = p.save(&self.paths);
+        let improved = {
+            let mut p = self.prefs.lock().unwrap();
+            let sev = |l: &str| match l { "ultra" => 2, "low" => 1, _ => 0 };
+            let was = sev(p.low_data_level.as_deref().unwrap_or("normal"));
+            p.low_data_level = Some(normalized.into());
+            let _ = p.save(&self.paths);
+            sev(normalized) < was
+        };
+        // The link just got better — complete the media that was held back, now. Mirrors
+        // `LowDataMonitor.recompute` on iOS and Android (docs/PREVIEW-TIER-DESIGN.md §4.3).
+        // Taken AFTER the prefs lock is dropped: `request_missing_media` reads them.
+        if improved {
+            self.request_missing_media();
+        }
     }
 
     pub fn set_privacy_prefs(

@@ -181,6 +181,8 @@ pub enum Traffic {
     Text,
     KeyConvergence,
     Presence,
+    /// The 512px AVIF preview tier — the only media that crosses a satellite link.
+    Preview,
     Media,
     Thumbnail,
     LinkPreview,
@@ -218,6 +220,7 @@ impl From<Traffic> for transport::Traffic {
             Traffic::Text => transport::Traffic::Text,
             Traffic::KeyConvergence => transport::Traffic::KeyConvergence,
             Traffic::Presence => transport::Traffic::Presence,
+            Traffic::Preview => transport::Traffic::Preview,
             Traffic::Media => transport::Traffic::Media,
             Traffic::Thumbnail => transport::Traffic::Thumbnail,
             Traffic::LinkPreview => transport::Traffic::LinkPreview,
@@ -1711,10 +1714,11 @@ mod low_data_ffi_tests {
 
     const LINKS: [LinkConstraint; 3] =
         [LinkConstraint::Normal, LinkConstraint::Low, LinkConstraint::Ultra];
-    const TRAFFIC: [Traffic; 11] = [
+    const TRAFFIC: [Traffic; 12] = [
         Traffic::Text,
         Traffic::KeyConvergence,
         Traffic::Presence,
+        Traffic::Preview,
         Traffic::Media,
         Traffic::Thumbnail,
         Traffic::LinkPreview,

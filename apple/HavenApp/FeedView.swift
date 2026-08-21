@@ -6640,6 +6640,20 @@ final class FeedStore: ObservableObject {
         }
     }
 
+    /// Run a media-prefetch pass now, because the network just got better.
+    ///
+    /// Low-data mode suppresses media prefetch on a constrained link (`docs/SATELLITE-DESIGN.md` §5).
+    /// Without this, the bytes that were held back wait for whatever happens to refresh the feed
+    /// next — which, for someone who put their phone away off-grid and pulled it out again in
+    /// coverage, can be a long time. This is the moment the deferred half of a satellite post
+    /// completes itself, so it fires on the transition rather than on a timer.
+    ///
+    /// Cheap and idempotent: `requestMissingMedia` already skips refs that are present, in flight,
+    /// or deliberately evicted.
+    func nudgeMediaPrefetchNow() {
+        requestMissingMedia()
+    }
+
     private func requestMissingMedia() {
         #if os(iOS)
         // Pocketed: no media scan, no peer asks, no restore Tasks. slimBackgroundSync owns

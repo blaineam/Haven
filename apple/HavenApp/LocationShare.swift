@@ -20,6 +20,18 @@ enum SharedLocation {
         return (lat, lon, parts.count > 2 ? parts[2] : "")
     }
 
+    /// Human-readable coordinates, e.g. `37.7749° N, 122.4194° W`.
+    ///
+    /// This is the OFF-GRID fallback, and off-grid is exactly when a shared location matters most.
+    /// The inline map is an `MKMapSnapshotter` render and snapshotting needs network tiles, so with
+    /// no service the map cannot draw — and the one thing worth having, the actual position, was the
+    /// thing that vanished with it.
+    static func coordinateText(lat: Double, lon: Double) -> String {
+        let ns = lat >= 0 ? "N" : "S"
+        let ew = lon >= 0 ? "E" : "W"
+        return String(format: "%.4f° %@, %.4f° %@", abs(lat), ns, abs(lon), ew)
+    }
+
     /// Reverse-geocode a coordinate into a short, friendly place name (city / POI), for tagging a
     /// post from a photo's GPS. Falls back to a generic label if geocoding is unavailable.
     static func placeName(_ coord: CLLocationCoordinate2D) async -> String {
@@ -40,6 +52,12 @@ private struct MapSnapshotView: View {
     let coord: CLLocationCoordinate2D
 
     @State private var image: PlatformImage?
+    /// Set when the snapshot could not be rendered — almost always no network. Distinct from "still
+    /// loading", because the two must not look the same: one resolves on its own, the other never
+    /// will, and the second needs to hand the viewer the coordinates instead.
+    @State private var failed = false
+    /// Reported upward so the surrounding card can show the coordinates in place of a dead map.
+    var onUnavailable: ((Bool) -> Void)?
     private static let cache = NSCache<NSString, PlatformImage>()
     private var key: String { String(format: "%.5f,%.5f", coord.latitude, coord.longitude) }
 
@@ -50,9 +68,11 @@ private struct MapSnapshotView: View {
             } else {
                 Rectangle().fill(Color.secondary.opacity(0.15))   // reserves the frame while it renders
             }
-            Image(systemName: "mappin.circle.fill")
-                .font(.title2).foregroundStyle(HavenTheme.pink)
-                .shadow(color: .black.opacity(0.35), radius: 2)
+            if !failed {
+                Image(systemName: "mappin.circle.fill")
+                    .font(.title2).foregroundStyle(HavenTheme.pink)
+                    .shadow(color: .black.opacity(0.35), radius: 2)
+            }
         }
         .task(id: key) { await load() }
     }
@@ -67,7 +87,15 @@ private struct MapSnapshotView: View {
         let snap: MKMapSnapshotter.Snapshot? = await withCheckedContinuation { cont in
             snapshotter.start(with: .global(qos: .userInitiated)) { s, _ in cont.resume(returning: s) }
         }
-        guard let snap else { return }
+        guard let snap else {
+            // No tiles — offline, or the snapshotter failed. Say so, so the card can fall back to
+            // the coordinates rather than showing an empty grey rectangle forever.
+            failed = true
+            onUnavailable?(true)
+            return
+        }
+        failed = false
+        onUnavailable?(false)
         Self.cache.setObject(snap.image, forKey: k)
         image = snap.image
     }
@@ -78,6 +106,10 @@ struct LocationMapView: View {
     let lon: Double
     let label: String
 
+    /// True once the map snapshot has failed — i.e. there is no network. Off-grid is precisely when
+    /// a shared position matters, so the card degrades to text rather than to nothing.
+    @State private var mapUnavailable = false
+
     private var coord: CLLocationCoordinate2D { .init(latitude: lat, longitude: lon) }
     private var title: String { label.isEmpty ? "Pinned location" : label }
 
@@ -86,7 +118,7 @@ struct LocationMapView: View {
         // rendering plus network fetches running while you scroll past it, which showed up as jitter on
         // location posts. The feed only ever showed a non-interactive preview, so render it once and
         // cache the image. (The interactive map is still one tap away via "Open in Maps".)
-        MapSnapshotView(coord: coord)
+        MapSnapshotView(coord: coord, onUnavailable: { mapUnavailable = $0 })
         // macOS: even with interactionModes:[] the Map's NSView eats scroll-wheel events, so the feed
         // couldn't scroll while the cursor was over a map. Ignore hits on the map itself (the "Open in
         // Maps" button is a separate overlay below, so it stays clickable) → scroll passes to the feed.
@@ -98,6 +130,13 @@ struct LocationMapView: View {
                 .font(.caption.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
                 .padding(.horizontal, 10).padding(.vertical, 6)
                 .background(.black.opacity(0.55), in: Capsule()).padding(8)
+        }
+        // OFF-GRID FALLBACK. With no service the snapshot never draws and this used to be a blank
+        // grey box with a pin on it — the position, the only part that matters when you are off the
+        // grid, was the part that disappeared. The coordinates always travel with the post (a `geo:`
+        // ref is text inside the event, not a blob), so they can always be shown.
+        .overlay(alignment: .center) {
+            if mapUnavailable { OfflineCoordinates(lat: lat, lon: lon) }
         }
         .overlay(alignment: .bottomTrailing) {
             Button(action: openInMaps) {
@@ -172,5 +211,35 @@ struct LocationPicker: View {
             }
             .onAppear { mgr.requestWhenInUseAuthorization() }
         }.havenPausesPostAudio()
+    }
+}
+
+
+/// Shown in place of the map when the snapshot cannot render.
+///
+/// Kept as its own `View` rather than inlined into `LocationMapView`'s modifier chain: nested in
+/// there it pushed the expression past what the type checker would solve ("failed to produce
+/// diagnostic for expression"), which is a compile failure, not a style question.
+private struct OfflineCoordinates: View {
+    let lat: Double
+    let lon: Double
+
+    var body: some View {
+        let coords = SharedLocation.coordinateText(lat: lat, lon: lon)
+        return VStack(spacing: 4) {
+            Image(systemName: "mappin.and.ellipse")
+                .font(.title3)
+                .foregroundStyle(HavenTheme.pink)
+            Text(coords)
+                .font(.callout.weight(.semibold))
+                .monospacedDigit()
+                .foregroundStyle(.primary)
+                // Off-grid, copying these into a downloaded map is the whole recovery path.
+                .textSelection(.enabled)
+            Text("Map unavailable offline")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
     }
 }

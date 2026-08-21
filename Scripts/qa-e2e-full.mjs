@@ -240,6 +240,17 @@ async function main() {
     score(`${name} driver answers dump`, !!d, d ? '' : 'no qa-dump.json');
   }
 
+  // Clear any pending connection requests before asserting anything.
+  //
+  // Account B reaching A's OTHER devices arrives there as a stranger, and until it is approved
+  // those legs hold nothing of B's. There was no approve op at all until now, which is why Android
+  // and desktop sat on an un-approvable "Matrix Stub Host" request while every B-related assertion
+  // failed for reasons that had nothing to do with the product.
+  //
+  // Runs on every device including the stub (A is a stranger to B too), and again after the fleet
+  // has exchanged hellos, because a request can arrive at any point during bootstrap.
+  await Promise.all(all.map((n) => op(devices[n], { op: 'approve_connections' }, 1500)));
+
   const stubDump = await freshDump(devices.stub);
   const stubHexPath = join(process.env.HOME, 'Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/qa-account-hex.txt');
   const B = stubDump?.account_hex || process.env.HAVEN_STUB_ACCOUNT
@@ -269,6 +280,10 @@ async function main() {
       await convergeAll(fleet.filter((x) => x !== 'ios'), (j) => j.circles?.some((c) => c.name === cname), BUDGET.settings, 'circle (own devices)');
     }
   }
+
+  // Second approval pass: the circle invite above can surface a request that did not exist during
+  // bootstrap.
+  await Promise.all(all.map((n) => op(devices[n], { op: 'approve_connections' }, 1500)));
 
   // Content authored into the SHARED circle reaches B (stub); content in A's
   // default circle only ever reaches A's own devices. Every shared-content op

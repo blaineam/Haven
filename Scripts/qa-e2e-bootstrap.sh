@@ -31,6 +31,21 @@ log "resetting the Tauri desktop dataset ($DATA_DIR)"
 pkill -f 'target/debug/haven-desktop' 2>/dev/null || true
 rm -rf "$DATA_DIR" 2>/dev/null || true
 
+# The stub's QA state is reset every run too, for the same reason and with more evidence behind it.
+#
+# The stub is account B in an isolated container (com.blaineam.kith.qa.stub). Nothing ever cleaned
+# it, so it accumulated ONE CIRCLE PER RUN indefinitely — 13 of them by the time anyone looked, each
+# still polled every cycle, with the poll set growing run over run (12 -> 14 across two consecutive
+# runs). A leg that gets monotonically slower every time the suite runs will eventually miss any
+# budget, and it will look like a product regression when it does.
+#
+# Identity is safe to drop: the bootstrap re-mints the stub seed and re-exchanges bundles on every
+# run anyway, which is why E2E_FRESH could already do this.
+STUB_AS_RESET="$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support"
+log "resetting the stub dataset ($STUB_AS_RESET)"
+pkill -f "HavenStub.app" 2>/dev/null || true
+rm -rf "$STUB_AS_RESET"/{haven-relay-store,haven-media,haven-feed.json,haven-mailbox-seen.txt,haven-selfsync.bin,qa-*} 2>/dev/null || true
+
 # E2E_FRESH=1 → hermetic fleet: wipe every leg's QA state (identities re-mint,
 # bundles re-exchange, no stale seen-sets/contacts from prior runs can leak in).
 if [[ "${E2E_FRESH:-0}" == "1" ]]; then

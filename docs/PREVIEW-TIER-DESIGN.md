@@ -184,16 +184,22 @@ a straightforwardly better experience on a metered link and costs 6 KB a post.
 
 | Stage | What | Proof obligation |
 |---|---|---|
-| **P0** | `Traffic::Preview` in the policy table + FFI mirror | The cross-product sweep still passes; Preview is the only media Allowed at Ultra |
-| **P1** | Prefetch nudge when `LinkConstraint` improves | Deferred fetches demonstrably run at the moment the constraint clears, not on the next refresh |
-| **P2** | Encoders: ImageIO (Apple), `ravif` (desktop), bundled lib (Android) | All three produce ≤8 KB at 512px from the same source, and each decodes the other two's output |
-| **P3** | `preview:` marker + format capability negotiation | An un-advertised member never receives a format it cannot decode |
-| **P4** | Composer: preview-first upload at Ultra, rest queued | On an ultra link exactly one blob is uploaded; the remainder upload on return |
-| **P5** | Interact-before-complete + completion notification | Reacting to a preview-only post produces a notification when the full media lands, and only for engaged items |
-| **P6** | Super data saver renders preview at full footprint | No layout shift when the full copy replaces it |
+| **P0** ✅ | `Traffic::Preview` in the policy table + FFI mirror | The cross-product sweep still passes; Preview is the only media Allowed at Ultra |
+| **P1** ✅ | Prefetch nudge when `LinkConstraint` improves | Deferred fetches demonstrably run at the moment the constraint clears, not on the next refresh |
+| **P2** ✅ | Encoders: ImageIO (Apple), `ravif` (desktop), bundled lib (Android) | All three produce ≤8 KB at 512px from the same source, and each decodes the other two's output |
+| **P3** ✅ | `preview:` marker + format capability negotiation | An un-advertised member never receives a format it cannot decode |
+| **P4** ✅ | Composer: preview-first upload at Ultra, rest queued | On an ultra link exactly one blob is uploaded; the remainder upload on return |
+| **P5** ✅ | Interact-before-complete + completion notification | Reacting to a preview-only post produces a notification when the full media lands, and only for engaged items |
+| **P6** ✅ | Super data saver renders preview at full footprint | No layout shift when the full copy replaces it |
 
-P0 and P1 are small and independently useful. P2 is the real work. P5 is the only genuinely new
-product behaviour and should ship last, behind the rest.
+**All stages landed in 1.6.0-rc.4.** Apple, Android and desktop all mint previews at attach time;
+Apple and Android hold back everything but the preview on an ultra-constrained link and complete the
+rest when service returns.
+
+One caveat worth keeping visible: desktop does not gate its uploads by link constraint, because its
+constraint is chosen rather than detected (§2 — there is no path monitor there). A desktop on a
+satellite terminal will still attempt full media. Fixing that means either a real desktop path
+monitor or honouring the manual low-data switch in the upload path.
 
 ---
 

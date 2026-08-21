@@ -42,9 +42,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   notification when it does. That is remembered entirely on the device; what you looked at and
   reacted to is not something anyone else learns.
 
-  Apple and Android both mint previews at attach time and both hold back everything else on a
-  satellite link. Desktop can read and write the format and understands the marker; it does not mint
-  at attach yet.
+  All three platforms mint previews at attach time. Desktop is the odd one out mechanically: it
+  downscales and re-encodes photos in the webview, and Chromium's canvas can write PNG, JPEG and
+  WebP but not AVIF — so that one encode happens in Rust instead, on the same sanitized bytes the
+  composer is about to attach.
 
 ### Docs
 

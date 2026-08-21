@@ -1380,6 +1380,21 @@ pub fn add_media(engine: Eng, circle_id: String, data_base64: String, is_video: 
     Ok(engine.add_local_media(&cid, &bytes, is_video))
 }
 
+/// Mint the 512px AVIF preview for a photo the composer is attaching, returning its ref (or null).
+///
+/// Separate from `add_media` because the webview cannot encode AVIF: JS hands the same sanitized
+/// bytes here, Rust re-encodes them, and JS then names the pairing with a `preview:` marker. The
+/// preview is the only media that will cross a satellite link, so a photo without one simply cannot
+/// be seen off-grid — but a null here is still fine, and never a reason to send the full copy.
+#[tauri::command]
+pub fn mint_preview(engine: Eng, circle_id: String, data_base64: String) -> Option<String> {
+    let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.trim())
+        .ok()?;
+    engine.mint_preview(&cid, &bytes)
+}
+
 /// Extensions the drop path will read back. Anything else is not media and is refused here rather
 /// than in JS, so this command can never be turned into a general "read any file" primitive.
 const DROP_VIDEO_EXTS: &[&str] = &["mp4", "mov", "m4v", "webm", "avi", "mkv", "3gp"];

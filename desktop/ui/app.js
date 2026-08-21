@@ -1955,9 +1955,16 @@ function displayMediaRefs(media) {
       const c = rest.lastIndexOf(":");
       if (c > 0) thumbImages.add(rest.slice(c + 1));
     }
+    if (r.startsWith("preview:")) {
+      const rest = r.slice(8);
+      const c = rest.lastIndexOf(":");
+      if (c > 0) thumbImages.add(rest.slice(c + 1));
+    }
   }
   // Poster stills ride with the video page (data-saver still + play) — not as their own slide.
-  // Thumbs never render as slides at all: they back the loading placeholder, blurred.
+  // Thumbs and 512px previews never render as slides at all: they back the loading placeholder,
+  // blurred. Without excluding the preview a satellite post would draw the same picture twice —
+  // small, then full — the moment the real bytes landed.
   return (media || []).filter((r) => !isSyntheticMedia(r) && !originals.has(r) && !posterImages.has(r) && !thumbImages.has(r));
 }
 
@@ -1966,11 +1973,21 @@ function displayMediaRefs(media) {
 // so a still-loading tile can paint its own blurred preview instead of a grey box.
 const ThumbIndex = {
   map: new Map(),
+  /// Content refs for which the entry in `map` is a 512px preview rather than a thumb, so a later
+  /// `thumb:` marker for the same content cannot downgrade it.
+  previews: new Set(),
   learn(media) {
     for (const r of media || []) {
-      if (!r.startsWith("thumb:")) continue;
-      const rest = r.slice(6), c = rest.lastIndexOf(":");
-      if (c > 0) this.map.set(rest.slice(0, c), rest.slice(c + 1));
+      if (r.startsWith("thumb:")) {
+        const rest = r.slice(6), c = rest.lastIndexOf(":");
+        // Do not clobber a preview already learned for this content: the 512px AVIF is twice the
+        // thumb's resolution at a quarter of its bytes, and on a constrained link it may be the
+        // only companion that arrived.
+        if (c > 0 && !this.previews.has(rest.slice(0, c))) this.map.set(rest.slice(0, c), rest.slice(c + 1));
+      } else if (r.startsWith("preview:")) {
+        const rest = r.slice(8), c = rest.lastIndexOf(":");
+        if (c > 0) { this.previews.add(rest.slice(0, c)); this.map.set(rest.slice(0, c), rest.slice(c + 1)); }
+      }
     }
   },
   thumbFor(ref) { return this.map.get(ref) || null; },
@@ -2580,7 +2597,8 @@ async function handleFiles(files, after) {
       const ref = await invoke("add_media", { circleId: state.activeCircle, dataBase64: b64, isVideo });
       const url = await invoke("media_data_url", { circleId: state.activeCircle, reference: ref });
       const thumbRef = isVideo ? null : await mintThumb(b64, state.activeCircle);
-      state.attachments.push({ ref, url, isVideo, thumbRef });
+      const previewRef = isVideo ? null : await mintPreview(b64, state.activeCircle);
+      state.attachments.push({ ref, url, isVideo, thumbRef, previewRef });
       after();
     } catch (e) { toast(t("couldnt_attach", e)); }
   }
@@ -2590,6 +2608,17 @@ async function handleFiles(files, after) {
 // it blurred behind the loading placeholder long before the full bytes land. Returns the thumb's
 // ref, or null when the encode can't get small enough (a "thumb" that isn't tiny is just waste) —
 // the photo simply posts without one. Mirrors iOS MediaStore.mintThumbCompanion.
+// Mint the 512px AVIF preview for a photo at compose time — the ONLY media small enough to cross a
+// satellite link (docs/PREVIEW-TIER-DESIGN.md). Unlike the thumb above this cannot be done here:
+// Chromium's canvas writes PNG, JPEG and WebP but not AVIF, so the encode happens in Rust and we
+// just hand it the same sanitized bytes we are about to attach. Null simply means the photo posts
+// without one. Mirrors iOS MediaStore.mintPreviewCompanion / Android LocalMedia.mintPreviewCompanion.
+async function mintPreview(b64, circleId) {
+  try {
+    return await invoke("mint_preview", { circleId, dataBase64: b64 });
+  } catch (_) { return null; }
+}
+
 async function mintThumb(b64, circleId) {
   try {
     if (b64.length * 0.75 < 64 * 1024) return null;   // already small — a thumb saves nothing
@@ -2694,6 +2723,7 @@ function withThumbMarkers(atts) {
   return [
     ...atts.map((a) => a.ref),
     ...atts.filter((a) => a.thumbRef).map((a) => `thumb:${a.ref}:${a.thumbRef}`),
+    ...atts.filter((a) => a.previewRef).map((a) => `preview:${a.ref}:${a.previewRef}`),
   ];
 }
 
@@ -3707,6 +3737,8 @@ function editPostDialog(it, circleId) {
         if (!isVideo) {
           const th = await mintThumb(b64, circleId);
           if (th) media.push(`thumb:${ref}:${th}`);
+          const pv = await mintPreview(b64, circleId);
+          if (pv) media.push(`preview:${ref}:${pv}`);
         }
         draw();
       } catch (err) { toast(t("couldnt_attach", err)); }
@@ -7909,7 +7941,11 @@ async function boot() {
         if (!b64) return answer(null);                      // refused (oversize/unreadable) → raw
         const ref = await invoke("add_media", { circleId: p.circleId, dataBase64: b64, isVideo: false });
         const thumb = await mintThumb(b64, p.circleId);      // null when the photo is already tiny
-        return answer(thumb ? [ref, `thumb:${ref}:${thumb}`] : [ref]);
+        const preview = await mintPreview(b64, p.circleId);
+        const out = [ref];
+        if (thumb) out.push(`thumb:${ref}:${thumb}`);
+        if (preview) out.push(`preview:${ref}:${preview}`);
+        return answer(out);
       }
       if (p.kind === "video") {
         const bin = atob(p.dataBase64 || "");

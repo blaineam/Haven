@@ -524,6 +524,7 @@ pub fn run() {
             commands::set_video_sound,
             commands::privacy_prefs,
             commands::set_privacy_prefs,
+            commands::mint_preview,
             commands::low_data_state,
             commands::set_low_data_level,
             commands::low_data_allowance,

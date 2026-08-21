@@ -67,6 +67,24 @@ pub fn fit(w: u32, h: u32) -> (u32, u32) {
     )
 }
 
+/// Decode encoded image bytes (what the composer hands over — sanitized JPEG or PNG from the
+/// webview), fit to [`MAX_DIMENSION`], and encode the preview.
+///
+/// `None` for anything we cannot decode, or that the encoder could not fit. Never a reason to send
+/// the full media on a constrained link.
+pub fn encode_image_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+    let decoded = image::load_from_memory(bytes).ok()?.to_rgb8();
+    let (w, h) = decoded.dimensions();
+    let (fw, fh) = fit(w, h);
+    let scaled = if (fw, fh) == (w, h) {
+        decoded
+    } else {
+        image::imageops::resize(&decoded, fw, fh, image::imageops::FilterType::Lanczos3)
+    };
+    let pixels: Vec<RGB8> = scaled.pixels().map(|p| RGB8::new(p[0], p[1], p[2])).collect();
+    encode_rgb8(&pixels, fw, fh)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +126,35 @@ mod tests {
         assert_eq!(fit(768, 1024), (384, 512));
         assert_eq!(fit(200, 150), (200, 150), "already small: not upscaled");
         assert_eq!(fit(512, 512), (512, 512));
+    }
+
+    /// The path the composer actually takes: encoded bytes in, preview out. Desktop cannot do this
+    /// in the webview (Chromium's canvas has no AVIF writer), so this function is the whole reason
+    /// the encode lives in Rust.
+    #[test]
+    fn encodes_a_preview_from_encoded_image_bytes() {
+        let (w, h) = (1600u32, 1200u32);
+        let px = photo(w, h);
+        // Round-trip through PNG so the input is what a caller really hands us: encoded bytes.
+        let mut raw = Vec::with_capacity((w * h * 3) as usize);
+        for p in &px {
+            raw.push(p.r);
+            raw.push(p.g);
+            raw.push(p.b);
+        }
+        let img: image::RgbImage = image::ImageBuffer::from_raw(w, h, raw).expect("buffer");
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut encoded, image::ImageFormat::Png).expect("png");
+
+        let out = encode_image_bytes(encoded.get_ref()).expect("a real photo must produce a preview");
+        assert!(out.len() <= MAX_BYTES, "preview is {} B, budget {}", out.len(), MAX_BYTES);
+        assert!(out.len() > 12 && &out[4..8] == b"ftyp", "must be a real AVIF container");
+    }
+
+    #[test]
+    fn undecodable_bytes_yield_no_preview() {
+        assert!(encode_image_bytes(b"not an image at all").is_none());
+        assert!(encode_image_bytes(&[]).is_none());
     }
 
     #[test]

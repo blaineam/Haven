@@ -9896,6 +9896,21 @@ impl Engine {
             .ok()
     }
 
+    /// Mint the 512px AVIF preview for an image and store it, returning its ref.
+    ///
+    /// Desktop's composer downscales and re-encodes in the WEBVIEW, but Chromium's canvas cannot
+    /// write AVIF — only PNG, JPEG and WebP — so this one encode has to happen in Rust
+    /// (`docs/PREVIEW-TIER-DESIGN.md` §2). The caller hands over the same sanitized bytes it is
+    /// about to attach; we decode, fit to 512 on the longest edge, and encode to the shared byte
+    /// budget.
+    ///
+    /// `None` means "no preview for this item" — a picture we cannot decode, or one the encoder
+    /// could not fit. It is never a reason to send full media on a constrained link.
+    pub fn mint_preview(&self, circle_id: &str, bytes: &[u8]) -> Option<String> {
+        let avif = crate::preview::encode_image_bytes(bytes)?;
+        Some(self.media.store(&self.social, circle_id, &avif, false))
+    }
+
     pub fn add_local_audio(&self, circle_id: &str, bytes: &[u8]) -> String {
         self.media.store_kind(&self.social, circle_id, bytes, crate::localmedia::MediaKind::Audio)
     }

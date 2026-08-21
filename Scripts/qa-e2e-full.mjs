@@ -30,7 +30,7 @@ const MARKER = `E2E_${stamp().replace(/-/g, '').slice(-6)}`;
 const REPORT = [];
 const PERF = [];
 const HISTORY = join(ROOT, 'build', 'e2e-history.jsonl');
-const STEPS = (process.env.E2E_STEPS || 'profile,circle,post,story,file,music,dm,call,react,comment,media').split(',');
+const STEPS = (process.env.E2E_STEPS || 'profile,circle,post,story,file,music,dm,call,react,comment,media,satellite').split(',');
 
 // Convergence budgets (ms). Generous but bounded; tune via env.
 // One active-cadence mailbox poll is ~30-45s; a budget must cover a full poll plus
@@ -359,6 +359,64 @@ async function main() {
 
   // 8-9. reaction + comment from friend and from own second device on the same
   // shared-circle post (interactions only make sense where everyone sees the post).
+  // ── satellite: only the preview crosses, and the rest completes on return ──────────────────
+  //
+  // The behaviour this proves cannot be reached any other way: `ultra` comes only from
+  // NWPath.isUltraConstrained / TRANSPORT_SATELLITE, which a simulator and an emulator never
+  // report. The `link_constraint` qa op (DEBUG-only) is the way in. See docs/PREVIEW-TIER-DESIGN.md.
+  if (STEPS.includes('satellite') && circleId) {
+    const parsePreview = (p) => {
+      const m = (p?.media_refs || []).find((r) => r.startsWith('preview:'));
+      if (!m) return null;
+      const rest = m.slice('preview:'.length);
+      const c = rest.lastIndexOf(':');
+      return c > 0 ? { content: rest.slice(0, c), preview: rest.slice(c + 1) } : null;
+    };
+    const presentRef = (p, ref) => {
+      const i = (p?.media_refs || []).indexOf(ref);
+      return i >= 0 && Boolean((p.media_present || [])[i]);
+    };
+    const findPost = (j, body) => j.posts?.find((x) => x.body === body);
+
+    const SAT = `${MARKER}_Sat`;
+    // The SENDER goes off-grid, then posts a photo.
+    await op(devices.ios, { op: 'link_constraint', level: 'ultra' }, 2500);
+    const satPhoto = devices.ios.stage(PHOTO, 'qa-sat.jpg');
+    await op(devices.ios, { op: 'post', body: SAT, media: 'photo', photo_path: satPhoto, circle_id: cid() }, 12_000);
+
+    const audience = audienceFor(true).filter((x) => x !== 'ios');
+    for (const d of audience) {
+      // 1. The post itself still arrives — it is real, signed and sealed; only bytes were deferred.
+      perfGate('satellite post event', d, await converge(devices[d],
+        (j) => Boolean(parsePreview(findPost(j, SAT))), BUDGET.mediaEvent));
+      // 2. The ~6 KB preview crosses.
+      perfGate('satellite preview blob', d, await converge(devices[d], (j) => {
+        const p = findPost(j, SAT); const v = parsePreview(p);
+        return Boolean(v && presentRef(p, v.preview));
+      }, BUDGET.mediaBlob));
+    }
+
+    // 3. THE NEGATIVE, and the point of the whole tier: the full photo must NOT have crossed. A
+    //    positive-only test would pass just as happily if the gate did nothing at all.
+    let leaked = null;
+    for (const d of audience) {
+      const j = await freshDump(devices[d]);
+      const p = findPost(j, SAT); const v = parsePreview(p);
+      if (v && presentRef(p, v.content)) leaked = d;
+    }
+    score('satellite holds back the full photo', leaked === null,
+      leaked ? `full media reached ${leaked} while the link was ultra-constrained` : 'preview only, as designed');
+
+    // 4. Back in coverage — the deferred half must complete ON ITS OWN, with no further action.
+    await op(devices.ios, { op: 'link_constraint', level: 'auto' }, 3000);
+    for (const d of audience) {
+      perfGate('full photo completes on return', d, await converge(devices[d], (j) => {
+        const p = findPost(j, SAT); const v = parsePreview(p);
+        return Boolean(v && presentRef(p, v.content));
+      }, BUDGET.mediaBlob));
+    }
+  }
+
   if (STEPS.includes('react') || STEPS.includes('comment')) {
     const mine = await freshDump(devices.ios);
     const target = mine?.posts?.find((p) => p.body === `${MARKER}_Text`)?.id;

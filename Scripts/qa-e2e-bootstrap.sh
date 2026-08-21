@@ -16,6 +16,21 @@ AND_PKG="${HAVEN_AND_PKG:-com.blaineam.haven}"
 
 log() { echo "[e2e-boot] $*"; }
 
+# The Tauri desktop leg ALWAYS starts from an empty dataset.
+#
+# `qa-matrix` is an isolated QA-only data dir (desktop force_qa_seed_identity pins it there and
+# refuses the personal root), so wiping it costs nothing and removes an entire class of false green:
+# a desktop that still holds a previous run's identity, contacts, seen-set and — now that the wire
+# format has a second envelope container and a new media tier — blobs and markers from a build that
+# no longer exists. A leg carrying yesterday's state can converge for reasons that have nothing to
+# do with the change under test.
+#
+# The other legs stay behind E2E_FRESH: their state lives in real app containers and re-minting an
+# identity on each is slow. This one is free.
+log "resetting the Tauri desktop dataset ($DATA_DIR)"
+pkill -f 'target/debug/haven-desktop' 2>/dev/null || true
+rm -rf "$DATA_DIR" 2>/dev/null || true
+
 # E2E_FRESH=1 → hermetic fleet: wipe every leg's QA state (identities re-mint,
 # bundles re-exchange, no stale seen-sets/contacts from prior runs can leak in).
 if [[ "${E2E_FRESH:-0}" == "1" ]]; then

@@ -68,6 +68,24 @@ export default {
     //    JAVA_HOME pinned to 17; ANDROID_HOME + platform-tools/emulator are put
     //    on PATH by the runner (both are commonly unset in the shell). The
     //    emulator is LEFT RUNNING after the run for faster reruns (stopEmulator).
+    // ── Android NATIVE library. This has to run before `android`, and it is in the release gate,
+    //    because NOTHING else rebuilds it: `compileDebugKotlin` and `testDebugUnitTest` compile
+    //    Kotlin against the GENERATED BINDINGS and never look at the .so those bindings call into.
+    //
+    //    That is not hypothetical. The preview work added FFI functions, the Kotlin bindings were
+    //    regenerated, the Android suite went green — and the app died on every launch with
+    //    `UnsatisfiedLinkError: undefined symbol: uniffi_haven_ffi_fn_func_link_constraint`,
+    //    because the jniLibs .so was three weeks old. A compile-only gate cannot see that; it is a
+    //    launch crash, not a build error, and the class-init failure is cached so every subsequent
+    //    attempt is rejected too.
+    'android-native': {
+      type: 'cmd',
+      cmd: 'bash',
+      args: ['build-rust.sh'],
+      cwd: 'android',
+      description: 'Android jniLibs (libhaven_ffi.so) are rebuilt from the current core',
+    },
+
     android: {
       type: 'gradle',
       cwd: 'android',
@@ -166,7 +184,7 @@ export default {
     // them never produce the Tauri app, and `macos` builds the native HavenMac app, which is a
     // different product.
     requireGreen: [
-      'core', 'fabric', 'ios', 'macos', 'android',
+      'core', 'fabric', 'ios', 'macos', 'android-native', 'android',
       'desktop', 'desktop-ui', 'desktop-build', 'e2e',
     ],
   },

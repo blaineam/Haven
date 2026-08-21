@@ -803,7 +803,14 @@ final class MediaStore: ObservableObject {
     /// desktop) rather than trusting the extension, and inventing a new MediaKind would mean
     /// teaching every prefix check in the codebase about it for no functional gain.
     private func mintPreviewCompanion(for ref: String, from image: PlatformImage) {
-        guard previewCompanions[ref] == nil else { return }
+        // SELF-HEAL. Skipping whenever a pairing exists made a phantom permanent: if the blob is
+        // gone — a failed write, an eviction, a half-restored container — the map still names it, the
+        // mint is skipped forever, and `withPreviewMarkers` silently emits no marker because its
+        // `has` check fails. That photo can then NEVER carry a preview again, which is exactly what
+        // stranded the mac stub: the same phantom pairing survived every fleet wipe (the companion
+        // maps live in Preferences, which the wipe does not clear) and its posts shipped with
+        // markers: [] run after run.
+        if let existing = previewCompanions[ref], has(existing) { return }
         guard let data = PreviewCodec.encode(image) else { return }
         let previewRef = Self.contentRef(.image, data)
         // Record the pairing ONLY if the bytes actually landed. `try?` + an unconditional map write
@@ -828,7 +835,9 @@ final class MediaStore: ObservableObject {
     /// Encode + store a ≤32KB, ~256px JPEG companion for `ref` and remember the pairing. Skipped
     /// silently when the encode can't get small enough — a "thumb" that isn't tiny is just waste.
     private func mintThumbCompanion(for ref: String, from image: PlatformImage) {
-        guard thumbCompanions[ref] == nil else { return }
+        // Same self-heal as the preview path: a pairing whose blob is gone must be re-minted, not
+        // treated as proof the work was already done.
+        if let existing = thumbCompanions[ref], has(existing) { return }
         let small = Self.downscale(image, maxDimension: 256)
         var quality: CGFloat = 0.6
         guard var data = small.jpegData(compressionQuality: quality) else { return }

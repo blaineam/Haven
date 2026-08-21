@@ -34,6 +34,12 @@ if [[ "${E2E_FRESH:-1}" != "0" ]]; then
   pkill -f 'target/debug/haven-desktop' 2>/dev/null || true
   sleep 1
   rm -rf "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support"/{haven-relay-store,haven-media,haven-feed.json,haven-mailbox-seen.txt,haven-selfsync.bin,qa-*} 2>/dev/null || true
+  # PREFERENCES too. The companion maps (haven.media.previewCompanions / thumbCompanions) live here,
+  # not in Application Support, so a "hermetic" wipe left them behind — and a pairing naming a blob
+  # the wipe had just deleted then suppressed re-minting on every subsequent run. The stub shipped
+  # posts with no preview marker for three consecutive runs because of it.
+  rm -f "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Preferences/com.blaineam.kith.qa.stub.plist" 2>/dev/null || true
+  defaults delete com.blaineam.kith.qa.stub 2>/dev/null || true
   rm -rf "$DATA_DIR" 2>/dev/null || true
   SIM_FRESH="${HAVEN_IOS_UDID:-$(xcrun simctl list devices booted 2>/dev/null | grep -oE '[A-F0-9-]{36}' | head -1)}"
   if [[ -n "$SIM_FRESH" ]]; then

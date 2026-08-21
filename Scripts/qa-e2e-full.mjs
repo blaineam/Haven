@@ -311,8 +311,10 @@ async function main() {
   const audienceFor = (shared) => (shared && circleId && B) ? all : fleet;
   const cid = () => circleId || undefined;
 
-  // Warm the fleet before ANY timed content assertion (see warmUp above).
-  if (STEPS.includes('post')) await warmUp();
+  // Warm the fleet before ANY timed content assertion (see warmUp above). Satellite counts: it is
+  // the most timing-sensitive step in the suite, so running it on a cold fleet measures the fleet
+  // coming up rather than the feature.
+  if (STEPS.includes('post') || STEPS.includes('satellite')) await warmUp();
 
   // 3. posts: text + photo + video (author iOS; friend authors one from stub)
   if (STEPS.includes('post')) {

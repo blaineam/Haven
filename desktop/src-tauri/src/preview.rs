@@ -72,8 +72,34 @@ pub fn fit(w: u32, h: u32) -> (u32, u32) {
 ///
 /// `None` for anything we cannot decode, or that the encoder could not fit. Never a reason to send
 /// the full media on a constrained link.
+/// Decode to pixels that are the RIGHT WAY UP.
+///
+/// `load_from_memory` returns the stored pixel order and ignores the EXIF orientation tag, and
+/// cameras record rotation as metadata rather than rotating the sensor data. Encoding those pixels
+/// straight into a preview bakes the wrong rotation in permanently — the re-encoded AVIF has no
+/// orientation of its own to correct it later.
+///
+/// The symptom this fixes: a photo's preview renders sideways on every platform and then appears to
+/// "flip" upright the moment the full-resolution original arrives, because the original still has
+/// its EXIF tag and is drawn correctly. One photo, two representations, disagreeing.
+///
+/// An image with no orientation metadata (PNG, or a JPEG without the tag) reads as `NoTransforms`
+/// and is returned untouched.
+fn decode_upright(bytes: &[u8]) -> Option<image::DynamicImage> {
+    use image::ImageDecoder;
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    // Absent/unreadable metadata is not a failure: it means "no transform".
+    let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = image::DynamicImage::from_decoder(decoder).ok()?;
+    img.apply_orientation(orientation);
+    Some(img)
+}
+
 pub fn encode_image_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
-    let decoded = image::load_from_memory(bytes).ok()?.to_rgb8();
+    let decoded = decode_upright(bytes)?.to_rgb8();
     let (w, h) = decoded.dimensions();
     let (fw, fh) = fit(w, h);
     let scaled = if (fw, fh) == (w, h) {

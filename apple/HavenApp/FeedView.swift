@@ -2920,8 +2920,24 @@ final class FeedStore: ObservableObject {
                     // be able to fail the orchestrator's media-blob gate (Android realRefs /
                     // desktop media_present already skip them; the stub runs THIS file).
                     let real = item.media.filter { !MediaStore.isSynthetic($0) }
+                    // Companion markers on DM rows too. Without these the preview tier is
+                    // invisible to QA in DMs specifically — the satellite assertions read
+                    // `media_markers`, so a DM could carry (or fail to carry) a preview and no test
+                    // could tell. DMs seal per-message under the sender ratchet rather than the
+                    // circle epoch, so they are a genuinely different path and need their own proof.
                     rows.append(["id": item.id, "body": item.body,
-                                 "media_present": real.map { MediaStore.shared.has($0) }])
+                                 "media_refs": real,
+                                 "media_present": real.map { MediaStore.shared.has($0) },
+                                 "media_markers": item.media.filter { MediaStore.isSynthetic($0) },
+                                 "companions_present": Dictionary(
+                                    uniqueKeysWithValues: item.media.compactMap { m -> (String, Bool)? in
+                                        let companion = MediaVariants.parsePreview(m)?.preview
+                                            ?? MediaVariants.parseThumb(m)?.thumb
+                                            ?? MediaVariants.parsePoster(m)?.poster
+                                            ?? MediaVariants.parseOriginal(m)?.original
+                                        guard let companion else { return nil }
+                                        return (companion, MediaStore.shared.has(companion))
+                                    })])
                 }
                 dms[peer] = rows
             } else {

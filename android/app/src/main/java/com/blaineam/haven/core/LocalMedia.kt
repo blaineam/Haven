@@ -140,17 +140,64 @@ object LocalMedia {
      * means "no preview for this item" and is never a reason to send the full media on a constrained
      * link. Mirrors iOS `MediaStore.mintPreviewCompanion`.
      */
-    private fun mintPreviewCompanion(circleId: String, ref: String, bytes: ByteArray) {
-        if (!this::thumbPrefs.isInitialized || previewCompanion(ref) != null) return
+    /**
+     * Decode [bytes] to an UPRIGHT bitmap, subsampled near [targetDim].
+     *
+     * `BitmapFactory` returns pixels in STORED order and ignores the EXIF orientation tag entirely.
+     * Phones almost always shoot in one physical sensor orientation and record the rotation as
+     * metadata instead, so a portrait photo decodes on its side — and an encoder handed those pixels
+     * bakes the wrong rotation in permanently, since the re-encoded companion carries no EXIF of its
+     * own to correct it later.
+     *
+     * That is exactly what shipped: a photo posted from Android rendered sideways in its preview on
+     * every platform, and then appeared to "flip" upright on iOS the moment the full-resolution
+     * original arrived — because the ORIGINAL still had its EXIF tag and was displayed correctly.
+     * Two different images of the same photo, disagreeing.
+     *
+     * All eight orientations are handled, not just the three rotations: 2/4/5/7 are mirrored, and a
+     * mirrored photo silently flipped left-to-right is its own bug.
+     */
+    private fun decodeUpright(bytes: ByteArray, targetDim: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return
-        // Power-of-two subsample close to the target, then let PreviewCodec do the exact fit —
-        // cheap and heap-bounded, the same shape the thumb path uses.
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
         var sample = 1
-        while (max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= PreviewCodec.MAX_DIMENSION) sample *= 2
+        while (max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= targetDim) sample *= 2
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-        val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return
+        val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return null
+
+        val orientation = runCatching {
+            androidx.exifinterface.media.ExifInterface(java.io.ByteArrayInputStream(bytes))
+                .getAttributeInt(
+                    androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
+                    androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL,
+                )
+        }.getOrDefault(androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL)
+        val m = android.graphics.Matrix()
+        when (orientation) {
+            androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.postScale(-1f, 1f)
+            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
+            androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> m.postScale(1f, -1f)
+            androidx.exifinterface.media.ExifInterface.ORIENTATION_TRANSPOSE -> { m.postRotate(90f); m.postScale(-1f, 1f) }
+            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90 -> m.postRotate(90f)
+            androidx.exifinterface.media.ExifInterface.ORIENTATION_TRANSVERSE -> { m.postRotate(270f); m.postScale(-1f, 1f) }
+            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
+            else -> return decoded   // ORIENTATION_NORMAL / UNDEFINED — already upright
+        }
+        return runCatching {
+            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, m, true)
+                .also { if (it !== decoded) decoded.recycle() }
+        }.getOrDefault(decoded)
+    }
+
+    private fun mintPreviewCompanion(circleId: String, ref: String, bytes: ByteArray) {
+        if (!this::thumbPrefs.isInitialized) return
+        // SELF-HEAL, matching iOS: a pairing whose blob is GONE must be re-minted, not treated as
+        // proof of work. Skipping on the map alone makes a phantom permanent — the photo can then
+        // never carry a preview again, silently.
+        previewCompanion(ref)?.let { if (has(it)) return }
+        // Upright pixels, or the encoder bakes the EXIF rotation in the wrong way round.
+        val decoded = decodeUpright(bytes, PreviewCodec.MAX_DIMENSION) ?: return
         val data = runCatching { PreviewCodec.encode(decoded) }.getOrNull()
         decoded.recycle()
         if (data == null) return
@@ -166,15 +213,9 @@ object LocalMedia {
      * silently when the encode can't get small enough — a "thumb" that isn't tiny is just waste.
      */
     private fun mintThumbCompanion(circleId: String, ref: String, bytes: ByteArray) {
-        if (!this::thumbPrefs.isInitialized || thumbCompanion(ref) != null) return
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return
-        // Power-of-two subsample close to 256px, then an exact scale — cheap and heap-bounded.
-        var sample = 1
-        while (max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 256) sample *= 2
-        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-        val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return
+        if (!this::thumbPrefs.isInitialized) return
+        thumbCompanion(ref)?.let { if (has(it)) return }   // self-heal, as above
+        val decoded = decodeUpright(bytes, 256) ?: return
         val longSide = max(decoded.width, decoded.height)
         val small = if (longSide > 256) {
             val scale = 256f / longSide

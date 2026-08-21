@@ -63,7 +63,32 @@ enum PreviewCodec {
     }
 
     #if canImport(UIKit)
-    static func encode(_ image: UIImage) -> Data? { image.cgImage.flatMap(encode) }
+    static func encode(_ image: UIImage) -> Data? { upright(image).flatMap(encode) }
+
+    /// The image's pixels ROTATED UPRIGHT.
+    ///
+    /// `UIImage.cgImage` hands back the pixels exactly as stored and leaves the rotation behind in
+    /// `imageOrientation` — cameras record orientation as metadata rather than rotating the sensor
+    /// data. Encoding that CGImage directly bakes the wrong rotation into the companion permanently,
+    /// because the re-encoded AVIF carries no orientation of its own to correct it.
+    ///
+    /// The visible symptom: a photo's preview renders sideways on every platform, then appears to
+    /// "flip" upright the instant the full-resolution original arrives — the original still has its
+    /// EXIF tag and is drawn correctly, so the two representations of one photo disagree.
+    private static func upright(_ image: UIImage) -> CGImage? {
+        guard let cg = image.cgImage else { return nil }
+        guard image.imageOrientation != .up else { return cg }
+        // Redrawing applies `imageOrientation` (including the mirrored cases, which a bare rotation
+        // would get backwards). Point size, so the renderer's own scale is not applied twice.
+        let size = CGSize(width: cg.width, height: cg.height)
+        let bounds = image.imageOrientation.isSideways
+            ? CGSize(width: size.height, height: size.width) : size
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: bounds, format: format)
+            .image { _ in image.draw(in: CGRect(origin: .zero, size: bounds)) }
+            .cgImage
+    }
     #else
     static func encode(_ image: NSImage) -> Data? {
         var rect = CGRect(x: 0, y: 0, width: image.size.width, height: image.size.height)
@@ -104,3 +129,17 @@ enum PreviewCodec {
         return ctx.makeImage()
     }
 }
+
+
+#if canImport(UIKit)
+extension UIImage.Orientation {
+    /// Orientations that exchange width and height. Getting this wrong crops the redraw to the
+    /// wrong box rather than merely rotating it.
+    var isSideways: Bool {
+        switch self {
+        case .left, .leftMirrored, .right, .rightMirrored: return true
+        default: return false
+        }
+    }
+}
+#endif

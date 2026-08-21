@@ -472,6 +472,9 @@ async function main() {
       return Boolean((p?.companions_present || {})[ref]);
     };
     const findPost = (j, body) => j.posts?.find((x) => x.body === body);
+    // DM rows live under `dms`, keyed by peer, and are a different shape from feed posts. They now
+    // carry the same companion markers, so the identical assertions can run against them.
+    const findDM = (j, body) => Object.values(j.dms || {}).flat().find((m) => m.body === body);
 
     // Every device that can author AND force its own constraint. Each takes a turn, so the
     // receive-side is exercised on every platform including iOS.
@@ -490,25 +493,56 @@ async function main() {
     const ACCOUNT_A = ['ios', 'desktop', 'android'];
     const sameAccount = (a, b) => ACCOUNT_A.includes(a) === ACCOUNT_A.includes(b);
 
-    for (const author of authors) {
-      const SAT = `${MARKER}_Sat_${author}`;
-      const audience = all.filter((x) => x !== author && devices[x]);
+    // LANES: the same scenario over each way content is keyed, because they are NOT the same code
+    // underneath and the preview tier sits on top of all three.
+    //
+    //   * the created circle — creator-bound, so tree keying is LIVE: MLS epochs, Welcome-on-join.
+    //   * `default` ("My Circle") — binds no creator, so tree keying is OFF for it permanently and
+    //     it uses the legacy KeyCommit + sender-keys epoch path instead. This is the circle most
+    //     users actually live in and it can never become MLS.
+    //   * a DM — sealed per-message under the sender ratchet, a third path again.
+    //
+    // The satellite work was validated ONLY on the MLS lane, and the bug it found (content sealed
+    // before a member joined the tree) was specific to MLS. That says nothing about the other two.
+    // The gating itself is circle-agnostic (`maySendOnUltraConstrained` is per-blob), but key
+    // convergence underneath is not, and that is where the failure was.
+    //
+    // The MLS lane sweeps every author so the receive-side is proven on every platform. The other
+    // two lanes run cross-account from iOS only — enough to prove the path works without tripling
+    // an already long step.
+    const LANES = [
+      { id: 'mls', label: '', authors, dm: false, circle: () => cid() },
+      { id: 'mycircle', label: ' [my circle]', authors: ['ios'], dm: false, circle: () => 'default' },
+      { id: 'dm', label: ' [dm]', authors: ['ios'], dm: true, circle: () => undefined },
+    ];
+
+    for (const lane of LANES) {
+    for (const author of lane.authors.filter((a) => devices[a])) {
+      const SAT = `${MARKER}_Sat_${author}${lane.id === 'mls' ? '' : '_' + lane.id}`;
+      const find = lane.dm ? findDM : findPost;
+      // A DM has exactly one recipient; a circle post has everyone in it.
+      const audience = lane.dm
+        ? all.filter((x) => x === 'stub' && devices[x])
+        : all.filter((x) => x !== author && devices[x]);
       // Cross-account only while constrained; everyone once service returns.
       const constrainedAudience = audience.filter((d) => !sameAccount(d, author));
       if (!audience.length || !constrainedAudience.length) continue;
+      if (lane.dm && !B) continue;
 
       await op(devices[author], { op: 'link_constraint', level: 'ultra' }, 2500);
-      const satPhoto = devices[author].stage(PHOTO, `qa-sat-${author}.jpg`);
-      await op(devices[author], { op: 'post', body: SAT, media: 'photo', photo_path: satPhoto, circle_id: cid() }, 12_000);
+      const satPhoto = devices[author].stage(PHOTO, `qa-sat-${author}-${lane.id}.jpg`);
+      await op(devices[author], lane.dm
+        ? { op: 'dm', dm_to: B, body: SAT, media: 'photo', photo_path: satPhoto }
+        : { op: 'post', body: SAT, media: 'photo', photo_path: satPhoto, circle_id: lane.circle() }, 12_000);
 
       // 1. The post still arrives — it is real, signed and sealed; only bytes were deferred.
-      await convergeAll(constrainedAudience, (j) => Boolean(parsePreview(findPost(j, SAT))),
-        BUDGET.mediaEvent, `satellite post event (${author}→)`);
+      await convergeAll(constrainedAudience, (j) => Boolean(parsePreview(find(j, SAT))),
+        BUDGET.mediaEvent, `satellite post event (${author}→)${lane.label}`);
       // 2. The ~6 KB preview crosses.
       await convergeAll(constrainedAudience, (j) => {
-        const p = findPost(j, SAT); const v = parsePreview(p);
+        const p = find(j, SAT); const v = parsePreview(p);
         return Boolean(v && presentRef(p, v.preview));
-      }, BUDGET.mediaBlob, `satellite preview blob (${author}→)`);
+      }, BUDGET.mediaBlob, `satellite preview blob (${author}→)${lane.label}`);
 
       // 3. THE NEGATIVE, and the point of the tier: the full photo must NOT have crossed. A
       //    positive-only test passes just as happily if the gate does nothing at all, and a leaking
@@ -516,18 +550,19 @@ async function main() {
       const dumps = await Promise.all(constrainedAudience.map(async (d) => ({ d, j: await freshDump(devices[d]) })));
       let leaked = null;
       for (const { d, j } of dumps) {
-        const p = findPost(j, SAT); const v = parsePreview(p);
+        const p = find(j, SAT); const v = parsePreview(p);
         if (v && presentRef(p, v.content)) leaked = d;
       }
-      score(`satellite holds back the full photo (${author}→)`, leaked === null,
+      score(`satellite holds back the full photo (${author}→)${lane.label}`, leaked === null,
         leaked ? `full media reached ${leaked} while the link was ultra-constrained` : 'preview only, as designed');
 
       // 4. Back in coverage — the deferred half must complete ON ITS OWN, with no further action.
       await op(devices[author], { op: 'link_constraint', level: 'auto' }, 3000);
       await convergeAll(audience, (j) => {
-        const p = findPost(j, SAT); const v = parsePreview(p);
+        const p = find(j, SAT); const v = parsePreview(p);
         return Boolean(v && presentRef(p, v.content));
-      }, BUDGET.mediaBlob, `full photo completes on return (${author}→)`);
+      }, BUDGET.mediaBlob, `full photo completes on return (${author}→)${lane.label}`);
+    }
     }
   }
 

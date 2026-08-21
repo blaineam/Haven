@@ -380,6 +380,9 @@ targets:
       - path: HavenApp/PushBanner.swift
       - path: HavenApp/PostDedupe.swift
       - path: HavenApp/PerceptualHash.swift
+      # The 512px AVIF preview tier. ImageIO/CoreGraphics only — no FeedStore, no FFI, so the
+      # target stays host-LESS and its byte budget is covered by CI.
+      - path: HavenApp/PreviewCodec.swift
       # HavenFabricTests covers the Haven-first ICE policy + hairpin URL derivation. Foundation/os
       # only, so the target stays host-LESS. CallHairpin is deliberately NOT here: it grew a
       # FeedStore/RelayMailboxStore dependency in its reconnect path, which broke this target's

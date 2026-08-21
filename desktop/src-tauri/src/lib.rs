@@ -2,6 +2,7 @@
 //! shared Rust core (`haven_ffi`). The GUI is the WebView2 frontend in `../ui`; `--headless`
 //! runs only the in-process relay/mailbox (the "invisible relay", like the Mac app).
 
+mod preview;
 mod callwire;
 mod commands;
 // The PII-free screenshot dataset. `cfg` — NOT a runtime check — so the seeder and every synthetic

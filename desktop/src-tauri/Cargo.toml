@@ -29,6 +29,12 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # The shared engine (identity, circles, feed, sealing, iroh node, relay/mailbox).
 haven_ffi = { path = "../../core/haven-ffi" }
+# The 512px AVIF preview tier (docs/PREVIEW-TIER-DESIGN.md). Desktop encodes images in the WEBVIEW
+# today (canvas.toDataURL), and Chromium's canvas has no AVIF writer — so the preview encode lives
+# in Rust instead. ravif is rav1e-backed, royalty-free (no HEVC packaging problem on Windows/Linux),
+# and encodes 512px in tens of milliseconds.
+ravif = "0.11"
+rgb = "0.8"
 # The pure core crate — used DIRECTLY for the multi-device self-sync CRDT (AccountState,
 # Stamp, slot_key/slot_prefix) and identity self-sync key, matching the iOS wire format.
 haven-p2p = { path = "../../core/haven-p2p" }

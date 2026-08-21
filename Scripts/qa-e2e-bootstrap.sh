@@ -77,14 +77,23 @@ else
 fi
 if [[ "$NEEDS_IOS" == 1 ]]; then
   log "building iOS sim app (missing or stale)…"
-  IOS_DD="$(dirname "$(dirname "$(dirname "$IOS_APP")")")"
+  # FOUR dirnames, not three: Haven.app -> Debug-iphonesimulator -> Products -> Build -> <dd root>.
+  # With three, -derivedDataPath was ".../haven-signed-ios-dd/Build", so xcodebuild nested its own
+  # Build/ inside it and the app landed at .../Build/Build/Products/... — a path nothing looks at.
+  # The build then "succeeded" every run while the install silently found no app, and the sim kept
+  # running whatever binary happened to be installed by hand. A leg that never installs what it just
+  # built is worse than a broken leg: it reports on code that is not under test.
+  IOS_DD="$(dirname "$(dirname "$(dirname "$(dirname "$IOS_APP")")")")"
   ( cd "$ROOT/apple" && xcodegen generate >/dev/null && xcodebuild \
       -project Haven.xcodeproj -scheme Haven -configuration Debug \
       -destination "platform=iOS Simulator,id=$SIM" -derivedDataPath "$IOS_DD" \
       DEVELOPMENT_TEAM=8ZVSPZYSVF build ) >"$OUT/ios-build.log" 2>&1 \
     || { echo "error: iOS sim build FAILED — tail of $OUT/ios-build.log:"; tail -25 "$OUT/ios-build.log"; exit 1; }
 fi
-if [[ -d "$IOS_APP" ]]; then xcrun simctl install "$SIM" "$IOS_APP" || true; fi
+# Install is FATAL on failure. It used to be `|| true`, so a missing or unusable app produced a
+# confusing "failed to launch" three steps later instead of naming the actual problem here.
+[[ -d "$IOS_APP" ]] || { echo "error: no iOS app at $IOS_APP after build — see $OUT/ios-build.log"; exit 1; }
+xcrun simctl install "$SIM" "$IOS_APP" || { echo "error: simctl install failed for $IOS_APP"; exit 1; }
 SIMCTL_CHILD_HAVEN_SKIP_ONBOARDING=1 xcrun simctl launch "$SIM" "$IOS_BUNDLE" >/dev/null 2>&1 || true
 
 # ── 1b. Stage account A's contact bundle for the stub BEFORE its (only) launch —

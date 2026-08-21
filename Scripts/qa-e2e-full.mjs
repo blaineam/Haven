@@ -393,16 +393,22 @@ async function main() {
   // NWPath.isUltraConstrained / TRANSPORT_SATELLITE, which a simulator and an emulator never
   // report. The `link_constraint` qa op (DEBUG-only) is the way in.
   if (STEPS.includes('satellite') && circleId) {
+    // Markers live in `media_markers`, NOT `media_refs`: the dump filters synthetic refs out of the
+    // latter, and a post never lists the bare companion ref either. Reading media_refs here made the
+    // satellite assertions unpassable regardless of how the product behaved.
     const parsePreview = (p) => {
-      const m = (p?.media_refs || []).find((r) => r.startsWith('preview:'));
+      const m = (p?.media_markers || []).find((r) => r.startsWith('preview:'));
       if (!m) return null;
       const rest = m.slice('preview:'.length);
       const c = rest.lastIndexOf(':');
       return c > 0 ? { content: rest.slice(0, c), preview: rest.slice(c + 1) } : null;
     };
+    // Content refs report through media_refs/media_present; COMPANION blobs (the preview itself)
+    // report through companions_present, since they are never listed as refs.
     const presentRef = (p, ref) => {
       const i = (p?.media_refs || []).indexOf(ref);
-      return i >= 0 && Boolean((p.media_present || [])[i]);
+      if (i >= 0) return Boolean((p.media_present || [])[i]);
+      return Boolean((p?.companions_present || {})[ref]);
     };
     const findPost = (j, body) => j.posts?.find((x) => x.body === body);
 

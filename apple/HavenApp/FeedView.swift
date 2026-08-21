@@ -2922,6 +2922,25 @@ final class FeedStore: ObservableObject {
                         "caption": item.story ? item.body : NSNull(),
                         "media_refs": real,
                         "media_present": real.map { MediaStore.shared.has($0) },
+                        // Companion MARKERS (`preview:`/`thumb:`/`poster:`/`orig:`) and whether the
+                        // blobs they name are here.
+                        //
+                        // `real` above deliberately drops synthetic refs, and the bare companion ref
+                        // is never listed in a post's media either — so without this a preview is
+                        // invisible to QA even when it exists, is stored, and is on the wire. The
+                        // satellite assertions were checking for something the dump could not
+                        // report, which is a test that cannot pass rather than a product that
+                        // cannot work.
+                        "media_markers": item.media.filter { MediaStore.isSynthetic($0) },
+                        "companions_present": Dictionary(
+                            uniqueKeysWithValues: item.media.compactMap { m -> (String, Bool)? in
+                                let companion = MediaVariants.parsePreview(m)?.preview
+                                    ?? MediaVariants.parseThumb(m)?.thumb
+                                    ?? MediaVariants.parsePoster(m)?.poster
+                                    ?? MediaVariants.parseOriginal(m)?.original
+                                guard let companion else { return nil }
+                                return (companion, MediaStore.shared.has(companion))
+                            }),
                         "reactions": Dictionary(item.reactions.map { ($0.emoji, Int($0.count)) }, uniquingKeysWith: +),
                         "comments": item.comments.filter { !$0.unsent }.map { ["id": $0.id, "body": $0.body] },
                     ]))

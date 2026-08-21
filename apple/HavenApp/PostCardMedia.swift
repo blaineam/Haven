@@ -573,7 +573,12 @@ struct PostMediaView: View {
             guard let p else { return }
             MainActor.assumeIsolated {   // observer is delivered on .main, so this is genuinely isolated
                 p.seek(to: .zero)
-                if AudioCoordinator.shared.centeredPostId == postId {
+                // Ask the coordinator, which folds in whether the app is even in the foreground.
+                // `centeredPostId == postId` alone says where the feed is scrolled, not whether
+                // anyone can see it — and backgrounding does not move the centred post. A video
+                // centred when the user locked their phone therefore looped forever, audibly, with
+                // the app fully backgrounded.
+                if AudioCoordinator.shared.videoMayLoop(forPost: postId) {
                     p.play()
                     AudioCoordinator.shared.videoFinished()
                 }

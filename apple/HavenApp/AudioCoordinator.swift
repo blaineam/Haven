@@ -231,10 +231,35 @@ final class AudioCoordinator: ObservableObject {
     }
 
     /// Pause all feed playback when the app backgrounds (a call's own audio is separate).
+    ///
+    /// EVERY registered player, not just the active one. `videoPlayer` is whichever post currently
+    /// owns the audio stage, but the feed builds a player PER post and they all live in
+    /// `videoByPost`. Pausing only the active one left the others running, and a looping player that
+    /// nobody paused keeps going with the app backgrounded and the phone LOCKED — reported as the
+    /// most recent post's audio playing on loop out of nowhere.
+    ///
+    /// Volume is zeroed as well as pausing. Pause alone is not enough: anything that calls `play()`
+    /// on a player again — the end-of-item loop, a resumed session — would come back at full volume,
+    /// because volume is decided when the player is BUILT and never re-checked.
     func pauseForBackground() {
         backgrounded = true
         MusicPlayback.shared.duck()
+        for (_, player) in videoByPost {
+            player.pause()
+            player.volume = 0
+        }
         videoPlayer?.pause()
+        videoPlayer?.volume = 0
+    }
+
+    /// May this post's video keep LOOPING? Never while the app is backgrounded.
+    ///
+    /// The end-of-item handler decided this from `centeredPostId` alone, which says where the feed
+    /// was scrolled — not whether anyone is looking at it. Backgrounding does not move the centred
+    /// post, so a video that was centred when the user locked the phone kept restarting itself
+    /// forever. The background state has to be part of the question, not something checked elsewhere.
+    func videoMayLoop(forPost postId: String) -> Bool {
+        centeredPostId == postId && !backgrounded
     }
 
     /// A sheet / cover opened over the feed: stop the post song playing behind it. Unlike

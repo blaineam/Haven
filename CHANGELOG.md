@@ -9,6 +9,30 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — the 512px preview tier (partial; Apple composes them)
+
+- **Photos now carry a picture small enough to cross a satellite link.** Attaching a photo mints a
+  512-pixel AVIF beside it — about six kilobytes, under two text messages, against the ≤32 KB thumb
+  companion that already existed and a full photo measured in megabytes. It rides the signed media
+  list as a `preview:` marker, the same shape as `poster:` and `thumb:`, so an older client simply
+  ignores it.
+
+  It uploads before anything else in the post, which stopped being a matter of politeness: on a
+  constrained link the upload may only get through the first rank before the pass ends, so what is
+  first decides what a recipient can see at all. It is fetched even under data saver, being the
+  cheapest thing in the post. And it never draws as its own tile — without that guard a post would
+  show the same picture twice, small then full, the moment the real bytes landed.
+
+  AVIF rather than JPEG because JPEG cannot reach the budget: measured on real device photographs at
+  512 pixels its floor is twelve kilobytes and it looks worse there than AVIF does at half the size.
+  All three platforms encode to the same **byte** budget rather than a shared quality number, which
+  would have silently meant three different things — their encoders' scales do not line up.
+
+  **This is a foundation, not the finished feature.** Apple composes previews; Android and desktop
+  can read and write them but do not yet mint them at attach time. Sending only the preview while
+  off-grid and queueing the rest, rendering it in place of the full image until a tap, and telling
+  someone the picture they reacted to has finally arrived — all still to come.
+
 ### Docs
 
 - **A design for pictures that survive a satellite link.** [`docs/PREVIEW-TIER-DESIGN.md`](docs/PREVIEW-TIER-DESIGN.md)

@@ -729,7 +729,10 @@ final class MediaStore: ObservableObject {
         // blurred behind the loading placeholder long before the full bytes land. The pairing
         // marker (`thumb:<ref>:<thumbRef>`) joins the SIGNED media list at post time — see
         // FeedStore.withThumbMarkers — so old clients simply ignore it (synthetic scheme).
-        if data.count > 64 * 1024 { mintThumbCompanion(for: ref, from: img) }
+        if data.count > 64 * 1024 {
+            mintThumbCompanion(for: ref, from: img)
+            mintPreviewCompanion(for: ref, from: img)
+        }
         return ref
     }
 
@@ -742,6 +745,41 @@ final class MediaStore: ObservableObject {
 
     /// The thumb companion ref minted for a photo at compose time, if one exists.
     func thumbCompanion(_ ref: String) -> String? { thumbCompanions[ref] }
+
+    // MARK: - The 512px AVIF preview tier (docs/PREVIEW-TIER-DESIGN.md)
+
+    private static let previewCompanionKey = "haven.media.previewCompanions"
+    private var previewCompanions: [String: String] = {
+        (UserDefaults.standard.dictionary(forKey: MediaStore.previewCompanionKey) as? [String: String]) ?? [:]
+    }()
+
+    /// The 512px AVIF preview minted for a photo at attach time, if one exists.
+    func previewCompanion(_ ref: String) -> String? { previewCompanions[ref] }
+
+    /// Encode + store the ≤8KB, 512px AVIF preview for `ref` and remember the pairing.
+    ///
+    /// This is the only media that will cross a satellite link, so it is minted at ATTACH time —
+    /// before anyone knows what network the post will eventually go out on. Skipped silently when
+    /// the encoder cannot fit the budget; "no preview for this item" is a valid answer and must
+    /// never be read as permission to send the full media on a constrained link.
+    ///
+    /// **Storage note:** the ref uses the ordinary `.image` kind, so every existing path — content
+    /// addressing, relay upload, eviction, the blob allow-list — treats it as the image it is. That
+    /// means the bytes land at `<ref>.jpg` while actually being AVIF. Deliberate: every consumer
+    /// sniffs the container (ImageIO on Apple, avif-coder on Android, the webview's own decoder on
+    /// desktop) rather than trusting the extension, and inventing a new MediaKind would mean
+    /// teaching every prefix check in the codebase about it for no functional gain.
+    private func mintPreviewCompanion(for ref: String, from image: PlatformImage) {
+        guard previewCompanions[ref] == nil else { return }
+        guard let data = PreviewCodec.encode(image) else { return }
+        let previewRef = Self.contentRef(.image, data)
+        if let url = fileURL(previewRef) { try? data.write(to: url) }
+        previewCompanions[ref] = previewRef
+        if previewCompanions.count > 2000 {   // same bound as thumbs: pairings matter until sealed
+            previewCompanions = Dictionary(uniqueKeysWithValues: Array(previewCompanions.suffix(1000)))
+        }
+        UserDefaults.standard.set(previewCompanions, forKey: Self.previewCompanionKey)
+    }
 
     /// Encode + store a ≤32KB, ~256px JPEG companion for `ref` and remember the pairing. Skipped
     /// silently when the encode can't get small enough — a "thumb" that isn't tiny is just waste.

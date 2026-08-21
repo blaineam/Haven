@@ -1541,7 +1541,7 @@ final class FeedStore: ObservableObject {
     /// the post throws, so the caller can keep it and retry.
     @discardableResult
     func sendMessage(to circleId: String, _ body: String, media rawMedia: [String], music: TrackRefFfi?, retentionSecs: UInt64? = nil) -> Bool {
-        let media = withThumbMarkers(rawMedia)
+        let media = withPreviewMarkers(withThumbMarkers(rawMedia))
         let ts = now()
         guard let social, let env = try? social.post(circleId: circleId, body: body, media: media, music: music, retentionSecs: retentionSecs, story: false, muteVideo: false, createdAt: ts) else { return false }
         let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
@@ -3305,6 +3305,24 @@ final class FeedStore: ObservableObject {
         return out
     }
 
+    /// Expand a compose-time media list with `preview:` markers for photos whose 512px AVIF was
+    /// minted at attach time (`MediaStore.mintPreviewCompanion`).
+    ///
+    /// Same shape and the same reasoning as `withThumbMarkers`: the marker joins the SIGNED list so
+    /// old clients ignore it, and the bare preview ref is deliberately NOT listed so a legacy
+    /// carousel never shows a duplicate slide. This is what makes a photo sendable off-grid at all
+    /// (`docs/PREVIEW-TIER-DESIGN.md` §4.1) — without the marker there is nothing small enough to
+    /// cross, and the post arrives as text with a placeholder.
+    private func withPreviewMarkers(_ media: [String]) -> [String] {
+        var out = media
+        for ref in media where ref.hasPrefix("img_") {
+            guard MediaVariants.preview(for: ref, in: media) == nil,
+                  let p = MediaStore.shared.previewCompanion(ref), MediaStore.shared.has(p) else { continue }
+            out.append(MediaVariants.previewMarker(content: ref, preview: p))
+        }
+        return out
+    }
+
     /// Queue a just-authored event's media for relay backup: PRIORITY lane (ahead of any backfill
     /// backlog), thumbs first, then posters, then content — so the placeholder-feeding bytes land
     /// before the big blobs start.
@@ -3315,7 +3333,7 @@ final class FeedStore: ObservableObject {
     }
 
     func post(_ body: String, media rawMedia: [String] = [], music: TrackRefFfi? = nil, retentionSecs: UInt64? = nil, story: Bool = false, muteVideo: Bool = false) {
-        let media = withThumbMarkers(rawMedia)
+        let media = withPreviewMarkers(withThumbMarkers(rawMedia))
         let ts = now()
         guard let social, let env = try? social.post(circleId: activeCircleId, body: body, media: media, music: music, retentionSecs: retentionSecs, story: story, muteVideo: muteVideo, createdAt: ts) else { return }
         let cid = activeCircleId
@@ -3366,7 +3384,7 @@ final class FeedStore: ObservableObject {
     /// landing in a heap at today's date.
     func postImported(circleId: String, body: String, media rawMedia: [String],
                       music: TrackRefFfi? = nil, story: Bool = false, createdAt: UInt64) {
-        let media = withThumbMarkers(rawMedia)
+        let media = withPreviewMarkers(withThumbMarkers(rawMedia))
         guard let social, let env = try? social.post(circleId: circleId, body: body, media: media,
                                                      music: music, retentionSecs: nil, story: story,
                                                      muteVideo: false, createdAt: createdAt) else { return }
@@ -3396,7 +3414,7 @@ final class FeedStore: ObservableObject {
     /// Post to a SPECIFIC circle (used by the scheduler when a queued post fires — the target
     /// circle may not be the active one). Same seal → broadcast → mailbox-backup path as `post`.
     func postScheduled(circleId: String, body: String, media rawMedia: [String]) {
-        let media = withThumbMarkers(rawMedia)
+        let media = withPreviewMarkers(withThumbMarkers(rawMedia))
         let ts = now()
         guard let social, let env = try? social.post(circleId: circleId, body: body, media: media, music: nil, retentionSecs: nil, story: false, muteVideo: false, createdAt: ts) else { return }
         let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
@@ -3502,7 +3520,7 @@ final class FeedStore: ObservableObject {
         return (isConnected(hex), lastHeard[hex])
     }
     func edit(_ id: String, _ body: String, media rawMedia: [String] = [], music: TrackRefFfi? = nil, muteVideo: Bool = false) {
-        let media = withThumbMarkers(rawMedia)
+        let media = withPreviewMarkers(withThumbMarkers(rawMedia))
         guard let social, let env = try? social.edit(circleId: activeCircleId, target: id, body: body, media: media, music: music, muteVideo: muteVideo, createdAt: now()) else { return }
         let cid = activeCircleId
         let name = circles.first(where: { $0.id == cid })?.name ?? "your circle"

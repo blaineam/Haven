@@ -1370,6 +1370,7 @@ object HavenNet : InboundListener {
         val postId = runCatching {
             social.feed(circleId, nowMs(), null).firstOrNull { item ->
                 item.isMe && (item.media.contains(ref) ||
+                    MediaVariants.allPreviews(item.media).contains(ref) ||
                     MediaVariants.allThumbs(item.media).contains(ref) ||
                     item.media.mapNotNull { MediaVariants.parsePoster(it)?.second }.contains(ref))
             }?.id
@@ -1948,7 +1949,11 @@ object HavenNet : InboundListener {
         run {
             val saver = runCatching { ProfileStore.get(appContext).dataSaverActive }.getOrDefault(false)
             val wanted = if (saver) MediaVariants.dataSaverPrefetchRefs(newest.media) else newest.media
-            val ordered = MediaVariants.allThumbs(newest.media) +
+            // Previews lead. A preview ref is named only INSIDE its `preview:` marker and is never
+            // listed in item.media, so without this nothing ever asks for it — a satellite post
+            // arrives pointing at 8 KB the receiver never requests. iOS parity.
+            val ordered = MediaVariants.allPreviews(newest.media) +
+                MediaVariants.allThumbs(newest.media) +
                 newest.media.mapNotNull { MediaVariants.parsePoster(it)?.second } + wanted
             for (ref in ordered.distinct()) {
                 if (!LocalMedia.isSynthetic(ref) && !LocalMedia.has(ref) &&
@@ -3144,7 +3149,8 @@ object HavenNet : InboundListener {
      *  backlog), thumbs first, then posters, then content — so the placeholder-feeding bytes land
      *  before the big blobs start. Apple FeedStore.enqueueAuthoredMedia parity. */
     private fun enqueueAuthoredMedia(circleId: String, media: List<String>) {
-        for (ref in MediaVariants.allThumbs(media) + MediaVariants.uploadOrder(media)) {
+        for (ref in MediaVariants.allPreviews(media) + MediaVariants.allThumbs(media) +
+            MediaVariants.uploadOrder(media)) {
             enqueueBackup(circleId, ref, priority = true)
         }
     }
@@ -7313,6 +7319,20 @@ object HavenNet : InboundListener {
         if (requester.length != 64) return
         val ref = String(body.copyOfRange(64, body.size), Charsets.UTF_8)
         if (ref.isEmpty() || !LocalMedia.has(ref)) return
+        // ULTRA-CONSTRAINED LINK: serve only what may cross it.
+        //
+        // The upload gate covers the backup queue — pushing blobs to relays — and nothing else. A
+        // peer that simply ASKS goes through here, which served whatever was on disk regardless of
+        // the link. The fleet caught exactly that: with Android forced to ultra, the far side ended
+        // up with the 500 KB original instead of the 8 KB preview. Refusing is safe — the requester
+        // re-asks, and the full copy goes normally once the constraint clears. iOS
+        // handleMediaRequest parity.
+        if (LowDataMonitor.effective.value == uniffi.haven_ffi.LinkConstraint.ULTRA &&
+            !LocalMedia.maySendOnUltraConstrained(ref)
+        ) {
+            Log.i(TAG, "media REQ ${ref.take(12)} — refused, link is ultra-constrained")
+            return
+        }
         // They had to come to US for bytes we already backed up — so no relay served them. That is a
         // signal about our own backup, not just a request to answer.
         reverifyBackupAfterDirectAsk(ref)

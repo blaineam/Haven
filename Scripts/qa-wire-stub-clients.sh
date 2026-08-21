@@ -26,7 +26,7 @@ if [[ -z "$SIM" ]]; then
   echo "error: no booted iOS simulator" >&2
   exit 1
 fi
-if ! pgrep -x HavenStub >/dev/null; then
+if ! pgrep -f "HavenStub.app" >/dev/null; then
   echo "error: HavenStub not running — launch isolated stub first" >&2
   exit 1
 fi

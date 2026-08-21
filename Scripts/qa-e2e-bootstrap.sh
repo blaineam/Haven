@@ -20,7 +20,7 @@ log() { echo "[e2e-boot] $*"; }
 # bundles re-exchange, no stale seen-sets/contacts from prior runs can leak in).
 if [[ "${E2E_FRESH:-0}" == "1" ]]; then
   log "FRESH fleet requested — wiping QA state on all legs"
-  pkill -x HavenStub 2>/dev/null || true
+  pkill -f "HavenStub.app" 2>/dev/null || true
   pkill -f 'target/debug/haven-desktop' 2>/dev/null || true
   sleep 1
   rm -rf "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support"/{haven-relay-store,haven-media,haven-feed.json,haven-mailbox-seen.txt,haven-selfsync.bin,qa-*} 2>/dev/null || true

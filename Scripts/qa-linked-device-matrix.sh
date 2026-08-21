@@ -79,7 +79,7 @@ write_stub_members() {
 start_stub() {
   local app="/tmp/matrix-haven-mac-stub/Build/Products/Debug/HavenStub.app"
   [[ -d "$app" ]] || { echo "error: missing $app — rebuild HavenStub first"; exit 1; }
-  pkill -x HavenStub 2>/dev/null || true
+  pkill -f "HavenStub.app" 2>/dev/null || true
   sleep 1
   free_matrix_ports
   mkdir -p /tmp/haven-mac-stub-home/Library/Application\ Support /tmp/haven-mac-stub-tmp
@@ -90,12 +90,12 @@ start_stub() {
     "$app/Contents/MacOS/HavenStub" >"$OUT/stub-stdout.log" 2>&1 &
   echo $! >"$OUT/stub.pid"
   sleep 6
-  if ! pgrep -x HavenStub >/dev/null; then
+  if ! pgrep -f "HavenStub.app" >/dev/null; then
     log "isolated HOME launch failed — trying open(1)"
     open "$app" 2>/dev/null || true
     sleep 5
   fi
-  pgrep -x HavenStub >/dev/null || { echo "error: HavenStub not running"; tail -40 "$OUT/stub-stdout.log" 2>/dev/null; exit 1; }
+  pgrep -f "HavenStub.app" >/dev/null || { echo "error: HavenStub not running"; tail -40 "$OUT/stub-stdout.log" 2>/dev/null; exit 1; }
   for i in 1 2 3 4 5 6 7 8 9 10; do
     lsof -nP -iTCP:8674 -sTCP:LISTEN >/dev/null 2>&1 && break
     sleep 1
@@ -107,7 +107,7 @@ start_stub() {
   fi
   local who
   who=$(lsof -nP -iTCP:8674 -sTCP:LISTEN 2>/dev/null | awk 'NR==2{print $1}')
-  log "stub up pid=$(pgrep -x HavenStub | head -1) :8674=$who"
+  log "stub up pid=$(pgrep -f "HavenStub.app" | head -1) :8674=$who"
 }
 
 start_stub
@@ -241,7 +241,7 @@ write_stub_members "$(cat "$MEMBERS_FILE")"
 # Do NOT bounce the stub after Tauri starts — bounce was killing the live mailbox mid-test
 # (and Multipeer thrash crashed HavenStub). authorizeMembership re-reads qa-authorize-members
 # on every meshSyncTick while hosting.
-if ! pgrep -x HavenStub >/dev/null || ! lsof -nP -iTCP:8674 -sTCP:LISTEN >/dev/null 2>&1; then
+if ! pgrep -f "HavenStub.app" >/dev/null || ! lsof -nP -iTCP:8674 -sTCP:LISTEN >/dev/null 2>&1; then
   log "stub died after Tauri launch — restarting once"
   start_stub
   "$ROOT/Scripts/qa-wire-stub-clients.sh" 2>&1 | tail -3 || true
@@ -266,7 +266,7 @@ sleep 20
 xcrun simctl openurl "$SIM" 'haven://qa?x=2' 2>/dev/null || true
 sleep 45
 # Stub must still be hosting for Tauri to pull.
-if pgrep -x HavenStub >/dev/null && lsof -nP -iTCP:8674 -sTCP:LISTEN >/dev/null 2>&1; then
+if pgrep -f "HavenStub.app" >/dev/null && lsof -nP -iTCP:8674 -sTCP:LISTEN >/dev/null 2>&1; then
   log "stub still up after author window"
 else
   log "stub DOWN after author window — restart + re-auth"

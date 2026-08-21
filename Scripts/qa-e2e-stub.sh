@@ -28,7 +28,7 @@ free_ports() {
 # Match by PATH, not process name: the stub's executable is `Haven` (the bundle directory is
 # renamed but the signed payload is left alone — see qa-e2e-build-stub.sh), and a bare
 # `pkill -x Haven` would take the real app down with it.
-pkill -f "matrix-haven-mac-stub.*HavenStub.app" 2>/dev/null || true
+pkill -f "HavenStub.app" 2>/dev/null || true
 sleep 1
 free_ports
 mkdir -p /tmp/haven-mac-stub-home/Library/Application\ Support /tmp/haven-mac-stub-tmp
@@ -47,15 +47,20 @@ nohup env HOME=/tmp/haven-mac-stub-home HAVEN_SKIP_ONBOARDING=1 TMPDIR=/tmp/have
   "$APP/Contents/MacOS/Haven" >"$OUT/stub-stdout.log" 2>&1 &
 echo $! >"$OUT/stub.pid"
 sleep 6
-if ! pgrep -x HavenStub >/dev/null; then
+# Match by PATH, not by process name. The stub's executable is `Haven` — the .app DIRECTORY is
+# renamed but the signed payload is left untouched (see qa-e2e-build-stub.sh), because renaming the
+# executable invalidates the code seal and every attempt to re-sign it ends in `Killed: 9`. A
+# `pgrep -f "HavenStub.app"` therefore never matches, and a `pgrep -x Haven` would match the REAL app.
+stub_pid() { pgrep -f "HavenStub.app" 2>/dev/null | head -1; }
+if [[ -z "$(stub_pid)" ]]; then
   log "isolated HOME launch failed — trying open(1)"
   open "$APP" 2>/dev/null || true
   sleep 5
 fi
-pgrep -x HavenStub >/dev/null || { echo "error: HavenStub not running"; tail -40 "$OUT/stub-stdout.log" 2>/dev/null; exit 1; }
+[[ -n "$(stub_pid)" ]] || { echo "error: HavenStub not running"; tail -40 "$OUT/stub-stdout.log" 2>/dev/null; exit 1; }
 for i in $(seq 1 12); do
   lsof -nP -iTCP:8674 -sTCP:LISTEN >/dev/null 2>&1 && break
   sleep 1
 done
 lsof -nP -iTCP:8674 -sTCP:LISTEN >/dev/null 2>&1 || { echo "error: :8674 not listening"; exit 1; }
-log "stub up pid=$(pgrep -x HavenStub | head -1)"
+log "stub up pid=$(stub_pid)"

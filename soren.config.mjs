@@ -109,6 +109,20 @@ export default {
       description: 'desktop web UI syntax check',
     },
 
+    // ── Desktop (Tauri) BINARY. `desktop` above runs the crate's tests and `desktop-ui` is a JS
+    //    syntax check — neither of them ever produces the app. A crate whose tests pass can still
+    //    fail to link an actual binary (a native dependency that resolves for `cargo test` but not
+    //    for the bin target, a missing system lib), and until this suite existed the Tauri app was
+    //    never built by any gate: `macos` builds the NATIVE HavenMac app, which is a different
+    //    product entirely. Debug, because that is what the e2e fleet runs.
+    'desktop-build': {
+      type: 'cmd',
+      cmd: 'cargo',
+      args: ['build', '--bin', 'haven-desktop'],
+      cwd: 'desktop/src-tauri',
+      description: 'Tauri desktop binary actually links (haven-desktop)',
+    },
+
     // ── Full cross-device E2E: iOS sim + Android emu + macOS HavenStub (relay
     //    host + friend account) + Tauri desktop on one fleet account. Exercises
     //    every in-app action (posts/stories/DMs/reactions/comments/files/music/
@@ -144,6 +158,16 @@ export default {
 
   // Suites whose green is the release gate (documented in docs/QA.md).
   release: {
-    requireGreen: ['core', 'fabric', 'ios', 'macos', 'android', 'desktop', 'desktop-ui'],
+    // `e2e` is a gate, not a nice-to-have. It sat broken at bootstrap for long enough that nothing
+    // in it had run — a suite nobody notices is dead is worse than no suite, and the only way it
+    // gets noticed is by blocking a release.
+    //
+    // `desktop-build` is here because `desktop` (crate tests) and `desktop-ui` (JS syntax) between
+    // them never produce the Tauri app, and `macos` builds the native HavenMac app, which is a
+    // different product.
+    requireGreen: [
+      'core', 'fabric', 'ios', 'macos', 'android',
+      'desktop', 'desktop-ui', 'desktop-build', 'e2e',
+    ],
   },
 };

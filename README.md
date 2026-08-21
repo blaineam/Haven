@@ -217,6 +217,7 @@ noncommercial restriction is the difference). Contributions require a CLA/DCO.
 - [`docs/HAVEN-NET-RELAY.md`](docs/HAVEN-NET-RELAY.md) — routing the relay/mailbox over Haven Net (no public host)
 - [`docs/LORA-DESIGN.md`](docs/LORA-DESIGN.md) — off-grid text over LoRa/Meshtastic radio: the compact wire profile the link would need (design spike, not built)
 - [`docs/SATELLITE-DESIGN.md`](docs/SATELLITE-DESIGN.md) — Haven over carrier satellite data (T-Satellite): the ultra-constrained path APIs, low-data mode's policy table, and the carrier-allowlist problem (mode shipped in 1.6.0; carrier admission still a design question)
+- [`docs/PREVIEW-TIER-DESIGN.md`](docs/PREVIEW-TIER-DESIGN.md) — a 512px AVIF preview tier (~6 KB) that crosses a satellite link first and upgrades to the full copy on return (design, not built)
 - [`docs/BYO-STORAGE.md`](docs/BYO-STORAGE.md) — bring-your-own S3 / cloud-drive storage
 - [`docs/OPERATING-COSTS.md`](docs/OPERATING-COSTS.md) — $0 operator cost model
 - [`docs/EXPORT-COMPLIANCE.md`](docs/EXPORT-COMPLIANCE.md) — US export-compliance (automated)

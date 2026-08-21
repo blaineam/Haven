@@ -9,6 +9,33 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Docs
+
+- **A design for pictures that survive a satellite link.** [`docs/PREVIEW-TIER-DESIGN.md`](docs/PREVIEW-TIER-DESIGN.md)
+  works out a fourth media tier small enough to cross the bearer low-data mode was built for. Nothing
+  is implemented; the arithmetic decides the feature, and this time the arithmetic is encouraging.
+
+  A 512-pixel preview costs about six kilobytes — under two text messages — but only in AVIF. JPEG
+  cannot get there at all: its floor at that size is twelve kilobytes and it looks worse at the
+  bottom than AVIF does at half the bytes. Measured on real device photographs and scored against the
+  uncompressed original rather than eyeballed, because a size without a quality number attached means
+  nothing.
+
+  Every claim about what the platforms can do was checked rather than assumed, which mattered,
+  because the requirement is not just reading these files but writing them — any device can be the
+  sender. iPhones turn out to encode AVIF natively, confirmed by running the check on a simulator
+  rather than trusting documentation that only ever mentions reading. Desktop cannot do it in the
+  webview where it encodes images today, so that work moves into Rust, where it takes about twenty
+  milliseconds. Android is the one gap and needs either a bundled library or a higher floor — a
+  decision the document states plainly rather than burying.
+
+  The rest is what the small picture buys: sending a photograph from a place with no signal, and
+  other people being able to see it, react to it and reply before the full-resolution copy exists at
+  all. Everything needed to make it complete itself later is already there — the reference travels
+  inside the message, the bytes are fetched separately, and a missing blob already draws an honest
+  "waiting for sender" placeholder. What is missing is a nudge at the moment service returns, and a
+  note to anyone who reacted to a picture they could not fully see yet that it has arrived.
+
 ### Fixed
 
 - **The Apple logic-test suite compiles again in CI.** It had been failing on every push since the

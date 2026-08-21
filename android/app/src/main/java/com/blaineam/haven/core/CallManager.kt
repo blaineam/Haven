@@ -327,7 +327,13 @@ object CallManager {
     fun hangup() {
         // Declining counts as handling it: silence my other devices too, or they keep ringing after I
         // have dismissed the call here.
-        if (ringing.value && !inCall.value) notifyOwnDevicesHandled()
+        // Stand down my OTHER devices on any end, not just a decline. The hangup below goes to
+        // invitees() — the roster minus my own account — so nothing ever told my other devices an
+        // ESTABLISHED call had ended, and they sat in it indefinitely. Observed on a QA fleet: iOS
+        // and the Mac stub hung up while Android and desktop did not. The receiving side stays
+        // narrow (it only silences a device still RINGING), so this cannot tear down a conversation
+        // someone is actively having elsewhere. iOS CallManager.reallyEnd parity.
+        notifyOwnDevicesHandled()
         // The hangup is one fire-and-forget UDP frame; a single drop makes the far side wait out the
         // ICE timeout (~seconds) instead of ending promptly. Send it a few times — it's idempotent on
         // receipt. Capture targets before teardown clears the roster.

@@ -1653,9 +1653,18 @@ final class CallManager: NSObject, ObservableObject {
     private func reallyEnd() {
         // Idempotent: the tap ends the call and CallKit's echo arrives here again a moment later.
         guard active else { HavenLog.call("reallyEnd ignored — no active call"); return }
-        // Declining counts as handling it: silence my other devices too, or they keep ringing after
-        // I've dismissed the call here.
-        if ringing && !inCall { notifyOwnDevicesHandled() }
+        // Stand down my OTHER devices on any end, not just a decline.
+        //
+        // This used to fire only for `ringing && !inCall`, so declining a ring silenced my other
+        // devices but ENDING an established call did not — the hangup below goes to `invitees()`,
+        // which is the roster minus my own account, so nothing ever told my other devices the call
+        // was over. Observed on a QA fleet: iOS and the Mac stub hung up correctly while the Android
+        // and desktop legs sat in the call indefinitely.
+        //
+        // Ending is at least as much "I have handled this" as declining is. The receiving side stays
+        // deliberately narrow — it only silences a device still RINGING, never one already answered,
+        // so this cannot tear down a conversation someone is actively having on another device.
+        notifyOwnDevicesHandled()
         for p in invitees() {
             var f = Data(myHex.utf8)
             CallManager.lpAppend(&f, Data(sessionId.utf8))

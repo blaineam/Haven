@@ -1068,6 +1068,9 @@ object HavenNet : InboundListener {
                 // turning their camera off left everyone staring at a frozen last frame.
                 CallWire.INVITE, CallWire.ACCEPT, CallWire.HANGUP, CallWire.OFFER,
                 CallWire.ANSWER, CallWire.ICE, CallWire.GROUP_INVITE, CallWire.HANDLED_ELSEWHERE,
+                // 35 must be routed too, or the handler added for it never runs and an established
+                // call ended on another device leaves THIS one in a dead call.
+                CallWire.ENDED_ELSEWHERE,
                 CallWire.CAMERA ->
                     withContext(Dispatchers.Main) { callRouter?.invoke(type, body) }
                 // 31/32 are media frames, not call signaling, so they're handled here rather than in
@@ -1166,7 +1169,7 @@ object HavenNet : InboundListener {
         val callTypes = setOf(
             CallWire.INVITE, CallWire.ACCEPT, CallWire.HANGUP, CallWire.OFFER,
             CallWire.ANSWER, CallWire.ICE, CallWire.GROUP_INVITE,
-            CallWire.HANDLED_ELSEWHERE, CallWire.CAMERA,
+            CallWire.HANDLED_ELSEWHERE, CallWire.ENDED_ELSEWHERE, CallWire.CAMERA,
         )
         for (circleId in circles) {
             val relays = relaysFor(circleId).toMutableList()

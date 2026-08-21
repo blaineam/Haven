@@ -240,6 +240,25 @@ async function main() {
     score(`${name} driver answers dump`, !!d, d ? '' : 'no qa-dump.json');
   }
 
+  // WARM-UP, deliberately untimed.
+  //
+  // The first content post after bootstrap absorbs the whole cost of the fleet coming up — relay
+  // connections, first hello round, mailbox subscriptions. Whichever assertion happens to be first
+  // in this file gets charged for all of it, which is why an identical suite went fully green one
+  // run and failed `text post` on two legs the next while every later step passed. That is not a
+  // product signal, it is a measurement artifact, and loosening budgets would only hide it.
+  //
+  // So: post once, wait for it everywhere with a generous ceiling, and score nothing. Every timed
+  // step afterwards measures a warm fleet.
+  async function warmUp() {
+    const marker = `${MARKER}_WarmUp`;
+    await op(devices.ios, { op: 'post', body: marker }, 3000);
+    const seen = await Promise.all(all.filter((n) => n !== 'ios').map((n) =>
+      converge(devices[n], (j) => j.posts?.some((p) => p.body === marker), 240_000)));
+    log(`warm-up: ${seen.filter((ms) => ms >= 0).length}/${seen.length} legs converged` +
+        ` (${seen.map((ms) => ms < 0 ? 'never' : (ms / 1000).toFixed(1) + 's').join(', ')})`);
+  }
+
   // Clear any pending connection requests before asserting anything.
   //
   // Account B reaching A's OTHER devices arrives there as a stranger, and until it is approved
@@ -291,6 +310,9 @@ async function main() {
   // circle, so stub expectations are skipped (and honestly reported as such).
   const audienceFor = (shared) => (shared && circleId && B) ? all : fleet;
   const cid = () => circleId || undefined;
+
+  // Warm the fleet before ANY timed content assertion (see warmUp above).
+  if (STEPS.includes('post')) await warmUp();
 
   // 3. posts: text + photo + video (author iOS; friend authors one from stub)
   if (STEPS.includes('post')) {

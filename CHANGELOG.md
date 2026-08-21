@@ -22,6 +22,22 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   machine — the suite passed there both before and after — so the fix was verified against CI, not
   against a green run locally that proved nothing.
 
+- **iOS now declares itself eligible for a carrier satellite network too.** The Android half of this
+  shipped with the manifest declaration; the Apple half was written down as an open question,
+  because the opt-in Apple documents is a per-connection Network.framework flag and Haven's mailbox
+  traffic is QUIC and HTTP from Rust over ordinary sockets, with no object to set it on.
+
+  That framing was wrong, and Signal's own repository settled it: the real mechanism is a pair of
+  *entitlements*, which apply to the process rather than to individual connections. Signal shipped
+  satellite support in a thirty-six line, code-free commit that adds nothing but those keys to every
+  target that touches the network. Haven now carries the same two keys — optimised-for-carrier-network
+  and an app category of messaging — on the iPhone app, the notification service extension and the
+  share extension.
+
+  Not on the Mac targets: Apple lists the entitlement for iOS and iPadOS only. Not on the broadcast
+  extension either, which exists for screen sharing during calls, and calls are refused outright on a
+  satellite link.
+
 ### Added — all platforms (low data mode)
 
 - **Android now declares itself satellite-optimised.** A one-line manifest declaration is what gets

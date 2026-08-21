@@ -8,6 +8,18 @@
 	<array>
 		<string>applinks:wemiller.com?mode=developer</string>
 	</array>
+	<!-- Carrier satellite (T-Satellite and the direct-to-cell services behind it). Declares Haven
+	     as optimised for a carrier-constrained network and names its category, which is what makes
+	     the app eligible for the bearer. iOS/iPadOS 26.0+; process-level, so it covers the core's
+	     QUIC/HTTP traffic and not just Network.framework connections — see
+	     docs/SATELLITE-DESIGN.md §2.1. Deliberately NOT on the macOS targets: Apple lists this
+	     entitlement for iOS and iPadOS only. -->
+	<key>com.apple.developer.networking.carrier-constrained.app-optimized</key>
+	<true/>
+	<key>com.apple.developer.networking.carrier-constrained.appcategory</key>
+	<array>
+		<string>messaging-8001</string>
+	</array>
 	<key>com.apple.security.application-groups</key>
 	<array>
 		<string>group.com.blaineam.kith</string>

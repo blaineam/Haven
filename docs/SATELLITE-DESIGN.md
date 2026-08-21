@@ -89,16 +89,35 @@ The mode exists and is on by default in its automatic setting. Concretely:
 
 Still open, and one of them is load-bearing:
 
-* **The Apple opt-in does not obviously map onto Haven's data path.**
-  `nw_parameters_set_allow_ultra_constrained` governs `Network.framework` connections, and the
-  header is explicit that without it a connection *may not use* an ultra-constrained interface. But
-  Haven's mailbox traffic is iroh QUIC and HTTP from Rust over BSD sockets, not `NWConnection`, so
-  there is no `nw_parameters_t` to set the flag on. Whether the restriction is enforced at the
-  Network.framework layer only, or lower down where a raw socket would also hit it, is **not
-  established here and must not be assumed either way** — it decides whether Haven can move a single
-  byte over T-Satellite. The `URLSession` uses that do exist (`CallHairpin`, `RelayHost`,
-  `CloudflaredTunnel`) are peripheral to messaging. Resolve this by measurement on a real bearer
-  before believing any part of §9.
+* **Apple's satellite eligibility — RESOLVED, and the earlier reading here was wrong.** This
+  document previously said the Apple opt-in did not obviously map onto Haven's data path, because
+  `nw_parameters_set_allow_ultra_constrained` is per-`NWConnection` and Haven's mailbox traffic is
+  iroh QUIC and HTTP from Rust over ordinary sockets. That is not the mechanism. Eligibility comes
+  from two **entitlements**, which apply process-wide:
+
+  ```xml
+  <key>com.apple.developer.networking.carrier-constrained.app-optimized</key><true/>
+  <key>com.apple.developer.networking.carrier-constrained.appcategory</key>
+  <array><string>messaging-8001</string></array>
+  ```
+
+  iOS/iPadOS 26.0+, 22 valid categories (`messaging-8001`, `maps-8002`, `voip-8006`,
+  `emergency-8007`, `light-social-8008`, …). Per Xcode's own portal capability record
+  (`CARRIER_CONSTRAINED_NETWORK_CAT_OPT`) it is **self-serve** —
+  `distributionApprovalRequired: false` — but the capability must be enabled on each App ID before
+  the entitlement will sign, and a locally cached provisioning profile minted before that change
+  will fail with "doesn't include the Carrier-Constrained Network Category and Optimized
+  capability" until it is regenerated.
+
+  The evidence is Signal, which is on T-Satellite: their entire satellite implementation is two
+  commits — a one-line Android manifest declaration and a 36-line, **code-free** iOS entitlements
+  change across app, NSE and share extension. No low-data mode, no governor, no link-quality
+  handling. If a per-connection opt-in were required, that commit could not have worked.
+
+  Haven now carries the same keys on the iPhone app, the NSE and the share extension. Not on macOS
+  (Apple lists the entitlement for iOS/iPadOS only) and not on the broadcast extension (screen share
+  for calls, which are refused on a satellite link anyway).
+
 * **The governor (§6.3)** — burst-and-idle scheduling, per-pass byte ceilings, quality-aware drain
   depth.
 * **The push question in §7** — whether APNs reaches a third-party app over satellite at all.

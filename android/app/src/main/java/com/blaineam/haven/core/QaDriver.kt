@@ -452,6 +452,24 @@ object QaDriver {
             .put("caption", if (item.story) item.body else JSONObject.NULL)
             .put("media_refs", JSONArray(real))
             .put("media_present", JSONArray(real.map { LocalMedia.has(it) }))
+            // Companion MARKERS (`preview:`/`thumb:`/`poster:`/`orig:`) and whether the blobs they
+            // name are here. Apple and desktop already report these; Android never did, and that
+            // alone made every satellite assertion against this leg UNPASSABLE — the orchestrator
+            // resolves a post's content ref THROUGH its `preview:` marker, so with no markers the
+            // predicate is false no matter what the device actually holds.
+            //
+            // It read as a delivery failure for several runs while the dump showed, in the same
+            // breath, `media_present=[true]` and `parked=0`: the photo was here the whole time.
+            .put("media_markers", JSONArray(item.media.filter { LocalMedia.isSynthetic(it) }))
+            .put("companions_present", JSONObject().apply {
+                for (m in item.media) {
+                    val companion = MediaVariants.parsePreview(m)?.second
+                        ?: MediaVariants.parseThumb(m)?.second
+                        ?: MediaVariants.parsePoster(m)?.second
+                        ?: MediaVariants.parseOriginal(m)?.second
+                    if (companion != null) put(companion, LocalMedia.has(companion))
+                }
+            })
             .put("reactions", reactions)
             .put("comments", comments)
     }

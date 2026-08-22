@@ -296,7 +296,9 @@ jobs:
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
             libayatana-appindicator3-dev librsvg2-dev patchelf file \
-            xdg-utils
+            xdg-utils nasm
+          # nasm: rav1e (AVIF encode for the preview tier) assembles with it — same fix as
+          # desktop.yml; this job has its own deps list and was missed when that one was patched.
           # xdg-utils (xdg-mime) is preinstalled on ubuntu-latest (x64) but NOT on the leaner
           # ubuntu-24.04-arm image, and Tauri's .deb/AppImage bundler shells out to xdg-mime.
       - name: Stamp version

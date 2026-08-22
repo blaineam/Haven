@@ -7,6 +7,60 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 2026-08-22 — 1.6.1 (stability wave: the fork is dead)
+
+Two full QA gauntlets green back-to-back (91/91 twice, zero forks) — the first releases
+where the recurring MLS "welcome-election fork" cannot recur by construction.
+
+### Fixed
+- **iOS launch crash (watchdog 0x8BADF00D, TestFlight build 536).** Scene-create ran a
+  synchronous keychain write (`SecItemAdd` → securityd XPC) inside a `@StateObject` init;
+  on a cold unlock that blocked past the watchdog budget and the OS killed the app at
+  launch. Steady-state startup now performs **zero** keychain writes; the one legacy-seed
+  migration that needed one waits for `protectedDataDidBecomeAvailable` on a utility queue.
+- **The welcome-election fork (root cause).** Every device of a circle-creator account
+  validly authors a competing genesis (multi-master), and the keying election picked by
+  (adds, hash) without asking which genesis the commit CHAIN had actually grown on. When
+  the grown branch lost, every member's replay found no child of the winner and froze one
+  epoch behind, while any device holding a direct Welcome onto the grown branch sailed
+  past — one device sealing at epoch N+1, the rest at N, unreadable in both directions.
+  The election now prefers **chain height, then adds, then hash** — deterministic from
+  the shared commit set, and self-reinforcing: the first extension makes its branch the
+  winner everywhere. Committers also read the genesis hash JOIN acks always carried and
+  automatically re-Welcome any device that announced a losing branch.
+- **Force-reseal-everything is gone.** The remaining roster-event sites (three on
+  Android, one on desktop) re-sealed EVERY circle's history on any roster change — the
+  ~100s stall class. All now drain the engine's per-circle `epoch_moved` flags (scoped,
+  consuming, throttled). Measured: Android own-device echo **104s → 2.6s**; iOS→Android
+  full-photo completion **18.8s → 6.7s**.
+- **Desktop dropped every peer's profile card.** The hello handshake has always carried
+  the signed card; desktop never read it, so every peer rendered as initials forever.
+  Cards now ingest on all established hello paths (emoji, avatar, bio, link) — Apple
+  `ContactsStore.setCard` parity.
+- **Desktop calls rendered only after `getUserMedia` resolved** — a caller stared at an
+  idle app through the OS mic prompt while the far side was already ringing. Both the
+  dial and answer paths render the call screen first.
+- **Outgoing dials never timed out on desktop.** An unanswered dial now ends after the
+  same 60s bound as incoming rings (proper hangup: far side stops ringing, session
+  tombstones against invite retransmits).
+
+### Changed
+- **Desktop call screen rebuilt to macOS parity.** Full-window brand-gradient stage; 1:1
+  shows the other person full-bleed with your mirrored camera as a corner PiP; groups get
+  the adaptive tile grid; the active speaker glows (full-stage border in 1:1 — which now
+  actually lights: the level detector used to disable itself with a single peer); avatars
+  resolve photo → emoji → initials; circular glass controls anchored bottom-centre with
+  mic/speaker device pickers.
+- **Minimized calls dock into the tab bar** as a "Call" tab beside You (green pulse dot)
+  instead of a floating pill that covered the composer. Audio keeps playing; the tab
+  exists exactly while a live call is minimized.
+
+### QA
+- Desktop gained webview-driving ops (`ui`: call_start/accept/end/minimize/expand +
+  `probe`, which reports the rendered DOM through the trail channel) — the desktop leg
+  can now PLACE and ANSWER calls under test, and layout states are assertable without
+  screen capture.
+
 ## 2026-08-22 — 1.6.0 (satellite wave, final)
 
 ### Satellite / low-data (the headline)

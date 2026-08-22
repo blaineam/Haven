@@ -6,6 +6,18 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **1.6.1 — the fork is dead + the call screen grows up (2026-08-22, all platforms)** — two full
+  gauntlets green back-to-back (91/91 twice, zero forks). The recurring MLS "welcome-election fork"
+  turned out to be the genesis election ignoring which candidate the commit chain had actually grown
+  on (every creator device authors a competing genesis by design); the election now prefers chain
+  height and committers auto-re-Welcome devices stranded on a losing branch. The iOS launch crash
+  (watchdog kill on a scene-create keychain write, build 536) is fixed at the root — startup does
+  zero keychain writes. The last force-reseal-ALL-circles sites are gone: Android echo 104s → 2.6s,
+  iOS→Android full-photo 18.8s → 6.7s. Desktop's call screen was rebuilt to macOS parity (gradient
+  stage, 1:1 full-bleed + PiP vs. group grid, speaker glow, emoji/photo avatars, bottom-centre glass
+  controls), minimized calls dock into a Call tab instead of a pill over the composer, outgoing
+  dials finally time out, and desktop learned to read the profile card every hello always carried —
+  peers have faces now. QA can drive the desktop webview (place/answer calls, probe rendered layout).
 - **1.6.0 — satellite comms + the QA gauntlet (2026-08-22, all platforms)** — the satellite/low-data
   wave verified end to end: only a ~6 KB AVIF preview crosses an ultra-constrained link (MLS circles,
   My Circle, and DMs all proven, both directions), and the full photo completes on return. Getting

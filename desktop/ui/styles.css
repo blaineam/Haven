@@ -1078,6 +1078,10 @@ button.set-row:hover { background: var(--panel); }
 .call-ic svg { width: 22px; height: 22px; }
 /* Minimized call = the "Call" tab (next to You). The dot marks the live call. */
 .tab.call-tab { display: inline-flex; align-items: center; gap: 6px; }
+/* An author `display` OUTRANKS the UA's `[hidden] { display:none }` — without this rule the tab
+   rendered ALWAYS, blinking dot and all, while the hidden attribute sat there correctly set
+   (reported directly; the DOM probe read the attribute and was blind to the computed style). */
+.tab.call-tab[hidden] { display: none; }
 .call-tab-dot { width: 8px; height: 8px; border-radius: 4px; background: #34d399; box-shadow: 0 0 8px #34d399; animation: call-pulse 2s ease-in-out infinite; }
 @keyframes call-pulse { 50% { opacity: .45; } }
 .btn.sm { padding: 6px 12px; font-size: 12px; }

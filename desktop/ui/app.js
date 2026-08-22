@@ -8292,7 +8292,8 @@ async function boot() {
         rounds: document.querySelectorAll(".call-round").length,
         devices: document.querySelectorAll(".call-device").length,
         avatar: av ? (av.querySelector("img") ? "img" : av.textContent) : null,
-        calltab: !document.querySelector("#tab-call")?.hidden,
+        calltab: (() => { const b = document.querySelector("#tab-call");
+          return !!b && getComputedStyle(b).display !== "none"; })(),
         minimized: !!call.minimized,
         connecting: !!call.connecting,
         err: window.__rcoErr || null,

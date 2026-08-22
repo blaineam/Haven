@@ -479,6 +479,12 @@ async function main() {
   // The forced constraint cannot be reached any other way: `ultra` comes only from
   // NWPath.isUltraConstrained / TRANSPORT_SATELLITE, which a simulator and an emulator never
   // report. The `link_constraint` qa op (DEBUG-only) is the way in.
+  if (STEPS.includes('satellite') && !circleId) {
+    // Asked for satellite but the 'circle' step didn't run, so there is no circle to post into —
+    // the lanes below would be skipped WHOLESALE. That must never read as a pass: a targeted
+    // `E2E_STEPS=satellite` run exited 0 with zero satellite checks and looked like a clean bill.
+    score('satellite lanes ran (need circle step: E2E_STEPS=circle,satellite)', false);
+  }
   if (STEPS.includes('satellite') && circleId) {
     // Markers live in `media_markers`, NOT `media_refs`: the dump filters synthetic refs out of the
     // latter, and a post never lists the bare companion ref either. Reading media_refs here made the

@@ -1388,8 +1388,8 @@ pub fn add_media(engine: Eng, circle_id: String, data_base64: String, is_video: 
 /// be seen off-grid — but a null here is still fine, and never a reason to send the full copy.
 /// Push the webview's call state down so the QA dump can report it (see Engine::set_qa_call_state).
 #[tauri::command]
-pub fn qa_set_call_state(engine: Eng, ringing: bool, in_call: bool, session: Option<String>) {
-    engine.set_qa_call_state(ringing, in_call, session.unwrap_or_default());
+pub fn qa_set_call_state(engine: Eng, ringing: bool, in_call: bool, session: Option<String>, trail: Option<String>) {
+    engine.set_qa_call_state(ringing, in_call, session.unwrap_or_default(), trail.unwrap_or_default());
 }
 
 #[tauri::command]

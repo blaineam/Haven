@@ -6851,7 +6851,12 @@ function callAudioActive() { return call.ringing || call.connecting || call.inCa
 // and stub only. That blind spot let an established call ended on iOS strand THIS leg in a dead call
 // while the suite reported green. Cheap and idempotent; safe to call on every transition.
 function qaPushCallState() {
-  try { invoke("qa_set_call_state", { ringing: !!call.ringing, inCall: !!call.inCall, session: call.session || "" }); } catch (_) {}
+  // `.catch`, not try/catch: invoke returns a promise, so a synchronous try never saw rejections —
+  // a push could fail and the engine's copy of our state silently freeze at its last value.
+  invoke("qa_set_call_state", {
+    ringing: !!call.ringing, inCall: !!call.inCall, session: call.session || "",
+    trail: (call.trail || []).join(","),
+  }).catch(() => {});
 }
 
 // ---- Capture owns the audio ---------------------------------------------------------------
@@ -7256,6 +7261,9 @@ async function connectPeerIfNeeded(peer) {
 
 async function onCallEvent(payload) {
   const c = payload || {};
+  // Last 12 events this webview handled, pushed with every state update — the engine-side log of
+  // these is what finally shows the real sequence instead of another deduction about it.
+  call.trail = [...(call.trail || []), c.kind].slice(-12);
   call.me = state.node;
   switch (c.kind) {
     case "groupInvite":

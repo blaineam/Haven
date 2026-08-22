@@ -388,6 +388,7 @@ pub struct Engine {
     /// from one that is in a DIFFERENT session — every handler is gated on the session id matching.
     qa_last_call_event: StdMutex<String>,
     qa_call_session: StdMutex<String>,
+    qa_call_trail: StdMutex<String>,
     /// The account master seed — `Some` on a primary/legacy device, `None` on a SEEDLESS device
     /// (seed-drop S4). Making it an `Option` turns every account-key use into a compile-checked
     /// decision, so a missed seedless guard is a build error, not a runtime forge/panic.
@@ -710,6 +711,7 @@ impl Engine {
             last_epoch_reseal: StdMutex::new(0),
             qa_last_call_event: StdMutex::new("none".into()),
             qa_call_session: StdMutex::new(String::new()),
+            qa_call_trail: StdMutex::new(String::new()),
             seed: Some(seed),
             social,
             paths,
@@ -829,6 +831,7 @@ impl Engine {
             last_epoch_reseal: StdMutex::new(0),
             qa_last_call_event: StdMutex::new("none".into()),
             qa_call_session: StdMutex::new(String::new()),
+            qa_call_trail: StdMutex::new(String::new()),
             seed: None,
             social,
             paths,
@@ -10689,16 +10692,22 @@ impl Engine {
     /// this leg was ringing or in a call — and the e2e call step only ever asserted on ios and stub.
     /// That blind spot let an established call ended on iOS strand THIS leg in a dead call while the
     /// suite reported green; only someone looking at the screen could tell. Two bools close it.
-    pub fn set_qa_call_state(self: &Arc<Self>, ringing: bool, in_call: bool, session: String) {
+    pub fn set_qa_call_state(self: &Arc<Self>, ringing: bool, in_call: bool, session: String, trail: String) {
+        // Every push is LOGGED. The dump can only show the latest state; the stuck-call bug produced
+        // a state no code path pushes at all, so the sequence itself is the evidence that matters.
+        log::info!("qa-call push ringing={ringing} in_call={in_call} session={} trail=[{trail}]",
+                   if session.is_empty() { "-" } else { &session[..session.len().min(12)] });
         // bit2 = KNOWN. Set on the first push and never cleared.
         self.qa_call.store(
             0b100 | (ringing as u8) | ((in_call as u8) << 1),
             std::sync::atomic::Ordering::Relaxed,
         );
         *self.qa_call_session.lock() = session;
+        *self.qa_call_trail.lock() = trail;
     }
 
     pub fn qa_call_session(&self) -> String { self.qa_call_session.lock().clone() }
+    pub fn qa_call_trail(&self) -> String { self.qa_call_trail.lock().clone() }
     pub fn qa_last_call_event(&self) -> String { self.qa_last_call_event.lock().clone() }
 
     /// `None` until the webview has pushed at least once.

@@ -427,6 +427,7 @@ fn write_dump(engine: &Arc<Engine>) {
                 // in a DIFFERENT session, or from one the frame never reached.
                 "session": engine.qa_call_session(),
                 "last_event": engine.qa_last_call_event(),
+                "trail": engine.qa_call_trail(),
             }),
             None => serde_json::Value::Null,
         },

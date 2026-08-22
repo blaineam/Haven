@@ -747,6 +747,26 @@ final class CallManager: NSObject, ObservableObject {
         let type: UInt8 = ended ? 35 : 30
         HavenLog.call("call \(sessionId.prefix(8)) \(ended ? "ended" : "handled") here — standing down \(others.count) other device(s) of mine")
         for dev in others { FeedStore.shared.sendCallFrame(type, f, to: dev) }
+        // AND to my own ACCOUNT, not only to each device id.
+        //
+        // Addressing devices alone left both of my other devices sitting in a dead call: neither
+        // received the frame at all. Two reasons, and the account lane fixes both.
+        //
+        // Sealing is per-recipient and can only resolve OUR OWN ACCOUNT, a circle member, or a
+        // KNOWN device bundle — so a device whose bundle has not been learned yet seals to nothing
+        // and the frame is dropped before it is ever transmitted. The account always resolves.
+        //
+        // And the receive side already listens for it: the live-frame poller matches keys addressed
+        // to [myDevice, myAccount], so an account-addressed frame is picked up over the mailbox lane
+        // that reaches a device with no dialable path — which is exactly the case here, and exactly
+        // why `dm echo (own devices)` lands on both of those legs in ~2.5s while this did not.
+        //
+        // Idempotent by construction: both handlers require the session id to match the call this
+        // device is actually in, so receiving it twice is a no-op.
+        let myAccount = FeedStore.shared.myAccountHex
+        if !myAccount.isEmpty, !others.contains(where: { $0.lowercased() == myAccount.lowercased() }) {
+            FeedStore.shared.sendCallFrame(type, f, to: myAccount)
+        }
     }
 
     /// My account ENDED this call session on another device. Tear down whatever state we are in —

@@ -10102,14 +10102,23 @@ impl Engine {
             // instead. Narrow on purpose: only my own account may silence my ring, and the signature
             // verified above is what proves it. (The UI then refuses to act on one for a call it has
             // already answered, so a late copy can never hang up a live conversation.)
-            if t == wire::CALL_HANDLED {
+            // 30 AND 35 come from MY OWN account, which is never in my contact list. When 35 was
+            // added, only 30 got the own-account exemption — so the teardown frame was received,
+            // opened, verified… and silently dropped three lines from the webview. The engine's own
+            // diagnostic said "recv:35" while the UI never heard a thing, which is exactly the split
+            // the call_engine dump block finally made visible.
+            if t == wire::CALL_HANDLED || t == wire::CALL_ENDED_ELSEWHERE {
                 if !from.eq_ignore_ascii_case(&self.social.my_node_hex()) {
                     return;
                 }
             } else if !self.is_contact(from) {
                 return;
             }
-            let _ = app.emit("haven:call", ev);
+            if let Err(e) = app.emit("haven:call", ev) {
+                *self.qa_last_call_event.lock() = format!("emit-failed:{t}:{e}");
+            } else {
+                *self.qa_last_call_event.lock() = format!("emitted:{t}");
+            }
         }
     }
 

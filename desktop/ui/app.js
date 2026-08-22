@@ -8180,6 +8180,9 @@ async function boot() {
   // first event can land with nobody listening — ask once at boot rather than showing nothing.
   invoke("instagram_status").then((s) => { IG.status = s; renderImportPill(s); }).catch(() => {});
   listen("haven:call", (e) => onCallEvent(e.payload));
+  // Baseline push: "this webview is alive and NOT in a call". Without it a leg that (correctly)
+  // never joined reports call:null — indistinguishable from a dead webview, and scored as one.
+  qaPushCallState();
   // Drag photos/videos from the file manager onto the window → attach to the active composer.
   //
   // A dropped file goes through the SAME `sanitizeMediaFile` pipeline as a picked one. It used to

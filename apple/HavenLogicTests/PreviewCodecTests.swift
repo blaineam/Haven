@@ -31,7 +31,7 @@ final class PreviewCodecTests: XCTestCase {
         return ctx.makeImage()!
     }
 
-    func testThisBuildCanWritePreviews() {
+    func testThisBuildCanWritePreviews() throws {
         // Every client must be able to WRITE previews, not just read them — any device can be the
         // sender. Apple's docs only discuss decoding AVIF, so this is asserted rather than trusted.
         // CI macos-15 runners ship an ImageIO with NO AVIF writer ("unsupported output file

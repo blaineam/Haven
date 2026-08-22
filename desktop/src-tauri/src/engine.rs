@@ -1688,9 +1688,26 @@ impl Engine {
                     me.reannounce_own_relay();
                     // Mirror our own media to the relays we know periodically (~every 2 min). The
                     // cross-device chunk path is unreliable; the relay is the durable convergence path.
+                    // saturating_sub, not `-`. These are wall-clock millisecond stamps, and a
+                    // u64 subtraction where the stored stamp is AHEAD of `now` underflows and
+                    // panics in a debug build. It happens: the clock steps backwards (NTP
+                    // correction, sleep/wake, a VM host resyncing), and the stamp written before
+                    // the step is then in the future.
+                    //
+                    // That is not a hypothetical. This exact line aborted the desktop app:
+                    //
+                    //   thread 'tokio-rt-worker' panicked at engine.rs:1693: attempt to subtract with overflow
+                    //   thread 'qa-driver'       panicked: PoisonError { .. }
+                    //   thread 'main'            panicked: PoisonError { .. }
+                    //   fatal runtime error: failed to initiate panic, aborting
+                    //
+                    // One arithmetic underflow poisoned `dyn_state`, and every later thread that
+                    // touched it died on the poison — including the QA driver, whose death is what
+                    // silently froze the dump file for the rest of a run. A stale timer is worth
+                    // nothing; crashing over one is worth less.
                     let backfill_due = {
                         let mut st = me.dyn_state.lock().unwrap();
-                        if now - st.last_media_backfill_ms > 120_000 {
+                        if now.saturating_sub(st.last_media_backfill_ms) > 120_000 {
                             st.last_media_backfill_ms = now;
                             true
                         } else {
@@ -1712,7 +1729,7 @@ impl Engine {
                     // duplicates and stale-epoch copies age out.
                     let refresh_due = {
                         let mut st = me.dyn_state.lock().unwrap();
-                        if now - st.last_event_refresh_ms > 86_400_000 {
+                        if now.saturating_sub(st.last_event_refresh_ms) > 86_400_000 {
                             st.last_event_refresh_ms = now;
                             true
                         } else {
@@ -4738,7 +4755,9 @@ impl Engine {
         let catchup_due = {
             let mut st = self.dyn_state.lock().unwrap();
             let now = now_ms();
-            if !st.own_device_catchup_in_flight && now - st.last_own_device_catchup_ms > 300_000 {
+            if !st.own_device_catchup_in_flight
+                && now.saturating_sub(st.last_own_device_catchup_ms) > 300_000
+            {
                 st.last_own_device_catchup_ms = now;
                 st.own_device_catchup_in_flight = true;
                 true
@@ -8646,7 +8665,7 @@ impl Engine {
                         .progress(&reference)
                         .is_some_and(|held| held > 0);
                     let cooldown: u64 = if in_flight { 10_000 } else { 300_000 };
-                    let stale = st.media_req_at.get(&reference).map(|&t| now - t > cooldown).unwrap_or(true);
+                    let stale = st.media_req_at.get(&reference).map(|&t| now.saturating_sub(t) > cooldown).unwrap_or(true);
                     if stale && direct_budget > 0 {
                         st.media_req_at.insert(reference.clone(), now);
                         direct_budget -= 1;

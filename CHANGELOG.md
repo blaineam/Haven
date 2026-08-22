@@ -7,6 +7,49 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 2026-08-22 — 1.6.0 (satellite wave, final)
+
+### Satellite / low-data (the headline)
+- **512px AVIF preview tier verified end to end** across MLS circles, legacy "My Circle", and DMs:
+  only the ~6 KB preview crosses an ultra-constrained link; the full photo completes automatically
+  on return to coverage. The negative gate (full media must NOT cross) is asserted per keying path.
+- Ultra-constrained link policy (Text/KeyConvergence/Preview allowed; media deferred) exercised in
+  both directions on every platform pair.
+
+### Fixed — silent content loss (most serious)
+- A contact's roster arriving by relay pull never replayed parked envelopes, and an already-held
+  roster reported as *refused* — content could arrive and stay unreadable forever, with nothing
+  logged. Both paths fixed; regression-tested (fail-without-fix verified).
+- Epoch advance (rotation, tree commit, sibling-device registration) now triggers a history re-seal
+  via the engine's own `take_epoch_moved` signal, replacing the roster-change proxy that missed the
+  MLS tree-driven case and stranded receivers on unopenable envelopes.
+
+### Fixed — crashes and aborts
+- Android: opening the circle switcher crashed the app every time (uniffi `UInt` into `%d`);
+  guarded by a source-scanning unit test.
+- Desktop: a clock-step underflow in a stale-timer check aborted the entire app via mutex
+  poisoning; all four sites now saturate, and **desktop mutexes no longer poison at all**
+  (parking_lot) — a panic now costs one operation, not the process.
+- iOS: feed video looped audibly with the app backgrounded and the phone locked; background pause
+  now stops every registered player and looping asks the coordinator (foreground-aware).
+
+### Fixed — media correctness
+- EXIF orientation was dropped when minting previews/thumbnails on all three platforms and when
+  drawing feed photos on Android (sideways photos, "flipping" on full-res arrival). All decode
+  paths now normalize to upright; Android also banks post-rotation dimensions.
+- Desktop still-loading placeholder collapsed into a 38px "pill"; now sized like real fitted media.
+- Shared locations show selectable coordinates + "Map unavailable offline" when tiles can't load
+  (off-grid is exactly when a pin matters). "Open in Maps" remains the offline path.
+
+### QA infrastructure (why the above became findable)
+- Per-leg delivery diagnostic (`parked` / `held_slots` / `missing_keys`) distinguishes "never
+  arrived" from "arrived unopenable".
+- Dump liveness (`dump_seq` + heartbeat) on desktop and Apple drivers — a frozen dump now reports
+  itself instead of impersonating 20 delivery failures.
+- Fail-fast for targeted runs; pixel-distinct fixtures per scenario; DM dump rows carry companion
+  markers; Android dump reports markers/companions; call dumps report session + last frame handled.
+
+
 ## [Unreleased]
 
 ### Added — the 512px preview tier

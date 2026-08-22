@@ -6,6 +6,18 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **1.6.0 — satellite comms + the QA gauntlet (2026-08-22, all platforms)** — the satellite/low-data
+  wave verified end to end: only a ~6 KB AVIF preview crosses an ultra-constrained link (MLS circles,
+  My Circle, and DMs all proven, both directions), and the full photo completes on return. Getting
+  the matrix green surfaced a dozen real bugs, the worst of them silent: content that arrived and
+  could never be read (roster-pull never replaying parked envelopes; epoch advances that never
+  re-sealed history), a call-teardown frame that was received, verified, and dropped three lines from
+  the UI, an Android circle-switcher crash on every open, a desktop abort from a clock-step underflow
+  spread process-wide by mutex poisoning (desktop is now parking_lot, non-poisoning), EXIF rotation
+  baked sideways into previews on all three platforms, and background feed audio playing from a
+  locked iPhone. Desktop calls grew mic/speaker pickers, on-demand camera, a minimize pill, and
+  audible camera-off peers. The e2e harness itself gained per-leg delivery + call diagnostics,
+  dump liveness, fail-fast, and pixel-distinct fixtures — half the reds it ever reported were its own.
 - **Haven kept asking to be woken (2026-08-12, 1.4.7, iPhone/iPad)** — 1.4.1–1.4.6 each made a
   background wake cheaper; none of them stopped the app from *requesting* wakes. A background-refresh
   request was chained unconditionally on every background entry and again at the end of every

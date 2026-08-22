@@ -1596,6 +1596,13 @@ struct Circle {
     /// Set when this circle's epoch ADVANCES, cleared by `take_epoch_moved`. Deliberately absent
     /// from `PersistCircle`: it is a signal about THIS session, and a restart re-seals anyway.
     epoch_moved: bool,
+    /// Tree envelopes (MLS commit / welcome / join) that arrived and did NOT apply — usually
+    /// out-of-order under churn. The THIRD instance of the mark-seen-on-failure trap: content got
+    /// `pending_epoch`, rosters got a status code, and tree envelopes had NOTHING — a burned commit
+    /// forked the fleet (A's devices sealing at epoch N while the joiner sat at N+1, each side
+    /// parking the other's content forever). Replayed by `drain_pending_tree` whenever any tree
+    /// envelope APPLIES or a roster is stored. Bounded + deduped; persisted like `pending_epoch`.
+    pending_tree: Vec<Vec<u8>>,
     id: String,
     name: String,
     members: Vec<HavenId>,
@@ -1774,6 +1781,7 @@ impl Circle {
     fn bare(id: String, name: String) -> Self {
         Circle {
             epoch_moved: false,
+            pending_tree: vec![],
             id,
             name,
             members: vec![],
@@ -4201,6 +4209,50 @@ fn drain_pending(st: &mut NetState, idx: usize) {
     });
 }
 
+/// Park an unapplied TREE envelope (raw, tagged) for replay. Deduped, capped at 128 — tree traffic
+/// is a few dozen envelopes per membership change, not a content stream.
+fn park_pending_tree(c: &mut Circle, raw: &[u8]) {
+    if c.pending_tree.iter().any(|p| p == raw) {
+        return;
+    }
+    if c.pending_tree.len() >= 128 {
+        c.pending_tree.remove(0);
+    }
+    c.pending_tree.push(raw.to_vec());
+}
+
+/// Replay parked tree envelopes until a full pass applies nothing. Each application can unlock the
+/// next (commits are ordered by epoch), so loop-while-progress rather than single-pass. Envelopes
+/// that still don't apply go back in the buffer and wait for the next trigger.
+fn drain_pending_tree(st: &mut NetState, idx: usize) {
+    for _ in 0..16 {
+        let pending = std::mem::take(&mut st.circles[idx].pending_tree);
+        if pending.is_empty() {
+            return;
+        }
+        let mut progressed = false;
+        for raw in pending {
+            let applied = match raw.first() {
+                Some(&TAG_MLS_COMMIT) => receive_mls_commit(st, idx, &raw[1..]).unwrap_or(false),
+                Some(&TAG_MLS_WELCOME) => receive_mls_welcome(st, idx, &raw[1..]).unwrap_or(false),
+                Some(&TAG_MLS_JOIN) => receive_mls_join(st, idx, &raw[1..]).unwrap_or(false),
+                _ => false,
+            };
+            if applied {
+                progressed = true;
+            } else {
+                park_pending_tree(&mut st.circles[idx], &raw);
+            }
+        }
+        if progressed {
+            mls_refresh_keying(st, idx);
+            drain_pending(st, idx);
+        } else {
+            return;
+        }
+    }
+}
+
 /// Drain the retry buffer of EVERY circle — called after a roster is learned (a member's newly-known
 /// device can now be matched as a valid sender) and after a state import (a persisted buffer meets
 /// the keys/rosters we already hold). Returns whether anything newly ingested.
@@ -4312,6 +4364,8 @@ struct PersistCircle {
     /// AND roster arrival, so late keys/rosters still unlock it. Defaulted so old state files load.
     #[serde(default)]
     pending_epoch: Vec<Vec<u8>>,
+    #[serde(default)]
+    pending_tree: Vec<Vec<u8>>,
     /// MLS M3: the pinned circle creator (Remove/Add authority root, §4.3). Defaulted so old state
     /// files load with no creator (⇒ no tree Remove is accepted until one is learned).
     #[serde(default)]
@@ -6734,6 +6788,7 @@ have_seed={} have_device={} members={}",
                 rotated_at: c.rotated_at,
                 cached_commit: c.cached_commit.clone(),
                 pending_epoch: c.pending_epoch.clone(),
+                pending_tree: c.pending_tree.clone(),
                 creator: c.creator,
                 creator_pinned: c.creator_pinned,
                 admin_grants: c.admin_grants.clone(),
@@ -6800,6 +6855,7 @@ have_seed={} have_device={} members={}",
                 rotated_at: 0,
                 cached_commit: None,
                 pending_epoch: vec![],
+                pending_tree: vec![],
                 creator: None,
                 creator_pinned: false,
                 admin_grants: vec![],
@@ -6852,18 +6908,39 @@ impl HavenSocial {
             // (no direct content change from the wire itself); a non-capable circle ignores them.
             TAG_MLS_COMMIT => {
                 let r = receive_mls_commit(&mut st, idx, &envelope[1..]);
+                match r {
+                    // Applied: this may be the envelope the buffer was waiting on.
+                    Ok(true) => drain_pending_tree(&mut st, idx),
+                    // NOT applied: park it instead of letting the client burn it as seen — the
+                    // fork-and-strand failure mode this buffer exists for.
+                    _ => park_pending_tree(&mut st.circles[idx], envelope),
+                }
                 mls_refresh_keying(&mut st, idx);
                 drain_pending(&mut st, idx);
                 r
             }
             TAG_MLS_WELCOME => {
                 let r = receive_mls_welcome(&mut st, idx, &envelope[1..]);
+                match r {
+                    // Applied: this may be the envelope the buffer was waiting on.
+                    Ok(true) => drain_pending_tree(&mut st, idx),
+                    // NOT applied: park it instead of letting the client burn it as seen — the
+                    // fork-and-strand failure mode this buffer exists for.
+                    _ => park_pending_tree(&mut st.circles[idx], envelope),
+                }
                 mls_refresh_keying(&mut st, idx);
                 drain_pending(&mut st, idx);
                 r
             }
             TAG_MLS_JOIN => {
                 let r = receive_mls_join(&mut st, idx, &envelope[1..]);
+                match r {
+                    // Applied: this may be the envelope the buffer was waiting on.
+                    Ok(true) => drain_pending_tree(&mut st, idx),
+                    // NOT applied: park it instead of letting the client burn it as seen — the
+                    // fork-and-strand failure mode this buffer exists for.
+                    _ => park_pending_tree(&mut st.circles[idx], envelope),
+                }
                 mls_refresh_keying(&mut st, idx);
                 drain_pending(&mut st, idx);
                 r
@@ -6885,6 +6962,9 @@ impl HavenSocial {
                         // A newly-learned roster may make a previously "unknown sender" event openable —
                         // drain the durable buffer so multi-device roster lag no longer loses posts.
                         let drained = drain_all_pending(&mut st);
+                        for i in 0..st.circles.len() {
+                            drain_pending_tree(&mut st, i);
+                        }
                         Ok(stored || drained)
                     }
                     None => Ok(false),
@@ -7009,6 +7089,12 @@ impl HavenSocial {
             // silently discard restored entries past the cap and re-wedge a healed buffer.
             park_pending(&mut st.circles[idx], &raw);
         }
+        for raw in pc.pending_tree {
+            park_pending_tree(&mut st.circles[idx], &raw);
+        }
+        // A restart is a natural convergence point: the keys/rosters we already hold may open what
+        // was parked, and a restored tree buffer may contain the very commit whose loss forked us.
+        drain_pending_tree(st, idx);
         // MLS M3 / AUDIT M2 authority: adopt the creator, giving a DEFINITION-pinned creator priority.
         // A signed circle-sync record (or another of my devices) carrying a definition-pinned creator is
         // authoritative — it re-pins even over a creator we only weakly TOFU-learned from a grant, which

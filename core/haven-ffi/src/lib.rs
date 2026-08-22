@@ -5443,6 +5443,13 @@ impl HavenSocial {
     /// peer on 27 unopenable envelopes. Ask the real question instead of a correlated one.
     pub fn take_epoch_moved(&self) -> bool {
         let mut st = self.state.lock().unwrap();
+        // Piggyback the tree-buffer replay on this per-poll call. A parked commit whose only trigger
+        // is "another tree envelope applies" can wait FOREVER when it is the sole one outstanding —
+        // exactly the forked-fleet case: the 777→778 commit sits parked on every member at 777 and
+        // nothing further ever arrives. Empty buffer = no-op.
+        for i in 0..st.circles.len() {
+            drain_pending_tree(&mut st, i);
+        }
         let mut moved = false;
         for c in st.circles.iter_mut() {
             if c.epoch_moved {
@@ -6435,13 +6442,14 @@ impl HavenSocial {
                 v.iter().take(12).map(|x| format!("\"{x}\"")).collect::<Vec<_>>().join(",")
             };
             circles.push(format!(
-                "{{\"parked_slots\":[{}],\"held_slots\":[{}],\"missing_keys\":[{}],\"id\":\"{}\",\"events\":{},\"parked\":{},\"my_epoch\":{},\"my_epoch_keys\":{},\"peer_epoch_keys\":{},\"peers_keyed\":{},\"members\":{}}}",
+                "{{\"parked_slots\":[{}],\"held_slots\":[{}],\"missing_keys\":[{}],\"id\":\"{}\",\"events\":{},\"parked\":{},\"parked_tree\":{},\"my_epoch\":{},\"my_epoch_keys\":{},\"peer_epoch_keys\":{},\"peers_keyed\":{},\"members\":{}}}",
                 q(&want),
                 q(&held),
                 missing.iter().take(12).map(|x| format!("\"{x}\"")).collect::<Vec<_>>().join(","),
                 c.id.replace('"', ""),
                 c.events.len(),
                 c.pending_epoch.len(),
+                c.pending_tree.len(),
                 c.my_epoch,
                 c.my_epoch_keys.len(),
                 c.peer_epoch_keys.len(),

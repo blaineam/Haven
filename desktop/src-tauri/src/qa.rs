@@ -419,6 +419,14 @@ fn write_dump(engine: &Arc<Engine>) {
         "dms": dms,
         "profile": { "name": engine.get_profile().name },
         // null until the webview has reported — deliberately NOT a healthy-looking default.
+        // ALWAYS present, webview or no webview: when the webview has never pushed (or died), these
+        // are the only call facts left — and "engine received recv:35, webview reported nothing" vs
+        // "engine received nothing" is precisely the fork that matters.
+        "call_engine": {
+            "last_event": engine.qa_last_call_event(),
+            "session": engine.qa_call_session(),
+            "trail": engine.qa_call_trail(),
+        },
         "call": match engine.qa_call_state() {
             Some((ringing, in_call)) => serde_json::json!({
                 "ringing": ringing, "in_call": in_call,

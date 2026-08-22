@@ -3047,13 +3047,12 @@ object HavenNet : InboundListener {
                                 Log.i(TAG, "devroster PULLED ${acct.take(8)} from relay ${nodeHex.take(8)} — roster CHANGED")
                                 authorizeMembership()
                                 onRosterLearned()
-                                // The roster changed, so the circle epoch moved. Content already
-                                // sealed under the PREVIOUS epoch is unreadable to anyone who joins
-                                // or advances past it, and the only thing that repairs that is a
-                                // full re-seal of my history under the new epoch. Without this the
-                                // repair waited for the next periodic backfill, which is how three
-                                // posts stayed invisible to a peer for an entire QA run.
-                                resealAfterEpochChange()
+                                // The roster changed — but which circles' epochs MOVED is the
+                                // engine's call, not ours. Force-resealing ALL circles here cost
+                                // ~100s per trigger on device and was the android echo/full-photo
+                                // lag; the epoch_moved flag (drained scoped here and every poll)
+                                // repairs exactly the circles that need it.
+                                drainEpochMoved()
                                 return true
                             }
                         }
@@ -4757,16 +4756,24 @@ object HavenNet : InboundListener {
     private fun handleDeviceRosterAnnounce(body: ByteArray) {
         val status = runCatching { social.ingestRosterWireStatus(body) }.getOrDefault((-1).toByte())
         if (status >= 0) authorizeMembership()
-        // CHANGED, not merely known: the epoch moved, so re-seal history under it. An announce can
-        // carry a sibling's registration, same as the self-sync path.
-        if (status > 0) resealAfterEpochChange()
+        // CHANGED, not merely known — but scoped: drain the engine's epoch_moved flag instead of
+        // force-resealing every circle (~100s per trigger; the android echo/full-photo lag).
+        if (status > 0) drainEpochMoved()
     }
 
     /** `resealAfterEpochChange` for callers outside this object (SelfSyncCoordinator).
      *  Explicit `Unit` on purpose: an expression body here made the inferred type participate in
      *  overload resolution elsewhere in the file and broke inference at unrelated call sites. */
     internal fun resealAfterEpochChangePublic(): Unit {
-        resealAfterEpochChange()
+        drainEpochMoved()
+    }
+
+    /** Scoped repair: consume the engine's per-circle epoch-moved flags and re-seal ONLY those
+     *  circles. When a roster event lands before the keying actually advances, the flag is still
+     *  unset here — the identical drain in pollMailbox catches it within a cycle. */
+    private fun drainEpochMoved() {
+        val moved = runCatching { social.takeEpochMovedCircles() }.getOrDefault(emptyList())
+        if (moved.isNotEmpty()) resealAfterEpochChange(moved)
     }
 
     fun stopHosting() {

@@ -28,6 +28,9 @@
         <button class="tab active" data-view="circle" role="tab">Circle<i class="badge" id="badge-circle"></i></button>
         <button class="tab" data-view="messages" role="tab" data-i18n="messages">Messages<i class="badge" id="badge-messages"></i></button>
         <button class="tab" data-view="you" role="tab" data-i18n="you">You</button>
+        <!-- Appears ONLY while a call is minimized: the call docks HERE instead of a floating
+             pill (the pill sat on top of the composer). Click = back to the full call screen. -->
+        <button class="tab call-tab" data-view="call" id="tab-call" role="tab" hidden><span class="call-tab-dot"></span><span data-i18n="call_tab">Call</span></button>
       </nav>
 
       <!-- Activity bell — the in-app notification list. Rides beside the per-tab trailing slot

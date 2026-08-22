@@ -4364,6 +4364,13 @@ impl Engine {
         self.emit_changed();
     }
 
+    /// QA: forward a UI action to the webview (`haven:qa-ui`). See qa.rs `"ui"`.
+    pub fn qa_ui(&self, action: String, dm_to: String) {
+        if let Some(app) = self.app.lock().clone() {
+            let _ = app.emit("haven:qa-ui", serde_json::json!({ "action": action, "to": dm_to }));
+        }
+    }
+
     pub fn contacts(&self) -> Vec<Contact> {
         self.prefs.lock().contacts.clone()
     }
@@ -4415,6 +4422,10 @@ impl Engine {
                     id_hex: id_hex.to_string(),
                     name: name.to_string(),
                     verify_hex: verify_hex.to_string(),
+                    emoji: String::new(),
+                    avatar: String::new(),
+                    bio: String::new(),
+                    link: String::new(),
                 });
             }
             let _ = p.save(&self.paths);
@@ -4919,6 +4930,63 @@ impl Engine {
         self.handle_hello_from(None, payload)
     }
 
+    /// Verify and store the appearance half of a hello's signed profile card (emoji, avatar,
+    /// bio/link — and a fresher name) onto an EXISTING contact record. Parity with Apple's
+    /// ContactsStore.setCard (FeedView.swift:7770); desktop received the same blob in every hello
+    /// and dropped it, so peers rendered as initials in calls and the feed forever. Only
+    /// non-empty appearance fields overwrite (a legacy blob must not wipe a stored photo).
+    fn apply_profile_card(self: &Arc<Self>, id_hex: &str, bundle: &[u8], signed_profile: &[u8]) {
+        if signed_profile.is_empty() {
+            return;
+        }
+        let Some(card) = self
+            .social
+            .verify_profile_card(bundle.to_vec(), signed_profile.to_vec())
+        else {
+            return;
+        };
+        if card.name.is_empty() {
+            return;
+        }
+        let avatar = if card.avatar.is_empty() || card.avatar.starts_with("data:") {
+            card.avatar.clone()
+        } else {
+            format!("data:image/jpeg;base64,{}", card.avatar)
+        };
+        let mut changed = false;
+        {
+            let mut p = self.prefs.lock();
+            if let Some(c) = p.contacts.iter_mut().find(|c| c.id_hex == id_hex) {
+                if c.name != card.name {
+                    c.name = card.name.clone();
+                    changed = true;
+                }
+                if !card.emoji.is_empty() && c.emoji != card.emoji {
+                    c.emoji = card.emoji.clone();
+                    changed = true;
+                }
+                if !avatar.is_empty() && c.avatar != avatar {
+                    c.avatar = avatar;
+                    changed = true;
+                }
+                if c.bio != card.bio {
+                    c.bio = card.bio.clone();
+                    changed = true;
+                }
+                if c.link != card.link {
+                    c.link = card.link.clone();
+                    changed = true;
+                }
+                if changed {
+                    let _ = p.save(&self.paths);
+                }
+            }
+        }
+        if changed {
+            self.emit_changed();
+        }
+    }
+
     fn handle_hello_from(self: &Arc<Self>, sender_device: Option<&str>, payload: &[u8]) {
         let Some(hello) = wire::parse_hello(payload) else { return };
         let id_hex = wire::node_hex(&hello.bundle);
@@ -4965,11 +5033,13 @@ impl Engine {
                 return;
             }
             self.accept_contact(&hello.circle_id, &hello.bundle, &id_hex, &name, &actual_verify, true);
+            self.apply_profile_card(&id_hex, &hello.bundle, &hello.signed_profile);
             self.dyn_state.lock().initiated.remove(&id_hex);
             return;
         }
         if self.prefs.lock().contacts.iter().any(|c| c.id_hex == id_hex) {
             let _ = self.social.add_contact_bundle(hello.circle_id.clone(), hello.bundle.clone());
+            self.apply_profile_card(&id_hex, &hello.bundle, &hello.signed_profile);
             return;
         }
         // A hello carrying a DEVICE bundle of an account we ALREADY know is not a new person. A linked
@@ -5022,10 +5092,15 @@ impl Engine {
                         id_hex: id_hex.clone(),
                         name: name.clone(),
                         verify_hex: actual_verify.clone(),
+                        emoji: String::new(),
+                        avatar: String::new(),
+                        bio: String::new(),
+                        link: String::new(),
                     });
                     let _ = p.save(&self.paths);
                 }
             }
+            self.apply_profile_card(&id_hex, &hello.bundle, &hello.signed_profile);
             log::info!(
                 "hello from {} is an engine-known circle member — adopted as contact, handshake continues",
                 &id_hex.chars().take(8).collect::<String>()
@@ -6688,11 +6763,13 @@ impl Engine {
                 return false; // already current — keep looking for a NEWER copy
             }
             log::info!("devroster PULLED {short} — roster CHANGED");
-            // The roster changed, so the circle epoch moved. Content already sealed under the
-            // PREVIOUS epoch is unreadable to a member who joins or advances past it; the full
-            // bundle re-seals my history under the new one. The mechanism existed, nothing
-            // triggered it here, so the repair waited for the next periodic backfill.
-            me.reseal_after_epoch_change(me.social.circles().into_iter().map(|c| c.id).collect());
+            // Scoped: drain the engine's epoch_moved flags instead of force-resealing EVERY
+            // circle (the all-circles bundle was the ~100s stall class). If the keying hasn't
+            // advanced yet the flag is unset here and the poll_mailbox drain catches it.
+            let moved = me.social.take_epoch_moved_circles();
+            if !moved.is_empty() {
+                me.reseal_after_epoch_change(moved);
+            }
             true
         };
 

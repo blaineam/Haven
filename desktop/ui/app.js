@@ -6642,14 +6642,14 @@ function stopSpeakerDetection() {
  * anything.
  */
 function paintActiveSpeaker() {
-  document.querySelectorAll(".call-tile[data-peer]").forEach((tile) => {
+  document.querySelectorAll(".call-screen [data-peer]").forEach((tile) => {
     tile.classList.toggle("speaking", tile.dataset.peer === call.activeSpeaker);
   });
 }
 
 async function pollAudioLevels() {
   const entries = [...call.pcs.entries()];
-  if (entries.length <= 1) {
+  if (entries.length < 1) {
     if (call.activeSpeaker !== null) { call.activeSpeaker = null; paintActiveSpeaker(); }
     call.speakerStreak = {};
     return;
@@ -7138,6 +7138,10 @@ async function callStart(others, name, video) {
   // video call (it drives whether the camera control is offered), but the camera itself begins off.
   call.name = name; call.video = video; call.connecting = true; call.camOn = false;
   syncFeedVideoSound();   // call audio owns the stage from the first dial
+  // Show "Calling…" NOW — getUserMedia inside startMesh can block on the OS permission prompt
+  // (indefinitely on a first launch), and rendering only after it resolved left the caller
+  // staring at a completely idle app while the call was already ringing the other side.
+  renderCallOverlay();
   await invoke("call_group_invite", { sessionId: call.session, groupName: name, roster: [...call.roster], to: invitees() });
   await startMesh();
   renderCallOverlay();
@@ -7174,6 +7178,9 @@ async function callAccept() {
   // signalling when the offer arrived and joined the mesh — audio jumping to whichever device was
   // touched last, and both of them choppy from competing.
   invoke("call_handled_elsewhere", { sessionId: call.session });
+  // Same rule as callStart: show the call screen BEFORE media acquisition — getUserMedia can sit
+  // on the OS permission prompt, and the answerer must not stare at a frozen ring modal meanwhile.
+  renderCallOverlay();
   await invoke("call_accept", { sessionId: call.session, to: invitees() });
   await startMesh();
   invitees().forEach(connectPeerIfNeeded);
@@ -7544,7 +7551,7 @@ async function applyMicDevice(id) {
 /// to every element the overlay creates — applySink() is called on each at render time too.
 function applySpeakerDevice(id) {
   call.spkDevice = id; try { localStorage.setItem("haven-spk-device", id); } catch (_) {}
-  document.querySelectorAll(".call-tile video, .call-tile audio, .call-mini audio").forEach(applySink);
+  document.querySelectorAll(".call-stage video, .call-audio-dock audio").forEach(applySink);
 }
 function applySink(elm) {
   if (call.spkDevice && elm.setSinkId) elm.setSinkId(call.spkDevice).catch(() => {});
@@ -7573,23 +7580,24 @@ function deviceSelect(kind, list, current, onchange) {
   return sel;
 }
 
-/// The minimized pill: the call keeps running, the app stays usable. Audio for every peer keeps
-/// playing through the hidden elements built here.
+/// Minimized: the call docks into the tab bar as a "Call" tab (a floating pill obstructed the
+/// composer). Nothing visual renders here — only the hidden per-peer audio elements, so every
+/// peer keeps playing while the user browses. Controls live on the full call screen, one tab away.
 function renderMiniCall(root) {
-  const who = call.name || invitees().map(displayNameFor).join(", ");
-  const bar = el("div", { class: "call-mini" },
-    el("span", { class: "call-mini-dot" }),
-    el("span", { class: "call-mini-name" }, t("in_call_with", who)),
-    el("button", { class: "btn sm " + (call.micOn ? "" : "danger"), onclick: () => { toggleMic(); } }, call.micOn ? t("mute") : t("unmute")),
-    el("button", { class: "btn sm", onclick: () => { call.minimized = false; renderCallOverlay(); } }, t("expand_call")),
-    el("button", { class: "btn sm danger", onclick: () => callHangup() }, t("hang_up")),
-  );
-  for (const peer of invitees()) bar.append(peerAudioEl(peer));
-  root.replaceChildren(bar);
+  const dock = el("div", { class: "call-audio-dock", style: "display:none" });
+  for (const peer of invitees()) dock.append(peerAudioEl(peer));
+  root.replaceChildren(dock);
 }
 
 function renderCallOverlay() {
+  try { renderCallOverlayInner(); } catch (e) { window.__rcoErr = String(e && e.stack || e); }
+}
+function renderCallOverlayInner() {
   const root = $("#modal-root");
+  // The Call tab exists exactly while a live call is minimized; every state change routes
+  // through here, so this one line keeps it honest (call ends while minimized → tab gone).
+  const callTab = $("#tab-call");
+  if (callTab) callTab.hidden = !(call.minimized && (call.inCall || call.connecting));
   if (!call.ringing && !call.connecting && !call.inCall) {
     if (root.querySelector(".call-overlay")) root.replaceChildren();
     return;
@@ -7605,64 +7613,128 @@ function renderCallOverlay() {
     return;
   }
   if (call.minimized) { renderMiniCall(root); return; }
-  // In-call / connecting: a video grid + controls.
-  const grid = el("div", { class: "call-grid" });
-  const localTile = el("div", { class: "call-tile" });
+  // In-call / connecting — macOS CallOverlay parity (CallManager.swift `active`): a brand-gradient
+  // stage; 1:1 puts the other person FULL-BLEED with our camera as a corner PiP; groups (2+) use
+  // the adaptive tile grid, local PiP in both. Controls anchor bottom-centre. Every surface carries
+  // `data-peer` so paintActiveSpeaker() moves the speaking glow without a re-render.
+  const peers = invitees();
+  const stage = el("div", { class: "call-stage" });
+  const audioDock = el("div", { class: "call-audio-dock", style: "display:none" });
+  for (const peer of peers) audioDock.append(peerAudioEl(peer));
+  if (peers.length === 1) {
+    stage.append(callPersonSurface(peers[0], "call-solo"));
+  } else {
+    const grid = el("div", { class: "call-grid" });
+    for (const peer of peers) grid.append(callPersonSurface(peer, "call-tile"));
+    stage.append(grid);
+  }
+  stage.append(callSelfPip());
+  const status = call.connecting ? t("calling_name", call.name)
+    : peers.length > 1 ? t("participants_n", String(peers.length + 1))
+    : t("connected");
+  root.replaceChildren(el("div", { class: "call-screen" },
+    el("div", { class: "call-topbar" },
+      el("button", { class: "call-chip", title: t("minimize_call"), "aria-label": t("minimize_call"),
+        onclick: () => { call.minimized = true; renderCallOverlay(); } }, svgIcon("chevron")),
+      el("div", { class: "call-title" },
+        el("div", { class: "nm" }, call.name || t("call_tab")),
+        el("div", { class: "st" }, status)),
+      el("div", {}),
+    ),
+    stage,
+    el("div", { class: "call-bottom" },
+      el("div", { class: "call-devices" },
+        deviceSelect("mic_input", call.audioIns, call.micDevice, applyMicDevice),
+        deviceSelect("speaker_output", call.audioOuts, call.spkDevice, applySpeakerDevice),
+      ),
+      el("div", { class: "call-controls" },
+        // Engaged states mirror macOS callButton(): mic lights when MUTED, camera when ON.
+        roundBtn(call.micOn ? "mic" : "micOff", !call.micOn, call.micOn ? t("mute") : t("unmute"), toggleMic),
+        (call.hasCamera === false && !call.audioIns.length && !call.camOn) ? null
+          : roundBtn(call.camOn ? "cam" : "camOff", call.camOn, call.camOn ? t("camera_off_btn") : t("camera_on_btn"), toggleCam),
+        roundBtn("screen", call.screenOn, call.screenOn ? t("stop_sharing") : t("share_screen"), toggleScreen),
+        roundBtn("add", false, t("add_call_btn"), addToCallDialog),
+        roundBtn("hangup", false, t("hang_up"), () => callHangup(), "hang"),
+      ),
+    ),
+    audioDock,
+  ));
+}
+
+/// One participant's surface — full-bleed (`call-solo`) for 1:1, a grid tile (`call-tile`) for
+/// groups. Video aspect-fills; camera-off centres their avatar (photo → emoji → initials) on the
+/// gradient, exactly like macOS soloTile/tile.
+function callPersonSurface(peer, cls) {
+  const camOff = !!(call.camOff && call.camOff[peer]);
+  const speaking = call.activeSpeaker === peer;
+  const surf = el("div", { class: cls + (speaking ? " speaking" : ""), "data-peer": peer });
+  if (!camOff && call.remote && call.remote[peer]) {
+    const v = el("video", { autoplay: "", playsinline: "", muted: "" });
+    v.srcObject = call.remote[peer];
+    applySink(v);
+    surf.append(v);
+    if (cls === "call-tile") surf.append(el("div", { class: "call-tile-shade" }));
+  } else {
+    surf.append(callAvatar(peer, cls === "call-solo" ? 110 : 78));
+  }
+  if (cls === "call-tile") {
+    surf.append(el("span", { class: "call-name" }, displayNameFor(peer) + (camOff ? t("camera_off_suffix") : "")));
+  }
+  return surf;
+}
+
+/// Our camera as a corner PiP, top-right (macOS: 96×128, hairline border), mirrored like a mirror.
+/// Camera off → our avatar. `data-peer=""` is ME in paintActiveSpeaker's vocabulary.
+function callSelfPip() {
+  const pip = el("div", { class: "call-pip" + (call.activeSpeaker === "" ? " speaking" : ""), "data-peer": "" });
   if (call.camOn && call.localStream) {
     const lv = el("video", { autoplay: "", muted: "", playsinline: "" });
     lv.srcObject = call.localStream;
-    localTile.append(lv);
+    pip.append(lv);
   } else {
-    // Camera off → OUR avatar, matching how peers render us. A muted black <video> reads as broken.
-    localTile.append(el("div", { class: "avatar big" }, initials(state.profile?.name || t("you"))));
+    pip.append(callAvatar("", 44));
   }
-  localTile.append(el("span", { class: "call-name" }, t("you") + (call.camOn ? "" : t("camera_off_suffix"))));
-  grid.append(localTile);
-  for (const peer of invitees()) {
-    // Who is talking, so a group call doesn't make you guess. Apple/Android parity.
-    // `data-peer` lets paintActiveSpeaker() repaint this tile IN PLACE — see why below.
-    const speaking = call.activeSpeaker === peer;
-    const tile = el("div", { class: "call-tile" + (speaking ? " speaking" : ""), "data-peer": peer });
-    const camOff = !!(call.camOff && call.camOff[peer]);
-    // Camera off (told to us by frame 22) → show their avatar, NOT the frozen last frame their
-    // stopped track left behind.
-    if (camOff) {
-      tile.append(el("div", { class: "avatar big" }, initials(displayNameFor(peer))));
-    } else {
-      // muted: audio plays through the ALWAYS-attached <audio> below, never twice.
-      const v = el("video", { autoplay: "", playsinline: "", muted: "" });
-      if (call.remote && call.remote[peer]) v.srcObject = call.remote[peer];
-      applySink(v);
-      tile.append(v);
-    }
-    tile.append(peerAudioEl(peer));
-    tile.append(el("span", { class: "call-name" }, displayNameFor(peer) + (camOff ? t("camera_off_suffix") : "")));
-    grid.append(tile);
-  }
-  root.replaceChildren(el("div", { class: "modal-backdrop" }, el("div", { class: "call-overlay-full" },
-    el("div", { class: "call-topbar" },
-      el("div", { class: "muted small" }, call.connecting ? t("calling_name", call.name) : call.name),
-      el("button", { class: "btn sm", onclick: () => { call.minimized = true; renderCallOverlay(); } }, t("minimize_call")),
-    ),
-    grid,
-    el("div", { class: "call-devices" },
-      deviceSelect("mic_input", call.audioIns, call.micDevice, applyMicDevice),
-      deviceSelect("speaker_output", call.audioOuts, call.spkDevice, applySpeakerDevice),
-    ),
-    el("div", { class: "call-controls" },
-      el("button", { class: "btn " + (call.micOn ? "" : "danger"), onclick: toggleMic }, call.micOn ? t("mute") : t("unmute")),
-      // Always offered — the track is published for every call, so video is always available. It was
-      // gated on `call.video`, which meant an audio call could never become a video one.
-      // Offered whenever a camera EXISTS. `hasCamera` is false when the stream came up audio-only —
-      // which also happens when the camera was merely BUSY at answer time — and hiding the button
-      // then left desktop with no way to ever turn video on (reported directly). enableCamera()
-      // acquires the track on demand.
-      (call.hasCamera === false && !call.audioIns.length && !call.camOn) ? null
-        : el("button", { class: "btn " + (call.camOn ? "" : "danger"), onclick: toggleCam }, call.camOn ? t("camera_off_btn") : t("camera_on_btn")),
-      el("button", { class: "btn " + (call.screenOn ? "primary" : ""), onclick: toggleScreen }, call.screenOn ? t("stop_sharing") : t("share_screen")),
-      el("button", { class: "btn", onclick: addToCallDialog }, t("add_call_btn")),
-      el("button", { class: "btn danger", onclick: () => callHangup() }, t("hang_up")),
-    ))));
+  return pip;
+}
+
+/// photo → emoji → initials, macOS PeerAvatar order. `""` = me (state.profile); peers resolve
+/// through the contact card the hello handshake carries (contacts from before the card landed
+/// fall back to initials until their next hello).
+function callAvatar(hex, size) {
+  const me = hex === "";
+  const c = me ? (state.profile || {}) : ((state.contacts || []).find((x) => x.id_hex === hex) || {});
+  const disc = el("div", { class: "call-avatar",
+    style: `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.5)}px` });
+  if (c.avatar) disc.append(el("img", { src: c.avatar, alt: "" }));
+  else if (c.emoji) disc.textContent = c.emoji;
+  else disc.textContent = initials(me ? (c.name || t("you")) : displayNameFor(hex));
+  return disc;
+}
+
+/// Circular glass control (macOS callButton): white glyph on a translucent disc; `on` = the
+/// engaged white-filled state; the hangup variant is the solid red disc with the rotated handset.
+function roundBtn(icon, on, label, onclick, variant) {
+  return el("button", {
+    class: "call-round" + (variant === "hang" ? " hang" : on ? " on" : ""),
+    title: label, "aria-label": label, onclick,
+  }, svgIcon(icon));
+}
+
+/// Feather-style stroke icons, inline (no SF Symbols on the web side).
+const CALL_ICONS = {
+  chevron: '<path d="M6 9l6 6 6-6"/>',
+  mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4"/>',
+  micOff: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4M3 3l18 18"/>',
+  cam: '<path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/>',
+  camOff: '<path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/><path d="M2 2l20 20"/>',
+  screen: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
+  add: '<path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M20 8v6M17 11h6"/>',
+  hangup: '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/>',
+};
+function svgIcon(name) {
+  const span = el("span", { class: "call-ic" });
+  span.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${CALL_ICONS[name] || ""}</svg>`;
+  return span;
 }
 
 // ---- boot ------------------------------------------------------------------------------
@@ -7955,7 +8027,10 @@ async function boot() {
   // dismisses it HERE rather than in the seeder because this nudge's state is localStorage, which
   // the Rust side can't reach.
   if (await invoke("demo_mode").catch(() => false)) RelayNudge.dismiss("default");
-  $$(".tab").forEach((b) => b.addEventListener("click", () => switchView(b.dataset.view)));
+  $$(".tab").forEach((b) => b.addEventListener("click", () => {
+    if (b.dataset.view === "call") { call.minimized = false; renderCallOverlay(); return; }
+    switchView(b.dataset.view);
+  }));
   // The activity bell: glyph + click target (the badge <i> already sits inside the button).
   const bell = $("#bell-btn");
   if (bell) {
@@ -8180,6 +8255,38 @@ async function boot() {
   // first event can land with nobody listening — ask once at boot rather than showing nothing.
   invoke("instagram_status").then((s) => { IG.status = s; renderImportPill(s); }).catch(() => {});
   listen("haven:call", (e) => onCallEvent(e.payload));
+  // QA driver → webview: deterministic call-UI actions (qa.rs "ui" op). Calls live in the page on
+  // desktop, so this is the only way a test can make this leg PLACE or ANSWER one.
+  listen("haven:qa-ui", (e) => {
+    const a = e.payload || {};
+    if (a.action === "call_start" && a.to) callStart([String(a.to).toLowerCase()], displayNameFor(String(a.to).toLowerCase()), false);
+    else if (a.action === "call_accept") callAccept();
+    else if (a.action === "call_end") callHangup();
+    else if (a.action === "call_minimize") { call.minimized = true; renderCallOverlay(); }
+    else if (a.action === "call_expand") { call.minimized = false; renderCallOverlay(); }
+    else if (a.action === "probe") {
+      // Structural snapshot of the call UI, reported through the trail channel — lets a test (or a
+      // headless verification pass) assert the RENDERED layout without screen capture: which layout
+      // is up (solo vs grid), the PiP, what the avatar disc actually shows, tab-bar dock state.
+      const av = document.querySelector(".call-avatar");
+      const probe = {
+        screen: !!document.querySelector(".call-screen"),
+        solo: !!document.querySelector(".call-solo"),
+        grid: !!document.querySelector(".call-grid"),
+        pip: !!document.querySelector(".call-pip"),
+        rounds: document.querySelectorAll(".call-round").length,
+        devices: document.querySelectorAll(".call-device").length,
+        avatar: av ? (av.querySelector("img") ? "img" : av.textContent) : null,
+        calltab: !document.querySelector("#tab-call")?.hidden,
+        minimized: !!call.minimized,
+        connecting: !!call.connecting,
+        err: window.__rcoErr || null,
+        speaking: document.querySelectorAll(".speaking").length,
+      };
+      invoke("qa_set_call_state", { ringing: !!call.ringing, inCall: !!call.inCall,
+        session: call.session || "", trail: "probe:" + JSON.stringify(probe) }).catch(() => {});
+    }
+  });
   // Baseline push: "this webview is alive and NOT in a call". Without it a leg that (correctly)
   // never joined reports call:null — indistinguishable from a dead webview, and scored as one.
   qaPushCallState();

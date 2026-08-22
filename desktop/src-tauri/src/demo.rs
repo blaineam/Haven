@@ -113,7 +113,7 @@ pub fn seed(engine: &Arc<Engine>) -> Option<usize> {
         }
         let verify_hex = friend.verification_hex();
         engine.demo_with_prefs(|p| {
-            p.contacts.push(Contact { id_hex: hex.clone(), name: name.to_string(), verify_hex })
+            p.contacts.push(Contact { id_hex: hex.clone(), name: name.to_string(), verify_hex, emoji: String::new(), avatar: String::new(), bio: String::new(), link: String::new() })
         });
         people.push(Persona { name, engine: friend, hex });
     }

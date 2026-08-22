@@ -254,6 +254,14 @@ fn apply(engine: &Arc<Engine>, cmd: &Value) {
                 engine.mark_dm_read(cid);
             }
         }
+        // Drive the WEBVIEW deterministically — calls live in JS on desktop (WebRTC in the page),
+        // so engine-side ops can't answer or place one. The webview listens for `haven:qa-ui` and
+        // routes: call_start (dm_to = account hex), call_accept, call_end, call_minimize,
+        // call_expand. This is what lets E2E cover the desktop leg JOINING a call instead of only
+        // observing one, and drives the call-screen states for visual QA.
+        "ui" => {
+            engine.qa_ui(field(cmd, "action"), field(cmd, "dm_to"));
+        }
         "dump" => {} // the refresh after `apply` is the whole op
         other => {
             log::warn!("qa-cmd: unknown op {other:?}");

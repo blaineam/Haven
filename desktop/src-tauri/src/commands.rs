@@ -75,6 +75,10 @@ pub struct ContactDto {
     pub id_hex: String,
     pub name: String,
     pub verify_hex: String,
+    pub emoji: String,
+    pub avatar: String,
+    pub bio: String,
+    pub link: String,
 }
 
 #[derive(Serialize)]
@@ -1120,7 +1124,7 @@ pub fn contacts(engine: Eng) -> Vec<ContactDto> {
     engine
         .contacts()
         .into_iter()
-        .map(|c| ContactDto { id_hex: c.id_hex, name: c.name, verify_hex: c.verify_hex })
+        .map(|c| ContactDto { id_hex: c.id_hex, name: c.name, verify_hex: c.verify_hex, emoji: c.emoji, avatar: c.avatar, bio: c.bio, link: c.link })
         .collect()
 }
 

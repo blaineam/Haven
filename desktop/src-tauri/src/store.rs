@@ -107,6 +107,18 @@ pub struct Contact {
     pub id_hex: String,
     pub name: String,
     pub verify_hex: String,
+    /// Appearance from their signed profile card (hello handshake): chosen emoji, avatar as a
+    /// `data:image/jpeg;base64,…` URL, and the card's bio/link. Empty until their card is seen —
+    /// iOS/macOS have stored these since the card shipped (ContactsStore.setCard); desktop dropped
+    /// the blob, which is why every peer rendered as initials.
+    #[serde(default)]
+    pub emoji: String,
+    #[serde(default)]
+    pub avatar: String,
+    #[serde(default)]
+    pub bio: String,
+    #[serde(default)]
+    pub link: String,
 }
 
 /// One configured relay's metadata (deactivate-not-erase model — mirrors iOS `RelayEntry`).

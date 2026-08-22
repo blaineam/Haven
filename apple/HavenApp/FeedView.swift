@@ -2838,14 +2838,18 @@ final class FeedStore: ObservableObject {
         guard dmTo.count == 64, !body.isEmpty else { return }
         let name = ContactsStore.shared.name(forNodePrefix: dmTo) ?? "Friend"
         let cid = startDM(with: dmTo, name: name)
-        // Author into the DM circle only (not the active feed circle).
-        if let social,
-           let env = try? social.post(circleId: cid, body: body, media: refs, music: nil,
-                                      retentionSecs: nil, story: false, muteVideo: false, createdAt: now()) {
-            broadcastEvent(cid, env)
-            for r in refs { MediaBackupQueue.shared.enqueue(r, circleId: cid, social: social) }
-            persist(); refresh()
-        }
+        // Through `sendMessage`, the SAME path the UI uses, rather than calling `social.post`
+        // directly. The driver's whole contract is that a driven action is indistinguishable from a
+        // clicked one, and this one was not: it passed the raw refs, so it skipped
+        // `withPreviewMarkers`/`withThumbMarkers` and a QA-sent DM carried no companion markers at
+        // all. The satellite DM lane therefore failed against a product that attaches them
+        // correctly — the harness was testing a path no user can take.
+        //
+        // It also picks up what the hand-rolled version had drifted from: the authored-media
+        // enqueue, the roster publish + relay reannounce that heal a 403-before-roster on a media
+        // DM, and the share-suggestion donation.
+        _ = sendMessage(to: cid, body, media: refs, music: nil)
+        persist(); refresh()
         HavenLog.net("matrix-qa dm to=\(dmTo.prefix(8)) circle=\(cid.prefix(24)) body=\(body.prefix(40)) media=\(refs.count)")
     }
 

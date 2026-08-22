@@ -530,7 +530,23 @@ async function main() {
       if (lane.dm && !B) continue;
 
       await op(devices[author], { op: 'link_constraint', level: 'ultra' }, 2500);
-      const satPhoto = devices[author].stage(PHOTO, `qa-sat-${author}-${lane.id}.jpg`);
+      // DISTINCT BYTES PER SCENARIO, or the assertion below is meaningless.
+      //
+      // Media refs are content-addressed, so staging the same fixture twice produces the SAME ref —
+      // and a receiver that legitimately fetched those bytes in an earlier lane still holds them.
+      // `holds back the full photo` then reports a leak that never happened: it did observe the blob
+      // present, just not because anything crossed the constrained link. Exactly that fired a RED
+      // against My Circle while the product was behaving correctly.
+      //
+      // A JPEG tolerates trailing bytes after its EOI marker, so a unique tag changes the hash while
+      // leaving a decodable image (the preview minter still decodes it, which is the point).
+      const laneBytes = Buffer.concat([
+        readFileSync(PHOTO),
+        Buffer.from(`\n<<haven-qa:${MARKER}:${author}:${lane.id}>>`),
+      ]);
+      const laneSrc = join(OUT, `sat-${author}-${lane.id}.jpg`);
+      writeFileSync(laneSrc, laneBytes);
+      const satPhoto = devices[author].stage(laneSrc, `qa-sat-${author}-${lane.id}.jpg`);
       await op(devices[author], lane.dm
         ? { op: 'dm', dm_to: B, body: SAT, media: 'photo', photo_path: satPhoto }
         : { op: 'post', body: SAT, media: 'photo', photo_path: satPhoto, circle_id: lane.circle() }, 12_000);
@@ -549,12 +565,21 @@ async function main() {
       //    gate looks identical to success from the receiving end.
       const dumps = await Promise.all(constrainedAudience.map(async (d) => ({ d, j: await freshDump(devices[d]) })));
       let leaked = null;
+      let arrived = 0;
       for (const { d, j } of dumps) {
         const p = find(j, SAT); const v = parsePreview(p);
+        if (v && presentRef(p, v.preview)) arrived++;
         if (v && presentRef(p, v.content)) leaked = d;
       }
-      score(`satellite holds back the full photo (${author}→)${lane.label}`, leaked === null,
-        leaked ? `full media reached ${leaked} while the link was ultra-constrained` : 'preview only, as designed');
+      // A negative test that passes when NOTHING arrived is worthless — and it fired exactly that
+      // way: the DM lane reported "preview only, as designed" while the DM had not reached anyone
+      // at all. Nothing crossed, so of course the full photo did not. Require the preview to have
+      // landed somewhere before this can mean anything.
+      score(`satellite holds back the full photo (${author}→)${lane.label}`,
+        arrived > 0 && leaked === null,
+        leaked ? `full media reached ${leaked} while the link was ultra-constrained`
+               : arrived === 0 ? 'INCONCLUSIVE — no preview arrived anywhere, so there was nothing to hold back'
+               : 'preview only, as designed');
 
       // 4. Back in coverage — the deferred half must complete ON ITS OWN, with no further action.
       await op(devices[author], { op: 'link_constraint', level: 'auto' }, 3000);

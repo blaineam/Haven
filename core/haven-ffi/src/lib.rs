@@ -2327,6 +2327,9 @@ struct ShadowTree {
     /// This is the second all-present-positive gate on top of `circle_fully_mls_capable`, so a member
     /// who never fetched its Welcome can never strand the circle in the flipped state.
     joined: std::collections::HashSet<[u8; 32]>,
+    /// Which genesis each joined device announced (JOIN ack `gh`). A device not on the winning
+    /// genesis is on the losing branch of an election fork; the committer re-Welcomes it. Not persisted.
+    joined_genesis: std::collections::HashMap<[u8; 32], [u8; 32]>,
     /// MLS M3: the secret keying root this device uses when it is the committer (creator/admin) —
     /// derived from its DEVICE seed (§ leaf-secret secrecy), so leaf secrets + the genesis init are
     /// unknowable to a removed device even though the commit is public. Set at genesis build; unused
@@ -2348,6 +2351,7 @@ impl ShadowTree {
             my_genesis: None,
             emit_cache: Vec::new(),
             joined: std::collections::HashSet::new(),
+            joined_genesis: std::collections::HashMap::new(),
             my_secret_root: None,
             genesis_devices: Vec::new(),
         }
@@ -3137,10 +3141,33 @@ fn tree_leaf_accounts(tree: &treekem::RatchetTree) -> Vec<[u8; 32]> {
 /// genesis that is a strict SUPERSET, and that larger genesis wins on every device — so the newcomer
 /// is never stranded behind a smaller stale genesis. (The M2 `mls_shadow_status` telemetry keeps its
 /// own pure `select_chain` view, unchanged, so nothing about the shadow soak signal moves.)
+/// How many chained commits extend `tip` in this shadow store (longest path).
+///
+/// The genesis election needs it: every device of the creator ACCOUNT validly authors a competing
+/// genesis (the authority check binds to the account, and multi-master means several devices race
+/// at circle birth), so a store commonly holds 2–4 candidates. Electing by (adds, hash) alone
+/// ignored which candidate the chain actually GREW on — a committer's epoch-2 Add extends one
+/// specific genesis, and when that one lost the election every member's chain walk found no child
+/// of the winner and froze at epoch 1, while any device holding a direct Welcome onto the grown
+/// branch entered at epoch 2. One leg at 778, three at 777, both directions dark: the gauntlet's
+/// recurring fork. Chain height is shared state (same commit set ⇒ same heights on every leg), so
+/// preferring it keeps the election deterministic AND pointed at the branch that is actually alive.
+fn keying_chain_height(shadow: &ShadowTree, tip: [u8; 32], epoch: u64) -> usize {
+    let mut best = 0usize;
+    for (h, b) in shadow.commits.iter() {
+        let Ok(c) = treekem::Commit::from_bytes(b) else { continue };
+        if c.epoch == epoch + 1 && c.parent_commit_hash == tip {
+            best = best.max(1 + keying_chain_height(shadow, *h, c.epoch));
+        }
+    }
+    best
+}
+
 fn keying_winning_genesis(shadow: &ShadowTree) -> Option<([u8; 32], Vec<u8>)> {
     let gid = &shadow.group_id;
     let parent = shadow_genesis_parent(gid);
-    let mut best: Option<(usize, [u8; 32], Vec<u8>)> = None; // (leaf count, hash, bytes)
+    // (chain height, leaf count, hash) — height FIRST. See keying_chain_height for why.
+    let mut best: Option<(usize, usize, [u8; 32], Vec<u8>)> = None;
     for b in shadow.commits.values() {
         let Ok(c) = treekem::Commit::from_bytes(b) else { continue };
         if c.epoch != 1 || c.parent_commit_hash != parent || &c.group_id != gid {
@@ -3152,15 +3179,20 @@ fn keying_winning_genesis(shadow: &ShadowTree) -> Option<([u8; 32], Vec<u8>)> {
             .filter(|p| matches!(p.body, treekem::ProposalBody::Add { .. }))
             .count();
         let h = treekem::commit_hash(b);
+        let height = keying_chain_height(shadow, h, 1);
         let better = match &best {
             None => true,
-            Some((bn, bh, _)) => adds > *bn || (adds == *bn && h > *bh),
+            Some((bht, bn, bh, _)) => {
+                height > *bht
+                    || (height == *bht && adds > *bn)
+                    || (height == *bht && adds == *bn && h > *bh)
+            }
         };
         if better {
-            best = Some((adds, h, b.clone()));
+            best = Some((height, adds, h, b.clone()));
         }
     }
-    best.map(|(_, h, b)| (h, b))
+    best.map(|(_, _, h, b)| (h, b))
 }
 
 /// This device's keying state after replaying the tree commit chain from its Welcome (§4.5, §5.1).
@@ -3490,6 +3522,7 @@ fn receive_mls_join(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, 
     let gid = circle_id.as_bytes().to_vec();
     let shadow = st.shadow_trees.entry(circle_id).or_insert_with(|| ShadowTree::new(gid));
     shadow.joined.insert(did);
+    shadow.joined_genesis.insert(did, gh);
     Ok(false)
 }
 
@@ -3932,6 +3965,46 @@ fn mls_refresh_keying(st: &mut NetState, idx: usize) -> Option<u64> {
         }
     }
     st.circles[idx].mls_live_epoch = Some(content_epoch);
+    // FORK HEALING (committer only). A JOIN ack names the genesis its sender is on; any admitted
+    // device announcing a DIFFERENT genesis than my current tip's chain joined the LOSING branch of
+    // a genesis election and holds a Welcome my epoch chain will never reach. It seals at its branch
+    // epoch, I seal at mine, and both sides park each other's content forever — the gauntlet's
+    // signature (one leg at 778, three at 777, every cross-account step red both ways).
+    //
+    // The M4 re-Welcome (`mls_rewelcome_device`) already hands a device a self-contained Welcome at
+    // MY live epoch; it was only ever invoked manually, for sleepers. Fire it automatically here for
+    // every join-acked device whose genesis disagrees with the winning one, and for any device whose
+    // announced genesis I don't even hold. Once per divergent (device, genesis) sighting: the
+    // re-Welcome rides the next sync bundle, the laggard's Welcome-first entry door then takes the
+    // HIGHER epoch, and the fleet converges instead of splitting.
+    if mls_am_committer(st, idx) {
+        let winning = {
+            let shadow = st.shadow_trees.get(&st.circles[idx].id.clone());
+            shadow.and_then(keying_winning_genesis).map(|(h, _)| h)
+        };
+        if let Some(win) = winning {
+            let divergent: Vec<[u8; 32]> = st
+                .shadow_trees
+                .get(&st.circles[idx].id.clone())
+                .map(|sh| {
+                    sh.joined_genesis
+                        .iter()
+                        .filter(|(_, gh)| **gh != win)
+                        .map(|(did, _)| *did)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for did in divergent {
+                if mls_rewelcome_device(st, idx, &did) {
+                    // Record the heal against the winning tip so we do not re-emit every refresh:
+                    // point the device at the genesis we just welcomed it toward.
+                    if let Some(sh) = st.shadow_trees.get_mut(&st.circles[idx].id.clone()) {
+                        sh.joined_genesis.insert(did, win);
+                    }
+                }
+            }
+        }
+    }
     Some(content_epoch)
 }
 

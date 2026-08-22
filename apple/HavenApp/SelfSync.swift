@@ -419,7 +419,18 @@ final class SelfSyncCoordinator {
         // is what lets a linked Mac reach friends it never contacted directly — it inherits their device ids
         // from the phone. Idempotent + version-checked in the engine, so a stale roster can't roll anything back.
         if let social = social {
-            for e in live where e.key.hasPrefix("roster:") { _ = social.ingestRosterWire(wire: e.value) }
+            // A roster arriving here is very often MY OWN account's — a sibling device registering.
+            // That advances the circle's epoch just as a contact's roster change does, so it needs the
+            // same re-seal, and it was the door the first fix missed: the re-seal was wired only into
+            // the CONTACT pull path, while a sibling's registration comes through self-sync. The
+            // symptom was an Android leg parked on `@…777` while everyone else had moved to `@…778`.
+            var rosterChanged = false
+            for e in live where e.key.hasPrefix("roster:") {
+                if social.ingestRosterWireStatus(wire: e.value) > 0 { rosterChanged = true }
+            }
+            if rosterChanged {
+                NotificationCenter.default.post(name: SharedStore.rosterEpochChangedNotification, object: nil)
+            }
         }
 
         // Circles: reconstruct each synced circle — create it, register every member's bundle

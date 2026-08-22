@@ -4752,7 +4752,18 @@ object HavenNet : InboundListener {
      *  then refresh our relay's circle authorization — else a friend on the per-device transport connects
      *  with a device id our member list doesn't recognize and every fetch is "forbidden". */
     private fun handleDeviceRosterAnnounce(body: ByteArray) {
-        if (runCatching { social.ingestRosterWire(body) }.getOrDefault(false)) authorizeMembership()
+        val status = runCatching { social.ingestRosterWireStatus(body) }.getOrDefault((-1).toByte())
+        if (status >= 0) authorizeMembership()
+        // CHANGED, not merely known: the epoch moved, so re-seal history under it. An announce can
+        // carry a sibling's registration, same as the self-sync path.
+        if (status > 0) resealAfterEpochChange()
+    }
+
+    /** `resealAfterEpochChange` for callers outside this object (SelfSyncCoordinator).
+     *  Explicit `Unit` on purpose: an expression body here made the inferred type participate in
+     *  overload resolution elsewhere in the file and broke inference at unrelated call sites. */
+    internal fun resealAfterEpochChangePublic(): Unit {
+        resealAfterEpochChange()
     }
 
     fun stopHosting() {

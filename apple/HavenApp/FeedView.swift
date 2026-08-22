@@ -5276,9 +5276,15 @@ final class FeedStore: ObservableObject {
     /// connects with a device id our relay's member list doesn't recognize and every fetch is "forbidden".
     private func handleDeviceRosterAnnounce(_ payload: Data) {
         guard let social else { return }
-        if social.ingestRosterWire(wire: payload) {
+        let status = social.ingestRosterWireStatus(wire: payload)
+        if status >= 0 {
             RelayHost.shared.authorizeMembership()   // authorize the newly-learned device ids at our relay
             dialTargetsCache.removeAll()             // newly-learned device ids must be dialable now
+        }
+        // CHANGED, not merely known: the epoch moved, so re-seal my history under it. Same reason as
+        // the self-sync path — a roster announce can carry a sibling's registration.
+        if status > 0 {
+            NotificationCenter.default.post(name: SharedStore.rosterEpochChangedNotification, object: nil)
         }
     }
 

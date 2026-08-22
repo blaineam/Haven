@@ -324,9 +324,18 @@ object SelfSyncCoordinator {
         // device ids from a sibling. Idempotent + version-checked in the engine, so a stale roster can't roll
         // anything back. Additive (roster: is never in dynamicPrefixes, so it's never tombstoned).
         if (social != null) {
+            // Usually MY OWN account's roster — a sibling device registering — which advances the
+            // circle epoch exactly as a contact's change does and needs the same re-seal. This is the
+            // door the first fix missed: the trigger was wired only into the CONTACT pull path, while
+            // a sibling's registration arrives here. Symptom was this leg parked on `@…777` while the
+            // rest of the fleet had moved to `@…778`.
+            var rosterChanged = false
             for (e in live) if (e.key.startsWith("roster:")) {
-                runCatching { social.ingestRosterWire(e.value) }
+                if (runCatching { social.ingestRosterWireStatus(e.value) }.getOrDefault((-1).toByte()) > 0) {
+                    rosterChanged = true
+                }
             }
+            if (rosterChanged) HavenNet.resealAfterEpochChangePublic()
         }
 
         // Contact removals — LWW by timestamp, applied BEFORE the upsert so a removed contact is

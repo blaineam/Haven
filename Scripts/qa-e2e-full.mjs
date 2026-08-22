@@ -516,6 +516,7 @@ async function main() {
       { id: 'dm', label: ' [dm]', authors: ['ios'], dm: true, circle: () => undefined },
     ];
 
+    let laneSeq = 0;   // every scenario gets its own resample width -> its own content ref
     for (const lane of LANES) {
     for (const author of lane.authors.filter((a) => devices[a])) {
       const SAT = `${MARKER}_Sat_${author}${lane.id === 'mls' ? '' : '_' + lane.id}`;
@@ -530,22 +531,22 @@ async function main() {
       if (lane.dm && !B) continue;
 
       await op(devices[author], { op: 'link_constraint', level: 'ultra' }, 2500);
-      // DISTINCT BYTES PER SCENARIO, or the assertion below is meaningless.
+      // DISTINCT PIXELS PER SCENARIO, or the assertion below is meaningless.
       //
       // Media refs are content-addressed, so staging the same fixture twice produces the SAME ref —
       // and a receiver that legitimately fetched those bytes in an earlier lane still holds them.
-      // `holds back the full photo` then reports a leak that never happened: it did observe the blob
-      // present, just not because anything crossed the constrained link. Exactly that fired a RED
-      // against My Circle while the product was behaving correctly.
+      // `holds back the full photo` then reports a leak that never happened: it observed the blob
+      // present, just not because anything crossed the constrained link.
       //
-      // A JPEG tolerates trailing bytes after its EOI marker, so a unique tag changes the hash while
-      // leaving a decodable image (the preview minter still decodes it, which is the point).
-      const laneBytes = Buffer.concat([
-        readFileSync(PHOTO),
-        Buffer.from(`\n<<haven-qa:${MARKER}:${author}:${lane.id}>>`),
-      ]);
+      // Appending a unique tag after the JPEG's EOI is NOT enough, which cost a run to learn: the
+      // clients decode and RE-ENCODE before content-addressing, so anything outside the image data
+      // is normalised away and both lanes produced `img_8bc2ad01…` again. The pixels themselves
+      // have to differ. Resampling to a per-scenario width is a one-liner that keeps a real
+      // photograph (big enough to need a preview at all) while guaranteeing a distinct ref.
       const laneSrc = join(OUT, `sat-${author}-${lane.id}.jpg`);
-      writeFileSync(laneSrc, laneBytes);
+      const width = 1200 - laneSeq * 7;   // distinct per scenario, still a full-size photo
+      laneSeq += 1;
+      execFileSync('sips', ['--resampleWidth', String(width), PHOTO, '--out', laneSrc], { stdio: 'ignore' });
       const satPhoto = devices[author].stage(laneSrc, `qa-sat-${author}-${lane.id}.jpg`);
       await op(devices[author], lane.dm
         ? { op: 'dm', dm_to: B, body: SAT, media: 'photo', photo_path: satPhoto }

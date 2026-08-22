@@ -2395,10 +2395,23 @@ final class FeedStore: ObservableObject {
     ///   circle_invite|file|music_post|mark_read|dump", …}` — every op answers with a fresh
     ///   `qa-dump.json` next to the drop file.
     private var matrixQaTimer: Timer?
+    /// Successful dump writes, and when the last one landed. See `dump_seq` in the payload.
+    nonisolated(unsafe) static var qaDumpSeq: Int = 0
+    nonisolated(unsafe) static var qaLastDumpAt = Date.distantPast
+
     private func startMatrixQaPoller() {
         matrixQaTimer?.invalidate()
         matrixQaTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.processMatrixQaDropFile() }
+            Task { @MainActor in
+                guard let self else { return }
+                self.processMatrixQaDropFile()
+                // HEARTBEAT. The orchestrator's view of this device must not depend on a command
+                // arriving: a command can be lost (its writer truncates before writing, so a poll
+                // landing in that window reads an empty file), and a failed dump write leaves the
+                // file frozen with nothing to say so. Refreshing on a timer decouples the two, so a
+                // lost command costs one interval rather than every assertion that follows.
+                if Date().timeIntervalSince(Self.qaLastDumpAt) >= 5 { self.qaWriteDump() }
+            }
         }
         // Also honor one-shot launch env (relaunch-driven automation).
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
@@ -2996,16 +3009,30 @@ final class FeedStore: ObservableObject {
             // works — the field failure was both sides connected with zero audio either way — so QA
             // asserts on bytes actually received (CallManager.qaMediaSnapshot, refreshed per dump).
             "call": CallManager.shared.qaSnapshot(),
+            // Liveness: strictly increasing while the driver is healthy. The orchestrator watches it
+            // to tell a FROZEN dump apart from a device that genuinely received nothing — they are
+            // indistinguishable from the file alone, and they need opposite fixes.
+            "dump_seq": Self.qaDumpSeq,
             // What the engine is HOLDING BACK: parked (received-but-unopenable) envelopes per
             // circle, plus the rosters we know. A short feed alone cannot tell "never arrived" from
             // "arrived and could not be opened", and the two have opposite fixes.
             "delivery": (try? JSONSerialization.jsonObject(with: Data(delivery.utf8))) ?? [:],
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: dump, options: [.sortedKeys]) else {
-            HavenLog.net("matrix-qa dump: JSON encode failed")
+            HavenLog.net("matrix-qa dump: JSON encode failed — dump is now STALE")
             return
         }
-        try? data.write(to: dir.appendingPathComponent("qa-dump.json"), options: .atomic)
+        do {
+            try data.write(to: dir.appendingPathComponent("qa-dump.json"), options: .atomic)
+            Self.qaDumpSeq += 1
+            Self.qaLastDumpAt = Date()
+        } catch {
+            // Was `try?`. A failed write left the file frozen at its last good state while the app
+            // carried on perfectly, and the orchestrator — which can only poll that file — read every
+            // later assertion against this device as "never". Sixteen minutes of that turned one
+            // stalled writer into twenty delivery failures that never happened.
+            HavenLog.net("matrix-qa dump WRITE FAILED: \(error.localizedDescription) — dump is now STALE")
+        }
         HavenLog.net("matrix-qa dump written posts=\(min(posts.count, 100)) dms=\(dms.count) circles=\(circles.count)")
     }
     #endif

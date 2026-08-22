@@ -7671,6 +7671,12 @@ impl Engine {
     }
 
     pub async fn poll_mailbox(self: &Arc<Self>) {
+        // THE EPOCH MOVED -> re-seal my history under it (see `take_epoch_moved`). Asked directly
+        // rather than inferred from a roster change, which is only a proxy and missed the rotation
+        // and tree-commit cases.
+        if self.social.take_epoch_moved() {
+            self.reseal_after_epoch_change();
+        }
         let mut changed = false;
         // Content-envelope seen-marks, applied only AFTER persist() lands the engine state
         // holding their events (see the tail of this function).

@@ -4643,6 +4643,18 @@ final class FeedStore: ObservableObject {
     /// sweep of all circles after the current pass (and its marks) complete.
     @discardableResult
     @MainActor func pullMailbox(circleIds ids: [String]) async -> Int {
+        // THE EPOCH MOVED -> re-seal my history under it, so a member who joined or advanced past
+        // the old epoch can still read what I already posted. Asked of the engine directly rather
+        // than inferred from a roster change: the epoch also advances on periodic rotation and on
+        // tree commits carrying no roster change, and those cases stranded peers on content they
+        // could never open. Consuming, so it fires once per advance.
+        if social?.takeEpochMoved() == true {
+            let now = Date()
+            if now.timeIntervalSince(lastEpochReseal) > 30 {
+                lastEpochReseal = now
+                backfillMailbox(circleIds: (social?.circles() ?? []).map(\.id))
+            }
+        }
         guard let social, ids.contains(where: { SharedStore.hasMailbox($0) }) else { return 0 }
         if pullMailboxInFlight {
             pullMailboxQueued = true

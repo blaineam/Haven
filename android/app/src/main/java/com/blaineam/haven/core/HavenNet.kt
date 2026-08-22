@@ -5048,6 +5048,12 @@ object HavenNet : InboundListener {
     /** Poll every circle's mailbox; ingest envelopes we haven't seen. */
     suspend fun pollMailbox() {
         if (!ready) return
+        // THE EPOCH MOVED -> re-seal my history under it, so anyone who joined or advanced past the
+        // old epoch can still read what I already posted. Asked of the engine directly rather than
+        // inferred from a roster change: the epoch also advances on periodic rotation and on tree
+        // commits that carry no roster change, and those left peers holding envelopes they could
+        // never open. Consuming, so it fires once per advance.
+        if (runCatching { social.takeEpochMoved() }.getOrDefault(false)) resealAfterEpochChange()
         // SINGLE-FLIGHT (iOS parity): overlapping sweeps both LIST before either finishes
         // marking, so they GET + ingest the same backlog twice — with a big backlog that
         // stacks duplicate work faster than it drains (the 55 GB relay-hosting-Mac spiral).

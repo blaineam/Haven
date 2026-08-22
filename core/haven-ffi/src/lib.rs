@@ -1593,6 +1593,9 @@ struct RatchetLanes {
 }
 
 struct Circle {
+    /// Set when this circle's epoch ADVANCES, cleared by `take_epoch_moved`. Deliberately absent
+    /// from `PersistCircle`: it is a signal about THIS session, and a restart re-seals anyway.
+    epoch_moved: bool,
     id: String,
     name: String,
     members: Vec<HavenId>,
@@ -1770,6 +1773,7 @@ static TEST_CLOCK_SKEW: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 impl Circle {
     fn bare(id: String, name: String) -> Self {
         Circle {
+            epoch_moved: false,
             id,
             name,
             members: vec![],
@@ -1819,6 +1823,7 @@ impl Circle {
     fn rotate_epoch(&mut self) {
         self.ensure_epoch();
         self.my_epoch += 1;
+        self.epoch_moved = true;
         self.my_epoch_keys.insert(self.my_epoch, new_epoch_key());
         // ANY rotation restarts the periodic window — a membership change already gave us a fresh
         // epoch, so the timer shouldn't immediately hand out another.
@@ -3878,6 +3883,13 @@ fn mls_refresh_keying(st: &mut NetState, idx: usize) -> Option<u64> {
         return None;
     };
     let content_epoch = MLS_EPOCH_BASE + cur.epoch;
+    // The TREE drives the epoch on a keying-live circle — `rotate_epoch` is gated off there — so this
+    // is where "the epoch moved" actually happens for MLS, and it is the case that was stranding
+    // peers: content sealed at N while a member who joined or advanced sits at N+1, holding envelopes
+    // it can never open. Flag it so the client re-seals its history under the new epoch.
+    if st.circles[idx].my_epoch < content_epoch && !st.circles[idx].my_epoch_keys.contains_key(&content_epoch) {
+        st.circles[idx].epoch_moved = true;
+    }
     let me_acct = st.me().node_id_bytes();
     // Derive the account-scoped content key for every account still present in the tree. Every member
     // holds the same `sender_root`, so every member computes the identical key for each account.
@@ -5364,6 +5376,29 @@ impl HavenSocial {
     /// Answers only "does the engine now know this roster?". Callers that need to know whether it
     /// CHANGED — to keep querying other relays for a newer copy, or to re-seal history under the new
     /// epoch — must use [`Self::ingest_roster_wire_status`].
+    /// Has any circle's epoch ADVANCED since the last call? Consumes the flag.
+    ///
+    /// Clients poll this and, when true, re-seal their own history under the new epoch (the full
+    /// `export_my_envelopes` bundle). Anyone who joined or advanced past the old epoch can then read
+    /// what was sealed under it; without that they hold content they can never open, and it looks
+    /// exactly like a delivery failure from both ends.
+    ///
+    /// This replaces triggering on a roster change, which was only a PROXY for the epoch moving. The
+    /// proxy passed in isolation and then missed in a longer run — the epoch also advances on
+    /// periodic rotation and on tree commits carrying no roster change, and each of those stranded a
+    /// peer on 27 unopenable envelopes. Ask the real question instead of a correlated one.
+    pub fn take_epoch_moved(&self) -> bool {
+        let mut st = self.state.lock().unwrap();
+        let mut moved = false;
+        for c in st.circles.iter_mut() {
+            if c.epoch_moved {
+                c.epoch_moved = false;
+                moved = true;
+            }
+        }
+        moved
+    }
+
     pub fn ingest_roster_wire(&self, wire: Vec<u8>) -> bool {
         self.ingest_roster_wire_status(wire) >= 0
     }

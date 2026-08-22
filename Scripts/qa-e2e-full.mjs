@@ -51,9 +51,33 @@ function log(m) { const s = `[e2e ${new Date().toISOString().slice(11, 19)}] ${m
 function sh(cmd, args, opts = {}) { return execFileSync(cmd, args, { encoding: 'utf8', ...opts }); }
 function shOk(cmd, args, opts = {}) { const r = spawnSync(cmd, args, { encoding: 'utf8', ...opts }); return r.status === 0 ? (r.stdout || '') : null; }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+// FAIL FAST (E2E_FAIL_FAST=1, on by default for the satellite step — see below).
+//
+// The satellite legs are SLOW ON PURPOSE: they model a link that is genuinely slow in the real
+// world, so their budgets are minutes, not seconds. That makes running to completion after the
+// first red an expensive way to learn nothing — the remaining legs mostly re-measure the same
+// broken thing, and a full satellite sweep costs ~15 minutes of wall clock before anyone can
+// start on the failure. Stopping at the first red gets the diagnosis started immediately, with
+// the fleet still in the exact state that produced it (dumps fresh, logs hot, nothing torn down).
+//
+// Off by default for the whole-suite run, where a complete matrix is the point.
+const FAIL_FAST = process.env.E2E_FAIL_FAST === '1'
+  || (process.env.E2E_FAIL_FAST !== '0' && (process.env.E2E_STEPS || '').includes('satellite'));
+
 function score(name, ok, detail = '') {
   REPORT.push({ name, ok, detail });
   log(`${ok ? 'GREEN' : 'RED  '} ${name}${detail ? ` — ${detail}` : ''}`);
+  if (!ok && FAIL_FAST) {
+    log('');
+    log(`FAIL-FAST: stopping at the first red so it can be worked NOW, with the fleet still in`);
+    log(`the state that produced it. Set E2E_FAIL_FAST=0 to run the whole matrix instead.`);
+    log('');
+    log(`  failed: ${name}${detail ? ` — ${detail}` : ''}`);
+    log(`  passed: ${REPORT.filter((r) => r.ok).length} before this`);
+    log(`  fleet:  LEFT RUNNING — dumps are fresh, logs are hot, nothing has been torn down`);
+    writeReport();
+    process.exit(1);
+  }
 }
 
 // ── device handles ──────────────────────────────────────────────────────────
@@ -162,7 +186,7 @@ let lastBudget = 0;
 // at a 375s budget, and yet the desktop dump held ALL THREE posts with media_present=true once the
 // run ended. It was never failing to receive; it was receiving after the budget. 2.5x was not
 // enough headroom for that, so it is 6x — still a bound, just an honest one.
-const SLOW_LEG = { desktop: 6, 'mac-stub': 2 };
+const SLOW_LEG = { desktop: 6, 'mac-stub': 2, android: Number(process.env.E2E_ANDROID_SLOW || 1) };
 
 const budgetFor = (dev, base) => Math.round(base * (SLOW_LEG[dev?.label] || 1));
 
@@ -620,7 +644,9 @@ async function main() {
   finish();
 }
 
-function finish() {
+/// The markdown report, split out of `finish` so a FAIL-FAST exit still leaves one behind —
+/// a run that stopped early is exactly when you want the partial matrix on disk.
+function writeReport() {
   const pass = REPORT.filter((r) => r.ok).length, fail = REPORT.length - pass;
   const md = [
     `# Haven full E2E — ${MARKER}`, '',
@@ -633,6 +659,14 @@ function finish() {
   ].join('\n');
   writeFileSync(join(OUT, 'E2E_REPORT.md'), md);
   console.log('\n' + md);
+}
+
+function finish() {
+  writeReport();
+  // Recomputed here, not borrowed from writeReport: those locals moved when the report was split
+  // out for FAIL-FAST, and a stale reference would only blow up at the very END of a long run —
+  // after every expensive assertion had already been paid for.
+  const pass = REPORT.filter((r) => r.ok).length, fail = REPORT.length - pass;
 
   // history + regression check (>2x latency vs last green run of the same step+device)
   let regression = false;

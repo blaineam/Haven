@@ -445,6 +445,10 @@ fn write_dump(engine: &Arc<Engine>) {
         // could not be opened", and those have opposite fixes.
         "delivery": serde_json::from_str::<serde_json::Value>(&engine.diag_delivery_json())
             .unwrap_or(serde_json::Value::Null),
+        // Fork forensics: the stored commit chain per circle. Session-only state, so the dump is the
+        // ONLY window into it — offline analysis of persisted files sees an empty chain.
+        "tree_chain": serde_json::from_str::<serde_json::Value>(&engine.debug_tree_chain_json())
+            .unwrap_or(serde_json::Value::Null),
         // Liveness: strictly increasing while the driver is healthy. A stuck value means the file
         // is frozen, not that the fleet is quiet.
         "dump_seq": DUMP_WRITES.load(Ordering::Relaxed),

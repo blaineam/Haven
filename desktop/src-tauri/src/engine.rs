@@ -10732,6 +10732,10 @@ impl Engine {
         self.social.diag_delivery_json()
     }
 
+    pub fn debug_tree_chain_json(&self) -> String {
+        self.social.debug_tree_chain_json()
+    }
+
     pub fn qa_call_state(&self) -> Option<(bool, bool)> {
         let v = self.qa_call.load(std::sync::atomic::Ordering::Relaxed);
         if v & 0b100 == 0 { return None; }

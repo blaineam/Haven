@@ -2909,13 +2909,14 @@ final class FeedStore: ObservableObject {
             await MainActor.run { [weak self] in
                 guard let self, self.qaDumpGeneration == gen else { return }
                 self.qaWriteDumpFile(snapshot, accountHex: social.myNodeHex(), tsMs: nowMs,
-                                     delivery: social.diagDeliveryJson())
+                                     delivery: social.diagDeliveryJson(),
+                                     treeChain: social.debugTreeChainJson())
             }
         }
     }
 
     private func qaWriteDumpFile(_ snapshot: [QaCircleSnapshot], accountHex: String, tsMs: UInt64,
-                                 delivery: String) {
+                                 delivery: String, treeChain: String) {
         guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
         #if os(iOS)
         let device = "ios"
@@ -3017,6 +3018,8 @@ final class FeedStore: ObservableObject {
             // circle, plus the rosters we know. A short feed alone cannot tell "never arrived" from
             // "arrived and could not be opened", and the two have opposite fixes.
             "delivery": (try? JSONSerialization.jsonObject(with: Data(delivery.utf8))) ?? [:],
+            // Fork forensics — session-only chain, dump is the only window (see desktop twin).
+            "tree_chain": (try? JSONSerialization.jsonObject(with: Data(treeChain.utf8))) ?? [],
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: dump, options: [.sortedKeys]) else {
             HavenLog.net("matrix-qa dump: JSON encode failed — dump is now STALE")

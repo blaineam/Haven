@@ -433,6 +433,8 @@ object QaDriver {
         // from "arrived and could not be opened", and those have opposite fixes — this leg once
         // read as a delivery failure while sitting on 8 parked envelopes.
         o.put("delivery", runCatching { JSONObject(social.diagDeliveryJson()) }.getOrNull())
+        // Fork forensics — session-only chain, dump is the only window (see desktop twin).
+        o.put("tree_chain", runCatching { org.json.JSONArray(social.debugTreeChainJson()) }.getOrNull())
 
         // App-owned file in Download/ (allowed on scoped storage); tmp+rename keeps reads whole.
         val tmp = File(downloads, dumpFile.name + ".tmp")

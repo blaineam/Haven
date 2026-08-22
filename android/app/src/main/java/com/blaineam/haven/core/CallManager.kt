@@ -77,6 +77,15 @@ object CallManager {
     private var screenTrack: VideoTrack? = null   // the shared "screen0" track added to every peer
 
     private var sessionId: String = ""
+
+    /// QA visibility ONLY. A leg stuck in a call reports `in_call: true` and nothing else, which is
+    /// not enough to tell WHY: whether it is in the session that ended, in a different one, or how
+    /// it joined at all. Four attempts at the stuck-call bug were reasoned from source because these
+    /// two facts were not observable.
+    val qaSessionId: String get() = sessionId
+    @Volatile var qaLastCallEvent: String = "none"
+        private set
+    fun qaNoteCallEvent(what: String) { qaLastCallEvent = what }
     private var isCaller = false
     private var mediaStarted = false
     private val roster = HashSet<String>()                 // includes me
@@ -392,7 +401,14 @@ object CallManager {
     }
 
     private fun handle(type: Int, sealedBody: ByteArray) {
-        val body = openCallFrame(type, sealedBody) ?: return
+        val body = openCallFrame(type, sealedBody) ?: run {
+            // A frame that arrives and CANNOT BE OPENED is invisible otherwise — it looks identical
+            // to one that never arrived, which is precisely the ambiguity that made the stuck-call
+            // bug unreadable from the outside.
+            qaNoteCallEvent("recv-unopenable:$type")
+            return
+        }
+        qaNoteCallEvent("recv:$type")
         when (type) {
             CallWire.GROUP_INVITE -> handleGroupInvite(body)
             CallWire.INVITE -> CallWire.parseInviteName(body)?.let { (from, name) ->

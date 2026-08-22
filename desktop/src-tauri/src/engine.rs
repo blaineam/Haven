@@ -383,6 +383,11 @@ pub struct Engine {
     qa_call: std::sync::atomic::AtomicU8,
     /// When the epoch-change re-seal last ran, so a burst of roster changes coalesces into one pass.
     last_epoch_reseal: StdMutex<u64>,
+    /// QA visibility ONLY: the last call frame this engine handled (e.g. "recv:35"), and the session
+    /// the webview says it is in. `in_call` alone cannot distinguish a leg that ignored a teardown
+    /// from one that is in a DIFFERENT session — every handler is gated on the session id matching.
+    qa_last_call_event: StdMutex<String>,
+    qa_call_session: StdMutex<String>,
     /// The account master seed — `Some` on a primary/legacy device, `None` on a SEEDLESS device
     /// (seed-drop S4). Making it an `Option` turns every account-key use into a compile-checked
     /// decision, so a missed seedless guard is a build error, not a runtime forge/panic.
@@ -703,6 +708,8 @@ impl Engine {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
             qa_call: std::sync::atomic::AtomicU8::new(0),
             last_epoch_reseal: StdMutex::new(0),
+            qa_last_call_event: StdMutex::new("none".into()),
+            qa_call_session: StdMutex::new(String::new()),
             seed: Some(seed),
             social,
             paths,
@@ -820,6 +827,8 @@ impl Engine {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
             qa_call: std::sync::atomic::AtomicU8::new(0),
             last_epoch_reseal: StdMutex::new(0),
+            qa_last_call_event: StdMutex::new("none".into()),
+            qa_call_session: StdMutex::new(String::new()),
             seed: None,
             social,
             paths,
@@ -10022,10 +10031,19 @@ impl Engine {
     /// self-declared `from` prefix the parsers key on. This runs identically for direct and
     /// frame-9-relayed frames — authentication is the signature, not a transport id.
     fn handle_call(self: &Arc<Self>, t: u8, sealed: &[u8]) {
-        let Some(app) = self.app.lock().clone() else { return };
+        *self.qa_last_call_event.lock() = format!("recv:{t}");
+        let Some(app) = self.app.lock().clone() else {
+            *self.qa_last_call_event.lock() = format!("recv-no-app:{t}");
+            return;
+        };
         // The verified sender is re-derived per frame type below, from the parser's own `from` field
         // — `open_sealed_frame` has already proven the two agree.
-        let Some((_declared, body)) = self.open_sealed_frame(t, sealed) else { return };
+        let Some((_declared, body)) = self.open_sealed_frame(t, sealed) else {
+            // An unopenable frame is otherwise identical to one that never arrived — the exact
+            // ambiguity that made the stuck-call bug unreadable from outside.
+            *self.qa_last_call_event.lock() = format!("recv-unopenable:{t}");
+            return;
+        };
         let body = body.as_slice();
         let ev = match t {
             wire::CALL_INVITE => callwire::parse_invite_name(body).map(|(from, name)| {
@@ -10671,13 +10689,17 @@ impl Engine {
     /// this leg was ringing or in a call — and the e2e call step only ever asserted on ios and stub.
     /// That blind spot let an established call ended on iOS strand THIS leg in a dead call while the
     /// suite reported green; only someone looking at the screen could tell. Two bools close it.
-    pub fn set_qa_call_state(self: &Arc<Self>, ringing: bool, in_call: bool) {
+    pub fn set_qa_call_state(self: &Arc<Self>, ringing: bool, in_call: bool, session: String) {
         // bit2 = KNOWN. Set on the first push and never cleared.
         self.qa_call.store(
             0b100 | (ringing as u8) | ((in_call as u8) << 1),
             std::sync::atomic::Ordering::Relaxed,
         );
+        *self.qa_call_session.lock() = session;
     }
+
+    pub fn qa_call_session(&self) -> String { self.qa_call_session.lock().clone() }
+    pub fn qa_last_call_event(&self) -> String { self.qa_last_call_event.lock().clone() }
 
     /// `None` until the webview has pushed at least once.
     ///

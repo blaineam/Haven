@@ -420,7 +420,14 @@ fn write_dump(engine: &Arc<Engine>) {
         "profile": { "name": engine.get_profile().name },
         // null until the webview has reported — deliberately NOT a healthy-looking default.
         "call": match engine.qa_call_state() {
-            Some((ringing, in_call)) => serde_json::json!({ "ringing": ringing, "in_call": in_call }),
+            Some((ringing, in_call)) => serde_json::json!({
+                "ringing": ringing, "in_call": in_call,
+                // WHICH session, and the last frame the engine handled ("recv:35" / "recv-unopenable:…"
+                // / "none"). `in_call` alone cannot distinguish a leg that ignored a teardown from one
+                // in a DIFFERENT session, or from one the frame never reached.
+                "session": engine.qa_call_session(),
+                "last_event": engine.qa_last_call_event(),
+            }),
             None => serde_json::Value::Null,
         },
         "circles": circles,

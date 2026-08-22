@@ -61,8 +61,10 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 // the fleet still in the exact state that produced it (dumps fresh, logs hot, nothing torn down).
 //
 // Off by default for the whole-suite run, where a complete matrix is the point.
+// Any TARGETED run (explicit E2E_STEPS) is a debugging loop: stop at the first red, keep the fleet
+// hot. Only the no-args full matrix runs to completion by default — that is the release gate.
 const FAIL_FAST = process.env.E2E_FAIL_FAST === '1'
-  || (process.env.E2E_FAIL_FAST !== '0' && (process.env.E2E_STEPS || '').includes('satellite'));
+  || (process.env.E2E_FAIL_FAST !== '0' && !!process.env.E2E_STEPS);
 
 function score(name, ok, detail = '') {
   REPORT.push({ name, ok, detail });

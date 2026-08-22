@@ -6844,7 +6844,7 @@ function callAudioActive() { return call.ringing || call.connecting || call.inCa
 // and stub only. That blind spot let an established call ended on iOS strand THIS leg in a dead call
 // while the suite reported green. Cheap and idempotent; safe to call on every transition.
 function qaPushCallState() {
-  try { invoke("qa_set_call_state", { ringing: !!call.ringing, inCall: !!call.inCall }); } catch (_) {}
+  try { invoke("qa_set_call_state", { ringing: !!call.ringing, inCall: !!call.inCall, session: call.session || "" }); } catch (_) {}
 }
 
 // ---- Capture owns the audio ---------------------------------------------------------------

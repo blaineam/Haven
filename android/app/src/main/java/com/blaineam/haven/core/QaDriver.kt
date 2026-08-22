@@ -422,7 +422,12 @@ object QaDriver {
         // Android in a call with no way out, and only someone looking at the screen could tell.
         o.put("call", JSONObject()
             .put("ringing", runCatching { CallManager.ringing.value }.getOrDefault(false))
-            .put("in_call", runCatching { CallManager.inCall.value }.getOrDefault(false)))
+            .put("in_call", runCatching { CallManager.inCall.value }.getOrDefault(false))
+            // WHICH session, and what this leg last applied. `in_call` alone cannot distinguish a
+            // leg that ignored the teardown from one that is in a DIFFERENT session than the one
+            // that ended — and every handler here is gated on the session id matching.
+            .put("session", runCatching { CallManager.qaSessionId }.getOrDefault(""))
+            .put("last_event", runCatching { CallManager.qaLastCallEvent }.getOrDefault("?")))
         o.put("circles", circles)
         // What the engine is HOLDING BACK. A short feed alone cannot distinguish "never arrived"
         // from "arrived and could not be opened", and those have opposite fixes — this leg once

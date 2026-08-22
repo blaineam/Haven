@@ -1641,6 +1641,11 @@ final class CallManager: NSObject, ObservableObject {
     /// Call state for the QA dump. Reports BYTES RECEIVED, not just connection state: a call that
     /// shows "connected" on both sides while carrying no audio is exactly the failure this has to
     /// catch, and only the RTP counters distinguish the two.
+    /// QA visibility ONLY — see the Android twin. `in_call` alone cannot say WHICH session a leg is
+    /// in, and every teardown handler is gated on the session id matching.
+    private(set) var qaLastCallEvent: String = "none"
+    func qaNoteCallEvent(_ what: String) { qaLastCallEvent = what }
+
     func qaSnapshot() -> [String: Any] {
         for (hex, conn) in peers {
             conn.call.inboundMedia { [weak self] audio, video, frames in
@@ -1654,6 +1659,8 @@ final class CallManager: NSObject, ObservableObject {
             perPeer[hex] = ["audio_bytes": m.audio, "video_bytes": m.video, "video_frames": m.frames]
         }
         return [
+            "session": sessionId,
+            "last_event": qaLastCallEvent,
             "in_call": inCall,
             "connecting": connecting,
             "ringing": ringing,

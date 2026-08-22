@@ -5496,6 +5496,34 @@ impl HavenSocial {
         format!("[{}]", out.join(","))
     }
 
+    /// Forensic: every stored tree commit per circle — epoch, committer, proposal kinds, parent
+    /// known-ness — plus this device's applied tree epoch. The artifact that names WHO authored the
+    /// branch each side of a fork is the chain itself; nothing else records it.
+    pub fn debug_tree_chain_json(&self) -> String {
+        let st = self.state.lock().unwrap();
+        let mut out = Vec::new();
+        for c in st.circles.iter() {
+            let Some(shadow) = st.shadow_trees.get(&c.id) else { continue };
+            let rows: Vec<String> = shadow.commits.values().map(|b| {
+                match treekem::Commit::from_bytes(b) {
+                    Ok(cm) => {
+                        let kinds: Vec<&str> = cm.proposals.iter().map(|p| match p.body {
+                            treekem::ProposalBody::Add { .. } => "add",
+                            treekem::ProposalBody::Remove { .. } => "remove",
+                            _ => "other",
+                        }).collect();
+                        let parent_known = shadow.commits.contains_key(&cm.parent_commit_hash);
+                        format!("{{\"epoch\":{},\"sender_leaf\":{},\"props\":\"{}\",\"parent_known\":{}}}",
+                                cm.epoch, cm.sender_leaf, kinds.join("+"), parent_known)
+                    }
+                    Err(_) => "{\"epoch\":0}".into(),
+                }
+            }).collect();
+            out.push(format!("{{\"id\":\"{}\",\"commits\":[{}]}}", &c.id[..c.id.len().min(20)], rows.join(",")));
+        }
+        format!("[{}]", out.join(","))
+    }
+
     pub fn take_epoch_moved(&self) -> bool {
         let mut st = self.state.lock().unwrap();
         // Piggyback ONE bounded tree-buffer replay attempt per poll — but only while the buffer is

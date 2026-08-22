@@ -92,7 +92,9 @@ fn init_logging() {
 /// before the webview exists, and an event emitted then is dropped on the floor. The frontend drains
 /// this at boot AND on the `haven:deep-link` ping, so either order works.
 #[derive(Default)]
-pub struct DeepLinks(pub std::sync::Mutex<Vec<String>>);
+/// Non-poisoning: a panic while draining deep links would otherwise poison this permanently and
+/// make every subsequent link open panic instead of working.
+pub struct DeepLinks(pub parking_lot::Mutex<Vec<String>>);
 
 /// Load the master seed from the secure store, or mint + persist a new identity.
 fn ensure_seed() -> Result<[u8; 32]> {
@@ -399,7 +401,7 @@ pub fn run() {
                     let link_handle = handle.clone();
                     app.deep_link().on_open_url(move |event| {
                         if let Some(q) = link_handle.try_state::<DeepLinks>() {
-                            let mut pending = q.0.lock().unwrap();
+                            let mut pending = q.0.lock();
                             pending.extend(event.urls().iter().map(|u| u.to_string()));
                         }
                         let _ = link_handle.emit("haven:deep-link", ());

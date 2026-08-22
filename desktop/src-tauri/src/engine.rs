@@ -5,7 +5,24 @@
 //! with an iPhone or Android phone.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::{Arc, Weak};
+/// NON-POISONING mutex, aliased over the whole engine.
+///
+/// `std::sync::Mutex` poisons: if any thread panics while holding one, every later `.lock()`
+/// returns Err and the usual `.unwrap()` turns that into a second panic. With ~400 lock sites in
+/// this file that means ONE panic anywhere takes the entire app down, reported at whatever
+/// unrelated line happens to touch that lock next.
+///
+/// That is not theoretical. A `now - stamp` underflow in a stale-timer check poisoned `dyn_state`,
+/// and the process aborted inside `relay_status` — code with nothing to do with the fault — after
+/// silently killing the QA driver thread on the way. Chasing it started at the innocent line.
+///
+/// parking_lot does not poison. A panic still fails whatever it was doing, but the mutex stays
+/// usable and the blast radius is the one operation instead of the process.
+///
+/// Note the guards are `!Send`, so holding one across an `.await` is now a COMPILE error rather
+/// than a latent deadlock — worth keeping in mind when this shape appears.
+use parking_lot::Mutex as StdMutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -365,7 +382,7 @@ pub struct Engine {
     /// `set_qa_call_state` for why this exists.
     qa_call: std::sync::atomic::AtomicU8,
     /// When the epoch-change re-seal last ran, so a burst of roster changes coalesces into one pass.
-    last_epoch_reseal: std::sync::Mutex<u64>,
+    last_epoch_reseal: StdMutex<u64>,
     /// The account master seed — `Some` on a primary/legacy device, `None` on a SEEDLESS device
     /// (seed-drop S4). Making it an `Option` turns every account-key use into a compile-checked
     /// decision, so a missed seedless guard is a build error, not a runtime forge/panic.
@@ -685,7 +702,7 @@ impl Engine {
         Ok(Arc::new(Self {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
             qa_call: std::sync::atomic::AtomicU8::new(0),
-            last_epoch_reseal: std::sync::Mutex::new(0),
+            last_epoch_reseal: StdMutex::new(0),
             seed: Some(seed),
             social,
             paths,
@@ -802,7 +819,7 @@ impl Engine {
         Ok(Arc::new(Self {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
             qa_call: std::sync::atomic::AtomicU8::new(0),
-            last_epoch_reseal: std::sync::Mutex::new(0),
+            last_epoch_reseal: StdMutex::new(0),
             seed: None,
             social,
             paths,
@@ -856,7 +873,7 @@ impl Engine {
     /// (seedless, linked, linking) for the UI — `linking` = seedless but the grant hasn't landed yet.
     pub fn seedless_status(&self) -> (bool, bool, bool) {
         let seedless = self.is_seedless();
-        let linked = self.seedless.lock().unwrap().linked;
+        let linked = self.seedless.lock().linked;
         (seedless, linked, seedless && !linked)
     }
 
@@ -865,23 +882,23 @@ impl Engine {
     fn self_sync_key(&self) -> Option<[u8; 32]> {
         match &self.seed {
             Some(seed) => Some(haven_p2p::identity::Identity::from_seed(seed).self_sync_key()),
-            None => self.seedless.lock().unwrap().self_sync_key32(),
+            None => self.seedless.lock().self_sync_key32(),
         }
     }
 
     pub fn set_app(&self, app: AppHandle) {
-        *self.app.lock().unwrap() = Some(app);
+        *self.app.lock() = Some(app);
     }
 
     pub fn set_foreground(&self, fg: bool) {
-        self.dyn_state.lock().unwrap().foreground = fg;
+        self.dyn_state.lock().foreground = fg;
         if fg {
             self.bump_activity(); // back to foreground → snap sync cadence tight
         }
     }
 
     pub(crate) fn emit_changed(&self) {
-        if let Some(app) = self.app.lock().unwrap().clone() {
+        if let Some(app) = self.app.lock().clone() {
             let _ = app.emit("haven:changed", ());
         }
     }
@@ -890,7 +907,7 @@ impl Engine {
     /// a time and pushes progress with this rather than making the UI poll — and it is a no-op in
     /// headless mode, where there is no window to tell.
     pub(crate) fn emit_event(&self, name: &str, payload: serde_json::Value) {
-        if let Some(app) = self.app.lock().unwrap().clone() {
+        if let Some(app) = self.app.lock().clone() {
             let _ = app.emit(name, payload);
         }
     }
@@ -918,13 +935,13 @@ impl Engine {
         }
         // A deep-linked notification is worth showing while FOREGROUND too — "your media is back"
         // silently doing nothing for someone already looking at the app is the case this exists for.
-        if deep_link.is_none() && self.dyn_state.lock().unwrap().foreground {
+        if deep_link.is_none() && self.dyn_state.lock().foreground {
             return;
         }
-        if let Some(app) = self.app.lock().unwrap().clone() {
+        if let Some(app) = self.app.lock().clone() {
             // Native OS notification (Action Center / toast) — skipped while frontmost, where the
             // in-app toast below is the better surface.
-            if !self.dyn_state.lock().unwrap().foreground {
+            if !self.dyn_state.lock().foreground {
                 use tauri_plugin_notification::NotificationExt;
                 let _ = app.notification().builder().title(title).body(body).show();
             }
@@ -940,7 +957,7 @@ impl Engine {
     /// `notify_with_link` — the bell mirrors every deep-linked notification this device raises.
     fn append_app_activity(&self, title: &str, body: &str, deep_link: Option<&str>) {
         let snapshot = {
-            let mut rows = self.app_activity.lock().unwrap();
+            let mut rows = self.app_activity.lock();
             rows.insert(0, ActivityRow {
                 id: format!("app-{}", now_ms()),
                 kind: "app".into(),
@@ -989,7 +1006,7 @@ impl Engine {
                 }
             })
             .collect();
-        out.extend(self.app_activity.lock().unwrap().iter().cloned());
+        out.extend(self.app_activity.lock().iter().cloned());
         out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
         out.truncate(200);
         out
@@ -997,14 +1014,14 @@ impl Engine {
 
     /// The bell's "seen up to" watermark (unix ms) — rows newer than this badge.
     pub fn activity_seen_at(&self) -> u64 {
-        self.prefs.lock().unwrap().activity_seen_at
+        self.prefs.lock().activity_seen_at
     }
 
     /// Opening the bell marks everything current as seen. MONOTONIC — merged per-key MAX across my
     /// devices via `setting:activitySeenAt`, so this clears the badge fleet-wide.
     pub fn mark_activity_seen(&self) {
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             let now = now_ms();
             if now <= p.activity_seen_at {
                 return;
@@ -1018,13 +1035,13 @@ impl Engine {
 
     /// Pinned DM ids in pin order (synced via `setting:pinnedDMs`).
     pub fn pinned_dms(&self) -> Vec<String> {
-        self.prefs.lock().unwrap().pinned_dms.clone()
+        self.prefs.lock().pinned_dms.clone()
     }
 
     /// Replace the pinned-DM list (the UI enforces the 6-cap; clamped here too).
     pub fn set_pinned_dms(&self, ids: Vec<String>) {
         let changed = {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             let ids: Vec<String> = ids.into_iter().take(6).collect();
             let changed = ids != p.pinned_dms;
             p.pinned_dms = ids;
@@ -1149,7 +1166,7 @@ impl Engine {
             return;
         }
         let key = account_hex.to_lowercase();
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         let cur = p.device_hints.entry(key).or_default();
         for d in ids {
             if !cur.contains(&d) {
@@ -1164,7 +1181,7 @@ impl Engine {
     }
 
     fn device_hints_for(&self, account_hex: &str) -> Vec<String> {
-        self.prefs.lock().unwrap().device_hints.get(&account_hex.to_lowercase()).cloned().unwrap_or_default()
+        self.prefs.lock().device_hints.get(&account_hex.to_lowercase()).cloned().unwrap_or_default()
     }
 
     // ---- account device discovery (relay-optional reachability) --------------------------
@@ -1173,7 +1190,7 @@ impl Engine {
     /// my account id can dial one of my devices with NO relay in common. Fire-and-forget; the
     /// publisher re-publishes on its own TTL for as long as the node lives. iOS/Android parity.
     fn publish_account_devices(self: &Arc<Self>) {
-        let node = self.node.lock().unwrap().clone();
+        let node = self.node.lock().clone();
         let Some(node) = node else { return };
         let social = self.social.clone();
         tauri::async_runtime::spawn(async move {
@@ -1192,11 +1209,11 @@ impl Engine {
     /// an unthrottled lookup would fire a DNS round-trip per peer per sync tick to learn nothing).
     fn resolve_missing_device_ids(self: &Arc<Self>, account_hex: &str) {
         const RETRY_MS: u64 = 600_000; // 10 min
-        let node = self.node.lock().unwrap().clone();
+        let node = self.node.lock().clone();
         let Some(node) = node else { return };
         let key = account_hex.to_lowercase();
         {
-            let mut asked = self.discovery_asked.lock().unwrap();
+            let mut asked = self.discovery_asked.lock();
             let now = now_ms();
             if let Some(at) = asked.get(&key) {
                 if now.saturating_sub(*at) < RETRY_MS {
@@ -1223,12 +1240,12 @@ impl Engine {
     }
 
     pub fn get_profile(&self) -> Profile {
-        self.prefs.lock().unwrap().profile.clone()
+        self.prefs.lock().profile.clone()
     }
 
     pub fn set_profile(self: &Arc<Self>, profile: Profile) {
         let edited = {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             // Stamp each field the user actually CHANGED (LWW), so a remote sibling edit only overrides
             // ours when it's newer. Mirrors iOS ProfileStore.stamp on each edited field.
             if p.profile.name != profile.name {
@@ -1347,7 +1364,7 @@ impl Engine {
     /// Start the iroh node and begin syncing. Safe to call repeatedly.
     pub async fn start(self: &Arc<Self>) {
         {
-            if self.node.lock().unwrap().is_some() {
+            if self.node.lock().is_some() {
                 return;
             }
         }
@@ -1363,17 +1380,17 @@ impl Engine {
         });
         // Bind the transport to the per-DEVICE seed (unique node/relay id per install, parity with
         // iOS/Android device-seed transport) — never the account id, which is identity-only.
-        let device_seed = self.roster.lock().unwrap().device_seed.clone();
+        let device_seed = self.roster.lock().device_seed.clone();
         match HavenNode::start(device_seed, listener).await {
             Ok(node) => {
-                *self.node.lock().unwrap() = Some(node);
+                *self.node.lock() = Some(node);
                 // Account id -> my device ids in the public directory, so a contact who holds only
                 // my account id can dial me with NO relay in common (parity with iOS/Android).
                 self.publish_account_devices();
                 // Record which fabric map this bind used so mid-session learns can soft-rebind only
                 // when the set actually changes (not on every refresh).
-                self.fabric_rebind.lock().unwrap().bound_derp_urls = haven_net::active_derp_urls();
-                self.dyn_state.lock().unwrap().started = true;
+                self.fabric_rebind.lock().bound_derp_urls = haven_net::active_derp_urls();
+                self.dyn_state.lock().started = true;
                 self.emit_changed();
                 self.sync_with_contacts();
                 // Seedless LINKING device: fire the frame-28 request now that the transport is up (the
@@ -1390,7 +1407,7 @@ impl Engine {
                 // idempotent (confirmed refs are skipped before any read). Mirrors iOS
                 // MediaBackupQueue.drainPersisted / Android drainPersistedBackups.
                 self.backfill_media_to_relays().await;
-                self.dyn_state.lock().unwrap().last_media_backfill_ms = now_ms();
+                self.dyn_state.lock().last_media_backfill_ms = now_ms();
             }
             Err(e) => {
                 log::error!("node start failed: {e}");
@@ -1433,7 +1450,7 @@ impl Engine {
         // primary-only op). Both switches are inert until every member is affirmatively capable.
         self.social.set_seed_drop_retire(true);
         let my_hex = self.node_id_hex();
-        let created: Vec<String> = self.prefs.lock().unwrap().created_circles.clone();
+        let created: Vec<String> = self.prefs.lock().created_circles.clone();
         for c in self.social.circles() {
             if c.id.starts_with("dm:") {
                 self.pin_dm_authority(&c.id);
@@ -1471,17 +1488,17 @@ impl Engine {
         }
         // Only an EXISTING multi-device account carries the legacy bare-account leaf. A fresh
         // device-only install (roster never enabled) has nothing to retire.
-        if !self.roster.lock().unwrap().is_enabled() {
+        if !self.roster.lock().is_enabled() {
             return;
         }
-        if self.prefs.lock().unwrap().account_leaf_retired {
+        if self.prefs.lock().account_leaf_retired {
             return; // already migrated (sticky)
         }
         // Gated in-core: false until retire switch ON + own account seed-drop-capable + device
         // identity adopted. Safe to retry each launch; latch only once it actually succeeds.
         if self.social.retire_account_leaf() {
             {
-                let mut p = self.prefs.lock().unwrap();
+                let mut p = self.prefs.lock();
                 p.account_leaf_retired = true;
                 let _ = p.save(&self.paths);
             }
@@ -1501,7 +1518,7 @@ impl Engine {
     /// off the launch path. Mirrors iOS `MediaRecovery` / Android `runMediaRecoveryOnceIfNeeded`.
     async fn maybe_reseal_own_media(self: &Arc<Self>) {
         const MAX_ATTEMPTS: u32 = 10;
-        if self.prefs.lock().unwrap().media_resealed_v108 {
+        if self.prefs.lock().media_resealed_v108 {
             return;
         }
         // Enumerate my OWN posted media I STILL hold the plaintext for (the re-seal reads the original
@@ -1527,7 +1544,7 @@ impl Engine {
             }
         }
         let mut done: HashSet<String> =
-            self.prefs.lock().unwrap().media_reseal_refs.iter().cloned().collect();
+            self.prefs.lock().media_reseal_refs.iter().cloned().collect();
         // Collect the not-yet-confirmed refs first so the loop can mutate `done` without holding an
         // immutable borrow of it through the filter iterator.
         let todo: Vec<(String, String)> =
@@ -1544,12 +1561,12 @@ impl Engine {
                 done.insert(r.clone());
             }
         }
-        let attempts = self.prefs.lock().unwrap().media_reseal_attempts + 1;
+        let attempts = self.prefs.lock().media_reseal_attempts + 1;
         // Latch when every repairable ref is confirmed, or after enough tries that a still-failing ref
         // is almost certainly un-repairable (its destination is gone / was never reachable).
         let latched = held.iter().all(|(_, r)| done.contains(r)) || attempts >= MAX_ATTEMPTS;
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             p.media_reseal_refs = done.iter().cloned().collect();
             p.media_reseal_attempts = attempts;
             p.media_resealed_v108 = latched;
@@ -1574,7 +1591,7 @@ impl Engine {
 
     /// Mark "something is happening" → snap both timers back to their tight base cadence immediately.
     fn bump_activity(&self) {
-        let mut st = self.dyn_state.lock().unwrap();
+        let mut st = self.dyn_state.lock();
         st.last_activity_ms = now_ms();
         st.next_sync_due_ms = 0;
         st.next_poll_due_ms = 0;
@@ -1600,7 +1617,7 @@ impl Engine {
             });
         } else {
             let now = now_ms();
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             st.last_activity_ms = now;
             // Base cadences from start_mailbox_loop: poll 30s, sync 20s.
             st.next_poll_due_ms = st.next_poll_due_ms.min(now + 30_000);
@@ -1616,7 +1633,7 @@ impl Engine {
     /// devices. Each call slides the deadline, coalescing an edit burst (renaming twice, pinning
     /// three DMs) into a single pass. Deliberately does NOT touch the periodic cadence.
     fn nudge_self_sync(&self) {
-        self.dyn_state.lock().unwrap().selfsync_nudge_at_ms = now_ms() + 4_000;
+        self.dyn_state.lock().selfsync_nudge_at_ms = now_ms() + 4_000;
     }
 
     // Adaptive sync cadence (device-heat control). The loop keeps a cheap 10s heartbeat, but the
@@ -1638,7 +1655,7 @@ impl Engine {
                 // Poll bucket (base 30s): pull the circle mailbox so posts arrive even when peers
                 // aren't both online, then converge this user's OWN devices over the same relays.
                 let poll_due = {
-                    let mut st = me.dyn_state.lock().unwrap();
+                    let mut st = me.dyn_state.lock();
                     if now >= st.next_poll_due_ms {
                         st.next_poll_due_ms = now + Self::adaptive_interval(now, st.last_activity_ms, 30_000);
                         true
@@ -1651,7 +1668,7 @@ impl Engine {
                 // user's other devices in seconds. A due poll bucket clears any pending nudge too
                 // (its own pass snapshots the same mutation), so a burst never runs twice.
                 let nudge_due = {
-                    let mut st = me.dyn_state.lock().unwrap();
+                    let mut st = me.dyn_state.lock();
                     let due = st.selfsync_nudge_at_ms != 0 && now >= st.selfsync_nudge_at_ms;
                     if due || poll_due {
                         st.selfsync_nudge_at_ms = 0;
@@ -1671,7 +1688,7 @@ impl Engine {
                 // we host), the ~2-min media backfill + daily mailbox refresh (own inner gates), and GC
                 // relays inactive + unseen > 7 days.
                 let sync_due = {
-                    let mut st = me.dyn_state.lock().unwrap();
+                    let mut st = me.dyn_state.lock();
                     if now >= st.next_sync_due_ms {
                         st.next_sync_due_ms = now + Self::adaptive_interval(now, st.last_activity_ms, 20_000);
                         true
@@ -1706,7 +1723,7 @@ impl Engine {
                     // silently froze the dump file for the rest of a run. A stale timer is worth
                     // nothing; crashing over one is worth less.
                     let backfill_due = {
-                        let mut st = me.dyn_state.lock().unwrap();
+                        let mut st = me.dyn_state.lock();
                         if now.saturating_sub(st.last_media_backfill_ms) > 120_000 {
                             st.last_media_backfill_ms = now;
                             true
@@ -1728,7 +1745,7 @@ impl Engine {
                     // already holds so relay-side mailbox GC (30-day TTL) keeps live entries while legacy
                     // duplicates and stale-epoch copies age out.
                     let refresh_due = {
-                        let mut st = me.dyn_state.lock().unwrap();
+                        let mut st = me.dyn_state.lock();
                         if now.saturating_sub(st.last_event_refresh_ms) > 86_400_000 {
                             st.last_event_refresh_ms = now;
                             true
@@ -1770,10 +1787,10 @@ impl Engine {
     }
 
     async fn mesh_sync(self: &Arc<Self>) {
-        let Some(host) = self.relay_host.lock().unwrap().clone() else { return };
+        let Some(host) = self.relay_host.lock().clone() else { return };
         let my_hex = host.node_id_hex();
         let peers: std::collections::BTreeSet<String> = {
-            let p = self.prefs.lock().unwrap();
+            let p = self.prefs.lock();
             p.relays.values().flatten().filter(|h| p.relay_is_active(h)).cloned().collect()
         };
         // Teach every relay in the pool about the others. We already pull from all of them; a
@@ -1792,7 +1809,7 @@ impl Engine {
             }
             if host.sync_from(peer.clone()).await > 0 {
                 self.mark_relay_ok(&peer);
-                self.dyn_state.lock().unwrap().relay_active = true;
+                self.dyn_state.lock().relay_active = true;
                 self.emit_changed();
             }
         }
@@ -1801,7 +1818,7 @@ impl Engine {
     // ---- scheduled messages -------------------------------------------------------------
 
     fn persist_scheduled(&self) {
-        let snap = self.scheduled.lock().unwrap().clone();
+        let snap = self.scheduled.lock().clone();
         let _ = snap.save(&self.paths.scheduled_file());
     }
 
@@ -1829,18 +1846,18 @@ impl Engine {
             send_at_ms,
             created_at_ms: now_ms(),
         };
-        self.scheduled.lock().unwrap().add(item);
+        self.scheduled.lock().add(item);
         self.persist_scheduled();
         self.emit_changed();
         id
     }
 
     pub fn list_scheduled(&self) -> Vec<crate::scheduled::ScheduledItem> {
-        self.scheduled.lock().unwrap().items.clone()
+        self.scheduled.lock().items.clone()
     }
 
     pub fn cancel_scheduled(self: &Arc<Self>, id: &str) {
-        let removed = self.scheduled.lock().unwrap().remove(id);
+        let removed = self.scheduled.lock().remove(id);
         if removed {
             self.persist_scheduled();
             self.emit_changed();
@@ -1849,7 +1866,7 @@ impl Engine {
 
     /// Send everything whose time has arrived, then persist the remaining queue.
     pub fn fire_due_scheduled(self: &Arc<Self>) {
-        let due = self.scheduled.lock().unwrap().take_due(now_ms());
+        let due = self.scheduled.lock().take_due(now_ms());
         if due.is_empty() {
             return;
         }
@@ -1878,11 +1895,11 @@ impl Engine {
     }
 
     pub fn started(&self) -> bool {
-        self.dyn_state.lock().unwrap().started
+        self.dyn_state.lock().started
     }
 
     pub fn host_on_launch(&self) -> bool {
-        self.prefs.lock().unwrap().host_on_launch
+        self.prefs.lock().host_on_launch
     }
 
     /// Composer reachability light for a circle: "synced" = a relay/bucket holds posts for offline
@@ -1891,7 +1908,7 @@ impl Engine {
     /// local proximity mesh, so there's no mesh-based "syncing" state.)
     pub fn sync_status(&self, circle_id: &str) -> String {
         let any_transport = {
-            let prefs = self.prefs.lock().unwrap();
+            let prefs = self.prefs.lock();
             !prefs.active_relays_for(circle_id).is_empty()
                 || prefs.s3.is_some()
                 || prefs.host_on_launch
@@ -1903,12 +1920,12 @@ impl Engine {
         // No relay/bucket configured: online = best-effort direct iroh delivery done (green, no nag);
         // only genuinely offline is the device-only warning. (Previously pinned a relay-less node to a
         // permanent "device only" red.)
-        if self.dyn_state.lock().unwrap().internet_active { "synced".into() } else { "local".into() }
+        if self.dyn_state.lock().internet_active { "synced".into() } else { "local".into() }
     }
 
     pub fn set_host_on_launch(self: &Arc<Self>, on: bool) {
         let changed = {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             let changed = p.host_on_launch != on;
             if changed {
                 p.stamp_setting("host_on_launch"); // LWW so two desktops don't ping-pong this toggle
@@ -1923,12 +1940,12 @@ impl Engine {
     }
 
     pub fn video_sound_on(&self) -> bool {
-        self.prefs.lock().unwrap().video_sound_on
+        self.prefs.lock().video_sound_on
     }
 
     /// Device-local privacy prefs (notification lock-screen detail, super data saver, send original).
     pub fn privacy_prefs(&self) -> (String, bool, bool) {
-        let p = self.prefs.lock().unwrap();
+        let p = self.prefs.lock();
         (
             p.notification_detail
                 .clone()
@@ -1944,7 +1961,7 @@ impl Engine {
     /// held in the same device-local prefs as the manual data saver. `super_data_saver` still forces
     /// at least the `low` profile, so the existing switch keeps working and the two cannot disagree.
     pub fn low_data_level(self: &Arc<Self>) -> String {
-        let p = self.prefs.lock().unwrap();
+        let p = self.prefs.lock();
         let chosen = p.low_data_level.clone().unwrap_or_else(|| "normal".into());
         if chosen == "normal" && p.super_data_saver {
             "low".into()
@@ -1960,7 +1977,7 @@ impl Engine {
             _ => "normal",
         };
         let improved = {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             let sev = |l: &str| match l { "ultra" => 2, "low" => 1, _ => 0 };
             let was = sev(p.low_data_level.as_deref().unwrap_or("normal"));
             p.low_data_level = Some(normalized.into());
@@ -1981,7 +1998,7 @@ impl Engine {
         super_data_saver: Option<bool>,
         send_original: Option<bool>,
     ) {
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         if let Some(d) = notification_detail {
             p.notification_detail = Some(match d.as_str() {
                 "private" | "minimal" => d,
@@ -1998,7 +2015,7 @@ impl Engine {
     }
 
     pub fn set_video_sound(self: &Arc<Self>, on: bool) {
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         p.video_sound_on = on;
         let _ = p.save(&self.paths);
     }
@@ -2011,7 +2028,7 @@ impl Engine {
             // Seedless: the account PUBLIC bundle was granted + persisted; `my_bundle()` also returns it
             // (me_pub) once the engine booted linked, but the persisted copy is the source of truth.
             None => {
-                let b = self.seedless.lock().unwrap().account_bundle.clone();
+                let b = self.seedless.lock().account_bundle.clone();
                 if b.len() >= 32 { b } else { self.social.my_bundle() }
             }
         }
@@ -2022,31 +2039,31 @@ impl Engine {
     fn push_roster(self: &Arc<Self>) {
         let Some(seed) = self.seed else { return };
         let now = now_ms() / 1000;
-        let signed = self.roster.lock().unwrap().resign(&seed, now);
+        let signed = self.roster.lock().resign(&seed, now);
         if let Some((list, creds)) = signed {
             self.social.set_my_device_roster(list, creds);
         }
         // §1: a fresh resign rebuilds the roster from the device entries WITH the bare account leaf
         // authorized. If this account already migrated to device-only, re-apply the retirement on top
         // (higher-version, sticky) so a revoke/enroll re-sign can't flip us back to the shadow shape.
-        if self.prefs.lock().unwrap().account_leaf_retired {
+        if self.prefs.lock().account_leaf_retired {
             let _ = self.social.retire_account_leaf();
         }
-        let _ = self.roster.lock().unwrap().save(&self.paths);
+        let _ = self.roster.lock().save(&self.paths);
     }
 
     /// Turn THIS device into the primary (master-key holder) that authorizes/revokes the others.
     pub fn enable_device_roster(self: &Arc<Self>) {
         let bundle = self.account_bundle();
         let hex = self.node_id_hex();
-        self.roster.lock().unwrap().enable(&bundle, &hex);
+        self.roster.lock().enable(&bundle, &hex);
         self.push_roster();
         self.emit_changed();
     }
 
     /// Revoke a linked device — it can decrypt nothing posted afterward.
     pub fn revoke_device(self: &Arc<Self>, node_hex: String) {
-        if !self.roster.lock().unwrap().revoke(&node_hex) {
+        if !self.roster.lock().revoke(&node_hex) {
             return;
         }
         self.push_roster();
@@ -2078,7 +2095,7 @@ impl Engine {
         // Seal the rotated key to every still-authorized device bundle and publish it over the self-
         // sync mailbox (the revoked device is simply not a grant recipient → keeps only the stale key).
         let survivors: Vec<Vec<u8>> = {
-            let r = self.roster.lock().unwrap();
+            let r = self.roster.lock();
             let me = r.device_node_hex();
             r.entries
                 .iter()
@@ -2144,7 +2161,7 @@ impl Engine {
     /// Step this device down from being the primary (e.g. the wrong device claimed the role).
     pub fn step_down_as_primary(self: &Arc<Self>) {
         {
-            let mut r = self.roster.lock().unwrap();
+            let mut r = self.roster.lock();
             r.step_down();
             let _ = r.save(&self.paths);
         }
@@ -2154,7 +2171,7 @@ impl Engine {
     /// Ask the primary (over iroh, to my own node id) to authorize this device with its own key.
     pub fn request_device_enrollment(self: &Arc<Self>) {
         let (bundle, name, hex) = {
-            let r = self.roster.lock().unwrap();
+            let r = self.roster.lock();
             (r.device_bundle(), crate::roster::DeviceRoster::device_name(), r.device_node_hex())
         };
         let mut payload = Vec::new();
@@ -2174,7 +2191,7 @@ impl Engine {
         let name = r.lp().map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_else(|| "Device".into());
         let Some(hex_b) = r.lp() else { return };
         let hex = String::from_utf8_lossy(&hex_b).into_owned();
-        let my_dev = self.roster.lock().unwrap().device_node_hex();
+        let my_dev = self.roster.lock().device_node_hex();
         if hex.is_empty() || hex == my_dev {
             return; // not my own device's request
         }
@@ -2182,7 +2199,7 @@ impl Engine {
         let account_hex = self.node_id_hex();
         let now = now_ms() / 1000;
         let cred = {
-            let mut rr = self.roster.lock().unwrap();
+            let mut rr = self.roster.lock();
             rr.enable(&account_bundle, &account_hex);
             rr.add_linked_device(&bundle, &hex, &name, &seed, now)
         };
@@ -2201,7 +2218,7 @@ impl Engine {
         let Some(hex_b) = r.lp() else { return };
         let hex = String::from_utf8_lossy(&hex_b).into_owned();
         let Some(cred) = r.lp() else { return };
-        let mut rr = self.roster.lock().unwrap();
+        let mut rr = self.roster.lock();
         if hex != rr.device_node_hex() {
             return; // not for me
         }
@@ -2211,7 +2228,7 @@ impl Engine {
 
     /// (isEnabled, thisDeviceAuthorized, devices) for the Authorized-Devices UI.
     pub fn device_roster_dto(&self) -> (bool, bool, Vec<crate::roster::RosterDeviceDto>) {
-        let r = self.roster.lock().unwrap();
+        let r = self.roster.lock();
         (r.is_enabled(), r.is_authorized(), r.devices(&self.node_id_hex()))
     }
 
@@ -2233,7 +2250,7 @@ impl Engine {
         {
             let bundle = self.account_bundle();
             let hex = self.node_id_hex();
-            self.roster.lock().unwrap().enable(&bundle, &hex);
+            self.roster.lock().enable(&bundle, &hex);
         }
         self.push_roster();
         let account_bundle = self.account_bundle();
@@ -2247,7 +2264,7 @@ impl Engine {
         // Remember the secret so a frame-28 request can be verified against it (single-use, 10-min TTL).
         let secret: [u8; 32] = ticket.secret.clone().try_into().map_err(|_| anyhow::anyhow!("bad secret"))?;
         {
-            let mut t = self.enroll_tickets.lock().unwrap();
+            let mut t = self.enroll_tickets.lock();
             t.retain(|p| now.saturating_sub(p.issued_at) < 600 && !p.consumed); // prune stale/used
             t.push(PendingEnrollTicket { secret, issued_at: now, consumed: false });
         }
@@ -2257,7 +2274,7 @@ impl Engine {
     /// Active relay node hexes (bootstrap relays carried in the ticket + grant, so the new device can
     /// reach the primary's self-sync slot). Excludes S3 pseudo-relays (not iroh-dialable by hex).
     fn active_relay_hexes(&self) -> Vec<String> {
-        let prefs = self.prefs.lock().unwrap();
+        let prefs = self.prefs.lock();
         let mut out: Vec<String> = prefs
             .relays
             .values()
@@ -2279,7 +2296,7 @@ impl Engine {
         }
         let now = now_ms() / 1000;
         let secrets: Vec<[u8; 32]> = {
-            let mut t = self.enroll_tickets.lock().unwrap();
+            let mut t = self.enroll_tickets.lock();
             t.retain(|p| now.saturating_sub(p.issued_at) < 600 && !p.consumed);
             t.iter().map(|p| p.secret).collect()
         };
@@ -2295,7 +2312,7 @@ impl Engine {
                 sender_device.unwrap_or_default().to_lowercase()
             };
             {
-                let mut reqs = self.enroll_requests.lock().unwrap();
+                let mut reqs = self.enroll_requests.lock();
                 if reqs.iter().any(|r| r.device_hex == device_hex) {
                     return; // already pending confirm — ignore the resend
                 }
@@ -2306,7 +2323,7 @@ impl Engine {
                     secret,
                 });
             }
-            if let Some(app) = self.app.lock().unwrap().clone() {
+            if let Some(app) = self.app.lock().clone() {
                 let _ = app.emit(
                     "haven:enroll-request",
                     serde_json::json!({ "deviceHex": device_hex, "name": req.name }),
@@ -2319,7 +2336,7 @@ impl Engine {
 
     /// PRIMARY-side UI query: the seedless-enroll requests awaiting the user's confirm.
     pub fn enroll_pending(&self) -> Vec<(String, String)> {
-        self.enroll_requests.lock().unwrap().iter().map(|r| (r.device_hex.clone(), r.name.clone())).collect()
+        self.enroll_requests.lock().iter().map(|r| (r.device_hex.clone(), r.name.clone())).collect()
     }
 
     /// PRIMARY: the user CONFIRMED a pending seedless-enroll request → issue the credential, union the
@@ -2330,7 +2347,7 @@ impl Engine {
             return Err(anyhow::anyhow!("no account seed"));
         };
         let req = {
-            let mut reqs = self.enroll_requests.lock().unwrap();
+            let mut reqs = self.enroll_requests.lock();
             let idx = reqs.iter().position(|r| r.device_hex.eq_ignore_ascii_case(&device_hex));
             match idx {
                 Some(i) => reqs.remove(i),
@@ -2342,7 +2359,7 @@ impl Engine {
         {
             let bundle = self.account_bundle();
             let hex = self.node_id_hex();
-            let mut rr = self.roster.lock().unwrap();
+            let mut rr = self.roster.lock();
             rr.enable(&bundle, &hex);
             let _ = rr.add_linked_device(&req.device_bundle, &req.device_hex, &req.name, &seed, now);
         }
@@ -2365,7 +2382,7 @@ impl Engine {
         self.send_frame(wire::SEEDLESS_ENROLL_GRANT, &grant, &req.device_hex);
         // 5. Consume the ticket (single-use).
         {
-            let mut t = self.enroll_tickets.lock().unwrap();
+            let mut t = self.enroll_tickets.lock();
             for p in t.iter_mut() {
                 if p.secret == req.secret {
                     p.consumed = true;
@@ -2383,7 +2400,7 @@ impl Engine {
 
     /// PRIMARY: the user DISMISSED a pending seedless-enroll request.
     pub fn reject_enroll(self: &Arc<Self>, device_hex: String) {
-        self.enroll_requests.lock().unwrap().retain(|r| !r.device_hex.eq_ignore_ascii_case(&device_hex));
+        self.enroll_requests.lock().retain(|r| !r.device_hex.eq_ignore_ascii_case(&device_hex));
         self.emit_changed();
     }
 
@@ -2392,14 +2409,14 @@ impl Engine {
     /// whichever path resolves reaches the primary. No-op once linked or without a pending ticket.
     fn send_seedless_enroll_request(self: &Arc<Self>) {
         let ticket = {
-            let s = self.seedless.lock().unwrap();
+            let s = self.seedless.lock();
             if s.linked {
                 return;
             }
             s.pending_ticket.clone()
         };
         let Some(ticket) = ticket else { return };
-        let device_bundle = self.roster.lock().unwrap().device_bundle();
+        let device_bundle = self.roster.lock().device_bundle();
         let name = crate::roster::DeviceRoster::device_name();
         let now = now_ms() / 1000;
         let Ok(req) = haven_ffi::enroll::enroll_build_request(ticket.secret.clone(), device_bundle, name, now) else {
@@ -2424,12 +2441,12 @@ impl Engine {
     async fn handle_seedless_enroll_grant(self: &Arc<Self>, wire: &[u8]) {
         // Only a linking device accepts a grant, and only once.
         let (ticket, device_seed) = {
-            let s = self.seedless.lock().unwrap();
+            let s = self.seedless.lock();
             if s.linked {
                 return;
             }
             let Some(t) = s.pending_ticket.clone() else { return };
-            (t, self.roster.lock().unwrap().device_seed.clone())
+            (t, self.roster.lock().device_seed.clone())
         };
         let ticket_ffi = haven_ffi::enroll::EnrollTicketFfi {
             account_id: ticket.account_id.clone(),
@@ -2448,13 +2465,13 @@ impl Engine {
         };
         // Persist the granted credential (roster credential store).
         {
-            let mut rr = self.roster.lock().unwrap();
+            let mut rr = self.roster.lock();
             rr.credential = Some(grant.credential.clone());
             let _ = rr.save(&self.paths);
         }
         // Persist the seedless identity state (0600). This is the ONLY writer of these secrets.
         {
-            let mut s = self.seedless.lock().unwrap();
+            let mut s = self.seedless.lock();
             s.enabled = true;
             s.linked = true;
             s.account_bundle = grant.account_bundle.clone();
@@ -2484,7 +2501,7 @@ impl Engine {
             self.prime_self_sync_base(key).await;
         }
         log::info!("seedless enrollment complete — device credentialed under account {}", &wire::node_hex(&grant.account_bundle));
-        if let Some(app) = self.app.lock().unwrap().clone() {
+        if let Some(app) = self.app.lock().clone() {
             let _ = app.emit("haven:enrolled", ());
         }
         self.emit_changed();
@@ -2533,7 +2550,7 @@ impl Engine {
         let entries: Vec<(String, Vec<u8>)> =
             base.entries().map(|(k, v)| (k.to_string(), v.to_vec())).collect();
         {
-            let mut prefs = self.prefs.lock().unwrap();
+            let mut prefs = self.prefs.lock();
             if crate::selfsync::apply_local(&entries, &mut prefs, &self.social) {
                 let _ = prefs.save(&self.paths);
             }
@@ -2546,7 +2563,7 @@ impl Engine {
     // ---- circles ------------------------------------------------------------------------
 
     pub fn feed_circles(&self) -> Vec<haven_ffi::CircleInfoFfi> {
-        let p = self.prefs.lock().unwrap();
+        let p = self.prefs.lock();
         self.social
             .circles()
             .into_iter()
@@ -2568,12 +2585,12 @@ impl Engine {
         }
         let mut changed = false;
         for legacy in superseded {
-            let already = self.prefs.lock().unwrap().is_circle_deleted(&legacy);
+            let already = self.prefs.lock().is_circle_deleted(&legacy);
             if already {
                 continue;
             }
             {
-                let mut p = self.prefs.lock().unwrap();
+                let mut p = self.prefs.lock();
                 p.mark_circle_deleted(&legacy); // LWW tombstone → syncs to all my devices
                 let _ = p.save(&self.paths);
             }
@@ -2593,7 +2610,7 @@ impl Engine {
         let id = self.social.create_circle_owned(name);
         // §2: remember it (device-local) so the pin is re-applied every launch.
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             if !p.created_circles.iter().any(|c| c == &id) {
                 p.created_circles.push(id.clone());
             }
@@ -2640,7 +2657,7 @@ impl Engine {
         let id = self.social.upgrade_circle(circle_id)?;
         // §2: remember it (device-local) so the pin is re-applied every launch, like any circle I made.
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             if !p.created_circles.iter().any(|c| c == &id) {
                 p.created_circles.push(id.clone());
                 let _ = p.save(&self.paths);
@@ -2677,7 +2694,7 @@ impl Engine {
     /// author an MLS Remove. Returns false if I'm not authorized to delegate. Re-pins the creator first
     /// so the authority root is established even if this is the first authority action this launch.
     pub fn grant_circle_admin(self: &Arc<Self>, circle_id: String, admin_hex: String) -> bool {
-        let created = self.prefs.lock().unwrap().created_circles.iter().any(|c| c == &circle_id);
+        let created = self.prefs.lock().created_circles.iter().any(|c| c == &circle_id);
         if created {
             self.social.set_circle_creator(circle_id.clone(), self.node_id_hex());
         }
@@ -2701,7 +2718,7 @@ impl Engine {
         {
             // LWW deletion tombstone so a sibling's `circle:` record can't re-create it every sync.
             // Mirrors iOS CircleDeletionStore.markDeleted on delete.
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             p.mark_circle_deleted(&id);
             let _ = p.save(&self.paths);
         }
@@ -2727,7 +2744,7 @@ impl Engine {
     /// removed person can't pull future media.
     pub fn remove_from_circle(self: &Arc<Self>, circle_id: String, contact_id_hex: String) {
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             // LWW severance: stamp the removal NOW so it beats any stale sibling re-add (and a later
             // deliberate re-add beats this). Mirrors iOS ConnectionsStore.removeFromCircle.
             let entry = format!("{circle_id}|{}", contact_id_hex.to_lowercase());
@@ -2745,7 +2762,7 @@ impl Engine {
     /// LWW: removed iff the removal is newer than any re-add.
     fn is_removed_from_circle(&self, circle_id: &str, id_hex: &str) -> bool {
         let entry = format!("{circle_id}|{}", id_hex.to_lowercase());
-        self.prefs.lock().unwrap().is_circle_member_removed(&entry)
+        self.prefs.lock().is_circle_member_removed(&entry)
     }
 
     /// Re-allow a member into a circle — ONLY on a deliberate re-add (approve / add / invite connect).
@@ -2754,7 +2771,7 @@ impl Engine {
     fn clear_circle_removal(&self, circle_id: &str, id_hex: &str) {
         let entry = format!("{circle_id}|{}", id_hex.to_lowercase());
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             p.mark_circle_member_readded(&entry);
             let _ = p.save(&self.paths);
         }
@@ -2766,7 +2783,7 @@ impl Engine {
     // ---- feed / authoring ---------------------------------------------------------------
 
     pub fn feed(&self, circle_id: &str) -> Vec<FeedItemFfi> {
-        let retention = self.prefs.lock().unwrap().retention_secs;
+        let retention = self.prefs.lock().retention_secs;
         self.social.feed(circle_id.to_string(), now_ms(), retention)
     }
 
@@ -2780,7 +2797,7 @@ impl Engine {
     /// the feed/messages commands — throttled to once per circle per app session so a refreshing
     /// frontend never re-runs engine purges. Runs off the command thread.
     pub fn maybe_purge_expired_media(self: &Arc<Self>, circle_id: &str) {
-        if !self.media_purged.lock().unwrap().insert(circle_id.to_string()) {
+        if !self.media_purged.lock().insert(circle_id.to_string()) {
             return;
         }
         let me = self.clone();
@@ -2791,7 +2808,7 @@ impl Engine {
             let retention = if cid.starts_with("dm:") {
                 None
             } else {
-                me.prefs.lock().unwrap().retention_secs
+                me.prefs.lock().retention_secs
             };
             let purged = me.social.purge_expired(cid.clone(), retention, now_ms());
             if purged.is_empty() {
@@ -2842,7 +2859,7 @@ impl Engine {
                 }
             }
         }
-        for s in &self.scheduled.lock().unwrap().items {
+        for s in &self.scheduled.lock().items {
             for r in &s.media {
                 add(&mut names, r);
             }
@@ -2889,7 +2906,7 @@ impl Engine {
         // against that map means the sweep can't delete a 99%-complete download a record still
         // points at — which is exactly how resume died on Apple before this landed there.
         let live_parts = {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             let dropped = st.reassembly.expire();
             if dropped > 0 {
                 log::info!("media reassembly: dropped {dropped} abandoned or orphaned partial(s)");
@@ -2926,7 +2943,6 @@ impl Engine {
     fn pinned_names(&self) -> std::collections::HashSet<String> {
         self.prefs
             .lock()
-            .unwrap()
             .pinned_media
             .iter()
             .filter(|r| !LocalMedia::is_synthetic(r))
@@ -2940,12 +2956,12 @@ impl Engine {
     }
 
     pub fn pinned_count(&self) -> usize {
-        self.prefs.lock().unwrap().pinned_media.len()
+        self.prefs.lock().pinned_media.len()
     }
 
     /// Pin refs so no cleanup ever removes them (skips synthetic geo refs; deduped).
     pub fn pin_media(self: &Arc<Self>, refs: Vec<String>) {
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         for r in refs {
             if !LocalMedia::is_synthetic(&r) && !p.pinned_media.contains(&r) {
                 p.pinned_media.push(r);
@@ -2958,13 +2974,13 @@ impl Engine {
 
     /// Every kept story, newest first.
     pub fn kept_stories(&self) -> Vec<crate::store::KeptStory> {
-        let mut v = self.prefs.lock().unwrap().kept_stories.clone();
+        let mut v = self.prefs.lock().kept_stories.clone();
         v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         v
     }
 
     pub fn is_story_kept(&self, id: &str) -> bool {
-        self.prefs.lock().unwrap().kept_stories.iter().any(|k| k.id == id)
+        self.prefs.lock().kept_stories.iter().any(|k| k.id == id)
     }
 
     /// Keep a story: snapshot it and PIN its media, so the blobs survive the cleanup sweeps that
@@ -2972,7 +2988,7 @@ impl Engine {
     /// row of "no longer available" placeholders — kept in name only.
     pub fn keep_story(self: &Arc<Self>, entry: crate::store::KeptStory) {
         let media = {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             if p.kept_stories.iter().any(|k| k.id == entry.id) {
                 return;
             }
@@ -2991,7 +3007,7 @@ impl Engine {
     /// Stop keeping it — and release the pin, so the blobs are eligible for cleanup again.
     pub fn unkeep_story(self: &Arc<Self>, id: &str) {
         let release = {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             let Some(i) = p.kept_stories.iter().position(|k| k.id == id) else { return };
             let media = p.kept_stories.remove(i).media;
             p.kept_stories_removed.insert(id.to_string(), now_ms());
@@ -3011,7 +3027,7 @@ impl Engine {
     /// The `setting:keptStories` payload, or None when there is nothing at all to say — never
     /// published empty, so a fresh device can't blank a sibling's collection.
     pub fn kept_stories_payload(&self) -> Option<Vec<u8>> {
-        let p = self.prefs.lock().unwrap();
+        let p = self.prefs.lock();
         if p.kept_stories.is_empty() && p.kept_stories_removed.is_empty() {
             return None;
         }
@@ -3024,7 +3040,7 @@ impl Engine {
 
     /// Un-pin refs (matches on the exact ref stored).
     pub fn unpin_media(self: &Arc<Self>, refs: Vec<String>) {
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         let drop: std::collections::HashSet<&String> = refs.iter().collect();
         p.pinned_media.retain(|r| !drop.contains(r));
         let _ = p.save(&self.paths);
@@ -3036,14 +3052,14 @@ impl Engine {
     /// name, so an event ref `img_<hash>`/`v:<hash>` resolves an eviction recorded under either key).
     /// CRITICAL: `request_missing_media` gates on this, or a deliberate cleanup is silently undone.
     pub fn evicted_contains(&self, reference: &str) -> bool {
-        let p = self.prefs.lock().unwrap();
+        let p = self.prefs.lock();
         p.evicted_media.contains_key(reference)
             || p.evicted_media.contains_key(&LocalMedia::storage_name(reference))
     }
 
     /// Last-known bytes of an evicted ref (for the "Download N" placeholder), by ref or storage name.
     pub fn evicted_size(&self, reference: &str) -> Option<u64> {
-        let p = self.prefs.lock().unwrap();
+        let p = self.prefs.lock();
         p.evicted_media
             .get(reference)
             .or_else(|| p.evicted_media.get(&LocalMedia::storage_name(reference)))
@@ -3053,7 +3069,7 @@ impl Engine {
     /// Record a ref as deliberately evicted (bounded map — prune to 4000 newest-ish when it grows past
     /// 8000, matching iOS). Persists prefs.
     fn mark_evicted(&self, reference: &str, bytes: u64) {
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         p.evicted_media.insert(reference.to_string(), bytes);
         if p.evicted_media.len() > 8000 {
             let keep: std::collections::HashMap<String, u64> =
@@ -3065,7 +3081,7 @@ impl Engine {
 
     /// Clear an eviction (both the ref and its bare-hash key). Persists prefs if anything changed.
     fn clear_evicted(&self, reference: &str) {
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         let mut changed = p.evicted_media.remove(reference).is_some();
         if p.evicted_media.remove(&LocalMedia::storage_name(reference)).is_some() {
             changed = true;
@@ -3138,7 +3154,7 @@ impl Engine {
     /// what makes that acceptable — see the bounding rules in the Apple header.
     pub fn reoptimize_scan(&self) -> ReoptimizeScan {
         let skipped: std::collections::HashSet<String> =
-            self.prefs.lock().unwrap().reoptimize_skipped.iter().cloned().collect();
+            self.prefs.lock().reoptimize_skipped.iter().cloned().collect();
 
         // Earliest time each ref was shared by me, and which circle it lives in. A ref used by
         // several posts is ONE encode.
@@ -3281,7 +3297,7 @@ impl Engine {
 
     /// Record a ref as not-worth-retrying (encode failed, or came back no smaller). Bounded.
     pub fn reoptimize_skip(&self, reference: String) {
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         if crate::reoptimize::push_skip(&mut p.reoptimize_skipped, reference) {
             let _ = p.save(&self.paths);
         }
@@ -3388,7 +3404,7 @@ impl Engine {
         // referencing ref); and the set of names a pending scheduled send holds.
         let mut ref_kind: std::collections::HashMap<String, &'static str> = std::collections::HashMap::new();
         let mut scheduled_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for s in &self.scheduled.lock().unwrap().items {
+        for s in &self.scheduled.lock().items {
             for r in &s.media {
                 if LocalMedia::is_synthetic(r) {
                     continue;
@@ -3537,10 +3553,10 @@ impl Engine {
                 return;
             }
             // Relay couldn't serve it → ask peers directly (same payload shape as request_missing_media).
-            me.dyn_state.lock().unwrap().requested_refs.insert(reference.clone());
+            me.dyn_state.lock().requested_refs.insert(reference.clone());
             let mut payload = my_hex.clone().into_bytes();
             payload.extend_from_slice(reference.as_bytes());
-            let ids: Vec<String> = me.prefs.lock().unwrap().contacts.iter().map(|c| c.id_hex.clone()).collect();
+            let ids: Vec<String> = me.prefs.lock().contacts.iter().map(|c| c.id_hex.clone()).collect();
             me.ask_for_media(&reference, &my_hex, payload, ids); // resumes from a partial when we have one
         });
     }
@@ -3548,14 +3564,14 @@ impl Engine {
     // ---- #4 local limits (age/size caps) -------------------------------------------------
 
     pub fn get_media_limits(&self) -> (u32, u32) {
-        let p = self.prefs.lock().unwrap();
+        let p = self.prefs.lock();
         (p.local_media_max_days, p.local_media_max_gb)
     }
 
     /// Persist the device-local age/size caps and enforce them immediately (bypassing the throttle).
     pub fn set_media_limits(self: &Arc<Self>, days: u32, gb: u32) {
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             p.local_media_max_days = days;
             p.local_media_max_gb = gb;
             let _ = p.save(&self.paths);
@@ -3573,7 +3589,7 @@ impl Engine {
             return;
         }
         {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             if st.limit_sweep_in_flight {
                 return;
             }
@@ -3589,7 +3605,7 @@ impl Engine {
             let pinned = me.pinned_names();
             let in_use = me.media_referenced_names();
             let (bytes, files, evict) = me.media.perform_limit_sweep(max_days, max_gb, &pinned, &in_use, 48 * 3600);
-            me.dyn_state.lock().unwrap().limit_sweep_in_flight = false;
+            me.dyn_state.lock().limit_sweep_in_flight = false;
             if files > 0 {
                 for (name, b) in &evict {
                     me.mark_evicted(name, *b);
@@ -3792,7 +3808,7 @@ impl Engine {
             return;
         }
         {
-            let mut asked = self.history_asked_before.lock().unwrap();
+            let mut asked = self.history_asked_before.lock();
             if asked.get(&circle_id) == Some(&oldest_created_at) {
                 return;
             }
@@ -3985,7 +4001,7 @@ impl Engine {
         let event_b64 = base64::engine::general_purpose::STANDARD.encode(env);
         self.push_wake(&self.node_id_hex(), None, Some(event_b64.clone()), true);
         let notif_json: Option<Vec<u8>> = banner.map(|b| {
-            let my_name = self.prefs.lock().unwrap().profile.name.clone();
+            let my_name = self.prefs.lock().profile.name.clone();
             let title = if my_name.is_empty() { "Someone".to_string() } else { my_name };
             // `{t,b,bp,c,k,e?,p?}` — the cross-platform sealed-banner wire (Apple PushBanner.jsonObject).
             let mut o = serde_json::json!({
@@ -4100,7 +4116,7 @@ impl Engine {
         }
         self.pin_dm_authority(circle_id);
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             let actives = p.all_active_relay_hexes();
             let list = p.relays.entry(circle_id.to_string()).or_default();
             for hex in actives {
@@ -4155,7 +4171,7 @@ impl Engine {
         let mut m = self.social.feed(circle_id.to_string(), now_ms(), None);
         // Hide anything exchanged before this DM was cleared (see `delete_conversation`). A DM's circle id is
         // deterministic, so a re-started/re-synced thread would otherwise resurrect the old messages.
-        if let Some(&cutoff) = self.prefs.lock().unwrap().dm_cleared_before.get(circle_id) {
+        if let Some(&cutoff) = self.prefs.lock().dm_cleared_before.get(circle_id) {
             m.retain(|i| i.created_at >= cutoff);
         }
         m.sort_by_key(|i| i.created_at);
@@ -4170,7 +4186,7 @@ impl Engine {
             return;
         }
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             p.dm_cleared_before.insert(circle_id.clone(), now_ms());
             let _ = p.save(&self.paths);
         }
@@ -4224,7 +4240,7 @@ impl Engine {
         post_id: String,
     ) -> Option<MessageAuthorTarget> {
         let (hex, name) = {
-            let p = self.prefs.lock().unwrap();
+            let p = self.prefs.lock();
             let c = p.contacts.iter().find(|c| c.id_hex.starts_with(&author_short))?;
             (c.id_hex.clone(), c.name.clone())
         };
@@ -4235,7 +4251,7 @@ impl Engine {
     /// A DM's read watermark: its `dm_last_read` entry, else the first-run seed (so pre-feature
     /// history doesn't badge). Mirrors iOS `DMReadStore.watermark`.
     fn dm_watermark(&self, circle_id: &str) -> u64 {
-        let p = self.prefs.lock().unwrap();
+        let p = self.prefs.lock();
         p.dm_last_read.get(circle_id).copied().unwrap_or(p.dm_read_seeded_at)
     }
 
@@ -4248,7 +4264,7 @@ impl Engine {
         let newest = self.messages(&circle_id).iter().map(|m| m.created_at).max().unwrap_or(0);
         let mark = now_ms().max(newest);
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             if mark <= p.dm_last_read.get(&circle_id).copied().unwrap_or(0) {
                 return;
             }
@@ -4263,7 +4279,7 @@ impl Engine {
     /// `unread` = inbound messages newer than the thread's read watermark (row/pin badge).
     pub fn dm_threads(&self) -> Vec<(String, String, String, u64, u32, u32)> {
         let (cleared, reads, seed) = {
-            let p = self.prefs.lock().unwrap();
+            let p = self.prefs.lock();
             (p.dm_cleared_before.clone(), p.dm_last_read.clone(), p.dm_read_seeded_at)
         };
         let mut out = vec![];
@@ -4305,7 +4321,6 @@ impl Engine {
         self.record_device_hints(&info.id_hex, Self::extract_invite_hints(&trimmed));
         self.dyn_state
             .lock()
-            .unwrap()
             .initiated
             .insert(info.id_hex.clone(), info.verification_hex.clone());
         self.send_hello(DEFAULT_CIRCLE, &info.id_hex);
@@ -4313,12 +4328,12 @@ impl Engine {
     }
 
     pub fn pending(&self) -> Vec<PendingRequest> {
-        self.dyn_state.lock().unwrap().pending.clone()
+        self.dyn_state.lock().pending.clone()
     }
 
     pub fn approve(self: &Arc<Self>, id_hex: String) {
         let req = {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             let idx = st.pending.iter().position(|p| p.id_hex == id_hex);
             idx.map(|i| st.pending.remove(i))
         };
@@ -4333,16 +4348,16 @@ impl Engine {
     }
 
     pub fn dismiss(self: &Arc<Self>, id_hex: String) {
-        self.dyn_state.lock().unwrap().pending.retain(|p| p.id_hex != id_hex);
+        self.dyn_state.lock().pending.retain(|p| p.id_hex != id_hex);
         self.emit_changed();
     }
 
     pub fn contacts(&self) -> Vec<Contact> {
-        self.prefs.lock().unwrap().contacts.clone()
+        self.prefs.lock().contacts.clone()
     }
 
     pub fn blocked(&self) -> Vec<String> {
-        self.prefs.lock().unwrap().blocked.clone()
+        self.prefs.lock().blocked.clone()
     }
 
     /// Blocking is local and private (audit F1) — it sends NOTHING to the network. No ledger flag,
@@ -4350,7 +4365,7 @@ impl Engine {
     pub fn block(self: &Arc<Self>, id_hex: String) {
         self.social.block_member(id_hex.clone());
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             p.contacts.retain(|c| c.id_hex != id_hex);
             // LWW contact tombstone so the removal sticks fleet-wide (a sibling's additive `contact:`
             // record can't resurrect them). Mirrors iOS ContactsStore.remove.
@@ -4360,7 +4375,7 @@ impl Engine {
             }
             let _ = p.save(&self.paths);
         }
-        self.dyn_state.lock().unwrap().pending.retain(|r| r.id_hex != id_hex);
+        self.dyn_state.lock().pending.retain(|r| r.id_hex != id_hex);
         self.persist();
         self.nudge_self_sync(); // block + contact tombstone reach my other devices promptly
         self.emit_changed();
@@ -4368,7 +4383,7 @@ impl Engine {
 
     pub fn unblock(self: &Arc<Self>, id_hex: String) {
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             p.blocked.retain(|b| *b != id_hex);
             let _ = p.save(&self.paths);
         }
@@ -4379,7 +4394,7 @@ impl Engine {
         self.bump_activity(); // a peer just connected → sync tight for the catch-up burst
         let _ = self.social.add_contact_bundle(circle_id.to_string(), bundle.to_vec());
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             // A deliberate (re-)add lifts any contact tombstone (LWW), so a previously-removed person can
             // be added back and a stale removal can't re-drop them. Mirrors iOS ContactsStore.add.
             p.mark_contact_readded(id_hex);
@@ -4408,7 +4423,7 @@ impl Engine {
     /// relay — no fragmented posts. Parity with iOS/Android. No-op without a mailbox.
     async fn backfill_history_to_relay(self: &Arc<Self>, circle_id: &str) {
         let has_relay = !self.relays_for(circle_id).is_empty();
-        let has_s3 = self.prefs.lock().unwrap().s3.is_some();
+        let has_s3 = self.prefs.lock().s3.is_some();
         if !has_relay && !has_s3 {
             return;
         }
@@ -4450,7 +4465,7 @@ impl Engine {
     }
 
     pub fn display_name(&self, author_short: &str) -> String {
-        let p = self.prefs.lock().unwrap();
+        let p = self.prefs.lock();
         p.contacts
             .iter()
             .find(|c| c.id_hex.starts_with(author_short))
@@ -4467,7 +4482,7 @@ impl Engine {
     // ---- outbound helpers ---------------------------------------------------------------
 
     fn hello_payload(&self, circle_id: &str) -> Option<Vec<u8>> {
-        let profile = self.prefs.lock().unwrap().profile.clone();
+        let profile = self.prefs.lock().profile.clone();
         let name = if profile.name.trim().is_empty() { "Someone".to_string() } else { profile.name.clone() };
         let circle_name = self
             .social
@@ -4511,24 +4526,24 @@ impl Engine {
     /// pair, so a failed upload retries next tick.
     async fn offer_hello_mailbox(self: &Arc<Self>, circle_id: &str, to_hex: &str, hello: &[u8]) {
         let key = Self::hello_mailbox_key(circle_id, to_hex, &self.node_id_hex(), hello);
-        let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
+        let hosted = self.relay_host.lock().as_ref().map(|h| h.node_id_hex());
         for node_hex in self.relays_for(circle_id) {
             // The S3 mailbox loop feeds receive() only — a hello parked there would never route.
             if node_hex.starts_with("s3:") {
                 continue;
             }
             let offered = format!("{node_hex}|{key}");
-            if self.hello_offered.lock().unwrap().contains(&offered) {
+            if self.hello_offered.lock().contains(&offered) {
                 continue;
             }
             // Our OWN hosted relay: store directly into the local mailbox (no iroh self-dial).
             if hosted.as_deref() == Some(node_hex.as_str()) {
-                let ok = match self.relay_host.lock().unwrap().as_ref() {
+                let ok = match self.relay_host.lock().as_ref() {
                     Some(h) => h.local_put(key.clone(), hello.to_vec()),
                     None => false,
                 };
                 if ok {
-                    self.hello_offered.lock().unwrap().insert(offered);
+                    self.hello_offered.lock().insert(offered);
                 }
                 continue;
             }
@@ -4574,7 +4589,7 @@ impl Engine {
                     &to_hex.chars().take(8).collect::<String>(),
                     &node_hex.chars().take(8).collect::<String>()
                 );
-                self.hello_offered.lock().unwrap().insert(offered);
+                self.hello_offered.lock().insert(offered);
             }
         }
     }
@@ -4631,7 +4646,6 @@ impl Engine {
             let mut out: Vec<String> = self
                 .prefs
                 .lock()
-                .unwrap()
                 .contacts
                 .iter()
                 .map(|c| c.id_hex.clone())
@@ -4698,7 +4712,7 @@ impl Engine {
         const ROSTER_PULL_PER_PASS: usize = 3;
         const ROSTER_PULL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(600);
         let due: Vec<String> = {
-            let seen = self.roster_pull_at.lock().unwrap();
+            let seen = self.roster_pull_at.lock();
             unresolved
                 .into_iter()
                 .filter(|hex| {
@@ -4728,7 +4742,6 @@ impl Engine {
                 for hex in due {
                     me.roster_pull_at
                         .lock()
-                        .unwrap()
                         .insert(hex.to_lowercase(), std::time::Instant::now());
                     me.fetch_contact_roster(&hex).await;
                 }
@@ -4753,7 +4766,7 @@ impl Engine {
         // Siblings dedupe on receive, so repeating a sweep is harmless.
         const OWN_DEVICE_CATCHUP_LIMIT: u32 = 50;
         let catchup_due = {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             let now = now_ms();
             if !st.own_device_catchup_in_flight
                 && now.saturating_sub(st.last_own_device_catchup_ms) > 300_000
@@ -4767,7 +4780,7 @@ impl Engine {
         };
         if catchup_due {
             if self.my_other_device_hexes().is_empty() {
-                self.dyn_state.lock().unwrap().own_device_catchup_in_flight = false;
+                self.dyn_state.lock().own_device_catchup_in_flight = false;
             } else {
                 let me = self.clone();
                 tauri::async_runtime::spawn(async move {
@@ -4782,7 +4795,7 @@ impl Engine {
                             me.live_deliver_many_to_my_devices(wire::EVENT, payloads);
                         }
                     }
-                    me.dyn_state.lock().unwrap().own_device_catchup_in_flight = false;
+                    me.dyn_state.lock().own_device_catchup_in_flight = false;
                 });
             }
         }
@@ -4792,7 +4805,7 @@ impl Engine {
     }
 
     fn send_frame(self: &Arc<Self>, t: u8, payload: &[u8], to_node_hex: &str) {
-        let node = self.node.lock().unwrap().clone();
+        let node = self.node.lock().clone();
         let Some(node) = node else { return };
         let frame = wire::frame(t, payload);
         // Transport edge (parity with iOS sendIroh / Android sendFrame): callers address an ACCOUNT
@@ -4851,14 +4864,14 @@ impl Engine {
         if matches!(t, wire::MEDIA_REQ | wire::HISTORY_REQ | wire::MEDIA_RESUME_REQ | wire::CALL_INVITE | wire::CALL_ACCEPT | wire::CALL_HANGUP | wire::SDP_OFFER | wire::SDP_ANSWER | wire::ICE | wire::GROUP_INVITE | wire::CALL_CAMERA | wire::MEDIA_WANTED | wire::MEDIA_AVAILABLE) {
             if body.len() >= 64 {
                 let head = String::from_utf8_lossy(&body[..64]).into_owned();
-                if head.len() == 64 && self.prefs.lock().unwrap().blocked.contains(&head) {
+                if head.len() == 64 && self.prefs.lock().blocked.contains(&head) {
                     return;
                 }
             }
         }
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
-            me.dyn_state.lock().unwrap().internet_active = true;
+            me.dyn_state.lock().internet_active = true;
             match t {
                 wire::HELLO => me.handle_hello_from(sender_device.as_deref(), &body),
                 wire::EVENT => me.handle_event(&body, sender_device.as_deref()),
@@ -4897,7 +4910,7 @@ impl Engine {
     fn handle_hello_from(self: &Arc<Self>, sender_device: Option<&str>, payload: &[u8]) {
         let Some(hello) = wire::parse_hello(payload) else { return };
         let id_hex = wire::node_hex(&hello.bundle);
-        if self.prefs.lock().unwrap().blocked.contains(&id_hex) {
+        if self.prefs.lock().blocked.contains(&id_hex) {
             return;
         }
         // A hello delivered DIRECTLY teaches us the sender's dialable device id for this account —
@@ -4933,17 +4946,17 @@ impl Engine {
             self.pin_dm_authority(&hello.circle_id); // §5 live-lane + §2 deterministic creator pin
         }
 
-        let expected = self.dyn_state.lock().unwrap().initiated.get(&id_hex).cloned();
+        let expected = self.dyn_state.lock().initiated.get(&id_hex).cloned();
         if let Some(expected) = expected {
             if !expected.is_empty() && expected != actual_verify {
                 log::warn!("verify mismatch for {id_hex} — dropping (possible MITM)");
                 return;
             }
             self.accept_contact(&hello.circle_id, &hello.bundle, &id_hex, &name, &actual_verify, true);
-            self.dyn_state.lock().unwrap().initiated.remove(&id_hex);
+            self.dyn_state.lock().initiated.remove(&id_hex);
             return;
         }
-        if self.prefs.lock().unwrap().contacts.iter().any(|c| c.id_hex == id_hex) {
+        if self.prefs.lock().contacts.iter().any(|c| c.id_hex == id_hex) {
             let _ = self.social.add_contact_bundle(hello.circle_id.clone(), hello.bundle.clone());
             return;
         }
@@ -4981,7 +4994,7 @@ impl Engine {
         // simply missing here — a seed-adopted desktop has an EMPTY prefs.contacts (measured: 0), so
         // the known-contact branch above never fires for it either. Same principle as the
         // device-of-known-account rule above, at account level.
-        let engine_knows = !self.prefs.lock().unwrap().is_contact_removed(&id_hex)
+        let engine_knows = !self.prefs.lock().is_contact_removed(&id_hex)
             && self.social.circles().iter().any(|c| {
                 self.social
                     .contact_node_ids(c.id.clone())
@@ -4991,7 +5004,7 @@ impl Engine {
         if engine_knows {
             let _ = self.social.add_contact_bundle(hello.circle_id.clone(), hello.bundle.clone());
             {
-                let mut p = self.prefs.lock().unwrap();
+                let mut p = self.prefs.lock();
                 if !p.contacts.iter().any(|c| c.id_hex == id_hex) {
                     p.contacts.push(Contact {
                         id_hex: id_hex.clone(),
@@ -5009,7 +5022,7 @@ impl Engine {
             return;
         }
         if !hello.circle_id.starts_with("dm:") {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             if !st.pending.iter().any(|p| p.id_hex == id_hex) {
                 st.pending.push(PendingRequest { id_hex, name, verify_hex: actual_verify, bundle: hello.bundle });
             }
@@ -5160,7 +5173,7 @@ impl Engine {
                     .device_node_ids_for(announcer_hex.clone())
                     .iter()
                     .any(|d| d.to_lowercase() == node_hex);
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             let is_forgotten = p.suppressed_relays.contains(&node_hex);
             let is_inactive = !p.relay_is_active(&node_hex);
             let mut was_reactivated = false;
@@ -5214,7 +5227,7 @@ impl Engine {
             // Clear any stale backoff so a just-reactivated relay is retried immediately.
             if was_suppressed_or_inactive {
                 drop(p);
-                self.relay_health.lock().unwrap().remove(&node_hex);
+                self.relay_health.lock().remove(&node_hex);
             }
         }
         Some(circle_id)
@@ -5239,7 +5252,7 @@ impl Engine {
         }
         let now = now_ms();
         {
-            let mut m = self.relay_interface_refresh_ms.lock().unwrap();
+            let mut m = self.relay_interface_refresh_ms.lock();
             if let Some(&last) = m.get(&lower) {
                 if now.saturating_sub(last) < 300_000 {
                     return;
@@ -5291,7 +5304,7 @@ impl Engine {
                 urls.len()
             );
             let circles: Vec<String> = {
-                let mut p = me.prefs.lock().unwrap();
+                let mut p = me.prefs.lock();
                 p.set_relay_http(&lower, urls.clone(), token);
                 if let Some(d) = &derp {
                     p.set_relay_derp(&lower, d);
@@ -5317,7 +5330,7 @@ impl Engine {
                     me.backfill_mailbox(cid).await;
                 }
                 me.backfill_media_to_relays().await;
-                me.dyn_state.lock().unwrap().last_media_backfill_ms = now_ms();
+                me.dyn_state.lock().last_media_backfill_ms = now_ms();
             }
             me.poll_mailbox().await;
             me.reannounce_own_relay();
@@ -5325,8 +5338,8 @@ impl Engine {
     }
 
     pub fn relay_status(&self) -> (bool, bool, bool, bool, bool) {
-        let st = self.dyn_state.lock().unwrap();
-        let prefs = self.prefs.lock().unwrap();
+        let st = self.dyn_state.lock();
+        let prefs = self.prefs.lock();
         // Only ACTIVE relays count — a fully-deactivated set means "no relay" even though configs linger.
         let has_relay = prefs
             .relays
@@ -5340,13 +5353,13 @@ impl Engine {
 
     /// The host's media limits, `(days, bytes)`; `0` on either = no limit for that dimension.
     pub fn relay_media_limits(&self) -> (u32, u64) {
-        self.prefs.lock().unwrap().relay_media_limits()
+        self.prefs.lock().relay_media_limits()
     }
 
     /// Set the host's media limits. Takes effect when the relay NEXT STARTS — the retention is handed
     /// to the store at attach time, so the UI says so rather than pretending a live change applied.
     pub fn set_relay_media_limits(&self, max_age_days: u32, max_bytes: u64) {
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         p.relay_media_max_age_days = Some(max_age_days);
         p.relay_media_max_bytes = Some(max_bytes);
         let _ = p.save(&self.paths);
@@ -5355,27 +5368,27 @@ impl Engine {
     /// The relay's node id (64-hex), which a friend pastes into "Adopt relay" so we share a
     /// mailbox. `None` unless we're currently hosting.
     pub fn relay_link(&self) -> Option<String> {
-        self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex())
+        self.relay_host.lock().as_ref().map(|h| h.node_id_hex())
     }
 
     /// Start serving the circle's mailbox from this device + adopt it for every circle.
     pub async fn start_hosting(self: &Arc<Self>) -> Result<String> {
         {
-            if let Some(h) = self.relay_host.lock().unwrap().as_ref() {
+            if let Some(h) = self.relay_host.lock().as_ref() {
                 return Ok(h.node_id_hex());
             }
         }
         // Attach the relay to the EXISTING messaging node's endpoint (one iroh node, two ALPNs) — a
         // second in-process iroh node made iroh churn paths unboundedly (the tens-of-GB leak). The relay
         // id is therefore the account node id.
-        let Some(node) = self.node.lock().unwrap().clone() else {
+        let Some(node) = self.node.lock().clone() else {
             return Err(anyhow::anyhow!("relay host: messaging node not started yet"));
         };
         let dir = self.paths.relay_dir();
         std::fs::create_dir_all(&dir).ok();
         // attach_with_limits, not attach: plain `attach` runs media UNLIMITED, so hosting meant
         // volunteering the whole disk with no way to say otherwise.
-        let (max_age_days, max_bytes) = self.prefs.lock().unwrap().relay_media_limits();
+        let (max_age_days, max_bytes) = self.prefs.lock().relay_media_limits();
         let handle = RelayServerHandle::attach_with_limits(
             node,
             dir.to_string_lossy().to_string(),
@@ -5383,8 +5396,8 @@ impl Engine {
             max_bytes,
         );
         let node_hex = handle.node_id_hex();
-        *self.relay_host.lock().unwrap() = Some(handle.clone());
-        self.dyn_state.lock().unwrap().hosting = true;
+        *self.relay_host.lock() = Some(handle.clone());
+        self.dyn_state.lock().hosting = true;
         // Lock the mailbox to circle members before announcing it (audit transport-F4).
         self.authorize_membership();
         // Plain-HTTP media interface — the DEFAULT cross-NAT media transport (the iroh blob ALPN
@@ -5400,7 +5413,7 @@ impl Engine {
     /// every announce carries them. URLs = the optional configured public URL first, then the LAN IP.
     async fn start_relay_http(self: &Arc<Self>, handle: &Arc<RelayServerHandle>, node_hex: &str) {
         let token = {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             if p.relay_http_token.is_empty() {
                 use rand::RngCore;
                 let mut bytes = [0u8; 16];
@@ -5430,7 +5443,7 @@ impl Engine {
         // on receipt (`relay_http_reachable` keeps a private address only when we are on that /24), so
         // the useless case is filtered by the side that can actually tell.
         let (mode, configured_public, tunnel_token, auto_tunnel, configured_derp) = {
-            let p = self.prefs.lock().unwrap();
+            let p = self.prefs.lock();
             let mode = p.front_door_mode();
             let pub_url = p.relay_public_url.trim();
             let pub_url = if !pub_url.is_empty() {
@@ -5487,7 +5500,7 @@ impl Engine {
                                 "path router on {} — single origin media+DERP (one cloudflared)",
                                 router.local_addr
                             );
-                            *self.path_router.lock().unwrap() = Some(router);
+                            *self.path_router.lock() = Some(router);
                             break;
                         }
                         Ok(None) => {}
@@ -5507,7 +5520,7 @@ impl Engine {
                 }
             }
         }
-        *self.path_routed.lock().unwrap() = path_routed;
+        *self.path_routed.lock() = path_routed;
 
         let mut urls = Vec::new();
         // Manual = announce-only. Bundled/Auto may spawn cloudflared → path router when unified.
@@ -5526,7 +5539,7 @@ impl Engine {
                     t.public_url
                 );
                 urls.push(t.public_url.clone());
-                *self.quick_tunnel.lock().unwrap() = Some(t);
+                *self.quick_tunnel.lock() = Some(t);
             }
             Ok(DeskFrontDoor::AnnounceOnly(u)) => {
                 log::info!(
@@ -5576,7 +5589,7 @@ impl Engine {
         if urls.is_empty() && derp_url.is_none() && turn_info.is_none() {
             return;
         }
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         let mut changed = if !urls.is_empty() {
             p.set_relay_http(node_hex, urls.clone(), token.clone())
         } else {
@@ -5607,7 +5620,7 @@ impl Engine {
         tauri::async_runtime::spawn(async move {
             for secs in [2u64, 5, 12, 25] {
                 tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
-                if !me.dyn_state.lock().unwrap().hosting {
+                if !me.dyn_state.lock().hosting {
                     return;
                 }
                 me.reannounce_own_relay();
@@ -5655,7 +5668,7 @@ impl Engine {
             Ok(Some(srv)) => {
                 let port = srv.local_port();
                 log::info!("iroh DERP fabric on {}", srv.local_addr);
-                *self.derp_server.lock().unwrap() = Some(srv);
+                *self.derp_server.lock() = Some(srv);
                 Some(port)
             }
             Ok(None) => None,
@@ -5675,7 +5688,7 @@ impl Engine {
         configured_derp: Option<String>,
         sibling_derp: Option<String>,
     ) -> Option<String> {
-        let mut guard = self.derp_server.lock().unwrap();
+        let mut guard = self.derp_server.lock();
         let Some(srv) = guard.as_mut() else {
             return None;
         };
@@ -5702,9 +5715,9 @@ impl Engine {
                         t.public_url
                     );
                     let url = t.public_url.clone();
-                    *self.derp_tunnel.lock().unwrap() = Some(t);
-                    *self.path_routed.lock().unwrap() = false;
-                    if let Some(srv) = self.derp_server.lock().unwrap().as_mut() {
+                    *self.derp_tunnel.lock() = Some(t);
+                    *self.path_routed.lock() = false;
+                    if let Some(srv) = self.derp_server.lock().as_mut() {
                         srv.public_url = url.clone();
                     }
                     return Some(url);
@@ -5737,7 +5750,7 @@ impl Engine {
         media_urls: &[String],
     ) -> Option<(Vec<String>, String, String)> {
         let secret = {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             if p.relay_turn_token.is_empty() {
                 use rand::RngCore;
                 let mut bytes = [0u8; 16];
@@ -5778,7 +5791,7 @@ impl Engine {
                     srv.username.clone(),
                     srv.password.clone(),
                 );
-                *self.turn_server.lock().unwrap() = Some(srv);
+                *self.turn_server.lock() = Some(srv);
                 Some(out)
             }
             Ok(None) => None,
@@ -5853,7 +5866,7 @@ impl Engine {
     /// Public HTTPS front door settings (device-local prefs).
     /// Returns `(media_url, tunnel_token, auto_tunnel, front_door, derp_url)`.
     pub fn relay_public_settings(&self) -> (String, String, bool, String, String) {
-        let p = self.prefs.lock().unwrap();
+        let p = self.prefs.lock();
         (
             p.relay_public_url.clone(),
             p.relay_cf_tunnel_token.clone(),
@@ -5871,7 +5884,7 @@ impl Engine {
         front_door: String,
         derp_url: String,
     ) {
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         p.relay_public_url = public_url.trim().trim_end_matches('/').to_string();
         p.relay_cf_tunnel_token = tunnel_token.trim().to_string();
         p.relay_auto_tunnel = Some(auto_tunnel);
@@ -5896,7 +5909,7 @@ impl Engine {
     /// HTTP interface at all, so callers go straight to the path that works. iOS
     /// `RelayMailboxStore.httpInterface` parity.
     fn relay_http_reachable(&self, hex: &str) -> Option<(Vec<String>, String)> {
-        let (urls, token) = self.prefs.lock().unwrap().relay_http(hex)?;
+        let (urls, token) = self.prefs.lock().relay_http(hex)?;
         let usable: Vec<String> = urls.into_iter().filter(|u| Self::url_plausibly_reachable(u)).collect();
         if usable.is_empty() {
             return None;
@@ -5947,7 +5960,7 @@ impl Engine {
     /// The frame-19 announce body for one relay: bare 64-hex, or JSON
     /// `{"node","urls","token","derp","turn","turnUser","turnPass"}` when media/fabric/TURN known.
     fn relay_announce_body(&self, hex: &str) -> Vec<u8> {
-        let p = self.prefs.lock().unwrap();
+        let p = self.prefs.lock();
         let added_at = p.relay_entries.get(hex).map(|e| e.added_at_ms).unwrap_or(0);
         let http = p.relay_http(hex);
         let entry = p.relay_entries.get(hex);
@@ -5994,16 +6007,16 @@ impl Engine {
     /// node is already running, schedules a debounced soft rebind so the next bind uses Haven
     /// RelayMap without requiring a full app restart.
     pub fn refresh_haven_fabric(self: &Arc<Self>) {
-        let urls = self.prefs.lock().unwrap().all_derp_urls();
+        let urls = self.prefs.lock().all_derp_urls();
         haven_net::apply_derp_urls(urls.clone());
         let target = if haven_net::haven_fabric_active() {
             haven_net::active_derp_urls()
         } else {
             Vec::new()
         };
-        let node_up = self.node.lock().unwrap().is_some();
+        let node_up = self.node.lock().is_some();
         let (bound, in_flight) = {
-            let st = self.fabric_rebind.lock().unwrap();
+            let st = self.fabric_rebind.lock();
             (st.bound_derp_urls.clone(), st.in_flight)
         };
         // Soft-rebind only when we have a non-empty fabric the live node was not bound with.
@@ -6017,8 +6030,8 @@ impl Engine {
     }
 
     fn emit_haven_fabric(&self, urls: &[String], rebind_pending: bool) {
-        let (turn_urls, turn_user, turn_pass) = self.prefs.lock().unwrap().all_turn_ice();
-        if let Some(app) = self.app.lock().unwrap().as_ref() {
+        let (turn_urls, turn_user, turn_pass) = self.prefs.lock().all_turn_ice();
+        if let Some(app) = self.app.lock().as_ref() {
             let _ = app.emit(
                 "haven-fabric",
                 serde_json::json!({
@@ -6035,14 +6048,14 @@ impl Engine {
     /// Debounce 2s so flapping frame-19 / multi-relay learn coalesces into one stop+start.
     fn schedule_fabric_rebind(self: &Arc<Self>) {
         let gen = {
-            let mut st = self.fabric_rebind.lock().unwrap();
+            let mut st = self.fabric_rebind.lock();
             st.debounce_gen = st.debounce_gen.wrapping_add(1);
             st.debounce_gen
         };
         let eng = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            if eng.fabric_rebind.lock().unwrap().debounce_gen != gen {
+            if eng.fabric_rebind.lock().debounce_gen != gen {
                 return; // superseded by a newer schedule
             }
             eng.rebind_transport_for_fabric().await;
@@ -6055,25 +6068,25 @@ impl Engine {
     /// Guarantees: old endpoint is fully shut down before the new spawn (no same-key dual endpoint).
     pub async fn rebind_transport_for_fabric(self: &Arc<Self>) {
         {
-            let mut st = self.fabric_rebind.lock().unwrap();
+            let mut st = self.fabric_rebind.lock();
             if st.in_flight {
                 return;
             }
             st.in_flight = true;
         }
-        let urls = self.prefs.lock().unwrap().all_derp_urls();
+        let urls = self.prefs.lock().all_derp_urls();
         self.emit_haven_fabric(&urls, true);
 
         let outcome = self.rebind_transport_for_fabric_inner().await;
 
-        let urls_after = self.prefs.lock().unwrap().all_derp_urls();
+        let urls_after = self.prefs.lock().all_derp_urls();
         match outcome {
             Ok(()) => {
                 log::info!(
                     "fabric rebind ok — messaging node on Haven RelayMap ({})",
                     haven_net::active_derp_urls().join(", ")
                 );
-                self.fabric_rebind.lock().unwrap().in_flight = false;
+                self.fabric_rebind.lock().in_flight = false;
                 self.emit_haven_fabric(&urls_after, false);
                 self.emit_changed();
                 // Learns that arrived while we were rebound: schedule another pass if the map moved.
@@ -6081,7 +6094,7 @@ impl Engine {
             }
             Err(e) => {
                 log::error!("fabric rebind failed: {e:#}");
-                self.fabric_rebind.lock().unwrap().in_flight = false;
+                self.fabric_rebind.lock().in_flight = false;
                 // Still pending so UI can hint; a later refresh or next launch recovers.
                 self.emit_haven_fabric(&urls_after, true);
             }
@@ -6090,7 +6103,7 @@ impl Engine {
 
     async fn rebind_transport_for_fabric_inner(self: &Arc<Self>) -> Result<()> {
         let target = {
-            haven_net::apply_derp_urls(self.prefs.lock().unwrap().all_derp_urls());
+            haven_net::apply_derp_urls(self.prefs.lock().all_derp_urls());
             if haven_net::haven_fabric_active() {
                 haven_net::active_derp_urls()
             } else {
@@ -6101,21 +6114,21 @@ impl Engine {
             return Ok(()); // nothing to rebind onto
         }
         {
-            let bound = self.fabric_rebind.lock().unwrap().bound_derp_urls.clone();
+            let bound = self.fabric_rebind.lock().bound_derp_urls.clone();
             if bound == target {
                 return Ok(()); // already on this map (debounce race)
             }
         }
-        if self.node.lock().unwrap().is_none() {
+        if self.node.lock().is_none() {
             // Not started yet — next `start()` applies fabric before bind.
-            self.fabric_rebind.lock().unwrap().bound_derp_urls = target;
+            self.fabric_rebind.lock().bound_derp_urls = target;
             return Ok(());
         }
 
         // Detach relay host first (same endpoint as messaging — must not outlive the node).
         // Keep cloudflared + embedded DERP: they are separate sockets and still front the same ports.
         let was_hosting = {
-            let mut g = self.relay_host.lock().unwrap();
+            let mut g = self.relay_host.lock();
             if let Some(h) = g.take() {
                 h.disable();
                 true
@@ -6128,7 +6141,7 @@ impl Engine {
         self.relay_clients.lock().await.clear();
 
         // Fully close the old endpoint before same-seed spawn.
-        let old = self.node.lock().unwrap().take();
+        let old = self.node.lock().take();
         if let Some(old) = old {
             old.shutdown().await;
             // Brief pause so OS UDP / iroh internals finish teardown.
@@ -6136,22 +6149,22 @@ impl Engine {
         }
 
         // Policy again (may have learned more during debounce), then bind.
-        haven_net::apply_derp_urls(self.prefs.lock().unwrap().all_derp_urls());
+        haven_net::apply_derp_urls(self.prefs.lock().all_derp_urls());
         let listener: Arc<dyn InboundListener> = Arc::new(NodeListener {
             engine: Arc::downgrade(self),
         });
-        let device_seed = self.roster.lock().unwrap().device_seed.clone();
+        let device_seed = self.roster.lock().device_seed.clone();
         let node = HavenNode::start(device_seed, listener)
             .await
             .map_err(|e| anyhow::anyhow!("HavenNode::start after fabric rebind: {e}"))?;
-        *self.node.lock().unwrap() = Some(node);
-        self.fabric_rebind.lock().unwrap().bound_derp_urls = haven_net::active_derp_urls();
-        self.dyn_state.lock().unwrap().started = true;
+        *self.node.lock() = Some(node);
+        self.fabric_rebind.lock().bound_derp_urls = haven_net::active_derp_urls();
+        self.dyn_state.lock().started = true;
 
         if was_hosting {
             if let Err(e) = self.reattach_hosting_after_rebind().await {
                 log::error!("fabric rebind: re-attach relay host failed: {e:#}");
-                self.dyn_state.lock().unwrap().hosting = false;
+                self.dyn_state.lock().hosting = false;
             }
         }
 
@@ -6165,12 +6178,12 @@ impl Engine {
 
     /// Re-attach in-process mailbox to the new messaging node without re-spawning tunnels/DERP.
     async fn reattach_hosting_after_rebind(self: &Arc<Self>) -> Result<()> {
-        let Some(node) = self.node.lock().unwrap().clone() else {
+        let Some(node) = self.node.lock().clone() else {
             return Err(anyhow::anyhow!("messaging node missing after rebind"));
         };
         let dir = self.paths.relay_dir();
         std::fs::create_dir_all(&dir).ok();
-        let (max_age_days, max_bytes) = self.prefs.lock().unwrap().relay_media_limits();
+        let (max_age_days, max_bytes) = self.prefs.lock().relay_media_limits();
         let handle = RelayServerHandle::attach_with_limits(
             node,
             dir.to_string_lossy().to_string(),
@@ -6178,7 +6191,7 @@ impl Engine {
             max_bytes,
         );
         let node_hex = handle.node_id_hex();
-        let token = self.prefs.lock().unwrap().relay_http_token.clone();
+        let token = self.prefs.lock().relay_http_token.clone();
         if !token.is_empty() {
             // Prefer the well-known port so existing cloudflared front doors keep working.
             if let Err(e) = handle.serve_http("0.0.0.0:8674".into(), token.clone()).await {
@@ -6192,14 +6205,14 @@ impl Engine {
         // Re-publish media URLs from the *live* tunnel. Without this, fabric rebind left
         // LAN-only media URLs while DERP still had trycloudflare → iroh works, media never does.
         let mut urls: Vec<String> = Vec::new();
-        if let Some(t) = self.quick_tunnel.lock().unwrap().as_ref() {
+        if let Some(t) = self.quick_tunnel.lock().as_ref() {
             let u = t.public_url.trim().trim_end_matches('/').to_string();
             if !u.is_empty() {
                 urls.push(u);
             }
         }
         if urls.is_empty() {
-            let pub_url = self.prefs.lock().unwrap().relay_public_url.clone();
+            let pub_url = self.prefs.lock().relay_public_url.clone();
             let t = pub_url.trim().trim_end_matches('/');
             if !t.is_empty() {
                 if let Ok(n) = haven_net::cfquicktunnel::normalize_public_url(t) {
@@ -6215,8 +6228,8 @@ impl Engine {
             }
         }
         if !urls.is_empty() && !token.is_empty() {
-            let path_routed = *self.path_routed.lock().unwrap();
-            let mut p = self.prefs.lock().unwrap();
+            let path_routed = *self.path_routed.lock();
+            let mut p = self.prefs.lock();
             let mut changed = p.set_relay_http(&node_hex, urls.clone(), token);
             // Path-proxy single origin: keep DERP on the same public URL.
             if path_routed {
@@ -6229,8 +6242,8 @@ impl Engine {
             }
             log::info!("reattach media announce urls={urls:?}");
         }
-        *self.relay_host.lock().unwrap() = Some(handle);
-        self.dyn_state.lock().unwrap().hosting = true;
+        *self.relay_host.lock() = Some(handle);
+        self.dyn_state.lock().hosting = true;
         Ok(())
     }
 
@@ -6248,7 +6261,7 @@ impl Engine {
     /// to its members (+ sibling relays for mesh sync) — a stranger who learns the relay id gets
     /// nothing (audit transport-F4). Idempotent; call on host start and whenever membership changes.
     pub fn authorize_membership(self: &Arc<Self>) {
-        let Some(handle) = self.relay_host.lock().unwrap().clone() else { return };
+        let Some(handle) = self.relay_host.lock().clone() else { return };
         let me = self.social.my_node_hex();
         for c in self.social.circles() {
             let mut accounts = self.social.contact_node_ids(c.id.clone());
@@ -6276,18 +6289,18 @@ impl Engine {
     }
 
     pub fn stop_hosting(self: &Arc<Self>) {
-        *self.relay_host.lock().unwrap() = None;
+        *self.relay_host.lock() = None;
         // Drop kills cloudflared; the trycloudflare hostname dies with it.
-        *self.quick_tunnel.lock().unwrap() = None;
-        *self.derp_tunnel.lock().unwrap() = None;
-        *self.derp_server.lock().unwrap() = None;
-        *self.path_router.lock().unwrap() = None;
-        *self.path_routed.lock().unwrap() = false;
-        *self.turn_server.lock().unwrap() = None;
+        *self.quick_tunnel.lock() = None;
+        *self.derp_tunnel.lock() = None;
+        *self.derp_server.lock() = None;
+        *self.path_router.lock() = None;
+        *self.path_routed.lock() = false;
+        *self.turn_server.lock() = None;
         // Also sweep orphans — lost Process/Child refs leave dual free tunnels that make the
         // public URL look like "Iroh Relay only" or 401 after toggle off/on.
         haven_net::cfquicktunnel::kill_orphan_cloudflareds(&[]);
-        self.dyn_state.lock().unwrap().hosting = false;
+        self.dyn_state.lock().hosting = false;
         self.emit_changed();
     }
 
@@ -6297,16 +6310,14 @@ impl Engine {
         let media = self
             .quick_tunnel
             .lock()
-            .unwrap()
             .as_ref()
             .map(|t| t.public_url.clone());
         let derp = self
             .derp_tunnel
             .lock()
-            .unwrap()
             .as_ref()
             .map(|t| t.public_url.clone());
-        let path_routed = *self.path_routed.lock().unwrap();
+        let path_routed = *self.path_routed.lock();
         (media, derp, path_routed)
     }
 
@@ -6323,7 +6334,6 @@ impl Engine {
         let own_hex = self
             .relay_host
             .lock()
-            .unwrap()
             .as_ref()
             .map(|h| h.node_id_hex())
             .filter(|h| h.len() == 64);
@@ -6333,8 +6343,8 @@ impl Engine {
             // the mesh forever (each member re-broadcast them; receivers reactivated them).
             let now = now_ms();
             let mut hexes: Vec<String> = {
-                let p = self.prefs.lock().unwrap();
-                let health = self.relay_health.lock().unwrap();
+                let p = self.prefs.lock();
+                let health = self.relay_health.lock();
                 p.relays
                     .get(&c.id)
                     .cloned()
@@ -6379,7 +6389,7 @@ impl Engine {
             // Broaden to media_dests (every known relay, not just the circle's own) so media still
             // backs up when a circle's own relays are all offline but some OTHER relay is reachable.
             let has_relay = !self.media_dests(&circle_id).is_empty();
-            let has_s3 = self.prefs.lock().unwrap().s3.is_some();
+            let has_s3 = self.prefs.lock().s3.is_some();
             if !has_relay && !has_s3 {
                 continue;
             }
@@ -6481,23 +6491,23 @@ impl Engine {
             wire.hash(&mut h);
             h.finish()
         };
-        let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
+        let hosted = self.relay_host.lock().as_ref().map(|h| h.node_id_hex());
         let nodes: Vec<String> = {
-            let p = self.prefs.lock().unwrap();
+            let p = self.prefs.lock();
             p.all_active_relay_hexes().into_iter().filter(|h| !h.starts_with("s3:")).collect()
         };
         let mut skipped = 0usize;
         for node_hex in nodes {
             // Our OWN hosted relay: write straight into the local store (no iroh self-dial).
             if hosted.as_deref() == Some(node_hex.as_str()) {
-                if let Some(h) = self.relay_host.lock().unwrap().as_ref() {
+                if let Some(h) = self.relay_host.lock().as_ref() {
                     h.local_put(key.clone(), wire.clone());
                 }
                 continue;
             }
             // Already holds these exact bytes and confirmed recently → nothing to say.
             if !force {
-                let seen = self.roster_published.lock().unwrap().get(&node_hex).copied();
+                let seen = self.roster_published.lock().get(&node_hex).copied();
                 if let Some((hash, at)) = seen {
                     if hash == wire_hash && now_ms().saturating_sub(at) < ROSTER_REPUBLISH_MS {
                         skipped += 1;
@@ -6514,7 +6524,7 @@ impl Engine {
                     match self.http_put(base, &token, &key, wire.clone()).await {
                         Ok(()) => {
                             self.mark_relay_ok(&node_hex);
-                            self.roster_published.lock().unwrap().insert(node_hex.clone(), (wire_hash, now_ms()));
+                            self.roster_published.lock().insert(node_hex.clone(), (wire_hash, now_ms()));
                             done = true;
                             break;
                         }
@@ -6551,7 +6561,7 @@ impl Engine {
                 match client.put(key.clone(), wire.clone()).await {
                     Ok(()) => {
                         self.mark_relay_ok(&node_hex);
-                        self.roster_published.lock().unwrap().insert(node_hex.clone(), (wire_hash, now_ms()));
+                        self.roster_published.lock().insert(node_hex.clone(), (wire_hash, now_ms()));
                     }
                     Err(e) => {
                         self.relay_failed(&node_hex).await;
@@ -6646,7 +6656,7 @@ impl Engine {
         }
         let key = format!("haven/devroster/{acct}");
         let short = acct.chars().take(8).collect::<String>();
-        let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
+        let hosted = self.relay_host.lock().as_ref().map(|h| h.node_id_hex());
         // -1 refused, 0 already current, 1 stored (changed). `known` records that we HAVE the
         // roster while still letting the loop ask the remaining relays: stopping at the first one
         // holding a stale-but-equal copy pins this device a version behind its siblings forever.
@@ -6676,7 +6686,7 @@ impl Engine {
 
         // Our own hosted store first — no dial, and a relay-hosting device usually already holds it.
         if hosted.is_some() {
-            let local = self.relay_host.lock().unwrap().as_ref().and_then(|h| h.local_get(key.clone()));
+            let local = self.relay_host.lock().as_ref().and_then(|h| h.local_get(key.clone()));
             if let Some(w) = local {
                 if !w.is_empty() && ingest(self, w, None) {
                     return true;
@@ -6684,7 +6694,7 @@ impl Engine {
             }
         }
         let nodes: Vec<String> = {
-            let p = self.prefs.lock().unwrap();
+            let p = self.prefs.lock();
             p.all_active_relay_hexes().into_iter().filter(|h| !h.starts_with("s3:")).collect()
         };
         for node_hex in nodes {
@@ -6724,7 +6734,7 @@ impl Engine {
     fn reseal_after_epoch_change(self: &Arc<Self>) {
         const MIN_INTERVAL_MS: u64 = 30_000;
         {
-            let mut last = self.last_epoch_reseal.lock().unwrap();
+            let mut last = self.last_epoch_reseal.lock();
             let now = now_ms();
             if now.saturating_sub(*last) < MIN_INTERVAL_MS {
                 return;
@@ -6786,7 +6796,7 @@ impl Engine {
         {
             // Explicit adoption overrides a prior Forget AND reactivates the entry — re-adding a
             // previously-deactivated relay always works. Mirrors iOS `add(circleId:nodeHex:)`.
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             p.relay_clear_forget(&hex);        // explicit adoption clears the deletion stamp + records re-add
             p.ensure_relay_entry(&hex, None, false, true);
             p.set_relay_added_at(&hex, 0);     // fresh adoption stamp = now()
@@ -6804,7 +6814,7 @@ impl Engine {
         self.refresh_haven_fabric();
         for c in self.social.circles() {
             {
-                let mut p = self.prefs.lock().unwrap();
+                let mut p = self.prefs.lock();
                 let list = p.relays.entry(c.id.clone()).or_default();
                 if !list.contains(&hex) {
                     list.push(hex.clone());
@@ -6839,7 +6849,7 @@ impl Engine {
     pub async fn forget_relay(self: &Arc<Self>, node_hex: String) {
         let hex = Self::norm_relay_hex(&node_hex);
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             let is_s3 = hex.starts_with("s3:");
             p.ensure_relay_entry(&hex, None, is_s3, false);
             if let Some(e) = p.relay_entries.get_mut(&hex) {
@@ -6852,7 +6862,7 @@ impl Engine {
             let _ = p.save(&self.paths);
         }
         self.relay_clients.lock().await.remove(&hex);
-        self.relay_health.lock().unwrap().remove(&hex);
+        self.relay_health.lock().remove(&hex);
         // A forgotten relay may be wiped — drop its media confirmations so a re-adopted one is re-mirrored.
         self.forget_media_backed_up(&hex);
         self.flush_media_backed_up();
@@ -6865,13 +6875,13 @@ impl Engine {
     pub async fn reactivate_relay(self: &Arc<Self>, node_hex: String) {
         let hex = Self::norm_relay_hex(&node_hex);
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             p.relay_clear_forget(&hex);        // explicit reactivation clears the deletion stamp + records re-add
             p.ensure_relay_entry(&hex, None, hex.starts_with("s3:"), true);
             p.set_relay_added_at(&hex, 0);     // fresh adoption stamp = now()
             let _ = p.save(&self.paths);
         }
-        self.relay_health.lock().unwrap().remove(&hex);
+        self.relay_health.lock().remove(&hex);
         self.nudge_self_sync(); // the re-add (LWW) rides a prompt pass
         self.emit_changed();
     }
@@ -6883,7 +6893,7 @@ impl Engine {
         if trimmed.is_empty() {
             return;
         }
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         if let Some(e) = p.relay_entries.get_mut(&hex) {
             e.name = trimmed.to_string();
             let _ = p.save(&self.paths);
@@ -6895,7 +6905,7 @@ impl Engine {
     /// Pick the all-circles default relay (every present + future circle inherits it). Empty = unset.
     /// Mirrors iOS `setDefault`.
     pub fn set_default_relay(self: &Arc<Self>, node_hex: String) {
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         if node_hex.is_empty() {
             p.default_relay.clear();
         } else {
@@ -6913,7 +6923,7 @@ impl Engine {
     pub async fn erase_relay(self: &Arc<Self>, node_hex: String) {
         let hex = Self::norm_relay_hex(&node_hex);
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             let served: Vec<String> =
                 p.relays.iter().filter(|(_, v)| v.contains(&hex)).map(|(k, _)| k.clone()).collect();
             for list in p.relays.values_mut() {
@@ -6950,14 +6960,14 @@ impl Engine {
             let _ = p.save(&self.paths);
         }
         self.relay_clients.lock().await.remove(&hex);
-        self.relay_health.lock().unwrap().remove(&hex);
+        self.relay_health.lock().remove(&hex);
         self.emit_changed();
     }
 
     /// Deleted relays that can still be brought back, newest deletion first (the "Deleted relays"
     /// disclosure on the Relays screen). Mirrors iOS `erasedRelays` / Android `erasedRelayList`.
     pub fn erased_relays(&self) -> Vec<crate::store::ErasedRelay> {
-        let p = self.prefs.lock().unwrap();
+        let p = self.prefs.lock();
         let cutoff = now_ms().saturating_sub(30 * 24 * 60 * 60 * 1000);
         let mut out: Vec<_> = p.erased_relays.values().filter(|r| r.erased_at > cutoff).cloned().collect();
         out.sort_by(|a, b| b.erased_at.cmp(&a.erased_at));
@@ -6970,7 +6980,7 @@ impl Engine {
     pub async fn restore_erased_relay(self: &Arc<Self>, node_hex: String) {
         let hex = Self::norm_relay_hex(&node_hex);
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             let Some(rec) = p.erased_relays.remove(&hex) else { return };
             let now = now_ms();
             let mut entry = rec.entry.clone();
@@ -6990,7 +7000,7 @@ impl Engine {
             p.relay_clear_forget(&hex);   // publish an explicit CLEAR so a sibling's tombstone loses
             let _ = p.save(&self.paths);
         }
-        self.relay_health.lock().unwrap().remove(&hex);   // retry it immediately, not after a backoff
+        self.relay_health.lock().remove(&hex);   // retry it immediately, not after a backoff
         log::info!("restored deleted relay {}", &hex[..8.min(hex.len())]);
         self.emit_changed();
         self.poll_mailbox().await;
@@ -6999,7 +7009,7 @@ impl Engine {
     /// Forget an archived deletion for good (the user chose not to keep the undo around).
     pub fn drop_erased_relay(self: &Arc<Self>, node_hex: String) {
         let hex = Self::norm_relay_hex(&node_hex);
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         if p.erased_relays.remove(&hex).is_some() {
             let _ = p.save(&self.paths);
         }
@@ -7010,7 +7020,7 @@ impl Engine {
     /// ERASE only relays that are BOTH inactive AND unseen for > 7 days. An ACTIVE relay that's merely
     /// unreachable is never purged. Called on launch + on the sync timer. Mirrors iOS `purgeStale`.
     pub async fn purge_stale_relays(self: &Arc<Self>) {
-        let dead = self.prefs.lock().unwrap().stale_relay_hexes();
+        let dead = self.prefs.lock().stale_relay_hexes();
         for hex in dead {
             self.erase_relay(hex).await;
         }
@@ -7021,7 +7031,7 @@ impl Engine {
     pub async fn set_circle_relay(self: &Arc<Self>, node_hex: String, circle_id: String, on: bool) {
         let hex = Self::norm_relay_hex(&node_hex);
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             if on {
                 p.relay_clear_forget(&hex);   // turning a relay on for a circle is an explicit re-add
                 p.ensure_relay_entry(&hex, None, hex.starts_with("s3:"), true);
@@ -7060,7 +7070,7 @@ impl Engine {
         // s3_configure validates connectivity, stores the secret in the keychain, and sets prefs.s3.
         self.s3_configure(pub_cfg, secret_key).await?;
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             let label = if name.trim().is_empty() { format!("S3 · {bucket}") } else { name.trim().to_string() };
             p.ensure_relay_entry(&hex, Some(&label), true, true);
             for c in self.social.circles() {
@@ -7086,9 +7096,9 @@ impl Engine {
     /// sorted active-first then by name. Mirrors iOS `allEntries`.
     pub fn relays_detail(&self) -> Vec<RelayDetail> {
         let now = now_ms();
-        let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
-        let prefs = self.prefs.lock().unwrap();
-        let health = self.relay_health.lock().unwrap();
+        let hosted = self.relay_host.lock().as_ref().map(|h| h.node_id_hex());
+        let prefs = self.prefs.lock();
+        let health = self.relay_health.lock();
         let mut out: Vec<RelayDetail> = prefs
             .relay_entries
             .values()
@@ -7113,14 +7123,14 @@ impl Engine {
     /// The set of relay hexes explicitly associated with a circle (INCLUDING inactive) — for the
     /// per-circle override toggles. Mirrors iOS `explicitRelays(forCircle:)`.
     pub fn circle_relay_hexes(&self, circle_id: &str) -> Vec<String> {
-        self.prefs.lock().unwrap().relays.get(circle_id).cloned().unwrap_or_default()
+        self.prefs.lock().relays.get(circle_id).cloned().unwrap_or_default()
     }
 
     /// The redundant ACTIVE relay set for a circle (mirrored writes, fallback reads). Deactivated relays
     /// are filtered out so they aren't dialed/served, but their config survives. Includes the all-circles
     /// default. Mirrors iOS `relays(forCircle:)`.
     fn relays_for(&self, circle_id: &str) -> Vec<String> {
-        self.prefs.lock().unwrap().active_relays_for(circle_id)
+        self.prefs.lock().active_relays_for(circle_id)
     }
 
     /// Relay hexes to MIRROR media to / FETCH media from — the circle's own active relays PLUS every
@@ -7132,7 +7142,7 @@ impl Engine {
     /// addressing keeps the extra puts idempotent and mesh anti-entropy replicates it back later. Mirrors
     /// iOS `mediaDests(_:)`. Leave MAILBOX (message) paths on `relays_for` — those are membership-gated.
     fn media_dests(&self, circle_id: &str) -> Vec<String> {
-        let p = self.prefs.lock().unwrap();
+        let p = self.prefs.lock();
         let mut out: Vec<String> = p
             .active_relays_for(circle_id)
             .into_iter()
@@ -7148,14 +7158,14 @@ impl Engine {
 
     fn relay_available(&self, node_hex: &str) -> bool {
         let now = now_ms();
-        self.relay_health.lock().unwrap().get(node_hex).map(|h| h.available(now)).unwrap_or(true)
+        self.relay_health.lock().get(node_hex).map(|h| h.available(now)).unwrap_or(true)
     }
 
     fn mark_relay_ok(&self, node_hex: &str) {
-        self.relay_health.lock().unwrap().entry(node_hex.to_string()).or_default().record_success_at(now_ms());
+        self.relay_health.lock().entry(node_hex.to_string()).or_default().record_success_at(now_ms());
         // Stamp the relay's last-seen so purge_stale never reaps a relay that's actually working, and
         // an inactive relay's stale-clock only counts time since it last succeeded. Mirrors iOS markSeen.
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         if p.relay_entries.contains_key(node_hex) {
             p.relay_mark_seen(node_hex);
             let _ = p.save(&self.paths);
@@ -7164,7 +7174,7 @@ impl Engine {
 
     fn mark_relay_fail(&self, node_hex: &str) {
         let now = now_ms();
-        self.relay_health.lock().unwrap().entry(node_hex.to_string()).or_default().record_failure(now);
+        self.relay_health.lock().entry(node_hex.to_string()).or_default().record_failure(now);
     }
 
     async fn relay_client_for(self: &Arc<Self>, node_hex: &str) -> Option<Arc<RelayClient>> {
@@ -7188,7 +7198,7 @@ impl Engine {
         {
             return None;
         }
-        if let Some(h) = self.relay_host.lock().unwrap().as_ref() {
+        if let Some(h) = self.relay_host.lock().as_ref() {
             if h.node_id_hex() == node_hex {
                 return None;
             }
@@ -7203,7 +7213,7 @@ impl Engine {
         // while messaging on the same relay path works.
         // Clone the node OUT of the lock before awaiting: `relay_client` is async, and holding a
         // std::sync MutexGuard across an await point is what makes the future non-Send.
-        let node = self.node.lock().unwrap().clone();
+        let node = self.node.lock().clone();
         let warm = match node {
             Some(n) => n.relay_client(node_hex.to_string()).await.ok(),
             None => None,
@@ -7213,7 +7223,7 @@ impl Engine {
             // No messaging node yet → cold connect under the DEVICE seed (never the account seed:
             // the account id is identity-only and must not appear as a transport node).
             None => {
-                let device_seed = self.roster.lock().unwrap().device_seed.clone();
+                let device_seed = self.roster.lock().device_seed.clone();
                 RelayClient::connect(device_seed, node_hex.to_string()).await
             }
         };
@@ -7246,14 +7256,14 @@ impl Engine {
     /// Record a mailbox key as ingested/uploaded; [`Self::flush_seen_mailbox`] persists the set
     /// (call it once after a poll/backfill pass) so the cursor survives restarts.
     fn mark_mailbox_seen(&self, key: String) {
-        let mut st = self.dyn_state.lock().unwrap();
+        let mut st = self.dyn_state.lock();
         if st.seen_mailbox.insert(key) {
             st.seen_mailbox_dirty = true;
         }
     }
     fn flush_seen_mailbox(&self) {
         let snapshot = {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             if !st.seen_mailbox_dirty {
                 return;
             }
@@ -7272,7 +7282,7 @@ impl Engine {
     /// was reading the log. Apple has had `BackupDetailView` for this since the day the tick said
     /// yes and nobody could fetch anything. Returns `(destination, how many of refs it holds)`.
     pub fn media_backup_rows(&self, circle_id: String, refs: Vec<String>) -> Vec<(String, u32)> {
-        let ledger = self.dyn_state.lock().unwrap().media_backed_up.clone();
+        let ledger = self.dyn_state.lock().media_backed_up.clone();
         let mut dests: std::collections::BTreeSet<String> =
             self.relays_for(&circle_id).into_iter().collect();
         for entry in &ledger {
@@ -7301,17 +7311,17 @@ impl Engine {
     }
 
     fn media_backed_up_has(&self, dest: &str, reference: &str) -> bool {
-        self.dyn_state.lock().unwrap().media_backed_up.contains(&format!("{dest}|{reference}"))
+        self.dyn_state.lock().media_backed_up.contains(&format!("{dest}|{reference}"))
     }
     fn mark_media_backed_up(&self, dest: &str, reference: &str) {
-        let mut st = self.dyn_state.lock().unwrap();
+        let mut st = self.dyn_state.lock();
         if st.media_backed_up.insert(format!("{dest}|{reference}")) {
             st.media_backed_up_dirty = true;
         }
     }
     fn flush_media_backed_up(&self) {
         let snapshot = {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             if !st.media_backed_up_dirty {
                 return;
             }
@@ -7367,7 +7377,7 @@ impl Engine {
     /// `(fingerprint, windows)` this destination was last given for `reference`, or `None` if we have
     /// no record — which safely means "re-send everything".
     fn media_upload_progress(&self, dest: &str, reference: &str) -> Option<(String, usize)> {
-        let st = self.dyn_state.lock().unwrap();
+        let st = self.dyn_state.lock();
         let v = st.media_upload_progress.get(&format!("{dest}|{reference}"))?;
         let (fp, n) = v.rsplit_once(':')?;
         Some((fp.to_string(), n.parse().ok()?))
@@ -7379,7 +7389,7 @@ impl Engine {
     /// and can never overstate it. `windows == 0` clears the record (a finished upload needs none).
     fn record_media_upload_progress(&self, dest: &str, reference: &str, fingerprint: &str, windows: usize) {
         let snapshot = {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             let k = format!("{dest}|{reference}");
             if windows == 0 {
                 if st.media_upload_progress.remove(&k).is_none() {
@@ -7420,7 +7430,7 @@ impl Engine {
     /// it stays broken forever while this device keeps reporting the post as safely backed up. The
     /// complement of [`Self::forget_media_backed_up`], which drops a whole destination.
     fn forget_media_backed_up_ref(&self, reference: &str) {
-        let mut st = self.dyn_state.lock().unwrap();
+        let mut st = self.dyn_state.lock();
         let before = st.media_backed_up.len();
         let suffix = format!("|{reference}");
         st.media_backed_up.retain(|k| !k.ends_with(&suffix));
@@ -7430,7 +7440,7 @@ impl Engine {
     }
 
     fn forget_media_backed_up(&self, dest: &str) {
-        let mut st = self.dyn_state.lock().unwrap();
+        let mut st = self.dyn_state.lock();
         let before = st.media_backed_up.len();
         let prefix = format!("{dest}|");
         st.media_backed_up.retain(|k| !k.starts_with(&prefix));
@@ -7444,7 +7454,7 @@ impl Engine {
         if let Some(c) = self.s3.lock().await.as_ref() {
             return Some(c.clone());
         }
-        let pub_cfg = self.prefs.lock().unwrap().s3.clone()?;
+        let pub_cfg = self.prefs.lock().s3.clone()?;
         let secret = store::load_s3_secret()?;
         let cfg = S3Config {
             endpoint: pub_cfg.endpoint,
@@ -7473,7 +7483,7 @@ impl Engine {
         //    relay this device knows — exactly what the poll side reads from. Ephemeral by design:
         //    this never writes prefs.relays.
         let relay_hexes: Vec<String> = {
-            let p = self.prefs.lock().unwrap();
+            let p = self.prefs.lock();
             let explicit = p.active_relays_for(circle_id);
             if !explicit.is_empty() || p.relays.contains_key(circle_id) {
                 explicit
@@ -7491,14 +7501,14 @@ impl Engine {
             &circle_id.chars().take(16).collect::<String>(),
             relay_hexes.len()
         );
-        let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
+        let hosted = self.relay_host.lock().as_ref().map(|h| h.node_id_hex());
         // PER-(relay,key) skip (iOS parity): the old global "seen once anywhere -> skip forever"
         // starved every relay adopted, recovered, or GC-swept AFTER a key first landed. The
         // epoch-head KEY COMMIT has a stable content-addressed key, so it landed once long ago and
         // never reached the relay a peer actually polls -- their copy of every event sealed under
         // that epoch buffered in pending_epoch forever (the content blackout's sender half).
         let relay_hexes: Vec<String> = {
-            let st = self.dyn_state.lock().unwrap();
+            let st = self.dyn_state.lock();
             relay_hexes
                 .into_iter()
                 .filter(|n| !st.seen_mailbox.contains(&format!("put:{n}|{key}")))
@@ -7507,9 +7517,9 @@ impl Engine {
         for node_hex in relay_hexes {
             // Our OWN hosted relay: store directly into the local mailbox (no iroh self-dial).
             if hosted.as_deref() == Some(node_hex.as_str()) {
-                if let Some(h) = self.relay_host.lock().unwrap().as_ref() {
+                if let Some(h) = self.relay_host.lock().as_ref() {
                     h.local_put(key.clone(), env.to_vec());
-                    self.dyn_state.lock().unwrap().relay_active = true;
+                    self.dyn_state.lock().relay_active = true;
                     landed = true;
                 }
                 self.mark_mailbox_seen(format!("put:{node_hex}|{key}"));
@@ -7532,7 +7542,7 @@ impl Engine {
                     match self.http_put(base, &token, &key, env.to_vec()).await {
                         Ok(()) => {
                             self.mark_relay_ok(&node_hex);
-                            self.dyn_state.lock().unwrap().relay_active = true;
+                            self.dyn_state.lock().relay_active = true;
                             self.mark_mailbox_seen(format!("put:{node_hex}|{key}"));
                             put_ok = true;
                             landed = true;
@@ -7554,7 +7564,7 @@ impl Engine {
                     match client.put(key.clone(), env.to_vec()).await {
                         Ok(()) => {
                             self.mark_relay_ok(&node_hex);
-                            self.dyn_state.lock().unwrap().relay_active = true;
+                            self.dyn_state.lock().relay_active = true;
                             self.mark_mailbox_seen(format!("put:{node_hex}|{key}"));
                             landed = true;
                         }
@@ -7569,7 +7579,7 @@ impl Engine {
         // 2) BYO S3 bucket — an additional, independent mailbox (also idempotent).
         if let Some(s3) = self.s3_client().await {
             if s3.put(&key, env).await.is_ok() {
-                self.dyn_state.lock().unwrap().relay_active = true;
+                self.dyn_state.lock().relay_active = true;
                 landed = true;
             }
         }
@@ -7583,12 +7593,12 @@ impl Engine {
         // (no prefs.relays key) still has somewhere to land if this device knows any active relay,
         // so the catch-up sweep must not short-circuit it the way an S3-less, relay-less circle is.
         let has_relay = {
-            let p = self.prefs.lock().unwrap();
+            let p = self.prefs.lock();
             !p.active_relays_for(circle_id).is_empty()
                 || (!p.relays.contains_key(circle_id)
                     && p.all_active_relay_hexes().iter().any(|h| !h.starts_with("s3:")))
         };
-        let has_s3 = self.prefs.lock().unwrap().s3.is_some();
+        let has_s3 = self.prefs.lock().s3.is_some();
         if !has_relay && !has_s3 {
             return;
         }
@@ -7628,14 +7638,14 @@ impl Engine {
             envs.iter().map(|e| (Self::mailbox_key(circle_id, e), e)).collect();
         let keys: Vec<String> = by_key.keys().cloned().collect();
         let prefix = format!("haven/mailbox/{circle_id}/");
-        let hosted = self.relay_host.lock().unwrap().as_ref().map(|h| h.node_id_hex());
+        let hosted = self.relay_host.lock().as_ref().map(|h| h.node_id_hex());
         for node_hex in self.relays_for(circle_id) {
             if hosted.as_deref() == Some(node_hex.as_str()) {
-                let misses = match self.relay_host.lock().unwrap().as_ref() {
+                let misses = match self.relay_host.lock().as_ref() {
                     Some(h) => h.local_touch(keys.clone()),
                     None => continue,
                 };
-                if let Some(h) = self.relay_host.lock().unwrap().as_ref() {
+                if let Some(h) = self.relay_host.lock().as_ref() {
                     for k in misses {
                         if let Some(env) = by_key.get(&k) {
                             h.local_put(k, env.to_vec());
@@ -7692,7 +7702,7 @@ impl Engine {
         let repair_marker = self.paths.root.join("repair-storm-burn-v1");
         if !repair_marker.exists() {
             let removed = {
-                let mut st = self.dyn_state.lock().unwrap();
+                let mut st = self.dyn_state.lock();
                 let before = st.seen_mailbox.len();
                 st.seen_mailbox.retain(|k| k.contains("/__live__/"));
                 st.seen_mailbox_dirty = true;
@@ -7737,7 +7747,7 @@ impl Engine {
         let relay_targets: Vec<(String, String)> = {
             let engine_circles: Vec<String> =
                 self.social.circles().into_iter().map(|c| c.id).collect();
-            let prefs = self.prefs.lock().unwrap();
+            let prefs = self.prefs.lock();
             let mut out: Vec<(String, String)> = prefs
                 .relays
                 .iter()
@@ -7778,7 +7788,7 @@ impl Engine {
             let mut fresh_digest: Option<String> = None;
             if let Some((bases, token)) = self.relay_http_reachable(&node_hex) {
                 let cached =
-                    self.dyn_state.lock().unwrap().mailbox_list_digests.get(&digest_key).cloned();
+                    self.dyn_state.lock().mailbox_list_digests.get(&digest_key).cloned();
                 for base in &bases {
                     if self.http_url_bad(base) {
                         continue;
@@ -7788,7 +7798,7 @@ impl Engine {
                         Ok((None, _)) => {
                             got_via_http = true;
                             self.mark_relay_ok(&node_hex);
-                            self.dyn_state.lock().unwrap().relay_active = true;
+                            self.dyn_state.lock().relay_active = true;
                             break;
                         }
                         Ok((Some(list), digest)) => {
@@ -7831,7 +7841,7 @@ impl Engine {
                 self.refresh_relay_interface_if_needed(&node_hex);
             }
             if !keys.is_empty() {
-                self.dyn_state.lock().unwrap().relay_active = true;
+                self.dyn_state.lock().relay_active = true;
             }
             // Cap unopened keys processed per pass. A fat mailbox (matrix stub ~1k entries,
             // mostly `__live__` / history) used to GET+crypto every unseen key every poll →
@@ -7848,7 +7858,7 @@ impl Engine {
                 }
                 // seen_mailbox is keyed by the content-addressed key, so the same envelope
                 // mirrored on several relays is ingested exactly once.
-                if self.dyn_state.lock().unwrap().seen_mailbox.contains(&key) {
+                if self.dyn_state.lock().seen_mailbox.contains(&key) {
                     continue;
                 }
                 // A control blob we already fetched and could not apply yet: skip the GET until its
@@ -7856,7 +7866,7 @@ impl Engine {
                 // `deferred` keeps the LIST digest uncommitted so we keep seeing the key.
                 {
                     const CONTROL_RETRY_MS: u64 = 120_000;
-                    let st = self.dyn_state.lock().unwrap();
+                    let st = self.dyn_state.lock();
                     if let Some(t) = st.control_retry_at.get(&key) {
                         if now_ms().saturating_sub(*t) < CONTROL_RETRY_MS {
                             drop(st);
@@ -7997,7 +8007,7 @@ impl Engine {
                         // re-GETting + re-verifying it every poll is a measurable tax on a leg that
                         // is already the slowest in the fleet. Retry roughly every 2 minutes.
                         // Stamp it; the loop head skips the GET entirely until the stamp ages out.
-                        self.dyn_state.lock().unwrap().control_retry_at.insert(key.clone(), now_ms());
+                        self.dyn_state.lock().control_retry_at.insert(key.clone(), now_ms());
                         log::debug!(
                             "mailbox control blob not yet applicable circle={} key={} — UNSEEN, retry later",
                             &circle_id.chars().take(12).collect::<String>(),
@@ -8034,7 +8044,7 @@ impl Engine {
             }
             if !deferred {
                 if let Some(d) = fresh_digest {
-                    self.dyn_state.lock().unwrap().mailbox_list_digests.insert(digest_key, d);
+                    self.dyn_state.lock().mailbox_list_digests.insert(digest_key, d);
                 }
             }
         }
@@ -8043,10 +8053,10 @@ impl Engine {
             for c in self.social.circles() {
                 let keys = s3.list(&format!("haven/mailbox/{}", c.id)).await.unwrap_or_default();
                 if !keys.is_empty() {
-                    self.dyn_state.lock().unwrap().relay_active = true;
+                    self.dyn_state.lock().relay_active = true;
                 }
                 for key in keys {
-                    if self.dyn_state.lock().unwrap().seen_mailbox.contains(&key) {
+                    if self.dyn_state.lock().seen_mailbox.contains(&key) {
                         continue;
                     }
                     let env = match s3.get(&key).await {
@@ -8095,7 +8105,7 @@ impl Engine {
             let mut requeued_any = false;
             for cid in &unlocked_circles {
                 {
-                    let mut st = self.dyn_state.lock().unwrap();
+                    let mut st = self.dyn_state.lock();
                     let due = st
                         .seen_requeued_at
                         .get(cid)
@@ -8127,7 +8137,6 @@ impl Engine {
                 // ("unchanged") and we never re-list the keys we just un-marked.
                 self.dyn_state
                     .lock()
-                    .unwrap()
                     .mailbox_list_digests
                     .retain(|k, _| !k.ends_with(&format!("|{cid}")));
             }
@@ -8215,7 +8224,7 @@ impl Engine {
         }
         let key = format!("{circle_id}:{}", newest.id);
         {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             if !st.notified.insert(key) {
                 return;
             }
@@ -8255,7 +8264,6 @@ impl Engine {
         let detail = self
             .prefs
             .lock()
-            .unwrap()
             .notification_detail
             .clone()
             .unwrap_or_else(|| "full".into());
@@ -8357,7 +8365,7 @@ impl Engine {
 
     fn flush_notified(&self) {
         let snapshot = {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             if !st.notified_dirty {
                 return;
             }
@@ -8383,7 +8391,7 @@ impl Engine {
         client.list("haven/mailbox").await.map_err(|e| anyhow::anyhow!("bucket unreachable: {e}"))?;
         store::save_s3_secret(&secret_key)?;
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             p.s3 = Some(pub_cfg);
             p.save(&self.paths)?;
         }
@@ -8400,7 +8408,7 @@ impl Engine {
 
     pub async fn s3_clear(self: &Arc<Self>) {
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             p.s3 = None;
             let _ = p.save(&self.paths);
         }
@@ -8410,7 +8418,7 @@ impl Engine {
     }
 
     pub fn s3_status(&self) -> Option<store::S3Public> {
-        self.prefs.lock().unwrap().s3.clone()
+        self.prefs.lock().s3.clone()
     }
 
     // ---- cross-device media bytes (frame 3 request / frame 5 sealed chunks) -------------
@@ -8515,11 +8523,11 @@ impl Engine {
                     if tested >= limit { return; }
                     if LocalMedia::is_synthetic(reference) { continue; }
                     {
-                        let st = self.dyn_state.lock().unwrap();
+                        let st = self.dyn_state.lock();
                         if st.media_probed_session.contains(reference) { continue; }
                     }
                     if !self.media.has(reference) { continue; }
-                    self.dyn_state.lock().unwrap().media_probed_session.insert(reference.clone());
+                    self.dyn_state.lock().media_probed_session.insert(reference.clone());
                     tested += 1;
                     if self.media.load_any_circle(&self.social, reference).is_some() { continue; }
                     log::warn!("held-but-unreadable {} — asking {} to re-seal",
@@ -8538,7 +8546,7 @@ impl Engine {
         // Refs whose relay copy was found and could not be opened (see `accept_fetched_blob`). Fetching
         // them again this session just re-downloads the same unopenable bytes; only the author's
         // re-seal can fix them, and the set is dropped on restart so a repair is picked up.
-        let unopenable = self.dyn_state.lock().unwrap().media_unopenable.clone();
+        let unopenable = self.dyn_state.lock().media_unopenable.clone();
         let now = now_ms();
         // A ref on an event < 5 min old rides the FRESH lane below: its author is right there
         // uploading it, so it retries at 5s..90s instead of waiting out the 5-min throttle.
@@ -8600,7 +8608,7 @@ impl Engine {
         const FAST_STEPS: [u64; 5] = [5_000, 10_000, 20_000, 45_000, 90_000];
         let mut direct_budget = 8;
         {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             if st.media_req_at.len() > 4000 {
                 st.media_req_at.clear(); // bound the throttle map
             }
@@ -8611,7 +8619,7 @@ impl Engine {
         // Thumbs: no lanes, no data-saver gate — tiny by contract; a plain 90s per-ref throttle.
         for (t, cid) in thumbs {
             {
-                let mut st = self.dyn_state.lock().unwrap();
+                let mut st = self.dyn_state.lock();
                 if st.thumb_req_at.get(&t).is_some_and(|&at| now.saturating_sub(at) < 90_000) {
                     continue;
                 }
@@ -8635,7 +8643,7 @@ impl Engine {
             // Decide direct-eligibility up front (cooldown + per-cycle budget) so the spawned task only
             // peer-blasts when the gate allows; the relay restore always runs.
             let direct_ok = {
-                let mut st = self.dyn_state.lock().unwrap();
+                let mut st = self.dyn_state.lock();
                 if fresh {
                     // FRESH lane: 5s/10s/20s/45s/90s, then park (the ref ages into the old lane).
                     let (n, due) = st.fast_req.get(&reference).copied().unwrap_or((0, 0));
@@ -8698,7 +8706,7 @@ impl Engine {
                 if !direct_ok {
                     return;
                 }
-                me.dyn_state.lock().unwrap().requested_refs.insert(reference.clone());
+                me.dyn_state.lock().requested_refs.insert(reference.clone());
                 let mut payload = my_hex.clone().into_bytes();
                 payload.extend_from_slice(reference.as_bytes());
                 // NOTE: we deliberately do NOT add our own ACCOUNT node id as a request target here.
@@ -8712,7 +8720,7 @@ impl Engine {
                 // path" — does not survive contact: a relay copy can be incomplete, or sealed to a
                 // recipient set a sibling isn't in, and then the backfill converges on nothing at all
                 // while the device holding the original sits idle a metre away.
-                let ids: Vec<String> = me.prefs.lock().unwrap().contacts.iter().map(|c| c.id_hex.clone()).collect();
+                let ids: Vec<String> = me.prefs.lock().contacts.iter().map(|c| c.id_hex.clone()).collect();
                 // A partial we already hold upgrades this to frame 33, so an interrupted transfer
                 // finishes on its missing chunks instead of re-sending everything each sweep.
                 me.ask_for_media(&reference, &my_hex, payload, ids);
@@ -8722,14 +8730,14 @@ impl Engine {
         // cadence than 5s. Single-flight so bursts of calls can't stack timers.
         if fast_active {
             let arm = {
-                let mut st = self.dyn_state.lock().unwrap();
+                let mut st = self.dyn_state.lock();
                 !std::mem::replace(&mut st.fast_sweep_armed, true)
             };
             if arm {
                 let me = self.clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    me.dyn_state.lock().unwrap().fast_sweep_armed = false;
+                    me.dyn_state.lock().fast_sweep_armed = false;
                     me.request_missing_media();
                 });
             }
@@ -8743,14 +8751,14 @@ impl Engine {
     // a connect-timeout per chunk. Keys are already URL-path-safe (haven/media/… ascii), so no encoding.
 
     fn http_url_bad(&self, base: &str) -> bool {
-        self.http_url_bad.lock().unwrap().get(base).map(|&t| t > now_ms()).unwrap_or(false)
+        self.http_url_bad.lock().get(base).map(|&t| t > now_ms()).unwrap_or(false)
     }
     fn mark_http_url_bad(&self, base: &str) {
-        self.http_url_bad.lock().unwrap().insert(base.to_string(), now_ms() + 120_000);
+        self.http_url_bad.lock().insert(base.to_string(), now_ms() + 120_000);
     }
     /// Forget a URL's bad window — a just-adopted relay interface must be tried immediately.
     fn clear_http_url_bad(&self, base: &str) {
-        self.http_url_bad.lock().unwrap().remove(base);
+        self.http_url_bad.lock().remove(base);
     }
     fn http_key_url(base: &str, key: &str) -> String {
         format!("{}/k/{}", base.trim_end_matches('/'), key)
@@ -8780,7 +8788,7 @@ impl Engine {
     /// NEVER cache the returned header: it carries a timestamp, a one-shot nonce and a digest of
     /// THIS body, so reusing one is a replay and the relay refuses it.
     fn http_auth(&self, token: &str, method: &str, key: &str, body: &[u8]) -> Option<String> {
-        let seed: [u8; 32] = self.roster.lock().unwrap().device_seed.clone().try_into().ok()?;
+        let seed: [u8; 32] = self.roster.lock().device_seed.clone().try_into().ok()?;
         let secret = haven_p2p::identity::Identity::from_seed(&seed).node_secret_bytes();
         Some(haven_net::httprelay::auth_header(&secret, token, method, key, body))
     }
@@ -8859,7 +8867,7 @@ impl Engine {
     /// account-signed roster is precisely the remedy, so record the refusal and fix the CAUSE rather
     /// than backing off from a relay that is working perfectly.
     fn note_refused(&self, node_hex: &str, what: &str) {
-        self.roster_needed.lock().unwrap().insert(node_hex.to_string());
+        self.roster_needed.lock().insert(node_hex.to_string());
         log::info!(
             "relay {} REFUSED {what} — not an outage; our device id isn't authorized there yet",
             &node_hex.chars().take(8).collect::<String>()
@@ -8871,8 +8879,8 @@ impl Engine {
     /// that refuses us for some OTHER reason must not turn every media miss into a publish storm.
     async fn heal_forbidden_relays(self: &Arc<Self>) -> bool {
         let nodes: Vec<String> = {
-            let mut needed = self.roster_needed.lock().unwrap();
-            let mut last = self.last_heal_ms.lock().unwrap();
+            let mut needed = self.roster_needed.lock();
+            let mut last = self.last_heal_ms.lock();
             if needed.is_empty() || now_ms().saturating_sub(*last) < 30_000 {
                 return false;
             }
@@ -9515,7 +9523,7 @@ impl Engine {
         // Say WHICH it was. Reporting a permissions failure as absence is what made this read as data
         // loss for days — the blob was on the relay the whole time and the device simply wasn't
         // allowed to ask for it.
-        let refused = self.roster_needed.lock().unwrap().len();
+        let refused = self.roster_needed.lock().len();
         let short = reference.chars().take(12).collect::<String>();
         if refused == 0 {
             log::info!("media restore {short}: NOT FOUND on any relay/S3");
@@ -9603,7 +9611,7 @@ impl Engine {
             circles.len()
         );
         self.media.delete(reference);
-        self.dyn_state.lock().unwrap().media_unopenable.insert(reference.to_string());
+        self.dyn_state.lock().media_unopenable.insert(reference.to_string());
         false
     }
 
@@ -9624,7 +9632,7 @@ impl Engine {
         // the same account could each be holding what the other needs, both online, with no lane
         // between them: the fetch just kept "asking peers" that could never answer. (Apple parity:
         // `FeedStore.askForMedia`; Android: `askForMedia`.)
-        let hint = self.dyn_state.lock().unwrap().reassembly.resume_hint(reference);
+        let hint = self.dyn_state.lock().reassembly.resume_hint(reference);
         let Some((total, got)) = hint else {
             for id_hex in &targets {
                 self.send_frame(wire::MEDIA_REQ, &plain, id_hex);
@@ -9644,7 +9652,7 @@ impl Engine {
             self.send_frame(wire::MEDIA_RESUME_REQ, &resume, id_hex);
         }
         self.live_deliver_to_my_devices(wire::MEDIA_RESUME_REQ, &resume);
-        if !self.dyn_state.lock().unwrap().resume_fallback.insert(reference.to_string()) {
+        if !self.dyn_state.lock().resume_fallback.insert(reference.to_string()) {
             return; // a fallback for this ref is already armed
         }
         let me = self.clone();
@@ -9652,7 +9660,7 @@ impl Engine {
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(8)).await;
             let progressed = {
-                let mut st = me.dyn_state.lock().unwrap();
+                let mut st = me.dyn_state.lock();
                 st.resume_fallback.remove(&reference);
                 st.reassembly.progress(&reference).map(|n| n != before).unwrap_or(true)
             };
@@ -9704,7 +9712,7 @@ impl Engine {
         const INTERVAL_MS: u64 = 3_600_000;
         let now = now_ms();
         {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             if let Some(at) = st.backup_reverified_at.get(reference) {
                 if now.saturating_sub(*at) < INTERVAL_MS {
                     return;
@@ -9781,7 +9789,7 @@ impl Engine {
     ) {
         let key = format!("{reference}|{requester_hex}");
         {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             if !st.chunk_serving.insert(key.clone()) {
                 log::debug!(
                     "media serve {}: already streaming to {}, ignoring",
@@ -9794,7 +9802,7 @@ impl Engine {
         self.send_media_chunks(reference, bytes, requester_hex, missing).await;
         // Cleared however the serve ends — a seal failure returns early mid-file, and leaving the key
         // behind would lock this pair out of ever being served again this session.
-        self.dyn_state.lock().unwrap().chunk_serving.remove(&key);
+        self.dyn_state.lock().chunk_serving.remove(&key);
     }
 
     /// Send a frame and WAIT for it, rather than spawning a task that outlives the caller.
@@ -9809,7 +9817,7 @@ impl Engine {
     /// chunk, and the rate follows the actual link instead of a fixed sleep (which would be slower
     /// than necessary on a fast link and still unbounded on a slow one).
     async fn send_frame_awaited(self: &Arc<Self>, t: u8, payload: &[u8], to_node_hex: &str) {
-        let node = self.node.lock().unwrap().clone();
+        let node = self.node.lock().clone();
         let Some(node) = node else { return };
         let frame = wire::frame(t, payload);
         let mut targets = self.social.device_node_ids_for(to_node_hex.to_string());
@@ -9904,7 +9912,7 @@ impl Engine {
         // what makes it resumable — and it removes the old in-memory accumulation (with its silent
         // 1 GB cap, above which a fully-received transfer was simply dropped).
         let part_name = {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             if st.reassembly.get(&reference).map(|r| r.got.contains(&index)).unwrap_or(false) {
                 return; // already on disk — a re-send filling someone else's gap, or our own resume
             }
@@ -9925,7 +9933,7 @@ impl Engine {
             return;
         }
         let complete = {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             st.reassembly.mark(&reference, index).unwrap_or(false)
         };
         if !complete {
@@ -9936,7 +9944,7 @@ impl Engine {
         // resurrect a bitmap whose bytes are gone and stall the ref forever.
         let ok = self.media.adopt_plain_part(&self.social, DEFAULT_CIRCLE, &reference, &part);
         {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             st.reassembly.clear(&reference);
             st.resume_fallback.remove(&reference);
         }
@@ -10008,7 +10016,7 @@ impl Engine {
     /// self-declared `from` prefix the parsers key on. This runs identically for direct and
     /// frame-9-relayed frames — authentication is the signature, not a transport id.
     fn handle_call(self: &Arc<Self>, t: u8, sealed: &[u8]) {
-        let Some(app) = self.app.lock().unwrap().clone() else { return };
+        let Some(app) = self.app.lock().clone() else { return };
         // The verified sender is re-derived per frame type below, from the parser's own `from` field
         // — `open_sealed_frame` has already proven the two agree.
         let Some((_declared, body)) = self.open_sealed_frame(t, sealed) else { return };
@@ -10091,7 +10099,7 @@ impl Engine {
     /// someone "we'll tell you when it's back" about a repair that deliberately never notifies both
     /// promises something that won't happen and hides the button that would earn it.
     pub fn media_is_wanted(&self, reference: &str) -> bool {
-        self.prefs.lock().unwrap().media_wanted_manual.iter().any(|r| r == reference)
+        self.prefs.lock().media_wanted_manual.iter().any(|r| r == reference)
     }
 
     /// Ask a post's AUTHOR to re-upload media a relay has swept, and remember that we asked.
@@ -10114,7 +10122,7 @@ impl Engine {
             return;
         };
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             if manual && !p.media_wanted_manual.iter().any(|r| *r == reference) {
                 p.media_wanted_manual.push(reference.clone());
                 while p.media_wanted_manual.len() > 500 {
@@ -10190,11 +10198,11 @@ impl Engine {
         // repaired depends on where its ask lands in the window, which reads as "some media loads,
         // some doesn't, at random". Observed on a real pair of devices.
         let resealed_before = {
-            let st = self.dyn_state.lock().unwrap();
+            let st = self.dyn_state.lock();
             st.media_resealed_session.contains(&reference)
         };
         let served_recently = resealed_before && {
-            let st = self.dyn_state.lock().unwrap();
+            let st = self.dyn_state.lock();
             st.media_served_at.get(&reference).is_some_and(|at| now.saturating_sub(*at) < RESERVE_COOLDOWN_MS)
         };
         if served_recently {
@@ -10204,7 +10212,7 @@ impl Engine {
             return;
         }
         {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             if !st.media_serving.insert(reference.clone()) {
                 log::info!("media-wanted {}: re-upload already in flight — dropping duplicate ask", short(&reference));
                 return;
@@ -10216,11 +10224,11 @@ impl Engine {
         // upload the asker is waiting for.
         let ok = self.upload_media_inner_reseal(&circle_id, &reference, true, true).await;
         if ok {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             st.media_resealed_session.insert(reference.clone());
         }
         {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             st.media_serving.remove(&reference);
             if ok {
                 st.media_served_at.insert(reference.clone(), now);
@@ -10251,7 +10259,7 @@ impl Engine {
         // quietly — bounded, deduped, data-saver aware — with NO notification; the post's own
         // banner is the news, this is just its media arriving on time.
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             match p.media_wanted.iter().position(|r| *r == reference) {
                 Some(i) => {
                     p.media_wanted.remove(i);
@@ -10270,7 +10278,7 @@ impl Engine {
         // heard of; the fetch above still runs, which is the part that matters — the picture
         // appears either way.
         let person_asked = {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             match p.media_wanted_manual.iter().position(|r| *r == reference) {
                 Some(i) => { p.media_wanted_manual.remove(i); let _ = p.save(&self.paths); true }
                 None => false,
@@ -10329,7 +10337,7 @@ impl Engine {
             return;
         }
         {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             let now = now_ms();
             if st.announced_media_at.get(reference).is_some_and(|&at| now.saturating_sub(at) < 60_000) {
                 return;
@@ -10362,7 +10370,6 @@ impl Engine {
         }
         self.prefs
             .lock()
-            .unwrap()
             .contacts
             .iter()
             .find(|c| c.id_hex.starts_with(author_short))
@@ -10395,7 +10402,7 @@ impl Engine {
         }
         // Block by ACCOUNT id (`declared`), which for a device-signed frame is the account behind the
         // device, not the transient device hex.
-        if self.prefs.lock().unwrap().blocked.contains(&declared) {
+        if self.prefs.lock().blocked.contains(&declared) {
             return None;
         }
         Some((declared, body))
@@ -10403,7 +10410,7 @@ impl Engine {
 
     /// Whether `hex` is a known contact — gates unsealed call control frames.
     fn is_contact(&self, hex: &str) -> bool {
-        self.prefs.lock().unwrap().contacts.iter().any(|c| c.id_hex == hex)
+        self.prefs.lock().contacts.iter().any(|c| c.id_hex == hex)
     }
 
     /// Send a call-signaling frame direct AND live-forwarded through the circle relays (frame 9 —
@@ -10457,7 +10464,7 @@ impl Engine {
             use rand::RngCore;
             rand::rngs::OsRng.fill_bytes(&mut msg_id);
         }
-        self.seen_relay.lock().unwrap().insert(bytes_to_hex(&msg_id)); // don't reprocess our own
+        self.seen_relay.lock().insert(bytes_to_hex(&msg_id)); // don't reprocess our own
         let mut p = Vec::with_capacity(18 + dest_bytes.len() * 32 + inner.len());
         p.extend_from_slice(&msg_id);
         p.push(3); // ttl
@@ -10468,7 +10475,7 @@ impl Engine {
         p.extend_from_slice(inner);
         let my_acct = self.social.my_node_hex().to_lowercase();
         let my_dev = self.social.my_device_node_hex().to_lowercase();
-        let relays: Vec<String> = self.prefs.lock().unwrap().relays.values().flatten().cloned().collect();
+        let relays: Vec<String> = self.prefs.lock().relays.values().flatten().cloned().collect();
         let mut used = std::collections::HashSet::new();
         let mut sent = 0;
         for r in relays {
@@ -10492,7 +10499,7 @@ impl Engine {
             return;
         }
         {
-            let mut seen = self.seen_relay.lock().unwrap();
+            let mut seen = self.seen_relay.lock();
             if !seen.insert(bytes_to_hex(&body[..16])) {
                 return;
             }
@@ -10527,7 +10534,7 @@ impl Engine {
         if ttl == 0 {
             return;
         }
-        let node = self.node.lock().unwrap().clone();
+        let node = self.node.lock().clone();
         let Some(node) = node else { return };
         for dest in dests {
             let l = dest.to_lowercase();
@@ -10606,7 +10613,7 @@ impl Engine {
         if targets.is_empty() || payloads.is_empty() {
             return;
         }
-        let node = self.node.lock().unwrap().clone();
+        let node = self.node.lock().clone();
         let Some(node) = node else { return };
         let frames: Vec<Vec<u8>> = payloads.iter().map(|p| wire::frame(t, p)).collect();
         tauri::async_runtime::spawn(async move {
@@ -10747,7 +10754,7 @@ impl Engine {
     /// Mutate + save prefs directly, skipping the networked broadcast `set_profile` does.
     #[cfg(debug_assertions)]
     pub(crate) fn demo_with_prefs(&self, f: impl FnOnce(&mut Prefs)) {
-        let mut p = self.prefs.lock().unwrap();
+        let mut p = self.prefs.lock();
         f(&mut p);
         if let Err(e) = p.save(&self.paths) {
             log::error!("demo prefs save failed: {e}");
@@ -10758,7 +10765,7 @@ impl Engine {
     /// `dyn_state`, so the UI would otherwise sit on "starting…" through every screenshot.
     #[cfg(debug_assertions)]
     pub(crate) fn demo_mark_started(&self) {
-        self.dyn_state.lock().unwrap().started = true;
+        self.dyn_state.lock().started = true;
         self.emit_changed();
     }
 
@@ -10799,7 +10806,7 @@ impl Engine {
                 }
             }
             None => {
-                let s = self.seedless.lock().unwrap();
+                let s = self.seedless.lock();
                 let epoch = s.self_sync_epoch;
                 match s.self_sync_key32() {
                     Some(key) if epoch > 0 => {
@@ -10818,9 +10825,9 @@ impl Engine {
     /// primary sealed to this device after a revocation. Verifies the account signature + that the
     /// grant was sealed to our device bundle; persists the higher epoch's key (guarded like a seed).
     async fn adopt_rotated_self_sync_grant(self: &Arc<Self>) {
-        let device_seed = self.roster.lock().unwrap().device_seed.clone();
+        let device_seed = self.roster.lock().device_seed.clone();
         let account_bundle = self.account_bundle();
-        let cur_epoch = self.seedless.lock().unwrap().self_sync_epoch;
+        let cur_epoch = self.seedless.lock().self_sync_epoch;
         let account_hex = wire::node_hex(&account_bundle);
         if account_hex.len() != 64 {
             return;
@@ -10847,7 +10854,7 @@ impl Engine {
             }
         }
         if let Some((epoch, key)) = best {
-            let mut s = self.seedless.lock().unwrap();
+            let mut s = self.seedless.lock();
             s.self_sync_epoch = epoch;
             s.self_sync_key = key;
             let _ = s.save(&self.paths);
@@ -10864,7 +10871,7 @@ impl Engine {
 
         // Coalesce concurrent passes (the 15s loop must never overlap itself).
         {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             if st.self_syncing {
                 return;
             }
@@ -10874,7 +10881,7 @@ impl Engine {
         struct Guard<'a>(&'a Engine);
         impl Drop for Guard<'_> {
             fn drop(&mut self) {
-                self.0.dyn_state.lock().unwrap().self_syncing = false;
+                self.0.dyn_state.lock().self_syncing = false;
             }
         }
         let _guard = Guard(self);
@@ -10929,7 +10936,7 @@ impl Engine {
         // local state, so the tombstone rides THIS pass's slot (mirrors iOS refreshCircles before export).
         self.reconcile_superseded_circles();
         let local = {
-            let prefs = self.prefs.lock().unwrap();
+            let prefs = self.prefs.lock();
             crate::selfsync::current_local(&prefs, &self.social)
         };
         for (key, value) in &local {
@@ -10993,7 +11000,7 @@ impl Engine {
         let entries: Vec<(String, Vec<u8>)> =
             base.entries().map(|(k, v)| (k.to_string(), v.to_vec())).collect();
         let applied = {
-            let mut prefs = self.prefs.lock().unwrap();
+            let mut prefs = self.prefs.lock();
             let applied = crate::selfsync::apply_local(&entries, &mut prefs, &self.social);
             if applied {
                 let _ = prefs.save(&self.paths);
@@ -11043,7 +11050,7 @@ impl Engine {
     async fn gather_self_sync_transports(self: &Arc<Self>) -> Vec<SelfSyncTransport> {
         let mut out: Vec<SelfSyncTransport> = vec![];
         let relays: std::collections::BTreeSet<String> = {
-            let prefs = self.prefs.lock().unwrap();
+            let prefs = self.prefs.lock();
             prefs
                 .relays
                 .values()
@@ -11066,7 +11073,7 @@ impl Engine {
     /// iroh path can never reach it, and the self-sync ladder would otherwise silently skip the
     /// one relay a hosting desktop always has.
     fn hosted_relay_for(&self, node_hex: &str) -> Option<Arc<RelayServerHandle>> {
-        let g = self.relay_host.lock().unwrap();
+        let g = self.relay_host.lock();
         g.as_ref().filter(|h| h.node_id_hex() == node_hex).cloned()
     }
 
@@ -11191,14 +11198,14 @@ impl Engine {
 
     pub fn reset(self: &Arc<Self>) {
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = self.prefs.lock();
             *p = Prefs::default();
             // Re-stamp the unread seed for the next identity (0 would badge all of history).
             p.dm_read_seeded_at = now_ms();
             let _ = p.save(&self.paths);
         }
         {
-            let mut st = self.dyn_state.lock().unwrap();
+            let mut st = self.dyn_state.lock();
             *st = DynState::default();
         }
         self.media.clear();
@@ -11209,7 +11216,7 @@ impl Engine {
         // a stale base and tombstone the account (the data-loss bug).
         store::remove_if_exists(&self.paths.selfsync_state_file());
         {
-            let mut r = self.roster.lock().unwrap();
+            let mut r = self.roster.lock();
             *r = crate::roster::DeviceRoster::load(&self.paths);
             r.step_down();
             let _ = r.save(&self.paths);

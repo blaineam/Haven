@@ -29,7 +29,10 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+/// Non-poisoning, same reason as the engine's: a panic mid-import would otherwise poison this and
+/// turn every later `.lock()` into a second panic, killing imports for the rest of the process.
+use parking_lot::Mutex;
 
 use haven_ffi::TrackRefFfi;
 use serde::{Deserialize, Serialize};
@@ -126,7 +129,7 @@ fn clear_pending(engine: &Engine) {
 /// Restart an import that a quit or a crash interrupted. Called once, after the engine starts.
 pub fn resume_if_needed(engine: Arc<Engine>) {
     {
-        let st = state().lock().unwrap();
+        let st = state().lock();
         if st.running {
             return;
         }
@@ -151,7 +154,7 @@ pub fn resume_if_needed(engine: Arc<Engine>) {
             return;
         }
         {
-            let mut st = state().lock().unwrap();
+            let mut st = state().lock();
             st.archive_path = Some(path);
             st.summary = Some(summary);
             st.phase = Some(Phase::Previewing); // `run` requires this state
@@ -167,7 +170,7 @@ pub fn resume_if_needed(engine: Arc<Engine>) {
 /// multi-megabyte JSON and seeks the whole central directory.
 pub fn read(engine: Arc<Engine>, path: String) {
     {
-        let mut st = state().lock().unwrap();
+        let mut st = state().lock();
         if st.running {
             return; // an import is already in flight; do not swap the archive out from under it
         }
@@ -180,13 +183,13 @@ pub fn read(engine: Arc<Engine>, path: String) {
         let path = PathBuf::from(path);
         match instagram::read(&path) {
             Ok(s) => {
-                let mut st = state().lock().unwrap();
+                let mut st = state().lock();
                 st.archive_path = Some(path);
                 st.summary = Some(s);
                 st.phase = Some(Phase::Previewing);
             }
             Err(e) => {
-                let mut st = state().lock().unwrap();
+                let mut st = state().lock();
                 st.phase = Some(Phase::Failed);
                 st.message = e.message().to_string();
             }
@@ -196,7 +199,7 @@ pub fn read(engine: Arc<Engine>, path: String) {
 }
 
 pub fn cancel() {
-    let st = state().lock().unwrap();
+    let st = state().lock();
     if let Some(c) = &st.cancel {
         c.store(true, Ordering::SeqCst);
     }
@@ -204,7 +207,7 @@ pub fn cancel() {
 
 /// Back to square one. Refuses while a run is in flight — closing the window is not cancelling.
 pub fn reset(engine: &Engine) {
-    let mut st = state().lock().unwrap();
+    let mut st = state().lock();
     if st.running {
         return;
     }
@@ -235,7 +238,7 @@ pub fn run(
     start_at: usize,
 ) {
     let (items, path) = {
-        let mut st = state().lock().unwrap();
+        let mut st = state().lock();
         if st.running || st.phase() != Phase::Previewing {
             return;
         }
@@ -254,7 +257,7 @@ pub fn run(
         st.cancel = Some(Arc::new(AtomicBool::new(false)));
         (items, path)
     };
-    let cancel = state().lock().unwrap().cancel.clone().unwrap_or_default();
+    let cancel = state().lock().cancel.clone().unwrap_or_default();
 
     // Record the job BEFORE any work, so a crash on the very first item still resumes.
     save_pending(
@@ -275,7 +278,7 @@ pub fn run(
             Ok(z) => z,
             Err(e) => {
                 {
-                    let mut st = state().lock().unwrap();
+                    let mut st = state().lock();
                     st.running = false;
                     st.phase = Some(Phase::Failed);
                     st.message = e.message().to_string();
@@ -381,7 +384,7 @@ pub fn run(
             // rather than re-importing all 300.
             let done = idx + 1;
             {
-                let mut st = state().lock().unwrap();
+                let mut st = state().lock();
                 st.done = done;
                 st.imported = imported;
                 st.skipped = skipped;
@@ -418,7 +421,7 @@ pub fn run(
             clear_pending(&engine);
         }
         {
-            let mut st = state().lock().unwrap();
+            let mut st = state().lock();
             st.running = false;
             st.phase = Some(Phase::Finished);
             st.imported = imported;
@@ -561,7 +564,7 @@ fn scratch_path(ext: &str) -> PathBuf {
 /// takes the other door, `resume_if_needed`, and lands in exactly the same place.
 pub fn resume_now(engine: Arc<Engine>) {
     let pending = {
-        let mut st = state().lock().unwrap();
+        let mut st = state().lock();
         if st.running {
             return;
         }
@@ -577,7 +580,7 @@ pub fn resume_now(engine: Arc<Engine>) {
 /// What the UI draws from — the whole importer in one JSON object, so a view that mounts mid-import
 /// (or after a relaunch resumed one) renders correctly without replaying any events.
 pub fn status() -> serde_json::Value {
-    let st = state().lock().unwrap();
+    let st = state().lock();
     let summary = st.summary.as_ref().map(|s| {
         serde_json::json!({
             "posts": s.count(Kind::Post),

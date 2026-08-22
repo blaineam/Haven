@@ -1093,7 +1093,7 @@ pub fn connect_by_link(engine: Eng, uri: String) -> bool {
 /// on the `haven:deep-link` ping, and either may win.
 #[tauri::command]
 pub fn take_deep_links(links: tauri::State<'_, crate::DeepLinks>) -> Vec<String> {
-    std::mem::take(&mut *links.0.lock().unwrap())
+    std::mem::take(&mut *links.0.lock())
 }
 
 #[tauri::command]

@@ -27,6 +27,8 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# Non-poisoning mutexes. See the StdMutex alias in engine.rs for why.
+parking_lot = "0.12"
 # The shared engine (identity, circles, feed, sealing, iroh node, relay/mailbox).
 haven_ffi = { path = "../../core/haven-ffi" }
 # The 512px AVIF preview tier (docs/PREVIEW-TIER-DESIGN.md). Desktop encodes images in the WEBVIEW

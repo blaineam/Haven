@@ -27,6 +27,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = process.env.QA_OUT || join(ROOT, 'build', `e2e-${stamp()}`);
 mkdirSync(OUT, { recursive: true });
 const MARKER = `E2E_${stamp().replace(/-/g, '').slice(-6)}`;
+const RUN_NONCE = Date.now();   // per-run fixture salt — see the satellite lane
 const REPORT = [];
 const PERF = [];
 const HISTORY = join(ROOT, 'build', 'e2e-history.jsonl');
@@ -576,9 +577,15 @@ async function main() {
       // have to differ. Resampling to a per-scenario width is a one-liner that keeps a real
       // photograph (big enough to need a preview at all) while guaranteeing a distinct ref.
       const laneSrc = join(OUT, `sat-${author}-${lane.id}.jpg`);
-      const width = 1200 - laneSeq * 7;   // distinct per scenario, still a full-size photo
+      // Distinct per scenario AND per run. laneSeq spaces widths 7 apart within a run; the run
+      // nonce shifts the whole run into its own mod-7 residue class (and heights into mod-11), so
+      // no lane of run N can reproduce a ref from run N-1. Without the nonce, an E2E_FRESH=0 rerun
+      // regenerated IDENTICAL pixels → identical content-addressed refs → receivers still holding
+      // last run's legitimately-fetched blob scored a full-photo "leak" with nothing crossing.
+      const width = 1200 - laneSeq * 7 - (RUN_NONCE % 7);
+      const height = 920 - (RUN_NONCE % 11);
       laneSeq += 1;
-      execFileSync('sips', ['--resampleWidth', String(width), PHOTO, '--out', laneSrc], { stdio: 'ignore' });
+      execFileSync('sips', ['--resampleHeightWidth', String(height), String(width), PHOTO, '--out', laneSrc], { stdio: 'ignore' });
       const satPhoto = devices[author].stage(laneSrc, `qa-sat-${author}-${lane.id}.jpg`);
       await op(devices[author], lane.dm
         ? { op: 'dm', dm_to: B, body: SAT, media: 'photo', photo_path: satPhoto }

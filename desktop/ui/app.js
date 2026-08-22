@@ -6835,6 +6835,19 @@ function startRingTimeout() {
   }, RING_TIMEOUT_MS);
 }
 
+/** Bound the OUTGOING dial the same way incoming rings are bounded. Without this, dialing
+ *  someone offline connected forever — and while minimized, the Call tab advertised an "active
+ *  call" that could never establish (reported directly). callHangup, not bare teardown: the far
+ *  side must stop ringing and the session must tombstone so invite retransmits can't re-ring. */
+function startDialTimeout() {
+  clearTimeout(call.ringTimer);
+  call.ringTimer = setTimeout(() => {
+    if (call.inCall || !call.connecting) return;
+    toast(call.name ? t("no_answer_from", call.name) : t("no_answer"));
+    callHangup();
+  }, RING_TIMEOUT_MS);
+}
+
 /** Did a session end here recently enough that a fresh invite for it must be ignored? A caller
  *  retransmits the invite every 2.5s and relay hops can replay copies late — none of those may
  *  re-ring a session we've already left. */
@@ -7142,6 +7155,7 @@ async function callStart(others, name, video) {
   // (indefinitely on a first launch), and rendering only after it resolved left the caller
   // staring at a completely idle app while the call was already ringing the other side.
   renderCallOverlay();
+  startDialTimeout();
   await invoke("call_group_invite", { sessionId: call.session, groupName: name, roster: [...call.roster], to: invitees() });
   await startMesh();
   renderCallOverlay();
@@ -7307,6 +7321,7 @@ async function onCallEvent(payload) {
     case "accept": {
       if (!validSession(c.sessionId)) return;
       call.connecting = false; call.inCall = true; call.roster.add(c.from); qaPushCallState();
+      clearTimeout(call.ringTimer); call.ringTimer = null;   // the dial bound — this call connected
       await startMesh(); connectPeerIfNeeded(c.from); renderCallOverlay();
       break;
     }

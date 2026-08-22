@@ -662,6 +662,8 @@
     "speaker_output": "Speaker",
     "default_device": "Default",
     "in_call_with": "In call · {0}",
+    "no_answer_from": "No answer from {0}",
+    "no_answer": "No answer",
     "participants_n": "{0} in call",
     "call_tab": "Call",
     "camera_off_btn": "📹 Camera off",

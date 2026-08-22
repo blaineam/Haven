@@ -1603,6 +1603,8 @@ struct Circle {
     /// parking the other's content forever). Replayed by `drain_pending_tree` whenever any tree
     /// envelope APPLIES or a roster is stored. Bounded + deduped; persisted like `pending_epoch`.
     pending_tree: Vec<Vec<u8>>,
+    /// Per-poll replay attempts since the buffer last CHANGED — bounds the poll-driven retry.
+    pending_tree_retries: u8,
     id: String,
     name: String,
     members: Vec<HavenId>,
@@ -1782,6 +1784,7 @@ impl Circle {
         Circle {
             epoch_moved: false,
             pending_tree: vec![],
+            pending_tree_retries: 0,
             id,
             name,
             members: vec![],
@@ -2716,7 +2719,17 @@ fn receive_mls_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
             .get(&circle_id)
             .map(|s| s.commits.contains_key(&commit.parent_commit_hash))
             .unwrap_or(false);
-        if !parent_known || !mls_commit_authorized(st, idx, &commit) {
+        if !parent_known {
+            // ORPHAN: extends a commit we don't hold yet. The ONE commit outcome worth retrying —
+            // its parent may be in flight. Everything else that returns false here is terminal
+            // (wrong circle, unauthorized, not capable) or is a SUCCESSFUL store that reports false
+            // by design, and parking those poisoned the retry buffer with entries that can never
+            // change outcome: gate 3 measured ~20 permanent residents per leg, re-verified under
+            // the engine lock on every poll.
+            TREE_RETRYABLE.with(|f| f.set(true));
+            return Ok(false);
+        }
+        if !mls_commit_authorized(st, idx, &commit) {
             return Ok(false);
         }
     }
@@ -2874,8 +2887,14 @@ fn receive_mls_welcome(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
     }
     let Ok(env) = SealedEnvelope::from_bytes(body) else { return Ok(false) };
     let sender_hex = env.sender_hex();
-    let Some(sender) = resolve_shadow_sender(st, idx, &sender_hex) else { return Ok(false) };
+    let Some(sender) = resolve_shadow_sender(st, idx, &sender_hex) else {
+        // Roster lag: we can't verify the sender YET. Retryable — the roster may be in flight.
+        TREE_RETRYABLE.with(|f| f.set(true));
+        return Ok(false);
+    };
     // Dual-open: my device key first (the Welcome is sealed to my device bundle), then account key.
+    // An OPEN failure below is NOT retryable: the overwhelmingly common cause is a Welcome sealed to
+    // a DIFFERENT device sharing our mailbox prefix — someone else's mail, never ours to apply.
     let opened = st
         .device
         .as_ref()
@@ -3460,7 +3479,10 @@ fn receive_mls_join(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, 
     let did: [u8; 32] = body[32..64].try_into().unwrap();
     let sig = &body[64..];
     let did_hex = hex(&did);
-    let Some(bundle) = resolve_shadow_sender(st, idx, &did_hex) else { return Ok(false) };
+    let Some(bundle) = resolve_shadow_sender(st, idx, &did_hex) else {
+        TREE_RETRYABLE.with(|f| f.set(true));
+        return Ok(false);
+    };
     if bundle.verify(&keying_join_payload(&gh, &did), sig).is_err() {
         return Ok(false);
     }
@@ -4209,6 +4231,13 @@ fn drain_pending(st: &mut NetState, idx: usize) {
     });
 }
 
+thread_local! {
+    /// Set by the tree handlers when a false return is RETRYABLE (orphan commit, roster lag) rather
+    /// than terminal (not mine, unauthorized, stored-by-design). Consumed by the receive() arms to
+    /// decide parking. Thread-local because the handlers' public signatures are stable API.
+    static TREE_RETRYABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Park an unapplied TREE envelope (raw, tagged) for replay. Deduped, capped at 128 — tree traffic
 /// is a few dozen envelopes per membership change, not a content stream.
 fn park_pending_tree(c: &mut Circle, raw: &[u8]) {
@@ -4219,6 +4248,7 @@ fn park_pending_tree(c: &mut Circle, raw: &[u8]) {
         c.pending_tree.remove(0);
     }
     c.pending_tree.push(raw.to_vec());
+    c.pending_tree_retries = 0;   // new material — the poll-driven retry gets a fresh allowance
 }
 
 /// Replay parked tree envelopes until a full pass applies nothing. Each application can unlock the
@@ -4232,6 +4262,7 @@ fn drain_pending_tree(st: &mut NetState, idx: usize) {
         }
         let mut progressed = false;
         for raw in pending {
+            TREE_RETRYABLE.with(|f| f.set(false));
             let applied = match raw.first() {
                 Some(&TAG_MLS_COMMIT) => receive_mls_commit(st, idx, &raw[1..]).unwrap_or(false),
                 Some(&TAG_MLS_WELCOME) => receive_mls_welcome(st, idx, &raw[1..]).unwrap_or(false),
@@ -4240,8 +4271,12 @@ fn drain_pending_tree(st: &mut NetState, idx: usize) {
             };
             if applied {
                 progressed = true;
-            } else {
+            } else if TREE_RETRYABLE.with(|f| f.get()) {
                 park_pending_tree(&mut st.circles[idx], &raw);
+            } else {
+                // Terminal on replay too (e.g. its roster arrived and revealed it as someone
+                // else's, or it stored) — drop it from the buffer rather than churn forever.
+                progressed = true;
             }
         }
         if progressed {
@@ -5441,14 +5476,39 @@ impl HavenSocial {
     /// proxy passed in isolation and then missed in a longer run — the epoch also advances on
     /// periodic rotation and on tree commits carrying no roster change, and each of those stranded a
     /// peer on 27 unopenable envelopes. Ask the real question instead of a correlated one.
+    /// Forensic dump of the parked TREE buffer: tag, signer (when parseable), and byte size of each
+    /// entry, per circle. Diagnostic-only; exists because a forked fleet's parked commits are the
+    /// only artifact that says WHO authored the branch each side is rejecting.
+    pub fn debug_pending_tree_json(&self) -> String {
+        let st = self.state.lock().unwrap();
+        let mut out = Vec::new();
+        for c in st.circles.iter() {
+            if c.pending_tree.is_empty() { continue; }
+            let rows: Vec<String> = c.pending_tree.iter().map(|raw| {
+                let tag = raw.first().copied().unwrap_or(0);
+                // Both commit and welcome carry a signer hint early; fall back to a hex sniff of the
+                // first 32 bytes after the tag.
+                let hint = raw.get(1..33).map(hex).unwrap_or_default();
+                format!("{{\"tag\":{},\"len\":{},\"head\":\"{}\"}}", tag, raw.len(), &hint[..hint.len().min(16)])
+            }).collect();
+            out.push(format!("{{\"id\":\"{}\",\"tree\":[{}]}}", c.id, rows.join(",")));
+        }
+        format!("[{}]", out.join(","))
+    }
+
     pub fn take_epoch_moved(&self) -> bool {
         let mut st = self.state.lock().unwrap();
-        // Piggyback the tree-buffer replay on this per-poll call. A parked commit whose only trigger
-        // is "another tree envelope applies" can wait FOREVER when it is the sole one outstanding —
-        // exactly the forked-fleet case: the 777→778 commit sits parked on every member at 777 and
-        // nothing further ever arrives. Empty buffer = no-op.
+        // Piggyback ONE bounded tree-buffer replay attempt per poll — but only while the buffer is
+        // plausibly convergeable. Gate 3 measured the ungated version: on a genuinely forked fleet
+        // the buffer never empties, so every poll re-verified ~20 MLS envelopes UNDER THE ENGINE
+        // LOCK — the desktop dump froze for 10+ minutes and every leg slowed. Retry a few times,
+        // then leave the buffer for event-driven triggers (a new tree envelope, a roster store, an
+        // import); a fork needs resolution, not a hot loop.
         for i in 0..st.circles.len() {
-            drain_pending_tree(&mut st, i);
+            if !st.circles[i].pending_tree.is_empty() && st.circles[i].pending_tree_retries < 8 {
+                st.circles[i].pending_tree_retries += 1;
+                drain_pending_tree(&mut st, i);
+            }
         }
         let mut moved = false;
         for c in st.circles.iter_mut() {
@@ -6915,39 +6975,57 @@ impl HavenSocial {
             // the all-joined gate, then unlocks content immediately. Still returns the handler's value
             // (no direct content change from the wire itself); a non-capable circle ignores them.
             TAG_MLS_COMMIT => {
+                TREE_RETRYABLE.with(|f| f.set(false));
                 let r = receive_mls_commit(&mut st, idx, &envelope[1..]);
                 match r {
                     // Applied: this may be the envelope the buffer was waiting on.
                     Ok(true) => drain_pending_tree(&mut st, idx),
-                    // NOT applied: park it instead of letting the client burn it as seen — the
-                    // fork-and-strand failure mode this buffer exists for.
-                    _ => park_pending_tree(&mut st.circles[idx], envelope),
+                    // Park ONLY the retryable outcomes (orphan / roster lag). Terminal falses —
+                    // someone else's welcome, an unauthorized commit, a store-that-reports-false —
+                    // poisoned the buffer with permanent residents when parked indiscriminately.
+                    _ => {
+                        if TREE_RETRYABLE.with(|f| f.get()) {
+                            park_pending_tree(&mut st.circles[idx], envelope);
+                        }
+                    }
                 }
                 mls_refresh_keying(&mut st, idx);
                 drain_pending(&mut st, idx);
                 r
             }
             TAG_MLS_WELCOME => {
+                TREE_RETRYABLE.with(|f| f.set(false));
                 let r = receive_mls_welcome(&mut st, idx, &envelope[1..]);
                 match r {
                     // Applied: this may be the envelope the buffer was waiting on.
                     Ok(true) => drain_pending_tree(&mut st, idx),
-                    // NOT applied: park it instead of letting the client burn it as seen — the
-                    // fork-and-strand failure mode this buffer exists for.
-                    _ => park_pending_tree(&mut st.circles[idx], envelope),
+                    // Park ONLY the retryable outcomes (orphan / roster lag). Terminal falses —
+                    // someone else's welcome, an unauthorized commit, a store-that-reports-false —
+                    // poisoned the buffer with permanent residents when parked indiscriminately.
+                    _ => {
+                        if TREE_RETRYABLE.with(|f| f.get()) {
+                            park_pending_tree(&mut st.circles[idx], envelope);
+                        }
+                    }
                 }
                 mls_refresh_keying(&mut st, idx);
                 drain_pending(&mut st, idx);
                 r
             }
             TAG_MLS_JOIN => {
+                TREE_RETRYABLE.with(|f| f.set(false));
                 let r = receive_mls_join(&mut st, idx, &envelope[1..]);
                 match r {
                     // Applied: this may be the envelope the buffer was waiting on.
                     Ok(true) => drain_pending_tree(&mut st, idx),
-                    // NOT applied: park it instead of letting the client burn it as seen — the
-                    // fork-and-strand failure mode this buffer exists for.
-                    _ => park_pending_tree(&mut st.circles[idx], envelope),
+                    // Park ONLY the retryable outcomes (orphan / roster lag). Terminal falses —
+                    // someone else's welcome, an unauthorized commit, a store-that-reports-false —
+                    // poisoned the buffer with permanent residents when parked indiscriminately.
+                    _ => {
+                        if TREE_RETRYABLE.with(|f| f.get()) {
+                            park_pending_tree(&mut st.circles[idx], envelope);
+                        }
+                    }
                 }
                 mls_refresh_keying(&mut st, idx);
                 drain_pending(&mut st, idx);

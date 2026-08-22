@@ -4651,11 +4651,12 @@ final class FeedStore: ObservableObject {
         // than inferred from a roster change: the epoch also advances on periodic rotation and on
         // tree commits carrying no roster change, and those cases stranded peers on content they
         // could never open. Consuming, so it fires once per advance.
-        if social?.takeEpochMoved() == true {
+        if let moved = social?.takeEpochMovedCircles(), !moved.isEmpty {
             let now = Date()
             if now.timeIntervalSince(lastEpochReseal) > 30 {
                 lastEpochReseal = now
-                backfillMailbox(circleIds: (social?.circles() ?? []).map(\.id))
+                // Scoped: only the circles whose epoch moved (96s per trigger when it was all of them).
+                backfillMailbox(circleIds: moved)
             }
         }
         guard let social, ids.contains(where: { SharedStore.hasMailbox($0) }) else { return 0 }

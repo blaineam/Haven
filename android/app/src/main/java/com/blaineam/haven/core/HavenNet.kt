@@ -2958,7 +2958,7 @@ object HavenNet : InboundListener {
     /// Throttled: the re-seal is a hybrid signature per event, so a roster that changes twice in
     /// quick succession must not run it twice.
     private var lastResealAt = 0L
-    private fun resealAfterEpochChange() {
+    private fun resealAfterEpochChange(circleIds: List<String>? = null) {
         val now = System.currentTimeMillis()
         synchronized(this) {
             if (now - lastResealAt < RESEAL_MIN_INTERVAL_MS) return
@@ -2966,7 +2966,10 @@ object HavenNet : InboundListener {
         }
         scope.launch {
             runCatching {
-                for (c in social.circles()) backfillMailbox(c.id, eventsToo = true)
+                // Scoped to the circles whose epoch actually moved. Re-sealing everything was 96s of
+                // hybrid-PQ signatures per trigger, nearly all of it for circles that hadn't changed.
+                val ids = circleIds ?: social.circles().map { it.id }
+                for (cid in ids) backfillMailbox(cid, eventsToo = true)
             }.onFailure { Log.w(TAG, "re-seal after epoch change failed", it) }
         }
     }
@@ -5053,7 +5056,10 @@ object HavenNet : InboundListener {
         // inferred from a roster change: the epoch also advances on periodic rotation and on tree
         // commits that carry no roster change, and those left peers holding envelopes they could
         // never open. Consuming, so it fires once per advance.
-        if (runCatching { social.takeEpochMoved() }.getOrDefault(false)) resealAfterEpochChange()
+        run {
+            val moved = runCatching { social.takeEpochMovedCircles() }.getOrDefault(emptyList())
+            if (moved.isNotEmpty()) resealAfterEpochChange(moved)
+        }
         // SINGLE-FLIGHT (iOS parity): overlapping sweeps both LIST before either finishes
         // marking, so they GET + ingest the same backlog twice — with a big backlog that
         // stacks duplicate work faster than it drains (the 55 GB relay-hosting-Mac spiral).

@@ -5524,6 +5524,30 @@ impl HavenSocial {
         format!("[{}]", out.join(","))
     }
 
+    /// The circle ids whose epoch ADVANCED since the last call — consuming, like the bool form.
+    ///
+    /// The bool form made every client re-seal EVERY circle on any advance; on the Android leg that
+    /// measured 96s for an own-device echo, nearly all of it hybrid-PQ re-signing of circles whose
+    /// epoch had not moved at all. Scoping the re-seal to the circles actually affected is the
+    /// whole difference.
+    pub fn take_epoch_moved_circles(&self) -> Vec<String> {
+        let mut st = self.state.lock().unwrap();
+        for i in 0..st.circles.len() {
+            if !st.circles[i].pending_tree.is_empty() && st.circles[i].pending_tree_retries < 8 {
+                st.circles[i].pending_tree_retries += 1;
+                drain_pending_tree(&mut st, i);
+            }
+        }
+        let mut moved = Vec::new();
+        for c in st.circles.iter_mut() {
+            if c.epoch_moved {
+                c.epoch_moved = false;
+                moved.push(c.id.clone());
+            }
+        }
+        moved
+    }
+
     pub fn take_epoch_moved(&self) -> bool {
         let mut st = self.state.lock().unwrap();
         // Piggyback ONE bounded tree-buffer replay attempt per poll — but only while the buffer is

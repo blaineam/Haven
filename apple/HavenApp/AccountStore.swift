@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 import Security
 
 /// Owns the user's Haven account. Persists only the 32-byte master seed in the
@@ -39,16 +42,33 @@ final class AccountStore: ObservableObject {
         case .found(let seed):
             if let restored = try? Account.fromSeed(seed: seed) {
                 account = restored
-                // Re-store device-local. This also performs the Secure-Enclave migration: if the
-                // seed came back from a legacy *plaintext* keychain item (or a synchronizable one),
-                // `saveSeed` re-wraps it under the SE key and deletes the plaintext copy — so a
-                // Keychain dump alone is useless after the first launch on this change. Also record
-                // it in the recoverable identity history.
-                Self.saveSeed(seed)
+                // STEADY STATE — the seed is already SE-wrapped, so there is nothing to migrate.
+                // This init used to call saveSeed(seed) here anyway, on EVERY launch: delete +
+                // Secure-Enclave wrap + SecItemAdd, a synchronous securityd XPC, inside a root
+                // @StateObject init during SwiftUI view-graph construction. At a BACKGROUND
+                // scene-create on a LOCKED phone that stalls past the 10s allowance, and did:
+                //
+                //   0x8BADF00D scene-create watchdog — main thread in SecItemAdd ←
+                //   securityd_send_sync_and_do ← StateObject.Box.update
+                //   ProcessVisibility: Background, isLocked: 1   (TF build 536, on a charger)
+                //
+                // A re-store that changes nothing is not worth a watchdog kill: the steady-state
+                // launch now performs ZERO keychain writes.
                 Self.archive(seed)
                 SharedSeed.write(seed)   // mirror into the shared group for the NSE
             } else {
                 // Seed present but un-deriveable — NEVER overwrite it; use a temp identity.
+                account = Account.generate(); usingTemporaryIdentity = true
+            }
+        case .foundLegacy(let seed):
+            if let restored = try? Account.fromSeed(seed: seed) {
+                account = restored
+                Self.archive(seed)
+                SharedSeed.write(seed)
+                // The one-time legacy→SE migration still matters (a keychain dump must stay
+                // useless) — but it is maintenance, not launch work. Off-main, after unlock.
+                Self.migrateLegacySeedWhenUnlocked(seed)
+            } else {
                 account = Account.generate(); usingTemporaryIdentity = true
             }
         case .notFound:
@@ -79,7 +99,10 @@ final class AccountStore: ObservableObject {
 
     /// Re-attempt loading the real seed (call when the app becomes active / keychain unlocks).
     func reloadIfTemporary() {
-        guard usingTemporaryIdentity, case .found(let seed) = Self.loadSeedStatus(),
+        let status = Self.loadSeedStatus()
+        let seedOpt: Data?
+        switch status { case .found(let d), .foundLegacy(let d): seedOpt = d; default: seedOpt = nil }
+        guard usingTemporaryIdentity, let seed = seedOpt,
               let restored = try? Account.fromSeed(seed: seed) else { return }
         account = restored
         usingTemporaryIdentity = false
@@ -294,6 +317,34 @@ final class AccountStore: ObservableObject {
     /// Persist the seed. Prefers Secure-Enclave wrapping; falls back to a device-local plaintext
     /// item only when no Enclave is available. Always clears the *other* representation first so a
     /// migrated user never leaves a stale plaintext copy behind.
+    /// One-time legacy→Secure-Enclave migration, OFF the launch path. Utility queue; a locked
+    /// launch waits for the protected-data notification instead of stalling securityd. Idempotent —
+    /// saveSeed clears the other representations, and re-wrapping the same 32 bytes is harmless.
+    /// Also clears the legacy NON-data-protection item, which the old inline hop handled.
+    private static func migrateLegacySeedWhenUnlocked(_ seed: Data) {
+        // saveSeed → deleteSeed clears BOTH keychain domains (DP + legacy) before wrapping, so a
+        // single call retires every plaintext representation.
+        func run() { DispatchQueue.global(qos: .utility).async { saveSeed(seed) } }
+        #if canImport(UIKit)
+        DispatchQueue.main.async {
+            if UIApplication.shared.isProtectedDataAvailable {
+                run()
+            } else {
+                var token: NSObjectProtocol?
+                token = NotificationCenter.default.addObserver(
+                    forName: UIApplication.protectedDataDidBecomeAvailableNotification,
+                    object: nil, queue: .main
+                ) { _ in
+                    if let token { NotificationCenter.default.removeObserver(token) }
+                    run()
+                }
+            }
+        }
+        #else
+        run()
+        #endif
+    }
+
     private static func saveSeed(_ data: Data, synced: Bool = false) {
         invalidateSeedCache()
         deleteSeed()
@@ -330,7 +381,12 @@ final class AccountStore: ObservableObject {
             return cachedSeed
         }
         seedCacheLock.unlock()
-        if case .found(let d) = loadSeedStatus() {
+        let st = loadSeedStatus()
+        if case .foundLegacy(let d) = st {
+            seedCacheLock.lock(); cachedSeed = d; seedCacheLock.unlock()
+            return d
+        }
+        if case .found(let d) = st {
             seedCacheLock.lock()
             cachedSeed = d
             seedCacheLock.unlock()
@@ -346,7 +402,15 @@ final class AccountStore: ObservableObject {
     ///   • `.seError`      — an SE-wrapped seed exists but the Enclave couldn't unwrap it this
     ///                       launch (key locked, key missing, or decrypt failed). A real seed
     ///                       exists; treat exactly like `.lockedOrError` — temp identity, retry.
-    private enum SeedStatus { case found(Data), notFound, lockedOrError, seError }
+    private enum SeedStatus {
+        /// From the Secure-Enclave-wrapped item — the steady state. Nothing to migrate; a launch in
+        /// this state must perform ZERO keychain writes.
+        case found(Data)
+        /// From a LEGACY plaintext / synchronizable item. Needs the one-time SE migration — a
+        /// keychain WRITE, which must never run inline on the launch path (see init for the crash).
+        case foundLegacy(Data)
+        case notFound, lockedOrError, seError
+    }
 
     private static func loadSeedStatus() -> SeedStatus {
         // 1. Secure-Enclave-wrapped seed takes precedence over any legacy plaintext copy.
@@ -380,7 +444,7 @@ final class AccountStore: ObservableObject {
             return (SecItemCopyMatching(query as CFDictionary, &item), item as? Data)
         }
         let (dpStatus, dpData) = readPlain(dataProtection: true)
-        if dpStatus == errSecSuccess { return dpData.map { .found($0) } ?? .lockedOrError }
+        if dpStatus == errSecSuccess { return dpData.map { .foundLegacy($0) } ?? .lockedOrError }
         if dpStatus != errSecItemNotFound { return .lockedOrError }
         // QA stub: absent in the DP keychain IS absent — a legacy probe would prompt on rebuild.
         if SecureEnclaveBox.dataProtectionKeychainOnly { return .notFound }
@@ -388,17 +452,10 @@ final class AccountStore: ObservableObject {
         switch legStatus {
         case errSecSuccess:
             guard let d = legData else { return .lockedOrError }
-            var add = baseQuery(dataProtection: true)
-            add[kSecValueData as String] = d
-            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            add[kSecAttrSynchronizable as String] = kCFBooleanFalse!
-            let s = SecItemAdd(add as CFDictionary, nil)
-            if s == errSecSuccess || s == errSecDuplicateItem {
-                var del = baseQuery(dataProtection: false)
-                del[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
-                SecItemDelete(del as CFDictionary)
-            }
-            return .found(d)
+            // Load only. This used to SecItemAdd the DP copy (and delete the legacy one) INLINE —
+            // a keychain write on whatever thread asked for the seed, launch included. The deferred
+            // migrator owns that hop now; a load must never write.
+            return .foundLegacy(d)
         case errSecItemNotFound: return .notFound
         default: return .lockedOrError   // errSecInteractionNotAllowed, etc. — don't clobber
         }

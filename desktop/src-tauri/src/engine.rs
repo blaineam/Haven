@@ -6692,7 +6692,7 @@ impl Engine {
             // PREVIOUS epoch is unreadable to a member who joins or advances past it; the full
             // bundle re-seals my history under the new one. The mechanism existed, nothing
             // triggered it here, so the repair waited for the next periodic backfill.
-            me.reseal_after_epoch_change();
+            me.reseal_after_epoch_change(me.social.circles().into_iter().map(|c| c.id).collect());
             true
         };
 
@@ -6743,7 +6743,7 @@ impl Engine {
 
     /// Re-seal my history under the circle's NEW epoch after a roster change. Throttled: each pass
     /// is a hybrid PQ signature per event, so a burst of roster changes coalesces into one.
-    fn reseal_after_epoch_change(self: &Arc<Self>) {
+    fn reseal_after_epoch_change(self: &Arc<Self>, circle_ids: Vec<String>) {
         const MIN_INTERVAL_MS: u64 = 30_000;
         {
             let mut last = self.last_epoch_reseal.lock();
@@ -6755,8 +6755,9 @@ impl Engine {
         }
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
-            let cids: Vec<String> = me.social.circles().into_iter().map(|c| c.id).collect();
-            for cid in cids {
+            // Scoped: only the circles whose epoch actually moved (Android measured 96s when this
+            // re-signed every circle's history per trigger).
+            for cid in circle_ids {
                 me.backfill_mailbox(&cid).await;
             }
         });
@@ -7686,8 +7687,9 @@ impl Engine {
         // THE EPOCH MOVED -> re-seal my history under it (see `take_epoch_moved`). Asked directly
         // rather than inferred from a roster change, which is only a proxy and missed the rotation
         // and tree-commit cases.
-        if self.social.take_epoch_moved() {
-            self.reseal_after_epoch_change();
+        let moved = self.social.take_epoch_moved_circles();
+        if !moved.is_empty() {
+            self.reseal_after_epoch_change(moved);
         }
         let mut changed = false;
         // Content-envelope seen-marks, applied only AFTER persist() lands the engine state

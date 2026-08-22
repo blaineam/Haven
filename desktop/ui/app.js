@@ -318,10 +318,27 @@ function syncingPlaceholder(circleId, ref, isVideo) {
       if (!u || !box.isConnected) return;
       // SHARP, full opacity, nothing over it. The thumb IS the picture, just smaller — blurring it
       // behind a spinner made a post that was loading fine look broken. Apple/Android parity.
-      box.prepend(el("img", {
+      // Sized exactly like the real fitted media (`.media-page > img`): auto/auto capped by the page
+      // cap, so it keeps its own aspect and the box hugs it. IN FLOW, not absolutely positioned —
+      // that is what gives the box a size at all.
+      const pic = el("img", {
         src: u,
-        style: "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:0",
-      }));
+        style: "display:block;width:auto;height:auto;max-width:100%;max-height:var(--page-cap);z-index:0",
+      });
+      // GIVE THE BOX A SIZE OF ITS OWN before hiding the front layer.
+      //
+      // The picture is absolutely positioned (inset:0), so it contributes nothing to layout — the
+      // spinner + "Still loading…" underneath it was the ONLY in-flow content. Hiding that left a
+      // flex item with no content at all, which collapsed to its own padding: measured at 38x120,
+      // 18px of padding either side and the 120px min-height. With `border-radius:16px` on a box
+      // that narrow the result is a PILL, filled by a 36px-wide vertical sliver of the photo.
+      //
+      // So: fill the page's width, take the picture's own aspect, and drop the padding/min-height
+      // that were only ever there to frame a spinner.
+      box.style.padding = "0";
+      box.style.minHeight = "0";
+      box.style.border = "0";
+      box.prepend(pic);
       front.style.display = "none";   // the picture is the status; no caption over it
     }).catch(() => {});
   }

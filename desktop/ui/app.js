@@ -6791,6 +6791,13 @@ const call = {
   // parity). hasCamera is set once the stream is acquired — null until then, false only when the
   // device genuinely has no usable camera, which is the one case the control is hidden.
   localStream: null, micOn: true, camOn: false, hasCamera: null,
+  // UI state: minimized = the call keeps running in a corner pill so the rest of Haven stays
+  // browsable (iOS/macOS have had this shape from day one; desktop trapped you in the overlay).
+  minimized: false,
+  // Device routing. Persisted so the next call starts on the devices the user chose.
+  audioIns: [], audioOuts: [],
+  micDevice: localStorage.getItem("haven-mic-device") || "",
+  spkDevice: localStorage.getItem("haven-spk-device") || "",
   /// Peers whose camera is OFF, per frame 22 — their tile shows an avatar instead of the frozen
   /// last frame their stopped track left behind. Cleared with the rest of the call state.
   camOff: {},
@@ -7200,6 +7207,8 @@ async function startMesh() {
     vids.forEach((t) => (t.enabled = !!call.camOn));
     call.hasCamera = vids.length > 0;
   }
+  refreshAudioDevices().then(renderCallOverlay);   // labels exist now that permission is granted
+  if (call.micDevice) applyMicDevice(call.micDevice);   // start on the user's chosen mic
   call.connecting = call.connecting && !call.inCall;
   ensureHairpins(); // TCP/WSS media path through free CF path proxy (pairs while ICE runs)
   invitees().forEach(connectPeerIfNeeded);
@@ -7396,6 +7405,7 @@ function authorContact(authorShort) {
 }
 
 function teardownCall() {
+  call.minimized = false;
   stopSpeakerDetection();
   // Remember the session so the caller's still-in-flight invite retransmits can't re-ring it.
   if (call.session) {
@@ -7418,8 +7428,24 @@ function teardownCall() {
 }
 
 function toggleMic() { call.micOn = !call.micOn; if (call.localStream) call.localStream.getAudioTracks().forEach((t) => (t.enabled = call.micOn)); renderCallOverlay(); }
-function toggleCam() {
+async function toggleCam() {
   call.camOn = !call.camOn;
+  // Stream came up audio-only (no camera at answer time, or it was busy)? Acquire video NOW and
+  // publish it via replaceTrack/addTrack — turning the camera on mid-call must not need a re-call.
+  if (call.camOn && call.localStream && call.localStream.getVideoTracks().length === 0) {
+    try {
+      const v = await navigator.mediaDevices.getUserMedia({ video: true });
+      const track = v.getVideoTracks()[0];
+      if (track) {
+        call.localStream.addTrack(track);
+        call.hasCamera = true;
+        for (const pc of call.pcs.values()) {
+          const sender = pc.getSenders().find((x) => x.track && x.track.kind === "video");
+          if (sender) await sender.replaceTrack(track); else pc.addTrack(track, call.localStream);
+        }
+      }
+    } catch (_) { call.camOn = false; call.hasCamera = false; }
+  }
   if (call.localStream) call.localStream.getVideoTracks().forEach((t) => (t.enabled = call.camOn));
   // TELL the other participants (frame 22). Disabling the track locally stops sending frames, so
   // without this every peer is left staring at our frozen last frame instead of our avatar. iOS and
@@ -7475,6 +7501,85 @@ function stopScreenShare() {
   }
 }
 
+/// Fill call.audioIns/audioOuts. Labels are only populated once mic permission is granted, so this
+/// runs after the local stream is acquired and again on devicechange.
+async function refreshAudioDevices() {
+  try {
+    const all = await navigator.mediaDevices.enumerateDevices();
+    call.audioIns = all.filter((d) => d.kind === "audioinput");
+    call.audioOuts = all.filter((d) => d.kind === "audiooutput");
+  } catch (_) { call.audioIns = []; call.audioOuts = []; }
+}
+try { navigator.mediaDevices.addEventListener("devicechange", () => { refreshAudioDevices().then(renderCallOverlay); }); } catch (_) {}
+
+/// Switch the microphone mid-call: capture the chosen device, swap the audio track into the local
+/// stream and into every peer connection via replaceTrack (no renegotiation).
+async function applyMicDevice(id) {
+  call.micDevice = id; try { localStorage.setItem("haven-mic-device", id); } catch (_) {}
+  try {
+    const fresh = await navigator.mediaDevices.getUserMedia({ audio: id ? { deviceId: { exact: id } } : true });
+    const track = fresh.getAudioTracks()[0];
+    if (!track) return;
+    track.enabled = call.micOn;
+    if (call.localStream) {
+      call.localStream.getAudioTracks().forEach((t) => { call.localStream.removeTrack(t); t.stop(); });
+      call.localStream.addTrack(track);
+    }
+    for (const pc of call.pcs.values()) {
+      const sender = pc.getSenders().find((x) => x.track && x.track.kind === "audio");
+      if (sender) await sender.replaceTrack(track);
+    }
+  } catch (e) { toast(t("mic_unavailable", e)); }
+}
+
+/// Route call audio to the chosen output. setSinkId lives on media ELEMENTS, so it must be applied
+/// to every element the overlay creates — applySink() is called on each at render time too.
+function applySpeakerDevice(id) {
+  call.spkDevice = id; try { localStorage.setItem("haven-spk-device", id); } catch (_) {}
+  document.querySelectorAll(".call-tile video, .call-tile audio, .call-mini audio").forEach(applySink);
+}
+function applySink(elm) {
+  if (call.spkDevice && elm.setSinkId) elm.setSinkId(call.spkDevice).catch(() => {});
+}
+
+/// One hidden <audio> per peer stream, ALWAYS. The camera-off tile used to render an avatar and no
+/// media element at all — and WebRTC audio only plays through an attached element, so a peer who
+/// turned their camera off went SILENT here. The video element (when shown) is muted so the pair
+/// never double-plays.
+function peerAudioEl(peer) {
+  const a = el("audio", { autoplay: "" });
+  if (call.remote && call.remote[peer]) a.srcObject = call.remote[peer];
+  applySink(a);
+  return a;
+}
+
+function deviceSelect(kind, list, current, onchange) {
+  const sel = el("select", { class: "call-device", title: t(kind) });
+  sel.append(el("option", { value: "" }, t(kind) + " · " + t("default_device")));
+  for (const d of list) {
+    const o = el("option", { value: d.deviceId }, d.label || d.deviceId.slice(0, 8));
+    if (d.deviceId === current) o.selected = true;
+    sel.append(o);
+  }
+  sel.onchange = () => onchange(sel.value);
+  return sel;
+}
+
+/// The minimized pill: the call keeps running, the app stays usable. Audio for every peer keeps
+/// playing through the hidden elements built here.
+function renderMiniCall(root) {
+  const who = call.name || invitees().map(displayNameFor).join(", ");
+  const bar = el("div", { class: "call-mini" },
+    el("span", { class: "call-mini-dot" }),
+    el("span", { class: "call-mini-name" }, t("in_call_with", who)),
+    el("button", { class: "btn sm " + (call.micOn ? "" : "danger"), onclick: () => { toggleMic(); } }, call.micOn ? t("mute") : t("unmute")),
+    el("button", { class: "btn sm", onclick: () => { call.minimized = false; renderCallOverlay(); } }, t("expand_call")),
+    el("button", { class: "btn sm danger", onclick: () => callHangup() }, t("hang_up")),
+  );
+  for (const peer of invitees()) bar.append(peerAudioEl(peer));
+  root.replaceChildren(bar);
+}
+
 function renderCallOverlay() {
   const root = $("#modal-root");
   if (!call.ringing && !call.connecting && !call.inCall) {
@@ -7491,12 +7596,19 @@ function renderCallOverlay() {
       ))));
     return;
   }
+  if (call.minimized) { renderMiniCall(root); return; }
   // In-call / connecting: a video grid + controls.
   const grid = el("div", { class: "call-grid" });
   const localTile = el("div", { class: "call-tile" });
-  const lv = el("video", { autoplay: "", muted: "", playsinline: "" });
-  if (call.localStream) lv.srcObject = call.localStream;
-  localTile.append(lv, el("span", { class: "call-name" }, t("you") + (call.camOn ? "" : t("camera_off_suffix"))));
+  if (call.camOn && call.localStream) {
+    const lv = el("video", { autoplay: "", muted: "", playsinline: "" });
+    lv.srcObject = call.localStream;
+    localTile.append(lv);
+  } else {
+    // Camera off → OUR avatar, matching how peers render us. A muted black <video> reads as broken.
+    localTile.append(el("div", { class: "avatar big" }, initials(state.profile?.name || t("you"))));
+  }
+  localTile.append(el("span", { class: "call-name" }, t("you") + (call.camOn ? "" : t("camera_off_suffix"))));
   grid.append(localTile);
   for (const peer of invitees()) {
     // Who is talking, so a group call doesn't make you guess. Apple/Android parity.
@@ -7509,21 +7621,35 @@ function renderCallOverlay() {
     if (camOff) {
       tile.append(el("div", { class: "avatar big" }, initials(displayNameFor(peer))));
     } else {
-      const v = el("video", { autoplay: "", playsinline: "" });
+      // muted: audio plays through the ALWAYS-attached <audio> below, never twice.
+      const v = el("video", { autoplay: "", playsinline: "", muted: "" });
       if (call.remote && call.remote[peer]) v.srcObject = call.remote[peer];
+      applySink(v);
       tile.append(v);
     }
+    tile.append(peerAudioEl(peer));
     tile.append(el("span", { class: "call-name" }, displayNameFor(peer) + (camOff ? t("camera_off_suffix") : "")));
     grid.append(tile);
   }
   root.replaceChildren(el("div", { class: "modal-backdrop" }, el("div", { class: "call-overlay-full" },
-    el("div", { class: "muted small", style: "text-align:center;margin-bottom:8px" }, call.connecting ? t("calling_name", call.name) : call.name),
+    el("div", { class: "call-topbar" },
+      el("div", { class: "muted small" }, call.connecting ? t("calling_name", call.name) : call.name),
+      el("button", { class: "btn sm", onclick: () => { call.minimized = true; renderCallOverlay(); } }, t("minimize_call")),
+    ),
     grid,
+    el("div", { class: "call-devices" },
+      deviceSelect("mic_input", call.audioIns, call.micDevice, applyMicDevice),
+      deviceSelect("speaker_output", call.audioOuts, call.spkDevice, applySpeakerDevice),
+    ),
     el("div", { class: "call-controls" },
       el("button", { class: "btn " + (call.micOn ? "" : "danger"), onclick: toggleMic }, call.micOn ? t("mute") : t("unmute")),
       // Always offered — the track is published for every call, so video is always available. It was
       // gated on `call.video`, which meant an audio call could never become a video one.
-      call.hasCamera === false ? null
+      // Offered whenever a camera EXISTS. `hasCamera` is false when the stream came up audio-only —
+      // which also happens when the camera was merely BUSY at answer time — and hiding the button
+      // then left desktop with no way to ever turn video on (reported directly). enableCamera()
+      // acquires the track on demand.
+      (call.hasCamera === false && !call.audioIns.length && !call.camOn) ? null
         : el("button", { class: "btn " + (call.camOn ? "" : "danger"), onclick: toggleCam }, call.camOn ? t("camera_off_btn") : t("camera_on_btn")),
       el("button", { class: "btn " + (call.screenOn ? "primary" : ""), onclick: toggleScreen }, call.screenOn ? t("stop_sharing") : t("share_screen")),
       el("button", { class: "btn", onclick: addToCallDialog }, t("add_call_btn")),

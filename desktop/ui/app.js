@@ -7302,7 +7302,9 @@ async function onCallEvent(payload) {
     // Still narrow: only my own account (the frame's signature is checked before it reaches here)
     // and only the session this device is actually in.
     case "endedElsewhere": {
-      if (c.sessionId !== call.session) return;
+      // Match the live session — or an EMPTY one (in-call with no session is the zombie state; when
+      // my own account ends a session and this device cannot name its own, tear down).
+      if (call.session && c.sessionId !== call.session) return;
       if (!(call.ringing || call.connecting || call.inCall)) return;
       teardownCall();
       break;
@@ -7359,7 +7361,10 @@ async function onCallEvent(payload) {
   }
 }
 
-const validSession = (sid) => sid === call.session || !call.session;
+// NO SESSION MEANS NO NEGOTIATION — `|| !call.session` accepted any media signal while in no call,
+// which let one late OFFER rebuild a zombie call the teardown frame could then never match. Android
+// twin has the full account; same rule on every platform.
+const validSession = (sid) => !!call.session && sid === call.session;
 function displayNameFor(hex) {
   const c = (state.contacts || []).find((x) => x.id_hex === hex);
   return c ? c.name : t("someone");

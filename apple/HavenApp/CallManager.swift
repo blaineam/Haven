@@ -780,7 +780,7 @@ final class CallManager: NSObject, ObservableObject {
         let body = payload.dropFirst(64)
         guard let sidData = CallManager.lpRead(body, &off) else { return }
         let sid = String(decoding: sidData, as: UTF8.self)
-        guard active, sid == sessionId else { return }
+        guard active, sid == sessionId || sessionId.isEmpty else { return }
         HavenLog.call("call \(sid.prefix(8)) ended on another of my devices — tearing down here")
         teardown("ended on another device")
     }
@@ -921,7 +921,11 @@ final class CallManager: NSObject, ObservableObject {
         // PLACEHOLDER (we were rung before the real invite reached us) — the signal's sid IS the
         // real session, so accept it; the sender is still gated by roster membership at every call
         // site, so only the pushed caller (or their roster) can speak into the placeholder.
-        return sid == sessionId || sessionId.isEmpty || sessionId.hasPrefix("push:")
+        // NO SESSION MEANS NO NEGOTIATION: the old `sessionId.isEmpty` clause accepted any media
+        // signal while in no call, letting a late OFFER rebuild a zombie call whose teardown frame
+        // could then never match (Android twin has the full account). The "push:" placeholder stays:
+        // there we ARE in a call, we just learned its id from the push before the invite.
+        return sid == sessionId || sessionId.hasPrefix("push:")
     }
 
     func handleAudio(_ payload: Data) {}

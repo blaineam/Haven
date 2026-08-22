@@ -346,7 +346,10 @@ object CallManager {
     private fun handleEndedElsewhere(body: ByteArray) {
         val a = CallWire.parseAccept(body) ?: return
         if (a.from != myHex) return                      // only MY account may end my call
-        if (a.sessionId != sessionId) return             // and only the session we are actually in
+        // Match the live session — or an EMPTY one. in_call with no session id is an inconsistent
+        // state by construction (the zombie above); when my own account says a session ended and
+        // this device cannot even name the session it is in, tearing down is the only sane answer.
+        if (a.sessionId != sessionId && sessionId.isNotEmpty()) return
         Log.i(TAG, "call ${a.sessionId.take(8)} ended on another of my devices — tearing down")
         endedSessions[a.sessionId] = System.currentTimeMillis()
         teardown()
@@ -584,7 +587,14 @@ object CallManager {
         peerFor(s.from).addRemoteCandidate(c.candidate, c.mLineIndex, c.mid)
     }
 
-    private fun validSession(sid: String) = sid == sessionId || sessionId.isEmpty()
+    // NO SESSION MEANS NO NEGOTIATION. The old `|| sessionId.isEmpty()` clause accepted any media
+    // signal while this device was in no call at all — so one late OFFER/ANSWER from a still-active
+    // peer rebuilt a mesh (`startMesh` → in_call=true) with sessionId still "", and from that state
+    // the teardown frame is rejected forever (`sid != ""`). Observed exactly: a leg stuck with
+    // {in_call:true, session:"", last_event:recv:ANSWER} that no hangup could reach. Out-of-order
+    // signals arriving before the invite are retransmitted and re-polled; dropping them here costs a
+    // retry, not the call.
+    private fun validSession(sid: String) = sessionId.isNotEmpty() && sid == sessionId
 
     /// Call frames are sealed + SIGNATURE-verified before dispatch (audit R1), so `hex` here is the
     /// cryptographically-PROVEN sender, not a self-asserted one. This gate applies AUTHORIZATION on

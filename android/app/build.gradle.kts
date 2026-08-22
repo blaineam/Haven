@@ -91,7 +91,7 @@ dependencies {
     // Bundled rather than relying on the platform: AVIF is native only from API 31 and minSdk is 29,
     // and Android has no public AVIF ENCODER at any level — every client must be able to WRITE
     // previews, not just read them, because any device can be the sender. libdav1d-based.
-    implementation("com.github.awxkee:avif-coder:2.1.0")
+    implementation("com.github.awxkee:avif-coder:2.1.4")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")

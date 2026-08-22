@@ -40,6 +40,14 @@ where the recurring MLS "welcome-election fork" cannot recur by construction.
 - **Desktop calls rendered only after `getUserMedia` resolved** — a caller stared at an
   idle app through the OS mic prompt while the far side was already ringing. Both the
   dial and answer paths render the call screen first.
+- **Google Play 16 KB page-size compliance.** Play flagged the production release: every
+  packaged native library must carry 16 KB-aligned ELF segments on Android 15+. Two
+  offenders: our own Rust core (NDK r27 does not align by default — r28+ does; the build
+  now passes `-Wl,-z,max-page-size=16384` per Android target and readelf-verifies every
+  produced .so, failing the build on any 4 KB segment) and the avif-coder codec stack
+  (2.1.0 shipped 4 KB libs; 2.1.4 is fully aligned on the same API line — newer 2.2.x is
+  built with Kotlin 2.3 and won't link here). Verified: all 28 .so in the release bundle
+  are 16 KB-aligned.
 - **Outgoing dials never timed out on desktop.** An unanswered dial now ends after the
   same 60s bound as incoming rings (proper hangup: far side stops ringing, session
   tombstones against invite retransmits).

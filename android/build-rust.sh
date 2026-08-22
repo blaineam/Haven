@@ -56,8 +56,36 @@ NDK_ARGS=()
 for abi in $ABIS; do NDK_ARGS+=( -t "$abi" ); done
 
 echo "▸ Building haven_ffi (release) for: $ABIS …"
+# Google Play requires 16 KB memory-page support for everything targeting Android 15+ —
+# every packaged .so must carry 16 KB-aligned LOAD segments. NDK r28+ links this way by
+# default but r27 (what CI and dev boxes pin) does NOT, so say it explicitly; harmless
+# where it's already the default. Play rejects production updates without it.
+#
+# TARGET-scoped, not plain RUSTFLAGS: the generic variable also reaches HOST build
+# scripts (proc-macros, build.rs), and the macOS host linker dies on `-z max-page-size`
+# ("ld: unknown options: -z") — measured, it killed portable-atomic's build script.
+PAGE16="-C link-arg=-Wl,-z,max-page-size=16384"
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="${CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS:-} $PAGE16"
+export CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS="${CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS:-} $PAGE16"
+export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_RUSTFLAGS="${CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_RUSTFLAGS:-} $PAGE16"
 ( cd "$CORE" && "$CARGO" ndk "${NDK_ARGS[@]}" -o "$JNILIBS" \
     build -p haven_ffi --lib --release )
+
+# Trust nothing: verify the alignment of what was just produced. 0x4000 = 16 KB. A single
+# 4 KB-aligned LOAD segment here means Play blocks the release — fail loudly NOW.
+case "$(uname -s)" in Darwin*) HOST_TAG="darwin-x86_64" ;; *) HOST_TAG="linux-x86_64" ;; esac
+READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$HOST_TAG/bin/llvm-readelf"
+if [[ -x "$READELF" ]]; then
+  for so in "$JNILIBS"/*/libhaven_ffi.so; do
+    "$READELF" -l "$so" | python3 -c '
+import sys
+aligns = [int(l.split()[-1], 16) for l in sys.stdin if l.split() and l.split()[0] == "LOAD"]
+sys.exit(0 if aligns and min(aligns) >= 16384 else 1)
+' && echo "  ✓ 16 KB-aligned: $so"       || { echo "✗ $so is NOT 16 KB-aligned (Play will refuse the release)" >&2; exit 1; }
+  done
+else
+  echo "⚠ llvm-readelf not found at $READELF — skipping alignment verification" >&2
+fi
 # cargo-ndk with -o lays the .so out under jniLibs/<abi>/libhaven_ffi.so directly.
 
 echo "▸ Generating Kotlin bindings…"

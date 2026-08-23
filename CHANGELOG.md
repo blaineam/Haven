@@ -26,6 +26,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `ITSAppUsesNonExemptEncryption = NO` answer the binary has carried since 1.0.
 
 ### Added
+- **Settings → "Support Future Development"** (MillerKit 1.2.0): a heart row in the
+  *Enjoying Haven?* block that opens wemiller.com/support — the page listing GitHub
+  Sponsors, Ko-fi and a one-time tip. Only the free, donation-funded apps carry it.
 - **App Store submission from CI** (`.github/workflows/apple-store.yml` +
   `Scripts/asc-autosubmit.mjs`). A plain `vX.Y.Z` tag now submits iOS + macOS for review from
   the **Xcode Cloud build of that exact commit** — it finds the XCC run by source commit

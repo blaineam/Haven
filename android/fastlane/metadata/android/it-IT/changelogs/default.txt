@@ -1,3 +1,6 @@
-1.3.1 — attività che ti porta dove dice.
-
-• Toccando una riga dell'attività o una notifica su una reazione o una risposta a un tuo commento si apre ora il post a cui appartiene, con quel commento evidenziato. Prima compariva "Post non disponibile" per un post che si trovava proprio lì nel tuo feed.
+1.6.1 — Haven ora è gratis. E l'ondata di stabilità.
+• Gratis ovunque: niente pubblicità, tracciamento, abbonamenti o acquisti in‑app.
+• Risolta la biforcazione delle chiavi che impediva ai membri di leggere i nuovi post; un dispositivo indietro si riallinea da solo.
+• Le modifiche ai membri richiedono secondi, non minuti.
+• Satellite e pochi dati: passa un'anteprima minuscola, la foto completa arriva con la copertura.
+• Risolti crash del selettore di cerchie, foto storte e posizioni offline.

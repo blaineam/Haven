@@ -393,31 +393,43 @@ jobs:
       # r0adkll/upload-google-play uploads the AAB + release notes ("what's new") only — it has NO
       # inputs for title/description/graphics (verified against its action.yml). So we hand it the
       # release notes via whatsNewDirectory and let `fastlane supply` (below) push the rest of the
-      # listing. whatsNewDirectory wants files named `whatsnew-<locale>`; build one from the fastlane
-      # changelog (a versionCode-specific changelogs/<code>.txt wins over changelogs/default.txt).
-      # Google caps this at 500 chars/locale, so default.txt is kept under that.
-      - name: Prepare Play what's-new (from the fastlane changelog)
+      # listing. whatsNewDirectory wants files named `whatsnew-<locale>`; build one PER LOCALE from
+      # the fastlane changelogs (a versionCode-specific changelogs/<code>.txt wins over
+      # changelogs/default.txt, per locale; a locale with no changelog simply gets none).
+      # Google caps this at 500 CHARACTERS per locale, so every default.txt is kept under that.
+      - name: Prepare Play what's-new (from the fastlane changelogs, every locale)
         if: steps.play.outputs.submit == 'true'
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
           dir="$RUNNER_TEMP/whatsnew"
           mkdir -p "$dir"
-          base="android/fastlane/metadata/android/en-US/changelogs"
-          src="$base/${{ github.run_number }}.txt"
-          [ -f "$src" ] || src="$base/default.txt"
-          cp "$src" "$dir/whatsnew-en-US"
           # Google hard-rejects the whole edit if any locale's notes exceed 500 CHARACTERS
-          # (not bytes — a "•" is 3 bytes). A silent over-run here once shipped a broken 1.0.6
-          # (release notes 501 chars → commit refused, and the publish step is continue-on-error,
-          # so the run went green with nothing published). Truncate defensively so length can
-          # never fail the commit, and warn loudly so we notice and trim the source.
-          chars=$(wc -m < "$dir/whatsnew-en-US")
-          if [ "$chars" -gt 500 ]; then
-            echo "::warning::Play what's-new is $chars chars (>500); truncating. Trim $src."
-            head -c 4000 "$dir/whatsnew-en-US" | cut -c1-497 > "$dir/whatsnew-en-US.trim"
-            printf '%s…' "$(cat "$dir/whatsnew-en-US.trim")" > "$dir/whatsnew-en-US"
-            rm -f "$dir/whatsnew-en-US.trim"
-          fi
+          # (not bytes — a "•" is 3 bytes, a CJK glyph is 3). A silent over-run here once shipped
+          # a broken 1.0.6 (release notes 501 chars → commit refused, and the publish step is
+          # continue-on-error, so the run went green with nothing published). Count characters
+          # in Python — `wc -m` counts BYTES under a non-UTF-8 locale — truncate defensively so
+          # length can never fail the commit, and warn loudly so we notice and trim the source.
+          python3 - "$dir" "$RUN_NUMBER" <<'PY'
+          import pathlib, sys
+          out, run = pathlib.Path(sys.argv[1]), sys.argv[2]
+          root = pathlib.Path("android/fastlane/metadata/android")
+          shipped = []
+          for loc in sorted(p for p in root.iterdir() if p.is_dir()):
+              src = loc / "changelogs" / f"{run}.txt"
+              if not src.exists(): src = loc / "changelogs" / "default.txt"
+              if not src.exists(): continue
+              text = src.read_text(encoding="utf-8").strip()
+              if len(text) > 500:
+                  print(f"::warning::Play what's-new for {loc.name} is {len(text)} chars (>500); truncating. Trim {src}.")
+                  text = text[:497].rstrip() + "…"
+              (out / f"whatsnew-{loc.name}").write_text(text + "\n", encoding="utf-8")
+              shipped.append(f"{loc.name}:{len(text)}")
+          if "en-US" not in " ".join(shipped):
+              sys.exit("no en-US changelog — android/fastlane/metadata/android/en-US/changelogs/default.txt is required")
+          print("what's-new:", ", ".join(shipped))
+          PY
           echo "whatsnew<<EOF" >> "$GITHUB_ENV"
           echo "$dir" >> "$GITHUB_ENV"
           echo "EOF" >> "$GITHUB_ENV"

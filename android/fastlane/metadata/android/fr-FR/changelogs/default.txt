@@ -1,5 +1,6 @@
-1.4.0 — Haven dans votre langue.
-
-• Localisation complète en six langues : japonais, allemand, espagnol, coréen, portugais (Brésil) et italien — toute l'app, sur iPhone, iPad et Mac.
-• Nouveau menu Commentaires et assistance : contactez directement le développeur depuis les Réglages, et laissez une note en toute simplicité, sans quitter l'app.
-• Les éléments d'activité et les notifications de réactions ou de réponses à vos commentaires ouvrent désormais la publication concernée, avec le commenta
+1.6.1 — Haven est désormais gratuit. Et la vague de stabilité.
+• Gratuit partout — sans pub, pistage, abonnement ni achats intégrés.
+• Fourche de clés corrigée : des membres ne lisaient plus les nouvelles publications ; un appareil en retard se rattrape seul.
+• Changements de membres en secondes, pas en minutes.
+• Satellite et bas débit : un minuscule aperçu passe, la photo complète suit avec le réseau.
+• Plantage du sélecteur de cercles, photos de travers et positions hors ligne corrigés.

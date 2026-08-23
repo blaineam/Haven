@@ -26,7 +26,7 @@ secrets below exist.
 | Thing | How | Tool |
 |---|---|---|
 | Signed **AAB** upload | to the resolved track | `r0adkll/upload-google-play@v1` |
-| **What's-new** (release notes) | `changelogs/<versionCode>.txt` → falls back to `changelogs/default.txt` | same action, `whatsNewDirectory` |
+| **What's-new** (release notes) | per locale: `<locale>/changelogs/<versionCode>.txt` → falls back to `<locale>/changelogs/default.txt` (all nine locale dirs ship; en-US is required) | same action, `whatsNewDirectory` |
 | **Title, short + full description** | `android/fastlane/metadata/android/en-US/*.txt` | `fastlane supply` |
 | **Feature graphic + screenshots** | `…/en-US/images/` (`featureGraphic.png`, `phoneScreenshots/`) | `fastlane supply` |
 | **Track promotion** (`internal`→`alpha`/`beta`→`production`) | a repo variable or a manual run | `r0adkll` `track` |
@@ -37,8 +37,10 @@ truth, edited in the repo. (`r0adkll` itself only uploads the binary + release n
 inputs for title/description/graphics, so `fastlane supply` — which reads that exact fastlane layout —
 does the rest. Both run in the same job.)
 
-> Google caps the "what's new" note at **500 characters per language**. `changelogs/default.txt` is
-> kept under that; a longer note makes the upload step warn (it's non-fatal) rather than publish.
+> Google caps the "what's new" note at **500 characters per language**. Every locale's
+> `changelogs/default.txt` is kept under that (the prep step counts characters in Python — `wc -m`
+> counts bytes under a non-UTF-8 locale, which would pass a 250-character Japanese note as 700);
+> an over-long note is truncated with a warning rather than failing the whole Play edit.
 
 ### The tag decides the channel
 

@@ -37,6 +37,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   pressing submit. The notes gate refuses to ship a `whats_new` that doesn't start with the
   version, and a locale still on an older version gets the English notes with a warning.
   `-rc.N` tags do nothing on Apple, as before.
+- **Google Play release notes ship in every locale.** `android.yml` used to copy only
+  `en-US/changelogs/default.txt`; it now builds `whatsnew-<locale>` for all nine locale dirs
+  (which had drifted — de-DE sat at 1.3.1, zh-CN at 1.4.0) and counts the 500-character cap in
+  Python instead of `wc -m`, which counts bytes under a non-UTF-8 locale. All nine files carry
+  the 1.6.1 note (free + stability wave), each under 500 characters.
 - **Microsoft Store publish is back**, opt-in: with the repo variable `MSSTORE_PUBLISH=true`
   (set 2026-08-23, after the Partner Center price went Free) `release.yml` runs `msstore
   publish` on a `vX.Y.Z` tag — free products are the case Microsoft supports over Actions. Not

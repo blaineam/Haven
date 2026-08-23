@@ -392,6 +392,25 @@ async function main() {
     } else {
       score('friend post (needs shared circle)', false, 'circle step skipped or B unknown');
     }
+
+    // CONTENT AUTHOR MATRIX — every platform authors, everyone else receives ("qa should test
+    // all actions between any platform direction"). iOS authored nearly everything above; a
+    // broken android/desktop SEND path was invisible. Text + photo per author, asserted on
+    // every other leg (and blob presence when the media step is on).
+    for (const author of ['android', 'desktop']) {
+      const tag = `${MARKER}_From_${author}`;
+      await op(devices[author], { op: 'post', body: tag, circle_id: cid() });
+      await convergeAll(audienceFor(true).filter((x) => x !== author),
+        (j) => j.posts?.some((p) => p.body === tag), BUDGET.text, `text post [${author}→all]`);
+      const ph = devices[author].stage(PHOTO, `qa-photo-${author}.jpg`);
+      await op(devices[author], { op: 'post', body: `${tag}_Photo`, media: 'photo', photo_path: ph, circle_id: cid() });
+      await convergeAll(audienceFor(true).filter((x) => x !== author),
+        (j) => j.posts?.some((p) => p.body === `${tag}_Photo`), BUDGET.mediaEvent, `photo post event [${author}→all]`);
+      if (STEPS.includes('media'))
+        await convergeAll(audienceFor(true).filter((x) => x !== author),
+          (j) => j.posts?.some((p) => p.body === `${tag}_Photo` && p.media_present?.length && p.media_present.every(Boolean)),
+          BUDGET.mediaBlob, `photo blob present [${author}→all]`);
+    }
   }
 
   // 4. story with caption
@@ -426,6 +445,17 @@ async function main() {
     if (A) {
       await op(devices.stub, { op: 'dm', dm_to: A, body: `${MARKER}_DM_BA` });
       await convergeAll(fleet, (j) => Object.values(j.dms || {}).flat().some((m) => m.body === `${MARKER}_DM_BA`), BUDGET.text * 2, 'dm B→A');
+    }
+    // DM AUTHOR MATRIX: A's other devices author into the same thread — the stub must get each,
+    // and A's remaining devices must echo it (self-sync), or a device's DM SEND path is broken
+    // while everything it receives looks fine.
+    for (const author of ['android', 'desktop']) {
+      const tag = `${MARKER}_DM_${author}B`;
+      await op(devices[author], { op: 'dm', dm_to: B, body: tag });
+      perfGate(`dm [${author}→stub]`, 'stub', await converge(devices.stub,
+        (j) => Object.values(j.dms || {}).flat().some((m) => m.body === tag), BUDGET.text * 2));
+      await convergeAll(fleet.filter((x) => x !== author),
+        (j) => Object.values(j.dms || {}).flat().some((m) => m.body === tag), BUDGET.text * 2, `dm echo [${author}→A devices]`);
     }
   }
 

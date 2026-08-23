@@ -223,6 +223,124 @@ manual run, `apple/project.yml`'s `MARKETING_VERSION`).
 
 ### What CI automates (on every `v*` tag)
 
+CI builds the Tauri app for **x64 and arm64**, packages each as an MSIX, and bundles them into one
+**`Haven-<ver>.msixbundle`** (the arm64 leg is best-effort: if its build breaks, the job goes loud
+with an x64-only warning instead of failing the release — check the *Package MSIX* step log). The
+bundle rides the short-retention **`desktop-windows`** CI artifact.
+
+The Store re-signs the package on ingestion, so **no paid code-signing certificate is needed** — the
+one-time developer fee (~$19 individual) is the only cost, and Store apps install with no SmartScreen
+warning.
+
+**Bundled `cloudflared.exe`:** the MSIX Pack step copies Tauri's `externalBin` helper next to
+`Haven.exe` so Quick Tunnel works without a user-installed CLI. It is **not** Authenticode-signed
+in CI — Partner Center re-signs every PE in the package on upload, the same as `Haven.exe`. Do not
+add a `signtool` step for it.
+
+### The 2026-08 submission-API break (why the Store leg is manual)
+
+`Scripts/ms-store-publish.mjs` drives the documented legacy DevCenter API
+(`manage.devcenter.microsoft.com/v1.0/my/applications/...`) — the **same** backend `msstore-cli`
+uses for packaged apps. Since Haven's 2026-08 price change was published through the **new Partner
+Center dashboard flow**, that API can no longer author a submission for this app:
+
+- `POST …/submissions` (clone) fails deterministically with
+  `400 InvalidParameterValue / "The size of Listings must be 1 or more"` even though the published
+  submission it clones from has a fully populated listing. Microsoft-side; no parameter dodges it.
+- A dashboard-created draft is readable (`PendingCommit`) but every `PUT` gets
+  `409 "state 'None'"` — a server-side read/write split-brain.
+- The newer Ingestion API (`api.partner.microsoft.com/v1.0/my/ingestion`) serves **unpackaged apps
+  only**; packaged MSIX products 404 on every path.
+
+So `MSSTORE_PUBLISH` is **`false`** and submissions are done by hand in Partner Center — with the
+listing half automated through the Export/Import CSV feature below. If a future API-authored
+submission ever publishes successfully, clones get a sane base again and the CI path can be retried.
+
+### Submitting by hand (the working flow)
+
+Partner Center allows **one open submission at a time**. All of this happens inside a single draft:
+
+1. **Partner Center** → Haven → Application overview → **Update** (creates the draft submission if
+   one doesn't exist).
+2. **Listings, all 9 languages at once** (en-us, de, es, fr, it, ja, ko, pt-br, zh-cn):
+   - Store listings row → **Export listings** → downloads `listingData-<StoreId>-<subId>.csv`
+     (columns `Field, ID, Type, default, en-us`).
+   - `node Scripts/ms-store-listings-import.mjs ~/Downloads/listingData-*.csv` → writes
+     `*.import.csv` with the 8 extra language columns filled from `appstore-metadata.*.md`
+     (descriptions, **What's-new for the current version** — it refuses to run on stale notes —
+     features, search terms, captions) and the en-us ReleaseNotes refreshed. Screenshot cells are
+     copied from en-us: Partner Center accepts its own image URLs across language columns, so all
+     languages share the same screenshots.
+   - Store listings row → **Import listings** → upload the generated CSV. The languages appear under
+     *Additional Store listing languages*, each **Complete**. (Listing **languages** ≠ **markets**:
+     France/China stay excluded in Pricing → Markets; fr/zh listings serve those speakers elsewhere.)
+3. **Package**: Packages page → remove the old `.msixbundle` → upload `Haven-<ver>.msixbundle` from
+   the run's `desktop-windows` artifact (`gh run download -n desktop-windows`) → wait for
+   **Validated**.
+4. **Submit for certification.**
+
+Publishing listing changes this way keeps `rocket meta` / the API out of the loop entirely — the
+CSV is the listing pipeline until Microsoft fixes the API state.
+
+### One-time manual setup (you must do this by hand)
+
+These are Google's rules, not CI limitations — no API can do them:
+
+1. **Play Console** → create the app `com.blaineam.haven` (one-time $25 lifetime fee).
+   **Price: Free** (Monetize ▸ Products ▸ App pricing). Haven went free in August 2026 (switched in
+   the console 2026-08-23); this is a one-way door on Play — a free app can never be made paid
+   again — and there is no API for it, so it was a one-time console step.
+2. **Upload keystore + Play App Signing.** Generate an upload keystore if you don't have one:
+   ```bash
+   keytool -genkey -v -keystore haven-upload.keystore -alias haven \
+     -keyalg RSA -keysize 2048 -validity 10000
+   ```
+   Enroll it under **Play App Signing** (the Console asks on first upload). CI must use this *same*
+   keystore.
+3. **First release must be manual.** Google won't let the API create an app's *very first* release —
+   upload one AAB by hand to the internal track in the Console. After that, CI takes over uploads.
+4. **Data Safety form** (App content ▸ Data safety) — **manual, one-time.** Haven collects nothing,
+   but you still have to declare that. The API cannot answer it; an unanswered form blocks *all*
+   releases from going live.
+5. **Content rating questionnaire** (App content ▸ Content ratings) — **manual, one-time.** Same
+   deal: no API path, and an unrated app can't be promoted to production.
+6. **Other App-content declarations** (target audience, ads, news, COVID, government) — **manual,
+   one-time.** In particular the **advertising-ID** declaration, if unset, is a common cause of the
+   Play upload step failing (it's non-fatal, so the GitHub Release still stands, but the Play release
+   won't).
+7. **Play Developer API access:** Console ▸ *Setup ▸ API access* → link a Google Cloud project →
+   create a **service account** → grant it *Release* permissions (Users & permissions → add the
+   service-account email, role "Release to production, exclude devices, and use Play App Signing", or
+   at minimum "Release to testing tracks" for non-prod). Download its **JSON key**.
+
+> The service-account role gates promotion: to have CI publish to **production**, the account needs
+> the production release permission, not just testing-track access.
+
+### Secrets + variables
+
+| Secret (Settings ▸ Secrets ▸ Actions) | What |
+|---|---|
+| `ANDROID_KEYSTORE_BASE64` | `base64 -i haven-upload.keystore` |
+| `ANDROID_KEYSTORE_PASSWORD` | keystore password |
+| `ANDROID_KEY_ALIAS` | e.g. `haven` |
+| `ANDROID_KEY_PASSWORD` | key password |
+| `PLAY_SERVICE_ACCOUNT_JSON` | the full service-account JSON (paste the file contents) |
+
+| Variable (Settings ▸ Variables ▸ Actions) — all optional | What |
+|---|---|
+| `PLAY_TRACK` | standing track for tags: `internal` (default if unset) / `alpha` / `beta` / `production` |
+| `PLAY_USER_FRACTION` | standing staged-rollout fraction `0.0`–`1.0` (blank = full) |
+| `PUBLISH_ANDROID_TO_GH` | **now set to `false`** — the APK/AAB are no longer attached to the GitHub Release. Google Play is the channel; the interim build is the short-retention `haven-android-apk` CI artifact. |
+
+`versionCode` is the workflow run number (always increasing); `versionName` is the tag (or, on a
+manual run, `apple/project.yml`'s `MARKETING_VERSION`).
+
+---
+
+## Microsoft Store (Windows → `.github/workflows/release.yml`, `desktop` job)
+
+### What CI automates (on every `v*` tag)
+
 CI packages an **MSIX** from the Tauri build, and — with the repo variable **`MSSTORE_PUBLISH`** set
 to `true` — runs `msstore publish` on a plain `vX.Y.Z` tag: opens a new submission with the package,
 commits it, and the Store runs certification automatically. Without the variable the MSIX is

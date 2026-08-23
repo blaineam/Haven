@@ -111,7 +111,23 @@ if (app.pendingApplicationSubmission) {
     log(`created submission ${sub.id}`);
   }
 } else {
-  sub = await createSubmission(api, appId);
+  try {
+    sub = await createSubmission(api, appId);
+  } catch (e) {
+    // Field case: after the dashboard price-flip published, POST /submissions started
+    // 400ing "The size of Listings must be 1 or more" — the clone-base (last published
+    // submission) fails validation. Dump Microsoft's actual state so the failure is
+    // diagnosable from the run log, then rethrow.
+    log(`create failed: ${e.message}`);
+    const fresh = await getApp(api, appId).catch(() => null);
+    log(`diagnostics: pending=${JSON.stringify(fresh?.pendingApplicationSubmission || null)} lastPublished=${JSON.stringify(fresh?.lastPublishedApplicationSubmission || null)}`);
+    const pubId = fresh?.lastPublishedApplicationSubmission?.id;
+    if (pubId) {
+      const pub = await getSubmission(api, appId, pubId).catch((err) => ({ error: String(err) }));
+      log(`published submission ${pubId}: status=${pub.status || '?'} listings=[${Object.keys(pub.listings || {}).join(',') || 'NONE'}] packages=${(pub.applicationPackages || []).length} pricing=${JSON.stringify(pub.pricing?.priceId || pub.pricing || null).slice(0, 120)}`);
+    }
+    throw e;
+  }
   log(`created submission ${sub.id}`);
 }
 

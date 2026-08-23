@@ -157,7 +157,7 @@ if (app.pendingApplicationSubmission) {
     log(`create failed: ${e.message}`);
     if (e.body) log(`full error body: ${JSON.stringify(e.body).slice(0, 1500)}`);
     const fresh = await getApp(api, appId).catch(() => null);
-    log(`diagnostics: pending=${JSON.stringify(fresh?.pendingApplicationSubmission || null)} lastPublished=${JSON.stringify(fresh?.lastPublishedApplicationSubmission || null)}`);
+    log(`diagnostics: pending=${JSON.stringify(fresh?.pendingApplicationSubmission || null)} lastPublished=${JSON.stringify(fresh?.lastPublishedApplicationSubmission || null)} advancedListings=${JSON.stringify(fresh?.hasAdvancedListingPermission ?? 'absent')}`);
     const pubId = fresh?.lastPublishedApplicationSubmission?.id;
     if (pubId) {
       const pub = await getSubmission(api, appId, pubId).catch((err) => ({ error: String(err) }));

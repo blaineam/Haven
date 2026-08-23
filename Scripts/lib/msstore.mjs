@@ -99,7 +99,9 @@ export async function deletePendingSubmission(api, appId, submissionId) {
 // Create a new submission (clones the last published one as the starting point).
 // Throws if a pending submission already exists — clear it first (see above).
 export async function createSubmission(api, appId) {
-  return api.post(`/applications/${enc(appId)}/submissions`, {});
+  // isMinimalResponse=true: exact parity with msstore-cli's create — worth it on its own,
+  // and tested as a possible dodge of the clone's listings validation.
+  return api.post(`/applications/${enc(appId)}/submissions?isMinimalResponse=true`, {});
 }
 
 export async function getSubmission(api, appId, submissionId) {

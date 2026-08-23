@@ -54,17 +54,15 @@ if (has('probe-ingestion')) {
   console.log('• ingestion token OK');
   const ing = ingestion(tok);
   const probes = [
+    '/products',
+    `/products?externalId=${storeId}`,
+    '/products?type=application',
     `/products/${storeId}`,
-    `/products/${storeId}/branches/getByModule(module=Package)`,
-    `/products/${storeId}/branches/getByModule(module=Listing)`,
-    `/products/${storeId}/branches/getByModule(module=Availability)`,
-    `/products/${storeId}/submissions`,
-    `/products/${storeId}/listings`,
   ];
   for (const p of probes) {
     try {
       const r = await ing.get(p);
-      console.log(`✓ GET ${p} → ${JSON.stringify(r).slice(0, 700)}`);
+      console.log(`✓ GET ${p} → ${JSON.stringify(r).slice(0, 1400)}`);
     } catch (e) {
       console.log(`✗ GET ${p} → ${e.status ?? '?'} ${String(e.message).slice(0, 260)}`);
     }

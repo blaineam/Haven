@@ -111,7 +111,17 @@ export async function getSubmission(api, appId, submissionId) {
 // PUT the full submission object back after mutating listings/packages/etc.
 // (the Store's update is a whole-object replace, not a patch).
 export async function updateSubmission(api, appId, submissionId, submission) {
-  return api.put(`/applications/${enc(appId)}/submissions/${enc(submissionId)}`, submission);
+  // Strip server-owned state before PUT. A dashboard-created draft GETs with
+  // status "None" in the BODY (while /status says PendingCommit); echoing it back
+  // made the server refuse: "Cannot update the submission because it is in the
+  // state 'None'" — it was reading OUR declared state. StoreBroker stripped
+  // read-only fields for the same reason.
+  const { status, statusDetails, fileUploadUrl, ...body } = submission;
+  void status; void statusDetails;
+  // fileUploadUrl is read-only too, but callers need it separately — keep the
+  // original object intact and PUT the cleaned copy (fileUploadUrl preserved on
+  // the response anyway).
+  return api.put(`/applications/${enc(appId)}/submissions/${enc(submissionId)}`, body);
 }
 
 // Commit a submission → sends it to certification.

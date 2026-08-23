@@ -137,6 +137,7 @@ if (app.pendingApplicationSubmission) {
   if (status === 'PendingCommit') {
     log(`reusing pending submission ${id} (${status})`);
     sub = await getSubmission(api, appId, id);
+    log(`draft body status=${sub.status ?? 'absent'} listings=[${Object.keys(sub.listings || {}).join(',')}] packages=${(sub.applicationPackages || []).length}`);
   } else if (IN_FLIGHT.includes(status)) {
     log(`slot occupied: submission ${id} is ${status} — retry after it publishes`);
     process.exit(3);

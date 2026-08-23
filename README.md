@@ -212,7 +212,7 @@ take it private: distributing a modified Haven, **or running one (relay included
 network service**, obliges you to publish your complete source under the same license.
 The software comes without warranty; the copyright holder is not liable for your use of
 it (AGPL §15–16). Copyright © Blaine Miller. The free official apps on the App Store,
-Google Play, and Microsoft Store are published by the copyright holder. Contributions
+Google Play, and Microsoft Store are published by the copyright holder, and an AGPL §7 [app‑store distribution exception](LICENSE-EXCEPTIONS.md) makes store distribution safe for compliant forks and future contributors alike. Contributions
 are accepted under the DCO — see [`CONTRIBUTING.md`](CONTRIBUTING.md), including the
 policy on AI‑assisted changes.
 

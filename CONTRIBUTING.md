@@ -18,7 +18,7 @@ Haven is licensed under the **GNU AGPL‑3.0‑or‑later** (see [LICENSE](LICEN
 - The software comes **without warranty of any kind**; the copyright holder is not liable
   for how you use it (AGPL §15–16).
 
-By submitting a contribution you agree it is licensed under AGPL‑3.0‑or‑later and certify
+By submitting a contribution you agree it is licensed under AGPL‑3.0‑or‑later **with the additional permissions in [LICENSE-EXCEPTIONS.md](LICENSE-EXCEPTIONS.md)** (the app‑store distribution exception — the Signal/Nextcloud pattern that keeps GPL‑family apps listable on Apple's stores) and certify
 the [Developer Certificate of Origin](https://developercertificate.org) — that you wrote
 it or otherwise have the right to submit it.
 

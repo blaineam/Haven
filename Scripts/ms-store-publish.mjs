@@ -91,18 +91,24 @@ log(`app: ${app.primaryName || appId}`);
 let sub;
 if (app.pendingApplicationSubmission) {
   const id = app.pendingApplicationSubmission.id;
-  const status = await getSubmissionStatus(api, appId, id).catch(() => ({}));
-  // A pending submission left in 'None' (msstore-cli corpses do this) rejects every PUT with
-  // 409 "delete the submission and create a new one" — so honor that up front and reuse only
-  // a submission that is actually editable.
-  if (!status.status || status.status === 'None' || status.status === 'CommitFailed') {
-    log(`pending submission ${id} is '${status.status || 'unknown'}' — deleting the corpse`);
+  const status = (await getSubmissionStatus(api, appId, id).catch(() => ({}))).status || 'unknown';
+  // Only 'PendingCommit' is editable. An IN-FLIGHT submission (e.g. a dashboard-committed price
+  // change in certification) occupies the one-per-app slot and nothing can be created until it
+  // publishes — that's a WAIT, not a failure: exit 3 so a dispatcher can retry later. Anything
+  // else pending ('None' msstore-cli corpses, 'CommitFailed') rejects every PUT with 409
+  // delete-and-recreate — honor that.
+  const IN_FLIGHT = ['CommitStarted', 'PreProcessing', 'Certification', 'Publishing', 'Release', 'PendingPublication'];
+  if (status === 'PendingCommit') {
+    log(`reusing pending submission ${id} (${status})`);
+    sub = await getSubmission(api, appId, id);
+  } else if (IN_FLIGHT.includes(status)) {
+    log(`slot occupied: submission ${id} is ${status} — retry after it publishes`);
+    process.exit(3);
+  } else {
+    log(`pending submission ${id} is '${status}' — deleting the corpse`);
     await deletePendingSubmission(api, appId, id);
     sub = await createSubmission(api, appId);
     log(`created submission ${sub.id}`);
-  } else {
-    log(`reusing pending submission ${id} (${status.status})`);
-    sub = await getSubmission(api, appId, id);
   }
 } else {
   sub = await createSubmission(api, appId);

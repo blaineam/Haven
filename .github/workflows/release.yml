@@ -487,7 +487,18 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          dotnet tool install --global MSStore.CLI
+          # MSStore.CLI vanished from nuget.org (only an unofficial repack remains — never feed
+          # store credentials to that). Install the OFFICIAL standalone binary from
+          # microsoft/msstore-cli releases instead, pinned and sha256-verified.
+          $ver = 'v0.4.1'
+          $zip = "$env:RUNNER_TEMP\msstore.zip"
+          Invoke-WebRequest -Uri "https://github.com/microsoft/msstore-cli/releases/download/$ver/MSStoreCLI-win-x64.zip" -OutFile $zip
+          $expected = (Invoke-WebRequest -Uri "https://github.com/microsoft/msstore-cli/releases/download/$ver/MSStoreCLI-win-x64.zip.sha256.txt").Content.Trim().Split()[0]
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected.ToLower()) { throw "msstore-cli sha256 mismatch: $actual != $expected" }
+          $dir = "$env:RUNNER_TEMP\msstore-cli"
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          $env:PATH = "$dir;$env:PATH"
           msstore reconfigure --tenantId $env:STORE_TENANT_ID --clientId $env:STORE_CLIENT_ID `
             --clientSecret $env:STORE_CLIENT_SECRET --sellerId $env:STORE_SELLER_ID
           # Opens a NEW submission with the package and COMMITS it → certification runs → live.

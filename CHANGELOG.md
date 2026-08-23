@@ -42,6 +42,36 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   publish` on a `vX.Y.Z` tag — free products are the case Microsoft supports over Actions. Not
   `continue-on-error`: a Store failure goes red instead of the old false-green.
 
+## Unreleased (1.6.2) — desktop calls actually usable
+
+Found by hand-testing desktop↔stub calls minutes after 1.6.1 shipped; every fix is now
+locked in by a new suite lane that places the call FROM desktop and clicks the real buttons.
+
+### Fixed
+- **Every call-screen button looked dead** (minimize, the Call tab, hang up). One selector:
+  the "no call → clear" branch matched the old `.call-overlay` class, not the rebuilt
+  `.call-screen` — when call state dropped, the screen stayed as a ZOMBIE whose buttons
+  correctly mutated state and then re-rendered into a clear branch that found nothing to clear.
+- **Callers stuck on "Calling…" while audio already flowed — then killed at 60s.** The
+  answerer's ACCEPT (frame 11) is sent exactly once, link-cold, and can vanish (frame-level
+  logging proved it never arrives from an Apple answerer to a desktop caller); the caller UI
+  waited for it forever and the new dial bound then hung up a LIVE call. A caller now
+  promotes to in-call the moment a peer connection actually connects — media IS the call.
+  (Apple-side 11 retry: backlog.)
+- **The mesh no longer waits on the mic prompt.** getUserMedia can block indefinitely;
+  signalling now proceeds after 6s with audio+video transceivers (same m-line shape), and
+  tracks replace in live when acquisition completes. Hang-up is local-FIRST: teardown runs
+  before the network invoke, so no rejected call can seal the user inside a dead screen.
+- **Faces, finally**: a caller's own devices resolve to your profile (emoji/photo), and a
+  one-shot boot backfill hellos every appearance-less contact so the card desktop dropped
+  for its whole life finally lands — initials only remain for peers not seen since.
+
+### QA
+- New suite lane: desktop PLACES the call, stub answers, caller must go LIVE, then REAL DOM
+  clicks (minimize → Call tab → restore → hang up) asserted on computed visibility. The
+  engine logs every call frame (the single-slot last-event diagnostic was overwritten by the
+  ICE flood in seconds, which is why the missing ACCEPT was undiagnosable).
+
 ## 2026-08-22 — 1.6.1 (stability wave: the fork is dead)
 
 Two full QA gauntlets green back-to-back (91/91 twice, zero forks) — the first releases

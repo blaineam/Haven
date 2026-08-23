@@ -434,6 +434,11 @@ pub struct Engine {
     /// without them the sync tick re-dials them forever, passes overlap, and iroh answers the
     /// resulting dial storm with unbounded path-discovery churn. It took a Mac to 28 GB.
     roster_pull_in_flight: std::sync::atomic::AtomicBool,
+    /// One-shot per app run: hello contacts whose record has NO appearance (empty emoji+avatar),
+    /// so their hello-back delivers the profile card this engine dropped for its whole life
+    /// before apply_profile_card existed. Established contacts otherwise re-hello ~never, which
+    /// left them as initials forever (reported: "it should never show the initial").
+    card_backfill_done: std::sync::atomic::AtomicBool,
     roster_pull_at: StdMutex<HashMap<String, std::time::Instant>>,
     relay_clients: TokioMutex<HashMap<String, Arc<RelayClient>>>,
     /// Per-relay backoff health, keyed by node hex — drives graceful fallback.
@@ -736,6 +741,7 @@ impl Engine {
             enroll_requests: StdMutex::new(Vec::new()),
             sched_counter: std::sync::atomic::AtomicU64::new(0),
             roster_pull_in_flight: std::sync::atomic::AtomicBool::new(false),
+            card_backfill_done: std::sync::atomic::AtomicBool::new(false),
             roster_pull_at: StdMutex::new(HashMap::new()),
             relay_clients: TokioMutex::new(HashMap::new()),
             relay_health: StdMutex::new(HashMap::new()),
@@ -856,6 +862,7 @@ impl Engine {
             enroll_requests: StdMutex::new(Vec::new()),
             sched_counter: std::sync::atomic::AtomicU64::new(0),
             roster_pull_in_flight: std::sync::atomic::AtomicBool::new(false),
+            card_backfill_done: std::sync::atomic::AtomicBool::new(false),
             roster_pull_at: StdMutex::new(HashMap::new()),
             relay_clients: TokioMutex::new(HashMap::new()),
             relay_health: StdMutex::new(HashMap::new()),
@@ -7760,6 +7767,28 @@ impl Engine {
         }
     }
 
+    /// See `card_backfill_done`. Runs once, after the first poll (fleet links are up by then).
+    fn backfill_profile_cards(self: &Arc<Self>) {
+        if self.card_backfill_done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let faceless: Vec<String> = self
+            .prefs
+            .lock()
+            .contacts
+            .iter()
+            .filter(|c| c.emoji.is_empty() && c.avatar.is_empty())
+            .map(|c| c.id_hex.clone())
+            .collect();
+        if faceless.is_empty() {
+            return;
+        }
+        log::info!("card backfill: hello-ing {} appearance-less contact(s)", faceless.len());
+        for id in faceless {
+            self.send_hello(DEFAULT_CIRCLE, &id);
+        }
+    }
+
     pub async fn poll_mailbox(self: &Arc<Self>) {
         // THE EPOCH MOVED -> re-seal my history under it (see `take_epoch_moved`). Asked directly
         // rather than inferred from a roster change, which is only a proxy and missed the rotation
@@ -7768,6 +7797,7 @@ impl Engine {
         if !moved.is_empty() {
             self.reseal_after_epoch_change(moved);
         }
+        self.backfill_profile_cards();   // one-shot; hellos queue fine even on the first poll
         let mut changed = false;
         // Content-envelope seen-marks, applied only AFTER persist() lands the engine state
         // holding their events (see the tail of this function).
@@ -10113,6 +10143,9 @@ impl Engine {
     /// self-declared `from` prefix the parsers key on. This runs identically for direct and
     /// frame-9-relayed frames — authentication is the signature, not a transport id.
     fn handle_call(self: &Arc<Self>, t: u8, sealed: &[u8]) {
+        // One line per frame at info: the qa_last_call_event slot is single-value and the ICE flood
+        // overwrites it in seconds — "did the ACCEPT ever arrive" was undiagnosable after the fact.
+        log::info!("call-frame recv t={t} ({} bytes)", sealed.len());
         *self.qa_last_call_event.lock() = format!("recv:{t}");
         let Some(app) = self.app.lock().clone() else {
             *self.qa_last_call_event.lock() = format!("recv-no-app:{t}");
@@ -10123,6 +10156,7 @@ impl Engine {
         let Some((_declared, body)) = self.open_sealed_frame(t, sealed) else {
             // An unopenable frame is otherwise identical to one that never arrived — the exact
             // ambiguity that made the stuck-call bug unreadable from outside.
+            log::warn!("call-frame t={t} UNOPENABLE (seal/signature)");
             *self.qa_last_call_event.lock() = format!("recv-unopenable:{t}");
             return;
         };
@@ -10191,6 +10225,7 @@ impl Engine {
                     return;
                 }
             } else if !self.is_contact(from) {
+                log::warn!("call-frame t={t} DROPPED at contact gate (from={})", &from.chars().take(12).collect::<String>());
                 return;
             }
             if let Err(e) = app.emit("haven:call", ev) {

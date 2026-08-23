@@ -466,6 +466,38 @@ async function main() {
     }
   }
 
+  // 7c. DESKTOP places the call and drives its REAL buttons. This leg never dialed, answered, or
+  // tapped anything in this suite — the caller path shipped broken while "call ended everywhere"
+  // stayed green (it watches state, not pixels). This is the manual test that found it, automated:
+  // dial → far side answers → the caller goes LIVE without relying on frame 11 (the accept is
+  // sent once, link-cold, and can vanish; media IS the call) → REAL DOM clicks: minimize docks
+  // into the Call tab, the tab restores, hang up clears — asserted on COMPUTED visibility.
+  if (STEPS.includes('call') && B) {
+    const dprobe = async () => {
+      await op(devices.desktop, { op: 'ui', action: 'probe' }, 2500);
+      const j = await freshDump(devices.desktop);
+      try { return JSON.parse((j?.call?.trail || '').replace(/^probe:/, '')); } catch { return {}; }
+    };
+    const dclick = (sel) => op(devices.desktop, { op: 'ui', action: 'click', dm_to: sel }, 3000);
+    await op(devices.desktop, { op: 'ui', action: 'call_start', dm_to: B }, 4000);
+    perfGate('desktop dial rings B', 'stub', await converge(devices.stub,
+      (j) => j.call?.ringing || j.call?.in_call, BUDGET.text));
+    await op(devices.stub, { op: 'call_accept' });
+    perfGate('desktop caller goes LIVE (media-promote)', 'desktop', await converge(devices.desktop,
+      (j) => j.call?.in_call === true, BUDGET.mediaEvent));
+    let p = await dprobe();
+    score('desktop call screen renders (solo + pip + controls)', !!(p.screen && p.pip && p.rounds >= 4));
+    await dclick('.call-chip'); p = await dprobe();
+    score('minimize TAP docks into the Call tab', !p.screen && p.calltab === true && p.minimized === true,
+      JSON.stringify(p));
+    await dclick('#tab-call'); p = await dprobe();
+    score('Call tab TAP restores the screen', !!p.screen && p.calltab === false, JSON.stringify(p));
+    await dclick('.call-round.hang'); p = await dprobe();
+    score('hangup TAP clears the call UI (no zombie screen)', !p.screen && !p.calltab, JSON.stringify(p));
+    await convergeAll(all, (j) => j.call != null && !(j.call.in_call || j.call.ringing),
+      BUDGET.text, 'desktop-originated call ended everywhere');
+  }
+
   // 8-9. reaction + comment from friend and from own second device on the same
   // shared-circle post (interactions only make sense where everyone sees the post).
   // ── satellite: only the preview crosses, and the rest completes on return ──────────────────

@@ -6831,7 +6831,7 @@ function startRingTimeout() {
   call.ringTimer = setTimeout(() => {
     if (!call.ringing || call.inCall) return;
     toast(call.name ? t("missed_call_from", call.name) : t("missed_call"));
-    teardownCall();
+    teardownCall("ring-timeout");
   }, RING_TIMEOUT_MS);
 }
 
@@ -7204,37 +7204,43 @@ async function callAccept() {
 async function callHangup() {
   // Declining counts as handling it: silence my other devices too, or they keep ringing after I have
   // dismissed the call here.
-  if (call.ringing && !call.inCall) invoke("call_handled_elsewhere", { sessionId: call.session });
-  await invoke("call_hangup", { to: invitees(), sessionId: call.session });
-  teardownCall();
+  if (call.ringing && !call.inCall) invoke("call_handled_elsewhere", { sessionId: call.session }).catch(() => {});
+  // LOCAL teardown is unconditional and FIRST — leaving a call is a right, not a request. The
+  // await-then-teardown order meant one rejected/stalled invoke sealed the user inside a dead
+  // call screen with a hang-up button that "did nothing" (reported directly).
+  const to = invitees(), sessionId = call.session;
+  teardownCall("hangup-btn");
+  invoke("call_hangup", { to, sessionId }).catch(() => {});
 }
 
 async function startMesh() {
-  if (call.localStream) return;
-  // Acquire audio AND video up front, then start the camera track DISABLED — a call begins
-  // audio-only, matching Apple and Android.
-  //
-  // Two reasons it must be acquired rather than skipped. A track added later adds an m-line later,
-  // and the re-offer carrying it can present its m-lines in a different order than was negotiated —
-  // WebRTC rejects that outright and the peer connection dies (the "order of m-lines in subsequent
-  // offer doesn't match" failure that was ending iOS↔Android calls). And the camera button here only
-  // ever rendered when `call.video` was true, so simply defaulting to audio removed any way to turn
-  // video on at all. Publishing the track disabled fixes both: the session shape is fixed for the
-  // call's lifetime and enabling video is instant, with no renegotiation.
-  try {
-    call.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-  } catch (e) {
-    // No camera (or refused) — audio still works; the camera button stays disabled.
-    call.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false }).catch(() => null);
-    if (!call.localStream) toast(t("mic_unavailable", e));
-  }
-  if (call.localStream) {
-    const vids = call.localStream.getVideoTracks();
+  if (call.localStream || call.mediaPending) return;
+  // Media is acquired up front (m-line order must be fixed for the call's lifetime — a track
+  // added later reorders the re-offer and WebRTC kills the connection), but the WAIT is BOUNDED:
+  // getUserMedia blocks indefinitely on the OS permission prompt, and the mesh awaiting it meant
+  // this device never sent a single OFFER — the far side "answered" into dead air (reported:
+  // mac couldn't answer a desktop-originated call). Signalling now proceeds after 6s regardless;
+  // peer connections carry audio+video TRANSCEIVERS when there is no stream yet (same m-line
+  // shape as the with-media session), and the tracks replace in the moment media lands.
+  const acquire = (async () => {
+    try { return await navigator.mediaDevices.getUserMedia({ audio: true, video: true }); }
+    catch (_) {
+      // No camera (or refused) — audio still works; the camera button stays disabled.
+      return await navigator.mediaDevices.getUserMedia({ audio: true, video: false }).catch(() => null);
+    }
+  })();
+  call.mediaPending = acquire.then((stream) => {
+    call.mediaPending = null;
+    if (!stream) { toast(t("mic_unavailable", "")); return; }
+    call.localStream = stream;
+    const vids = stream.getVideoTracks();
     vids.forEach((t) => (t.enabled = !!call.camOn));
     call.hasCamera = vids.length > 0;
-  }
-  refreshAudioDevices().then(renderCallOverlay);   // labels exist now that permission is granted
-  if (call.micDevice) applyMicDevice(call.micDevice);   // start on the user's chosen mic
+    attachLocalTracks();   // late media joins the LIVE mesh via replaceTrack
+    refreshAudioDevices().then(renderCallOverlay);   // labels exist now that permission is granted
+    if (call.micDevice) applyMicDevice(call.micDevice);   // start on the user's chosen mic
+  });
+  await Promise.race([call.mediaPending, new Promise((r) => setTimeout(r, 6000))]);
   call.connecting = call.connecting && !call.inCall;
   ensureHairpins(); // TCP/WSS media path through free CF path proxy (pairs while ICE runs)
   invitees().forEach(connectPeerIfNeeded);
@@ -7250,16 +7256,43 @@ async function startMesh() {
   renderCallOverlay();
 }
 
+/// Put the (late-arriving) local tracks into every live peer connection. Transceiver senders
+/// created empty (no media at offer time) take the track via replaceTrack — no renegotiation,
+/// m-line order untouched.
+function attachLocalTracks() {
+  if (!call.localStream) return;
+  for (const pc of call.pcs.values()) {
+    for (const track of call.localStream.getTracks()) {
+      if (pc.getSenders().some((sn) => sn.track === track)) continue;
+      const tr = pc.getTransceivers().find((x) => x.receiver.track && x.receiver.track.kind === track.kind && !x.sender.track);
+      if (tr) tr.sender.replaceTrack(track).catch(() => {});
+      else { try { pc.addTrack(track, call.localStream); } catch (_) {} }
+    }
+  }
+}
+
 function pcFor(peer) {
   if (call.pcs.has(peer)) return call.pcs.get(peer);
   const pc = new RTCPeerConnection({ iceServers: iceServers() });
   if (call.localStream) call.localStream.getTracks().forEach((t) => pc.addTrack(t, call.localStream));
+  // No media yet (permission prompt still up): reserve the m-lines so the session shape matches
+  // the with-media case; attachLocalTracks() fills the senders when acquisition completes.
+  else { try { pc.addTransceiver("audio"); pc.addTransceiver("video"); } catch (_) {} }
   pc.onicecandidate = (e) => {
     if (e.candidate) invoke("call_signal", { kind: "ice", sessionId: call.session, to: peer, json: JSON.stringify({ c: e.candidate.candidate, m: e.candidate.sdpMLineIndex, i: e.candidate.sdpMid }) });
   };
   pc.ontrack = (e) => { call.remote = call.remote || {}; call.remote[peer] = e.streams[0]; renderCallOverlay(); };
   pc.onconnectionstatechange = () => {
     const st = pc.connectionState;
+    // MEDIA IS THE CALL: when a peer connection actually connects while we still show "Calling…",
+    // promote to in-call even if the ACCEPT control frame went missing (measured: audio flowing
+    // both ways with the caller UI stuck dialing — which the 60s dial bound then KILLED, reading
+    // as "the far side can't answer"). The control frame is confirmation, not a prerequisite.
+    if (st === "connected" && call.connecting && !call.inCall) {
+      call.connecting = false; call.inCall = true;
+      clearTimeout(call.ringTimer); call.ringTimer = null;
+      qaPushCallState(); renderCallOverlay();
+    }
     // When ICE cannot path, fall back to path-proxy WebSocket hairpin (works over free CF).
     if (st === "failed" || st === "disconnected") {
       openHairpinForPeer(peer);
@@ -7273,7 +7306,7 @@ function pcFor(peer) {
 async function connectPeerIfNeeded(peer) {
   openHairpinForPeer(peer);
   const pc = pcFor(peer);
-  if (call.me < peer && call.localStream) {
+  if (call.me < peer) {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     invoke("call_signal", { kind: "offer", sessionId: call.session, to: peer, json: JSON.stringify({ t: "offer", sdp: offer.sdp }) });
@@ -7331,7 +7364,7 @@ async function onCallEvent(payload) {
     // frame's signature before emitting this.
     case "handledElsewhere": {
       if (!call.ringing || call.inCall || c.sessionId !== call.session) return;
-      teardownCall();   // tombstones the session, so a retransmitted invite can't re-ring us
+      teardownCall("handled-elsewhere");   // tombstones the session, so a retransmitted invite can't re-ring us
 
       break;
     }
@@ -7345,7 +7378,7 @@ async function onCallEvent(payload) {
       // my own account ends a session and this device cannot name its own, tear down).
       if (call.session && c.sessionId !== call.session) return;
       if (!(call.ringing || call.connecting || call.inCall)) return;
-      teardownCall();
+      teardownCall("ended-elsewhere");
       break;
     }
     // A peer's camera went on or off (frame 22). Their track stops producing frames either way, so
@@ -7369,7 +7402,7 @@ async function onCallEvent(payload) {
       const pc = call.pcs.get(c.from); if (pc) pc.close();
       call.pcs.delete(c.from); call.roster.delete(c.from);
       if (call.remote) delete call.remote[c.from];
-      if (invitees().length === 0) teardownCall(); else renderCallOverlay();
+      if (invitees().length === 0) teardownCall("hangup-frame-last-peer"); else renderCallOverlay();
       break;
     }
     case "offer": {
@@ -7434,7 +7467,10 @@ function authorContact(authorShort) {
   return (state.contacts || []).find((c) => (c.id_hex || "").startsWith(authorShort));
 }
 
-function teardownCall() {
+function teardownCall(reason) {
+  // The reason rides the qa trail: five call sites, and "the call died 7s in with no visible
+  // cause" is exactly the deduction spiral this line ends.
+  call.trail = [...(call.trail || []), "teardown:" + (reason || "?")].slice(-12);
   call.minimized = false;
   stopSpeakerDetection();
   // Remember the session so the caller's still-in-flight invite retransmits can't re-ring it.
@@ -7451,7 +7487,7 @@ function teardownCall() {
   call.screenOn = false; call.camTrack = null; call.camOff = {};
   call.pcs.forEach((pc) => pc.close()); call.pcs.clear();
   if (call.localStream) call.localStream.getTracks().forEach((t) => t.stop());
-  call.localStream = null; call.remote = {};
+  call.localStream = null; call.remote = {}; call.mediaPending = null;
   call.roster.clear(); call.session = ""; call.ringing = false; call.connecting = false; call.inCall = false; qaPushCallState();
   syncFeedVideoSound();   // restore the user's global video-sound choice now the call is over
   renderCallOverlay();
@@ -7614,7 +7650,11 @@ function renderCallOverlayInner() {
   const callTab = $("#tab-call");
   if (callTab) callTab.hidden = !(call.minimized && (call.inCall || call.connecting));
   if (!call.ringing && !call.connecting && !call.inCall) {
-    if (root.querySelector(".call-overlay")) root.replaceChildren();
+    // BOTH classes: the rebuilt in-call screen is `.call-screen`, the ring modal `.call-overlay`.
+    // Matching only the old class left the whole call screen as a ZOMBIE once the call state
+    // dropped — every button then mutated state and re-rendered into this branch, which found
+    // nothing to clear and returned; minimize/tab/hang-up all looked dead (reported directly).
+    if (root.querySelector(".call-overlay, .call-screen")) root.replaceChildren();
     return;
   }
   if (call.ringing) {
@@ -7716,7 +7756,7 @@ function callSelfPip() {
 /// through the contact card the hello handshake carries (contacts from before the card landed
 /// fall back to initials until their next hello).
 function callAvatar(hex, size) {
-  const me = hex === "";
+  const me = hex === "" || hex.toLowerCase() === (call.me || state.node || "").toLowerCase();
   const c = me ? (state.profile || {}) : ((state.contacts || []).find((x) => x.id_hex === hex) || {});
   const disc = el("div", { class: "call-avatar",
     style: `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.5)}px` });
@@ -8279,6 +8319,12 @@ async function boot() {
     else if (a.action === "call_end") callHangup();
     else if (a.action === "call_minimize") { call.minimized = true; renderCallOverlay(); }
     else if (a.action === "call_expand") { call.minimized = false; renderCallOverlay(); }
+    else if (a.action === "click" && a.to) {
+      // Click a REAL control by selector — state-change shortcuts above verify logic, not taps;
+      // the always-visible-Call-tab bug hid in exactly that gap.
+      const n = document.querySelector(String(a.to));
+      if (n) n.click();
+    }
     else if (a.action === "probe") {
       // Structural snapshot of the call UI, reported through the trail channel — lets a test (or a
       // headless verification pass) assert the RENDERED layout without screen capture: which layout

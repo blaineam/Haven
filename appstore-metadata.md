@@ -29,7 +29,7 @@ Haven is a stronghold for the people you love. It's built so that no one — not
 private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,no ads,quantum
 
 ## promotional_text
-Launch sale — 50% off through September 30: $4.99, then $9.99. A private, end‑to‑end encrypted home for your closest people. No ads, no tracking, peer‑to‑peer.
+Free. A private, end‑to‑end encrypted home for your closest people — no ads, no tracking, no subscription. Peer‑to‑peer, post‑quantum, yours.
 
 ## whats_new
 1.5.0 — Bring your Instagram archive with you.

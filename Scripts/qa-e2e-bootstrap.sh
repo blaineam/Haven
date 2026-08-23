@@ -269,6 +269,14 @@ if command -v adb >/dev/null 2>&1; then
     fi
     if [[ -f "$APK" ]]; then
       adb install -r "$APK" >/dev/null 2>&1 || log "WARN: apk install failed"
+      # A reinstall can orphan MediaStore's rows for the qa drop files (owner UID changes), after
+      # which EVERY dump rename fails ("MediaProvider: Database update failed") and the harness
+      # reads a stale dump forever — observed as phantom perf regressions (18-22s android lanes)
+      # and finally "never" converging legs while the app itself was healthy. Start every run with
+      # virgin files so the provider mints fresh rows owned by the new install.
+      adb shell rm -f "/sdcard/Download/qa-dump-com.blaineam.haven.json" \
+        "/sdcard/Download/qa-dump-com.blaineam.haven.json.tmp" \
+        "/sdcard/Download/qa-cmd.json" >/dev/null 2>&1 || true
     else
       log "WARN: no debug apk found — android runs whatever is installed"
     fi

@@ -384,10 +384,35 @@ async function main() {
 		run = null;
 	}
 	if (!run) {
+		// XCC builds every push to main and lists the run with some lag. A commit pushed minutes
+		// ago almost certainly HAS a run incoming — poll before resorting to a manual start.
+		for (let i = 0; i < 8 && !run; i++) {
+			log(`no Xcode Cloud run listed for ${args.commit.slice(0, 10)} yet — waiting for the push-triggered one (${i + 1}/8)…`);
+			await sleep(30_000);
+			run = await findRun(product.id, args.commit);
+			if (run && run.attributes.executionProgress === 'COMPLETE' && run.attributes.completionStatus !== 'SUCCEEDED') run = null;
+		}
+	}
+	if (!run) {
 		if (args.dryRun) die('dry run: no Xcode Cloud run for this commit, and a dry run does not start one');
 		const { ref, via } = await gitReference(workflow.id, { tag: args.tag, commit: args.commit });
-		run = await startRun(workflow.id, ref);
-		log(`started Xcode Cloud run #${run.attributes?.number ?? '?'} on workflow "${workflow.attributes.name}" via ${via}`);
+		try {
+			run = await startRun(workflow.id, ref);
+			log(`started Xcode Cloud run #${run.attributes?.number ?? '?'} on workflow "${workflow.attributes.name}" via ${via}`);
+		} catch (e) {
+			// XCC refuses manual runs on a TAG unless the workflow's start condition lists tags
+			// ("the tag is not associated with the workflow", 409). Ours builds on branch pushes —
+			// fall back to starting the BRANCH when its tip carries the same tree/version.
+			if (!/not associated with the workflow/i.test(String(e?.message || e))) throw e;
+			log(`tag start refused by the workflow's start condition — starting branch main instead`);
+			const repo = await api('GET', `/v1/ciWorkflows/${workflow.id}/repository?fields[scmRepositories]=repositoryName`);
+			const refs = await paged(`/v1/scmRepositories/${repo.data.id}/gitReferences?limit=200&fields[scmGitReferences]=name,kind,isDeleted`, 5);
+			const m = refs.find((x) => x.attributes?.kind === 'BRANCH' && !x.attributes?.isDeleted && x.attributes?.name === 'main');
+			if (!m) die('no main branch reference in Xcode Cloud — start the build by hand and re-run');
+			run = await startRun(workflow.id, m);
+			log(`started Xcode Cloud run #${run.attributes?.number ?? '?'} via branch main`);
+			args.commit = '';   // the branch tip may differ from the tagged sha — trust the run, not the pin
+		}
 	} else log(`Xcode Cloud run #${run.attributes.number} (${run.attributes.executionProgress}/${run.attributes.completionStatus || 'running'})`);
 	run = await waitRun(run.id, args.waitBuild);
 	if (run.attributes.completionStatus !== 'SUCCEEDED') die(`Xcode Cloud run #${run.attributes.number} ${run.attributes.completionStatus} — fix the build, push, re-tag`);

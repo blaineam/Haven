@@ -16,7 +16,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   Development is funded directly — the site's pricing card became a **Support future
   development** block linking GitHub Sponsors (`github.com/sponsors/blaineam`), Ko-fi
   (`ko-fi.com/wemiller`) and `wemiller.com/support`. Google Play and the Microsoft Store
-  prices are one-time console changes (Play's is one-way); see `docs/STORE-AUTOPUBLISH.md`.
+  prices were switched to Free in their consoles on 2026-08-23 (Play's is one-way); see
+  `docs/STORE-AUTOPUBLISH.md`.
 - **Store policy is data.** `appstore-metadata.md` gained `## availability` (`exclude: france,
   china`) and `## price` (`free`) sections that `rocket territories` / `rocket price` /
   `rocket compliance` audit and apply. France (ANSSI crypto filing) and China (ICP filing)
@@ -37,8 +38,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   version, and a locale still on an older version gets the English notes with a warning.
   `-rc.N` tags do nothing on Apple, as before.
 - **Microsoft Store publish is back**, opt-in: with the repo variable `MSSTORE_PUBLISH=true`
-  (set after the Partner Center price is Free) `release.yml` runs `msstore publish` on a
-  `vX.Y.Z` tag — free products are the case Microsoft supports over Actions. Not
+  (set 2026-08-23, after the Partner Center price went Free) `release.yml` runs `msstore
+  publish` on a `vX.Y.Z` tag — free products are the case Microsoft supports over Actions. Not
   `continue-on-error`: a Store failure goes red instead of the old false-green.
 
 ## 2026-08-22 — 1.6.1 (stability wave: the fork is dead)

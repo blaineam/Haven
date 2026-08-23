@@ -167,9 +167,9 @@ still be pulled from App Store Connect (Remove from Review) before a reviewer pi
 These are Google's rules, not CI limitations — no API can do them:
 
 1. **Play Console** → create the app `com.blaineam.haven` (one-time $25 lifetime fee).
-   **Price: Free** (Monetize ▸ Products ▸ App pricing). Haven went free in August 2026; this is a
-   one-way door on Play — a free app can never be made paid again — and there is no API for it, so
-   it is a one-time console step.
+   **Price: Free** (Monetize ▸ Products ▸ App pricing). Haven went free in August 2026 (switched in
+   the console 2026-08-23); this is a one-way door on Play — a free app can never be made paid
+   again — and there is no API for it, so it was a one-time console step.
 2. **Upload keystore + Play App Signing.** Generate an upload keystore if you don't have one:
    ```bash
    keytool -genkey -v -keystore haven-upload.keystore -alias haven \
@@ -243,8 +243,9 @@ agrees:
 
 1. **Partner Center** → Haven → **Pricing and availability** → Base price → **Free** → save and
    submit that change (it is its own submission; Partner Center allows **one open submission at a
-   time**, so let it certify before tagging).
+   time**, so let it certify before tagging). *Done 2026-08-23.*
 2. Repo → Settings ▸ Secrets and variables ▸ Actions ▸ **Variables** → `MSSTORE_PUBLISH` = `true`.
+   *Set 2026-08-23 — the next `vX.Y.Z` tag publishes to the Store.*
 
 The step is **not** `continue-on-error`: a Store-side failure goes red on the Windows leg. That is
 deliberate — the previous wiring reported a green job while submitting nothing, and a release once

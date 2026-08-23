@@ -28,6 +28,7 @@ import { basename, join } from 'node:path';
 import {
   makeMsToken, msstore, getApp, getSubmission, createSubmission, updateSubmission,
   commitSubmission, getSubmissionStatus, uploadPackageZip, patchListing,
+  deletePendingSubmission,
 } from './lib/msstore.mjs';
 import { loadMetadata, toMsListing } from './lib/metadata.mjs';
 import { msCode } from './lib/locales.mjs';
@@ -90,8 +91,19 @@ log(`app: ${app.primaryName || appId}`);
 let sub;
 if (app.pendingApplicationSubmission) {
   const id = app.pendingApplicationSubmission.id;
-  log(`reusing pending submission ${id}`);
-  sub = await getSubmission(api, appId, id);
+  const status = await getSubmissionStatus(api, appId, id).catch(() => ({}));
+  // A pending submission left in 'None' (msstore-cli corpses do this) rejects every PUT with
+  // 409 "delete the submission and create a new one" — so honor that up front and reuse only
+  // a submission that is actually editable.
+  if (!status.status || status.status === 'None' || status.status === 'CommitFailed') {
+    log(`pending submission ${id} is '${status.status || 'unknown'}' — deleting the corpse`);
+    await deletePendingSubmission(api, appId, id);
+    sub = await createSubmission(api, appId);
+    log(`created submission ${sub.id}`);
+  } else {
+    log(`reusing pending submission ${id} (${status.status})`);
+    sub = await getSubmission(api, appId, id);
+  }
 } else {
   sub = await createSubmission(api, appId);
   log(`created submission ${sub.id}`);

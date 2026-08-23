@@ -491,6 +491,11 @@ final class CallManager: NSObject, ObservableObject {
         if active {
             // Same session, new roster info → merge (someone learned about more participants).
             if sessionId == sid2 {
+                // The caller is STILL retransmitting this invite — which means our ACCEPT (sent
+                // once, link-cold) may never have landed. Re-send it: the caller's own retry loop
+                // becomes the retry channel for frame 11, and the caller stops retransmitting the
+                // moment one arrives. This replaces inferring "answered" from media.
+                if inCall, !isCaller { for p in invitees() { sendAccept(to: p) } }
                 let added = members.subtracting(roster)
                 roster.formUnion(members)
                 refreshParticipants()
@@ -823,6 +828,7 @@ final class CallManager: NSObject, ObservableObject {
         }
         HavenLog.call("ACCEPT from \(from.prefix(8)) — connecting → in-call")
         inviteTimer?.invalidate(); inviteTimer = nil
+        CallTones.shared.stop()   // answered — ringback ends HERE, not on transport events
         connecting = false; inCall = true
         if !roster.contains(from) { roster.insert(from); refreshParticipants() }
         startMesh()
@@ -1106,8 +1112,16 @@ final class CallManager: NSObject, ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 if state == .connected || state == .completed {
-                    self.connecting = false; self.inCall = true
-                    CallTones.shared.stop()   // first peer connected → stop the dialing loop
+                    // TRANSPORT truth is recorded unconditionally — mediaConnected reads it, and an
+                    // earlier guard that skipped this write left the UI on "Connecting media…" over
+                    // a live call. ANSWERED-ness is a different fact entirely: early media (a
+                    // caller negotiates at dial) must neither answer a RINGING callee (the
+                    // inCall+ringing poison — accept then no-ops forever) nor flip a CALLER to
+                    // connected before anyone accepted. inCall moves ONLY on ACCEPT (frame 11 /
+                    // reallyAccept); lost 11s are healed by re-accept-on-invite-retransmit.
+                    self.lastPeerState[peer] = state
+                    if self.ringing { return }
+                    if self.inCall { CallTones.shared.stop() }
                     // ICE RECOVERED while we were relaying — drop back to WebRTC's own (better)
                     // path. This used to live in a fourth `else if state == .connected ...` arm,
                     // which this very branch already swallows, so it was unreachable: once the
@@ -1225,6 +1239,10 @@ final class CallManager: NSObject, ObservableObject {
     /// Bring the hairpin relay up for `peer` and reflect it in the UI/CallKit. Shared by the grace
     /// timer above and the ICE `.failed` arm, so both paths report CONNECTED the same way.
     private func startHairpin(for peer: String) {
+        // Never while RINGING: relay-activating (and promoting to in-call) before the user answers
+        // is the same early-media poison as the ICE-connected path above. Post-accept negotiation
+        // re-fires this through its own failure arm if the relay is really needed.
+        guard !ringing else { return }
         guard !hairpinPeers.contains(peer) else { return }
         CallMediaBridge.shared.activate(remote: peer, sessionId: sessionId,
                                         me: myHex, localVideoTrack: localVideoTrack)

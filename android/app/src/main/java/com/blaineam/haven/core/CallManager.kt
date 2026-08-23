@@ -482,6 +482,10 @@ object CallManager {
             Log.i(TAG, "invite from ${g.from.take(8)} session=${g.sessionId.take(12)} — busy " +
                 "(inCall=${inCall.value} ringing=${ringing.value} connecting=${connecting.value} mine=${sessionId.take(12)})")
             if (sessionId == g.sessionId) {
+                // The caller is STILL retransmitting → our once-sent ACCEPT may never have
+                // landed. Re-send it; the caller's retry loop is frame 11's retry channel
+                // (Apple parity — replaces inferring "answered" from media).
+                if (inCall.value && !isCaller) resendAccept()
                 val added = members - roster
                 roster.addAll(members); refreshParticipants()
                 if (mediaStarted) added.filter { it != myHex }.forEach { connectPeerIfNeeded(it) }
@@ -532,6 +536,12 @@ object CallManager {
     private fun recentlyEnded(sid: String): Boolean {
         val endedAt = endedSessions[sid] ?: return false
         return System.currentTimeMillis() - endedAt < ENDED_TOMBSTONE_MS
+    }
+
+    /** Re-send frame 11 for the live session — the caller's invite retransmits call this until
+     *  one ACCEPT actually lands (they stop retransmitting then). */
+    private fun resendAccept() {
+        invitees().forEach { send(CallWire.ACCEPT, CallWire.accept(myHex, sessionId), it) }
     }
 
     private fun handleAccept(body: ByteArray) {
@@ -767,8 +777,12 @@ object CallManager {
         when (s) {
             PeerConnection.IceConnectionState.CONNECTED,
             PeerConnection.IceConnectionState.COMPLETED -> {
+                // Transport event only. Early media must not answer a RINGING callee (the
+                // inCall+ringing poison) and must not flip a CALLER before the peer accepted —
+                // inCall moves on ACCEPT alone; lost accepts heal via re-accept-on-retransmit.
+                if (ringing.value) return
+                if (inCall.value) { /* established call: fall through to hairpin recovery */ }
                 connecting.value = false
-                inCall.value = true
                 // ICE RECOVERED while we were relaying — drop back to WebRTC's own (better) path.
                 // Leaving both running is two full media pipelines for one call, which is heat and
                 // bandwidth for no gain. Apple parity.
@@ -872,6 +886,7 @@ object CallManager {
 
     /** Bring the hairpin relay up for a peer whose ICE cannot pair. Idempotent. */
     private fun startHairpin(peer: String) {
+        if (ringing.value) return   // never relay-activate an unanswered call (early-media poison)
         if (!hairpinPeers.add(peer)) return
         Log.i(TAG, "ice failed ${peer.take(8)} — relaying media over /webrtc/hairpin")
         // The relay IS the media path now, so the call is CONNECTED. Without saying so the UI sits on

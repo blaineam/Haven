@@ -7284,15 +7284,10 @@ function pcFor(peer) {
   pc.ontrack = (e) => { call.remote = call.remote || {}; call.remote[peer] = e.streams[0]; renderCallOverlay(); };
   pc.onconnectionstatechange = () => {
     const st = pc.connectionState;
-    // MEDIA IS THE CALL: when a peer connection actually connects while we still show "Calling…",
-    // promote to in-call even if the ACCEPT control frame went missing (measured: audio flowing
-    // both ways with the caller UI stuck dialing — which the 60s dial bound then KILLED, reading
-    // as "the far side can't answer"). The control frame is confirmation, not a prerequisite.
-    if (st === "connected" && call.connecting && !call.inCall) {
-      call.connecting = false; call.inCall = true;
-      clearTimeout(call.ringTimer); call.ringTimer = null;
-      qaPushCallState(); renderCallOverlay();
-    }
+    // Transport events do NOT answer calls. An early promote here flipped the CALLER to
+    // "connected" before the callee ever accepted (early negotiation connects media during the
+    // ring — reported directly). Answered-ness comes from the ACCEPT frame alone, which is now
+    // reliable: answerers re-send it on every invite retransmit until the caller stops retrying.
     // When ICE cannot path, fall back to path-proxy WebSocket hairpin (works over free CF).
     if (st === "failed" || st === "disconnected") {
       openHairpinForPeer(peer);
@@ -7340,7 +7335,13 @@ async function onCallEvent(payload) {
         return;
       }
       if (call.inCall || call.ringing || call.connecting) {
-        if (call.session === c.sessionId) { members.forEach((m) => call.roster.add(m)); if (call.localStream) invitees().forEach(connectPeerIfNeeded); }
+        if (call.session === c.sessionId) {
+          // Caller still retransmitting this invite → our once-sent ACCEPT may not have landed.
+          // Re-send it; the caller's retry loop is frame 11's retry channel (all-platform rule).
+          if (call.inCall) invoke("call_accept", { sessionId: call.session, to: invitees() }).catch(() => {});
+          members.forEach((m) => call.roster.add(m));
+          if (call.localStream) invitees().forEach(connectPeerIfNeeded);
+        }
         return;
       }
       if (recentlyEnded(c.sessionId)) return;   // we already left this session — retransmits can't re-ring
@@ -7762,7 +7763,10 @@ function callAvatar(hex, size) {
     style: `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.5)}px` });
   if (c.avatar) disc.append(el("img", { src: c.avatar, alt: "" }));
   else if (c.emoji) disc.textContent = c.emoji;
-  else disc.textContent = initials(me ? (c.name || t("you")) : displayNameFor(hex));
+  // Self NEVER falls to initials: a profile that skipped onboarding (QA seeds, linked devices)
+  // has no emoji yet — use the app's default sprout, the same one onboarding assigns.
+  else if (me) disc.textContent = "🌿";
+  else disc.textContent = initials(displayNameFor(hex));
   return disc;
 }
 

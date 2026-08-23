@@ -1019,8 +1019,14 @@ button.set-row:hover { background: var(--panel); }
 }
 
 /* ---- Calls (macOS CallOverlay parity: gradient stage, solo/grid, PiP, bottom-centre controls) ---- */
-.call-screen { position: fixed; inset: 0; z-index: 70; display: flex; flex-direction: column;
+.call-screen { position: fixed; inset: 0; z-index: 120; display: flex; flex-direction: column;
   background: var(--grad); overflow: hidden; color: #fff; }
+/* z 120 > the titlebar's 100: the invisible window-DRAG strip sat over the call topbar, so a real
+   click on minimize dragged the window and never reached the button — while the QA `.click()`
+   (which skips hit-testing) passed. The topbar itself takes over as the drag handle; its children
+   opt back out, same pattern as .titlebar. */
+.call-topbar { -webkit-app-region: drag; }
+.call-topbar > * { -webkit-app-region: no-drag; }
 .call-screen::before { content: ""; position: absolute; inset: 0; background: var(--glow1), var(--glow2); pointer-events: none; }
 .call-topbar { position: relative; z-index: 2; display: grid; grid-template-columns: 44px 1fr 44px;
   align-items: center; padding: 14px 16px 8px; }

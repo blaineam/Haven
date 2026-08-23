@@ -482,8 +482,20 @@ async function main() {
     await op(devices.desktop, { op: 'ui', action: 'call_start', dm_to: B }, 4000);
     perfGate('desktop dial rings B', 'stub', await converge(devices.stub,
       (j) => j.call?.ringing || j.call?.in_call, BUDGET.text));
+    // THE EARLY-MEDIA POISON (regression): the caller negotiates at dial, so media can CONNECT
+    // while B still rings. Promoting on that marked B answered underneath the ring screen —
+    // inCall+ringing together — and B's real accept then no-op'd forever ("reallyAccept ignored —
+    // already in the call" ×14; reported as "accepting never takes"). Hold the ring through the
+    // negotiation window and demand it survives UNANSWERED.
+    await sleep(8000);
+    const ringState = await freshDump(devices.stub);
+    score('ringing survives early media (not silently self-answered)',
+      ringState?.call?.ringing === true && ringState?.call?.in_call !== true,
+      JSON.stringify({ ringing: ringState?.call?.ringing, in_call: ringState?.call?.in_call }));
     await op(devices.stub, { op: 'call_accept' });
-    perfGate('desktop caller goes LIVE (media-promote)', 'desktop', await converge(devices.desktop,
+    perfGate('accept clears the ring', 'stub', await converge(devices.stub,
+      (j) => j.call?.in_call === true && !j.call?.ringing, BUDGET.text));
+    perfGate('desktop caller goes LIVE on ACCEPT', 'desktop', await converge(devices.desktop,
       (j) => j.call?.in_call === true, BUDGET.mediaEvent));
     let p = await dprobe();
     score('desktop call screen renders (solo + pip + controls)', !!(p.screen && p.pip && p.rounds >= 4));

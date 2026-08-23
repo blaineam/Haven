@@ -53,11 +53,20 @@ if (has('probe-ingestion')) {
   });
   console.log('• ingestion token OK');
   const ing = ingestion(tok);
+  // Also learn the legacy GUID for this app — the ingestion surface may key products by
+  // it rather than the Store big-ID.
+  let guid = null;
+  try {
+    const legacyTok = await makeMsToken({ tenantId: process.env.STORE_TENANT_ID, clientId: process.env.STORE_CLIENT_ID, clientSecret: process.env.STORE_CLIENT_SECRET });
+    const legacy = msstore(legacyTok);
+    const app = await getApp(legacy, process.env.STORE_APP_ID);
+    guid = app?.id || null;
+    console.log(`• legacy app.id = ${guid} (primaryName=${app?.primaryName})`);
+  } catch (e) { console.log(`• legacy lookup failed: ${String(e.message).slice(0, 120)}`); }
   const probes = [
     '/products',
-    `/products?externalId=${storeId}`,
-    '/products?type=application',
     `/products/${storeId}`,
+    ...(guid && guid !== storeId ? [`/products/${guid}`] : []),
   ];
   for (const p of probes) {
     try {

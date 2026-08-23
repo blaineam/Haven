@@ -500,58 +500,37 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Separate from the build ON PURPOSE: environmental failures here (CLI availability, Partner
-  # Center state) retry in ~2 minutes via `gh run rerun --failed` without rebuilding anything.
+  # Separate from the build ON PURPOSE: environmental failures here retry in ~2 minutes via
+  # `gh run rerun --failed` (or the msix_run_id dispatch) without rebuilding anything.
+  #
+  # Pure Ingestion API via Scripts/ms-store-publish.mjs — msstore-cli is GONE from nuget.org,
+  # refused paid-product updates, and only ever submitted the package. This lane pushes the
+  # LISTING (all 9 languages, release notes included) and the package in ONE submission.
   msix-submit:
     needs: [meta, desktop]
-    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc') && vars.MSSTORE_PUBLISH == 'true'
-    runs-on: windows-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc') && vars.MSSTORE_PUBLISH == 'true' 
+    runs-on: ubuntu-latest
     env:
       STORE_TENANT_ID: ${{ secrets.STORE_TENANT_ID }}
       STORE_CLIENT_ID: ${{ secrets.STORE_CLIENT_ID }}
       STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-      STORE_SELLER_ID: ${{ secrets.STORE_SELLER_ID }}
       STORE_APP_ID: ${{ secrets.STORE_APP_ID }}
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: desktop-windows
           path: out
-      - name: Submit MSIX to the Microsoft Store
+
+      - name: Submit listing + package to the Microsoft Store
         if: env.STORE_TENANT_ID != ''
-        shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $msix = (Get-ChildItem out -Recurse -Filter *.msix | Select-Object -First 1)
-          if (-not $msix) { throw 'no .msix in the desktop-windows artifact' }
-          # MSStore.CLI vanished from nuget.org (only an unofficial repack remains — never feed
-          # store credentials to that). Official standalone binary, pinned + sha256-verified.
-          # NOTE: the sha file downloads as BYTES in PS7 (its content-type is not texty), so it
-          # must be decoded explicitly — `.Content.Trim()` threw "[System.Byte] does not contain
-          # a method named 'Trim'" on the first attempt.
-          $ver = 'v0.4.1'
-          $zip = "$env:RUNNER_TEMP\msstore.zip"
-          Invoke-WebRequest -Uri "https://github.com/microsoft/msstore-cli/releases/download/$ver/MSStoreCLI-win-x64.zip" -OutFile $zip
-          $shaRaw = (Invoke-WebRequest -Uri "https://github.com/microsoft/msstore-cli/releases/download/$ver/MSStoreCLI-win-x64.zip.sha256.txt").Content
-          # The sha file arrives as BYTES and is UTF-16 with a BOM — a naive UTF-8 decode produced
-          # null-padded garbage (caught by running this very block LOCALLY in pwsh, 8 seconds).
-          # StreamReader with BOM detection decodes any of UTF-8/16LE/16BE correctly.
-          $shaText = if ($shaRaw -is [byte[]]) {
-            $ms = New-Object System.IO.MemoryStream(,[byte[]]$shaRaw)
-            (New-Object System.IO.StreamReader($ms, [System.Text.Encoding]::UTF8, $true)).ReadToEnd()
-          } else { [string]$shaRaw }
-          $expected = $shaText.Trim().Split()[0]
-          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-          if ($actual -ne $expected.ToLower()) { throw "msstore-cli sha256 mismatch: $actual != $expected" }
-          $dir = "$env:RUNNER_TEMP\msstore-cli"
-          Expand-Archive -Path $zip -DestinationPath $dir -Force
-          $env:PATH = "$dir;$env:PATH"
-          msstore reconfigure --tenantId $env:STORE_TENANT_ID --clientId $env:STORE_CLIENT_ID `
-            --clientSecret $env:STORE_CLIENT_SECRET --sellerId $env:STORE_SELLER_ID
-          # Opens a NEW submission with the package and COMMITS it -> certification runs -> live.
-          msstore publish "$($msix.FullName)" --appId $env:STORE_APP_ID --verbose
-          if ($LASTEXITCODE -ne 0) { throw "msstore publish exited $LASTEXITCODE" }
-          Write-Host "::notice title=Microsoft Store::Submission opened and committed — certification is running."
+          set -euo pipefail
+          VERSION=$(grep -m1 'MARKETING_VERSION' apple/project.yml | sed 's/[^0-9.]*//g')
+          MSIX=$(find out -name '*.msix' | head -1)
+          [ -n "$MSIX" ] || { echo '::error::no .msix in the desktop-windows artifact'; exit 1; }
+          echo "submitting $MSIX as $VERSION"
+          node Scripts/ms-store-publish.mjs --version "$VERSION" --msix "$MSIX"
 
   flatpak:
     needs: [meta, desktop]

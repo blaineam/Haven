@@ -1,0 +1,39 @@
+# Microsoft Store submit, standalone — listing (all languages) + package from an EXISTING
+# run's desktop-windows artifact. ~3 minutes; exists so Store-submission iteration never
+# rebuilds a 35-minute desktop matrix again (it did, four times, the night 1.7.0 shipped).
+name: ms-store
+on:
+  workflow_dispatch:
+    inputs:
+      msix_run_id:
+        description: "Run id whose desktop-windows artifact holds the MSIX to submit"
+        required: true
+
+permissions:
+  contents: read
+  actions: read   # cross-run artifact download
+
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    env:
+      STORE_TENANT_ID: ${{ secrets.STORE_TENANT_ID }}
+      STORE_CLIENT_ID: ${{ secrets.STORE_CLIENT_ID }}
+      STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
+      STORE_APP_ID: ${{ secrets.STORE_APP_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-windows
+          path: out
+          run-id: ${{ inputs.msix_run_id }}
+          github-token: ${{ github.token }}
+      - name: Submit listing + package to the Microsoft Store
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -m1 'MARKETING_VERSION' apple/project.yml | sed 's/[^0-9.]*//g')
+          MSIX=$(find out -name '*.msix' | head -1)
+          [ -n "$MSIX" ] || { echo '::error::no .msix in the desktop-windows artifact'; exit 1; }
+          echo "submitting $MSIX as $VERSION"
+          node Scripts/ms-store-publish.mjs --version "$VERSION" --msix "$MSIX"

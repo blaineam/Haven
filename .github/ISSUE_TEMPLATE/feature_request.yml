@@ -1,0 +1,24 @@
+name: Feature request
+description: Something Haven should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: story
+    attributes:
+      label: User story
+      placeholder: "As a member of a circle, I want … so that …"
+    validations: { required: true }
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Privacy fit
+      description: >
+        Haven is E2E-encrypted and serverless; the relay keeps no logs. How does this
+        feature work WITHOUT weakening that? Proposals that need server-side visibility
+        are out of scope by principle.
+    validations: { required: true }
+  - type: textarea
+    id: platforms
+    attributes:
+      label: Platform notes
+      description: Anything platform-specific (all platforms ship in the same wave).

@@ -20,7 +20,7 @@ anywhere.
 
 ## 1. What the license actually permits
 
-`LICENSE` is **PolyForm Noncommercial 1.0.0**. Copyright © Blaine Miller. Repo:
+`LICENSE` is **GNU AGPL-3.0-or-later** (relicensed from PolyForm Noncommercial 2026-08-23 by the sole copyright holder). Copyright © Blaine Miller. Repo:
 `github.com/blaineam/haven` (public). Read in full before writing this section; the relevant
 clauses are quoted by name below.
 
@@ -60,7 +60,7 @@ A successor shipping Haven **free** on the App Store, under their own developer 
 * But shipping through the App Store requires a **$99/yr Apple Developer Program membership**, an
   entity relationship with Apple, and — if the account is an organization rather than an individual
   — probably falls under *Your company*, which the license treats as a commercial actor.
-* PolyForm's own guidance treats "noncommercial" narrowly. A reasonable lawyer could read this
+* (Historical, pre-relicense) PolyForm's own guidance treats "noncommercial" narrowly. A reasonable lawyer could read this
   either way.
 
 **Engineering reading: do not rely on it.** A successor who wants App Store distribution should

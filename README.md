@@ -6,7 +6,7 @@
 
 > Your friends *and* your family. That's the whole product.
 
-[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 [![Status: 1.0 live on the App Store & Microsoft Store](https://img.shields.io/badge/status-1.0%20live%20on%20App%20Store%20%26%20Microsoft%20Store-brightgreen.svg)](docs/ROADMAP.md)
 [![Platforms](https://img.shields.io/badge/platforms-iOS%20%7C%20macOS%20%7C%20Android%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#platforms)
 [![Crypto](https://img.shields.io/badge/crypto-hybrid%20post--quantum-success.svg)](docs/DECISIONS.md)
@@ -206,11 +206,15 @@ does: your content stays on your devices, end-to-end encrypted, whether you chip
 
 ## License
 
-Source-available under **PolyForm Noncommercial 1.0.0** (see [`LICENSE`](LICENSE)) —
-read it, learn from it, fork it, use it noncommercially, but **not** commercially.
-Copyright © Blaine Miller. The paid iOS app on the App Store is distributed by the
-copyright holder. This is *source-available*, not OSI-approved open source (the
-noncommercial restriction is the difference). Contributions require a CLA/DCO.
+Free software under the **GNU AGPL‑3.0‑or‑later** (see [`LICENSE`](LICENSE)) —
+read it, learn from it, fork it, build on it, even commercially. What you cannot do is
+take it private: distributing a modified Haven, **or running one (relay included) as a
+network service**, obliges you to publish your complete source under the same license.
+The software comes without warranty; the copyright holder is not liable for your use of
+it (AGPL §15–16). Copyright © Blaine Miller. The free official apps on the App Store,
+Google Play, and Microsoft Store are published by the copyright holder. Contributions
+are accepted under the DCO — see [`CONTRIBUTING.md`](CONTRIBUTING.md), including the
+policy on AI‑assisted changes.
 
 ## Documentation
 

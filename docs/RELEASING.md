@@ -302,7 +302,7 @@ git add -A && git commit -m "haven-desktop 1.0.5" && git push origin HEAD:master
   `cargo build --frozen 2>/dev/null || cargo build` silently fell back to an unlocked network
   build, which is not reproducible.
 - **`LICENSE` is installed** to `/usr/share/licenses/$pkgname/` — required by Arch policy for
-  a non-standard license (PolyForm Noncommercial is `LicenseRef-`, not a common SPDX id).
+  the AGPL-3.0-or-later license (standard SPDX id).
 - **A 256×256 icon ships.** Tauri's `128x128@2x.png` *is* the 256px icon; the old recipe
   installed only 32 and 128, so icon themes had nothing to scale from.
 
@@ -336,7 +336,7 @@ is a hard reject.
 The `extra-data` escape hatch does **not** apply. It exists for *non-redistributable* sources;
 Flathub's own docs note that an upstream author submitting their own app doesn't need it,
 because redistribution permission is implicit. Haven's source is public — so the
-build-from-source rule binds, regardless of PolyForm Noncommercial not being an OSI license.
+build-from-source rule binds, and AGPL-3.0-or-later is an OSI-approved license.
 (Flathub does host proprietary apps; that changes nothing about this rule.)
 
 **The work required**, roughly in order:
@@ -363,7 +363,7 @@ listed here are closed. What changed and what to keep in mind:
   before `flatpak-builder` runs, exactly like `tauri.conf.json`. The number in-tree only has to
   be right for local builds. That job also runs `appstreamcli validate` and **fails the
   release** on bad AppStream data — flatpak-builder only warns, a Flathub reviewer won't.
-- **`project_license`** is now `LicenseRef-PolyForm-Noncommercial-1.0.0`, matching the
+- **`project_license`** is now `AGPL-3.0-or-later`, matching the
   PKGBUILDs and the actual LICENSE.
 - **`<developer id="com.blaineam">`** is present.
 - **`<screenshots>`** references three captures — `feed`, `thread`, `you`.

@@ -1,0 +1,86 @@
+# Cut a release from the Actions dialog: stamp versions, tag, and fan out to every pipeline.
+#
+#   version: X.Y.Z        → v X.Y.Z: desktop GH release + Play PRODUCTION + App Store submit
+#   rc:      N (optional) → vX.Y.Z-rc.N: testers only (Play testing track, prerelease GH assets,
+#                           NO App Store submission — rc→Apple is a hand decision by policy)
+#
+# The tag is pushed with the default token, which deliberately does NOT auto-trigger workflows
+# (GitHub's recursion guard) — so this workflow then dispatches each pipeline AT THE TAG REF,
+# where github.ref_type == 'tag' and every existing tag conditional behaves identically to a
+# hand-pushed tag.
+name: cut-release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "X.Y.Z (stamped into project.yml / pbxproj / tauri.conf if not already)"
+        required: true
+      rc:
+        description: "RC number — leave empty for a full release"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  cut:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Validate + stamp + tag
+        id: cut
+        env:
+          V: ${{ inputs.version }}
+          RC: ${{ inputs.rc }}
+        run: |
+          set -euo pipefail
+          [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version must be X.Y.Z"; exit 1; }
+          [[ -z "$RC" || "$RC" =~ ^[0-9]+$ ]] || { echo "::error::rc must be a number"; exit 1; }
+          TAG="v$V"; [ -n "$RC" ] && TAG="v$V-rc.$RC"
+          git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && { echo "::error::$TAG already exists"; exit 1; }
+          if [ -z "$RC" ]; then
+            # Fail in seconds, not after builds: a full release requires CURRENT release notes.
+            head -c 400 appstore-metadata.md | grep -q "^## whats_new" || true
+            NOTES=$(awk '/^## whats_new$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' appstore-metadata.md)
+            [[ "$NOTES" == "$V"* ]] || { echo "::error::appstore-metadata.md whats_new starts with '$NOTES' — write the $V notes first (all locales + android/fastlane changelogs)"; exit 1; }
+            CN=$(head -1 android/fastlane/metadata/android/en-US/changelogs/default.txt)
+            [[ "$CN" == "$V"* ]] || { echo "::error::Play changelog starts with '$CN' — write the $V fastlane changelogs first"; exit 1; }
+          fi
+          python3 - <<PY
+          import re
+          v = "$V"
+          p='desktop/src-tauri/tauri.conf.json'; s=open(p).read()
+          s=re.sub(r'"version": "[0-9.]+",', f'"version": "{v}",', s, count=1); open(p,'w').write(s)
+          p='apple/project.yml'; s=open(p).read()
+          s=re.sub(r'MARKETING_VERSION: "[0-9.]+"', f'MARKETING_VERSION: "{v}"', s); open(p,'w').write(s)
+          p='apple/Haven.xcodeproj/project.pbxproj'; s=open(p).read()
+          s=re.sub(r'MARKETING_VERSION = [0-9.]+;', f'MARKETING_VERSION = {v};', s); open(p,'w').write(s)
+          print("stamped", v)
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git add -A && git commit -m "release: stamp $V (cut-release dialog)" && git push origin HEAD:main
+          fi
+          git tag "$TAG" && git push origin "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "::notice title=cut-release::$TAG tagged at $(git rev-parse --short HEAD)"
+      - name: Fan out pipelines at the tag ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.cut.outputs.tag }}
+          RC: ${{ inputs.rc }}
+          V: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --ref "refs/tags/$TAG"
+          gh workflow run android.yml --ref "refs/tags/$TAG"
+          if [ -z "$RC" ]; then
+            gh workflow run apple-store.yml --ref "refs/tags/$TAG" -f version="$V"
+          else
+            echo "::notice::rc release — Apple submission is a hand decision (policy); skipped"
+          fi
+          echo "::notice title=cut-release::pipelines dispatched at $TAG"

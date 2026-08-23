@@ -4,7 +4,7 @@ version = "0.0.1"
 edition = "2021"
 publish = false
 description = "Haven BYO-storage mailbox: a tiny AWS SigV4 S3 client (put/get/list) shared by all clients."
-license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+license = "AGPL-3.0-or-later"
 
 # Additive crate: NOT a dependency of haven-p2p / haven-net / haven_ffi, so the iOS/Android
 # xcframework build is unaffected. The desktop client depends on it directly; other clients

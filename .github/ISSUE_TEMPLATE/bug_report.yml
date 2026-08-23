@@ -1,0 +1,32 @@
+name: Bug report
+description: Something broke
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Haven version + platform
+      placeholder: "1.7.0 · iOS 26 / Android 15 / macOS 15 / Windows 11 / Linux"
+    validations: { required: true }
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what happened instead.
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+    validations: { required: true }
+  - type: textarea
+    id: context
+    attributes:
+      label: Multi-device / network context
+      description: >
+        Haven bugs often live in the mesh: how many devices on the account, which platforms,
+        relay or direct, anything about the network (satellite/low-data?). Never post seeds,
+        keys, or invite links.

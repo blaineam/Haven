@@ -214,6 +214,18 @@ object QaDriver {
                 else -> null   // "auto" (or anything else) hands control back to the real monitor
             }
             "post" -> HavenNet.post(circle, body, stageMedia(cmd, circle))
+            // Calls: android was the ONLY leg that could neither place nor answer a call under
+            // test — its entire CallManager shipped changes on compile checks alone (reported:
+            // "i dont see android testing calls which is concerning"). Same vocabulary as iOS.
+            "call" -> {
+                val to = cmd.optString("dm_to").trim().lowercase()
+                if (to.length == 64) {
+                    val name = HavenNet.contacts.firstOrNull { it.idHex.equals(to, ignoreCase = true) }?.name ?: "Friend"
+                    CallManager.startCall(listOf(to), name)
+                }
+            }
+            "call_accept" -> CallManager.accept()
+            "call_end" -> CallManager.hangup()
             "story" -> {
                 val caption = cmd.optString("caption").ifEmpty { body }
                 val storyCircle = explicit ?: DEFAULT_CIRCLE

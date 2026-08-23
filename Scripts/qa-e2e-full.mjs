@@ -429,86 +429,107 @@ async function main() {
     }
   }
 
-  // 7b. Call media A↔B. Asserts BYTES RECEIVED, not "connected" — the field failure was a call
-  // both sides showed as connected and answered while neither could hear the other, so connection
-  // state proves nothing. Audio only by default: the iOS Simulator has no camera, so a video
-  // assertion would fail for reasons that have nothing to do with the transport (set
-  // E2E_CALL_VIDEO=1 on a camera-capable fleet to include it).
+  // 7b. CALLS — the full caller × answerer MATRIX ("qa should test all actions between any
+  // platform direction"). Every A-side platform dials the stub AND answers a stub-originated
+  // call; the platforms that did neither are exactly where the field bugs lived (desktop's dead
+  // buttons, android's never-exercised CallManager). Per pair: callee rings; ringing SURVIVES
+  // early media unanswered (the inCall+ringing poison); accept clears the ring; the CALLER goes
+  // live only on the ACCEPT (never on transport); hangup ends it EVERYWHERE. Audio-byte
+  // assertions stay on the ios↔stub pair (sim/emulator media quirks make them flaky elsewhere;
+  // state asserts run on every pair).
   if (STEPS.includes('call') && B) {
-    await op(devices.ios, { op: 'call', dm_to: B });
-    const ringing = await converge(devices.stub, (j) => j.call?.ringing || j.call?.in_call, BUDGET.text);
-    perfGate('call rings B', 'stub', ringing);
-    if (ringing >= 0) {
-      await op(devices.stub, { op: 'call_accept' });
-      // Media must flow BOTH ways — a one-way call is the same bug wearing a different hat.
-      perfGate('call audio A→B (bytes received)', 'stub', await converge(devices.stub,
-        (j) => (j.call?.inbound_audio_bytes || 0) > 0, BUDGET.mediaEvent));
-      perfGate('call audio B→A (bytes received)', 'ios', await converge(devices.ios,
-        (j) => (j.call?.inbound_audio_bytes || 0) > 0, BUDGET.mediaEvent));
-      if (process.env.E2E_CALL_VIDEO === '1') {
-        await op(devices.ios, { op: 'call_video', on: 'true' });
-        perfGate('call video A→B (frames decoded)', 'stub', await converge(devices.stub,
-          (j) => (j.call?.inbound_video_frames || 0) > 0, BUDGET.mediaEvent));
+    const A_HEX = (await freshDump(devices.ios))?.account_hex || '';
+    const callOps = {
+      ios:     { dial: (to) => op(devices.ios, { op: 'call', dm_to: to }),        accept: () => op(devices.ios, { op: 'call_accept' }),               end: () => op(devices.ios, { op: 'call_end' }, 6000) },
+      android: { dial: (to) => op(devices.android, { op: 'call', dm_to: to }),    accept: () => op(devices.android, { op: 'call_accept' }),           end: () => op(devices.android, { op: 'call_end' }, 6000) },
+      desktop: { dial: (to) => op(devices.desktop, { op: 'ui', action: 'call_start', dm_to: to }, 4000), accept: () => op(devices.desktop, { op: 'ui', action: 'call_accept' }), end: () => op(devices.desktop, { op: 'ui', action: 'call_end' }, 6000) },
+      stub:    { dial: (to) => op(devices.stub, { op: 'call', dm_to: to }),       accept: () => op(devices.stub, { op: 'call_accept' }),              end: () => op(devices.stub, { op: 'call_end' }, 6000) },
+    };
+    const endedEverywhere = (tag) => convergeAll(all, (j) => j.call != null && !(j.call.in_call || j.call.ringing),
+      BUDGET.text, `call ended everywhere [${tag}]`);
+    const pairs = [
+      { caller: 'ios', answerer: 'stub', to: B },
+      { caller: 'android', answerer: 'stub', to: B },
+      { caller: 'desktop', answerer: 'stub', to: B },
+      { caller: 'stub', answerer: 'ios', to: A_HEX },
+      { caller: 'stub', answerer: 'android', to: A_HEX },
+      { caller: 'stub', answerer: 'desktop', to: A_HEX },
+    ];
+    for (const pr of pairs) {
+      const tag = `${pr.caller}→${pr.answerer}`;
+      if (!pr.to) { score(`call matrix ${tag}`, false, 'no target hex'); continue; }
+      await callOps[pr.caller].dial(pr.to);
+      perfGate(`rings [${tag}]`, pr.answerer, await converge(devices[pr.answerer],
+        (j) => j.call?.ringing || j.call?.in_call, BUDGET.text));
+      await sleep(8000);   // early-media window: negotiation runs while the callee still rings
+      const midRing = await freshDump(devices[pr.answerer]);
+      score(`ringing survives early media [${tag}]`,
+        midRing?.call?.in_call !== true, JSON.stringify(midRing?.call));
+      await callOps[pr.answerer].accept();
+      perfGate(`accept clears the ring [${tag}]`, pr.answerer, await converge(devices[pr.answerer],
+        (j) => j.call?.in_call === true && !j.call?.ringing, BUDGET.text));
+      perfGate(`caller goes LIVE on ACCEPT [${tag}]`, pr.caller, await converge(devices[pr.caller],
+        (j) => j.call?.in_call === true, BUDGET.mediaEvent));
+      if (pr.caller === 'ios' && pr.answerer === 'stub') {
+        // Media bytes BOTH ways — connection state proves nothing (the field bug was two ends
+        // "connected" in silence). ios↔stub only: real audio paths exist on both.
+        perfGate('call audio A→B (bytes received)', 'stub', await converge(devices.stub,
+          (j) => (j.call?.inbound_audio_bytes || 0) > 0, BUDGET.mediaEvent));
+        perfGate('call audio B→A (bytes received)', 'ios', await converge(devices.ios,
+          (j) => (j.call?.inbound_audio_bytes || 0) > 0, BUDGET.mediaEvent));
       }
-      await op(devices.ios, { op: 'call_end' }, 6000);
-      // EVERY leg must leave the call, not just the two the audio assertions cover.
-      //
-      // The hangup fans out to the roster minus my own account, so my OTHER devices were never told
-      // an established call had ended and sat in a dead one. That survived a green run because
-      // neither the Android nor the desktop dump reported call state at all, and the call step only
-      // ever asserted on ios and stub — the two legs that DID hang up correctly. Both gaps are now
-      // closed, so assert on all of them.
-      // A leg must REPORT that it left the call. `j.call` being absent or null means the leg never
-      // told us anything, which is NOT the same as having hung up — and treating it as a pass is
-      // exactly how this assertion went green while desktop sat in a visibly live call.
-      await convergeAll(all, (j) => j.call != null && !(j.call.in_call || j.call.ringing),
-        BUDGET.text, 'call ended everywhere');
+      if (pr.answerer !== 'stub') {
+        // Stub dialed the ACCOUNT: the two NON-answering A devices rang too and must stand down
+        // (handled-elsewhere) instead of ringing forever next to a live call.
+        const others = ['ios', 'android', 'desktop'].filter((d) => d !== pr.answerer);
+        await convergeAll(others, (j) => j.call != null && !j.call.ringing,
+          BUDGET.text, `other devices stand down [${tag}]`);
+      }
+      await callOps[pr.caller].end();
+      await endedEverywhere(tag);
     }
-  }
 
-  // 7c. DESKTOP places the call and drives its REAL buttons. This leg never dialed, answered, or
-  // tapped anything in this suite — the caller path shipped broken while "call ended everywhere"
-  // stayed green (it watches state, not pixels). This is the manual test that found it, automated:
-  // dial → far side answers → the caller goes LIVE without relying on frame 11 (the accept is
-  // sent once, link-cold, and can vanish; media IS the call) → REAL DOM clicks: minimize docks
-  // into the Call tab, the tab restores, hang up clears — asserted on COMPUTED visibility.
-  if (STEPS.includes('call') && B) {
+    // 7c. DESKTOP's real buttons (screen-specific: REAL DOM clicks, computed visibility — the
+    // dead-button class lived exactly in the gap between state ops and actual taps).
     const dprobe = async () => {
       await op(devices.desktop, { op: 'ui', action: 'probe' }, 2500);
       const j = await freshDump(devices.desktop);
       try { return JSON.parse((j?.call?.trail || '').replace(/^probe:/, '')); } catch { return {}; }
     };
     const dclick = (sel) => op(devices.desktop, { op: 'ui', action: 'click', dm_to: sel }, 3000);
-    await op(devices.desktop, { op: 'ui', action: 'call_start', dm_to: B }, 4000);
-    perfGate('desktop dial rings B', 'stub', await converge(devices.stub,
-      (j) => j.call?.ringing || j.call?.in_call, BUDGET.text));
-    // THE EARLY-MEDIA POISON (regression): the caller negotiates at dial, so media can CONNECT
-    // while B still rings. Promoting on that marked B answered underneath the ring screen —
-    // inCall+ringing together — and B's real accept then no-op'd forever ("reallyAccept ignored —
-    // already in the call" ×14; reported as "accepting never takes"). Hold the ring through the
-    // negotiation window and demand it survives UNANSWERED.
-    await sleep(8000);
-    const ringState = await freshDump(devices.stub);
-    score('ringing survives early media (not silently self-answered)',
-      ringState?.call?.ringing === true && ringState?.call?.in_call !== true,
-      JSON.stringify({ ringing: ringState?.call?.ringing, in_call: ringState?.call?.in_call }));
-    await op(devices.stub, { op: 'call_accept' });
-    perfGate('accept clears the ring', 'stub', await converge(devices.stub,
-      (j) => j.call?.in_call === true && !j.call?.ringing, BUDGET.text));
-    perfGate('desktop caller goes LIVE on ACCEPT', 'desktop', await converge(devices.desktop,
-      (j) => j.call?.in_call === true, BUDGET.mediaEvent));
+    await callOps.desktop.dial(B);
+    await converge(devices.stub, (j) => j.call?.ringing, BUDGET.text);
+    await callOps.stub.accept();
+    await converge(devices.desktop, (j) => j.call?.in_call === true, BUDGET.mediaEvent);
     let p = await dprobe();
     score('desktop call screen renders (solo + pip + controls)', !!(p.screen && p.pip && p.rounds >= 4));
     await dclick('.call-chip'); p = await dprobe();
-    score('minimize TAP docks into the Call tab', !p.screen && p.calltab === true && p.minimized === true,
-      JSON.stringify(p));
+    score('minimize TAP docks into the Call tab', !p.screen && p.calltab === true && p.minimized === true, JSON.stringify(p));
     await dclick('#tab-call'); p = await dprobe();
     score('Call tab TAP restores the screen', !!p.screen && p.calltab === false, JSON.stringify(p));
     await dclick('.call-round.hang'); p = await dprobe();
     score('hangup TAP clears the call UI (no zombie screen)', !p.screen && !p.calltab, JSON.stringify(p));
-    await convergeAll(all, (j) => j.call != null && !(j.call.in_call || j.call.ringing),
-      BUDGET.text, 'desktop-originated call ended everywhere');
+    await endedEverywhere('desktop taps');
+
+    // 7d. UNANSWERED calls DIE — and callers never phantom-connect mid-ring. Apple's accept
+    // handler checked the sender but not the SESSION; once answerers re-send 11 on every invite
+    // retransmit, relays float stale 11s from finished sessions — one connected a fresh
+    // unanswered call, the caller killed its own retransmits (the real callee never rang) and
+    // sat in a phantom call forever ("rings indefinitely", reported + measured).
+    await callOps.desktop.dial(B);
+    await converge(devices.stub, (j) => j.call?.ringing, BUDGET.text);
+    await sleep(20_000);
+    const mid = await freshDump(devices.desktop);
+    score('unanswered caller never phantom-connects (stale-11 immunity)',
+      mid?.call?.in_call !== true, JSON.stringify(mid?.call));
+    await sleep(50_000);
+    const dEnd = await freshDump(devices.desktop); const sEnd = await freshDump(devices.stub);
+    score('unanswered call dies on the caller (60s dial bound)',
+      dEnd?.call != null && !dEnd.call.in_call && !dEnd.call.ringing, JSON.stringify(dEnd?.call));
+    score('unanswered call dies on the callee (ring bound / caller BYE)',
+      sEnd?.call != null && !sEnd.call.in_call && !sEnd.call.ringing, JSON.stringify(sEnd?.call));
   }
+
 
   // 8-9. reaction + comment from friend and from own second device on the same
   // shared-circle post (interactions only make sense where everyone sees the post).

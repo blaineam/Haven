@@ -826,6 +826,18 @@ final class CallManager: NSObject, ObservableObject {
             HavenLog.call("ACCEPT DROPPED from=\(from.prefix(8)) — not a known contact; caller stays stuck on Calling")
             return
         }
+        // THE SESSION MUST MATCH. Desktop and Android both check it; this handler never did, and
+        // accepts are no longer rare one-shots — answerers RE-SEND them on every invite retransmit,
+        // so relays float stale 11s from finished sessions. One of those connected a fresh
+        // unanswered call: the caller went phantom-in-call, invalidated its invite retransmits (so
+        // the real callee never even rang) and never timed out — "rings indefinitely", measured.
+        let sbody = payload.subdata(in: (payload.startIndex + 64)..<payload.endIndex)
+        var soff = 0
+        let sid = CallManager.lpRead(sbody, &soff).flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        guard sid.isEmpty || sid == sessionId else {
+            HavenLog.call("ACCEPT IGNORED from \(from.prefix(8)) for session \(sid.prefix(12)) — ours is \(sessionId.prefix(12)) (stale/replayed)")
+            return
+        }
         HavenLog.call("ACCEPT from \(from.prefix(8)) — connecting → in-call")
         inviteTimer?.invalidate(); inviteTimer = nil
         CallTones.shared.stop()   // answered — ringback ends HERE, not on transport events

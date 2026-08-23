@@ -187,7 +187,9 @@ export async function msStatus(api, appId) {
 // The pipeline behind msstore-cli and the new Partner Center UI. Exists here because the
 // legacy devcenter API's submission-clone went inconsistent after a dashboard-flow publish
 // (clone claims zero listings while GET shows them) — the new pipeline is the writable one.
-const INGESTION = 'https://api.partner.microsoft.com/v1.0/ingestion';
+// The `/my/` segment resolves the seller context for the AAD app (msstore-cli's base);
+// without it every product 404s (ICH50404) even with a valid token — probed empirically.
+const INGESTION = 'https://api.partner.microsoft.com/v1.0/my/ingestion';
 
 export async function makeIngestionToken({ tenantId, clientId, clientSecret } = {}) {
   const r = await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {

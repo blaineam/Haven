@@ -479,34 +479,10 @@ jobs:
       #   • it is NOT continue-on-error. A Store-side failure goes red on this leg. The Linux app +
       #     relay CLI still ship (the `publish` job only needs the artifacts, which were uploaded
       #     before this point), and a red step is the only honest signal.
-      # Tag-only and rc-guarded: a manual dispatch is for a hand-upload, and a `-rc.N` tag must never
-      # open a production Store submission. Partner Center allows ONE open submission at a time —
-      # a listing-text edit in flight will make this fail; finish that first.
-      - name: Submit MSIX to the Microsoft Store
-        if: steps.msix.outputs.msix != '' && env.STORE_TENANT_ID != '' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc') && vars.MSSTORE_PUBLISH == 'true'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # MSStore.CLI vanished from nuget.org (only an unofficial repack remains — never feed
-          # store credentials to that). Install the OFFICIAL standalone binary from
-          # microsoft/msstore-cli releases instead, pinned and sha256-verified.
-          $ver = 'v0.4.1'
-          $zip = "$env:RUNNER_TEMP\msstore.zip"
-          Invoke-WebRequest -Uri "https://github.com/microsoft/msstore-cli/releases/download/$ver/MSStoreCLI-win-x64.zip" -OutFile $zip
-          $expected = (Invoke-WebRequest -Uri "https://github.com/microsoft/msstore-cli/releases/download/$ver/MSStoreCLI-win-x64.zip.sha256.txt").Content.Trim().Split()[0]
-          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-          if ($actual -ne $expected.ToLower()) { throw "msstore-cli sha256 mismatch: $actual != $expected" }
-          $dir = "$env:RUNNER_TEMP\msstore-cli"
-          Expand-Archive -Path $zip -DestinationPath $dir -Force
-          $env:PATH = "$dir;$env:PATH"
-          msstore reconfigure --tenantId $env:STORE_TENANT_ID --clientId $env:STORE_CLIENT_ID `
-            --clientSecret $env:STORE_CLIENT_SECRET --sellerId $env:STORE_SELLER_ID
-          # Opens a NEW submission with the package and COMMITS it → certification runs → live.
-          # Listing text/screenshots/age rating carry forward unchanged (there is no per-field flag);
-          # "What's new" is pasted in Partner Center or pushed via `rocket meta Haven --store ms`.
-          msstore publish "${{ steps.msix.outputs.msix }}" --appId $env:STORE_APP_ID --verbose
-          if ($LASTEXITCODE -ne 0) { throw "msstore publish exited $LASTEXITCODE" }
-          Write-Host "::notice title=Microsoft Store::Submission opened and committed — certification is running."
+      # The Store submit moved to the `msix-submit` job: it consumes the desktop-windows
+      # artifact, so a submit-step failure retries in ~2 minutes via `gh run rerun --failed`
+      # instead of repeating this 35-minute build (four 40-minute cycles died on 5-second
+      # environmental failures the night 1.7.0 shipped).
 
       - name: Microsoft Store — manual submission required (MSSTORE_PUBLISH is not "true")
         if: steps.msix.outputs.msix != '' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc') && vars.MSSTORE_PUBLISH != 'true'
@@ -523,6 +499,59 @@ jobs:
           path: out/*
           if-no-files-found: error
           retention-days: 7
+
+  # Separate from the build ON PURPOSE: environmental failures here (CLI availability, Partner
+  # Center state) retry in ~2 minutes via `gh run rerun --failed` without rebuilding anything.
+  msix-submit:
+    needs: [meta, desktop]
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc') && vars.MSSTORE_PUBLISH == 'true'
+    runs-on: windows-latest
+    env:
+      STORE_TENANT_ID: ${{ secrets.STORE_TENANT_ID }}
+      STORE_CLIENT_ID: ${{ secrets.STORE_CLIENT_ID }}
+      STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
+      STORE_SELLER_ID: ${{ secrets.STORE_SELLER_ID }}
+      STORE_APP_ID: ${{ secrets.STORE_APP_ID }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-windows
+          path: out
+      - name: Submit MSIX to the Microsoft Store
+        if: env.STORE_TENANT_ID != ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msix = (Get-ChildItem out -Recurse -Filter *.msix | Select-Object -First 1)
+          if (-not $msix) { throw 'no .msix in the desktop-windows artifact' }
+          # MSStore.CLI vanished from nuget.org (only an unofficial repack remains — never feed
+          # store credentials to that). Official standalone binary, pinned + sha256-verified.
+          # NOTE: the sha file downloads as BYTES in PS7 (its content-type is not texty), so it
+          # must be decoded explicitly — `.Content.Trim()` threw "[System.Byte] does not contain
+          # a method named 'Trim'" on the first attempt.
+          $ver = 'v0.4.1'
+          $zip = "$env:RUNNER_TEMP\msstore.zip"
+          Invoke-WebRequest -Uri "https://github.com/microsoft/msstore-cli/releases/download/$ver/MSStoreCLI-win-x64.zip" -OutFile $zip
+          $shaRaw = (Invoke-WebRequest -Uri "https://github.com/microsoft/msstore-cli/releases/download/$ver/MSStoreCLI-win-x64.zip.sha256.txt").Content
+          # The sha file arrives as BYTES and is UTF-16 with a BOM — a naive UTF-8 decode produced
+          # null-padded garbage (caught by running this very block LOCALLY in pwsh, 8 seconds).
+          # StreamReader with BOM detection decodes any of UTF-8/16LE/16BE correctly.
+          $shaText = if ($shaRaw -is [byte[]]) {
+            $ms = New-Object System.IO.MemoryStream(,[byte[]]$shaRaw)
+            (New-Object System.IO.StreamReader($ms, [System.Text.Encoding]::UTF8, $true)).ReadToEnd()
+          } else { [string]$shaRaw }
+          $expected = $shaText.Trim().Split()[0]
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected.ToLower()) { throw "msstore-cli sha256 mismatch: $actual != $expected" }
+          $dir = "$env:RUNNER_TEMP\msstore-cli"
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          $env:PATH = "$dir;$env:PATH"
+          msstore reconfigure --tenantId $env:STORE_TENANT_ID --clientId $env:STORE_CLIENT_ID `
+            --clientSecret $env:STORE_CLIENT_SECRET --sellerId $env:STORE_SELLER_ID
+          # Opens a NEW submission with the package and COMMITS it -> certification runs -> live.
+          msstore publish "$($msix.FullName)" --appId $env:STORE_APP_ID --verbose
+          if ($LASTEXITCODE -ne 0) { throw "msstore publish exited $LASTEXITCODE" }
+          Write-Host "::notice title=Microsoft Store::Submission opened and committed — certification is running."
 
   flatpak:
     needs: [meta, desktop]

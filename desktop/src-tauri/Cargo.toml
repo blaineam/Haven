@@ -35,7 +35,11 @@ haven_ffi = { path = "../../core/haven-ffi" }
 # today (canvas.toDataURL), and Chromium's canvas has no AVIF writer — so the preview encode lives
 # in Rust instead. ravif is rav1e-backed, royalty-free (no HEVC packaging problem on Windows/Linux),
 # and encodes 512px in tens of milliseconds.
-ravif = "0.11"
+# asm OFF (pure-Rust rav1e) on every target: the assembly cannot assemble under the MSVC
+# arm64 cross toolchain (LNK1181 on the NEON .o files — silently killed every arm64 MSIX
+# after 1.5.0's), and keeping one codepath everywhere beats a few dozen ms on a 512px
+# preview encode. Also frees CI from the nasm dependency.
+ravif = { version = "0.11", default-features = false, features = ["threading"] }
 rgb = "0.8"
 # Decoding only, for the preview tier: the composer hands us sanitized JPEG/PNG from the webview and
 # we re-encode it as AVIF, which the webview cannot do. Default features off — no need to carry every

@@ -104,7 +104,7 @@ jobs:
     # job only ran if the LAST COMMIT happened to touch android/ or core/. Dispatching after a
     # desktop-only commit skipped the whole job — and the run still reported SUCCESS, having built
     # nothing and published nothing. A green run that did nothing is worse than a red one.
-    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.android == 'true'
+    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.listing_only_version_code == '') || needs.changes.outputs.android == 'true'   # a notes-only dispatch must not spin a 40-minute build
     # ── One Play publish at a time ──────────────────────────────────────────────────────────────
     # Google Play allows ONE open Edit per package. Two publish-capable runs racing (a `v*` tag
     # push → internal, plus a workflow_dispatch play_track=beta on the same ref) each open their

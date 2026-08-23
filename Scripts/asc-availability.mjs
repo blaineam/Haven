@@ -7,9 +7,11 @@
  *   Scripts/asc-availability.mjs --check CHN           # just report one territory
  *   Scripts/asc-availability.mjs --remove CHN --apply  # mark territory unavailable
  *
- * The v2 API replaces the WHOLE availability set on write, so --apply re-submits every
- * territory with its current flag and only flips the requested one. Without --apply the
- * script prints the plan and exits (dry run).
+ * Writes go through PATCH /v1/territoryAvailabilities/{id} per territory — the bulk
+ * POST /v2/appAvailabilities is create-only and 409s on any app that already has a record
+ * (it did once work on Haven's first record; it doesn't any more). Without --apply the
+ * script prints the plan and exits (dry run). Superseded by `rocket territories` for the
+ * policy-driven version of the same thing (_shared/rocket/docs/compliance.md).
  *
  * Auth: env ASC_API_KEY_ID / ASC_API_ISSUER_ID (falls back to ~/.rocket/config.json),
  * key at ~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8. (Same as asc-resubmit.mjs.)
@@ -89,7 +91,7 @@ async function main() {
 	while (next) {
 		const page = await api(token, 'GET', next);
 		for (const t of page.data) {
-			territories.push({ code: t.relationships.territory.data.id, available: t.attributes.available });
+			territories.push({ id: t.id, code: t.relationships.territory.data.id, available: t.attributes.available });
 		}
 		next = page.links?.next || null;
 	}
@@ -109,23 +111,8 @@ async function main() {
 	console.log(`• Plan: mark ${args.remove} unavailable, keep the other ${on.length - 1} available territories unchanged`);
 	if (!args.apply) { console.log('  (dry run — pass --apply to write)'); return; }
 
-	// v2 write REPLACES the whole set: send every territory with its current flag, flipping one.
-	const included = territories.map((t, i) => ({
-		type: 'territoryAvailabilities',
-		id: `${'${'}${i}}`,     // placeholder ids per the v2 create contract
-		attributes: { available: t.code === args.remove ? false : t.available },
-		relationships: { territory: { data: { type: 'territories', id: t.code } } },
-	}));
-	await api(token, 'POST', '/v2/appAvailabilities', {
-		data: {
-			type: 'appAvailabilities',
-			attributes: { availableInNewTerritories: avail.attributes.availableInNewTerritories },
-			relationships: {
-				app: { data: { type: 'apps', id: app.id } },
-				territoryAvailabilities: { data: included.map((x) => ({ type: 'territoryAvailabilities', id: x.id })) },
-			},
-		},
-		included,
+	await api(token, 'PATCH', `/v1/territoryAvailabilities/${target.id}`, {
+		data: { type: 'territoryAvailabilities', id: target.id, attributes: { available: false } },
 	});
 	console.log(`✓ ${args.remove} marked unavailable`);
 }

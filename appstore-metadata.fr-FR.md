@@ -34,18 +34,14 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Gratuit. Un espace privé, chiffré de bout en bout, pour vos proches — sans pub, sans suivi, sans abonnement. Pair‑à‑pair, post‑quantique, à vous.
 
 ## whats_new
-1.6.1 — Haven est désormais gratuit. Et la vague de stabilité.
+1.7.0 — Les appels, reconstruits et fiables.
 
-• Haven est gratuit sur toutes les plateformes — sans publicité, sans pistage, sans abonnement, sans achats intégrés. Rien ne change dans son fonctionnement : vos contenus restent sur vos appareils, chiffrés de bout en bout.
-• Correction d'un plantage au lancement sur iPhone et iPad qui pouvait fermer l'app au premier déverrouillage après un redémarrage.
-• Correction de la « fourche » de clés d'un cercle : un cercle créé depuis un compte à plusieurs appareils pouvait laisser des membres décalés d'un cran, incapables de lire les nouvelles publications des autres dans les deux sens. Cela ne peut plus se produire, et un appareil resté en arrière est rattrapé automatiquement.
-• Les changements de membres ne rescellent plus d'un coup tout l'historique de chaque cercle — ajouter ou retirer quelqu'un prend des secondes au lieu de minutes, et vos propres appareils se synchronisent bien plus vite.
-• Liaisons satellite et bas débit : les photos embarquent désormais un minuscule aperçu de 512 pixels (environ six kilo‑octets), pour qu'une publication passe même sur une connexion très limitée ; la photo complète se termine d'elle‑même dès le retour du réseau.
-• Correction de contenus qui pouvaient arriver mais rester illisibles à jamais après la réception de la liste de membres d'un contact via un relais.
-• Photos de travers : l'orientation est respectée partout où sont créés aperçus et vignettes — plus rien n'arrive pivoté ni ne bascule à l'arrivée de la pleine résolution.
-• Les vidéos du fil ne continuent plus à diffuser du son avec l'app en arrière‑plan et le téléphone verrouillé.
-• Les positions partagées affichent leurs coordonnées et un accès « Ouvrir dans Plans » quand les tuiles de carte ne se chargent pas — hors réseau, c'est précisément là qu'un repère compte.
-• Appels : un appel sortant sans réponse prend fin au bout d'une minute au lieu de sonner sans fin chez l'autre.
+• Décrocher fonctionne désormais toujours : un appel ne peut plus se connecter « sous » l'écran d'appel entrant — accepter prend effet à l'instant du geste, sur toutes les plateformes.
+• L'appelant ne voit « Connecté » que lorsque l'autre côté a vraiment répondu — jamais avant, et plus jamais bloqué sur « Appel… » alors que l'audio circule déjà.
+• Les appels sans réponse se terminent proprement après une minute des deux côtés — fini les appels fantômes qui sonnent sans fin.
+• L'écran d'appel du bureau a été refait : scène plein écran, caméra en incrustation, mise en avant de la personne qui parle, choix des périphériques — et réduire l'appel l'ancre dans un onglet.
+• Des visages partout : les émojis et photos de vos contacts apparaissent désormais dans les appels et fils du bureau.
+• Inclut la vague de stabilité 1.6.1 : le fork de clés multi-appareils est corrigé pour de bon, un plantage au lancement sur iPhone disparu, les changements de membres prennent quelques secondes.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

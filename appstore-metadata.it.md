@@ -34,18 +34,14 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Gratis. Una casa privata e crittografata end‑to‑end per i tuoi cari — niente pubblicità, niente tracciamento, nessun abbonamento. Peer‑to‑peer, post‑quantistica, tua.
 
 ## whats_new
-1.6.1 — Haven ora è gratis. E l'ondata di stabilità.
+1.7.0 — Chiamate ricostruite e affidabili.
 
-• Haven è gratis su ogni piattaforma: niente pubblicità, niente tracciamento, niente abbonamenti, niente acquisti in‑app. Nulla cambia nel suo funzionamento: i tuoi contenuti restano sui tuoi dispositivi, cifrati end‑to‑end.
-• Risolto un arresto anomalo all'avvio su iPhone e iPad che poteva chiudere l'app al primo sblocco dopo un riavvio.
-• Risolta la biforcazione delle chiavi di una cerchia: una cerchia creata da un account con più dispositivi poteva lasciare i membri sfasati di un passo, incapaci di leggere i nuovi post degli altri in entrambe le direzioni. Non può più accadere, e un dispositivo rimasto indietro viene riallineato automaticamente.
-• Le modifiche ai membri non risigillano più tutta la cronologia di ogni cerchia in una volta: aggiungere o rimuovere qualcuno richiede secondi invece di minuti, e i tuoi dispositivi si aggiornano molto più in fretta.
-• Collegamenti satellitari e a basso consumo di dati: le foto ora portano con sé un'anteprima minuscola da 512 pixel (circa sei kilobyte), così un post passa anche su una connessione molto limitata; la foto completa si scarica da sola quando torni in copertura.
-• Risolti contenuti che potevano arrivare ma restare illeggibili per sempre dopo la ricezione dell'elenco membri di un contatto tramite un relay.
-• Foto storte: l'orientamento è rispettato ovunque vengano create anteprime e miniature, quindi nulla arriva ruotato né si capovolge quando arriva la versione a piena risoluzione.
-• I video del feed non continuano più a riprodurre l'audio con l'app in background e il telefono bloccato.
-• Le posizioni condivise mostrano le coordinate e l'opzione «Apri in Mappe» quando le tessere della mappa non si caricano: fuori rete è proprio quando un segnaposto conta.
-• Chiamate: una chiamata in uscita senza risposta ora termina dopo un minuto invece di squillare all'infinito dall'altra parte.
+• Rispondere ora funziona sempre: una chiamata non può più connettersi "sotto" la schermata di chiamata in arrivo — accettare ha effetto nel momento in cui tocchi, su ogni piattaforma.
+• Chi chiama vede "Connesso" solo quando l'altro lato ha davvero risposto — mai prima, e mai più bloccato su "Chiamata…" con l'audio già attivo.
+• Le chiamate senza risposta terminano in modo pulito dopo un minuto su entrambi i lati — basta chiamate fantasma che squillano per sempre.
+• La schermata delle chiamate desktop è stata ricostruita: scena a schermo intero, camera picture-in-picture, evidenziazione di chi parla, scelta dei dispositivi — e riducendo, la chiamata si aggancia a una scheda.
+• Volti ovunque: emoji e foto dei contatti ora compaiono nelle chiamate e nelle chat desktop.
+• Include l'ondata di stabilità 1.6.1: il fork delle chiavi multi-dispositivo è risolto per sempre, un crash all'avvio su iPhone eliminato, le modifiche ai membri richiedono secondi.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

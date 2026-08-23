@@ -32,6 +32,16 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Free. A private, end‑to‑end encrypted home for your closest people — no ads, no tracking, no subscription. Peer‑to‑peer, post‑quantum, yours.
 
 ## whats_new
+1.7.0 — Calls, rebuilt to be trustworthy.
+
+• Answering now always takes effect: a call can no longer connect "underneath" your ring screen — accept works the moment you tap it, on every platform.
+• Callers only see "Connected" when the other side has actually answered — never before, and never stuck on "Calling…" while audio is already flowing.
+• Unanswered calls end cleanly after a minute on both ends — no more phantom calls that ring forever.
+• The desktop call screen was rebuilt: full-screen stage, picture-in-picture camera, live speaker highlighting, device pickers — and minimizing docks the call into a tab so you can keep browsing.
+• Faces everywhere: contacts' chosen emoji and photos now appear in calls and threads on desktop.
+• Includes the 1.6.1 stability wave: the multi-device circle key fork is fixed for good, an iPhone launch crash is gone, roster changes finish in seconds, and photo previews cross satellite links.
+
+## whats_new_previous
 1.6.1 — Haven is now free. And the stability wave.
 
 • Haven is free on every platform — no ads, no tracking, no subscription, no in‑app purchases. Nothing about how it works changed: your content still lives on your devices, end‑to‑end encrypted.
@@ -44,13 +54,6 @@ Free. A private, end‑to‑end encrypted home for your closest people — no ad
 • Feed videos no longer keep playing audio with the app in the background and the phone locked.
 • Shared locations show their coordinates and an Open in Maps path when map tiles can't load — off‑grid is exactly when a pin matters.
 • Calls: an unanswered outgoing call now ends after a minute instead of ringing forever on the other side.
-
-## whats_new_previous
-1.4.2 — Battery: stop multi-hour Background drain.
-
-• Fixed a case where Haven could stay warm for hours in the Background with no messages or circle activity. A cold wake from push or background refresh no longer runs the full foreground sync/Multipeer path.
-• Pocketed phones park timers and nearby discovery immediately so iOS can suspend the app after a quick empty poll.
-• Continues the 1.4.1 battery work (slim push wakes, no media-backup re-arm loop while pocketed).
 
 ## marketing_url
 https://wemiller.com/apps/haven/

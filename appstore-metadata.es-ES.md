@@ -34,18 +34,14 @@ privado,cifrado,familia,amigos,mensajería,seguro,sin conexión,llamadas,sin anu
 Gratis. Un hogar privado y cifrado de extremo a extremo para los tuyos: sin anuncios, sin rastreo, sin suscripción. Peer-to-peer, poscuántico, tuyo.
 
 ## whats_new
-1.6.1 — Haven ahora es gratis. Y la ola de estabilidad.
+1.7.0 — Llamadas reconstruidas y fiables.
 
-• Haven es gratis en todas las plataformas: sin anuncios, sin rastreo, sin suscripción, sin compras dentro de la app. Nada cambia en cómo funciona: tu contenido sigue en tus dispositivos, cifrado de extremo a extremo.
-• Corregido un fallo al abrir la app en iPhone y iPad que podía cerrarla en el primer desbloqueo tras un reinicio.
-• Corregida la bifurcación de claves de un círculo: un círculo creado desde una cuenta con varios dispositivos podía dejar a sus miembros un paso desincronizados, sin poder leer las publicaciones nuevas de los demás en ninguna dirección. Ya no puede ocurrir, y un dispositivo rezagado se pone al día automáticamente.
-• Los cambios de miembros ya no vuelven a sellar el historial de todos los círculos a la vez: añadir o quitar a alguien tarda segundos en lugar de minutos, y tus propios dispositivos se sincronizan mucho más rápido.
-• Enlaces por satélite y de pocos datos: las fotos llevan ahora una vista previa diminuta de 512 píxeles (unos seis kilobytes) para que una publicación pase incluso por una conexión muy limitada; la foto completa se descarga sola cuando recuperas cobertura.
-• Corregido contenido que podía llegar y quedarse ilegible para siempre tras recibir la lista de miembros de un contacto a través de un relé.
-• Fotos giradas: la orientación se respeta en todos los sitios donde se generan vistas previas y miniaturas, así que nada llega rotado ni se voltea al cargarse la resolución completa.
-• Los vídeos del feed ya no siguen reproduciendo audio con la app en segundo plano y el teléfono bloqueado.
-• Las ubicaciones compartidas muestran sus coordenadas y la opción «Abrir en Mapas» cuando no se pueden cargar los mapas: sin cobertura es justo cuando más importa un punto.
-• Llamadas: una llamada saliente sin respuesta termina al cabo de un minuto en lugar de sonar sin fin al otro lado.
+• Aceptar siempre funciona: una llamada ya no puede conectarse "debajo" de la pantalla de llamada entrante — aceptar surte efecto al instante, en todas las plataformas.
+• Quien llama solo ve "Conectado" cuando el otro lado ha respondido de verdad — nunca antes, y nunca más atascado en "Llamando…" con el audio ya en marcha.
+• Las llamadas sin respuesta terminan limpiamente tras un minuto en ambos extremos — se acabaron las llamadas fantasma que suenan para siempre.
+• La pantalla de llamadas de escritorio se rehizo: escenario a pantalla completa, cámara en miniatura, resaltado del hablante, selección de dispositivos — y al minimizar, la llamada se acopla como pestaña.
+• Caras en todas partes: los emojis y fotos de tus contactos aparecen ahora en llamadas y chats de escritorio.
+• Incluye la ola de estabilidad 1.6.1: el fork de claves con varios dispositivos queda corregido, un fallo de arranque en iPhone eliminado y los cambios de miembros tardan segundos.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

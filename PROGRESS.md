@@ -6,6 +6,16 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest wave (built, batched for next upload)
+- **1.7.0 — calls you can trust (2026-08-23, all platforms)** — the call protocol settled for
+  good: transport events never answer calls (in-call moves only on an explicit accept, on every
+  platform), accepts are un-losable (answerers re-send on the caller's own invite retransmits),
+  stale accepts are session-checked everywhere, and unanswered calls die on schedule on both
+  ends. Found by hand-testing minutes after 1.6.1 and pinned down with new QA machinery that now
+  guards it forever: a six-pair caller×answerer call matrix (android placed and answered its
+  first calls under test), a content-author matrix (android/desktop author posts + DMs), and
+  real-click desktop UI assertions that verify pixels, not state. Desktop also got the titlebar
+  drag-region fix (real clicks on minimize used to drag the window), profile-card backfill so
+  contacts finally have faces, and self-avatars that never fall to initials.
 - **1.6.1 — the fork is dead + the call screen grows up (2026-08-22, all platforms)** — two full
   gauntlets green back-to-back (91/91 twice, zero forks). The recurring MLS "welcome-election fork"
   turned out to be the genesis election ignoring which candidate the commit chain had actually grown

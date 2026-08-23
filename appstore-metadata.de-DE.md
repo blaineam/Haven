@@ -34,18 +34,14 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Kostenlos. Ein privates, Ende-zu-Ende verschlüsseltes Zuhause für deine Liebsten – keine Werbung, kein Tracking, kein Abo. Peer-to-Peer, Post-Quanten-sicher, deins.
 
 ## whats_new
-1.6.1 — Haven ist jetzt kostenlos. Und die Stabilitätswelle.
+1.7.0 — Anrufe, neu gebaut und verlässlich.
 
-• Haven ist auf jeder Plattform kostenlos – keine Werbung, kein Tracking, kein Abo, keine In‑App‑Käufe. An der Funktionsweise ändert sich nichts: Deine Inhalte bleiben auf deinen Geräten, Ende‑zu‑Ende verschlüsselt.
-• Ein Absturz beim Start auf iPhone und iPad behoben, der die App beim ersten Entsperren nach einem Neustart beenden konnte.
-• Die Schlüssel‑Gabelung in Kreisen behoben: Ein Kreis, der von einem Account mit mehreren Geräten erstellt wurde, konnte Mitglieder einen Schritt auseinanderbringen, sodass neue Beiträge in beide Richtungen unlesbar blieben. Das kann nicht mehr passieren, und ein zurückgefallenes Gerät wird automatisch wieder eingeholt.
-• Änderungen an der Mitgliederliste versiegeln nicht mehr die gesamte Historie aller Kreise auf einmal – jemanden hinzuzufügen oder zu entfernen dauert Sekunden statt Minuten, und deine eigenen Geräte holen viel schneller auf.
-• Satelliten‑ und Wenig‑Daten‑Verbindungen: Fotos tragen jetzt eine winzige 512‑Pixel‑Vorschau (etwa sechs Kilobyte), damit ein Beitrag auch über eine extrem eingeschränkte Verbindung ankommt; das vollständige Foto wird von selbst nachgeladen, sobald du wieder Empfang hast.
-• Inhalte behoben, die ankommen, aber für immer unlesbar bleiben konnten, nachdem die Mitgliederliste eines Kontakts über ein Relay eingetroffen war.
-• Seitlich gedrehte Fotos: Die Ausrichtung wird überall beachtet, wo Vorschauen und Miniaturen erzeugt werden – nichts kommt mehr gedreht an oder kippt, sobald die volle Auflösung eintrifft.
-• Feed‑Videos spielen keinen Ton mehr weiter, wenn die App im Hintergrund ist und das iPhone gesperrt.
-• Geteilte Standorte zeigen ihre Koordinaten und einen Weg „In Karten öffnen“, wenn keine Kartenkacheln geladen werden können – gerade abseits des Netzes zählt eine Markierung.
-• Anrufe: Ein unbeantworteter ausgehender Anruf endet jetzt nach einer Minute, statt auf der Gegenseite endlos zu klingeln.
+• Annehmen wirkt jetzt immer sofort: Ein Anruf kann sich nicht mehr „unter" dem Klingelbildschirm verbinden — Annehmen gilt in dem Moment, in dem du tippst, auf jeder Plattform.
+• Anrufer sehen „Verbunden" erst, wenn die Gegenseite wirklich angenommen hat — nie vorher und nie mehr hängend auf „Anrufen…", während Audio längst läuft.
+• Unbeantwortete Anrufe enden nach einer Minute sauber auf beiden Seiten — keine Geisteranrufe mehr, die endlos klingeln.
+• Der Desktop-Anrufbildschirm wurde neu gebaut: Vollbild, Bild-in-Bild-Kamera, Sprecher-Hervorhebung, Geräteauswahl — Minimieren dockt den Anruf als Tab an.
+• Gesichter überall: Emojis und Fotos deiner Kontakte erscheinen jetzt auch am Desktop in Anrufen und Chats.
+• Enthält die Stabilitätswelle 1.6.1: der Schlüssel-Fork bei mehreren Geräten ist endgültig behoben, ein iPhone-Startabsturz beseitigt, Roster-Änderungen dauern Sekunden.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

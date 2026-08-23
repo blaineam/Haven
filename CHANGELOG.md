@@ -50,7 +50,39 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   publish` on a `vX.Y.Z` tag — free products are the case Microsoft supports over Actions. Not
   `continue-on-error`: a Store failure goes red instead of the old false-green.
 
-## Unreleased (1.6.2) — desktop calls actually usable
+## 2026-08-23 — 1.7.0 (the calls-you-can-trust wave)
+
+Gate: the full matrixed suite green — six caller×answerer call pairs across every
+platform direction, content authored from every platform, real-click UI assertions,
+unanswered-death scenarios, and the satellite tier — in one run.
+
+### The call protocol, settled
+- **Transport events never answer calls.** Media connecting is recorded (truthful
+  "Connecting media…"/Connected states) but `in-call` moves ONLY on an explicit accept —
+  on every platform. This ends the whole family at once: callees that silently
+  self-answered under their own ring screen (accept then no-op'd forever), callers that
+  showed Connected before anyone answered, and callers stuck on "Calling…" over live audio.
+- **Accepts can no longer get lost.** The ACCEPT frame was sent once, link-cold; a missed
+  one deadlocked the call. Answerers now re-send it whenever the caller's own invite
+  retransmit arrives — the retry loop already in the protocol becomes the delivery
+  guarantee, and it stops the moment one lands.
+- **Stale accepts can no longer connect the wrong call**: session ids are validated on
+  every platform (Apple checked the sender but never the session — a relay-replayed
+  accept from a finished call connected a fresh unanswered one, killed the caller's
+  retransmits, and rang the victim forever).
+- **Unanswered calls die** — 60s dial bound on callers everywhere (desktop had none),
+  ring bounds on callees, and both proven by suite scenario.
+
+### QA (the reason the above is trusted)
+- **Caller × answerer matrix**: {iOS, Android, desktop} → stub and stub → each, asserting
+  ring, early-media survival, accept-clears, caller-live-on-accept, sibling stand-down,
+  and ended-everywhere per pair. Android could previously neither place nor answer a call
+  under test.
+- **Content author matrix**: Android and desktop author posts (text + photo, blob-checked)
+  and DMs; every other leg must receive and every sibling must echo.
+- Desktop real-click assertions (computed visibility) for minimize / Call-tab / hangup.
+
+## Superseded pre-release notes (1.6.2) — desktop calls actually usable
 
 Found by hand-testing desktop↔stub calls minutes after 1.6.1 shipped; every fix is now
 locked in by a new suite lane that places the call FROM desktop and clicks the real buttons.

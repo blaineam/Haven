@@ -416,7 +416,9 @@ async function main() {
 	} else log(`Xcode Cloud run #${run.attributes.number} (${run.attributes.executionProgress}/${run.attributes.completionStatus || 'running'})`);
 	run = await waitRun(run.id, args.waitBuild);
 	if (run.attributes.completionStatus !== 'SUCCEEDED') die(`Xcode Cloud run #${run.attributes.number} ${run.attributes.completionStatus} — fix the build, push, re-tag`);
-	if ((run.attributes.sourceCommit?.commitSha || '').toLowerCase() !== args.commit.toLowerCase()) die(`run #${run.attributes.number} built ${run.attributes.sourceCommit?.commitSha?.slice(0, 10)}, not ${args.commit.slice(0, 10)}`);
+	// args.commit is emptied by the branch-main fallback (the branch tip is the pin then); the
+	// marketing-version check right below still guards against building the wrong tree.
+	if (args.commit && (run.attributes.sourceCommit?.commitSha || '').toLowerCase() !== args.commit.toLowerCase()) die(`run #${run.attributes.number} built ${run.attributes.sourceCommit?.commitSha?.slice(0, 10)}, not ${args.commit.slice(0, 10)}`);
 	log(`run #${run.attributes.number} SUCCEEDED`);
 
 	// 2. the builds

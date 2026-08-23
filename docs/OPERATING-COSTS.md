@@ -15,8 +15,12 @@ This supersedes the earlier quota'd-bucket model (see DECISIONS D15).
 | Invite-landing page + AASA + marketing page | **GitHub Pages** (`blaineam.github.io`) | **$0** |
 | "You got media" notifications | APNs / Web Push | **$0** |
 
-**Result: the app is a one-time $9.99 with no subscription and no monthly operator
-cost, ever.** _(Launch sale: 50% off at $4.99 through September 30, then $9.99.)_
+**Result: the app is free — no subscription, no in-app purchases, no ads — with no
+monthly operator cost, ever.** Development is funded directly by the people who want it
+to exist ([GitHub Sponsors](https://github.com/sponsors/blaineam), [Ko-fi](https://ko-fi.com/wemiller),
+[wemiller.com/support](https://wemiller.com/support/)); nothing in the architecture bills
+the maker per user, so nothing needs to bill the user. _(Haven was a one-time $9.99 purchase
+until August 2026.)_
 
 ## Why storage is free to the operator
 

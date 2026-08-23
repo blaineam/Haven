@@ -262,9 +262,9 @@ jobs:
       STORE_IDENTITY_NAME: ${{ secrets.STORE_IDENTITY_NAME }}
       STORE_PUBLISHER: ${{ secrets.STORE_PUBLISHER }}
       STORE_PUBLISHER_DISPLAY: ${{ secrets.STORE_PUBLISHER_DISPLAY }}
-      # SUBMISSION credentials — currently UNUSED. Store submission is manual (paid products can't
-      # publish over Actions; see the "Microsoft Store — manual submission required" step). Kept wired
-      # so re-enabling automation, once Microsoft supports paid products, needs no secret re-plumbing.
+      # SUBMISSION credentials — used by "Submit MSIX to the Microsoft Store" when the repo variable
+      # MSSTORE_PUBLISH is "true" (Haven is a free product, which is what msstore publish supports
+      # over Actions); otherwise the manual-submission notice fires and these sit unused.
       STORE_TENANT_ID: ${{ secrets.STORE_TENANT_ID }}
       STORE_CLIENT_ID: ${{ secrets.STORE_CLIENT_ID }}
       STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
@@ -661,7 +661,7 @@ jobs:
           Haven ${{ needs.meta.outputs.version }}
 
           **This GitHub Release is the download channel for the Linux desktop app and the relay
-          daemon.** The paid apps ship through their proper stores:
+          daemon.** Haven is free everywhere; the store builds ship through their stores:
 
           **iPhone · iPad · Mac** — App Store: https://apps.apple.com/app/id6782147901
           **Android** — Google Play.

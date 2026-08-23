@@ -40,9 +40,10 @@ their family, or a nonprofit. That floor is real and it is worth stating first.
 
 ### 1.2 What a successor clearly CANNOT do
 
-**Sell it.** Haven is a $10 one-time paid App Store app. Charging for a fork is a commercial
-purpose, and *Noncommercial Purposes* grants only "any noncommercial purpose". There is no clause
-that permits it. A successor cannot continue the paid app.
+**Sell it.** Haven is free on every store (since August 2026; it was a $9.99 one-time purchase
+before that). Charging for a fork is a commercial purpose, and *Noncommercial Purposes* grants
+only "any noncommercial purpose". There is no clause that permits it. A successor can keep a
+fork free — which is what Haven is — but cannot turn it into a product.
 
 **Sublicense or transfer the grant.** *No Other Rights* is explicit: "These terms do not allow you
 to sublicense or transfer any of your licenses to anyone else." So a successor cannot re-grant

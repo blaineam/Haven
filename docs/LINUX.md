@@ -224,8 +224,8 @@ See [`RELEASING.md`](RELEASING.md) for the scheme and the full checklist.
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) then builds and attaches
 to one GitHub Release. **By policy the GitHub Release carries only the platforms that have no
 app store** — the Linux desktop app and the relay CLI. iOS/macOS (App Store), Android (Google
-Play) and Windows (Microsoft Store) are paid apps that ship through their stores and do **not**
-accumulate a Release history. (Windows/Android are still built by CI but are **no longer attached**
+Play) and Windows (Microsoft Store) are store apps (free, like every Haven build) that ship
+through their stores and do **not** accumulate a Release history. (Windows/Android are still built by CI but are **no longer attached**
 to the Release — both `PUBLISH_WINDOWS_TO_GH` and `PUBLISH_ANDROID_TO_GH` are now set to `false`;
 the interim builds are the short-retention `desktop-windows` / `haven-android-apk` CI artifacts.
 See [`RELEASING.md`](RELEASING.md#release-channels--what-goes-where).) On the Release you get:

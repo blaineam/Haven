@@ -246,26 +246,31 @@ async function ensureVersion(appId, platform, version, { dryRun }) {
 	return { version: created, state: 'PREPARE_FOR_SUBMISSION' };
 }
 
-// `## whats_new` from appstore-metadata[.<locale>].md, per locale that has a file.
+// `## whats_new` (and `## promotional_text`) from appstore-metadata[.<locale>].md, per
+// locale that has a file. Promotional text rides along because a NEW App Store version
+// does not inherit it from its predecessor — 1.6.1 went into review with it blank.
 async function notesByLocale(dir) {
-	const section = (md) => { const m = md.match(/^##\s+whats_new\s*$\n([\s\S]*?)(?=^##\s+|\s*$(?![\s\S]))/m); return m ? m[1].trim() : null; };
-	const out = {};
+	const section = (md, key) => { const m = md.match(new RegExp(`^##\\s+${key}\\s*$\\n([\\s\\S]*?)(?=^##\\s+|\\s*$(?![\\s\\S]))`, 'm')); return m ? m[1].replace(/<!--[\s\S]*?-->/g, '').trim() : null; };
+	const out = {}, promo = {};
 	const { readdir } = await import('node:fs/promises');
 	for (const f of await readdir(dir)) {
 		const m = f.match(/^appstore-metadata(?:\.([A-Za-z-]+))?\.md$/);
 		if (!m) continue;
 		const locale = m[1] || 'en-US';
-		const body = section(await readFile(join(dir, f), 'utf8'));
+		const md = await readFile(join(dir, f), 'utf8');
+		const body = section(md, 'whats_new');
 		if (body) out[locale] = body;
+		const p = section(md, 'promotional_text');
+		if (p) promo[locale] = p;
 	}
-	return out;
+	return Object.assign(out, { __promo: promo });
 }
 
 async function setNotes(versionId, version, notes, { dryRun }) {
 	const en = notes['en-US'];
 	if (!en) die('appstore-metadata.md has no `## whats_new` — nothing to ship as release notes');
 	if (!en.startsWith(version)) die(`appstore-metadata.md whats_new starts with "${en.split('\n')[0].slice(0, 60)}" — it must start with "${version}" (stale notes would ship otherwise)`);
-	const locs = (await api('GET', `/v1/appStoreVersions/${versionId}/appStoreVersionLocalizations?limit=50&fields[appStoreVersionLocalizations]=locale,whatsNew`)).data || [];
+	const locs = (await api('GET', `/v1/appStoreVersions/${versionId}/appStoreVersionLocalizations?limit=50&fields[appStoreVersionLocalizations]=locale,whatsNew,promotionalText`)).data || [];
 	let set = 0; const fellBack = [];
 	for (const loc of locs) {
 		const locale = loc.attributes.locale;
@@ -273,12 +278,19 @@ async function setNotes(versionId, version, notes, { dryRun }) {
 		// A translation still on an older version is worse than English: fall back, loudly.
 		if (locale !== 'en-US' && (!text || !text.startsWith(version))) { fellBack.push(locale); text = en; }
 		if (text.length > 4000) die(`${locale} whats_new is ${text.length} chars (ASC max 4000)`);
-		if (loc.attributes.whatsNew !== text && !dryRun) {
-			await api('PATCH', `/v1/appStoreVersionLocalizations/${loc.id}`, { data: { type: 'appStoreVersionLocalizations', id: loc.id, attributes: { whatsNew: text } } });
+		const attrs = {};
+		if (loc.attributes.whatsNew !== text) attrs.whatsNew = text;
+		const promo = (notes.__promo || {})[locale];
+		if (promo != null) {
+			if (promo.length > 170) die(`${locale} promotional_text is ${promo.length} chars (ASC max 170)`);
+			if ((loc.attributes.promotionalText || '') !== promo) attrs.promotionalText = promo;
+		}
+		if (Object.keys(attrs).length && !dryRun) {
+			await api('PATCH', `/v1/appStoreVersionLocalizations/${loc.id}`, { data: { type: 'appStoreVersionLocalizations', id: loc.id, attributes: attrs } });
 		}
 		set++;
 	}
-	log(`What's New set on ${set}/${locs.length} localization(s)`);
+	log(`What's New${Object.keys(notes.__promo || {}).length ? ' + promotional text' : ''} set on ${set}/${locs.length} localization(s)`);
 	if (fellBack.length) {
 		const msg = `no ${version} translation for ${fellBack.join(', ')} — those listings got the English notes (run \`rocket loc translate Haven --locale big8 --provider claude\` and re-push with \`rocket meta Haven --locale all\`)`;
 		console.log(`⚠ ${msg}`); summary(`- ⚠️ ${msg}`);

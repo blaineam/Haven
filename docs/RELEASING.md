@@ -119,7 +119,7 @@ upload. Only the *attach-to-Release* step is gated.
 
 ### Current state — the flip is DONE (both variables set to `false`)
 
-Both paid GUI platforms have moved off GitHub Releases. The attach for each is governed by a
+Both store-distributed GUI platforms have moved off GitHub Releases. The attach for each is governed by a
 **repo variable** (repo → *Settings ▸ Secrets and variables ▸ Actions ▸ **Variables***), and
 **both are now set to `false`**:
 

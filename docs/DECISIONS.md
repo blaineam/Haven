@@ -161,10 +161,11 @@ strongest guarantees possible without a server policing everyone's device.
 ## D12 — License: PolyForm Noncommercial 1.0.0, copyright retained
 
 **Decision:** The codebase is **source-available under PolyForm Noncommercial 1.0.0**
-(`LICENSE`). Copyright is retained by Blaine Miller, who distributes the paid
-($9.99) App Store binary — permitted because the copyright holder isn't bound by the
-public license. Outside contributions require a lightweight **CLA/DCO** granting
-relicensing rights, so the app can keep being sold.
+(`LICENSE`). Copyright is retained by Blaine Miller, who distributes the official
+store binaries — permitted because the copyright holder isn't bound by the public
+license. Outside contributions require a lightweight **CLA/DCO** granting relicensing
+rights, so the official distribution stays unencumbered. _(Amended 2026-08-22 — D20: the
+store binaries are free now; the licensing reasoning is unchanged.)_
 
 **Why:** PolyForm Noncommercial cleanly does the one thing requested — anyone may
 read, learn from, fork, and use it noncommercially, but **not** ship it commercially.
@@ -259,7 +260,7 @@ and makes the strongest IP claim that is actually true rather than a comforting 
 - **Hosting** = GitHub Pages (`blaineam.github.io`) for the invite-landing page, AASA,
   and marketing page. **Notifications** = a blind APNs relay on Cloudflare Workers
   (free tier; see [`NOTIFICATIONS.md`](NOTIFICATIONS.md)).
-- App is a **one-time $9.99, no subscription**.
+- App is a **one-time $9.99, no subscription**. _(Superseded 2026-08-22 by D20: free.)_
 
 **This deletes** the 512MB quota, blind-signed tokens, App Attest gating, the storage
 subscription, and the funded default bucket — they only existed to meter a bucket the
@@ -399,3 +400,26 @@ post over QUIC; on-device UI test brings a node online and mints a ticket.
 **Trade-off:** iroh+tokio grows the XCFramework to ~252 MB (App Store thinning applies
 per-arch). Two-device sync (replacing the demo friend with a connected contact) and
 relay-assisted reachability beyond the LAN are the next networking milestones.
+
+## D20 — Haven is free (2026-08-22)
+
+**Decision:** Haven is **free on every store** — App Store, Google Play, Microsoft Store, and
+the GitHub Release for Linux — with no ads, no tracking, no subscription and no in-app
+purchases. Development is funded directly: GitHub Sponsors, Ko-fi, and
+[wemiller.com/support](https://wemiller.com/support/).
+
+**Why:** two things lined up. (1) The EU Digital Services Act requires anyone *selling* apps in
+the EU to publish a trader listing with personal contact details; an independent developer who
+declines that must take paid apps out of the EU — and Haven, of all the apps, is the one that
+should be everywhere. A free app with no in-app purchases needs no trader listing. (2) Haven's
+architecture never billed the maker per user (D15/D16), so the one-time price was never
+*covering* anything; it was the honesty signal ("you're the customer, not the product"). That
+signal now comes from the funding model instead: nobody is monetised, and the people who want
+Haven to exist pay for its development on purpose.
+
+**Consequences:** price set to free in App Store Connect (`rocket price Haven`), the Play
+Console (a one-way change — a free app can never be made paid again) and Partner Center;
+France and mainland China stay excluded (`docs/EXPORT-COMPLIANCE.md`); the web, README and store
+copy say free; the Microsoft Store submission can now be automated (`msstore publish` supports
+free products over Actions — `MSSTORE_PUBLISH`). D12's licensing reasoning is unchanged: the
+code stays PolyForm Noncommercial, the official binaries stay the copyright holder's.

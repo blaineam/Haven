@@ -15,7 +15,7 @@ the **same Rust core** the iPhone and Android apps use.
   pure-native or immediate-mode GUI.
 - One binary doubles as the **headless relay/mailbox** (`--headless`), like the invisible
   Mac relay.
-- Packages to **MSIX/MSI/NSIS** for the Microsoft Store (the $10 one-time, zero-recurring
+- Packages to **MSIX/MSI/NSIS** for the Microsoft Store (free app, zero-recurring
   distribution mandate), and gives a Linux build (AppImage/deb) nearly for free later.
 
 > The Rust core is platform-agnostic; nothing in `core/` changes for Windows. This is a

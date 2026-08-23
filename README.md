@@ -192,6 +192,18 @@ One Rust core (`haven-p2p`) powers every client, so new platforms are mostly UI:
 - **Apple Watch** — glanceable companion (messages/photos/reactions/quick replies;
   not bulk video)
 
+## Support future development
+
+Haven is free — no ads, no tracking, no subscription, no in-app purchases — and it is
+built by one person. If it earns a place in your circle, you can help fund what comes next:
+
+- **Sponsor on GitHub** — <https://github.com/sponsors/blaineam>
+- **Buy me a coffee on Ko-fi** — <https://ko-fi.com/wemiller>
+- **All the ways to support** — <https://wemiller.com/support/>
+
+None of it is required, none of it unlocks anything, and none of it changes what the app
+does: your content stays on your devices, end-to-end encrypted, whether you chip in or not.
+
 ## License
 
 Source-available under **PolyForm Noncommercial 1.0.0** (see [`LICENSE`](LICENSE)) —

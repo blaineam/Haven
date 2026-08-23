@@ -78,9 +78,7 @@ jobs:
           set -euo pipefail
           gh workflow run release.yml --ref "refs/tags/$TAG"
           gh workflow run android.yml --ref "refs/tags/$TAG"
-          if [ -z "$RC" ]; then
-            gh workflow run apple-store.yml --ref "refs/tags/$TAG" -f version="$V"
-          else
-            echo "::notice::rc release — Apple submission is a hand decision (policy); skipped"
-          fi
+          gh workflow run apple-store.yml --ref "refs/tags/$TAG"
+          # rc tags run apple-store in TestFlight-only mode (build to VALID, no App Store
+          # version); full tags submit for review. The tag ref carries the version.
           echo "::notice title=cut-release::pipelines dispatched at $TAG"

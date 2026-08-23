@@ -238,6 +238,41 @@ async function ensureVersion(appId, platform, version, { dryRun }) {
 		if (!dryRun) await api('PATCH', `/v1/appStoreVersions/${other.id}`, { data: { type: 'appStoreVersions', id: other.id, attributes: { versionString: version } } });
 		return { version: { ...other, attributes: { ...other.attributes, versionString: version } }, state: other.attributes.appStoreState };
 	}
+	// SUPERSEDE: a version QUEUED for review (not yet live) also occupies the slot — POSTing a
+	// new version 409s "cannot create a new version in the current state". When that queued
+	// version is OLDER than the target, this release supersedes it: cancel its pending review
+	// submission, wait for the version to fall back to an editable state, and rename it in
+	// place (its notes are rewritten and the new build attached by the steps that follow).
+	// Never touches a queued version that is NEWER than or equal to the target.
+	const semverLt = (a, b) => {
+		const pa = String(a).split('.').map(Number), pb = String(b).split('.').map(Number);
+		for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) < (pb[i] || 0); }
+		return false;
+	};
+	const QUEUED = new Set(['WAITING_FOR_REVIEW', 'READY_FOR_REVIEW', 'IN_REVIEW']);
+	const queued = versions.find((v) => QUEUED.has(v.attributes.appStoreState) && semverLt(v.attributes.versionString, version));
+	if (queued) {
+		log(`${platform}: superseding ${queued.attributes.versionString} (${queued.attributes.appStoreState}) — canceling its review submission`);
+		if (!dryRun) {
+			const subs = (await api('GET', `/v1/reviewSubmissions?filter[app]=${appId}&filter[platform]=${platform}&filter[state]=READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW&fields[reviewSubmissions]=state&limit=10`)).data || [];
+			for (const sub of subs) {
+				await api('PATCH', `/v1/reviewSubmissions/${sub.id}`, { data: { type: 'reviewSubmissions', id: sub.id, attributes: { canceled: true } } })
+					.catch((e) => log(`${platform}: cancel of submission ${sub.id} → ${e.message || e} (continuing)`));
+			}
+			// The version takes a moment to fall back to an editable state after the cancel.
+			let st = queued.attributes.appStoreState;
+			for (let i = 0; i < 24; i++) {
+				await new Promise((r) => setTimeout(r, 5000));
+				const fresh = await api('GET', `/v1/appStoreVersions/${queued.id}?fields[appStoreVersions]=appStoreState`).catch(() => null);
+				st = fresh?.data?.attributes?.appStoreState || st;
+				if (EDITABLE.has(st)) break;
+			}
+			if (!EDITABLE.has(st)) die(`${platform}: canceled the review but ${queued.attributes.versionString} is still ${st} after 2min — check App Store Connect and re-run`);
+			log(`${platform}: ${queued.attributes.versionString} back to ${st} — renaming → ${version}`);
+			await api('PATCH', `/v1/appStoreVersions/${queued.id}`, { data: { type: 'appStoreVersions', id: queued.id, attributes: { versionString: version } } });
+		}
+		return { version: { ...queued, attributes: { ...queued.attributes, versionString: version } }, state: 'PREPARE_FOR_SUBMISSION' };
+	}
 	if (dryRun) return { version: { id: 'dry-run', attributes: { versionString: version } }, state: 'PREPARE_FOR_SUBMISSION' };
 	const created = (await api('POST', '/v1/appStoreVersions', {
 		data: { type: 'appStoreVersions', attributes: { platform, versionString: version }, relationships: { app: { data: { type: 'apps', id: appId } } } },

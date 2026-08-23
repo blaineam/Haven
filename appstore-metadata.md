@@ -32,14 +32,18 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Free. A private, end‑to‑end encrypted home for your closest people — no ads, no tracking, no subscription. Peer‑to‑peer, post‑quantum, yours.
 
 ## whats_new
-1.5.0 — Bring your Instagram archive with you.
+1.6.1 — Haven is now free. And the stability wave.
 
-• Import from Instagram, in Settings. Ask Instagram for your export, then hand Haven the .zip when it arrives days later. Nothing publishes until you have confirmed a preview of exactly what was found — how many posts, the dates they span, the total size, and anything the archive references but is missing.
-• Your history arrives as history. Posts and reels keep their original dates and go up silently, so nobody's feed is flooded with years of your past. A carousel stays one post rather than becoming twenty. Stories are off by default, and turned on they are kept on your own profile instead of published to your circle.
-• Imported photos and videos go through Haven's usual optimizer, with a poster still cut for every clip, so they behave like media you posted by hand. The import runs in the background, survives the app being killed, and resumes where it left off.
-• Song suggestions. Open the song picker with nothing typed and the top tab suggests tracks drawn from what the photo shows and what the caption says — in the composer, the post editor, DMs and stories. A reel that shipped with its soundtrack gets the real song named on it.
-• Feed videos keep their soft blurred edge wash for the whole loop, matching photo posts.
-• Replying to a story attaches a story reference in the DM: tall portrait crop, tap opens the real story with progress and music. Expired ones become "Story no longer available".
+• Haven is free on every platform — no ads, no tracking, no subscription, no in‑app purchases. Nothing about how it works changed: your content still lives on your devices, end‑to‑end encrypted.
+• Fixed a launch crash on iPhone and iPad that could kill the app on the first unlock after a restart.
+• Fixed the circle key fork: a circle created from an account with several devices could leave members one step out of sync, unable to read each other's new posts in either direction. It can no longer happen, and a device that had fallen behind is brought back automatically.
+• Roster changes no longer re‑seal every circle's history at once — adding or removing someone finishes in seconds instead of minutes, and your own devices catch up far faster.
+• Satellite and low‑data links: photos now carry a tiny 512‑pixel preview (about six kilobytes), so a post gets through an ultra‑constrained connection and the full photo completes on its own once you're back in coverage.
+• Fixed content that could arrive but stay unreadable forever after a contact's roster came in over a relay.
+• Sideways photos: orientation is respected everywhere previews and thumbnails are made, so nothing arrives rotated or flips when the full‑resolution version lands.
+• Feed videos no longer keep playing audio with the app in the background and the phone locked.
+• Shared locations show their coordinates and an Open in Maps path when map tiles can't load — off‑grid is exactly when a pin matters.
+• Calls: an unanswered outgoing call now ends after a minute instead of ringing forever on the other side.
 
 ## whats_new_previous
 1.4.2 — Battery: stop multi-hour Background drain.

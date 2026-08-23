@@ -182,3 +182,46 @@ export async function msStatus(api, appId) {
   if (last) out.lastPublished = { id: last.id };
   return out;
 }
+
+// ── NEW Store Submission API (api.partner.microsoft.com "ingestion") ─────────────────
+// The pipeline behind msstore-cli and the new Partner Center UI. Exists here because the
+// legacy devcenter API's submission-clone went inconsistent after a dashboard-flow publish
+// (clone claims zero listings while GET shows them) — the new pipeline is the writable one.
+const INGESTION = 'https://api.partner.microsoft.com/v1.0/ingestion';
+
+export async function makeIngestionToken({ tenantId, clientId, clientSecret } = {}) {
+  const r = await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: clientId,
+      client_secret: clientSecret,
+      scope: 'https://api.partner.microsoft.com/.default',
+    }),
+  });
+  const json = await r.json().catch(() => ({}));
+  if (!r.ok || !json.access_token) {
+    throw new Error(`ingestion token exchange failed → ${r.status} ${json.error_description || json.error || r.statusText}`);
+  }
+  return json.access_token;
+}
+
+export function ingestion(token) {
+  const call = async (method, path, body) => {
+    const r = await fetch(INGESTION + path, {
+      method,
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const text = await r.text();
+    let json = null; try { json = text ? JSON.parse(text) : null; } catch { /* */ }
+    if (!r.ok) {
+      const err = new Error(`ING ${method} ${path} → ${r.status} ${(json?.message || text || r.statusText).slice(0, 300)}`);
+      err.status = r.status; err.body = json ?? text;
+      throw err;
+    }
+    return json;
+  };
+  return { token, get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b) };
+}

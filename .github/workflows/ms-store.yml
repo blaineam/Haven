@@ -8,6 +8,10 @@ on:
       msix_run_id:
         description: "Run id whose desktop-windows artifact holds the MSIX to submit"
         required: true
+      mode:
+        description: "submit (default) or probe-ingestion (read-only map of the new Store API)"
+        required: false
+        default: "submit"
 
 permissions:
   contents: read
@@ -35,5 +39,9 @@ jobs:
           VERSION=$(grep -m1 'MARKETING_VERSION:' apple/project.yml | sed 's/[^0-9.]*//g')   # colon = the assignment, not the $(MARKETING_VERSION) reference above it
           MSIX=$(find out -name '*.msix' | head -1)
           [ -n "$MSIX" ] || { echo '::error::no .msix in the desktop-windows artifact'; exit 1; }
-          echo "submitting $MSIX as $VERSION"
-          node Scripts/ms-store-publish.mjs --version "$VERSION" --msix "$MSIX"
+          if [ "${{ inputs.mode }}" = "probe-ingestion" ]; then
+            node Scripts/ms-store-publish.mjs --probe-ingestion --store-id 9NKTFH1MF4LM
+          else
+            echo "submitting $MSIX as $VERSION"
+            node Scripts/ms-store-publish.mjs --version "$VERSION" --msix "$MSIX"
+          fi

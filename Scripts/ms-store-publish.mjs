@@ -31,6 +31,7 @@ import {
   deletePendingSubmission,
 } from './lib/msstore.mjs';
 import { loadMetadata, toMsListing } from './lib/metadata.mjs';
+import { makeIngestionToken, ingestion } from './lib/msstore.mjs';
 import { msCode } from './lib/locales.mjs';
 
 const arg = (name, dflt = null) => {
@@ -42,6 +43,34 @@ const die = (m) => { console.error(`✗ ${m}`); process.exit(1); };
 const log = (m) => console.log(`• ${m}`);
 const ok = (m) => console.log(`✓ ${m}`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ── probe mode: map the NEW ingestion API's view of this product (no writes) ──
+if (has('probe-ingestion')) {
+  const storeId = arg('store-id') || die('--store-id required for the probe');
+  const tok = await makeIngestionToken({
+    tenantId: process.env.STORE_TENANT_ID, clientId: process.env.STORE_CLIENT_ID,
+    clientSecret: process.env.STORE_CLIENT_SECRET,
+  });
+  console.log('• ingestion token OK');
+  const ing = ingestion(tok);
+  const probes = [
+    `/products/${storeId}`,
+    `/products/${storeId}/branches/getByModule(module=Package)`,
+    `/products/${storeId}/branches/getByModule(module=Listing)`,
+    `/products/${storeId}/branches/getByModule(module=Availability)`,
+    `/products/${storeId}/submissions`,
+    `/products/${storeId}/listings`,
+  ];
+  for (const p of probes) {
+    try {
+      const r = await ing.get(p);
+      console.log(`✓ GET ${p} → ${JSON.stringify(r).slice(0, 700)}`);
+    } catch (e) {
+      console.log(`✗ GET ${p} → ${e.status ?? '?'} ${String(e.message).slice(0, 260)}`);
+    }
+  }
+  process.exit(0);
+}
 
 const version = arg('version') || die('--version required');
 const msixPath = arg('msix');

@@ -65,7 +65,9 @@ export function msstore(token) {
       const detail = json?.message
         || json?.errors?.map((e) => e.message || e.code).join('; ')
         || r.statusText;
-      throw new Error(`MS ${method} ${path} → ${r.status} ${detail}`);
+      const err = new Error(`MS ${method} ${path} → ${r.status} ${detail}`);
+      err.body = json;   // Partner Center 400s hide per-field ModelState here — keep it
+      throw err;
     }
     return json;
   };

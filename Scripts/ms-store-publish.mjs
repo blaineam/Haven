@@ -119,12 +119,17 @@ if (app.pendingApplicationSubmission) {
     // submission) fails validation. Dump Microsoft's actual state so the failure is
     // diagnosable from the run log, then rethrow.
     log(`create failed: ${e.message}`);
+    if (e.body) log(`full error body: ${JSON.stringify(e.body).slice(0, 1500)}`);
     const fresh = await getApp(api, appId).catch(() => null);
     log(`diagnostics: pending=${JSON.stringify(fresh?.pendingApplicationSubmission || null)} lastPublished=${JSON.stringify(fresh?.lastPublishedApplicationSubmission || null)}`);
     const pubId = fresh?.lastPublishedApplicationSubmission?.id;
     if (pubId) {
       const pub = await getSubmission(api, appId, pubId).catch((err) => ({ error: String(err) }));
       log(`published submission ${pubId}: status=${pub.status || '?'} listings=[${Object.keys(pub.listings || {}).join(',') || 'NONE'}] packages=${(pub.applicationPackages || []).length} pricing=${JSON.stringify(pub.pricing?.priceId || pub.pricing || null).slice(0, 120)}`);
+      for (const [lang, l] of Object.entries(pub.listings || {})) {
+        const base = l?.baseListing || {};
+        log(`  listing ${lang}: baseListing keys=[${Object.keys(base).join(',') || 'EMPTY'}] title=${JSON.stringify(base.title ?? null)} descLen=${(base.description || '').length} overrides=[${Object.keys(l?.platformOverrides || {}).join(',') || 'none'}]`);
+      }
     }
     throw e;
   }

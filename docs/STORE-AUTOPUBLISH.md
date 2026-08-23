@@ -1,10 +1,12 @@
 # Auto-publishing Haven to the app stores
 
-Haven's CI can push every tagged release — **the signed binary *and* the full store listing** — to
-**Google Play** (Android) and the **Microsoft Store** (Windows), and can promote Android all the
-way to production. Both are **gated on secrets**: until you add them, the store steps skip and
+Haven's CI can push every tagged release — **the signed binary *and* the store listing** — to
+**Google Play** (Android), the **Microsoft Store** (Windows) and the **App Store** (iOS + macOS,
+built by Xcode Cloud, submitted by `apple-store.yml`), and can promote Android all the way to
+production. All three are **gated on secrets**: until you add them, the store steps skip and
 tagged releases just produce the usual sideloadable artifacts. Nothing here costs a recurring fee
-beyond the one-time developer-account registrations.
+beyond the one-time developer-account registrations. Haven is **free** on every store (August
+2026) — the only price-related step left is the one-time change in each console.
 
 Tag a release as usual (`git tag v1.0.5 && git push --tags`); the store jobs light up once the
 secrets below exist.
@@ -44,10 +46,10 @@ does the rest. Both run in the same job.)
 `-rc.N` suffix on the tag is what says which one this is — on *both* stores, so an rc can't be live
 on one platform and in testing on the other.
 
-| Tag | Google Play | Apple |
-|---|---|---|
-| `v1.3.0-rc.1` | `internal` **and** `alpha` (closed testing) | TestFlight internal (Xcode Cloud, off the push — not the tag) |
-| `v1.3.0` | `production` | *(nothing automatic — you submit)* |
+| Tag | Google Play | Apple | Microsoft Store |
+|---|---|---|---|
+| `v1.3.0-rc.1` | `internal` **and** `alpha` (closed testing) | TestFlight internal (Xcode Cloud, off the push — not the tag) | MSIX packaged, not submitted |
+| `v1.3.0` | `production` | **submitted for review** (iOS + macOS) by `apple-store.yml` | `msstore publish` when `MSSTORE_PUBLISH=true` |
 
 Promoting an rc is just tagging the same commit again without the suffix. Nothing is rebuilt from
 different source; the number that was in testers' hands is the number that ships.
@@ -57,7 +59,7 @@ different source; the number that was in testers' hands is the number that ships
 production while tagging a release *candidate* is a contradiction, and the safe reading of a
 contradiction is "testers only".
 
-**Apple's production step is deliberately NOT automated** — see below.
+**Apple's production step is automated from the same tag** — see below for what it does and how it is gated.
 
 Two overrides remain, for the off-schedule cases (neither can defeat the rc guard):
 
@@ -81,46 +83,93 @@ or `1.0` publishes fully live (`status=completed`).
 
 ---
 
-## Apple (iOS + macOS)
+## Apple (iOS + macOS → `.github/workflows/apple-store.yml`)
 
-**Nothing on the CI side ships Haven to the App Store, and that is on purpose.** Apple's half is:
+Xcode Cloud still does **every** Apple build — it is the only place Haven's iOS/macOS binaries come
+from, and a push to `main` that touches `apple/`, `core/` or `ci_scripts/` lands on TestFlight
+internal on its own. What the tag adds is the App Store **submission**:
 
 | Step | Who | When |
 |---|---|---|
 | Build + upload to TestFlight **internal** | **Xcode Cloud** | every push to `main` — no tag involved |
-| Create the App Store version, attach the build, submit for review | **you** | when you decide to ship |
+| Create the App Store version, set What's New, attach the build, submit for review | **`apple-store.yml`** → `Scripts/asc-autosubmit.mjs` | a plain `vX.Y.Z` tag (an `-rc.N` tag does nothing on Apple) |
 
-That covers the rc channel completely: testers get every push to `main` automatically, so a `-rc.N`
-tag has nothing to do on Apple at all. It exists to tell **Play** where to put the build.
+### What the job does (on every `vX.Y.Z` tag, once the secrets exist)
 
-Submitting stays a decision, not a side effect of a tag. An App Store version can't be reused,
-rewound, or un-submitted, and review is slow enough that a mistaken submission costs days — unlike
-Play, where a bad track assignment is a two-minute fix. Whatever you gain by making it automatic,
-you pay for the first time a tag goes out that you didn't mean to ship.
+1. **Finds the Xcode Cloud run for the tagged commit** — by `sourceCommit`, not "newest". If XCC
+   never ran it (auto-cancel ate it, or the commit touched nothing XCC watches) the job **starts
+   one on the tag** (falling back to `main` when main's tip *is* that commit) and waits.
+2. **Waits** for the run to `SUCCEEDED` and for both uploads (iOS + macOS) to reach `VALID` —
+   confirmed on `/v1/builds/{id}`, never the list (the list can say VALID mid-processing).
+3. **Version + notes.** Finds or creates the editable App Store version `X.Y.Z` per platform (an
+   abandoned draft with another number and no build attached is renamed — ASC allows one editable
+   version per platform). Sets **What's New** on every localization from
+   `appstore-metadata.md` / `appstore-metadata.<locale>.md`.
+   **Gate:** the en-US `## whats_new` must *start with* `X.Y.Z` — otherwise the job fails rather
+   than ship last release's notes. A locale file still on an older version gets the English notes,
+   with a warning in the run summary.
+4. **Attaches** the build; if ASC still wants an export-compliance answer on it, answers **exempt**
+   (matches `ITSAppUsesNonExemptEncryption = NO` in the Info.plist).
+5. **Submits** through `reviewSubmissions`. Already `WAITING_FOR_REVIEW`/`IN_REVIEW` for this
+   version = success; a wedged `UNRESOLVED_ISSUES` submission is reported with the fix, never
+   reused.
 
-To submit, from your machine:
+Every step is idempotent — re-run a failed workflow and it picks up where it was. The run summary
+lists the XCC run number, the build numbers, and the per-platform outcome.
+
+### Secrets + variables
+
+| Secret | What |
+|---|---|
+| `ASC_API_KEY_ID` | App Store Connect API key id (`AuthKey_<id>.p8`) — the key needs the **App Manager** role (Developer can't create a version or open a submission) |
+| `ASC_API_ISSUER_ID` | the issuer id (Users & Access → Integrations) |
+| `ASC_API_KEY_P8` | the `.p8` file contents — raw PEM or base64 |
+
+Absent → the job prints a notice and skips; submit by hand with `Scripts/asc-new-version.mjs`
+(below). Set them from the machine that holds the key:
 
 ```bash
-Scripts/asc-new-version.mjs --platform IOS --version 1.3.0 --build latest --wait 30 \
-    --notes-file whatsnew.txt --submit
-Scripts/asc-new-version.mjs --platform MAC_OS --version 1.3.0 --build latest --wait 30 \
-    --notes-file whatsnew.txt --submit
+gh secret set ASC_API_KEY_ID   --body "<key id>"
+gh secret set ASC_API_ISSUER_ID --body "<issuer id>"
+gh secret set ASC_API_KEY_P8   < ~/.appstoreconnect/private_keys/AuthKey_<key id>.p8
 ```
 
-`--build latest` is there because Xcode Cloud assigns the build number from its own run counter, so
-you'd otherwise have to go look it up in App Store Connect first; `--wait` sits through the few
-minutes a fresh upload spends in PROCESSING instead of failing. The script is idempotent — it
-re-finds an editable version of the same number, so re-running after a hiccup is safe.
+| Variable | What |
+|---|---|
+| `APPLE_STORE_SUBMIT` | `false` → do everything except press submit (version + notes + build attached; you submit from ASC). Unset = submit. |
 
-Auth comes from `~/.rocket/config.json` (or `ASC_API_KEY_ID` / `ASC_API_ISSUER_ID`) plus the `.p8`
-in `~/.appstoreconnect/private_keys/`. The key needs the **App Manager** role — Developer can't
-create an App Store version or open a review submission.
+### Running it by hand
+
+- **Dry run from your machine** (reads XCC + ASC, writes nothing):
+  `Scripts/asc-autosubmit.mjs --version 1.6.1 --commit $(git rev-parse v1.6.1^{commit}) --dry-run`
+- **Manual dispatch** on Actions ▸ apple-store with a version (and optionally a commit / dry run) —
+  for re-submitting a tag that was pushed before the secrets existed.
+- **The old by-hand path** still works:
+  ```bash
+  Scripts/asc-new-version.mjs --platform IOS    --version 1.3.0 --build latest --wait 30 \
+      --notes-file whatsnew.txt --submit
+  Scripts/asc-new-version.mjs --platform MAC_OS --version 1.3.0 --build latest --wait 30 \
+      --notes-file whatsnew.txt --submit
+  ```
+
+### Why this is safe to automate now
+
+The earlier reasoning — "an App Store version can't be reused, rewound, or un-submitted, so
+submitting must be a decision, not a side effect of a tag" — still holds. What changed is that the
+tag *is* the decision: `vX.Y.Z` already ships to Play production, and the two-hop `-rc.N` → plain
+tag flow exists precisely so the candidate is exercised first. The remaining risks are fenced:
+the notes gate stops stale release notes, the commit match stops shipping code the tag never
+pointed at, `APPLE_STORE_SUBMIT=false` keeps a staged-not-submitted mode, and a submission can
+still be pulled from App Store Connect (Remove from Review) before a reviewer picks it up.
 
 ### One-time manual setup (you must do this by hand)
 
 These are Google's rules, not CI limitations — no API can do them:
 
 1. **Play Console** → create the app `com.blaineam.haven` (one-time $25 lifetime fee).
+   **Price: Free** (Monetize ▸ Products ▸ App pricing). Haven went free in August 2026; this is a
+   one-way door on Play — a free app can never be made paid again — and there is no API for it, so
+   it is a one-time console step.
 2. **Upload keystore + Play App Signing.** Generate an upload keystore if you don't have one:
    ```bash
    keytool -genkey -v -keystore haven-upload.keystore -alias haven \
@@ -172,8 +221,10 @@ manual run, `apple/project.yml`'s `MARKETING_VERSION`).
 
 ### What CI automates (on every `v*` tag)
 
-CI packages an **MSIX** from the Tauri build and attaches it to the **GitHub Release**. That is all
-it does for the Store — **submission is manual** (see below).
+CI packages an **MSIX** from the Tauri build, and — with the repo variable **`MSSTORE_PUBLISH`** set
+to `true` — runs `msstore publish` on a plain `vX.Y.Z` tag: opens a new submission with the package,
+commits it, and the Store runs certification automatically. Without the variable the MSIX is
+packaged and a `::notice` reminds you to upload it by hand.
 
 The Store re-signs the package on ingestion, so **no paid code-signing certificate is needed** — the
 one-time developer fee (~$19 individual) is the only cost, and Store apps install with no SmartScreen
@@ -184,38 +235,39 @@ warning.
 in CI — Partner Center re-signs every PE in the package on upload, the same as `Haven.exe`. Do not
 add a `signtool` step for it.
 
-### Submitting the update (MANUAL — do this by hand in Partner Center)
+### Turning the automation on (one-time)
 
-`msstore publish` is **not run in CI**, because it only supports **free** products over GitHub
-Actions and **Haven is a paid listing** — the command exits non-zero and does nothing. It was
-previously wired with `continue-on-error: true`, which reported a **green** job while submitting
-nothing; a release once went to review believing the Store was done when it wasn't. So the step now
-just prints a `::notice` reminder, and a human finishes it:
+`msstore publish` over GitHub Actions supports **free products only** (paid "in a future release"
+per Microsoft). Haven is free now, so the step works — but only once the Partner Center listing
+agrees:
 
-1. **Partner Center** → Haven → **Packages** → upload the `Haven-<ver>.msixbundle` from that tag's
-   GitHub Release.
+1. **Partner Center** → Haven → **Pricing and availability** → Base price → **Free** → save and
+   submit that change (it is its own submission; Partner Center allows **one open submission at a
+   time**, so let it certify before tagging).
+2. Repo → Settings ▸ Secrets and variables ▸ Actions ▸ **Variables** → `MSSTORE_PUBLISH` = `true`.
+
+The step is **not** `continue-on-error`: a Store-side failure goes red on the Windows leg. That is
+deliberate — the previous wiring reported a green job while submitting nothing, and a release once
+went to review believing the Store was done when it wasn't. The Linux app + relay CLI still publish
+(the `publish` job only needs the artifacts, which are uploaded before this step).
+
+### Submitting by hand (when `MSSTORE_PUBLISH` is not set)
+
+1. **Partner Center** → Haven → **Packages** → upload the `Haven-<ver>.msixbundle` from the run's
+   `desktop-windows` artifact (`gh run download -n desktop-windows`).
 2. **Store listings (en-US)** → paste this version's **What's new**. **Clear the field first**, then
    paste and **Save** — Partner Center only re-validates on an *actual* change, so an identical
    re-paste is a no-op that can leave the section stuck **"Incomplete"** with no error shown.
 3. **Submit for certification.**
 
-Re-enable CI automation **only** once Microsoft ships paid-product support for `msstore publish` in
-Actions (they've said "in a future release"). At that point, restore the submit step from git
-history and drop its `continue-on-error` so a genuine failure goes **red** instead of false-green.
+### What `msstore publish` does and doesn't do
 
-### Why `msstore publish` isn't wired (be clear-eyed about this)
-
-- **Paid products aren't supported through GitHub Actions *yet*.** Per Microsoft's own docs, "app
-  update operations through GitHub Actions is currently supported for **free products only**. Paid
-  products will be supported in a future release." Haven is paid, so the command **exits non-zero
-  and does nothing** — this is why submission is manual today, not a config we can fix.
-- **Even when it works, it does not set listing text/screenshots per-field.** `msstore publish` has
-  *no* flag for description, screenshots, features, or age rating. Those are whatever you set in
-  Partner Center, and every package update **carries them forward unchanged** — which is why the
-  What's-new text still has to be pasted by hand each release (Android, by contrast, drives listing
-  text from the repo).
+- It does **not** set listing text/screenshots per-field — there is no flag for description,
+  screenshots, features, or age rating. Every package update **carries them forward unchanged**,
+  so the What's-new text is either pasted in Partner Center or pushed with
+  `rocket meta Haven --store ms` *between* package submissions.
 - **The app must already be live** before an update can be pushed, and Partner Center allows only
-  **one open submission at a time.**
+  **one open submission at a time** — a listing edit in flight makes the publish step fail.
 
 ### Editing the Microsoft Store listing (optional, advanced, deliberately not wired)
 
@@ -299,14 +351,14 @@ The user's goal is "straight to prod pipelines" after the initial vetting. Here'
 **Windows**
 1. Do the one-time manual setup (name reservation, Entra app, first live submission with listing +
    age rating).
-2. Once the app is live, every `v*` tag's `msstore publish` pushes the new package → certification →
-   live automatically **(subject to Microsoft enabling paid-product GitHub-Actions publishing; until
-   then this step may no-op — the GitHub Release is unaffected).**
+2. Once the app is live and the Partner Center price is Free, set `MSSTORE_PUBLISH=true`; every
+   `vX.Y.Z` tag's `msstore publish` then pushes the new package → certification → live.
 3. Listing-text changes remain the separate, on-demand `updateMetadata` flow above.
 
-## TL;DR for a free launch
-- **Windows:** ship via the **Store** (free signing, no warnings). Package publish is automated;
-  listing text is Partner-Center-side.
+## TL;DR
+- **Windows:** ship via the **Store** (free signing, no warnings). Package publish is automated
+  behind `MSSTORE_PUBLISH`; listing text is Partner-Center-side.
 - **Android:** the repo drives the **full listing** and the binary; promote `internal → closed →
   production` with a variable or a manual run.
-- **macOS/iOS:** TestFlight + the notarized direct-download `.dmg` (already wired).
+- **macOS/iOS:** Xcode Cloud builds every push to `main` → TestFlight; a `vX.Y.Z` tag submits
+  both platforms for review from that exact commit's build (`apple-store.yml`).

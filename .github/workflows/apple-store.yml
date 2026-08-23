@@ -1,0 +1,149 @@
+name: apple-store
+
+# Ship a tagged release to the App Store (iOS + macOS) — the Apple half of "the tag decides".
+#
+#   vX.Y.Z        → find the Xcode Cloud build of THIS commit (or start one), wait for it,
+#                   create the App Store version, set What's New from appstore-metadata*.md,
+#                   attach the build, submit for review. Both platforms.
+#   vX.Y.Z-rc.N   → nothing. Testers already get every push to main via Xcode Cloud → TestFlight.
+#
+# Xcode Cloud still does every build (it is the only place Haven's Apple binaries come from);
+# this workflow only talks to App Store Connect. It is gated on the ASC API secrets below and
+# skips cleanly (green, with a notice) until they exist — so a fresh clone releases Linux/relay/
+# Play/Windows as before and simply leaves Apple to the by-hand script.
+#
+# Secrets (Settings ▸ Secrets and variables ▸ Actions):
+#   ASC_API_KEY_ID      the App Store Connect API key id (AuthKey_<id>.p8) — needs App Manager
+#   ASC_API_ISSUER_ID   the issuer id
+#   ASC_API_KEY_P8      the .p8 file contents (raw PEM or base64)
+# Variable (optional):
+#   APPLE_STORE_SUBMIT  "false" → attach the build but do NOT press submit (staging a release)
+#
+# Re-running a failed/cancelled run is safe: every step is idempotent (re-finds the run, the
+# version, the attached build; an already-WAITING_FOR_REVIEW version is success).
+# See docs/RELEASING.md and docs/STORE-AUTOPUBLISH.md.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "X.Y.Z to submit (must equal apple/project.yml MARKETING_VERSION)"
+        required: true
+      commit:
+        description: "Full commit sha the release was tagged at (blank = this ref)"
+        required: false
+      dry_run:
+        description: "Read-only: find the Xcode Cloud run + builds, check the notes, write nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-store
+  cancel-in-progress: false     # a submission in flight must finish; the next tag waits
+
+jobs:
+  # The same version gate release.yml runs — the tag must be plain X.Y.Z and match the project.
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      is_rc: ${{ steps.v.outputs.is_rc }}
+      commit: ${{ steps.v.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_COMMIT: ${{ github.event.inputs.commit }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          asc="$(python3 - <<'PY'
+          import re, pathlib, sys
+          t = pathlib.Path("apple/project.yml").read_text()
+          vs = set(re.findall(r'(?m)^\s*MARKETING_VERSION:\s*"([^"]+)"', t))
+          if not vs: sys.exit("no MARKETING_VERSION found in apple/project.yml")
+          if len(vs) > 1: sys.exit(f"apple/project.yml disagrees with itself: MARKETING_VERSION = {sorted(vs)}")
+          print(vs.pop())
+          PY
+          )"
+          raw="${INPUT_VERSION:-}"
+          if [ -z "$raw" ]; then
+            [ "$REF_TYPE" = "tag" ] || { echo "::error::run this from a v* tag, or pass a version"; exit 1; }
+            raw="$REF_NAME"
+          fi
+          version="${raw#v}"
+          core="${version%%-rc.*}"
+          is_rc=false; [ "$core" != "$version" ] && is_rc=true
+          if ! printf '%s' "$core" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$raw' is not X.Y.Z (optionally -rc.N)"; exit 1
+          fi
+          if [ "$core" != "$asc" ]; then
+            echo "::error::Version drift: tag says '$core' but apple/project.yml MARKETING_VERSION says '$asc'."; exit 1
+          fi
+          # The commit the tag points at — resolve through the tag object so an annotated tag
+          # yields the commit, not the tag's own sha.
+          commit="${INPUT_COMMIT:-}"
+          if [ -z "$commit" ]; then commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"; fi
+          echo "version=$core" >> "$GITHUB_OUTPUT"
+          echo "is_rc=$is_rc" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          if [ "$is_rc" = true ]; then
+            echo "Haven **$core** — release candidate ($raw): Apple side does nothing (TestFlight already has every push to main)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Haven **$core** @ \`${commit:0:10}\` — submitting to the App Store." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  submit:
+    needs: meta
+    if: needs.meta.outputs.is_rc == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240          # Xcode Cloud can take an hour; processing another; review is not waited on
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # the script looks at origin/main to know whether main's tip is the tagged commit
+
+      - name: Gate on the ASC API secrets
+        id: gate
+        env:
+          KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ISSUER: ${{ secrets.ASC_API_ISSUER_ID }}
+          P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          if [ -z "$KEY_ID" ] || [ -z "$ISSUER" ] || [ -z "$P8" ]; then
+            echo "::notice title=apple-store skipped::ASC_API_KEY_ID / ASC_API_ISSUER_ID / ASC_API_KEY_P8 are not set — submit by hand: Scripts/asc-new-version.mjs … (docs/RELEASING.md)"
+            echo "- ⏭️ Apple: skipped — ASC API secrets not configured" >> "$GITHUB_STEP_SUMMARY"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.ready == 'true'
+        with:
+          node-version: "22"
+
+      - name: Submit to the App Store
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          COMMIT: ${{ needs.meta.outputs.commit }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          SUBMIT_FLAG: ${{ vars.APPLE_STORE_SUBMIT }}
+        run: |
+          set -euo pipefail
+          extra=()
+          [ "${DRY_RUN:-false}" = "true" ] && extra+=(--dry-run)
+          [ "${SUBMIT_FLAG:-true}" = "false" ] && extra+=(--no-submit)
+          node Scripts/asc-autosubmit.mjs --version "$VERSION" --commit "$COMMIT" --tag "v$VERSION" \
+            --platforms IOS,MAC_OS --wait-build 120 --wait-process 45 --notes-dir . "${extra[@]}"

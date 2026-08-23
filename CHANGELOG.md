@@ -7,6 +7,40 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Changed
+- **Haven is free.** The $9.99 one-time price is gone on the App Store (set via
+  `rocket price Haven`), and the website, README, App Store promotional text (en-US + 8
+  locales) and docs now say so: no ads, no tracking, no subscription, no in-app purchases.
+  Development is funded directly — the site's pricing card became a **Support future
+  development** block linking GitHub Sponsors (`github.com/sponsors/blaineam`), Ko-fi
+  (`ko-fi.com/wemiller`) and `wemiller.com/support`. Google Play and the Microsoft Store
+  prices are one-time console changes (Play's is one-way); see `docs/STORE-AUTOPUBLISH.md`.
+- **Store policy is data.** `appstore-metadata.md` gained `## availability` (`exclude: france,
+  china`) and `## price` (`free`) sections that `rocket territories` / `rocket price` /
+  `rocket compliance` audit and apply. France (ANSSI crypto filing) and China (ICP filing)
+  stay excluded; the EU stays **on** — a free app with no IAP needs no DSA trader
+  declaration. `docs/EXPORT-COMPLIANCE.md` rewritten to match the exempt
+  `ITSAppUsesNonExemptEncryption = NO` answer the binary has carried since 1.0.
+
+### Added
+- **App Store submission from CI** (`.github/workflows/apple-store.yml` +
+  `Scripts/asc-autosubmit.mjs`). A plain `vX.Y.Z` tag now submits iOS + macOS for review from
+  the **Xcode Cloud build of that exact commit** — it finds the XCC run by source commit
+  (starting one on the tag if auto-cancel ate it), waits for both uploads to go VALID,
+  creates the App Store version, sets What's New on every localization from
+  `appstore-metadata*.md`, attaches the build, answers export compliance if asked, and opens +
+  submits the review submission. Gated on `ASC_API_KEY_ID` / `ASC_API_ISSUER_ID` /
+  `ASC_API_KEY_P8` (skips with a notice until set); `APPLE_STORE_SUBMIT=false` stages without
+  pressing submit. The notes gate refuses to ship a `whats_new` that doesn't start with the
+  version, and a locale still on an older version gets the English notes with a warning.
+  `-rc.N` tags do nothing on Apple, as before.
+- **Microsoft Store publish is back**, opt-in: with the repo variable `MSSTORE_PUBLISH=true`
+  (set after the Partner Center price is Free) `release.yml` runs `msstore publish` on a
+  `vX.Y.Z` tag — free products are the case Microsoft supports over Actions. Not
+  `continue-on-error`: a Store failure goes red instead of the old false-green.
+
 ## 2026-08-22 — 1.6.1 (stability wave: the fork is dead)
 
 Two full QA gauntlets green back-to-back (91/91 twice, zero forks) — the first releases

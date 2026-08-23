@@ -1,50 +1,66 @@
-# US export compliance (automated)
+# US export compliance + where Haven is (and isn't) sold
 
-Haven uses **real end-to-end, post-quantum encryption**, so it is **non-exempt**
-(ECCN **5D992.c**, mass-market, License Exception ENC §740.17(b)(1)). Keeping that
-encryption is non-negotiable — and it does **not** restrict global App Store
-distribution. It only requires US paperwork, which is automated.
-
-## Fully automated via rocket
+Haven ships **real end-to-end, post-quantum encryption**, and that has two regulatory
+consequences: Apple's export-compliance questionnaire, and a short list of territories
+Haven deliberately does not distribute to. Both are policy, both are automated, and both
+are audited by one command:
 
 ```sh
-node _shared/rocket/rocket.mjs compliance Haven
+node _shared/rocket/rocket.mjs compliance Haven     # the audit (read-only)
+node _shared/rocket/rocket.mjs territories Haven    # availability vs. policy (read-only; --apply writes)
 ```
 
-This **creates the App Encryption Declaration** in App Store Connect (standard
-algorithms, not proprietary, third-party crypto, available on the French store) and
-**attaches it to the latest build** — so non-exempt builds never hit "Missing
-Compliance" and future builds inherit it. Run it once after the first upload (or after
-`rocket build Haven`); no manual ASC questionnaire needed. (Done — declaration created
-and attached to build 2.)
+## The export-compliance answer
 
-## What's declared
+`Info.plist` (both targets, set in `apple/project.yml`): **`ITSAppUsesNonExemptEncryption = false`**.
 
-- `Info.plist`: **`ITSAppUsesNonExemptEncryption = YES`** (honest; set in `project.yml`).
-- **App Store Connect — one-time App Encryption Declaration** (the answers):
-  - Uses encryption? **Yes**
-  - Qualifies for an exemption in Category 5, Part 2? **No** (it's E2E confidentiality)
-  - Standard, published algorithms only? **Yes**
-  - Mass market / open source? **Yes** → ECCN 5D992.c, License Exception ENC
-  - Apple accepts the self-classification — **no CCATS upload needed**.
+That is the "qualifies for an exemption" answer — Haven's cryptography is standard, published
+algorithms (hybrid X25519 + ML-KEM, AES-GCM, Ed25519/ML-DSA) in a mass-market app. With the
+answer baked into the binary, every Xcode Cloud upload is auto-compliant: no per-build
+"Missing Compliance" prompt, no ASC questionnaire, and `apple-store.yml` never has to wait on
+it. (If a build ever arrives with the flag unset, the auto-submit script answers *exempt* on the
+build itself, matching the plist.)
 
-## The two filings (generated for you)
+There is a leftover `CREATED` App Encryption Declaration on the ASC record from an earlier,
+non-exempt attempt (it says "available on the French store"). It is inert — it is attached to no
+build and the API can neither finish nor delete it. `rocket compliance Haven` reports it; ignore
+it.
 
-Run `node Scripts/export-compliance.mjs` → writes ready-to-send files:
+## Territories
 
-1. **One-time** — `open-source-notification.txt`: because Haven's source is public on
-   GitHub, EAR §742.15(b) lets you notify BIS + NSA of the URL. Send once (and again
-   only if the URL changes).
-2. **Annual (due Feb 1)** — `self-classification-report.csv` + `self-classification-email.txt`:
-   the mass-market self-classification report, emailed to `crypt@bis.doc.gov` and
-   `enc@nsa.gov`.
+| Territory | Available | Why |
+|---|---|---|
+| **France** | **no** | French law (ANSSI) wants its own declaration for apps shipping encryption, and Apple asks "available in France?" on the non-exempt path. Out, so the question is moot. |
+| **China (mainland)** | **no** | Any app needs an ICP filing number to be sold there; Apple flags the listing `MISSING_GRN` without one. |
+| **EU (27)** | **yes** | Haven is **free with no in-app purchases**, so it stays in the EU under the Digital Services Act without a trader declaration. (The paid apps in the portfolio are out of the EU for exactly that reason — see `_shared/rocket/docs/compliance.md`.) |
+| everything else (173 storefronts) | yes | |
 
-The generated files are gitignored (they contain contact details); regenerate anytime.
-Consider a yearly calendar reminder for the Feb 1 deadline.
+The policy lives in `appstore-metadata.md`:
 
-## Why this keeps distribution global
+```md
+## availability
+exclude: france, china
+new_territories: yes
 
-Non-exempt ≠ restricted. 5D992.c mass-market apps under ENC are eligible for export to
-essentially all destinations (excluding embargoed countries, which Apple already
-excludes). The open-source notification further places the *source* outside EAR
-control. Net: strongest encryption **and** worldwide availability.
+## price
+free
+```
+
+and `rocket territories Haven` diffs App Store Connect against it (`--apply` writes; the write is
+per-territory `PATCH /v1/territoryAvailabilities/{id}` and is read back before the command says
+✓). `Scripts/asc-availability.mjs` is the older single-territory version of the same thing.
+
+**Going free (August 2026).** The App Store price is set from the same file with
+`rocket price Haven --apply`. Google Play's price is a one-way, console-only change (a free app
+can never be made paid again; there is no API) and the Microsoft Store price is a Partner Center
+submission — both are one-time by-hand steps, noted in `docs/STORE-AUTOPUBLISH.md`.
+
+## If Haven ever goes non-exempt again
+
+Switching the plist to `true` means every build needs an **APPROVED** App Encryption Declaration
+attached. The first one must be completed in App Store Connect → App Information → App
+Encryption Documentation (uses encryption: yes · exemption: no · standard algorithms: yes ·
+mass-market, ECCN 5D992.c / License Exception ENC); after that `rocket compliance Haven
+--attach` attaches it to each new build. The annual BIS/NSA self-classification report and the
+one-time open-source notification (`Scripts/export-compliance.mjs` generates both) become due
+again on that path. None of that applies while the answer is *exempt*.

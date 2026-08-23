@@ -90,3 +90,13 @@ Miller
 
 ## review_email
 blaine@wemiller.com
+
+## availability
+<!-- Store policy — applied by: rocket territories "Haven" --apply   (_shared/rocket/docs/compliance.md)
+     free app, no IAP — stays in the EU as a non-trader; France (ANSSI crypto filing) and China (ICP filing) are out -->
+exclude: france, china
+new_territories: yes
+
+## price
+<!-- Base-territory (USA) customer price — applied by: rocket price "Haven" --apply -->
+free

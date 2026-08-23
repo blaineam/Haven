@@ -88,17 +88,18 @@ across the switch — verified, not assumed.
 ## Release channels — what goes where
 
 Haven ships to six places, but they are not all the same *kind* of channel. Three of them are
-**app stores that expect to be the distribution point** for a paid app; two of them have **no
-store** and the GitHub Release *is* their distribution point.
+**app stores that expect to be the distribution point**; two of them have **no store** and the
+GitHub Release *is* their distribution point. (Haven is **free** on every store as of August
+2026 — the channel policy is about *where* a platform's build comes from, not price.)
 
 > **The GitHub Release carries ONLY the things that have no store: the Linux desktop app
 > (`.deb` / `.rpm` / AppImage + `haven.flatpak`) and the `haven-relay` CLI for every arch.**
-> iOS/macOS, Android, and Windows are paid apps that go through the App Store, Google Play, and
-> the Microsoft Store. They must **not** accumulate a GitHub Release history.
+> iOS/macOS, Android, and Windows go through the App Store, Google Play, and the Microsoft
+> Store. They must **not** accumulate a GitHub Release history.
 
 | Platform | Proper channel | On the GitHub Release? |
 |---|---|---|
-| iPhone · iPad · Mac | **App Store** (TestFlight via Xcode Cloud; review submitted by hand) | No — never was |
+| iPhone · iPad · Mac | **App Store** (TestFlight via Xcode Cloud; review submitted by `apple-store.yml` on a `vX.Y.Z` tag) | No — never was |
 | Android | **Google Play** | No (once Play is public) — *stopgap until then* |
 | Windows | **Microsoft Store** (live) | No — [live on the Store](https://apps.microsoft.com/store/detail/9NKTFH1MF4LM) |
 | Linux desktop GUI | *(no store)* → GitHub Release | **Yes** — `.deb` / `.rpm` / AppImage / `haven.flatpak` |
@@ -175,25 +176,47 @@ Releases go out in **two hops: candidate, then promote.** Testers get the exact 
    git tag v1.3.0 && git push origin v1.3.0
    ```
    → Play **production**.
-6. **Apple** — submit by hand, because shipping to the App Store is a decision, not a side effect
-   of a tag (an App Store version can't be reused, rewound, or un-submitted):
+6. **Apple** — the same `vX.Y.Z` tag runs `apple-store.yml`, which submits **iOS + macOS** for
+   review from the **Xcode Cloud build of that exact commit**: it finds the XCC run whose source
+   commit is the tag's (starting one on the tag if auto-cancel ate it), waits for the run and for
+   both uploads to finish processing, creates the App Store version, sets What's New on every
+   localization from `appstore-metadata*.md`, attaches the build, and opens + submits the review
+   submission. It is gated on three repo secrets (`ASC_API_KEY_ID`, `ASC_API_ISSUER_ID`,
+   `ASC_API_KEY_P8` — the key needs **App Manager**) and skips with a notice until they exist.
+
+   **The notes gate:** `appstore-metadata.md`'s `## whats_new` must **start with the version**
+   (`1.6.1 — …`) or the job fails instead of shipping last release's notes. A locale file that is
+   still on an older version gets the English notes, loudly (summary + log) — translate first
+   with `rocket loc translate Haven --locale big8 --provider claude` if you want it clean.
+
+   Set the repo variable `APPLE_STORE_SUBMIT=false` to have the job do everything **except**
+   press submit (version + notes + build attached; you submit from ASC). Every step is
+   idempotent, so a failed run is just re-run; a version already `WAITING_FOR_REVIEW` is success.
+
+   By hand, the old way still works (and is the fallback when the secrets aren't set):
    ```bash
    Scripts/asc-new-version.mjs --platform IOS    --version 1.3.0 --build latest --wait 30 \
        --notes-file whatsnew.txt --submit
    Scripts/asc-new-version.mjs --platform MAC_OS --version 1.3.0 --build latest --wait 30 \
        --notes-file whatsnew.txt --submit
    ```
-   `--build latest` attaches whatever Xcode Cloud produced, so you don't have to look the build
-   number up first.
+   Or locally with the same CI script: `Scripts/asc-autosubmit.mjs --version 1.3.0 --commit
+   $(git rev-parse v1.3.0^{commit}) --dry-run` to see what it *would* do.
+
+7. **Windows** — with the repo variable `MSSTORE_PUBLISH=true` the same tag also opens and
+   commits the Microsoft Store submission (`msstore publish`, free products only — Haven is
+   free, so it works). Until that variable is set the MSIX is packaged and a notice reminds you
+   to upload it in Partner Center.
 
 Everything else rides the same tag. `release.yml` → relay binaries + `.deb`s, desktop installers,
 Flatpak bundle + pinned manifest, the GitHub Release, and the AUR push. `android.yml` → APKs, AAB,
 and the Play upload. All of it is gated: absent secrets skip cleanly instead of failing. Per the
-**channel policy above**, the GitHub Release carries Linux + relay; the paid Windows/Android builds
-are attached only as a stopgap until their stores go public (see the `PUBLISH_*_TO_GH` toggles).
+**channel policy above**, the GitHub Release carries Linux + relay; the Windows/Android builds
+live in their stores (see the `PUBLISH_*_TO_GH` toggles).
 
 > **Nothing forces the two-hop.** Tagging `v1.3.0` directly still works and ships straight to
-> production on both stores — it just skips the step where somebody else finds the problem first.
+> production on every store — Play, the App Store review queue, and (when enabled) the Microsoft
+> Store — it just skips the step where somebody else finds the problem first.
 
 See `docs/STORE-AUTOPUBLISH.md` for the full track table and the overrides.
 
@@ -396,6 +419,7 @@ green with zero setup.
 | `ANDROID_KEYSTORE_BASE64` + `_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` | signed APK/AAB | debug-signed APK instead |
 | `PLAY_SERVICE_ACCOUNT_JSON` | Play internal track | upload skipped |
 | `STORE_*` (8) | Microsoft Store MSIX | MSIX + submit skipped |
+| `ASC_API_KEY_ID`, `ASC_API_ISSUER_ID`, `ASC_API_KEY_P8` | App Store submission (`apple-store.yml`) | job skips with a notice; submit by hand |
 
 Separate from these secrets, two **repo variables** control the channel policy (see
 [Release channels](#release-channels--what-goes-where)) — **both are now set to `false`**, so the
@@ -406,6 +430,13 @@ Windows and Android GUI builds no longer ride the public Release (they come off 
 |---|---|
 | `PUBLISH_WINDOWS_TO_GH` | Windows `.msi`/`.exe`/`.msix` no longer attached to the GitHub Release |
 | `PUBLISH_ANDROID_TO_GH` | Android `.apk`/`.aab` no longer attached to the GitHub Release |
+
+Two more variables gate the store submissions themselves:
+
+| Repo variable | Default | Effect |
+|---|---|---|
+| `APPLE_STORE_SUBMIT` | unset (= submit) | `false` → `apple-store.yml` attaches the build and sets notes but does **not** press submit |
+| `MSSTORE_PUBLISH` | unset (= manual) | `true` → `release.yml` runs `msstore publish` on a `vX.Y.Z` tag (set it after the Partner Center price is Free) |
 
 ⚠️ **Android `versionCode` trap:** it's `github.run_number`, which is per-workflow-file.
 **Renaming or replacing `.github/workflows/android.yml` resets it to 1**, and Play permanently

@@ -13,9 +13,9 @@ name: release
 # ── CHANNEL POLICY ─────────────────────────────────────────────────────────────────────────
 # The public GitHub Release is the download channel for ONLY the things that have no app store:
 # the **Linux desktop app** (.deb/.rpm/AppImage + haven.flatpak) and the **haven-relay CLI**
-# for every arch. The *paid* apps go through *proper* channels — iOS/macOS via the App Store,
-# Android via Google Play, Windows via the Microsoft Store — and must NOT accumulate a GitHub
-# Release history.
+# for every arch. The store apps (free, as of August 2026) go through *proper* channels — iOS/macOS via
+# the App Store (submitted by apple-store.yml), Android via Google Play, Windows via the
+# Microsoft Store — and must NOT accumulate a GitHub Release history.
 #
 # We still BUILD the Windows GUI installers here (CI must verify they compile, and the
 # Microsoft-Store submit step consumes the MSIX) — the policy is only about what gets ATTACHED
@@ -466,29 +466,42 @@ jobs:
             Write-Host "MSIX carries both arches (bundle)."
           }
 
-      # Microsoft Store submission is DELIBERATELY not automated — it is a MANUAL step in Partner
-      # Center. `msstore publish` only supports FREE products over GitHub Actions; Haven is a paid
-      # listing, so the command exits non-zero and (under the old `continue-on-error: true`) reported
-      # a green job while having done nothing. That false-green is what sent a release to review
-      # thinking the Store was submitted when it wasn't. Rather than run a command that can only fail,
-      # the CI just PACKAGES the MSIX (above) and attaches it to the GitHub Release; a human uploads
-      # that bundle to Partner Center and submits it there.
+      # ── Microsoft Store submission ──────────────────────────────────────────────────────────
+      # Haven is FREE on the Store now, which is exactly the case `msstore publish` supports over
+      # GitHub Actions (paid products are still "a future release" on Microsoft's side — the reason
+      # this step was ripped out before: on a paid listing the command exits non-zero, and under
+      # `continue-on-error: true` that read as a green job that had submitted nothing).
       #
-      # To submit the Microsoft Store update after a release:
-      #   1. Partner Center → Haven → Packages → upload the Haven-<ver>.msixbundle. It rides the GH
-      #      Release only while PUBLISH_WINDOWS_TO_GH ≠ "false"; with the Store listing live it is in
-      #      the run's `desktop-windows` artifact instead (gh run download -n desktop-windows).
-      #   2. Store listings (en-US) → paste this version's "What's new" — CLEAR the field first, then
-      #      paste and Save, so Partner Center actually re-validates (an identical re-save is a no-op
-      #      that can leave the section stuck "Incomplete").
-      #   3. Submit for certification.
-      # See docs/STORE-AUTOPUBLISH.md. Re-enable automation ONLY once Microsoft ships paid-product
-      # support for `msstore publish` in Actions.
-      - name: Microsoft Store — manual submission required (not automated)
-        if: steps.msix.outputs.msix != '' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc')
+      # So the step is back, with two rules learned the hard way:
+      #   • it is OPT-IN via the repo variable MSSTORE_PUBLISH = "true" — flip it only AFTER the
+      #     Partner Center price is set to Free (Pricing and availability → Base price → Free);
+      #     until then the manual-submission notice below still fires.
+      #   • it is NOT continue-on-error. A Store-side failure goes red on this leg. The Linux app +
+      #     relay CLI still ship (the `publish` job only needs the artifacts, which were uploaded
+      #     before this point), and a red step is the only honest signal.
+      # Tag-only and rc-guarded: a manual dispatch is for a hand-upload, and a `-rc.N` tag must never
+      # open a production Store submission. Partner Center allows ONE open submission at a time —
+      # a listing-text edit in flight will make this fail; finish that first.
+      - name: Submit MSIX to the Microsoft Store
+        if: steps.msix.outputs.msix != '' && env.STORE_TENANT_ID != '' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc') && vars.MSSTORE_PUBLISH == 'true'
         shell: pwsh
         run: |
-          Write-Host "::notice title=Microsoft Store::MSIX packaged and attached to the GitHub Release. The Store update is a MANUAL step — upload the bundle in Partner Center and submit for certification (msstore publish does not support paid products over Actions). See docs/STORE-AUTOPUBLISH.md."
+          $ErrorActionPreference = 'Stop'
+          dotnet tool install --global MSStore.CLI
+          msstore reconfigure --tenantId $env:STORE_TENANT_ID --clientId $env:STORE_CLIENT_ID `
+            --clientSecret $env:STORE_CLIENT_SECRET --sellerId $env:STORE_SELLER_ID
+          # Opens a NEW submission with the package and COMMITS it → certification runs → live.
+          # Listing text/screenshots/age rating carry forward unchanged (there is no per-field flag);
+          # "What's new" is pasted in Partner Center or pushed via `rocket meta Haven --store ms`.
+          msstore publish "${{ steps.msix.outputs.msix }}" --appId $env:STORE_APP_ID --verbose
+          if ($LASTEXITCODE -ne 0) { throw "msstore publish exited $LASTEXITCODE" }
+          Write-Host "::notice title=Microsoft Store::Submission opened and committed — certification is running."
+
+      - name: Microsoft Store — manual submission required (MSSTORE_PUBLISH is not "true")
+        if: steps.msix.outputs.msix != '' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc') && vars.MSSTORE_PUBLISH != 'true'
+        shell: pwsh
+        run: |
+          Write-Host "::notice title=Microsoft Store::MSIX packaged. The Store update is a MANUAL step until the repo variable MSSTORE_PUBLISH is 'true' (set it once the Partner Center price is Free): upload the bundle in Partner Center and submit for certification. See docs/STORE-AUTOPUBLISH.md."
 
       # desktop-windows is the PRIVATE download channel for the Windows GUI (Microsoft Store is the
       # public one; PUBLISH_WINDOWS_TO_GH=false keeps it off the Release). Short retention so it

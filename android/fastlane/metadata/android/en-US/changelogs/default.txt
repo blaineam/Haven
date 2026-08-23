@@ -1,6 +1,6 @@
-1.6.1 — Haven is now free. And the stability wave.
-• Free everywhere — no ads, no tracking, no subscription, no in‑app purchases.
-• Fixed the circle key fork that left members unable to read each other's new posts; lagging devices catch up on their own.
-• Roster changes take seconds, not minutes.
-• Satellite and low‑data links: a tiny photo preview gets through; the full photo follows in coverage.
-• Fixed the circle‑switcher crash, sideways photos and offline locations.
+1.7.0 — Calls you can trust.
+• Answering always takes effect — calls can no longer connect "underneath" your ring screen.
+• Callers see "Connected" only when the other side really answered.
+• Unanswered calls end cleanly after a minute on both ends — no more phantom ringing.
+• Contacts' emoji and photos now show in calls everywhere.
+• Includes the 1.6.1 stability wave: circle key fork fixed for good, faster roster changes, satellite photo previews.

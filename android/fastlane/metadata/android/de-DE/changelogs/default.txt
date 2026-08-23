@@ -1,6 +1,6 @@
-1.6.1 – Haven ist jetzt kostenlos. Und die Stabilitätswelle.
-• Überall kostenlos – keine Werbung, kein Tracking, kein Abo, keine In‑App‑Käufe.
-• Schlüssel‑Gabelung in Kreisen behoben, die Mitglieder neue Beiträge nicht lesen ließ; zurückgefallene Geräte holen selbst auf.
-• Mitgliederänderungen dauern Sekunden statt Minuten.
-• Satellit und wenig Daten: Eine winzige Vorschau kommt durch, das volle Foto folgt bei Empfang.
-• Absturz des Kreiswechslers, gedrehte Fotos und Standorte offline behoben.
+1.7.0 — Anrufe, denen du vertrauen kannst.
+• Annehmen wirkt immer sofort — Anrufe verbinden sich nicht mehr „unter" dem Klingelbildschirm.
+• „Verbunden" erscheint erst, wenn wirklich angenommen wurde.
+• Unbeantwortete Anrufe enden nach einer Minute sauber — keine Geisteranrufe mehr.
+• Emojis und Fotos der Kontakte erscheinen jetzt überall in Anrufen.
+• Inklusive Stabilitätswelle 1.6.1: Schlüssel-Fork endgültig behoben, schnellere Roster-Änderungen.

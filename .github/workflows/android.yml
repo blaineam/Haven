@@ -46,6 +46,14 @@ on:
       - ".github/workflows/android.yml"
   workflow_dispatch:
     inputs:
+      # Push LISTING TEXT ONLY (what's-new changelogs + store listing metadata) to Play for an
+      # already-released versionCode — no build, no upload, ~2 minutes. Exists because 1.7.0
+      # shipped with 1.6.1's what's-new (the Apple notes were written, the fastlane changelogs
+      # forgotten) and re-uploading an identical bundle just to fix text is absurd.
+      listing_only_version_code:
+        description: "Notes-only: push fastlane metadata/changelogs to this released versionCode (skips build+upload entirely)"
+        required: false
+        default: ""
       # ── Manual Play-track override (see docs/STORE-AUTOPUBLISH.md "Promoting to production").
       # A `v*` tag NEVER reads these — the TAG decides its channel: `-rc.N` goes to testers,
       # a plain tag goes to production. This is for the off-schedule case: re-uploading the current
@@ -542,3 +550,31 @@ jobs:
             --skip_upload_aab true \
             --skip_upload_changelogs true \
             --changes_not_sent_for_review false
+
+  # Notes-only lane — see the listing_only_version_code input.
+  play-listing:
+    if: github.event_name == 'workflow_dispatch' && inputs.listing_only_version_code != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Push listing metadata + changelogs (no build)
+        env:
+          SUPPLY_JSON_KEY_DATA: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          VC: ${{ inputs.listing_only_version_code }}
+        run: |
+          set -euo pipefail
+          command -v fastlane >/dev/null || sudo gem install fastlane --no-document
+          # default.txt is the per-locale what's-new; supply keys changelogs to the versionCode,
+          # so stage each default.txt as <versionCode>.txt for the release being edited.
+          for d in android/fastlane/metadata/android/*/changelogs; do
+            [ -f "$d/default.txt" ] && cp "$d/default.txt" "$d/$VC.txt"
+          done
+          fastlane supply \
+            --json_key_data "$SUPPLY_JSON_KEY_DATA" \
+            --package_name com.blaineam.haven \
+            --metadata_path android/fastlane/metadata/android \
+            --version_code "$VC" \
+            --skip_upload_apk true \
+            --skip_upload_aab true \
+            --skip_upload_images true \
+            --skip_upload_screenshots true

@@ -1,6 +1,6 @@
-1.6.1 — Haven ora è gratis. E l'ondata di stabilità.
-• Gratis ovunque: niente pubblicità, tracciamento, abbonamenti o acquisti in‑app.
-• Risolta la biforcazione delle chiavi che impediva ai membri di leggere i nuovi post; un dispositivo indietro si riallinea da solo.
-• Le modifiche ai membri richiedono secondi, non minuti.
-• Satellite e pochi dati: passa un'anteprima minuscola, la foto completa arriva con la copertura.
-• Risolti crash del selettore di cerchie, foto storte e posizioni offline.
+1.7.0 — Chiamate affidabili.
+• Rispondere ha sempre effetto — le chiamate non si connettono più "sotto" la schermata di chiamata.
+• "Connesso" appare solo quando l'altro lato ha davvero risposto.
+• Le chiamate senza risposta terminano dopo un minuto — basta chiamate fantasma.
+• Emoji e foto dei contatti ora compaiono nelle chiamate.
+• Include la stabilità 1.6.1: fork delle chiavi risolto, modifiche ai membri più rapide.

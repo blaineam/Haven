@@ -1,6 +1,6 @@
-1.6.1 — O Haven agora é grátis. E a onda de estabilidade.
-• Grátis em todo lugar — sem anúncios, rastreamento, assinatura ou compras no app.
-• Corrigida a bifurcação de chaves que deixava membros sem ler as novas publicações; um aparelho atrasado se atualiza sozinho.
-• Mudanças de membros levam segundos, não minutos.
-• Satélite e poucos dados: uma prévia minúscula passa; a foto completa chega com cobertura.
-• Corrigidos a falha do seletor de círculos, fotos de lado e localizações offline.
+1.7.0 — Chamadas confiáveis.
+• Atender sempre funciona — chamadas não se conectam mais "por baixo" da tela de chamada.
+• "Conectado" só aparece quando o outro lado realmente atendeu.
+• Chamadas não atendidas terminam após um minuto — chega de chamadas fantasmas.
+• Emojis e fotos dos contatos aparecem nas chamadas.
+• Inclui a estabilidade 1.6.1: fork de chaves corrigido, mudanças de integrantes mais rápidas.

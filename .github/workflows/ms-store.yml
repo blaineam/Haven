@@ -32,7 +32,7 @@ jobs:
       - name: Submit listing + package to the Microsoft Store
         run: |
           set -euo pipefail
-          VERSION=$(grep -m1 'MARKETING_VERSION' apple/project.yml | sed 's/[^0-9.]*//g')
+          VERSION=$(grep -m1 'MARKETING_VERSION:' apple/project.yml | sed 's/[^0-9.]*//g')   # colon = the assignment, not the $(MARKETING_VERSION) reference above it
           MSIX=$(find out -name '*.msix' | head -1)
           [ -n "$MSIX" ] || { echo '::error::no .msix in the desktop-windows artifact'; exit 1; }
           echo "submitting $MSIX as $VERSION"

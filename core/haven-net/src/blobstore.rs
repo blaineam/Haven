@@ -2127,6 +2127,19 @@ impl BlobClient {
         })
     }
 
+    /// Drop (and close) the cached connection after a failed op. On an ASYMMETRICALLY dead path
+    /// — inbound keep-alives still arrive, our outbound goes into a void — `close_reason()` stays
+    /// `None` forever, so the reuse check in `conn()` keeps handing every retry the same doomed
+    /// connection and every op burns its full timeout. Evicting on failure makes the next op
+    /// re-dial (the dial-cooldown machinery still rate-limits a truly dead relay). App-level
+    /// refusals (Forbidden) skip this: the connection demonstrably works.
+    async fn evict_conn_after_failure(&self) {
+        let mut guard = self.conn.lock().await;
+        if let Some(c) = guard.take() {
+            c.close(0u32.into(), b"op-failed");
+        }
+    }
+
     /// Return the ONE warm connection to `dest`, reusing it if still open, else dialing (and caching) a
     /// fresh one. Reusing avoids a cold dial per get/put — the connection storm that broke cross-NAT media.
     async fn conn(&self) -> Result<Connection> {
@@ -2264,12 +2277,18 @@ impl BlobClient {
         if body.len() as u64 > MAX_BLOB {
             bail!("blob too large");
         }
-        match self.put_once(key, body).await {
+        let out = match self.put_once(key, body).await {
             Err(e) if is_forbidden(&e) && self.recover_forbidden(key).await => {
                 self.put_once(key, body).await
             }
             other => other,
+        };
+        if let Err(e) = &out {
+            if !is_forbidden(e) {
+                self.evict_conn_after_failure().await;
+            }
         }
+        out
     }
 
     async fn put_once(&self, key: &str, body: &[u8]) -> Result<()> {
@@ -2292,7 +2311,7 @@ impl BlobClient {
 
     /// Fetch the (sealed) blob at `key`, or `None` if the relay doesn't have it.
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        with_timeout("get", async {
+        let out = with_timeout("get", async {
             let conn = self.conn().await?;
             let (mut send, mut recv) = conn.open_bi().await.ah()?;
             write_header(&mut send, VERB_GET, key).await?;
@@ -2305,7 +2324,13 @@ impl BlobClient {
                 Ok(Some(bytes))
             }
         })
-        .await
+        .await;
+        if let Err(e) = &out {
+            if !is_forbidden(e) {
+                self.evict_conn_after_failure().await;
+            }
+        }
+        out
     }
 
     /// Existence check for `key`.

@@ -3660,11 +3660,26 @@ object HavenNet : InboundListener {
         // daily, a relay-only peer could otherwise pull this event long before the commit that opens
         // it (it would sit in their pending-epoch buffer). Cheap — the commit is cached until the
         // epoch/recipient set changes, and the persisted seen-set dedupes the re-upload. iOS parity.
+        // RETRY until the envelope actually LANDS somewhere durable (field bug: one failed
+        // attempt — every relay in backoff, or a dead URL — stranded the event until the next
+        // launch's backfill; the author had to restart the app for peers to see it). Bounded
+        // backoff, ~10 min worst case; attempts are idempotent (content-addressed keys +
+        // per-(relay,key) seen skip). Desktop/iOS parity.
         scope.launch {
-            for (head in runCatching { social.exportEpochHead(circleId) }.getOrDefault(emptyList())) {
-                uploadEvent(circleId, head)
+            var delaySecs = 5L
+            while (true) {
+                var ok = true
+                for (head in runCatching { social.exportEpochHead(circleId) }.getOrDefault(emptyList())) {
+                    ok = uploadEvent(circleId, head) && ok
+                }
+                ok = uploadEvent(circleId, env) && ok
+                if (ok || delaySecs > 300) {
+                    if (!ok) Log.i(TAG, "uploadEvent: giving up live retries for an authored event in ${circleId.take(16)} — daily backfill will carry it")
+                    break
+                }
+                kotlinx.coroutines.delay(delaySecs * 1000)
+                delaySecs *= 3
             }
-            uploadEvent(circleId, env)
         }
         // Push leg (Apple PushManager.wake/syncSelf parity): the blind worker forwards a banner
         // SEALED + SIGNED to each recipient (their NSE decrypts and verifies it really came from
@@ -4879,13 +4894,16 @@ object HavenNet : InboundListener {
     }
 
     /** Drop a sealed event into the circle's mailbox (Haven relay node and/or S3 pre-signed pool). */
-    private suspend fun uploadEvent(circleId: String, env: ByteArray) {
+    private suspend fun uploadEvent(circleId: String, env: ByteArray): Boolean {
         // Skip anything already confirmed in a mailbox: envelopes re-seal deterministically now, so
         // a backfill reproduces the same content-addressed key and the persisted seen-set makes the
         // whole re-upload a no-op instead of a network sweep (and, before determinism, a fresh
         // mailbox entry per event per run — the bloat behind the slow cold start).
         val key = mailboxKey(circleId, env)
         ensureSeenMailboxLoaded()
+        // Landed once = durable (content-addressed; the global key mark is set only on success) —
+        // without this a retry pass re-checking an already-landed envelope would misreport failure.
+        if (seenMailbox.contains(key)) return true
         var landed = false
         // S3 pre-signed pool (the BYO-bucket path many circles use).
         if (Presign.hasBootstrap(circleId)) {
@@ -4916,7 +4934,7 @@ object HavenNet : InboundListener {
         // and never reached the relay a peer actually polls -- their copy of every event sealed
         // under that epoch buffered in pending_epoch forever (the content blackout's sender half).
         val unlanded = relayHexes.filter { !seenMailbox.contains("put:$it|$key") }
-        if (relayHexes.isNotEmpty() && unlanded.isEmpty()) return
+        if (relayHexes.isNotEmpty() && unlanded.isEmpty()) return true
         for (nodeHex in unlanded) {
             // S3-bucket relay (store-and-forward): PUT the sealed blob straight into the bucket via the
             // direct S3 FFI using the device-local creds (StorageStore). Content-addressed key.
@@ -4970,6 +4988,7 @@ object HavenNet : InboundListener {
             }
         }
         if (landed) markMailboxSeen(key)
+        return landed
     }
 
     /** Re-upload every post I authored in a circle (for members who were offline when I posted).

@@ -4061,11 +4061,29 @@ impl Engine {
             // (it would sit in their pending-epoch buffer until the next full backfill). Cheap —
             // the commit is cached until the epoch/recipient set changes, and the persisted
             // seen-set dedupes the re-upload. iOS/Android parity.
-            for head in me.social.export_epoch_head(cid.clone()) {
-                me.upload_event(&cid, &head).await;
+            //
+            // RETRY until the envelope actually LANDS somewhere durable (field bug: one failed
+            // attempt — every relay in backoff, or a marked-bad URL — stranded the event until the
+            // next launch's backfill; the author had to restart the app for peers to see it).
+            // Bounded backoff, ~10 min worst case; every attempt is idempotent (content-addressed
+            // keys + per-(relay,key) seen skip), and the daily backfill stays the deep backstop.
+            let mut delay_secs = 5u64;
+            loop {
+                let mut ok = true;
+                for head in me.social.export_epoch_head(cid.clone()) {
+                    ok &= me.upload_event(&cid, &head).await;
+                }
+                ok &= me.upload_event(&cid, &env).await;
+                me.flush_seen_mailbox();
+                if ok || delay_secs > 300 {
+                    if !ok {
+                        log::info!("upload_event: giving up live retries for an authored event in {} — daily backfill will carry it", &cid.chars().take(16).collect::<String>());
+                    }
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                delay_secs *= 3;
             }
-            me.upload_event(&cid, &env).await;
-            me.flush_seen_mailbox();
         });
     }
 
@@ -7566,8 +7584,14 @@ impl Engine {
         Some(client)
     }
 
-    async fn upload_event(self: &Arc<Self>, circle_id: &str, env: &[u8]) {
+    async fn upload_event(self: &Arc<Self>, circle_id: &str, env: &[u8]) -> bool {
         let key = Self::mailbox_key(circle_id, env);
+        // Landed once = durable (content-addressed; the global key mark is set only on success).
+        // Without this, a retry pass re-checking an ALREADY-landed envelope sees every relay
+        // seen-filtered away and would misreport failure.
+        if self.dyn_state.lock().seen_mailbox.contains(&key) {
+            return true;
+        }
         let mut landed = false;
         // 1) Mirror to EVERY configured Haven relay (redundancy). Content-addressed keys make
         //    re-puts idempotent, and a relay in backoff is skipped — graceful fallback.
@@ -7683,6 +7707,7 @@ impl Engine {
         if landed {
             self.mark_mailbox_seen(key);
         }
+        landed
     }
 
     async fn backfill_mailbox(self: &Arc<Self>, circle_id: &str) {

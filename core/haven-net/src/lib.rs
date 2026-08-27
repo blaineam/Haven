@@ -526,11 +526,48 @@ impl Node {
     }
 
     /// Send a payload to a peer address (reusing a live connection if one exists).
+    ///
+    /// Delivery watchdog: `finish()` only closes OUR side — on an asymmetrically dead path
+    /// (inbound keep-alives arrive, our outbound goes into a void, so the 30s idle timeout never
+    /// fires) every call here "succeeds" into local QUIC buffers forever, which is how an app
+    /// could author posts/reactions all day that nobody received until a relaunch replaced the
+    /// endpoint. `stopped()` yields `None` once the peer ACKNOWLEDGES all stream data — a real
+    /// transport-level delivery signal — so a stream that is neither acked nor errored within the
+    /// window marks the cached connection dead and the NEXT send re-dials instead of feeding the
+    /// black hole. Eviction is by `stable_id` so a newer, healthy connection is never removed.
     pub async fn send(&self, to: EndpointAddr, payload: &[u8]) -> Result<()> {
+        let peer = to.id;
         let conn = self.conn_for(to).await?;
         let mut s = conn.open_uni().await.ah()?;
         s.write_all(payload).await.ah()?;
         s.finish().ah()?;
+        let conns = self.conns.clone();
+        let watched = conn.clone();
+        tokio::spawn(async move {
+            let acked = tokio::time::timeout(std::time::Duration::from_secs(20), s.stopped()).await;
+            match acked {
+                Ok(Ok(_)) => {} // acked (None) or peer-stopped (Some) — either way the path answered
+                Ok(Err(_)) | Err(_) => {
+                    let evicted = {
+                        let mut m = lock(&conns);
+                        match m.get(&peer) {
+                            Some(c) if c.stable_id() == watched.stable_id() => {
+                                m.remove(&peer);
+                                true
+                            }
+                            _ => false,
+                        }
+                    };
+                    if evicted {
+                        println!(
+                            "send watchdog: no ack from {} in 20s — evicting cached connection (next send re-dials)",
+                            hex(peer.as_bytes())
+                        );
+                        watched.close(0u32.into(), b"send-unacked");
+                    }
+                }
+            }
+        });
         Ok(())
     }
 

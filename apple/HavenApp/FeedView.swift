@@ -690,6 +690,13 @@ final class FeedStore: ObservableObject {
             Task { await BackgroundUploader.shared.flush() }
         }
         ScheduledStore.shared.start()   // one-shot arm only if anything is queued; cheap when empty
+        // A real network-path transition (Wi-Fi↔cellular, VPN toggle, sleep/wake) strands every
+        // live lane on dead sockets and leaves relay/blob backoffs grown against the old path —
+        // with the DERP set unchanged, nothing recovered until the user relaunched the app.
+        NotificationCenter.default.addObserver(forName: LowDataMonitor.pathChangedNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.noteNetworkPathChanged() }
+        }
     }
 
     /// Once a day: re-assert everything I authored — upload anything a mailbox never saw AND
@@ -2165,11 +2172,40 @@ final class FeedStore: ObservableObject {
         }
     }
 
+    /// The network path changed (interface set or reachability flipped — LowDataMode's monitor).
+    /// A path change strands everything in-flight: cached iroh connections keep accepting writes
+    /// into a black hole, relay/blob backoffs grew against the OLD path, and the DERP set is
+    /// unchanged so the fabric rebind never fires. Reset the failure state and force one rebind —
+    /// the same recovery an app relaunch performs, which is what users had resorted to ("my posts
+    /// and reactions don't reach anyone until I restart Haven").
+    private var pathChangeRebindPending = false
+    func noteNetworkPathChanged() {
+        guard node != nil, !pathChangeRebindPending else { return }
+        pathChangeRebindPending = true
+        HavenLog.net("network path changed — scheduling transport rebind + backoff reset")
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)   // let the new path settle
+            pathChangeRebindPending = false
+            RelayHealth.shared.resetBackoffs()
+            SharedStore.clearAllHttpUrlBad()
+            await rebindTransportForFabric(force: true)
+            // The rebind re-announces + re-syncs; the uploader drains anything the wedged
+            // session stranded (authored events already persist in its queue).
+            await BackgroundUploader.shared.flush()
+        }
+    }
+
     /// Stop messaging node cleanly, re-apply fabric, start again, re-attach relay host if needed.
-    private func rebindTransportForFabric() async {
+    /// `force` skips the same-DERP-set guard: a NETWORK PATH CHANGE (Wi-Fi↔cellular, sleep/wake,
+    /// router reboot) kills every socket under the endpoint without changing the DERP set, which
+    /// is exactly the wedge where all send lanes no-op until an app relaunch. The forced rebind IS
+    /// the relaunch, minus the relaunch.
+    private func rebindTransportForFabric(force: Bool = false) async {
         guard !fabricRebindInFlight else { return }
         let target = RelayMailboxStore.shared.allDerpUrls().sorted()
-        guard !target.isEmpty, target != fabricBoundUrls else { return }
+        if !force {
+            guard !target.isEmpty, target != fabricBoundUrls else { return }
+        }
         fabricRebindInFlight = true
         defer { fabricRebindInFlight = false }
         HavenLog.net("fabric rebind starting…")
@@ -3621,11 +3657,16 @@ final class FeedStore: ObservableObject {
         IncompleteInterestStore.shared.note(missing: missing, postId: postId, circleId: cid, circleName: name)
     }
 
-    func comment(_ id: String, _ body: String, _ media: [String] = []) {
+    func comment(_ id: String, _ body: String, _ rawMedia: [String] = []) {
+        // Same media treatment as post/sendMessage: markers so previews/thumbs exist, and
+        // enqueueAuthoredMedia so the BLOB reaches the relay — a photo/voice reply used to be
+        // announced while its bytes were never queued for backup anywhere.
+        let media = withPreviewMarkers(withThumbMarkers(rawMedia))
         guard let social, let env = try? social.comment(circleId: activeCircleId, target: id, body: body, media: media, createdAt: now()) else { return }
         let cid = activeCircleId
         let name = circles.first(where: { $0.id == cid })?.name ?? "your circle"
         broadcastEvent(cid, env, banner: .forComment(body: body, circleId: cid, circleName: name, postId: id))
+        enqueueAuthoredMedia(media, circleId: cid, social: social)
         noteInterestIfIncomplete(id)
         refresh()
     }
@@ -3653,10 +3694,13 @@ final class FeedStore: ObservableObject {
         broadcastEvent(circleId, env, silent: true); reactionTick += 1; refresh()
     }
     /// Comment on a post in a specific circle (used by the deep-link post viewer).
-    func commentMessage(in circleId: String, _ id: String, _ body: String, _ media: [String] = []) {
+    func commentMessage(in circleId: String, _ id: String, _ body: String, _ rawMedia: [String] = []) {
+        let media = withPreviewMarkers(withThumbMarkers(rawMedia))
         guard let social, let env = try? social.comment(circleId: circleId, target: id, body: body, media: media, createdAt: now()) else { return }
         let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
-        broadcastEvent(circleId, env, banner: .forComment(body: body, circleId: circleId, circleName: name, postId: id)); refresh()
+        broadcastEvent(circleId, env, banner: .forComment(body: body, circleId: circleId, circleName: name, postId: id))
+        enqueueAuthoredMedia(media, circleId: circleId, social: social)
+        refresh()
     }
     /// Auto-save freshly-received media to Photos (Haven ▸ Received) when "Save to Photos" is on.
     func autoSaveReceived(_ ref: String) {

@@ -392,19 +392,25 @@ pub fn post_story(engine: Eng, body: String, media: Option<String>, music: Optio
     engine.post_story(DEFAULT_CIRCLE.to_string(), body, media, music.map(|m| m.into_ffi()));
 }
 
+// Interactions get the same empty-circle normalization as `post` — without it an empty
+// `circleId` makes the core's author() return Err("unknown circle"), which the engine's
+// `if let Ok(env)` swallows with no store, no broadcast, and no log.
 #[tauri::command]
 pub fn comment(engine: Eng, circle_id: String, target: String, body: String) {
-    engine.comment(circle_id, target, body);
+    let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
+    engine.comment(cid, target, body);
 }
 
 #[tauri::command]
 pub fn react(engine: Eng, circle_id: String, target: String, emoji: String) {
-    engine.react(circle_id, target, emoji);
+    let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
+    engine.react(cid, target, emoji);
 }
 
 #[tauri::command]
 pub fn unreact(engine: Eng, circle_id: String, target: String, emoji: String) {
-    engine.unreact(circle_id, target, emoji);
+    let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
+    engine.unreact(cid, target, emoji);
 }
 
 #[tauri::command]

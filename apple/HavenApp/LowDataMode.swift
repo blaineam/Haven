@@ -63,17 +63,34 @@ final class LowDataMonitor: ObservableObject {
         preference = Preference(rawValue: raw ?? 0) ?? .automatic
     }
 
+    /// Posted when the PATH ITSELF changes (interface set / reachability), not just its
+    /// constraint level. FeedStore listens and force-rebinds the transport: a path change kills
+    /// every socket under the iroh endpoint while the DERP set — the only thing that used to
+    /// trigger a rebind — stays identical, wedging all delivery until an app relaunch.
+    static let pathChangedNotification = Notification.Name("haven.networkPathChanged")
+    private var pathSignature: String?
+
     /// Begin watching. Idempotent; safe to call from app launch.
     func start() {
         monitor.pathUpdateHandler = { [weak self] path in
             let detected = Self.classify(path)
             let quality = Self.qualityDescription(path)
-            Task { @MainActor in self?.apply(detected: detected, quality: quality) }
+            let signature = Self.signature(path)
+            Task { @MainActor in self?.apply(detected: detected, quality: quality, signature: signature) }
         }
         monitor.start(queue: queue)
         // Seed from the current path so the first send before any callback isn't misclassified.
         apply(detected: Self.classify(monitor.currentPath),
-              quality: Self.qualityDescription(monitor.currentPath))
+              quality: Self.qualityDescription(monitor.currentPath),
+              signature: Self.signature(monitor.currentPath))
+    }
+
+    /// A stable fingerprint of the path: which interfaces, and whether it works at all. Wi-Fi ↔
+    /// cellular, VPN up/down, sleep/wake and router reboots all change it; constraint-level
+    /// changes alone do not.
+    nonisolated private static func signature(_ path: NWPath) -> String {
+        let ifaces = path.availableInterfaces.map { "\($0.type)#\($0.name)" }.sorted().joined(separator: ",")
+        return "\(path.status)|\(ifaces)"
     }
 
     /// Map a path to the constraint level it deserves.
@@ -100,9 +117,15 @@ final class LowDataMonitor: ObservableObject {
         }
     }
 
-    private func apply(detected: LinkConstraint, quality: String?) {
+    private func apply(detected: LinkConstraint, quality: String?, signature: String) {
         self.detected = detected
         self.linkQualityDescription = quality
+        // Fire the path-change notification only on a REAL transition (never the seed call —
+        // launch already does a full transport start, a rebind on top would race it).
+        if let prev = pathSignature, prev != signature {
+            NotificationCenter.default.post(name: Self.pathChangedNotification, object: nil)
+        }
+        pathSignature = signature
         recompute()
     }
 

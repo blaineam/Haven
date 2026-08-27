@@ -19,6 +19,18 @@ final class BackgroundUploader {
     private let maxQueued = 200
     private var queue: [Pending]
     private var flushing = false
+    /// Re-arm state. Two bugs lived here (field-reported as "my posts/reactions don't reach
+    /// anyone until I relaunch the app"): (1) `enqueue` during an in-flight flush bounced off the
+    /// `flushing` guard, so anything authored inside another upload's network round-trip — every
+    /// reaction burst — sat queued with NOTHING scheduled to send it; (2) a failed upload had no
+    /// retry timer at all, so one relay hiccup stranded the event until the next launch /
+    /// scene-phase / BGRefresh trigger. Now every pass that ends with work left (or work that
+    /// arrived mid-pass) schedules the next pass itself, with capped backoff. Uploads are
+    /// idempotent (content-addressed keys), so the worst a retry can do is a no-op.
+    private var enqueuedWhileFlushing = false
+    private var retryTask: Task<Void, Never>?
+    private var backoffSecs: UInt64 = 3
+    private let backoffCapSecs: UInt64 = 120
 
     private init() {
         if let data = UserDefaults.standard.data(forKey: key),
@@ -49,7 +61,22 @@ final class BackgroundUploader {
         queue.append(Pending(circleId: circleId, env: env))
         if queue.count > maxQueued { queue.removeFirst(queue.count - maxQueued) }
         save()
-        Task { await flush() }
+        backoffSecs = 3   // fresh user action: retry eagerly again even if we'd backed off
+        if flushing {
+            enqueuedWhileFlushing = true   // the running pass re-arms on exit; the guard would eat this Task
+        } else {
+            Task { await flush() }
+        }
+    }
+
+    /// Schedule the next flush attempt. One timer at a time — a newer schedule replaces the old.
+    private func scheduleRetry(after secs: UInt64) {
+        retryTask?.cancel()
+        retryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: secs * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.flush()
+        }
     }
 
     /// Upload everything still pending, holding a background-task assertion so it can finish
@@ -94,6 +121,22 @@ final class BackgroundUploader {
         let newlyAdded = queue.count > work.count ? Array(queue.suffix(queue.count - work.count)) : []
         queue = stillPending + newlyAdded
         save()
+
+        // Re-arm. This is what turns one-shot best-effort into "keeps trying until it's in the
+        // relay": mid-pass arrivals go again immediately; failures go again on capped backoff.
+        let hadMidPassArrivals = enqueuedWhileFlushing || !newlyAdded.isEmpty
+        enqueuedWhileFlushing = false
+        if hadMidPassArrivals && !queue.isEmpty {
+            backoffSecs = 3
+            scheduleRetry(after: 0)
+        } else if !stillPending.isEmpty {
+            HavenLog.sync("uploader: \(stillPending.count) event(s) still pending — retrying in \(backoffSecs)s")
+            scheduleRetry(after: backoffSecs)
+            backoffSecs = min(backoffSecs * 2, backoffCapSecs)
+        } else {
+            backoffSecs = 3
+            retryTask?.cancel(); retryTask = nil
+        }
     }
 
     private func save() {

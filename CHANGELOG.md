@@ -9,6 +9,42 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed — authored content no longer waits for an app relaunch to reach anyone
+
+Field report: posts and reactions/comments authored on a device sometimes reached nobody until
+the AUTHOR closed and relaunched Haven. Root cause was structural: every authored event got
+exactly one best-effort attempt on each delivery lane and no per-event retry — all recovery was
+bulk re-asserts that a relaunch (and little else) re-arms. Five fixes, all platforms where they
+apply:
+
+- **Apple mailbox outbox actually retries.** `BackgroundUploader` had two wedges: an event
+  enqueued while a flush was in flight was kept but NOTHING was scheduled to send it (every
+  reaction burst hit this), and a failed upload had no retry timer at all — both waited for the
+  next launch/scene-phase/BGRefresh. Every pass now re-arms itself: immediately for work that
+  arrived mid-pass, capped exponential backoff (3s→2min) for failures.
+- **Network path changes now recover the transport instead of wedging it.** Wi-Fi↔cellular, VPN
+  toggles, sleep/wake and router reboots kill every socket under the iroh endpoint while leaving
+  the DERP set — the only thing that used to trigger a rebind — unchanged; relay/blob backoffs
+  (up to 30 min) had all grown against the dead path. A real path transition now resets the
+  backoff state and forces the same transport rebind + re-announce + re-sync an app relaunch
+  performs. (Apple; desktop/Android port next wave.)
+- **Asymmetric black-hole detection in core (all platforms).** On a path where inbound
+  keep-alives arrive but outbound vanishes, QUIC's idle timeout never fires and `send()`
+  "succeeded" into local buffers forever. `send` now watches `stopped()` — the transport-level
+  delivery ack — and evicts the cached connection after 20s without one, so the next send
+  re-dials. The blob/mailbox client likewise drops its cached connection after a failed put/get
+  instead of feeding every retry to the same doomed connection.
+- **Desktop authored-event uploads retry until they land.** `upload_event` now reports whether
+  the envelope reached ANY durable mailbox, and the author path retries with backoff (~10 min
+  worst case) instead of stranding the event until the next launch's daily backfill.
+- **Desktop interaction commands no longer vanish on an empty circle id.** `comment`/`react`/
+  `unreact` now get the same DEFAULT_CIRCLE normalization as `post` (an empty id made the core
+  return an error the engine silently swallowed). Apple comments with media also gain the same
+  preview/thumb markers + relay blob backup as posts (a photo reply's bytes were never queued).
+
+QA: the e2e `react`/`comment` steps now author from EVERY leg (iOS/Android were never reaction
+authors — a broken send path there was invisible) and converge in parallel.
+
 ### Changed
 - **Haven is free.** The $9.99 one-time price is gone on the App Store (set via
   `rocket price Haven`), and the website, README, App Store promotional text (en-US + 8

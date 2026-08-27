@@ -41,7 +41,12 @@ if [[ "${E2E_FRESH:-1}" != "0" ]]; then
   rm -f "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Preferences/com.blaineam.kith.qa.stub.plist" 2>/dev/null || true
   defaults delete com.blaineam.kith.qa.stub 2>/dev/null || true
   rm -rf "$DATA_DIR" 2>/dev/null || true
-  SIM_FRESH="${HAVEN_IOS_UDID:-$(xcrun simctl list devices booted 2>/dev/null | grep -oE '[A-F0-9-]{36}' | head -1)}"
+  SIM_FRESH="${HAVEN_IOS_UDID:-$(xcrun simctl list devices booted 2>/dev/null | grep -oE '[A-F0-9-]{36}' | head -1 || true)}"
+  if [[ -z "$SIM_FRESH" ]]; then
+    log "ERROR: no booted iOS simulator (and no HAVEN_IOS_UDID) — boot one first: xcrun simctl boot <udid>"
+    log "       (under pipefail this used to kill the script at the assignment with no message at all)"
+    exit 1
+  fi
   if [[ -n "$SIM_FRESH" ]]; then
     xcrun simctl terminate "$SIM_FRESH" "$IOS_BUNDLE" 2>/dev/null || true
     xcrun simctl uninstall "$SIM_FRESH" "$IOS_BUNDLE" 2>/dev/null || true

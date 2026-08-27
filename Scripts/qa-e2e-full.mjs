@@ -733,20 +733,34 @@ async function main() {
     const reactors = audienceFor(true);
     if (target) {
       if (STEPS.includes('react')) {
-        if (reactors.includes('stub')) await op(devices.stub, { op: 'react', target_id: target, emoji: '❤️' });
-        await op(devices.desktop, { op: 'react', target_id: target, emoji: '🔥' });
-        for (const d of reactors)
-          perfGate('reactions converge', d, await converge(devices[d], (j) => {
+        // INTERACTION AUTHOR MATRIX — every leg authors a distinct emoji on the same post and
+        // every OTHER leg must see it arrive LIVE (nothing in this harness restarts a client
+        // mid-run, so convergence here is exactly the field bug "reactions don't sync until
+        // the app is relaunched"). stub+desktop were the only reaction authors for months; a
+        // broken iOS/Android reaction SEND path was invisible — same gap the post matrix at
+        // the content-author-matrix block closed for posts.
+        const emojiOf = { stub: '❤️', desktop: '🔥', ios: '👍', android: '🎉' };
+        for (const author of ['stub', 'desktop', 'ios', 'android']) {
+          if (!devices[author] || !reactors.includes(author)) continue;
+          await op(devices[author], { op: 'react', target_id: target, emoji: emojiOf[author] });
+          await convergeAll(reactors.filter((x) => x !== author), (j) => {
             const p = j.posts?.find((x) => x.id === target);
-            return p && (reactors.includes('stub') ? (p.reactions?.['❤️'] || 0) >= 1 : true)
-              && (p.reactions?.['🔥'] || 0) >= 1;
-          }, BUDGET.text * 2));
+            return p && (p.reactions?.[emojiOf[author]] || 0) >= 1;
+          }, BUDGET.text * 2, `reaction live-syncs [${author}→all]`);
+        }
       }
-      if (STEPS.includes('comment') && reactors.includes('stub')) {
-        await op(devices.stub, { op: 'comment', target_id: target, body: `${MARKER}_CmtB` });
-        for (const d of reactors)
-          perfGate('comment converges', d, await converge(devices[d], (j) =>
-            j.posts?.find((x) => x.id === target)?.comments?.some((c) => c.body === `${MARKER}_CmtB`), BUDGET.text * 2));
+      if (STEPS.includes('comment')) {
+        if (reactors.includes('stub')) {
+          await op(devices.stub, { op: 'comment', target_id: target, body: `${MARKER}_CmtB` });
+          await convergeAll(reactors.filter((x) => x !== 'stub'), (j) =>
+            j.posts?.find((x) => x.id === target)?.comments?.some((c) => c.body === `${MARKER}_CmtB`),
+            BUDGET.text * 2, 'comment live-syncs [stub→all]');
+        }
+        // iOS-authored comment on own post — the reverse direction was never exercised.
+        await op(devices.ios, { op: 'comment', target_id: target, body: `${MARKER}_CmtA` });
+        await convergeAll(reactors.filter((x) => x !== 'ios'), (j) =>
+          j.posts?.find((x) => x.id === target)?.comments?.some((c) => c.body === `${MARKER}_CmtA`),
+          BUDGET.text * 2, 'comment live-syncs [ios→all]');
       }
     }
   }

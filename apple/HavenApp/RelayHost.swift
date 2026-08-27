@@ -1968,6 +1968,19 @@ final class RelayHealth: ObservableObject {
         objectWillChange.send()
     }
     func forget(_ nodeHex: String) { byNode[nodeHex] = nil; objectWillChange.send() }
+
+    /// Zero every backoff window (keep proof-of-life stamps). For a NETWORK PATH CHANGE: the
+    /// failures that grew these windows were failures of the OLD path — carrying a 5-minute
+    /// cool-off across an interface switch is how authored events stayed stranded until an app
+    /// relaunch (relaunch resets this map by virtue of being in-memory; this makes a path change
+    /// do the same without the relaunch).
+    func resetBackoffs() {
+        for k in byNode.keys {
+            byNode[k]?.fails = 0
+            byNode[k]?.nextRetryMs = 0
+        }
+        objectWillChange.send()
+    }
 }
 
 /// Caches connected `RelayClient`s by relay node id (connecting is async + reusable). Skips a relay

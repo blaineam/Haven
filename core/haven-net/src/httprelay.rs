@@ -391,6 +391,21 @@ async fn handle_conn(
                         },
                         None => respond(&mut w, 403, "forbidden", keep_alive, b"").await?,
                     }
+                } else if key.starts_with(crate::blobstore::INVITE_PREFIX) {
+                    // Invite blobs: un-gated by membership (the token path is the capability),
+                    // structurally verified before storing — the same contract as the iroh path.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    if crate::blobstore::verify_invite_put(&key, &body, now) {
+                        match local_put(root, &key, &body) {
+                            Ok(()) => respond(&mut w, 200, "OK", keep_alive, b"OK").await?,
+                            Err(_) => respond(&mut w, 500, "write failed", keep_alive, b"").await?,
+                        }
+                    } else {
+                        respond(&mut w, 403, "forbidden", keep_alive, b"").await?;
+                    }
                 } else if let Some(acct) = key.strip_prefix(DEVROSTER_PREFIX) {
                     match verify_devroster_put(root, acct, &body) {
                         DevrosterPut::Store { account, devices, revoked } => {

@@ -298,6 +298,7 @@ pub mod multidevice;
 
 /// `pub` so the desktop backend can call the shared seed-drop S4 enrollment codec directly.
 pub mod enroll;
+pub mod friend_invite;
 
 /// Android only: receive the app's `Context` (and, via it, the `JavaVM`) from Kotlin and hand
 /// both to `ndk-context`. iroh's TLS stack (rustls platform verifier) reads the system trust

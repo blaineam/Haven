@@ -56,8 +56,13 @@ jobs:
           s=re.sub(r'"version": "[0-9.]+",', f'"version": "{v}",', s, count=1); open(p,'w').write(s)
           p='apple/project.yml'; s=open(p).read()
           s=re.sub(r'MARKETING_VERSION: "[0-9.]+"', f'MARKETING_VERSION: "{v}"', s); open(p,'w').write(s)
-          p='apple/Haven.xcodeproj/project.pbxproj'; s=open(p).read()
-          s=re.sub(r'MARKETING_VERSION = [0-9.]+;', f'MARKETING_VERSION = {v};', s); open(p,'w').write(s)
+          # The pbxproj is xcodegen-generated and gitignored — absent in CI checkouts. project.yml
+          # is the source of truth (XCC's ci_post_clone regenerates the project from it).
+          import os
+          p='apple/Haven.xcodeproj/project.pbxproj'
+          if os.path.exists(p):
+              s=open(p).read()
+              s=re.sub(r'MARKETING_VERSION = [0-9.]+;', f'MARKETING_VERSION = {v};', s); open(p,'w').write(s)
           print("stamped", v)
           PY
           git config user.name "github-actions[bot]"

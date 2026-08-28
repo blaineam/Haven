@@ -141,8 +141,13 @@ fieldRow.get('ReleaseNotes')[enIdx] = enMeta.whats_new.slice(0, 1500);
 
 const cap = (v, n) => (v && v.length > n ? v.slice(0, n) : v || '');
 for (const [code] of LOCALES) {
-  hdr.push(code);
-  const col = hdr.length - 1;
+  // A re-export after a previous import already carries the language column — update it in
+  // place; appending again would produce duplicate columns and ambiguous imports.
+  let col = hdr.indexOf(code);
+  if (col < 0) {
+    hdr.push(code);
+    col = hdr.length - 1;
+  }
   const m = metas[code];
   if (!m.whats_new?.startsWith(version)) die(`${code} whats_new does not start with ${version} — stale notes would ship`);
   const put = (field, val) => { const r = fieldRow.get(field); if (r) { while (r.length < col) r.push(''); r[col] = val ?? ''; } else if (val) console.log(`⚠ template has no row "${field}" — skipped for ${code}`); };

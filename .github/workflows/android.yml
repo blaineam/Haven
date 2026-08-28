@@ -60,11 +60,11 @@ on:
       # version to a different track, or a staged rollout. The DEFAULT is `internal`, so a manual
       # run you forget to configure can't publish anything publicly.
       play_track:
-        description: "Google Play track to publish to (manual override; tags decide their own)"
+        description: "Google Play track (auto = let the tag decide: plain tag → production, rc → internal)"
         required: false
-        default: internal
+        default: auto
         type: choice
-        options: [internal, alpha, beta, production]
+        options: [auto, internal, alpha, beta, production]
       play_rollout:
         description: "Staged-rollout fraction 0.0-1.0 for a partial release (blank/1.0 = full). Only for alpha/beta/production."
         required: false
@@ -224,7 +224,7 @@ jobs:
           # The default used to be `internal` for everything, which made shipping a finished release
           # a second, manual act somebody had to remember. The tag already says which kind of build
           # this is — `-rc.N` or not — so it may as well be the thing that decides.
-          if [ "$EVENT" = "workflow_dispatch" ] && [ -n "${IN_TRACK:-}" ]; then
+          if [ "$EVENT" = "workflow_dispatch" ] && [ -n "${IN_TRACK:-}" ] && [ "$IN_TRACK" != "auto" ]; then
             TRACK="$IN_TRACK"
           elif [ -n "${VAR_TRACK:-}" ]; then
             TRACK="$VAR_TRACK"
@@ -268,7 +268,7 @@ jobs:
           # An EXPLICIT dispatch choice stays single-track: asking for production means production,
           # not production plus a surprise. Same for an explicit PLAY_TRACK variable.
           EXTRA=""
-          if [ "$EVENT" != "workflow_dispatch" ] || [ -z "${IN_TRACK:-}" ]; then
+          if [ "$EVENT" != "workflow_dispatch" ] || [ "${IN_TRACK:-auto}" = "auto" ]; then
             if [ -z "${VAR_TRACK:-}" ]; then
               case "$TRACK" in
                 internal) EXTRA="alpha" ;;

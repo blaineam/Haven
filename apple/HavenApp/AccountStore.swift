@@ -12,6 +12,9 @@ import Security
 /// phone) with a one-time transfer code / QR. The seed never touches a Haven server.
 @MainActor
 final class AccountStore: ObservableObject {
+    /// The app's single instance (set at init). For non-View code that needs the account's link
+    /// builders (the QA driver's invite_link op) — Views keep using the @StateObject.
+    static private(set) var qaShared: AccountStore?
     @Published private(set) var account: Account
     /// True when the keychain was unreadable at init (e.g., launched before first unlock):
     /// we use a throwaway identity and DID NOT touch the real seed. `reloadIfTemporary()`
@@ -28,6 +31,7 @@ final class AccountStore: ObservableObject {
     private static let syncDefaultsKey = "haven.icloud.identitySync"
 
     init() {
+        defer { Self.qaShared = self }
         // Seedless devices (S4) hold no account seed. Branch BEFORE the seed-load switch so we never
         // read/generate/save a master seed for them — a seedless first launch must not mint a real
         // identity, and `storedSeed()` below is forced to nil so no seed-holder path ever fires.

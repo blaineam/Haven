@@ -1464,6 +1464,9 @@ final class FeedStore: ObservableObject {
         // what makes "all the history except the media" impossible rather than merely unlikely.
         backfillMailboxMedia(circleIds: ["default"])
         ConnectionsStore.shared.removePending(req.idHex)
+        // If this approval answers a ticketed offline invite, park the grant on my relays so the
+        // acceptor completes the friendship whenever they next come online.
+        FriendInviteStore.shared.noteApproved(accountHex: req.idHex)
         refresh()
     }
 
@@ -2431,6 +2434,8 @@ final class FeedStore: ObservableObject {
     ///   circle_invite|file|music_post|mark_read|dump", …}` — every op answers with a fresh
     ///   `qa-dump.json` next to the drop file.
     private var matrixQaTimer: Timer?
+    /// The ticketed invite link minted by the `invite_link` qa op (exposed via the dump).
+    static var qaInviteLink: String = ""
     /// Successful dump writes, and when the last one landed. See `dump_seq` in the payload.
     nonisolated(unsafe) static var qaDumpSeq: Int = 0
     nonisolated(unsafe) static var qaLastDumpAt = Date.distantPast
@@ -2780,6 +2785,30 @@ final class FeedStore: ObservableObject {
                 HavenLog.net("matrix-qa v2 comment: target not found id=\(target.prefix(16))")
             }
 
+        case "invite_link":
+            // Mint (or reuse) the ticketed invite link and expose it via the dump — the
+            // invite_offline e2e reads it, kills this app, and has the peer accept it.
+            if let acct = AccountStore.qaShared?.account {
+                Self.qaInviteLink = InviteHints.appendQuery(
+                    in: InviteHints.embed(in: acct.havenLink(domain: HavenSite.inviteDomain),
+                                          deviceIds: inviteDeviceIds()),
+                    name: "t",
+                    value: FriendInviteStore.shared.currentTicketLinkValue() ?? "")
+            }
+
+        case "connect_link":
+            let uri = str("uri")
+            if !uri.isEmpty, let f = try? parseLink(s: uri) {
+                ContactsStore.shared.add(name: "Friend", idHex: f.idHex, verificationHex: f.verificationHex)
+                clearCircleRemovalEverywhere(idHex: f.idHex, circleId: "default")
+                recordDeviceHints(accountHex: f.idHex, deviceIds: InviteHints.extract(from: uri))
+                if let tv = InviteHints.queryValue(from: uri, name: "t") {
+                    FriendInviteStore.shared.acceptTicket(linkValue: tv)
+                }
+                syncWithContacts(force: true)
+                HavenLog.net("matrix-qa v2 connect_link: accepted \(f.idHex.prefix(8))")
+            }
+
         case "profile":
             let name = str("name")
             if !name.isEmpty {
@@ -3050,6 +3079,17 @@ final class FeedStore: ObservableObject {
             // to tell a FROZEN dump apart from a device that genuinely received nothing — they are
             // indistinguishable from the file alone, and they need opposite fixes.
             "dump_seq": Self.qaDumpSeq,
+            // Offline friend invites: the minted link (invite_link op) and both state lists, so
+            // the e2e can assert drop-landed / consumed / granted across kills and relaunches.
+            "invite_link": Self.qaInviteLink,
+            "friend_invites": [
+                "issued": FriendInviteStore.shared.issued.map {
+                    ["consumed": $0.consumedAt != nil, "has_acceptor": !($0.acceptorHex ?? "").isEmpty]
+                },
+                "accepted": FriendInviteStore.shared.accepted.map {
+                    ["drop_landed": $0.dropLanded, "granted": $0.granted]
+                },
+            ],
             // What the engine is HOLDING BACK: parked (received-but-unopenable) envelopes per
             // circle, plus the rosters we know. A short feed alone cannot tell "never arrived" from
             // "arrived and could not be opened", and the two have opposite fixes.
@@ -4323,6 +4363,38 @@ final class FeedStore: ObservableObject {
         }
     }
 
+    // MARK: - Offline friend invites (FriendInviteStore glue — same file so the private
+    // hello builder + inbound dispatch stay private)
+
+    /// My full public bundle bytes (what a ticket's issue step parses).
+    func myPublicBundle() -> Data? { social?.myBundle() }
+
+    /// The hello body an invite drop/grant carries — the exact frame-0 payload the live path sends.
+    func inviteHelloBody() -> Data? { helloPayload(circleId: "default", circleName: "Your circle") }
+
+    /// Ingest a hello delivered via the invite lane, through the normal handler: a stranger's
+    /// (ticket-verified) drop surfaces the connection-request prompt; the inviter's grant hello
+    /// completes a friendship the acceptor already committed to locally.
+    @discardableResult
+    func ingestInviteHello(_ body: Data) -> Bool {
+        handleHello(body, viaNearby: false, senderDevice: nil).consumed
+    }
+
+    /// The sender account hex inside a hello body ([LP circleId][LP circleName][LP bundle][profile]).
+    func helloSenderHex(_ body: Data) -> String? {
+        var i = 0
+        func lp() -> Data? {
+            guard body.count >= i + 4 else { return nil }
+            let n = Int(body[i]) | Int(body[i + 1]) << 8 | Int(body[i + 2]) << 16 | Int(body[i + 3]) << 24
+            i += 4
+            guard n >= 0, body.count >= i + n else { return nil }
+            defer { i += n }
+            return body.subdata(in: i..<(i + n))
+        }
+        guard lp() != nil, lp() != nil, let bundle = lp() else { return nil }
+        return try? bundleNodeHex(bundleBytes: bundle)
+    }
+
     private func helloPayload(circleId: String, circleName: String) -> Data? {
         guard let social else { return nil }
         let myName = ProfileStore.shared.displayName.isEmpty ? "Someone" : ProfileStore.shared.displayName
@@ -4644,6 +4716,8 @@ final class FeedStore: ObservableObject {
 
     func pollMailboxNow() {
         guard social != nil else { return }
+        // Offline friend invites ride the same cadence: cheap no-op when nothing is pending.
+        Task { await FriendInviteStore.shared.tick() }
         // Multi-device self-sync (profile, pins, contacts, read watermarks, circles) syncs the user's
         // OWN devices and changes rarely — running its full LIST+FETCH+merge on every 30s poll was
         // constant idle CPU/radio for no benefit. Throttle to ~2 min (convergence in 2 min instead of

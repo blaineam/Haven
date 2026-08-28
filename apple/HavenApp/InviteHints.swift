@@ -20,6 +20,28 @@ enum InviteHints {
         return String(link[..<hash]) + "?d=" + ids.joined(separator: ",") + String(link[hash...])
     }
 
+    /// Append one more query pair before the `#` fragment (after any existing query — unlike the
+    /// `d=` embed, which stays first for byte-format parity with old parsers). Used for the
+    /// offline-invite ticket (`t=`); base64url values need no percent-escaping.
+    static func appendQuery(in link: String, name: String, value: String) -> String {
+        guard !value.isEmpty else { return link }
+        let hash = link.firstIndex(of: "#") ?? link.endIndex
+        let sep = link[..<hash].contains("?") ? "&" : "?"
+        return String(link[..<hash]) + sep + name + "=" + value + String(link[hash...])
+    }
+
+    /// A named query value from a pasted/scanned link (nil when absent).
+    static func queryValue(from link: String, name: String) -> String? {
+        guard let qStart = link.firstIndex(of: "?") else { return nil }
+        let end = link.firstIndex(of: "#") ?? link.endIndex
+        guard qStart < end else { return nil }
+        for pair in link[link.index(after: qStart)..<end].split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1)
+            if kv.count == 2, kv[0] == name { return String(kv[1]) }
+        }
+        return nil
+    }
+
     /// The `d=` device ids from a pasted/scanned link (empty when absent). Only 64-hex ids pass.
     static func extract(from link: String) -> [String] {
         guard let qStart = link.firstIndex(of: "?") else { return [] }

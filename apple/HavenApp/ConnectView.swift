@@ -44,6 +44,7 @@ struct ConnectView: View {
     @State private var pasted = ""
     @State private var found: LinkInfo?
     @State private var foundHints: [String] = []
+    @State private var foundTicket: String?
     @State private var friendName = ""
     @State private var problem: String?
     @State private var addedName: String?
@@ -140,8 +141,15 @@ struct ConnectView: View {
     /// The shareable link, carrying my device node id(s) as `?d=` dial hints — the scanner's only
     /// reachable ids for me until my signed roster arrives (device-seed transport bootstrap).
     private var inviteLink: String {
-        InviteHints.embed(in: account.havenLink(domain: HavenSite.inviteDomain),
-                          deviceIds: FeedStore.shared.inviteDeviceIds())
+        var link = InviteHints.embed(in: account.havenLink(domain: HavenSite.inviteDomain),
+                                     deviceIds: FeedStore.shared.inviteDeviceIds())
+        // Offline-invite ticket: lets the scanner accept while we're offline (and vice versa) —
+        // the acceptance parks on our relays instead of needing a live handshake. Absent when we
+        // have no relays; the link then works exactly as before (live-only).
+        if let t = FriendInviteStore.shared.currentTicketLinkValue() {
+            link = InviteHints.appendQuery(in: link, name: "t", value: t)
+        }
+        return link
     }
 
     private var invite: some View {
@@ -245,6 +253,11 @@ struct ConnectView: View {
                 // can reach their device (their account id resolves to no node post-device-seed).
                 FeedStore.shared.recordDeviceHints(accountHex: f.idHex, deviceIds: foundHints)
                 FeedStore.shared.syncWithContacts(force: true)   // user action: greet now, never coalesced
+                // Ticketed invite: park a sealed acceptance on THEIR relays too, so this works
+                // even if they're offline for days — the live hello above still wins when online.
+                if let tv = foundTicket {
+                    FriendInviteStore.shared.acceptTicket(linkValue: tv)
+                }
                 withAnimation(HavenTheme.bouncy) { addedName = name }
             }
             .buttonStyle(BrandButtonStyle())
@@ -291,6 +304,7 @@ struct ConnectView: View {
             let trimmed = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
             let info = try parseLink(s: trimmed)
             foundHints = InviteHints.extract(from: trimmed)
+            foundTicket = InviteHints.queryValue(from: trimmed, name: "t")
             withAnimation(HavenTheme.bouncy) { found = info }
         } catch {
             problem = "That doesn't look like a Haven invite link. Double-check and try again."

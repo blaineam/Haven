@@ -1190,6 +1190,81 @@ fn self_sync_account(key: &str) -> Option<&str> {
 /// EVERY transport must verify the body before storing it (see [`verify_devroster_put`]).
 pub(crate) const DEVROSTER_PREFIX: &str = "haven/devroster/";
 
+/// Offline friend invites (`docs/OFFLINE-FRIEND-INVITES.md`): `haven/invite/<acct>/<token>[/grant]`,
+/// both ids 64 lowercase hex. The token is a keyed hash of the invite's one-time secret, so the
+/// PATH is unguessable and naming a valid key IS the write authorization — the relay never learns
+/// who is accepting, and the MAC + AES-GCM seal inside are verified by the parties, not here.
+pub(crate) const INVITE_PREFIX: &str = "haven/invite/";
+
+/// Parse an invite KEY → (account-hex, token-hex, is_grant). `None` for anything else.
+pub(crate) fn invite_key(key: &str) -> Option<(&str, &str, bool)> {
+    let rest = key.strip_prefix(INVITE_PREFIX)?;
+    let mut it = rest.split('/');
+    let acct = it.next()?;
+    let token = it.next()?;
+    let grant = match it.next() {
+        None => false,
+        Some("grant") => true,
+        Some(_) => return None,
+    };
+    if it.next().is_some() {
+        return None;
+    }
+    let hex64 = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    (hex64(acct) && hex64(token)).then_some((acct, token, grant))
+}
+
+/// The LIST prefix an inviter polls — `haven/invite/<acct>/` (trailing slash optional) → account.
+pub(crate) fn invite_list_account(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix(INVITE_PREFIX)?;
+    let acct = rest.strip_suffix('/').unwrap_or(rest);
+    let hex64 = acct.len() == 64 && acct.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    (hex64 && !acct.contains('/')).then_some(acct)
+}
+
+/// Relay-side STRUCTURAL verification of one invite blob — the blind-store half of
+/// `haven-p2p/src/friend_invite.rs` (the layouts must stay in LOCK-STEP; the round-trip test in
+/// this file pins them together): magic "HVI1" ‖ ver=1 ‖ kind(0=drop,1=grant) ‖ acct(32) ‖
+/// token(32) ‖ expires(8 LE) ‖ lp(sealed) ‖ mac(32), exact length, embedded acct/token equal to
+/// the key path, kind matching the key shape, unexpired, ≤ 16 KB. Everything a blind store CAN
+/// check — the MAC needs the ticket secret, which the relay must never hold.
+pub(crate) fn verify_invite_put(key: &str, body: &[u8], now_secs: u64) -> bool {
+    const MAX_INVITE_BLOB: usize = 16 * 1024;
+    const HDR: usize = 4 + 1 + 1 + 32 + 32 + 8 + 4;
+    let Some((acct, token, grant)) = invite_key(key) else {
+        return false;
+    };
+    if body.len() > MAX_INVITE_BLOB || body.len() < HDR + 32 {
+        return false;
+    }
+    if &body[0..4] != b"HVI1" || body[4] != 1 {
+        return false;
+    }
+    let kind = body[5];
+    if kind > 1 || (kind == 1) != grant {
+        return false;
+    }
+    let expires = u64::from_le_bytes(body[70..78].try_into().unwrap());
+    if expires <= now_secs {
+        return false;
+    }
+    let n = u32::from_le_bytes(body[78..82].try_into().unwrap()) as usize;
+    if body.len() != HDR + n + 32 {
+        return false;
+    }
+    hex32_eq(&body[6..38], acct) && hex32_eq(&body[38..70], token)
+}
+
+/// 32 raw bytes vs 64 lowercase hex, no allocation.
+fn hex32_eq(b: &[u8], hexs: &str) -> bool {
+    let h = hexs.as_bytes();
+    if b.len() != 32 || h.len() != 64 {
+        return false;
+    }
+    const T: &[u8; 16] = b"0123456789abcdef";
+    b.iter().enumerate().all(|(i, x)| h[2 * i] == T[(x >> 4) as usize] && h[2 * i + 1] == T[(x & 15) as usize])
+}
+
 /// Key prefix for the ENROLL control op: `haven/enroll/<circle>`. Nothing is ever STORED under it —
 /// it is a control channel that happens to ride the same header shape as the storage verbs, so it
 /// inherits `handle_request`'s namespace gate for free instead of inventing a second one.
@@ -1635,6 +1710,20 @@ pub(crate) fn blob_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8,
             return !a.is_self_sync_owner(acct, peer);
         }
     }
+    // Offline friend invites: PUT/GET/HAS open — the acceptor is BY DEFINITION not yet known
+    // here (that is the whole feature), and the unguessable token-derived path is the write
+    // capability. Bodies are structurally verified before storing on BOTH transports
+    // (`verify_invite_put`), so the lane cannot become anonymous general storage. LIST is
+    // owner-only (the inviter polling its own prefix) — same contract as `haven/self/**` — so
+    // the lane cannot be enumerated.
+    if matches!(verb, VERB_PUT | VERB_GET | VERB_HAS) && invite_key(key).is_some() {
+        return false;
+    }
+    if verb == VERB_LIST {
+        if let Some(acct) = invite_list_account(key) {
+            return !a.is_self_sync_owner(acct, peer);
+        }
+    }
     // Everything below requires the caller to be a member of SOME circle this relay serves. This
     // is the check that was entirely absent on the HTTP transport, and it is what a shared bearer
     // token can never establish: the token says "someone gave me a secret", not "I am Alice".
@@ -1812,6 +1901,20 @@ pub(crate) async fn handle_request(
             // THIS transport too — a relay must never be a weaker boundary on iroh than on HTTP.
             if let Some(node) = crate::discovery::discovery_node(&key) {
                 if crate::discovery::verify_discovery_put(&root, node, &body).is_none() {
+                    let _ = send.write_all(b"ERR forbidden").await;
+                    let _ = send.finish();
+                    return Ok(());
+                }
+            }
+
+            // Invite blobs are un-gated the same way (the token path is the capability) and carry
+            // the same obligation: verify the structure before storing, on THIS transport too.
+            if key.starts_with(INVITE_PREFIX) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if !verify_invite_put(&key, &body, now) {
                     let _ = send.write_all(b"ERR forbidden").await;
                     let _ = send.finish();
                     return Ok(());
@@ -2816,6 +2919,57 @@ mod tests {
             vec![("haven/media/brand_new".to_string(), 0)]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invite_lane_open_for_strangers_but_list_is_owner_only() {
+        use haven_p2p::friend_invite::{invite_drop_wire, invite_grant_wire, FriendTicket};
+        let auth: Arc<Mutex<RelayAuth>> = Arc::new(Mutex::new(RelayAuth::default()));
+        let stranger = "bb".repeat(32);
+        let t = FriendTicket {
+            account_id: [0xaa; 32],
+            verification: [1u8; 16],
+            secret: [42u8; 32],
+            issued_at: 1_000,
+            relays: vec![],
+            device_hints: vec![],
+        };
+        let (dk, gk) = (t.drop_key(), t.grant_key());
+
+        // A stranger — the acceptor, by definition unknown here — may PUT/GET/HAS invite keys…
+        assert!(!blob_forbidden(&auth, &stranger, VERB_PUT, &dk));
+        assert!(!blob_forbidden(&auth, &stranger, VERB_GET, &gk));
+        assert!(!blob_forbidden(&auth, &stranger, VERB_HAS, &dk));
+        // …but may NOT enumerate the lane, and malformed invite keys stay denied.
+        let acct_hex = dk.split('/').nth(2).unwrap().to_string();
+        assert!(blob_forbidden(&auth, &stranger, VERB_LIST, &format!("haven/invite/{acct_hex}/")));
+        assert!(blob_forbidden(&auth, &stranger, VERB_PUT, "haven/invite/short/alsoshort"));
+        assert!(blob_forbidden(&auth, &stranger, VERB_PUT, &format!("{dk}/extra")));
+
+        // The OWNER (the account id itself) may LIST its own invite prefix.
+        let owner = acct_hex.clone();
+        assert!(!blob_forbidden(&auth, &owner, VERB_LIST, &format!("haven/invite/{acct_hex}/")));
+
+        // LOCK-STEP: the relay's structural check accepts exactly what core produces…
+        let drop = invite_drop_wire(&t, 5_000, b"acceptance");
+        let grant = invite_grant_wire(&t, 5_000, b"grant");
+        assert!(verify_invite_put(&dk, &drop, 100));
+        assert!(verify_invite_put(&gk, &grant, 100));
+        // …and refuses direction swaps, expired bodies, truncation, and foreign paths.
+        assert!(!verify_invite_put(&gk, &drop, 100));
+        assert!(!verify_invite_put(&dk, &grant, 100));
+        assert!(!verify_invite_put(&dk, &drop, 5_000));
+        assert!(!verify_invite_put(&dk, &drop[..drop.len() - 1], 100));
+        let mut other = t.clone();
+        other.secret = [43u8; 32];
+        assert!(!verify_invite_put(&other.drop_key(), &drop, 100));
+
+        // Key parsing corners.
+        assert!(invite_key(&dk).is_some_and(|(_, _, g)| !g));
+        assert!(invite_key(&gk).is_some_and(|(_, _, g)| g));
+        assert!(invite_key("haven/invite/AA/bb").is_none());
+        assert!(invite_list_account(&format!("haven/invite/{acct_hex}")).is_some());
+        assert!(invite_list_account("haven/invite/").is_none());
     }
 
     #[test]

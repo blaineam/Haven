@@ -834,6 +834,7 @@ object HavenNet : InboundListener {
                     runCatching { purgeStaleRelays() }
                     runCatching { maybeWeeklyMediaSweep() }   // orphaned media blobs (at most once a week)
                     runCatching { enforceLocalLimits() }      // age/size caps (throttled ~10 min)
+                    runCatching { friendInviteTick() }        // offline friend invites (no-op when idle)
                 }
                 // Poll bucket (base 30s): pull the circle relay/mailbox so posts arrive even when peers
                 // aren't both online (pollMailbox also drives mesh + multi-device self-sync internally).
@@ -843,6 +844,259 @@ object HavenNet : InboundListener {
                 }
             }
         }
+    }
+
+
+    // ═══ Offline friend invites (docs/OFFLINE-FRIEND-INVITES.md) — iOS/desktop parity ═══════════
+    //
+    // Persisted as JSON in the shared prefs. Inviter: inviteUri() rides a `?t=` ticket; the sync
+    // bucket polls haven/invite/<my-acct>/ on my relays, opens drops against live tickets, and
+    // feeds them through handleHello — the normal approval prompt. approve() parks the reply
+    // hello under the grant key and consumes the ticket. Acceptor: connectByLink persists a
+    // ticketed acceptance; the tick parks my hello under the drop key on the INVITER's relays
+    // (retried until landed), polls the grant, ingests it, and adopts the ticket relays so
+    // standard mailbox sync carries everything else.
+
+    private data class IssuedInvite(val ticket: String, val issuedAt: Long, var consumedAt: Long, var acceptorHex: String)
+    private data class AcceptedInvite(val ticket: String, val acceptedAt: Long, var dropLanded: Boolean, var granted: Boolean)
+    private val issuedInvites = mutableListOf<IssuedInvite>()
+    private val acceptedInvites = mutableListOf<AcceptedInvite>()
+    private var invitesLoaded = false
+    private var inviteTickRunning = false
+
+    private fun inviteNow() = System.currentTimeMillis() / 1000
+    private fun inviteLive(issuedAt: Long) = inviteNow() - issuedAt <= uniffi.haven_ffi.friendInviteDefaultTtlSecs().toLong()
+
+    private fun loadInvites() {
+        if (invitesLoaded) return
+        invitesLoaded = true
+        runCatching {
+            org.json.JSONArray(prefs.getString("friendInvites.issued", "[]") ?: "[]").let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    issuedInvites.add(IssuedInvite(o.getString("t"), o.getLong("ia"), o.optLong("ca", 0), o.optString("ah", "")))
+                }
+            }
+        }
+        runCatching {
+            org.json.JSONArray(prefs.getString("friendInvites.accepted", "[]") ?: "[]").let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    acceptedInvites.add(AcceptedInvite(o.getString("t"), o.getLong("aa"), o.optBoolean("dl", false), o.optBoolean("g", false)))
+                }
+            }
+        }
+    }
+
+    private fun saveInvites() {
+        val iss = org.json.JSONArray()
+        for (i in issuedInvites) iss.put(org.json.JSONObject().put("t", i.ticket).put("ia", i.issuedAt).put("ca", i.consumedAt).put("ah", i.acceptorHex))
+        val acc = org.json.JSONArray()
+        for (a in acceptedInvites) acc.put(org.json.JSONObject().put("t", a.ticket).put("aa", a.acceptedAt).put("dl", a.dropLanded).put("g", a.granted))
+        prefs.edit().putString("friendInvites.issued", iss.toString()).putString("friendInvites.accepted", acc.toString()).apply()
+    }
+
+    private fun pruneInvites() {
+        loadInvites()
+        issuedInvites.removeAll { it.consumedAt == 0L && !inviteLive(it.issuedAt) }
+        while (issuedInvites.count { it.consumedAt == 0L } > 16) {
+            val idx = issuedInvites.indexOfFirst { it.consumedAt == 0L }
+            if (idx < 0) break
+            issuedInvites.removeAt(idx)
+        }
+        acceptedInvites.removeAll { it.granted || !inviteLive(it.acceptedAt) }
+    }
+
+    /** The `?t=` value for the share link: newest live ticket, minted on demand; null without relays. */
+    private fun friendInviteLinkValue(): String? {
+        pruneInvites()
+        issuedInvites.lastOrNull { it.consumedAt == 0L && inviteLive(it.issuedAt) }?.let {
+            return it.ticket.removePrefix("haven-friend:").takeIf { v -> v != it.ticket }
+        }
+        val relays = allActiveRelayHexes().filter { !it.startsWith("s3:") }
+        if (relays.isEmpty()) { Log.i(TAG, "friend-invite: mint skipped — no relays"); return null }
+        val bundle = runCatching { social.myBundle() }.getOrNull() ?: return null
+        val hints = buildList {
+            add(core.nodeIdHex)
+            addAll(runCatching { social.deviceNodeIdsFor(social.myNodeHex()) }.getOrDefault(emptyList()))
+        }.filter { it.length == 64 }.distinctBy { it.lowercase() }.take(4)
+            .mapNotNull { h -> runCatching { h.chunked(2).map { it.toInt(16).toByte() }.toByteArray() }.getOrNull() }
+        val t = runCatching {
+            uniffi.haven_ffi.friendInviteIssue(bundle, inviteNow().toULong(), relays, hints)
+        }.getOrNull() ?: return null
+        val text = runCatching { uniffi.haven_ffi.friendTicketEncode(t) }.getOrNull() ?: return null
+        issuedInvites.add(IssuedInvite(text, inviteNow(), 0, ""))
+        saveInvites()
+        Log.i(TAG, "friend-invite: minted ticket (relays=${relays.size})")
+        return text.removePrefix("haven-friend:")
+    }
+
+    /** Append the ticket to an invite link (after the `?d=` hints, before the `#` fragment). */
+    private fun friendInviteEmbed(link: String): String {
+        val t = friendInviteLinkValue() ?: return link
+        val hash = link.indexOf('#').let { if (it < 0) link.length else it }
+        val sep = if (link.substring(0, hash).contains('?')) "&" else "?"
+        return link.substring(0, hash) + sep + "t=" + t + link.substring(hash)
+    }
+
+    private fun friendInviteExtract(link: String): String? {
+        val q = link.indexOf('?').takeIf { it >= 0 } ?: return null
+        val end = link.indexOf('#').let { if (it < 0) link.length else it }
+        if (q >= end) return null
+        for (pair in link.substring(q + 1, end).split('&')) {
+            val kv = pair.split('=', limit = 2)
+            if (kv.size == 2 && kv[0] == "t" && kv[1].isNotEmpty()) return kv[1]
+        }
+        return null
+    }
+
+    private fun friendInviteAccept(linkValue: String) {
+        loadInvites()
+        val t = runCatching { uniffi.haven_ffi.friendTicketParse("haven-friend:" + linkValue) }.getOrNull() ?: return
+        val text = runCatching { uniffi.haven_ffi.friendTicketEncode(t) }.getOrNull() ?: return
+        if (acceptedInvites.any { it.ticket == text }) return
+        acceptedInvites.add(AcceptedInvite(text, inviteNow(), dropLanded = false, granted = false))
+        saveInvites()
+        Log.i(TAG, "friend-invite: accepted ticket (relays=${t.relays.size})")
+        scope.launch { friendInviteTick() }
+    }
+
+    /** One pass of every pending invite duty — sync bucket; cheap no-op when idle. Single-flight. */
+    private suspend fun friendInviteTick() {
+        if (inviteTickRunning) return
+        inviteTickRunning = true
+        try {
+            pruneInvites()
+            friendInviteWriteDrops()
+            friendInvitePollGrants()
+            friendInvitePollDrops()
+        } finally {
+            inviteTickRunning = false
+        }
+    }
+
+    private suspend fun friendInviteWriteDrops() {
+        for (a in acceptedInvites.filter { !it.dropLanded }) {
+            val t = runCatching { uniffi.haven_ffi.friendTicketParse(a.ticket) }.getOrNull() ?: continue
+            val hello = helloPayload(DEFAULT_CIRCLE) ?: continue
+            val expires = t.issuedAt + uniffi.haven_ffi.friendInviteDefaultTtlSecs()
+            val key = runCatching { uniffi.haven_ffi.friendInviteDropKey(t) }.getOrNull() ?: continue
+            val blob = runCatching { uniffi.haven_ffi.friendInviteBuildDrop(t, expires, hello) }.getOrNull() ?: continue
+            var landed = false
+            for (relay in t.relays) {
+                val c = relayClientFor(relay) ?: continue
+                if (runCatching { c.put(key, blob) }.isSuccess) {
+                    landed = true
+                    Log.i(TAG, "friend-invite: drop landed on ${relay.take(8)}")
+                }
+            }
+            if (landed) { a.dropLanded = true; saveInvites() }
+        }
+    }
+
+    private suspend fun friendInvitePollGrants() {
+        for (a in acceptedInvites.filter { it.dropLanded && !it.granted }) {
+            val t = runCatching { uniffi.haven_ffi.friendTicketParse(a.ticket) }.getOrNull() ?: continue
+            val key = runCatching { uniffi.haven_ffi.friendInviteGrantKey(t) }.getOrNull() ?: continue
+            for (relay in t.relays) {
+                val c = relayClientFor(relay) ?: continue
+                val blob = runCatching { c.get(key) }.getOrNull() ?: continue
+                if (blob.isEmpty()) continue
+                val hello = runCatching {
+                    uniffi.haven_ffi.friendInviteOpenGrant(t, blob, inviteNow().toULong())
+                }.getOrNull() ?: continue
+                Log.i(TAG, "friend-invite: grant received — completing friendship")
+                handleHello(hello, viaNearby = false, senderDevice = null)
+                for (r in t.relays) runCatching { adoptRelay(r, setDefault = false) }
+                a.granted = true
+                saveInvites()
+                runCatching { syncWithContacts() }
+                break
+            }
+        }
+    }
+
+    private suspend fun friendInvitePollDrops() {
+        val pending = issuedInvites.filter { it.consumedAt == 0L && inviteLive(it.issuedAt) }
+        if (pending.isEmpty()) return
+        val myAcct = runCatching { social.myNodeHex() }.getOrNull()?.lowercase() ?: return
+        if (myAcct.length != 64) return
+        val prefix = "haven/invite/$myAcct/"
+        val keys = mutableSetOf<String>()
+        runCatching { relayHost?.localList(prefix)?.let { keys.addAll(it) } }
+        for (relay in allActiveRelayHexes().filter { !it.startsWith("s3:") }) {
+            val c = relayClientFor(relay) ?: continue
+            runCatching { c.list(prefix) }.getOrNull()?.let { keys.addAll(it) }
+        }
+        if (keys.isEmpty()) return
+        for (iss in pending) {
+            val t = runCatching { uniffi.haven_ffi.friendTicketParse(iss.ticket) }.getOrNull() ?: continue
+            val dropKey = runCatching { uniffi.haven_ffi.friendInviteDropKey(t) }.getOrNull() ?: continue
+            if (dropKey !in keys) continue
+            var blob: ByteArray? = runCatching { relayHost?.localGet(dropKey) }.getOrNull()
+            if (blob == null) {
+                for (relay in allActiveRelayHexes().filter { !it.startsWith("s3:") }) {
+                    val c = relayClientFor(relay) ?: continue
+                    val b = runCatching { c.get(key = dropKey) }.getOrNull()
+                    if (b != null && b.isNotEmpty()) { blob = b; break }
+                }
+            }
+            val body = blob ?: continue
+            val hello = runCatching {
+                uniffi.haven_ffi.friendInviteOpenDrop(t, body, inviteNow().toULong())
+            }.getOrNull() ?: continue
+            val acceptor = runCatching { helloSenderHex(hello) }.getOrNull().orEmpty()
+            val alreadyContact = acceptor.isNotEmpty() && contacts.any { it.idHex.equals(acceptor, ignoreCase = true) }
+            if (iss.acceptorHex != acceptor) { iss.acceptorHex = acceptor; saveInvites() }
+            Log.i(TAG, "friend-invite: acceptance drop opened (from ${acceptor.take(8)}) — surfacing prompt")
+            handleHello(hello, viaNearby = false, senderDevice = null)
+            // Mutual-add race: we had already added them — approval is implicit; grant now.
+            if (alreadyContact && acceptor.isNotEmpty()) friendInviteNoteApproved(acceptor)
+        }
+    }
+
+    /** The user approved (or the mutual-add race made approval implicit): park the grant + consume. */
+    private suspend fun friendInviteNoteApproved(accountHex: String) {
+        loadInvites()
+        val hex = accountHex.lowercase()
+        val matches = issuedInvites.filter { it.consumedAt == 0L && it.acceptorHex.equals(hex, ignoreCase = true) }
+        if (matches.isEmpty()) return
+        val hello = helloPayload(DEFAULT_CIRCLE) ?: return
+        for (iss in matches) {
+            val t = runCatching { uniffi.haven_ffi.friendTicketParse(iss.ticket) }.getOrNull() ?: continue
+            val expires = t.issuedAt + uniffi.haven_ffi.friendInviteDefaultTtlSecs()
+            val key = runCatching { uniffi.haven_ffi.friendInviteGrantKey(t) }.getOrNull() ?: continue
+            val blob = runCatching { uniffi.haven_ffi.friendInviteBuildGrant(t, expires, hello) }.getOrNull() ?: continue
+            var landed = runCatching { relayHost?.localPut(key, blob) == true }.getOrDefault(false)
+            for (relay in allActiveRelayHexes().filter { !it.startsWith("s3:") }) {
+                val c = relayClientFor(relay) ?: continue
+                if (runCatching { c.put(key, blob) }.isSuccess) landed = true
+            }
+            if (landed) {
+                iss.consumedAt = inviteNow()
+                saveInvites()
+                Log.i(TAG, "friend-invite: grant parked — ticket consumed")
+            }
+        }
+    }
+
+    /** The sender account hex inside a hello body ([LP cid][LP name][LP bundle][profile]). */
+    private fun helloSenderHex(body: ByteArray): String? {
+        var i = 0
+        fun lp(): ByteArray? {
+            if (body.size < i + 4) return null
+            val n = (body[i].toInt() and 0xff) or ((body[i + 1].toInt() and 0xff) shl 8) or
+                ((body[i + 2].toInt() and 0xff) shl 16) or ((body[i + 3].toInt() and 0xff) shl 24)
+            i += 4
+            if (n < 0 || body.size < i + n) return null
+            val out = body.copyOfRange(i, i + n)
+            i += n
+            return out
+        }
+        lp() ?: return null
+        lp() ?: return null
+        val bundle = lp() ?: return null
+        return runCatching { uniffi.haven_ffi.bundleNodeHex(bundle) }.getOrNull()
     }
 
     val nodeIdHex: String get() = core.nodeIdHex
@@ -856,7 +1110,7 @@ object HavenNet : InboundListener {
         for (d in runCatching { social.deviceNodeIdsFor(acct) }.getOrDefault(emptyList())) {
             if (d.lowercase() != acct) mine.add(d)
         }
-        return InviteHints.embed(core.inviteUri(), mine.toList())
+        return friendInviteEmbed(InviteHints.embed(core.inviteUri(), mine.toList()))
     }
 
     // ---- Multi-circle ----
@@ -2019,6 +2273,9 @@ object HavenNet : InboundListener {
         initiated[info.idHex] = info.verificationHex
         initiatedAt[info.idHex] = System.currentTimeMillis()
         saveInitiated()   // survive the process death Android hands out freely
+        // Ticketed invite: park a sealed acceptance on THEIR relays too, so this works even if
+        // they're offline for days — the live hello below still wins when both are online.
+        friendInviteExtract(trimmed)?.let { friendInviteAccept(it) }
         sendHello(DEFAULT_CIRCLE, info.idHex)
         return true
     }
@@ -2131,6 +2388,9 @@ object HavenNet : InboundListener {
             feedVersion.value++; circlesVersion.value++; persist()
         }
         pending.removeAll { it.idHex == req.idHex }
+        // If this approval answers a ticketed offline invite, park the grant on my relays so the
+        // acceptor completes the friendship whenever they next come online.
+        scope.launch { friendInviteNoteApproved(req.idHex) }
     }
 
     fun dismiss(req: PendingRequest) { pending.removeAll { it.idHex == req.idHex } }

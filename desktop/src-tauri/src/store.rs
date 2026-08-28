@@ -250,10 +250,39 @@ pub struct KeptStoriesWire {
 }
 
 /// Everything that lives in `prefs.json` (mirrors the Android SharedPreferences set).
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct IssuedFriendInvite {
+    pub ticket: String,
+    pub issued_at: u64,
+    #[serde(default)]
+    pub consumed_at: u64,   // 0 = still live
+    #[serde(default)]
+    pub acceptor_hex: String,   // set once their drop arrives; the approve→grant join key
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct AcceptedFriendInvite {
+    pub ticket: String,
+    pub accepted_at: u64,
+    #[serde(default)]
+    pub drop_landed: bool,
+    #[serde(default)]
+    pub granted: bool,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Prefs {
     #[serde(default)]
     pub profile: Profile,
+    /// Offline friend invites (docs/OFFLINE-FRIEND-INVITES.md): tickets I issued, so the
+    /// mailbox pass can poll for parked acceptances and approvals can write grants. Mirrors
+    /// iOS FriendInviteStore.issued (there: UserDefaults haven.friendInvites.issued).
+    #[serde(default)]
+    pub friend_invites_issued: Vec<IssuedFriendInvite>,
+    /// Tickets I accepted: park the drop until it lands, then poll for the grant. Mirrors
+    /// iOS FriendInviteStore.accepted.
+    #[serde(default)]
+    pub friend_invites_accepted: Vec<AcceptedFriendInvite>,
     #[serde(default)]
     pub contacts: Vec<Contact>,
     #[serde(default)]

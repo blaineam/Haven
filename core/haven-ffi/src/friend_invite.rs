@@ -175,3 +175,11 @@ pub fn friend_invite_open_grant(
     open_invite_blob(&ticket.to_core()?, true, &blob, now)
         .map_err(|e| HavenError::Invalid { msg: format!("invite grant refused: {e}") })
 }
+
+/// The 64-hex account node id inside a full public bundle — the join key between an opened
+/// invite drop's hello and the approval prompt it surfaces.
+#[uniffi::export]
+pub fn bundle_node_hex(bundle_bytes: Vec<u8>) -> Result<String, HavenError> {
+    let id = bundle(&bundle_bytes)?;
+    Ok(id.node_id_bytes().iter().map(|b| format!("{b:02x}")).collect())
+}

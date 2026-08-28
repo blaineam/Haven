@@ -1457,6 +1457,9 @@ final class FeedStore: ObservableObject {
         // what makes "all the history except the media" impossible rather than merely unlikely.
         backfillMailboxMedia(circleIds: ["default"])
         ConnectionsStore.shared.removePending(req.idHex)
+        // If this approval answers a ticketed offline invite, park the grant on my relays so the
+        // acceptor completes the friendship whenever they next come online.
+        FriendInviteStore.shared.noteApproved(accountHex: req.idHex)
         refresh()
     }
 
@@ -4279,6 +4282,38 @@ final class FeedStore: ObservableObject {
         }
     }
 
+    // MARK: - Offline friend invites (FriendInviteStore glue — same file so the private
+    // hello builder + inbound dispatch stay private)
+
+    /// My full public bundle bytes (what a ticket's issue step parses).
+    func myPublicBundle() -> Data? { social?.myBundle() }
+
+    /// The hello body an invite drop/grant carries — the exact frame-0 payload the live path sends.
+    func inviteHelloBody() -> Data? { helloPayload(circleId: "default", circleName: "Your circle") }
+
+    /// Ingest a hello delivered via the invite lane, through the normal handler: a stranger's
+    /// (ticket-verified) drop surfaces the connection-request prompt; the inviter's grant hello
+    /// completes a friendship the acceptor already committed to locally.
+    @discardableResult
+    func ingestInviteHello(_ body: Data) -> Bool {
+        handleHello(body, viaNearby: false, senderDevice: nil).consumed
+    }
+
+    /// The sender account hex inside a hello body ([LP circleId][LP circleName][LP bundle][profile]).
+    func helloSenderHex(_ body: Data) -> String? {
+        var i = 0
+        func lp() -> Data? {
+            guard body.count >= i + 4 else { return nil }
+            let n = Int(body[i]) | Int(body[i + 1]) << 8 | Int(body[i + 2]) << 16 | Int(body[i + 3]) << 24
+            i += 4
+            guard n >= 0, body.count >= i + n else { return nil }
+            defer { i += n }
+            return body.subdata(in: i..<(i + n))
+        }
+        guard lp() != nil, lp() != nil, let bundle = lp() else { return nil }
+        return try? bundleNodeHex(bundleBytes: bundle)
+    }
+
     private func helloPayload(circleId: String, circleName: String) -> Data? {
         guard let social else { return nil }
         let myName = ProfileStore.shared.displayName.isEmpty ? "Someone" : ProfileStore.shared.displayName
@@ -4600,6 +4635,8 @@ final class FeedStore: ObservableObject {
 
     func pollMailboxNow() {
         guard social != nil else { return }
+        // Offline friend invites ride the same cadence: cheap no-op when nothing is pending.
+        Task { await FriendInviteStore.shared.tick() }
         // Multi-device self-sync (profile, pins, contacts, read watermarks, circles) syncs the user's
         // OWN devices and changes rarely — running its full LIST+FETCH+merge on every 30s poll was
         // constant idle CPU/radio for no benefit. Throttle to ~2 min (convergence in 2 min instead of

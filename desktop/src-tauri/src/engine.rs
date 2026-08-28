@@ -1122,12 +1122,12 @@ impl Engine {
 
     pub fn invite_uri(&self) -> String {
         let base = self.reach_link().map(|l| l.to_uri()).unwrap_or_default();
-        self.embed_invite_hints(base)
+        self.friend_invite_embed(self.embed_invite_hints(base))
     }
 
     pub fn invite_link(&self, domain: &str) -> String {
         let base = self.reach_link().map(|l| l.to_web(domain)).unwrap_or_default();
-        self.embed_invite_hints(base)
+        self.friend_invite_embed(self.embed_invite_hints(base))
     }
 
     // ---- invite device-id hints (roster-bootstrap bridge) --------------------------------
@@ -1778,6 +1778,7 @@ impl Engine {
                         }
                     }
                     me.purge_stale_relays().await; // GC relays inactive + unseen > 7 days (config else survives)
+                    me.friend_invite_tick().await; // offline friend invites: drops/grants (no-op when idle)
                 }
             }
         });
@@ -4342,6 +4343,13 @@ impl Engine {
             .lock()
             .initiated
             .insert(info.id_hex.clone(), info.verification_hex.clone());
+        // Ticketed invite: park a sealed acceptance on THEIR relays too, so this works even if
+        // they're offline for days — the live hello below still wins when both are online.
+        if let Some(tv) = Self::friend_invite_extract(&trimmed) {
+            self.friend_invite_accept(&tv);
+            let me = self.clone();
+            tauri::async_runtime::spawn(async move { me.friend_invite_tick().await });
+        }
         self.send_hello(DEFAULT_CIRCLE, &info.id_hex);
         true
     }
@@ -4362,6 +4370,11 @@ impl Engine {
             self.clear_circle_removal(DEFAULT_CIRCLE, &req.id_hex);
             self.accept_contact(DEFAULT_CIRCLE, &req.bundle, &req.id_hex, &req.name, &req.verify_hex, true);
             self.nudge_self_sync(); // the new contact (+ lifted tombstone) rides a prompt pass
+            // If this approval answers a ticketed offline invite, park the grant on my relays so
+            // the acceptor completes the friendship whenever they next come online.
+            let me = self.clone();
+            let hex = req.id_hex.clone();
+            tauri::async_runtime::spawn(async move { me.friend_invite_note_approved(&hex).await });
             self.emit_changed();
         }
     }
@@ -11583,5 +11596,387 @@ impl Engine {
     /// A circle's member account ids (excludes me) — the dump's `members` array.
     pub(crate) fn circle_member_ids(&self, circle_id: &str) -> Vec<String> {
         self.social.contact_node_ids(circle_id.to_string())
+    }
+}
+
+// ═══ Offline friend invites (docs/OFFLINE-FRIEND-INVITES.md) — iOS parity ══════════════════════
+//
+// Persisted in Prefs (NOT dyn_state.pending: a drop is only marked handled once consumed or
+// granted, so a restart between ingest and approval re-surfaces the prompt from the parked blob).
+// Inviter: invite_uri/invite_link ride a `?t=` ticket; the heartbeat sync bucket polls
+// haven/invite/<my-acct>/ on my relays, opens drops against live tickets, and feeds them through
+// handle_hello_from — the normal approval prompt. approve() parks the reply hello under the grant
+// key and consumes the ticket. Acceptor: connect_by_link persists a ticketed acceptance; the tick
+// parks my hello under the drop key on the INVITER's relays (retried until landed), polls the
+// grant, ingests it, and adopts the ticket relays so standard sync carries everything else.
+
+fn friend_invite_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn friend_invite_live(issued_at: u64) -> bool {
+    friend_invite_now().saturating_sub(issued_at)
+        <= haven_p2p::friend_invite::DEFAULT_TTL_SECS
+}
+
+/// The sender account hex inside a hello body (`[LP circleId][LP circleName][LP bundle][profile]`).
+fn friend_invite_hello_sender(body: &[u8]) -> Option<String> {
+    let mut i = 0usize;
+    let mut lp = || -> Option<&[u8]> {
+        if body.len() < i + 4 {
+            return None;
+        }
+        let n = u32::from_le_bytes(body[i..i + 4].try_into().ok()?) as usize;
+        i += 4;
+        if body.len() < i + n {
+            return None;
+        }
+        let s = &body[i..i + n];
+        i += n;
+        Some(s)
+    };
+    lp()?;
+    lp()?;
+    let bundle = lp()?;
+    let id = haven_p2p::identity::HavenId::from_bytes(bundle).ok()?;
+    Some(id.node_id_bytes().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn friend_invite_hex32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+        let hi = (chunk[0] as char).to_digit(16)?;
+        let lo = (chunk[1] as char).to_digit(16)?;
+        out[i] = (hi as u8) << 4 | lo as u8;
+    }
+    Some(out)
+}
+
+impl Engine {
+    /// The `?t=` value for the share link. Reuses the newest live ticket; mints when none is
+    /// live; `None` when this device has no relays (an offline acceptance would have nowhere to
+    /// land — the link stays live-only, exactly as before).
+    fn friend_invite_link_value(&self) -> Option<String> {
+        self.friend_invite_prune();
+        {
+            let p = self.prefs.lock();
+            if let Some(live) = p
+                .friend_invites_issued
+                .iter()
+                .rev()
+                .find(|i| i.consumed_at == 0 && friend_invite_live(i.issued_at))
+            {
+                return live.ticket.strip_prefix("haven-friend:").map(str::to_string);
+            }
+        }
+        let relays = self.active_relay_hexes();
+        if relays.is_empty() {
+            log::info!("friend-invite: mint skipped — no relays (live-only link)");
+            return None;
+        }
+        let bundle = self.account_bundle();
+        let id = haven_p2p::identity::HavenId::from_bytes(&bundle).ok()?;
+        let mut hint_hexes: Vec<String> = vec![self.social.my_device_node_hex()];
+        for d in self.social.device_node_ids_for(self.social.my_node_hex()) {
+            if !hint_hexes.iter().any(|h| h.eq_ignore_ascii_case(&d)) {
+                hint_hexes.push(d);
+            }
+        }
+        let hints: Vec<[u8; 32]> = hint_hexes
+            .iter()
+            .filter_map(|h| friend_invite_hex32(&h.to_lowercase()))
+            .take(4)
+            .collect();
+        let t = haven_p2p::friend_invite::FriendTicket::issue(&id, friend_invite_now(), relays, hints);
+        let text = t.encode_text();
+        {
+            let mut p = self.prefs.lock();
+            p.friend_invites_issued.push(crate::store::IssuedFriendInvite {
+                ticket: text.clone(),
+                issued_at: t.issued_at,
+                consumed_at: 0,
+                acceptor_hex: String::new(),
+            });
+            let _ = p.save(&self.paths);
+        }
+        log::info!("friend-invite: minted ticket");
+        text.strip_prefix("haven-friend:").map(str::to_string)
+    }
+
+    /// Append the ticket to an invite link (after the `?d=` hints, before the `#` fragment).
+    fn friend_invite_embed(&self, link: String) -> String {
+        let Some(t) = self.friend_invite_link_value() else { return link };
+        let hash = link.find('#').unwrap_or(link.len());
+        let sep = if link[..hash].contains('?') { "&" } else { "?" };
+        format!("{}{}t={}{}", &link[..hash], sep, t, &link[hash..])
+    }
+
+    /// The `t=` value from a pasted/scanned link (None when absent).
+    fn friend_invite_extract(link: &str) -> Option<String> {
+        let q_start = link.find('?')?;
+        let end = link.find('#').unwrap_or(link.len());
+        if q_start >= end {
+            return None;
+        }
+        for pair in link[q_start + 1..end].split('&') {
+            let Some((k, v)) = pair.split_once('=') else { continue };
+            if k == "t" && !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+        None
+    }
+
+    /// `connect_by_link` saw a `?t=` value: persist the acceptance so the tick parks the drop.
+    fn friend_invite_accept(&self, link_value: &str) {
+        let Ok(t) = haven_p2p::friend_invite::FriendTicket::parse_text(&format!("haven-friend:{link_value}")) else {
+            return;
+        };
+        let text = t.encode_text();
+        let mut p = self.prefs.lock();
+        if p.friend_invites_accepted.iter().any(|a| a.ticket == text) {
+            return;
+        }
+        p.friend_invites_accepted.push(crate::store::AcceptedFriendInvite {
+            ticket: text,
+            accepted_at: friend_invite_now(),
+            drop_landed: false,
+            granted: false,
+        });
+        let _ = p.save(&self.paths);
+        log::info!("friend-invite: accepted ticket (relays={})", t.relays.len());
+    }
+
+    fn friend_invite_prune(&self) {
+        let mut p = self.prefs.lock();
+        p.friend_invites_issued
+            .retain(|i| i.consumed_at != 0 || friend_invite_live(i.issued_at));
+        while p.friend_invites_issued.iter().filter(|i| i.consumed_at == 0).count() > 16 {
+            if let Some(idx) = p.friend_invites_issued.iter().position(|i| i.consumed_at == 0) {
+                p.friend_invites_issued.remove(idx);
+            } else {
+                break;
+            }
+        }
+        p.friend_invites_accepted
+            .retain(|a| !a.granted && friend_invite_live(a.accepted_at));
+    }
+
+    /// One pass of every pending invite duty — heartbeat sync bucket; cheap no-op when idle.
+    pub(crate) async fn friend_invite_tick(self: &Arc<Self>) {
+        self.friend_invite_prune();
+        self.friend_invite_write_drops().await;
+        self.friend_invite_poll_grants().await;
+        self.friend_invite_poll_drops().await;
+    }
+
+    async fn friend_invite_write_drops(self: &Arc<Self>) {
+        let pending: Vec<crate::store::AcceptedFriendInvite> = {
+            let p = self.prefs.lock();
+            p.friend_invites_accepted.iter().filter(|a| !a.drop_landed).cloned().collect()
+        };
+        for a in pending {
+            let Ok(t) = haven_p2p::friend_invite::FriendTicket::parse_text(&a.ticket) else { continue };
+            let Some(hello) = self.hello_payload(DEFAULT_CIRCLE) else { continue };
+            let blob = haven_p2p::friend_invite::invite_drop_wire(
+                &t,
+                t.issued_at + haven_p2p::friend_invite::DEFAULT_TTL_SECS,
+                &hello,
+            );
+            let key = t.drop_key();
+            let mut landed = false;
+            for relay in &t.relays {
+                if let Some(c) = self.relay_client_for(relay).await {
+                    if c.put(key.clone(), blob.clone()).await.is_ok() {
+                        landed = true;
+                        log::info!("friend-invite: drop landed on {}", &relay[..8.min(relay.len())]);
+                    }
+                }
+            }
+            if landed {
+                let mut p = self.prefs.lock();
+                if let Some(e) = p.friend_invites_accepted.iter_mut().find(|x| x.ticket == a.ticket) {
+                    e.drop_landed = true;
+                }
+                let _ = p.save(&self.paths);
+            }
+        }
+    }
+
+    async fn friend_invite_poll_grants(self: &Arc<Self>) {
+        let pending: Vec<crate::store::AcceptedFriendInvite> = {
+            let p = self.prefs.lock();
+            p.friend_invites_accepted
+                .iter()
+                .filter(|a| a.drop_landed && !a.granted)
+                .cloned()
+                .collect()
+        };
+        for a in pending {
+            let Ok(t) = haven_p2p::friend_invite::FriendTicket::parse_text(&a.ticket) else { continue };
+            let key = t.grant_key();
+            for relay in &t.relays {
+                let Some(c) = self.relay_client_for(relay).await else { continue };
+                let Some(blob) = c.get(key.clone()).await else { continue };
+                if blob.is_empty() {
+                    continue;
+                }
+                let Ok(hello) = haven_p2p::friend_invite::open_invite_blob(&t, true, &blob, friend_invite_now()) else {
+                    log::info!("friend-invite: grant blob refused (tamper/expiry)");
+                    continue;
+                };
+                log::info!("friend-invite: grant received — completing friendship");
+                self.handle_hello_from(None, &hello);
+                self.adopt_bootstrap_relays(&t.relays).await;
+                {
+                    let mut p = self.prefs.lock();
+                    if let Some(e) = p.friend_invites_accepted.iter_mut().find(|x| x.ticket == a.ticket) {
+                        e.granted = true;
+                    }
+                    let _ = p.save(&self.paths);
+                }
+                self.sync_with_contacts();
+                break;
+            }
+        }
+    }
+
+    async fn friend_invite_poll_drops(self: &Arc<Self>) {
+        let pending: Vec<crate::store::IssuedFriendInvite> = {
+            let p = self.prefs.lock();
+            p.friend_invites_issued
+                .iter()
+                .filter(|i| i.consumed_at == 0 && friend_invite_live(i.issued_at))
+                .cloned()
+                .collect()
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let my_acct = self.social.my_node_hex().to_lowercase();
+        if my_acct.len() != 64 {
+            return;
+        }
+        let prefix = format!("haven/invite/{my_acct}/");
+        let mut keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(h) = self.relay_host.lock().clone() {
+            keys.extend(h.local_list(prefix.clone()));
+        }
+        for relay in self.active_relay_hexes() {
+            if let Some(c) = self.relay_client_for(&relay).await {
+                if let Ok(listed) = c.list(prefix.clone()).await {
+                    keys.extend(listed);
+                }
+            }
+        }
+        if keys.is_empty() {
+            return;
+        }
+        for iss in pending {
+            let Ok(t) = haven_p2p::friend_invite::FriendTicket::parse_text(&iss.ticket) else { continue };
+            let drop_key = t.drop_key();
+            if !keys.contains(&drop_key) {
+                continue;
+            }
+            let mut blob: Option<Vec<u8>> =
+                self.relay_host.lock().clone().and_then(|h| h.local_get(drop_key.clone()));
+            if blob.is_none() {
+                for relay in self.active_relay_hexes() {
+                    if let Some(c) = self.relay_client_for(&relay).await {
+                        if let Some(b) = c.get(drop_key.clone()).await {
+                            if !b.is_empty() {
+                                blob = Some(b);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            let Some(blob) = blob else { continue };
+            let Ok(hello) = haven_p2p::friend_invite::open_invite_blob(&t, false, &blob, friend_invite_now()) else {
+                continue;
+            };
+            let acceptor = friend_invite_hello_sender(&hello).unwrap_or_default();
+            let already_contact = !acceptor.is_empty()
+                && self
+                    .prefs
+                    .lock()
+                    .contacts
+                    .iter()
+                    .any(|c| c.id_hex.eq_ignore_ascii_case(&acceptor));
+            {
+                let mut p = self.prefs.lock();
+                if let Some(e) = p.friend_invites_issued.iter_mut().find(|x| x.ticket == iss.ticket) {
+                    if e.acceptor_hex != acceptor {
+                        e.acceptor_hex = acceptor.clone();
+                        let _ = p.save(&self.paths);
+                    }
+                }
+            }
+            log::info!(
+                "friend-invite: acceptance drop opened (from {}) — surfacing prompt",
+                &acceptor[..8.min(acceptor.len())]
+            );
+            self.handle_hello_from(None, &hello);
+            // Mutual-add race: we had already added them, so no approval tap is coming — the
+            // approval is implicit. Park the grant right now.
+            if already_contact && !acceptor.is_empty() {
+                self.friend_invite_note_approved(&acceptor).await;
+            }
+        }
+    }
+
+    /// The user approved a connection request (or the mutual-add race made approval implicit).
+    /// Write the grant under every matching pending ticket and consume it.
+    pub(crate) async fn friend_invite_note_approved(self: &Arc<Self>, account_hex: &str) {
+        let hex = account_hex.to_lowercase();
+        let matches: Vec<crate::store::IssuedFriendInvite> = {
+            let p = self.prefs.lock();
+            p.friend_invites_issued
+                .iter()
+                .filter(|i| i.consumed_at == 0 && i.acceptor_hex.eq_ignore_ascii_case(&hex))
+                .cloned()
+                .collect()
+        };
+        if matches.is_empty() {
+            return;
+        }
+        let Some(hello) = self.hello_payload(DEFAULT_CIRCLE) else { return };
+        for iss in matches {
+            let Ok(t) = haven_p2p::friend_invite::FriendTicket::parse_text(&iss.ticket) else { continue };
+            let blob = haven_p2p::friend_invite::invite_grant_wire(
+                &t,
+                t.issued_at + haven_p2p::friend_invite::DEFAULT_TTL_SECS,
+                &hello,
+            );
+            let key = t.grant_key();
+            let mut landed = self
+                .relay_host
+                .lock()
+                .clone()
+                .map(|h| h.local_put(key.clone(), blob.clone()))
+                .unwrap_or(false);
+            for relay in self.active_relay_hexes() {
+                if let Some(c) = self.relay_client_for(&relay).await {
+                    if c.put(key.clone(), blob.clone()).await.is_ok() {
+                        landed = true;
+                    }
+                }
+            }
+            if landed {
+                let mut p = self.prefs.lock();
+                if let Some(e) = p.friend_invites_issued.iter_mut().find(|x| x.ticket == iss.ticket) {
+                    e.consumed_at = friend_invite_now();
+                }
+                let _ = p.save(&self.paths);
+                log::info!("friend-invite: grant parked — ticket consumed");
+            }
+        }
     }
 }

@@ -2398,6 +2398,8 @@ final class FeedStore: ObservableObject {
     ///   circle_invite|file|music_post|mark_read|dump", …}` — every op answers with a fresh
     ///   `qa-dump.json` next to the drop file.
     private var matrixQaTimer: Timer?
+    /// The ticketed invite link minted by the `invite_link` qa op (exposed via the dump).
+    static var qaInviteLink: String = ""
     /// Successful dump writes, and when the last one landed. See `dump_seq` in the payload.
     nonisolated(unsafe) static var qaDumpSeq: Int = 0
     nonisolated(unsafe) static var qaLastDumpAt = Date.distantPast
@@ -2747,6 +2749,30 @@ final class FeedStore: ObservableObject {
                 HavenLog.net("matrix-qa v2 comment: target not found id=\(target.prefix(16))")
             }
 
+        case "invite_link":
+            // Mint (or reuse) the ticketed invite link and expose it via the dump — the
+            // invite_offline e2e reads it, kills this app, and has the peer accept it.
+            if let acct = AccountStore.qaShared?.account {
+                Self.qaInviteLink = InviteHints.appendQuery(
+                    in: InviteHints.embed(in: acct.havenLink(domain: HavenSite.inviteDomain),
+                                          deviceIds: inviteDeviceIds()),
+                    name: "t",
+                    value: FriendInviteStore.shared.currentTicketLinkValue() ?? "")
+            }
+
+        case "connect_link":
+            let uri = str("uri")
+            if !uri.isEmpty, let f = try? parseLink(s: uri) {
+                ContactsStore.shared.add(name: "Friend", idHex: f.idHex, verificationHex: f.verificationHex)
+                clearCircleRemovalEverywhere(idHex: f.idHex, circleId: "default")
+                recordDeviceHints(accountHex: f.idHex, deviceIds: InviteHints.extract(from: uri))
+                if let tv = InviteHints.queryValue(from: uri, name: "t") {
+                    FriendInviteStore.shared.acceptTicket(linkValue: tv)
+                }
+                syncWithContacts(force: true)
+                HavenLog.net("matrix-qa v2 connect_link: accepted \(f.idHex.prefix(8))")
+            }
+
         case "profile":
             let name = str("name")
             if !name.isEmpty {
@@ -3017,6 +3043,17 @@ final class FeedStore: ObservableObject {
             // to tell a FROZEN dump apart from a device that genuinely received nothing — they are
             // indistinguishable from the file alone, and they need opposite fixes.
             "dump_seq": Self.qaDumpSeq,
+            // Offline friend invites: the minted link (invite_link op) and both state lists, so
+            // the e2e can assert drop-landed / consumed / granted across kills and relaunches.
+            "invite_link": Self.qaInviteLink,
+            "friend_invites": [
+                "issued": FriendInviteStore.shared.issued.map {
+                    ["consumed": $0.consumedAt != nil, "has_acceptor": !($0.acceptorHex ?? "").isEmpty]
+                },
+                "accepted": FriendInviteStore.shared.accepted.map {
+                    ["drop_landed": $0.dropLanded, "granted": $0.granted]
+                },
+            ],
             // What the engine is HOLDING BACK: parked (received-but-unopenable) envelopes per
             // circle, plus the rosters we know. A short feed alone cannot tell "never arrived" from
             // "arrived and could not be opened", and the two have opposite fixes.

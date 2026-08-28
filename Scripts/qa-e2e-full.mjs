@@ -31,7 +31,7 @@ const RUN_NONCE = Date.now();   // per-run fixture salt — see the satellite la
 const REPORT = [];
 const PERF = [];
 const HISTORY = join(ROOT, 'build', 'e2e-history.jsonl');
-const STEPS = (process.env.E2E_STEPS || 'profile,circle,post,story,file,music,dm,call,react,comment,media,satellite').split(',');
+const STEPS = (process.env.E2E_STEPS || 'profile,circle,post,story,file,music,dm,call,react,comment,media,satellite,invite_offline').split(',');
 
 // Convergence budgets (ms). Generous but bounded; tune via env.
 // One active-cadence mailbox poll is ~30-45s; a budget must cover a full poll plus
@@ -95,6 +95,7 @@ if (DESK_DATA === join(process.env.HOME, 'Library/Application Support/Haven')) {
 }
 
 const devices = {}; // name → {qaWrite(cmd), poke(), dump(), label}
+let IOS_UDID = '';   // set in main(); the invite_offline step kills/relaunches the sim app
 
 function iosContainer(udid) {
   return sh('xcrun', ['simctl', 'get_app_container', udid, IOS_BUNDLE, 'data']).trim();
@@ -277,6 +278,7 @@ async function main() {
   const udid = process.env.HAVEN_IOS_UDID
     || (sh('xcrun', ['simctl', 'list', 'devices', 'booted']).match(/[A-F0-9-]{36}/) || [])[0];
   if (!udid) { console.error('no booted iOS sim'); process.exit(1); }
+  IOS_UDID = udid;
   devices.ios = makeIos(udid);
   devices.stub = makeStub();
   devices.desktop = makeDesktop();
@@ -749,6 +751,43 @@ async function main() {
             j.posts?.find((x) => x.id === target)?.comments?.some((c) => c.body === `${MARKER}_CmtB`), BUDGET.text * 2));
       }
     }
+  }
+
+  if (STEPS.includes('invite_offline')) {
+    // Offline friend invites (docs/OFFLINE-FRIEND-INVITES.md): the acceptance must land while
+    // the INVITER'S APP IS DEAD — the exact thing the pre-ticket flow could not do (its hello
+    // was a live dial; its mailbox leg wrote to relays the inviter never polls). Fleet topology
+    // note: the stub hosts the only relay AND is account B, so the relay must stay up — the
+    // inviter (iOS) is the leg that dies. A and B are already contacts here, so the drop takes
+    // the mutual-add path (implicit approval); the stranger-prompt branch is the same held
+    // handleHello machinery the hello tests already cover.
+    await op(devices.ios, { op: 'invite_link' });
+    let link = '';
+    await converge(devices.ios, (j) => {
+      link = j.invite_link || '';
+      return link.includes('t=');
+    }, 30_000, 'ticketed invite link minted');
+    score('invite link carries a ticket', link.includes('t='));
+
+    // Kill the inviter DEAD. Everything that lands from here on lands without it.
+    shOk('xcrun', ['simctl', 'terminate', IOS_UDID, IOS_BUNDLE]);
+    log('invite_offline: inviter (ios) terminated');
+
+    await op(devices.stub, { op: 'connect_link', uri: link });
+    // The acceptance drop must reach the relay while the inviter is a corpse.
+    await convergeAll(['stub'], (j) => j.friend_invites?.accepted?.some((a) => a.drop_landed),
+      BUDGET.text * 2, 'acceptance drop landed (inviter dead)');
+
+    // Resurrect the inviter: its poll must find the drop, auto-grant (mutual-add), consume.
+    shOk('xcrun', ['simctl', 'launch', IOS_UDID, IOS_BUNDLE]);
+    await new Promise((r) => setTimeout(r, 4000));
+    devices.ios.poke();
+    await convergeAll(['ios'], (j) => j.friend_invites?.issued?.some((i) => i.consumed),
+      BUDGET.text * 3, 'drop opened + grant parked (on relaunch)');
+
+    // And the acceptor completes from the parked grant alone.
+    await convergeAll(['stub'], (j) => j.friend_invites?.accepted?.some((a) => a.granted),
+      BUDGET.text * 3, 'grant fetched — friendship async-complete');
   }
 
   finish();

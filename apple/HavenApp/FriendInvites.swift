@@ -153,6 +153,12 @@ final class FriendInviteStore: ObservableObject {
                   let blob = try? friendInviteBuildDrop(ticket: t, expires: expires, payload: hello) else { continue }
             var landed = false
             for relay in t.relays {
+                // The inviter's relay can be the relay THIS device hosts (shared-relay circles,
+                // and the QA fleet's stub) — RelayClients refuses self-dials, so store directly.
+                if RelayHost.shared.serving, relay == RelayHost.shared.nodeId {
+                    if RelayHost.shared.localPut(key, blob) { landed = true }
+                    continue
+                }
                 if let c = await RelayClients.client(relay) {
                     if (try? await c.put(key: key, data: blob)) != nil {
                         landed = true
@@ -175,8 +181,13 @@ final class FriendInviteStore: ObservableObject {
             guard let t = Self.ticket(a.ticket),
                   let key = try? friendInviteGrantKey(ticket: t) else { continue }
             for relay in t.relays {
-                guard let c = await RelayClients.client(relay),
-                      let blob = await c.get(key: key), !blob.isEmpty else { continue }
+                var fetched: Data?
+                if RelayHost.shared.serving, relay == RelayHost.shared.nodeId {
+                    fetched = RelayHost.shared.localGet(key)
+                } else if let c = await RelayClients.client(relay) {
+                    fetched = await c.get(key: key)
+                }
+                guard let blob = fetched, !blob.isEmpty else { continue }
                 guard let hello = try? friendInviteOpenGrant(ticket: t, blob: blob, now: Self.now()) else {
                     HavenLog.net("friend-invite: grant blob refused (tamper/expiry) from \(relay.prefix(8))")
                     continue

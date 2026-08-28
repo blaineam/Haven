@@ -1,6 +1,4 @@
-1.7.0 — Chiamate affidabili.
-• Rispondere ha sempre effetto — le chiamate non si connettono più "sotto" la schermata di chiamata.
-• "Connesso" appare solo quando l'altro lato ha davvero risposto.
-• Le chiamate senza risposta terminano dopo un minuto — basta chiamate fantasma.
-• Emoji e foto dei contatti ora compaiono nelle chiamate.
-• Include la stabilità 1.6.1: fork delle chiavi risolto, modifiche ai membri più rapide.
+1.8.0 — Aggiungi amici senza essere online insieme.
+• Gli inviti ora funzionano offline dall'inizio alla fine: accetta mentre l'app dell'altro è chiusa, lui approva al ritorno e l'amicizia si completa da sola.
+• Post, reazioni e commenti riprovano finché non vengono consegnati — niente più riavvii dopo un cambio di rete.
+• Le connessioni morte in silenzio vengono rilevate e sostituite in pochi secondi.

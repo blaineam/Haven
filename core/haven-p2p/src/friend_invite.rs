@@ -11,7 +11,11 @@
 //! side polls at its leisure:
 //!
 //!   `haven/invite/<inviter-acct-hex>/<token-id-hex>`         ← acceptance drop (B writes)
-//!   `haven/invite/<inviter-acct-hex>/<token-id-hex>/grant`   ← approval grant (A writes)
+//!   `haven/invite/<inviter-acct-hex>/<token-id-hex>.grant`   ← approval grant (A writes)
+//!
+//! The grant is a SIBLING of the drop, never a child: the relay stores keys as files, and a
+//! `<token>/grant` child would need the drop's own path to be a directory — the store refuses
+//! with `ERR write` (field-caught by the invite_offline e2e).
 //!
 //! Authorization model: the PUT path itself is the capability — `token_id` is a keyed hash of
 //! the ticket secret, so only a link holder can name a valid key. The relay verifies only
@@ -125,9 +129,9 @@ impl FriendTicket {
         format!("haven/invite/{}/{}", hex32(&self.account_id), hex32(&self.token_id()))
     }
 
-    /// Relay key for the approval grant.
+    /// Relay key for the approval grant — a SIBLING of the drop key (see the module doc).
     pub fn grant_key(&self) -> String {
-        format!("{}/grant", self.drop_key())
+        format!("{}.grant", self.drop_key())
     }
 
     /// Does the full bundle (fetched via the grant) match what this ticket promised?
@@ -513,7 +517,7 @@ mod tests {
         let dk = t.drop_key();
         assert!(dk.starts_with("haven/invite/"));
         assert_eq!(dk.split('/').count(), 4);
-        assert_eq!(t.grant_key(), format!("{dk}/grant"));
+        assert_eq!(t.grant_key(), format!("{dk}.grant"));
         // Token id reveals nothing secret-shaped and is stable.
         assert_eq!(t.token_id(), ticket().token_id());
         assert_ne!(t.token_id(), t.secret);

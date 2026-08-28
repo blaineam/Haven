@@ -11649,13 +11649,14 @@ fn friend_invite_live(issued_at: u64) -> bool {
 
 /// The sender account hex inside a hello body (`[LP circleId][LP circleName][LP bundle][profile]`).
 fn friend_invite_hello_sender(body: &[u8]) -> Option<String> {
+    // LP here is the HELLO wire's u16-LE prefix — NOT the enroll/invite wires' u32.
     let mut i = 0usize;
     let mut lp = || -> Option<&[u8]> {
-        if body.len() < i + 4 {
+        if body.len() < i + 2 {
             return None;
         }
-        let n = u32::from_le_bytes(body[i..i + 4].try_into().ok()?) as usize;
-        i += 4;
+        let n = u16::from_le_bytes(body[i..i + 2].try_into().ok()?) as usize;
+        i += 2;
         if body.len() < i + n {
             return None;
         }

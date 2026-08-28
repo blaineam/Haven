@@ -34,14 +34,12 @@ privado,criptografado,família,amigos,mensagens,seguro,offline,chamadas,sem anú
 Grátis. Um espaço privado e criptografado de ponta a ponta para seus mais próximos — sem anúncios, sem rastreamento, sem assinatura. Peer-to-peer, pós-quântico, seu.
 
 ## whats_new
-1.7.0 — Chamadas reconstruídas e confiáveis.
+1.8.0 — Adicione amigos sem estarem online ao mesmo tempo.
 
-• Atender agora sempre funciona: uma chamada não pode mais se conectar "por baixo" da tela de chamada recebida — aceitar vale no momento do toque, em todas as plataformas.
-• Quem liga só vê "Conectado" quando o outro lado realmente atendeu — nunca antes, e nunca mais preso em "Chamando…" com o áudio já fluindo.
-• Chamadas não atendidas terminam de forma limpa após um minuto nos dois lados — chega de chamadas fantasmas tocando para sempre.
-• A tela de chamadas do desktop foi refeita: palco em tela cheia, câmera picture-in-picture, destaque de quem fala, escolha de dispositivos — e minimizar encaixa a chamada numa aba.
-• Rostos em todo lugar: emojis e fotos dos contatos agora aparecem nas chamadas e conversas do desktop.
-• Inclui a onda de estabilidade 1.6.1: o fork de chaves multi-dispositivo corrigido de vez, uma falha de inicialização no iPhone eliminada e mudanças de integrantes em segundos.
+• Convites agora funcionam offline: aceite um convite mesmo com o Haven do seu amigo fechado — o pedido aparece na próxima vez que ele abrir o app, pode ser aprovado mesmo quando você já estiver offline de novo, e a amizade se completa sozinha. Chega de combinar "você está online agora?"
+• Nada para configurar: os links de convite carregam tudo o que é preciso, e os relays guardam apenas envelopes lacrados que não conseguem ler.
+• Posts, reações e comentários agora insistem até serem entregues. O conteúdo não espera mais um reinício do app depois de uma instabilidade de rede — trocar do Wi-Fi para dados, ligar uma VPN ou acordar do repouso se recupera sozinho, na hora.
+• Por dentro: conexões que morreram em silêncio são detectadas e substituídas em segundos, e tudo o que você escreve é reenviado com backoff até chegar a um relay.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

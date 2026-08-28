@@ -266,6 +266,7 @@ final class FriendInviteStore: ObservableObject {
     func noteApproved(accountHex: String) {
         let hex = accountHex.lowercased()
         let matches = issued.enumerated().filter { $0.element.consumedAt == nil && $0.element.acceptorHex == hex }
+        HavenLog.net("friend-invite: noteApproved(\(hex.prefix(8))) matches=\(matches.count)")
         guard !matches.isEmpty else { return }
         Task { [weak self] in
             guard let self else { return }
@@ -276,11 +277,17 @@ final class FriendInviteStore: ObservableObject {
                 let expires = t.issuedAt + friendInviteDefaultTtlSecs()
                 guard let blob = try? friendInviteBuildGrant(ticket: t, expires: expires, payload: hello) else { continue }
                 var landed = RelayHost.shared.serving && RelayHost.shared.localPut(key, blob)
-                for relay in RelayMailboxStore.shared.allRelays() {
-                    if let c = await RelayClients.client(relay), (try? await c.put(key: key, data: blob)) != nil {
-                        landed = true
+                let relays = RelayMailboxStore.shared.allRelays()
+                HavenLog.net("friend-invite: grant → relays=\(relays.count) serving=\(RelayHost.shared.serving)")
+                for relay in relays {
+                    if let c = await RelayClients.client(relay) {
+                        do { try await c.put(key: key, data: blob); landed = true }
+                        catch { HavenLog.net("friend-invite: grant put FAILED on \(relay.prefix(8)): \(error)") }
+                    } else {
+                        HavenLog.net("friend-invite: grant put — no client for \(relay.prefix(8))")
                     }
                 }
+                HavenLog.net("friend-invite: grant write landed=\(landed)")
                 if landed, self.issued.indices.contains(idx) {
                     self.issued[idx].consumedAt = Self.now()
                     self.save()

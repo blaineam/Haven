@@ -7,7 +7,20 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased
+## 1.8.0 — 2026-08-28
+
+### Added — add friends without being online together
+
+Offline friend invites (`docs/OFFLINE-FRIEND-INVITES.md`): invite links now carry a one-time
+ticket (secret + the inviter's relays + dial hints), and both halves of the first-contact
+handshake become sealed blobs parked under unguessable token-derived keys on the inviter's
+relays. Accept while the inviter's app is closed; they get the normal approval prompt next
+launch; approve while the acceptor is offline; the acceptor completes from the parked grant
+alone. The relay lane sits above the membership gate (the token path IS the write capability),
+bodies are structurally verified on both transports, everything is sealed + MAC'd from the
+ticket secret — relays stay blind. Live handshakes still run first and win when both are online.
+All four platforms; e2e `invite_offline` kills the inviter mid-handshake and proves the async
+path (drop lands 2.5s with the inviter dead; completion in ~6s per side after relaunch).
 
 ### Fixed — authored content no longer waits for an app relaunch to reach anyone
 

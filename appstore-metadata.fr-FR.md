@@ -34,14 +34,12 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Gratuit. Un espace privé, chiffré de bout en bout, pour vos proches — sans pub, sans suivi, sans abonnement. Pair‑à‑pair, post‑quantique, à vous.
 
 ## whats_new
-1.7.0 — Les appels, reconstruits et fiables.
+1.8.0 — Ajoutez des amis sans être en ligne en même temps.
 
-• Décrocher fonctionne désormais toujours : un appel ne peut plus se connecter « sous » l'écran d'appel entrant — accepter prend effet à l'instant du geste, sur toutes les plateformes.
-• L'appelant ne voit « Connecté » que lorsque l'autre côté a vraiment répondu — jamais avant, et plus jamais bloqué sur « Appel… » alors que l'audio circule déjà.
-• Les appels sans réponse se terminent proprement après une minute des deux côtés — fini les appels fantômes qui sonnent sans fin.
-• L'écran d'appel du bureau a été refait : scène plein écran, caméra en incrustation, mise en avant de la personne qui parle, choix des périphériques — et réduire l'appel l'ancre dans un onglet.
-• Des visages partout : les émojis et photos de vos contacts apparaissent désormais dans les appels et fils du bureau.
-• Inclut la vague de stabilité 1.6.1 : le fork de clés multi-appareils est corrigé pour de bon, un plantage au lancement sur iPhone disparu, les changements de membres prennent quelques secondes.
+• Les invitations fonctionnent désormais hors ligne : acceptez une invitation pendant que Haven est fermé chez l'autre — la demande apparaît à sa prochaine ouverture, il peut l'approuver même quand vous êtes reparti hors ligne, et l'amitié se complète toute seule. Fini le « tu es en ligne, là ? »
+• Rien à configurer : les liens d'invitation transportent discrètement tout le nécessaire, et les relais ne stockent que des enveloppes scellées qu'ils ne peuvent pas lire.
+• Les publications, réactions et commentaires insistent désormais jusqu'à être livrés. Le contenu n'attend plus un redémarrage de l'app après un souci réseau — passer du Wi-Fi au cellulaire, activer un VPN ou sortir de veille se rétablit immédiatement, tout seul.
+• Sous le capot : les connexions mortes en silence sont détectées et remplacées en quelques secondes, et tout ce que vous rédigez est retenté jusqu'à atteindre un relais.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

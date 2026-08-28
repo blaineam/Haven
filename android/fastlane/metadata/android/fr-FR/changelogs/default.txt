@@ -1,6 +1,4 @@
-1.7.0 — Des appels fiables.
-• Décrocher prend toujours effet — un appel ne se connecte plus « sous » l'écran d'appel entrant.
-• « Connecté » n'apparaît que si l'autre côté a vraiment répondu.
-• Les appels sans réponse se terminent après une minute — fini les appels fantômes.
-• Les émojis et photos de vos contacts s'affichent dans les appels.
-• Avec la vague de stabilité 1.6.1 : fork de clés corrigé, changements de membres plus rapides.
+1.8.0 — Ajoutez des amis sans être en ligne en même temps.
+• Les invitations fonctionnent désormais hors ligne de bout en bout : acceptez pendant que l'app de l'autre est fermée, il approuve à son retour, et l'amitié se complète toute seule.
+• Publications, réactions et commentaires réessaient jusqu'à être livrés — plus de redémarrage après un changement de réseau.
+• Les connexions mortes en silence sont détectées et remplacées en quelques secondes.

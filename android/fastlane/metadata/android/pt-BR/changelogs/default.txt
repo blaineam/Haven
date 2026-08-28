@@ -1,6 +1,4 @@
-1.7.0 — Chamadas confiáveis.
-• Atender sempre funciona — chamadas não se conectam mais "por baixo" da tela de chamada.
-• "Conectado" só aparece quando o outro lado realmente atendeu.
-• Chamadas não atendidas terminam após um minuto — chega de chamadas fantasmas.
-• Emojis e fotos dos contatos aparecem nas chamadas.
-• Inclui a estabilidade 1.6.1: fork de chaves corrigido, mudanças de integrantes mais rápidas.
+1.8.0 — Adicione amigos sem estarem online ao mesmo tempo.
+• Convites agora funcionam offline de ponta a ponta: aceite com o app do outro fechado, ele aprova quando voltar e a amizade se completa sozinha.
+• Posts, reações e comentários insistem até serem entregues — sem reiniciar o app depois de trocar de rede.
+• Conexões que morreram em silêncio são detectadas e substituídas em segundos.

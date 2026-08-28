@@ -1082,13 +1082,13 @@ object HavenNet : InboundListener {
 
     /** The sender account hex inside a hello body ([LP cid][LP name][LP bundle][profile]). */
     private fun helloSenderHex(body: ByteArray): String? {
+        // LP here is the HELLO wire's u16-LE prefix — NOT the enroll/invite wires' u32.
         var i = 0
         fun lp(): ByteArray? {
-            if (body.size < i + 4) return null
-            val n = (body[i].toInt() and 0xff) or ((body[i + 1].toInt() and 0xff) shl 8) or
-                ((body[i + 2].toInt() and 0xff) shl 16) or ((body[i + 3].toInt() and 0xff) shl 24)
-            i += 4
-            if (n < 0 || body.size < i + n) return null
+            if (body.size < i + 2) return null
+            val n = (body[i].toInt() and 0xff) or ((body[i + 1].toInt() and 0xff) shl 8)
+            i += 2
+            if (body.size < i + n) return null
             val out = body.copyOfRange(i, i + n)
             i += n
             return out

@@ -32,6 +32,14 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Free. A private, end‑to‑end encrypted home for your closest people — no ads, no tracking, no subscription. Peer‑to‑peer, post‑quantum, yours.
 
 ## whats_new
+1.8.0 — Add friends without being online together.
+
+• Invites now work offline: accept a friend's invite while their Haven is closed — they get the request the next time they open the app, can approve it even after you've gone offline again, and the friendship completes on its own. No more coordinating "are you online right now?"
+• Nothing new to set up: invite links quietly carry everything needed, and relays store only sealed envelopes they cannot read.
+• Posts, reactions, and comments now keep trying until they are delivered. Content no longer waits for an app restart after a rough network patch — switching Wi-Fi to cellular, toggling a VPN, or waking from sleep now recovers on its own, immediately.
+• Under the hood: connections that silently died are now detected and replaced within seconds, and everything you author retries with backoff until it reaches a relay.
+
+## whats_new_previous
 1.7.0 — Calls, rebuilt to be trustworthy.
 
 • Answering now always takes effect: a call can no longer connect "underneath" your ring screen — accept works the moment you tap it, on every platform.
@@ -40,20 +48,6 @@ Free. A private, end‑to‑end encrypted home for your closest people — no ad
 • The desktop call screen was rebuilt: full-screen stage, picture-in-picture camera, live speaker highlighting, device pickers — and minimizing docks the call into a tab so you can keep browsing.
 • Faces everywhere: contacts' chosen emoji and photos now appear in calls and threads on desktop.
 • Includes the 1.6.1 stability wave: the multi-device circle key fork is fixed for good, an iPhone launch crash is gone, roster changes finish in seconds, and photo previews cross satellite links.
-
-## whats_new_previous
-1.6.1 — Haven is now free. And the stability wave.
-
-• Haven is free on every platform — no ads, no tracking, no subscription, no in‑app purchases. Nothing about how it works changed: your content still lives on your devices, end‑to‑end encrypted.
-• Fixed a launch crash on iPhone and iPad that could kill the app on the first unlock after a restart.
-• Fixed the circle key fork: a circle created from an account with several devices could leave members one step out of sync, unable to read each other's new posts in either direction. It can no longer happen, and a device that had fallen behind is brought back automatically.
-• Roster changes no longer re‑seal every circle's history at once — adding or removing someone finishes in seconds instead of minutes, and your own devices catch up far faster.
-• Satellite and low‑data links: photos now carry a tiny 512‑pixel preview (about six kilobytes), so a post gets through an ultra‑constrained connection and the full photo completes on its own once you're back in coverage.
-• Fixed content that could arrive but stay unreadable forever after a contact's roster came in over a relay.
-• Sideways photos: orientation is respected everywhere previews and thumbnails are made, so nothing arrives rotated or flips when the full‑resolution version lands.
-• Feed videos no longer keep playing audio with the app in the background and the phone locked.
-• Shared locations show their coordinates and an Open in Maps path when map tiles can't load — off‑grid is exactly when a pin matters.
-• Calls: an unanswered outgoing call now ends after a minute instead of ringing forever on the other side.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

@@ -34,14 +34,12 @@ privado,cifrado,familia,amigos,mensajería,seguro,sin conexión,llamadas,sin anu
 Gratis. Un hogar privado y cifrado de extremo a extremo para los tuyos: sin anuncios, sin rastreo, sin suscripción. Peer-to-peer, poscuántico, tuyo.
 
 ## whats_new
-1.7.0 — Llamadas reconstruidas y fiables.
+1.8.0 — Añade amigos sin estar en línea a la vez.
 
-• Aceptar siempre funciona: una llamada ya no puede conectarse "debajo" de la pantalla de llamada entrante — aceptar surte efecto al instante, en todas las plataformas.
-• Quien llama solo ve "Conectado" cuando el otro lado ha respondido de verdad — nunca antes, y nunca más atascado en "Llamando…" con el audio ya en marcha.
-• Las llamadas sin respuesta terminan limpiamente tras un minuto en ambos extremos — se acabaron las llamadas fantasma que suenan para siempre.
-• La pantalla de llamadas de escritorio se rehizo: escenario a pantalla completa, cámara en miniatura, resaltado del hablante, selección de dispositivos — y al minimizar, la llamada se acopla como pestaña.
-• Caras en todas partes: los emojis y fotos de tus contactos aparecen ahora en llamadas y chats de escritorio.
-• Incluye la ola de estabilidad 1.6.1: el fork de claves con varios dispositivos queda corregido, un fallo de arranque en iPhone eliminado y los cambios de miembros tardan segundos.
+• Las invitaciones ahora funcionan sin conexión: acepta una invitación aunque tu amigo tenga Haven cerrado — la solicitud le aparecerá la próxima vez que abra la app, podrá aprobarla incluso cuando tú ya estés desconectado, y la amistad se completa sola. Se acabó el "¿estás en línea ahora?"
+• Sin configurar nada: los enlaces de invitación llevan todo lo necesario, y los relés solo guardan sobres sellados que no pueden leer.
+• Las publicaciones, reacciones y comentarios ahora insisten hasta entregarse. El contenido ya no espera a que reinicies la app tras un problema de red — cambiar de Wi-Fi a datos, activar una VPN o despertar del reposo se recupera solo, al instante.
+• Por dentro: las conexiones muertas en silencio se detectan y reemplazan en segundos, y todo lo que escribes se reintenta hasta llegar a un relé.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

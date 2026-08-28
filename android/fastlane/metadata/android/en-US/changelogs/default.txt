@@ -1,6 +1,4 @@
-1.7.0 — Calls you can trust.
-• Answering always takes effect — calls can no longer connect "underneath" your ring screen.
-• Callers see "Connected" only when the other side really answered.
-• Unanswered calls end cleanly after a minute on both ends — no more phantom ringing.
-• Contacts' emoji and photos now show in calls everywhere.
-• Includes the 1.6.1 stability wave: circle key fork fixed for good, faster roster changes, satellite photo previews.
+1.8.0 — Add friends without being online together.
+• Invites now work offline end to end: accept while your friend's app is closed, they approve whenever they're back, and the friendship completes on its own.
+• Posts, reactions, and comments now keep retrying until delivered — no more waiting for an app restart after switching networks.
+• Connections that silently died are detected and replaced in seconds.

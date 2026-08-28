@@ -1196,20 +1196,21 @@ pub(crate) const DEVROSTER_PREFIX: &str = "haven/devroster/";
 /// who is accepting, and the MAC + AES-GCM seal inside are verified by the parties, not here.
 pub(crate) const INVITE_PREFIX: &str = "haven/invite/";
 
-/// Parse an invite KEY → (account-hex, token-hex, is_grant). `None` for anything else.
+/// Parse an invite KEY → (account-hex, token-hex, is_grant). `None` for anything else. The
+/// grant is the drop's SIBLING (`<token>.grant`) — a `/grant` child would collide with the
+/// drop FILE in the store (directories vs files; `ERR write`).
 pub(crate) fn invite_key(key: &str) -> Option<(&str, &str, bool)> {
     let rest = key.strip_prefix(INVITE_PREFIX)?;
     let mut it = rest.split('/');
     let acct = it.next()?;
-    let token = it.next()?;
-    let grant = match it.next() {
-        None => false,
-        Some("grant") => true,
-        Some(_) => return None,
-    };
+    let last = it.next()?;
     if it.next().is_some() {
         return None;
     }
+    let (token, grant) = match last.strip_suffix(".grant") {
+        Some(t) => (t, true),
+        None => (last, false),
+    };
     let hex64 = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     (hex64(acct) && hex64(token)).then_some((acct, token, grant))
 }
@@ -2945,6 +2946,7 @@ mod tests {
         assert!(blob_forbidden(&auth, &stranger, VERB_LIST, &format!("haven/invite/{acct_hex}/")));
         assert!(blob_forbidden(&auth, &stranger, VERB_PUT, "haven/invite/short/alsoshort"));
         assert!(blob_forbidden(&auth, &stranger, VERB_PUT, &format!("{dk}/extra")));
+        assert!(blob_forbidden(&auth, &stranger, VERB_PUT, &format!("{dk}.other")));
 
         // The OWNER (the account id itself) may LIST its own invite prefix.
         let owner = acct_hex.clone();

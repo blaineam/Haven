@@ -4377,21 +4377,17 @@ final class FeedStore: ObservableObject {
     /// completes a friendship the acceptor already committed to locally.
     @discardableResult
     func ingestInviteHello(_ body: Data) -> Bool {
-        handleHello(body, viaNearby: false, senderDevice: nil).consumed
+        let r = handleHello(body, viaNearby: false, senderDevice: nil)
+        HavenLog.net("friend-invite: ingest → consumed=\(r.consumed) why=\(r.why)")
+        return r.consumed
     }
 
     /// The sender account hex inside a hello body ([LP circleId][LP circleName][LP bundle][profile]).
+    /// LP here is the HELLO wire's u16-LE prefix (`lpAppend`/`lpRead`) — NOT the enroll wire's u32.
     func helloSenderHex(_ body: Data) -> String? {
-        var i = 0
-        func lp() -> Data? {
-            guard body.count >= i + 4 else { return nil }
-            let n = Int(body[i]) | Int(body[i + 1]) << 8 | Int(body[i + 2]) << 16 | Int(body[i + 3]) << 24
-            i += 4
-            guard n >= 0, body.count >= i + n else { return nil }
-            defer { i += n }
-            return body.subdata(in: i..<(i + n))
-        }
-        guard lp() != nil, lp() != nil, let bundle = lp() else { return nil }
+        var off = 0
+        guard lpRead(body, &off) != nil, lpRead(body, &off) != nil,
+              let bundle = lpRead(body, &off) else { return nil }
         return try? bundleNodeHex(bundleBytes: bundle)
     }
 

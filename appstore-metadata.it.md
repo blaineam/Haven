@@ -34,14 +34,12 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Gratis. Una casa privata e crittografata end‑to‑end per i tuoi cari — niente pubblicità, niente tracciamento, nessun abbonamento. Peer‑to‑peer, post‑quantistica, tua.
 
 ## whats_new
-1.7.0 — Chiamate ricostruite e affidabili.
+1.8.0 — Aggiungi amici senza essere online insieme.
 
-• Rispondere ora funziona sempre: una chiamata non può più connettersi "sotto" la schermata di chiamata in arrivo — accettare ha effetto nel momento in cui tocchi, su ogni piattaforma.
-• Chi chiama vede "Connesso" solo quando l'altro lato ha davvero risposto — mai prima, e mai più bloccato su "Chiamata…" con l'audio già attivo.
-• Le chiamate senza risposta terminano in modo pulito dopo un minuto su entrambi i lati — basta chiamate fantasma che squillano per sempre.
-• La schermata delle chiamate desktop è stata ricostruita: scena a schermo intero, camera picture-in-picture, evidenziazione di chi parla, scelta dei dispositivi — e riducendo, la chiamata si aggancia a una scheda.
-• Volti ovunque: emoji e foto dei contatti ora compaiono nelle chiamate e nelle chat desktop.
-• Include l'ondata di stabilità 1.6.1: il fork delle chiavi multi-dispositivo è risolto per sempre, un crash all'avvio su iPhone eliminato, le modifiche ai membri richiedono secondi.
+• Gli inviti ora funzionano offline: accetta un invito mentre Haven è chiuso dall'altra parte — la richiesta compare alla prossima apertura, può essere approvata anche quando sei di nuovo offline, e l'amicizia si completa da sola. Basta con il "sei online adesso?"
+• Niente da configurare: i link di invito portano con sé tutto il necessario, e i relay conservano solo buste sigillate che non possono leggere.
+• Post, reazioni e commenti ora insistono finché non vengono consegnati. I contenuti non aspettano più un riavvio dell'app dopo un problema di rete — passare dal Wi-Fi ai dati, attivare una VPN o uscire dallo standby si riprende subito, da solo.
+• Sotto il cofano: le connessioni morte in silenzio vengono rilevate e sostituite in pochi secondi, e tutto ciò che scrivi viene ritentato finché non raggiunge un relay.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

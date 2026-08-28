@@ -1,6 +1,4 @@
-1.7.0 — Anrufe, denen du vertrauen kannst.
-• Annehmen wirkt immer sofort — Anrufe verbinden sich nicht mehr „unter" dem Klingelbildschirm.
-• „Verbunden" erscheint erst, wenn wirklich angenommen wurde.
-• Unbeantwortete Anrufe enden nach einer Minute sauber — keine Geisteranrufe mehr.
-• Emojis und Fotos der Kontakte erscheinen jetzt überall in Anrufen.
-• Inklusive Stabilitätswelle 1.6.1: Schlüssel-Fork endgültig behoben, schnellere Roster-Änderungen.
+1.8.0 — Freunde hinzufügen, ohne gleichzeitig online zu sein.
+• Einladungen funktionieren jetzt komplett offline: annehmen, während die App des anderen geschlossen ist — bestätigt wird später, die Freundschaft vervollständigt sich von allein.
+• Beiträge, Reaktionen und Kommentare versuchen es jetzt, bis sie zugestellt sind — kein App-Neustart mehr nach Netzwerkwechseln.
+• Still gestorbene Verbindungen werden in Sekunden erkannt und ersetzt.

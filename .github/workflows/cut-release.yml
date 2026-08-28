@@ -86,7 +86,11 @@ jobs:
           s=re.sub(r'"version": "[0-9.]+",', f'"version": "{v}",', s, count=1); open(p,'w').write(s)
           p='apple/project.yml'; s=open(p).read()
           s=re.sub(r'MARKETING_VERSION: "[0-9.]+"', f'MARKETING_VERSION: "{v}"', s); open(p,'w').write(s)
-          p='apple/Haven.xcodeproj/project.pbxproj'; s=open(p).read()
+          import os
+          p='apple/Haven.xcodeproj/project.pbxproj'
+          if not os.path.exists(p):
+              raise SystemExit(0)   # xcodegen-generated, gitignored — absent in CI
+          s=open(p).read()
           s=re.sub(r'MARKETING_VERSION = [0-9.]+;', f'MARKETING_VERSION = {v};', s); open(p,'w').write(s)
           print("main -> ", v)
           PY

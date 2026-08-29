@@ -7,6 +7,38 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 1.8.1 — 2026-08-29
+
+### Fixed — a smooth feed that no longer cooks the phone
+
+The feed had gone choppy and the phone ran hot browsing media *already* on the device — worst
+since the Instagram import landed. Two independent causes, both about feed-sized bytes:
+
+- **iOS feed thumbnails now persist to disk.** `MediaStore.thumbnailAsync` re-decoded the
+  multi-MB source on every scroll-back once the 48 MB in-memory cache churned. The decode is
+  off-main, but the sustained CPU saturated and thermal-throttled the phone into dropped frames —
+  the choppiness *and* the heat-on-open with nothing to sync. Each ref now decodes to a feed
+  thumbnail once and persists it as a small JPEG in Caches; re-scrolls reload the tiny file.
+  Content-addressed refs never need invalidation, and Caches stays evictable under pressure.
+- **The Instagram import's raw fallback no longer seals full-res originals.** When the webview is
+  closed or refuses a file, the importer sealed the archive original untouched — a multi-megapixel
+  still that then synced to every phone. It now re-encodes in Rust to the composer's own feed
+  target (1600px / JPEG q62, mirroring `ui/app.js` `STILL_LONG_EDGE`) and mints the matching
+  ≤32 KB `thumb:` companion. Undecodable bytes (e.g. HEIC) seal the original as before.
+
+### Fixed — network path churn no longer spins up a rebind storm
+
+The 1.8.0 delivery-recovery work rebinds the transport when the network path changes; on some
+devices the path signature flapped, firing rebinds in a tight loop that itself heated the phone.
+The path signature now keys off the primary interface class only (wifi/wired/cell/other), and
+rebinds are rate-limited to once per 60s.
+
+### Changed — offline invite links are yours to control
+
+Offline friend-invite links gained a configurable lifetime — 7 days, 30, 90, a year, or never —
+and a one-tap regenerate that retires the live ticket and mints a fresh link. Persisted per
+device; "never" links stay live until you roll them.
+
 ## 1.8.0 — 2026-08-28
 
 ### Added — add friends without being online together

@@ -1606,7 +1606,25 @@ final class MediaStore: ObservableObject {
                     return max(poster.size.width, poster.size.height) <= maxDimension ? poster
                                                                                        : Self.downscale(poster, maxDimension: maxDimension)
                 }
-                return Self.downsampled(at: url, maxPixel: maxDimension)
+                // Disk-persisted feed thumbnail. A huge imported archive (full-res originals with
+                // NO small companion — the desktop Instagram raw-fallback) otherwise re-decodes
+                // multi-MB sources on every scroll-back once the 48 MB memory cache churns. That
+                // decode is off-main, but the sustained CPU saturates and thermal-throttles the
+                // phone into dropped frames — the "choppy since the Instagram import" jank plus the
+                // heat. Decode to a thumbnail ONCE, keep the tiny JPEG on disk; re-scrolls reload it
+                // for a fraction of the cost. Refs are content-addressed, so a cached thumb is
+                // always valid.
+                let bucket = Int(maxDimension.rounded())
+                if let disk = Self.thumbDiskURL(ref, bucket: bucket),
+                   let data = try? Data(contentsOf: disk), let cached = PlatformImage(data: data) {
+                    return cached
+                }
+                guard let fresh = Self.downsampled(at: url, maxPixel: maxDimension) else { return nil }
+                if let disk = Self.thumbDiskURL(ref, bucket: bucket),
+                   let jpeg = fresh.jpegData(compressionQuality: 0.72) {
+                    try? jpeg.write(to: disk, options: .atomic)
+                }
+                return fresh
             }.value
             guard let self else { return img }
             self.thumbTasks[key] = nil
@@ -1738,6 +1756,21 @@ final class MediaStore: ObservableObject {
             probeVideoSize(ref, url)
         }
         return nil
+    }
+
+    /// Disk cache dir for feed thumbnails (in Caches — iOS may evict it under pressure, which is
+    /// correct: these are regenerable). Content-addressed refs never change, so a cached thumb for
+    /// a ref is always valid — no invalidation needed.
+    nonisolated static let thumbDiskDir: URL? = {
+        guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
+        let d = caches.appendingPathComponent("haven-feed-thumbs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }()
+    nonisolated static func thumbDiskURL(_ ref: String, bucket: Int) -> URL? {
+        guard let dir = thumbDiskDir else { return nil }
+        let safe = String(ref.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? Character($0) : "_" })
+        return dir.appendingPathComponent("\(safe)@\(bucket).jpg")
     }
 
     /// Decode a downsampled image directly from a file via ImageIO — peak memory is the THUMBNAIL size,

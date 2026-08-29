@@ -542,7 +542,28 @@ fn stage(
             // if the window is closed or the frontend refuses the file.
             match crate::igencode::image(engine, circle_id, &bytes) {
                 Some(encoded) if !encoded.is_empty() => refs.extend(encoded),
-                _ => refs.push(engine.add_local_media(circle_id, &bytes, false)),
+                // FALLBACK (webview closed or refusing the file). The old behaviour sealed the
+                // archive ORIGINAL untouched — a multi-megapixel still that then synced to every
+                // phone and churned the feed cache into a thermal stutter. Re-encode to the
+                // composer's own feed target in Rust and mint the matching thumb companion, so a
+                // fallback import is still feed-sized media. Undecodable bytes (e.g. HEIC) seal the
+                // original exactly as before.
+                _ => {
+                    let sealed = crate::preview::encode_still_jpeg(&bytes);
+                    let content_ref = engine.add_local_media(
+                        circle_id,
+                        sealed.as_deref().unwrap_or(&bytes),
+                        false,
+                    );
+                    let thumb_marker = crate::preview::encode_thumb_jpeg(&bytes).map(|thumb| {
+                        let thumb_ref = engine.add_local_media(circle_id, &thumb, false);
+                        format!("thumb:{content_ref}:{thumb_ref}")
+                    });
+                    refs.push(content_ref);
+                    if let Some(marker) = thumb_marker {
+                        refs.push(marker);
+                    }
+                }
             }
         }
     }

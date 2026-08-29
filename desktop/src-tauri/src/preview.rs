@@ -111,6 +111,66 @@ pub fn encode_image_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
     encode_rgb8(&pixels, fw, fh)
 }
 
+// ---- Feed-sized JPEG re-encode (Instagram import fallback) --------------------------------------
+//
+// The import's raw fallback (webview closed or refusing the file) used to seal the archive
+// ORIGINAL untouched — often a multi-megapixel still that then synced to every phone and churned
+// the feed's memory cache into a thermal stutter. These mirror the composer's own targets in
+// `ui/app.js` (STILL_LONG_EDGE 1600 / quality 0.62, and `mintThumb` 256px / ≤32 KB) so a fallback
+// import ships feed-sized media plus a thumb companion, indistinguishable from the webview path.
+
+/// Longest edge of the feed-sized "still" — the composer's `STILL_LONG_EDGE`.
+pub const STILL_LONG_EDGE: u32 = 1600;
+/// JPEG quality of the still — the composer's 0.62 on ImageIO's 0–1 scale.
+const STILL_JPEG_QUALITY: u8 = 62;
+/// `thumb:` companion target — 256px, ≤32 KB, mirroring `mintThumb`.
+const THUMB_LONG_EDGE: u32 = 256;
+const THUMB_MAX_BYTES: usize = 32 * 1024;
+
+/// Resize an already-decoded image to `max_edge` on the longest side (never upscaling) and encode
+/// baseline JPEG at `quality` (1–100). `None` only on an encoder failure.
+fn resize_to_jpeg(img: &image::DynamicImage, max_edge: u32, quality: u8) -> Option<Vec<u8>> {
+    let rgb = img.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    let scaled = if w.max(h) > max_edge {
+        let scale = max_edge as f64 / w.max(h) as f64;
+        let nw = ((w as f64 * scale) as u32).max(1);
+        let nh = ((h as f64 * scale) as u32).max(1);
+        image::imageops::resize(&rgb, nw, nh, image::imageops::FilterType::Lanczos3)
+    } else {
+        rgb
+    };
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality)
+        .encode(scaled.as_raw(), scaled.width(), scaled.height(), image::ExtendedColorType::Rgb8)
+        .ok()?;
+    Some(out)
+}
+
+/// Re-encode an imported still to the composer's feed target (1600px, JPEG q62). `None` if the
+/// bytes will not decode — the caller then seals the archive original as before.
+pub fn encode_still_jpeg(bytes: &[u8]) -> Option<Vec<u8>> {
+    resize_to_jpeg(&decode_upright(bytes)?, STILL_LONG_EDGE, STILL_JPEG_QUALITY)
+}
+
+/// Mint the ≤32 KB, 256px `thumb:` companion for an imported still, quality walked down until it
+/// fits. `None` when the source is already at/under the thumb size (the content ref is its own
+/// thumb — exactly as `mintThumb` returns null) or cannot be decoded.
+pub fn encode_thumb_jpeg(bytes: &[u8]) -> Option<Vec<u8>> {
+    let img = decode_upright(bytes)?;
+    if img.width().max(img.height()) <= THUMB_LONG_EDGE {
+        return None;
+    }
+    for q in [60u8, 45, 32, 22, 14] {
+        if let Some(jpeg) = resize_to_jpeg(&img, THUMB_LONG_EDGE, q) {
+            if jpeg.len() <= THUMB_MAX_BYTES {
+                return Some(jpeg);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

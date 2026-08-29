@@ -2182,8 +2182,20 @@ final class FeedStore: ObservableObject {
     /// the same recovery an app relaunch performs, which is what users had resorted to ("my posts
     /// and reactions don't reach anyone until I restart Haven").
     private var pathChangeRebindPending = false
+    private var lastPathRebindMs: UInt64 = 0
     func noteNetworkPathChanged() {
         guard node != nil, !pathChangeRebindPending else { return }
+        // Rate-limit HARD: a full transport rebind is expensive (node teardown + DERP
+        // re-handshake + re-announce + re-sync). Even a genuinely flapping link must never trigger
+        // it more than once a minute, or the recovery becomes the problem (the 1.8.0 heat/jank
+        // regression). Combined with the primary-class-only signature in LowDataMode, an ordinary
+        // stable session now fires this ZERO times.
+        let nowMs = now()
+        guard nowMs &- lastPathRebindMs > 60_000 else {
+            HavenLog.net("network path changed — within 60s rebind cooldown, skipping")
+            return
+        }
+        lastPathRebindMs = nowMs
         pathChangeRebindPending = true
         HavenLog.net("network path changed — scheduling transport rebind + backoff reset")
         Task { @MainActor in

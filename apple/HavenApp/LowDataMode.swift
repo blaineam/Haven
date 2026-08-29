@@ -89,8 +89,18 @@ final class LowDataMonitor: ObservableObject {
     /// cellular, VPN up/down, sleep/wake and router reboots all change it; constraint-level
     /// changes alone do not.
     nonisolated private static func signature(_ path: NWPath) -> String {
-        let ifaces = path.availableInterfaces.map { "\($0.type)#\($0.name)" }.sorted().joined(separator: ",")
-        return "\(path.status)|\(ifaces)"
+        // The PRIMARY interface CLASS only — Wi-Fi ↔ cellular ↔ wired ↔ none. NOT
+        // `availableInterfaces`: iOS churns that set constantly on a perfectly stable connection
+        // (cellular RAT changes, Wi-Fi background scans, a second radio coming/going), and keying
+        // the transport-rebind trigger off it meant every one of those fired a full node teardown
+        // → the app-wide heat + scroll-jank regression, worst right on open while the radios
+        // settle. Only a real change in what the app is actually routing over should recover the
+        // transport.
+        if path.status != .satisfied { return "none" }
+        if path.usesInterfaceType(.wifi) { return "wifi" }
+        if path.usesInterfaceType(.wiredEthernet) { return "wired" }
+        if path.usesInterfaceType(.cellular) { return "cell" }
+        return "other"
     }
 
     /// Map a path to the constraint level it deserves.

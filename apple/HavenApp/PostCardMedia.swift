@@ -26,7 +26,6 @@ import UIKit
 
 struct PostMediaView: View {
     let item: FeedItemFfi
-    let isActive: Bool
     let onHeart: () -> Void
     let onToggleMute: () -> Void
     @Binding var zoomTarget: ZoomTarget?
@@ -34,6 +33,20 @@ struct PostMediaView: View {
     @ObservedObject var audio = AudioCoordinator.shared
     @Environment(\.havenFeedContainer) var feedContainer
     var feed: FeedStore { FeedStore.shared }
+
+    /// Am I the post the feed reported as centred? Computed HERE, from the coordinator this media
+    /// leaf ALREADY observes to start/stop its player. PostCard used to observe the coordinator
+    /// solely to compute this and hand it down — which turned every scroll (a new post crossing
+    /// centre, ~once every couple of seconds) into a re-evaluation of its entire ~1,500-line body,
+    /// dropping the frame and making the swipe feel like it stuck. Owning the check here costs
+    /// nothing extra (this view re-renders on the same signal anyway) and takes the card out of the
+    /// scroll-invalidation path entirely.
+    ///
+    /// The centre must have been reported BY THIS CARD'S OWN FEED. Without the container guard a
+    /// post living in two live containers (your own video is in both the circle feed and your
+    /// profile) had both copies claim to be active, and both built an AVPlayer for the same clip —
+    /// two decode sessions playing over each other, only one of them known to the coordinator.
+    var isActive: Bool { audio.centeredPostId == item.id && audio.centeredContainer == feedContainer }
 
     // The media's own state, finally living with the media. On PostCard these forced the WHOLE card
     // to re-evaluate: paging a carousel, a width measurement landing, a data-saver tap.

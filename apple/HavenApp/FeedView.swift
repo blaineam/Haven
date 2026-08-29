@@ -9997,7 +9997,15 @@ struct PostCard: View {
     var onCommentFocus: ((Bool) -> Void)? = nil
 
     @Environment(\.havenFeedContainer) var feedContainer
-    @ObservedObject var audio = AudioCoordinator.shared
+    /// NOT @ObservedObject — deliberately, for the same reason as `feed` below. The card's ONLY
+    /// reactive use of the coordinator was `isActive`, which now lives on `PostMediaView` — the media
+    /// leaf that already observes the coordinator to start and stop its player. Observing here made
+    /// the centred-post signal (which changes on every scroll, a new post crossing centre roughly
+    /// every couple of seconds) re-evaluate this entire ~1,500-line body, dropping the frame and
+    /// making the swipe feel like it stuck. The remaining uses below (`start`, `toggleVideoAudio`,
+    /// `activePostId`) are ACTIONS that read the current value through this plain reference — no
+    /// reactivity needed.
+    var audio: AudioCoordinator { AudioCoordinator.shared }
     /// NOT @ObservedObject — deliberately.
     ///
     /// FeedStore publishes up to 40 TIMES PER SECOND on device (measured: "FeedStore published 204x
@@ -10057,13 +10065,6 @@ struct PostCard: View {
     /// Super data saver: video refs the user explicitly tapped play for. We pull those bytes and
     /// auto-start once they land (normal data-saver mode never autoplays).
 
-    /// The centre must have been reported BY THIS CARD'S OWN FEED. Without the container check a
-    /// post living in two live containers (your own video is in both the circle feed and your
-    /// profile) had both copies claim to be active, and both built an AVPlayer for the same clip —
-    /// two decode sessions playing over each other, only one of them known to the coordinator.
-    var isActive: Bool {
-        audio.centeredPostId == item.id && audio.centeredContainer == feedContainer
-    }
 
     /// The post's real media, minus synthetic refs (a `geo:` location pin has no bytes). A story needs
     /// something to show, so this is what gates the "Share as story" action.
@@ -10339,7 +10340,7 @@ struct PostCard: View {
     /// reactions and comments along with it. The playback lifecycle hooks moved with it, because they
     /// belong to the thing that owns the players.
     private var postMedia: some View {
-        PostMediaView(item: item, isActive: isActive, onHeart: { heartIt() },
+        PostMediaView(item: item, onHeart: { heartIt() },
                       onToggleMute: { togglePostMute() }, zoomTarget: $zoomTarget)
     }
 

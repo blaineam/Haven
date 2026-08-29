@@ -25,6 +25,12 @@ since the Instagram import landed. Two independent causes, both about feed-sized
   still that then synced to every phone. It now re-encodes in Rust to the composer's own feed
   target (1600px / JPEG q62, mirroring `ui/app.js` `STILL_LONG_EDGE`) and mints the matching
   ≤32 KB `thumb:` companion. Undecodable bytes (e.g. HEIC) seal the original as before.
+- **A scroll no longer re-renders every visible card.** Each `PostCard` observed the audio
+  coordinator solely to compute "am I the centred post?" — a signal that changes as each post
+  crosses centre while you swipe (~once every couple of seconds). That re-evaluated every visible
+  card's ~1,500-line body, dropping the frame (the swipe felt like it "stuck") and adding heat. The
+  check moved down to `PostMediaView`, the media leaf that already observes that signal to start and
+  stop its player, so a scroll now re-renders only the two cards whose centred-state actually flips.
 
 ### Fixed — network path churn no longer spins up a rebind storm
 

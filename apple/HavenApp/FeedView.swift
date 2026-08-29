@@ -2326,7 +2326,16 @@ final class FeedStore: ObservableObject {
     private var lastHeardPersistPending = false
     func recordHeard(_ idHex: String) {
         guard !idHex.isEmpty else { return }
-        lastHeard[idHex] = Date()
+        let now = Date()
+        // Coalesce the PUBLISH, not just the disk write. `lastHeard` is @Published and `lastHeard[id]
+        // = Date()` changes the value every call, so every received packet fired FeedStore's
+        // objectWillChange — and FeedView observes the whole store, so each one re-diffed the feed.
+        // Under ordinary traffic that was a periodic scroll hitch ("sticks every so often") and steady
+        // CPU. Both recency consumers (`isConnected`, `recentlyHeard`) use a 120s window, and the disk
+        // write is already debounced to 3s, so refreshing the in-memory stamp more than once every 2s
+        // per peer buys nothing. Skip the write — and its publish — inside that window.
+        if let prev = lastHeard[idHex], now.timeIntervalSince(prev) < 2 { return }
+        lastHeard[idHex] = now
         // Debounce the disk write. This used to serialize the WHOLE dict to UserDefaults on the main
         // thread on every call — and recordHeard fires per DM message during a sync burst. Coalesce to
         // one write per few seconds ("last seen" is coarse; sub-second precision on disk is pointless).

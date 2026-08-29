@@ -31,6 +31,11 @@ since the Instagram import landed. Two independent causes, both about feed-sized
   card's ~1,500-line body, dropping the frame (the swipe felt like it "stuck") and adding heat. The
   check moved down to `PostMediaView`, the media leaf that already observes that signal to start and
   stop its player, so a scroll now re-renders only the two cards whose centred-state actually flips.
+- **Presence updates no longer re-diff the feed on every packet.** `FeedStore` republished on every
+  received packet — each one refreshed a peer's "last heard" timestamp — and the feed observes the
+  whole store, so ordinary traffic periodically re-diffed the list mid-scroll (the occasional
+  remaining stick). The timestamp now refreshes at most once every 2s per peer, well inside the 120s
+  window both recency consumers use, which collapses that publish churn.
 
 ### Fixed — network path churn no longer spins up a rebind storm
 

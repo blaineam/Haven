@@ -32,12 +32,11 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Free. A private, end‑to‑end encrypted home for your closest people — no ads, no tracking, no subscription. Peer‑to‑peer, post‑quantum, yours.
 
 ## whats_new
-1.8.0 — Add friends without being online together.
+1.8.1 — Smoother feed, cooler phone.
 
-• Invites now work offline: accept a friend's invite while their Haven is closed — they get the request the next time they open the app, can approve it even after you've gone offline again, and the friendship completes on its own. No more coordinating "are you online right now?"
-• Nothing new to set up: invite links quietly carry everything needed, and relays store only sealed envelopes they cannot read.
-• Posts, reactions, and comments now keep trying until they are delivered. Content no longer waits for an app restart after a rough network patch — switching Wi-Fi to cellular, toggling a VPN, or waking from sleep now recovers on its own, immediately.
-• Under the hood: connections that silently died are now detected and replaced within seconds, and everything you author retries with backoff until it reaches a relay.
+• Scrolling the feed is smooth again, and Haven no longer heats up while you browse photos and videos already on your device — even large libraries you brought in from Instagram.
+• You control your offline invite links now: choose how long a link stays valid — 7 days, 30, 90, a year, or never — and regenerate one any time to retire the old link.
+• Plus a networking fix so the app works less hard when your connection changes.
 
 ## whats_new_previous
 1.7.0 — Calls, rebuilt to be trustworthy.

@@ -34,12 +34,11 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Kostenlos. Ein privates, Ende-zu-Ende verschlüsseltes Zuhause für deine Liebsten – keine Werbung, kein Tracking, kein Abo. Peer-to-Peer, Post-Quanten-sicher, deins.
 
 ## whats_new
-1.8.0 — Freunde hinzufügen, ohne gleichzeitig online zu sein.
+1.8.1 — Flüssigerer Feed, kühleres Telefon.
 
-• Einladungen funktionieren jetzt offline: Nimm eine Einladung an, während Haven bei deinem Gegenüber geschlossen ist — die Anfrage erscheint beim nächsten Öffnen, kann auch dann bestätigt werden, wenn du selbst wieder offline bist, und die Freundschaft vervollständigt sich von allein. Kein „Bist du gerade online?" mehr.
-• Nichts einzurichten: Einladungslinks tragen alles Nötige unsichtbar mit, und Relays speichern nur versiegelte Umschläge, die sie nicht lesen können.
-• Beiträge, Reaktionen und Kommentare versuchen es jetzt so lange, bis sie zugestellt sind. Inhalte warten nicht mehr auf einen App-Neustart nach Netzwerkproblemen — der Wechsel von WLAN zu Mobilfunk, ein VPN oder das Aufwachen aus dem Ruhezustand erholt sich sofort von selbst.
-• Unter der Haube: still gestorbene Verbindungen werden binnen Sekunden erkannt und ersetzt, und alles, was du verfasst, wird mit Backoff wiederholt, bis es ein Relay erreicht.
+• Der Feed scrollt wieder flüssig, und Haven erhitzt dein Telefon nicht mehr, während du bereits geladene Fotos und Videos durchblätterst — selbst große aus Instagram importierte Sammlungen.
+• Deine Offline-Einladungslinks liegen jetzt in deiner Hand: Lege fest, wie lange ein Link gültig bleibt — 7 Tage, 30, 90, ein Jahr oder nie — und erzeuge ihn jederzeit neu, um den alten Link außer Kraft zu setzen.
+• Außerdem eine Netzwerk-Korrektur, damit die App bei einem Verbindungswechsel weniger arbeitet.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

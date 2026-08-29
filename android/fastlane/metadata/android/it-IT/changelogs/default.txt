@@ -1,4 +1,3 @@
-1.8.0 — Aggiungi amici senza essere online insieme.
-• Gli inviti ora funzionano offline dall'inizio alla fine: accetta mentre l'app dell'altro è chiusa, lui approva al ritorno e l'amicizia si completa da sola.
-• Post, reazioni e commenti riprovano finché non vengono consegnati — niente più riavvii dopo un cambio di rete.
-• Le connessioni morte in silenzio vengono rilevate e sostituite in pochi secondi.
+1.8.1 — Feed più fluido, telefono più fresco.
+• Il feed torna a scorrere fluido e Haven non surriscalda più il telefono mentre sfogli foto e video già sul dispositivo, comprese le grandi raccolte importate da Instagram.
+• Ora gestisci tu i link d'invito offline: scegli la validità (da 7 giorni a mai) e rigenerali quando vuoi per revocare quello vecchio.

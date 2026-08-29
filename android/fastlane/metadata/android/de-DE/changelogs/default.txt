@@ -1,4 +1,3 @@
-1.8.0 — Freunde hinzufügen, ohne gleichzeitig online zu sein.
-• Einladungen funktionieren jetzt komplett offline: annehmen, während die App des anderen geschlossen ist — bestätigt wird später, die Freundschaft vervollständigt sich von allein.
-• Beiträge, Reaktionen und Kommentare versuchen es jetzt, bis sie zugestellt sind — kein App-Neustart mehr nach Netzwerkwechseln.
-• Still gestorbene Verbindungen werden in Sekunden erkannt und ersetzt.
+1.8.1 — Flüssigerer Feed, kühleres Telefon.
+• Der Feed scrollt wieder flüssig, und Haven erhitzt dein Telefon nicht mehr beim Durchblättern bereits geladener Fotos und Videos — auch großer aus Instagram importierter Sammlungen.
+• Du bestimmst jetzt deine Offline-Einladungslinks: Wähle die Gültigkeit (7 Tage bis nie) und erzeuge sie jederzeit neu, um alte Links zu widerrufen.

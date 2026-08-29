@@ -1,4 +1,3 @@
-1.8.0 — Añade amigos sin estar en línea a la vez.
-• Las invitaciones ahora funcionan sin conexión de principio a fin: acepta con la app del otro cerrada, él aprueba cuando vuelva y la amistad se completa sola.
-• Publicaciones, reacciones y comentarios reintentan hasta entregarse — sin reiniciar la app tras cambiar de red.
-• Las conexiones muertas en silencio se detectan y reemplazan en segundos.
+1.8.1 — Feed más fluido, teléfono más fresco.
+• El feed vuelve a desplazarse con fluidez y Haven ya no calienta el teléfono al ver fotos y vídeos que ya están en tu dispositivo, incluso bibliotecas grandes importadas de Instagram.
+• Ahora controlas tus enlaces de invitación sin conexión: elige su validez (de 7 días a nunca) y regénéralos cuando quieras para anular el anterior.

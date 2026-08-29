@@ -1,4 +1,3 @@
-1.8.0 — Ajoutez des amis sans être en ligne en même temps.
-• Les invitations fonctionnent désormais hors ligne de bout en bout : acceptez pendant que l'app de l'autre est fermée, il approuve à son retour, et l'amitié se complète toute seule.
-• Publications, réactions et commentaires réessaient jusqu'à être livrés — plus de redémarrage après un changement de réseau.
-• Les connexions mortes en silence sont détectées et remplacées en quelques secondes.
+1.8.1 — Fil plus fluide, téléphone plus frais.
+• Le fil défile de nouveau sans à-coups et Haven ne fait plus chauffer votre téléphone quand vous parcourez des photos et vidéos déjà sur l'appareil, même les grandes bibliothèques importées d'Instagram.
+• Vous gérez vos liens d'invitation hors ligne : choisissez leur validité (7 jours à jamais) et régénérez-les quand vous voulez.

@@ -34,12 +34,11 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Gratuit. Un espace privé, chiffré de bout en bout, pour vos proches — sans pub, sans suivi, sans abonnement. Pair‑à‑pair, post‑quantique, à vous.
 
 ## whats_new
-1.8.0 — Ajoutez des amis sans être en ligne en même temps.
+1.8.1 — Fil plus fluide, téléphone plus frais.
 
-• Les invitations fonctionnent désormais hors ligne : acceptez une invitation pendant que Haven est fermé chez l'autre — la demande apparaît à sa prochaine ouverture, il peut l'approuver même quand vous êtes reparti hors ligne, et l'amitié se complète toute seule. Fini le « tu es en ligne, là ? »
-• Rien à configurer : les liens d'invitation transportent discrètement tout le nécessaire, et les relais ne stockent que des enveloppes scellées qu'ils ne peuvent pas lire.
-• Les publications, réactions et commentaires insistent désormais jusqu'à être livrés. Le contenu n'attend plus un redémarrage de l'app après un souci réseau — passer du Wi-Fi au cellulaire, activer un VPN ou sortir de veille se rétablit immédiatement, tout seul.
-• Sous le capot : les connexions mortes en silence sont détectées et remplacées en quelques secondes, et tout ce que vous rédigez est retenté jusqu'à atteindre un relais.
+• Le fil défile de nouveau sans à-coups, et Haven ne fait plus chauffer votre téléphone lorsque vous parcourez des photos et vidéos déjà présentes sur l'appareil — même les grandes bibliothèques importées d'Instagram.
+• Vos liens d'invitation hors ligne sont désormais entre vos mains : choisissez leur durée de validité — 7 jours, 30, 90, un an ou jamais — et régénérez-en un à tout moment pour révoquer l'ancien.
+• Et une correction réseau pour que l'app travaille moins lorsque votre connexion change.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

@@ -34,12 +34,11 @@ privado,cifrado,familia,amigos,mensajería,seguro,sin conexión,llamadas,sin anu
 Gratis. Un hogar privado y cifrado de extremo a extremo para los tuyos: sin anuncios, sin rastreo, sin suscripción. Peer-to-peer, poscuántico, tuyo.
 
 ## whats_new
-1.8.0 — Añade amigos sin estar en línea a la vez.
+1.8.1 — Feed más fluido, teléfono más fresco.
 
-• Las invitaciones ahora funcionan sin conexión: acepta una invitación aunque tu amigo tenga Haven cerrado — la solicitud le aparecerá la próxima vez que abra la app, podrá aprobarla incluso cuando tú ya estés desconectado, y la amistad se completa sola. Se acabó el "¿estás en línea ahora?"
-• Sin configurar nada: los enlaces de invitación llevan todo lo necesario, y los relés solo guardan sobres sellados que no pueden leer.
-• Las publicaciones, reacciones y comentarios ahora insisten hasta entregarse. El contenido ya no espera a que reinicies la app tras un problema de red — cambiar de Wi-Fi a datos, activar una VPN o despertar del reposo se recupera solo, al instante.
-• Por dentro: las conexiones muertas en silencio se detectan y reemplazan en segundos, y todo lo que escribes se reintenta hasta llegar a un relé.
+• El feed vuelve a desplazarse con fluidez y Haven ya no calienta el teléfono mientras ves fotos y vídeos que ya están en tu dispositivo, incluso bibliotecas grandes importadas de Instagram.
+• Ahora tú controlas tus enlaces de invitación sin conexión: elige cuánto tiempo sigue siendo válido un enlace —7 días, 30, 90, un año o nunca— y vuelve a generarlo cuando quieras para anular el anterior.
+• Además, una corrección de red para que la app trabaje menos cuando cambia tu conexión.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

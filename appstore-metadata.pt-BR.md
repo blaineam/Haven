@@ -34,12 +34,11 @@ privado,criptografado,família,amigos,mensagens,seguro,offline,chamadas,sem anú
 Grátis. Um espaço privado e criptografado de ponta a ponta para seus mais próximos — sem anúncios, sem rastreamento, sem assinatura. Peer-to-peer, pós-quântico, seu.
 
 ## whats_new
-1.8.0 — Adicione amigos sem estarem online ao mesmo tempo.
+1.8.1 — Feed mais fluido, telefone mais frio.
 
-• Convites agora funcionam offline: aceite um convite mesmo com o Haven do seu amigo fechado — o pedido aparece na próxima vez que ele abrir o app, pode ser aprovado mesmo quando você já estiver offline de novo, e a amizade se completa sozinha. Chega de combinar "você está online agora?"
-• Nada para configurar: os links de convite carregam tudo o que é preciso, e os relays guardam apenas envelopes lacrados que não conseguem ler.
-• Posts, reações e comentários agora insistem até serem entregues. O conteúdo não espera mais um reinício do app depois de uma instabilidade de rede — trocar do Wi-Fi para dados, ligar uma VPN ou acordar do repouso se recupera sozinho, na hora.
-• Por dentro: conexões que morreram em silêncio são detectadas e substituídas em segundos, e tudo o que você escreve é reenviado com backoff até chegar a um relay.
+• O feed volta a rolar com fluidez e o Haven não esquenta mais o telefone enquanto você navega por fotos e vídeos que já estão no aparelho — inclusive bibliotecas grandes importadas do Instagram.
+• Agora você controla seus links de convite offline: escolha por quanto tempo um link continua válido — 7 dias, 30, 90, um ano ou nunca — e gere um novo quando quiser para revogar o antigo.
+• Além disso, uma correção de rede para o app trabalhar menos quando a sua conexão muda.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

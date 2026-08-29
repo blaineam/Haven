@@ -36,6 +36,7 @@ enum HavenSite {
 struct ConnectView: View {
     let account: Account
     @ObservedObject var contacts: ContactsStore
+    @ObservedObject private var invites = FriendInviteStore.shared   // re-render on roll / expiry change
     /// An invite link the app was opened with (deep link) — jumps straight to "Add a friend".
     var incomingLink: String? = nil
     @Environment(\.dismiss) private var dismiss
@@ -176,6 +177,39 @@ struct ConnectView: View {
                 .buttonStyle(BrandButtonStyle())
             }
 
+            // Offline-invite controls (only meaningful when this device hosts/uses a relay — that's
+            // where an offline acceptance lands). Configurable expiry + a manual roll; the link is
+            // otherwise stable and never auto-rotates.
+            if !RelayMailboxStore.shared.allRelays().isEmpty {
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        Text("Offline adds").font(.subheadline.weight(.medium))
+                        Spacer()
+                        Menu {
+                            Button("7 days")  { invites.expirySecs = 7 * 24 * 3600 }
+                            Button("30 days") { invites.expirySecs = 30 * 24 * 3600 }
+                            Button("90 days") { invites.expirySecs = 90 * 24 * 3600 }
+                            Button("1 year")  { invites.expirySecs = 365 * 24 * 3600 }
+                            Divider()
+                            Button("Never expire") { invites.expirySecs = FriendInviteStore.neverExpirySecs }
+                        } label: {
+                            Label(expiryLabel, systemImage: "clock.arrow.circlepath").font(.subheadline)
+                        }
+                    }
+                    Text(expiryDetail)
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button {
+                        _ = invites.rollInviteLink()   // @Published mutation → QR + link above refresh
+                    } label: {
+                        Label("Regenerate invite link", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.subheadline).frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(.top, 2)
+            }
+
             safetyCard(
                 title: "Your safety words",
                 words: SafetyWords.words(fromHex: account.verificationHex()),
@@ -183,6 +217,19 @@ struct ConnectView: View {
             )
         }
         .havenCard()
+    }
+
+    private var expiryLabel: String {
+        let s = invites.expirySecs
+        if s >= FriendInviteStore.neverExpirySecs { return "Never expires" }
+        let days = s / 86400
+        return days >= 365 ? "Expires in 1 year" : "Expires in \(days) days"
+    }
+
+    private var expiryDetail: String {
+        invites.expirySecs >= FriendInviteStore.neverExpirySecs
+            ? "Your invite link stays valid until you regenerate it — someone can accept anytime, even while you're offline."
+            : "Someone can accept while you're offline until the link expires; old links auto-retire. Regenerate to roll it now."
     }
 
     // MARK: - Add a friend

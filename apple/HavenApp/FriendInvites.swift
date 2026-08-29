@@ -43,11 +43,27 @@ final class FriendInviteStore: ObservableObject {
 
     private let issuedKey = "haven.friendInvites.issued"
     private let acceptedKey = "haven.friendInvites.accepted"
+    private let expiryKey = "haven.friendInvites.expirySecs"
     private let maxLive = 16   // cap outstanding tickets; oldest unconsumed pruned first
     private var ticking = false
 
+    /// "Never expire" sentinel (~a century). A real u64 timestamp, so the sealed blob's `expires`
+    /// field and the relay's `expires > now` check both stay valid — the link simply never lapses.
+    static let neverExpirySecs: UInt64 = 100 * 365 * 24 * 3600
+
+    /// How long a freshly-minted invite link stays valid. User-configurable (Settings ▸ invite):
+    /// 7d / 30d / 90d / 1yr / Never. Applied consistently to both the reuse/prune "is it still
+    /// live" check AND the sealed blob's expiry, so changing it retroactively extends or shortens
+    /// the CURRENT link (e.g. "Never" makes the link you're already sharing permanent). The link
+    /// is otherwise stable — reused until it lapses or you roll it by hand; it never auto-rotates.
+    @Published var expirySecs: UInt64 {
+        didSet { UserDefaults.standard.set(String(expirySecs), forKey: expiryKey) }
+    }
+
     private init() {
         let d = UserDefaults.standard
+        if let s = d.string(forKey: expiryKey), let v = UInt64(s) { expirySecs = v }
+        else { expirySecs = friendInviteDefaultTtlSecs() }   // 30 days
         if let raw = d.data(forKey: issuedKey), let v = try? JSONDecoder().decode([Issued].self, from: raw) { issued = v }
         if let raw = d.data(forKey: acceptedKey), let v = try? JSONDecoder().decode([Accepted].self, from: raw) { accepted = v }
     }
@@ -60,8 +76,10 @@ final class FriendInviteStore: ObservableObject {
 
     private static func now() -> UInt64 { UInt64(Date().timeIntervalSince1970) }
     private static func ticket(_ text: String) -> FriendTicketFfi? { try? friendTicketParse(text: text) }
-    private static func isLive(_ issuedAt: UInt64) -> Bool {
-        Self.now() - min(issuedAt, Self.now()) <= friendInviteDefaultTtlSecs()
+    /// Instance (not static) so it reads the user's configured `expirySecs`. "Never" always live.
+    private func isLive(_ issuedAt: UInt64) -> Bool {
+        if expirySecs >= Self.neverExpirySecs { return true }
+        return Self.now() - min(issuedAt, Self.now()) <= expirySecs
     }
 
     // MARK: - Inviter: minting + the share-link value
@@ -72,12 +90,33 @@ final class FriendInviteStore: ObservableObject {
     /// and the plain live-only link still works.
     func currentTicketLinkValue() -> String? {
         prune()
-        if let live = issued.last(where: { $0.consumedAt == nil && Self.isLive($0.issuedAt) }),
+        if let live = issued.last(where: { $0.consumedAt == nil && isLive($0.issuedAt) }),
            let v = Self.linkValue(live.ticket) {
             return v
         }
         guard let text = mint() else { return nil }
         return Self.linkValue(text)
+    }
+
+    /// Manually roll the invite link: retire every live, unconsumed ticket and mint a fresh one,
+    /// so the shared link changes on demand. Anyone holding the OLD link can no longer complete an
+    /// offline add (its drop key stops being polled); live/online adds via the identity part of the
+    /// link still work. Returns the new `?t=` value (nil if this device has no relays).
+    @discardableResult
+    func rollInviteLink() -> String? {
+        for i in issued.indices where issued[i].consumedAt == nil { issued[i].consumedAt = Self.now() }
+        save()
+        guard let text = mint() else { return nil }
+        HavenLog.net("friend-invite: link rolled by user")
+        return Self.linkValue(text)
+    }
+
+    /// When the current live link lapses (nil = none live, or Never). For the settings UI.
+    func currentLinkExpiry() -> Date? {
+        prune()
+        guard expirySecs < Self.neverExpirySecs,
+              let live = issued.last(where: { $0.consumedAt == nil && isLive($0.issuedAt) }) else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(live.issuedAt + expirySecs))
     }
 
     private static func linkValue(_ text: String) -> String? {
@@ -108,12 +147,12 @@ final class FriendInviteStore: ObservableObject {
 
     private func prune() {
         let before = issued.count
-        issued.removeAll { $0.consumedAt == nil && !Self.isLive($0.issuedAt) }
+        issued.removeAll { $0.consumedAt == nil && !isLive($0.issuedAt) }
         while issued.filter({ $0.consumedAt == nil }).count > maxLive,
               let idx = issued.firstIndex(where: { $0.consumedAt == nil }) {
             issued.remove(at: idx)
         }
-        accepted.removeAll { $0.granted || !Self.isLive($0.acceptedAt) }
+        accepted.removeAll { $0.granted || !isLive($0.acceptedAt) }
         if issued.count != before { save() }
     }
 
@@ -148,7 +187,7 @@ final class FriendInviteStore: ObservableObject {
         for (i, a) in accepted.enumerated() where !a.dropLanded {
             guard let t = Self.ticket(a.ticket) else { continue }
             guard let hello = FeedStore.shared.inviteHelloBody() else { continue }
-            let expires = t.issuedAt + friendInviteDefaultTtlSecs()
+            let expires = t.issuedAt + expirySecs
             guard let key = try? friendInviteDropKey(ticket: t),
                   let blob = try? friendInviteBuildDrop(ticket: t, expires: expires, payload: hello) else { continue }
             var landed = false
@@ -210,7 +249,7 @@ final class FriendInviteStore: ObservableObject {
     // MARK: - Inviter: incoming drops + grant on approval
 
     private func pollIncomingDrops() async {
-        let pending = issued.filter { $0.consumedAt == nil && Self.isLive($0.issuedAt) }
+        let pending = issued.filter { $0.consumedAt == nil && isLive($0.issuedAt) }
         guard !pending.isEmpty else { return }
         let myAcct = AccountStore.currentNodeHex().lowercased()
         guard myAcct.count == 64 else { return }
@@ -274,7 +313,7 @@ final class FriendInviteStore: ObservableObject {
             for (idx, p) in matches {
                 guard let t = Self.ticket(p.ticket),
                       let key = try? friendInviteGrantKey(ticket: t) else { continue }
-                let expires = t.issuedAt + friendInviteDefaultTtlSecs()
+                let expires = t.issuedAt + expirySecs
                 guard let blob = try? friendInviteBuildGrant(ticket: t, expires: expires, payload: hello) else { continue }
                 var landed = RelayHost.shared.serving && RelayHost.shared.localPut(key, blob)
                 let relays = RelayMailboxStore.shared.allRelays()

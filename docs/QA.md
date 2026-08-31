@@ -204,7 +204,7 @@ its JUnit as an artifact.
 
 ### How Soren is obtained in CI (it's in a *separate* repo)
 
-Haven's CI checks out only Haven. Soren lives in `github.com/blaineam/rocket`
+Haven's CI checks out only Haven. Soren lives in `github.com/blaineam/ark`
 (the `_shared` working copy locally). So each qa.yml job does a **second checkout
 alongside Haven** under the workspace:
 

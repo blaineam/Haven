@@ -8,7 +8,7 @@
 //   * The CLI also submits the PACKAGE ONLY — listing text and what's-new never rode CI, and the
 //     user's requirement is explicit: "I want ms store listing info to be updated on ci".
 //
-// The MS client + metadata parser are VENDORED from the private blaineam/rocket repo
+// The MS client + metadata parser are VENDORED from the private blaineam/ark repo
 // (lib/msstore.mjs, lib/metadata.mjs, lib/locales.mjs) — CI cannot check that repo out without a
 // cross-repo token this repo does not have. Improvements here (releaseNotes mapping, the
 // applicationPackages patch) should be upstreamed to rocket when convenient.

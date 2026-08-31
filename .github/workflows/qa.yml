@@ -15,7 +15,7 @@ name: qa
 # tag → action matrix is documented in docs/QA.md.
 #
 # ── HOW SOREN IS OBTAINED (it lives in a SEPARATE repo) ──────────────────────────
-# Soren lives in the shared tools repo (github.com/blaineam/rocket, the `_shared`
+# Soren lives in the shared tools repo (github.com/blaineam/ark, the `_shared`
 # working copy locally), NOT in Haven. Haven's CI only checks out Haven, so each job
 # ALSO checks out the tools repo *alongside* Haven under $GITHUB_WORKSPACE:
 #     $GITHUB_WORKSPACE/Haven      ← this repo
@@ -27,7 +27,7 @@ name: qa
 # for a *different* repo has no access, hence the fallback). See _shared/soren/docs/ci.md.
 
 # ── DISABLED ON rc TAGS (2026-07-20) ─────────────────────────────────────────────
-# The automatic rc-tag trigger is off. Soren lives in the PRIVATE blaineam/rocket
+# The automatic rc-tag trigger is off. Soren lives in the PRIVATE blaineam/ark
 # repo, and without a SHARED_REPO_TOKEN secret the checkout above 404s on "Retrieving
 # the default branch name" — so every rc tag produced a red qa run that reported a
 # missing credential, not a failing test. A permanently-red gate teaches you to ignore
@@ -46,7 +46,7 @@ permissions:
 env:
   # Point every checkout of the tools repo at the same place. A public repo ignores
   # the token; a private one needs a PAT in SHARED_REPO_TOKEN.
-  SHARED_REPO: blaineam/rocket
+  SHARED_REPO: blaineam/ark
 
 jobs:
   # ── Apple: iOS + macOS simulator/host tests on a macOS runner ─────────────────────

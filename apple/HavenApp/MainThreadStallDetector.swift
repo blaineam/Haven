@@ -35,6 +35,30 @@ import UIKit
 final class MainThreadStallDetector: @unchecked Sendable {
     static let shared = MainThreadStallDetector()
 
+    /// Stall lines also append here so evidence survives a dropped devicectl
+    /// console: pull with
+    ///   xcrun devicectl device copy from --domain-type appDataContainer
+    ///     --domain-identifier com.blaineam.kith
+    ///     --source Library/Caches/HavenStalls.log --destination /tmp/stalls.log
+    private static let fileURL: URL = {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        return dir.appendingPathComponent("HavenStalls.log")
+    }()
+
+    private func emit(_ line: String) {
+        HavenLog.sync(line)
+        let stamped = "\(Date().formatted(.iso8601)) \(line)\n"
+        if let data = stamped.data(using: .utf8) {
+            if let handle = try? FileHandle(forWritingTo: Self.fileURL) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+            } else {
+                try? data.write(to: Self.fileURL)
+            }
+        }
+    }
+
     private let queue = DispatchQueue(label: "com.blaineam.kith.stall-detector", qos: .utility)
     private var timer: DispatchSourceTimer?
     private let lock = NSLock()
@@ -98,8 +122,8 @@ final class MainThreadStallDetector: @unchecked Sendable {
                 let waited = CFAbsoluteTimeGetCurrent() - pending
                 if waited > threshold, !alreadyReported {
                     self.lock.lock(); self.reportedCurrentStall = true; self.lock.unlock()
-                    HavenLog.sync("[MainStall] blocked \(String(format: "%.2f", waited))s — main thread stack:")
-                    for line in self.captureMainStack() { HavenLog.sync("[MainStall]   \(line)") }
+                    emit("[MainStall] blocked \(String(format: "%.2f", waited))s — main thread stack:")
+                    for line in self.captureMainStack() { emit("[MainStall]   \(line)") }
                 }
                 return
             }
@@ -115,14 +139,14 @@ final class MainThreadStallDetector: @unchecked Sendable {
                 self.reportedCurrentStall = false
                 self.lock.unlock()
                 if waited > threshold {
-                    HavenLog.sync("[MainStall] \(wasReported ? "recovered after" : "stalled") \(String(format: "%.2f", waited))s")
+                    self.emit("[MainStall] \(wasReported ? "recovered after" : "stalled") \(String(format: "%.2f", waited))s")
                 }
             }
         }
         observeLifecycle()
         t.resume()
         timer = t
-        HavenLog.sync("[MainStall] detector armed (threshold \(threshold)s, stack capture on)")
+        emit("[MainStall] detector armed (threshold \(threshold)s, stack capture on)")
     }
 
     // MARK: - Stack capture

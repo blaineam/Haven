@@ -14,11 +14,12 @@ import AppKit
 final class BackgroundUploader {
     static let shared = BackgroundUploader()
 
-    private struct Pending: Codable { let circleId: String; let env: Data }
+    fileprivate struct Pending: Codable, Sendable { let circleId: String; let env: Data }
     private let key = "haven.pendingUploads"
     private let maxQueued = 200
     private var queue: [Pending]
     private var flushing = false
+    private var savePending = false
     /// Re-arm state. Two bugs lived here (field-reported as "my posts/reactions don't reach
     /// anyone until I relaunch the app"): (1) `enqueue` during an in-flight flush bounced off the
     /// `flushing` guard, so anything authored inside another upload's network round-trip — every
@@ -33,12 +34,23 @@ final class BackgroundUploader {
     private let backoffCapSecs: UInt64 = 120
 
     private init() {
-        if let data = UserDefaults.standard.data(forKey: key),
-           let list = try? JSONDecoder().decode([Pending].self, from: data) {
+        if let list = UploadQueuePersister.load() {
+            queue = list
+        } else if let data = UserDefaults.standard.data(forKey: key),
+                  let list = try? JSONDecoder().decode([Pending].self, from: data) {
+            // Legacy location (pre-file-store): adopt once, then evict below.
             queue = list
         } else {
             queue = []
         }
+        // One-time eviction of the legacy prefs blob, off-main: cfprefsd loads the
+        // WHOLE plist into every process at launch, so a fat stale queue taxed each
+        // start even after migration — and removeObject is itself a sync XPC.
+        let legacyKey = key
+        DispatchQueue.global(qos: .utility).async {
+            UserDefaults.standard.removeObject(forKey: legacyKey)
+        }
+        if !queue.isEmpty { save() }   // seed the file so the next launch skips legacy
     }
 
     /// Whether any authored event for this circle is still waiting to reach the relay mailbox (drives
@@ -139,9 +151,56 @@ final class BackgroundUploader {
         }
     }
 
+    /// Persist the queue — debounced, encoded and written OFF the main actor.
+    ///
+    /// This used to be `UserDefaults.standard.set(encode(queue))` inline: writing a
+    /// queue of full sealed envelopes through cfprefsd is a SYNCHRONOUS XPC round
+    /// trip plus an O(queue) encode, all on the main actor, on EVERY enqueue and
+    /// every flush. The stall detector caught launch's first enqueue blocking main
+    /// for 0.65s inside CFPreferencesSetAppValue — one visible slice of the
+    /// "freezes right after foregrounding" report. A reaction burst re-paid it per
+    /// tap. The 100ms coalesce window is the only loss risk on a hard kill, and the
+    /// queue is best-effort + idempotent by design (content-addressed keys, and the
+    /// post already reached online members directly).
     private func save() {
-        if let data = try? JSONEncoder().encode(queue) {
-            UserDefaults.standard.set(data, forKey: key)
+        guard !savePending else { return }
+        savePending = true
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            guard let self else { return }
+            self.savePending = false
+            let snapshot = self.queue
+            await UploadQueuePersister.shared.persist(snapshot)
         }
+    }
+}
+
+/// Serializes pending-upload persistence off the main actor (same shape as
+/// `StatePersister`): one write at a time, in order, so an older snapshot can never
+/// land after a newer one. The file replaces the legacy UserDefaults blob — sealed
+/// envelopes stay protected at rest, readable after first unlock so the
+/// background-task flush on the way out can still append.
+private actor UploadQueuePersister {
+    static let shared = UploadQueuePersister()
+
+    fileprivate static let url: URL = {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory,
+                                           in: .userDomainMask)[0]
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("haven-pending-uploads.json")
+    }()
+
+    /// Synchronous load for `BackgroundUploader.init` — a small local file read
+    /// (envelopes are KB-scale; media rides the media store, never this queue),
+    /// with none of the cfprefsd XPC the legacy path paid.
+    fileprivate static func load() -> [BackgroundUploader.Pending]? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode([BackgroundUploader.Pending].self, from: data)
+    }
+
+    fileprivate func persist(_ list: [BackgroundUploader.Pending]) {
+        guard let data = try? JSONEncoder().encode(list) else { return }
+        try? data.write(to: Self.url,
+                        options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 }

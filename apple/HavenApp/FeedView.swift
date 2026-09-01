@@ -4893,12 +4893,31 @@ final class FeedStore: ObservableObject {
                     controlKeys: [String: [String]],
                     unlockedCircles: Set<String>,
                     processedKeys: [String]) = await Task.detached(priority: .utility) {
-            await EngineGate.shared.run {
+            // SLICED, with real suspension points between engine holds. One monolithic
+            // EngineGate pass re-acquired the (barging, unfair) engine mutex back-to-back
+            // for the whole backlog, so any main-thread social.* touch during the drain —
+            // a view body's roster read, a scroll's cache miss — parked main for the
+            // ENTIRE drain. That is the "freezes for a few seconds right after
+            // foregrounding, then silky" report, and the background scene-create
+            // 0x8BADF00D at 2 AM is the same park crossing the 30s watchdog during an
+            // overnight push drain. Six envelopes per hold + a few ms of air lets a
+            // parked main thread win the lock within one slice.
+            var changed: [(String, Data)] = []
+            var controlKeys: [String: [String]] = [:]
+            var unlocked = Set<String>()
+            var processed: [String] = []
+            var sliceStart = 0
+            while sliceStart < content.count {
+                let slice = Array(content[sliceStart..<min(sliceStart + 6, content.count)])
+                if sliceStart > 0 { try? await Task.sleep(nanoseconds: 3_000_000) }
+                sliceStart += 6
+                let part: ([(String, Data)], [String: [String]], Set<String>, [String])
+                part = await EngineGate.shared.run {
                 var changed: [(String, Data)] = []
                 var controlKeys: [String: [String]] = [:]
                 var unlocked = Set<String>()
                 var processed: [String] = []
-                for (cid, key, env) in content {
+                for (cid, key, env) in slice {
                     let applied = (try? social.receive(circleId: cid, envelope: env)) == true
                     // Every processed envelope is marked seen — `false` means "duplicate" or
                     // "buffered until its key/roster arrives" and the pending buffer is durable,
@@ -4922,7 +4941,13 @@ final class FeedStore: ObservableObject {
                     }
                 }
                 return (changed, controlKeys, unlocked, processed)
+                }
+                changed += part.0
+                for (k, v) in part.1 { controlKeys[k, default: []] += v }
+                unlocked.formUnion(part.2)
+                processed += part.3
             }
+            return (changed, controlKeys, unlocked, processed)
         }.value
         let ingested = batch.ingested
         // After a NEW key commit lands, re-queue that circle's mailbox content (except the control

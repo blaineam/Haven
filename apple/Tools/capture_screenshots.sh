@@ -151,11 +151,11 @@ capture_sim() {
   done
 
   # Localized hero captures (CAP_LOCALES=big8) → <key>/<locale>/
-  if [[ "$key" == iphone* ]] && [ -n "$(cap_locales)" ]; then
+  if [[ "$key" == iphone* || "$key" == ipad* ]] && [ -n "$(cap_locales)" ]; then
     for LOCALE in $(cap_locales); do
       echo "  — locale $LOCALE"
       mkdir -p "$OUT/$key/$LOCALE"
-      for lentry in "circle||01-feed.png" "circle|story|02-story.png"; do
+      for lentry in "${SCENES[@]}"; do
         local ltab="${lentry%%|*}" lrest="${lentry#*|}"
         local lscene="${lrest%%|*}" lfile="${lrest#*|}"
         xcrun simctl terminate "$udid" "$BUNDLE_ID" >/dev/null 2>&1 || true

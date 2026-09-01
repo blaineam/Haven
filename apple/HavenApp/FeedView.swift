@@ -3034,14 +3034,16 @@ final class FeedStore: ObservableObject {
                                  "media_present": real.map { MediaStore.shared.has($0) },
                                  "media_markers": item.media.filter { MediaStore.isSynthetic($0) },
                                  "companions_present": Dictionary(
-                                    uniqueKeysWithValues: item.media.compactMap { m -> (String, Bool)? in
+                                    item.media.compactMap { m -> (String, Bool)? in
                                         let companion = MediaVariants.parsePreview(m)?.preview
                                             ?? MediaVariants.parseThumb(m)?.thumb
                                             ?? MediaVariants.parsePoster(m)?.poster
                                             ?? MediaVariants.parseOriginal(m)?.original
                                         guard let companion else { return nil }
                                         return (companion, MediaStore.shared.has(companion))
-                                    })])
+                                    // Two markers can legally name the SAME companion blob
+                                    // (crashed live: uniqueKeysWithValues traps on duplicates).
+                                    }, uniquingKeysWith: { a, _ in a })])
                 }
                 dms[peer] = rows
             } else {
@@ -3070,14 +3072,15 @@ final class FeedStore: ObservableObject {
                         // cannot work.
                         "media_markers": item.media.filter { MediaStore.isSynthetic($0) },
                         "companions_present": Dictionary(
-                            uniqueKeysWithValues: item.media.compactMap { m -> (String, Bool)? in
+                            item.media.compactMap { m -> (String, Bool)? in
                                 let companion = MediaVariants.parsePreview(m)?.preview
                                     ?? MediaVariants.parseThumb(m)?.thumb
                                     ?? MediaVariants.parsePoster(m)?.poster
                                     ?? MediaVariants.parseOriginal(m)?.original
                                 guard let companion else { return nil }
                                 return (companion, MediaStore.shared.has(companion))
-                            }),
+                            // Same duplicate-companion tolerance as the DM rows above.
+                            }, uniquingKeysWith: { a, _ in a }),
                         "reactions": Dictionary(item.reactions.map { ($0.emoji, Int($0.count)) }, uniquingKeysWith: +),
                         "comments": item.comments.filter { !$0.unsent }.map { ["id": $0.id, "body": $0.body] },
                     ]))

@@ -140,13 +140,43 @@ capture_sim() {
     sleep 9
     local tries=0 sz=0
     while :; do
-      xcrun simctl io "$udid" screenshot "$OUT/$key/$file" >/dev/null 2>&1
+      # TCC: simctl's screenshot service can't write ~/Documents — TMPDIR + mv.
+      local htmp="${TMPDIR:-/tmp}/.haven-shot-$$.png"
+      xcrun simctl io "$udid" screenshot "$htmp" >/dev/null 2>&1 && mv -f "$htmp" "$OUT/$key/$file"
       sz=$(stat -f%z "$OUT/$key/$file" 2>/dev/null || echo 0)
       if [ "$sz" -ge 400000 ] || [ "$tries" -ge 5 ]; then break; fi
       tries=$((tries + 1)); sleep 4
     done
     echo "  $key/$file ($((sz / 1024))KB${tries:+, $tries retries})"
   done
+
+  # Localized hero captures (CAP_LOCALES=big8) → <key>/<locale>/
+  if [[ "$key" == iphone* ]] && [ -n "$(cap_locales)" ]; then
+    for LOCALE in $(cap_locales); do
+      echo "  — locale $LOCALE"
+      mkdir -p "$OUT/$key/$LOCALE"
+      for lentry in "circle||01-feed.png" "circle|story|02-story.png"; do
+        local ltab="${lentry%%|*}" lrest="${lentry#*|}"
+        local lscene="${lrest%%|*}" lfile="${lrest#*|}"
+        xcrun simctl terminate "$udid" "$BUNDLE_ID" >/dev/null 2>&1 || true
+        sleep 0.6
+        # shellcheck disable=SC2046
+        env SIMCTL_CHILD_HAVEN_DEMO=1 SIMCTL_CHILD_HAVEN_SKIP_ONBOARDING=1 SIMCTL_CHILD_HAVEN_NO_NET=1 \
+            SIMCTL_CHILD_HAVEN_TAB="$ltab" SIMCTL_CHILD_HAVEN_SCENE="$lscene" \
+            xcrun simctl launch "$udid" "$BUNDLE_ID" $(cap_locale_args "$LOCALE") >/dev/null 2>&1
+        sleep 9
+        local ltries=0 lsz=0
+        while :; do
+          local htmp="${TMPDIR:-/tmp}/.haven-shot-$$.png"
+          xcrun simctl io "$udid" screenshot "$htmp" >/dev/null 2>&1 && mv -f "$htmp" "$OUT/$key/$LOCALE/$lfile"
+          lsz=$(stat -f%z "$OUT/$key/$LOCALE/$lfile" 2>/dev/null || echo 0)
+          if [ "$lsz" -ge 400000 ] || [ "$ltries" -ge 5 ]; then break; fi
+          ltries=$((ltries + 1)); sleep 4
+        done
+        echo "  $key/$LOCALE/$lfile ($((lsz / 1024))KB)"
+      done
+    done
+  fi
 
   cap_clear_statusbar "$udid"
   xcrun simctl terminate "$udid" "$BUNDLE_ID" >/dev/null 2>&1 || true

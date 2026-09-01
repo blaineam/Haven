@@ -241,7 +241,7 @@ final class SelfSyncCoordinator {
 
     /// Write a merged state back into the local stores (only when a value actually differs, to
     /// avoid feedback loops through the stores' didSet broadcasts).
-    private func applyLocal(_ h: AccountStateHandle, social: HavenSocial?) {
+    private func applyLocal(_ h: AccountStateHandle, social: HavenSocial?) async {
         let p = ProfileStore.shared
         // Profile fields are LAST-WRITER-WINS by per-field timestamp — a remote value is applied only if
         // it was edited MORE RECENTLY than our local one. This ends the endless ping-pong where two
@@ -424,12 +424,26 @@ final class SelfSyncCoordinator {
             // same re-seal, and it was the door the first fix missed: the re-seal was wired only into
             // the CONTACT pull path, while a sibling's registration comes through self-sync. The
             // symptom was an Android leg parked on `@…777` while everyone else had moved to `@…778`.
-            var rosterChanged = false
-            for e in live where e.key.hasPrefix("roster:") {
-                if social.ingestRosterWireStatus(wire: e.value) > 0 { rosterChanged = true }
-            }
-            if rosterChanged {
-                NotificationCenter.default.post(name: SharedStore.rosterEpochChangedNotification, object: nil)
+            //
+            // OFF-MAIN + EngineGate: ingest drains pending epoch events, and each drained event
+            // re-verifies device credentials — cloning ML-DSA verifying keys per contact device.
+            // The stall detector caught this exact loop blocking main 1.4–1.9s per foreground
+            // sync on a real account; it is engine work like any other and queues behind the
+            // mailbox drain instead of parking the UI.
+            let wires = live.filter { $0.key.hasPrefix("roster:") }.map(\.value)
+            if !wires.isEmpty {
+                let rosterChanged = await Task.detached(priority: .utility) {
+                    await EngineGate.shared.run {
+                        var changed = false
+                        for wire in wires where social.ingestRosterWireStatus(wire: wire) > 0 {
+                            changed = true
+                        }
+                        return changed
+                    }
+                }.value
+                if rosterChanged {
+                    NotificationCenter.default.post(name: SharedStore.rosterEpochChangedNotification, object: nil)
+                }
             }
         }
 
@@ -621,7 +635,7 @@ final class SelfSyncCoordinator {
         let changed = base.toBytes() != preMerge
 
         // 4. Apply the converged state locally + persist the new base.
-        applyLocal(base, social: social)
+        await applyLocal(base, social: social)
         let converged = base.toBytes()
         try? converged.write(to: baseURL, options: .atomic)
 
@@ -715,13 +729,13 @@ final class SelfSyncCoordinator {
     /// Merge a peer device's sealed slot received over a direct transport, apply + persist. Returns
     /// true if anything new arrived (so the caller can refresh the feed).
     @discardableResult
-    func ingestPeerSlot(_ blob: Data, social: HavenSocial?) -> Bool {
+    func ingestPeerSlot(_ blob: Data, social: HavenSocial?) async -> Bool {
         guard let peer = openState(blob) else { return false }
         let base = loadBase()
         let before = base.toBytes()
         base.merge(other: peer)
         let changed = base.toBytes() != before
-        applyLocal(base, social: social)
+        await applyLocal(base, social: social)
         try? base.toBytes().write(to: baseURL, options: .atomic)
         return changed
     }

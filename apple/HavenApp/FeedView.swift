@@ -4382,8 +4382,10 @@ final class FeedStore: ObservableObject {
     /// own seed can have produced one we can open). Merge it — this is what makes a linked device's
     /// circles/profile/posts appear locally without any relay.
     private func handleNearbySelfSync(_ payload: Data) {
-        if SelfSyncCoordinator.shared.ingestPeerSlot(payload, social: social) {
-            refreshCircles()   // a newly-synced circle must enter the polled list + pull its history
+        Task { @MainActor in
+            if await SelfSyncCoordinator.shared.ingestPeerSlot(payload, social: social) {
+                refreshCircles()   // a newly-synced circle must enter the polled list + pull its history
+            }
         }
     }
 

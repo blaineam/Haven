@@ -1757,8 +1757,13 @@ enum SharedStore {
             case 204:
                 return .success((keys: nil, digest: respDigest))   // nothing new — skip the GETs
             case 200...299:
-                let text = String(data: data, encoding: .utf8) ?? ""
-                let keys = text.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
+                // Parse off-main: a big circle's LIST is tens of thousands of
+                // newline-separated keys, and SharedStore is main-actor bound —
+                // the stall detector caught this exact split blocking main 0.5s.
+                let keys: [String] = await Task.detached(priority: .utility) {
+                    let text = String(data: data, encoding: .utf8) ?? ""
+                    return text.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
+                }.value
                 return .success((keys: keys, digest: respDigest))
             case 401, 403: return .failure(RelayForbidden())
             default: return .failure(URLError(.badServerResponse))

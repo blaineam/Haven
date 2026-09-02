@@ -298,7 +298,15 @@ if command -v adb >/dev/null 2>&1; then
     # identity that would make adoptSeedIfPresent refuse the fleet seed.
     adb shell am force-stop "$AND_PKG" >/dev/null 2>&1 || true
     adb shell pm clear "$AND_PKG" >/dev/null 2>&1 || true
-    adb shell appops set "$AND_PKG" MANAGE_EXTERNAL_STORAGE allow >/dev/null 2>&1 || true
+    # pm clear (and a reinstall) REVOKE every runtime permission, and the next launch then opens on
+    # a permission dialog instead of the app — a step that taps at fixed coordinates sails straight
+    # past it and reports on whatever is underneath. Seen 2026-09-02: after `install -r` the QR
+    # scanner's CAMERA grant was gone, the viewfinder never bound, and the tap looked like a no-op.
+    # Read the grants off the manifest so this cannot drift as permissions are added; pm grant
+    # rejects install-time permissions, hence the per-permission `|| true`.
+    for _p in $(grep -oE 'android\.permission\.[A-Z_]+' "$ROOT/android/app/src/main/AndroidManifest.xml" | sort -u); do
+      adb shell pm grant "$AND_PKG" "$_p" >/dev/null 2>&1 || true
+    done
     # Scoped storage (API 30+): adb-pushed files in /sdcard/Download are shell-owned — grant the
     # DEBUG build's All-Files access so QaDriver can read qa-seed.txt / qa-cmd.json / fixtures.
     adb shell appops set "$AND_PKG" MANAGE_EXTERNAL_STORAGE allow >/dev/null 2>&1 || true

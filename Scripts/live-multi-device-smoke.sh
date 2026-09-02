@@ -74,6 +74,12 @@ APK="$APK_UNI"
 if [[ -n "${EMU:-}" && -f "$APK" ]]; then
   log "installing Haven on $EMU ($ABI) from $(basename "$APK")"
   $ADB -s "$EMU" install -r -t "$APK" >"$OUT/android-install.log" 2>&1 || true
+  # A reinstall can revoke the runtime permissions, and the app then opens on a permission dialog
+  # rather than the feed — which this script would screenshot and call running. Grants are read off
+  # the manifest so they cannot drift; pm grant rejects install-time permissions, hence `|| true`.
+  for _p in $(grep -oE 'android\.permission\.[A-Z_]+' "$ROOT/android/app/src/main/AndroidManifest.xml" | sort -u); do
+    $ADB -s "$EMU" shell pm grant com.blaineam.haven "$_p" >/dev/null 2>&1 || true
+  done
   $ADB -s "$EMU" shell am force-stop com.blaineam.haven 2>/dev/null || true
   $ADB -s "$EMU" shell monkey -p com.blaineam.haven -c android.intent.category.LAUNCHER 1 \
     >"$OUT/android-launch.log" 2>&1 || \

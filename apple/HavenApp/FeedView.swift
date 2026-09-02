@@ -1264,9 +1264,27 @@ final class FeedStore: ObservableObject {
     /// dialable ids for a device-seed friend until their signed roster (frame 27) arrives, which the
     /// hint itself makes possible: without it neither side can deliver anything to the other.
     private let deviceHintsKey = "haven.contact.deviceHints"
+    /// Decoded-once mirror of the `deviceHintsKey` dictionary. The DEBUG stall detector's file sink
+    /// (Caches/HavenStalls.log, 2026-09-01) caught the remaining foreground freeze right here:
+    /// `contactDeviceHints.getter → _dictionaryDownCastConditional → swift_dynamicCast`, repeated
+    /// 0.40–0.50s main-thread blocks reached from `deviceHints(for:)` inside `sendIroh` — the getter
+    /// re-read the NSDictionary out of UserDefaults (cfprefsd) and conditionally bridged the whole
+    /// thing to `[String: [String]]` on the main actor on EVERY iroh send. The setter below is the
+    /// only writer, so the mirror is decoded on first read and kept in step on write: each lookup is
+    /// now an O(1) native dictionary read with no bridging. Semantics are unchanged (absent or
+    /// undecodable → `[:]`; every write still lands in UserDefaults).
+    private var contactDeviceHintsCache: [String: [String]]?
     private var contactDeviceHints: [String: [String]] {
-        get { (UserDefaults.standard.dictionary(forKey: deviceHintsKey) as? [String: [String]]) ?? [:] }
-        set { UserDefaults.standard.set(newValue, forKey: deviceHintsKey) }
+        get {
+            if let cached = contactDeviceHintsCache { return cached }
+            let decoded = (UserDefaults.standard.dictionary(forKey: deviceHintsKey) as? [String: [String]]) ?? [:]
+            contactDeviceHintsCache = decoded
+            return decoded
+        }
+        set {
+            contactDeviceHintsCache = newValue
+            UserDefaults.standard.set(newValue, forKey: deviceHintsKey)
+        }
     }
     func recordDeviceHints(accountHex: String, deviceIds: [String]) {
         guard !deviceIds.isEmpty else { return }
@@ -1488,9 +1506,21 @@ final class FeedStore: ObservableObject {
     /// circle id is deterministic, re-starting it re-syncs the old messages (from the relay / the other
     /// party / your other device) — true network deletion is impossible in P2P. The watermark hides
     /// everything from before the clear, so a re-started DM shows fresh. Persisted so it survives relaunch.
+    /// Same decoded-once mirror as `contactDeviceHints` (stall detector, 2026-09-01): this getter sits
+    /// on the `messages(in:)` warm-cache path, so every chat-body paint and every notify pass re-read
+    /// and re-bridged the dictionary out of cfprefsd. `clearDMBefore` is the only writer.
+    private var dmClearedBeforeCache: [String: UInt64]?
     private var dmClearedBefore: [String: UInt64] {
-        get { (UserDefaults.standard.dictionary(forKey: "haven.dm.clearedBefore") as? [String: UInt64]) ?? [:] }
-        set { UserDefaults.standard.set(newValue, forKey: "haven.dm.clearedBefore") }
+        get {
+            if let cached = dmClearedBeforeCache { return cached }
+            let decoded = (UserDefaults.standard.dictionary(forKey: "haven.dm.clearedBefore") as? [String: UInt64]) ?? [:]
+            dmClearedBeforeCache = decoded
+            return decoded
+        }
+        set {
+            dmClearedBeforeCache = newValue
+            UserDefaults.standard.set(newValue, forKey: "haven.dm.clearedBefore")
+        }
     }
     func clearDMBefore(_ circleId: String) { var m = dmClearedBefore; m[circleId] = now(); dmClearedBefore = m }
 

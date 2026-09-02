@@ -102,13 +102,36 @@ function iosContainer(udid) {
 }
 
 function makeIos(udid) {
-  const as = join(iosContainer(udid), 'Library/Application Support');
+  // Resolve the container PER USE, not once at startup. A simulator app's data-container UUID is
+  // reissued every time the app is reinstalled — bootstrap reinstalls it, and the iOS leg is
+  // relaunched again mid-bootstrap for B's bundle — so a path captured up front can point at a
+  // directory that no longer exists by the time the matrix runs. `writeFileSync` then threw ENOENT
+  // straight out of qaWrite, and with no catch anywhere above it that killed the WHOLE run: on
+  // 2026-09-02 the call step died on `call audio B→A [ios→stub]` and every remaining pair —
+  // android's speaker routing among them — simply never ran, with the fleet perfectly healthy.
+  //
+  // The android leg has promised the opposite since it was written (see makeAndroid): a hiccup on
+  // one leg degrades THAT leg to RED checks and never crashes the run. This gives iOS the same
+  // contract.
+  let as = join(iosContainer(udid), 'Library/Application Support');
+  const dir = () => {
+    if (!existsSync(as)) {
+      // Best-effort: if simctl cannot answer either, keep the stale path so the caller records a
+      // RED check on its own terms instead of exploding here.
+      const next = shOk('xcrun', ['simctl', 'get_app_container', udid, IOS_BUNDLE, 'data'])?.trim();
+      if (next) { as = join(next, 'Library/Application Support'); log(`ios container moved → ${next}`); }
+    }
+    return as;
+  };
   return {
     label: 'ios',
-    qaWrite: (cmd) => writeFileSync(join(as, 'qa-cmd.json'), JSON.stringify(cmd)),
+    qaWrite: (cmd) => {
+      try { writeFileSync(join(dir(), 'qa-cmd.json'), JSON.stringify(cmd)); }
+      catch (e) { log(`WARN ios qaWrite failed (${e.code || e.message}) — this leg will read RED`); }
+    },
     poke: () => shOk('xcrun', ['simctl', 'openurl', udid, 'haven://qa?x=1']),
-    dump: () => readJson(join(as, 'qa-dump.json')),
-    stage: (src, name) => { const p = join(as, name); writeFileSync(p, readFileSync(src)); return p; },
+    dump: () => readJson(join(dir(), 'qa-dump.json')),
+    stage: (src, name) => { const p = join(dir(), name); writeFileSync(p, readFileSync(src)); return p; },
   };
 }
 
@@ -518,6 +541,49 @@ async function main() {
           (j) => (j.call?.inbound_audio_bytes || 0) > 0, BUDGET.mediaEvent));
         perfGate('call audio B→A (bytes received)', 'ios', await converge(devices.ios,
           (j) => (j.call?.inbound_audio_bytes || 0) > 0, BUDGET.mediaEvent));
+      }
+      // SPEAKER ROUTING on whichever leg is android — the one call control whose effect lands
+      // outside the app, in the platform's audio router. `speaker_on` cannot see it: the flag flips
+      // locally even when the platform REFUSES the route, which is exactly how
+      // setCommunicationDevice fails (it returns false rather than throwing). So assert the route
+      // the OS reports back, not the flag we set.
+      //
+      // Both android pairs run this on purpose. The second call happens after a full teardown, so
+      // it is the check that hangup handed audio back to the system instead of leaving a
+      // communication device pinned and wedging the router for every call after it.
+      if (devices.android && (pr.caller === 'android' || pr.answerer === 'android')) {
+        // An earpiece can only be ROUTED TO if the device has one, and the emulator does not: its
+        // getAvailableCommunicationDevices() answers "speaker" and nothing else. Asserting
+        // speaker-off → earpiece there is unsatisfiable, and a check that can never pass is worse
+        // than no check — it sits RED until everyone learns to scroll past it. So branch on what
+        // the hardware actually offers, and NAME which case ran in the check title.
+        const sweep = async (label, hasEarpiece) => {
+          for (const [on, want] of [[false, 'earpiece'], [true, 'speaker']]) {
+            const off = !on;
+            const target = off && !hasEarpiece ? 'speaker' : want;
+            const what = on ? 'ON → loudspeaker'
+              : hasEarpiece ? 'OFF → earpiece'
+              : 'OFF → platform default (this device has no earpiece)';
+            await op(devices.android, { op: 'call_speaker', on }, 2000);
+            const ms = await converge(devices.android, (j) => j.call?.audio_route === target, 20_000);
+            score(`${label}: speaker ${what} [${tag}]`, ms >= 0,
+              ms >= 0 ? `${(ms / 1000).toFixed(1)}s`
+                      : JSON.stringify((await freshDump(devices.android))?.call || {}));
+          }
+        };
+        const live = (await freshDump(devices.android))?.call || {};
+        score(`speaker defaults to the loudspeaker [${tag}]`,
+          live.speaker_on === true && live.audio_route === 'speaker', JSON.stringify(live));
+        const hasEarpiece = String(live.audio_devices || '').includes('earpiece');
+        if (!hasEarpiece) log(`NOTE android offers only [${live.audio_devices}] — the API 31+ earpiece`
+          + ` route cannot be proven on this device; the pre-31 sweep below still exercises both ways`);
+        await sweep('api31+', hasEarpiece);
+        // The pre-31 fallback SHIPS (minSdk is 29) but every Android in the fleet is API 35, so the
+        // suite pins it explicitly — otherwise that branch is covered by the compiler and nothing
+        // else, which is the state the API-31 deprecation fix would have left it in.
+        await op(devices.android, { op: 'call_route_legacy', on: true }, 2000);
+        await sweep('pre-31 fallback', true);
+        await op(devices.android, { op: 'call_route_legacy', on: false }, 2000);
       }
       if (pr.answerer !== 'stub') {
         // Stub dialed the ACCOUNT: the two NON-answering A devices rang too and must stand down

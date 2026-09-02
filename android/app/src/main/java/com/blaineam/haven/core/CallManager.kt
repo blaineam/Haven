@@ -86,6 +86,38 @@ object CallManager {
     @Volatile var qaLastCallEvent: String = "none"
         private set
     fun qaNoteCallEvent(what: String) { qaLastCallEvent = what }
+
+    /**
+     * QA ONLY: pin routing to the pre-31 [legacySpeakerphone] path on a device that would otherwise
+     * take the API 31+ one. minSdk is 29, so that fallback SHIPS to real users — and every Android
+     * in the QA fleet is API 35, which means without this switch the fallback is verified by the
+     * compiler and nothing else. Same rationale, and the same BuildConfig.DEBUG-gated call site
+     * (QaDriver), as LowDataMonitor.debugForced. Re-routes on set so a flip mid-call takes effect.
+     */
+    @Volatile var qaForceLegacyRoute = false
+        set(v) { field = v; if (mediaStarted) applySpeaker() }
+
+    /// QA visibility ONLY. What the OS says audio is routed to RIGHT NOW, read back from the
+    /// platform rather than from [speakerOn]. The toggle's own flag cannot catch a route that was
+    /// requested and refused — and refusal is exactly how `setCommunicationDevice` fails, by
+    /// returning false rather than throwing. Without this the e2e call step can only prove that a
+    /// boolean flipped, which is what let the routing itself ship on compile checks alone.
+    /// QA visibility ONLY. Which communication routes the platform offers this device AT ALL. The
+    /// emulator answers "speaker" and nothing else — it models no earpiece — so asserting that
+    /// speaker-off REACHES the earpiece is unsatisfiable there, and a suite that cannot tell that
+    /// apart from a routing bug reports a permanent RED everyone learns to ignore.
+    val qaAudioDevices: String get() = runCatching {
+        if (android.os.Build.VERSION.SDK_INT >= 31)
+            audioManager().availableCommunicationDevices.joinToString(",") { routeName(it.type) }
+        else "pre31"
+    }.getOrDefault("?")
+
+    val qaAudioRoute: String get() = runCatching {
+        val am = audioManager()
+        if (modernRouting()) routeName(am.communicationDevice?.type)
+        else if (legacySpeakerphoneOn(am)) "speaker" else "earpiece"
+    }.getOrDefault("?")
+
     private var isCaller = false
     private var mediaStarted = false
     private val roster = HashSet<String>()                 // includes me
@@ -646,10 +678,13 @@ object CallManager {
         // Without MODE_IN_COMMUNICATION + speaker, ICE can show Connected while playout is silent
         // or stuck on the earpiece at near-zero volume (iOS parity "connected but no audio").
         runCatching {
-            val am = audioManager()
-            am.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
-            @Suppress("DEPRECATION")
-            am.isSpeakerphoneOn = speakerOn.value
+            // Mode FIRST: on API 31+ a communication-device selection only sticks once the audio
+            // system is in communication mode, so routing before this line is silently dropped.
+            audioManager().mode = android.media.AudioManager.MODE_IN_COMMUNICATION
+            // One routing path for start, toggle and re-assert. This used to be its own copy of the
+            // speakerphone write, which is exactly how a start and a toggle come to disagree about
+            // what "speaker on" means on a device where only one of the two paths was updated.
+            applySpeaker()
             // Re-assert after a beat — some devices ignore the first speakerphone flip at start.
             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                 if (mediaStarted) applySpeaker()
@@ -998,10 +1033,82 @@ object CallManager {
     private fun audioManager(): android.media.AudioManager =
         appContext.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
 
-    /** Route audio to the loudspeaker or the earpiece per [speakerOn]. Bluetooth/wired headsets, when
-     *  present, take over regardless — the OS honors the connected route over this flag. */
+    /**
+     * Route audio to the loudspeaker or the earpiece per [speakerOn]. Bluetooth/wired headsets, when
+     * present, take over regardless — the OS honors the connected route over this flag.
+     *
+     * TWO PATHS, because the platform changed shape at API 31 and minSdk is 29: `isSpeakerphoneOn`
+     * was deprecated in favour of naming an actual device with `setCommunicationDevice`.
+     *
+     * They are not interchangeable, and the difference is precisely the headset promise above. The
+     * old flag was a HINT the framework weighed against whatever was plugged in — "a headset wins"
+     * came for free. `setCommunicationDevice` is an OVERRIDE, so selecting the earpiece on
+     * speaker-off would yank a live call out of a connected headset and into the user's ear.
+     * Speaker-off therefore names the earpiece only when there is no external route to honor, and
+     * otherwise CLEARS the selection and lets the framework choose — which is what the old flag
+     * did by itself.
+     */
     private fun applySpeaker() {
-        runCatching { audioManager().isSpeakerphoneOn = speakerOn.value }
+        val am = runCatching { audioManager() }.getOrNull() ?: return
+        val want = speakerOn.value
+        runCatching {
+            if (modernRouting()) {
+                val available = am.availableCommunicationDevices
+                val target = when {
+                    want -> available.firstOrNull { it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                    // Speaker off with something plugged in or paired: clearing hands the call to it.
+                    available.any { isExternalRoute(it.type) } -> null
+                    else -> available.firstOrNull { it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+                }
+                if (target == null) {
+                    // Either a headset to honor, or a device that enumerated no such built-in —
+                    // "let the platform decide" is the right answer for both.
+                    am.clearCommunicationDevice()
+                } else if (!am.setCommunicationDevice(target)) {
+                    // It REPORTS failure instead of throwing, so an unchecked return is a call that
+                    // quietly keeps playing out of the wrong speaker with nothing logged.
+                    Log.w(TAG, "audio: device type ${target.type} refused — route unchanged")
+                }
+                // What was asked, what the OS granted, and what it had to offer. A routing report
+                // that names only the request cannot tell "device refused" from "device absent",
+                // and those have different fixes — one per toggle is not chatty.
+                Log.i(TAG, "audio: want=${if (want) "speaker" else "earpiece"}" +
+                    " → ${routeName(am.communicationDevice?.type)}" +
+                    " (available: ${available.joinToString { routeName(it.type) }})")
+            } else {
+                legacySpeakerphone(am, want)
+            }
+        }.onFailure { Log.w(TAG, "audio: could not route to ${if (want) "speaker" else "earpiece"}", it) }
+    }
+
+    /** API 31+ device selection, unless QA has pinned the pre-31 fallback for a run. */
+    private fun modernRouting(): Boolean = android.os.Build.VERSION.SDK_INT >= 31 && !qaForceLegacyRoute
+
+    /** Routes that are NOT this phone's own speaker/earpiece — a headset the user chose by plugging
+     *  it in or pairing it, and which an explicit earpiece selection would override. */
+    private fun isExternalRoute(type: Int): Boolean =
+        type != android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER &&
+            type != android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+
+    /** Pre-31 routing. The deprecated flag is the ONLY API on 29/30, and minSdk is 29 — so this is
+     *  a supported path, not a leftover. Isolated here so the suppression covers one line. */
+    @Suppress("DEPRECATION")
+    private fun legacySpeakerphone(am: android.media.AudioManager, on: Boolean) { am.isSpeakerphoneOn = on }
+
+    @Suppress("DEPRECATION")
+    private fun legacySpeakerphoneOn(am: android.media.AudioManager): Boolean = am.isSpeakerphoneOn
+
+    /** AudioDeviceInfo type → the short name [qaAudioRoute] reports. */
+    private fun routeName(type: Int?): String = when (type) {
+        null -> "none"
+        android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "speaker"
+        android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "earpiece"
+        android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET,
+        android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "wired"
+        android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "bluetooth"
+        android.media.AudioDeviceInfo.TYPE_USB_HEADSET,
+        android.media.AudioDeviceInfo.TYPE_USB_DEVICE -> "usb"
+        else -> "type:$type"
     }
     /** Open the camera at the best resolution it will accept. */
     private fun startCapture(cap: org.webrtc.VideoCapturer) {
@@ -1139,9 +1246,13 @@ object CallManager {
         localVideo = null
         remoteVideo.clear(); remoteScreen.clear(); remoteCameraOff.clear(); participants.clear(); roster.clear()
         // Hand audio back to the system (drop in-communication mode + loudspeaker routing).
+        // ORDER MATTERS on 31+: drop the selection while still IN communication mode. An explicit
+        // communication device outlives the call otherwise, and the next thing to open the mic —
+        // this app's own next call included — inherits a route nobody chose.
         runCatching {
             val am = audioManager()
-            am.isSpeakerphoneOn = false
+            if (modernRouting()) am.clearCommunicationDevice()
+            else legacySpeakerphone(am, false)
             am.mode = android.media.AudioManager.MODE_NORMAL
         }
         speakerOn.value = true   // default for the next call

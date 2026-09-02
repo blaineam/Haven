@@ -114,10 +114,11 @@ its account + device hexes to `/sdcard/Download/qa-device-hex.txt` for the
 stub-authorization step.
 
 ```json
-{"op":"post|story|dm|react|comment|profile|circle_create|circle_invite|file|music_post|dump|mark_read|link_constraint",
+{"op":"post|story|dm|react|comment|profile|circle_create|circle_invite|file|music_post|dump|mark_read|link_constraint
+      |call|call_accept|call_end|call_speaker|call_route_legacy",
  "body":"…","media":"photo|video","photo_path":"…","video_path":"…","file_path":"…",
  "target_id":"<event id>","emoji":"❤️","dm_to":"<64hex>","name":"…","circle_id":"…",
- "music":{"title":"…","artist":"…"},"caption":"…","level":"normal|low|ultra|auto"}
+ "music":{"title":"…","artist":"…"},"caption":"…","level":"normal|low|ultra|auto","on":true}
 ```
 
 **`link_constraint`** forces the low-data tier (`"level"`), because the satellite path is otherwise
@@ -127,6 +128,32 @@ and the user preference deliberately cannot escalate to it. Without this the pre
 unverified on the exact path it exists for. `"auto"` hands control back to the real path monitor.
 DEBUG-only on every client, so no release build can be pushed into a state the network is not in.
 Desktop accepts it too, and there it is the *only* way in — desktop has no path monitor at all.
+
+**`call_speaker`** (`"on"`, or omit it to toggle) flips the in-call speaker, and **`call_route_legacy`**
+(`"on"`) pins Android's routing to its pre-31 fallback. Both exist because in-call audio ROUTING is
+the one call control whose effect lands outside the app — in the platform's audio router — so the
+app's own `speaker_on` flag cannot see whether it worked: `AudioManager.setCommunicationDevice`
+reports failure by *returning false*, not by throwing, and the flag flips either way. The dump
+answers with both `call.speaker_on` (asked) and `call.audio_route` (granted, read back from
+`getCommunicationDevice()` — `speaker`/`earpiece`/`wired`/`bluetooth`/`usb`/`none`), and they agree
+until the routing is broken.
+
+`call_route_legacy` is the `link_constraint` argument applied to an SDK gate. Android's minSdk is 29
+so the deprecated-`isSpeakerphoneOn` path genuinely SHIPS, but every Android in the fleet is API 35
+and would never take it — without the pin, that branch is covered by the compiler and nothing else.
+The e2e call step sweeps speaker on/off through **both** routing paths on both android pairs; the
+second pair runs after a full teardown, which is what proves hangup hands audio back to the system
+instead of leaving a communication device pinned for the next call. DEBUG-only, like every op here.
+
+> **The emulator has no earpiece.** `haven_phone` reports `audio_devices: "speaker"` and nothing
+> else, so on the API 31+ path there is no `TYPE_BUILTIN_EARPIECE` to select and speaker-off
+> correctly falls back to `clearCommunicationDevice()` — the route stays on the only device present.
+> Asserting `OFF → earpiece` there can never pass, so the sweep reads `call.audio_devices` and
+> asserts *the platform default* instead, saying so in the check name. The pre-31 sweep still
+> exercises both directions on the same emulator, because `isSpeakerphoneOn` is a framework-tracked
+> flag rather than a device selection. **Earpiece routing on API 31+ therefore needs real hardware
+> to verify** — measured 2026-09-02, where the fallback went green both ways and the modern
+> earpiece leg was the one thing the emulator could not prove.
 
 
 Every op (and `{"op":"dump"}`) refreshes `qa-dump.json` next to the drop file

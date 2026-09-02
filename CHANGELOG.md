@@ -31,6 +31,30 @@ only a completed refresh moves that mark — to an event's own time, never to th
 that arrives late still lands. The first launch on this build asks for everything once, which fills
 back in whatever the old behaviour had already dropped.
 
+### Changed — Android in-call audio routing now uses the API the platform still supports
+
+The speaker button drove `AudioManager.isSpeakerphoneOn`, which Android deprecated in API 31 in
+favour of naming an output device outright (`setCommunicationDevice` / `clearCommunicationDevice`).
+Android 12 and newer now take that path; the deprecated flag stays for API 29–30, which Haven still
+supports, so both are real shipping code rather than one path and one leftover.
+
+The two APIs are not interchangeable, and the difference is the headset promise. The old flag was a
+*hint* the framework weighed against whatever was plugged in, so "a connected headset wins" came for
+free. `setCommunicationDevice` is an *override*: naming the earpiece when the speaker is switched
+off would have yanked a live call out of a paired headset and into the user's ear. Speaker-off
+therefore names the earpiece only when there is no external route to honour, and otherwise clears
+the selection and lets the framework choose — the behaviour the old flag had on its own. Hangup now
+releases the selected device explicitly, and while still in communication mode, so a route can no
+longer outlive the call that chose it and greet the next one.
+
+Verified on the emulator across the e2e call matrix rather than on a clean compile: the speaker
+toggle was driven through both routing paths in live calls on both android legs, asserting the route
+the OS reports back rather than the app's own flag, and the second leg runs after a full teardown.
+One honest gap — the emulator models no earpiece at all (it offers only a loudspeaker), so the
+API 31+ *earpiece* selection is the one thing that still needs real hardware to confirm; the pre-31
+fallback exercises both directions there, and the suite now says which case it ran instead of
+carrying a check that can never pass.
+
 ### Fixed — on Android, the call that just ended no longer hangs up the next one
 
 An Android phone could stop ringing for an incoming call about a second after it started, and then

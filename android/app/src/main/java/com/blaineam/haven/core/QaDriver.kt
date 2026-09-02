@@ -225,6 +225,17 @@ object QaDriver {
                 }
             }
             "call_accept" -> CallManager.accept()
+            // The speaker toggle is the one call control whose effect lands OUTSIDE the app — in the
+            // platform's audio router — so without a driver op it cannot be tested at all, which is
+            // how the routing came to ship on compile checks alone. `on` sets an explicit state;
+            // omit it for a plain toggle.
+            "call_speaker" -> {
+                val want = if (cmd.has("on")) cmd.optBoolean("on") else !CallManager.speakerOn.value
+                if (CallManager.speakerOn.value != want) CallManager.toggleSpeaker()
+            }
+            // QA: pin routing to the pre-31 fallback. minSdk is 29 so that branch ships, but every
+            // Android in the fleet is API 35 — without this it is exercised by nothing.
+            "call_route_legacy" -> CallManager.qaForceLegacyRoute = cmd.optBoolean("on", true)
             "call_end" -> CallManager.hangup()
             "story" -> {
                 val caption = cmd.optString("caption").ifEmpty { body }
@@ -439,7 +450,14 @@ object QaDriver {
             // leg that ignored the teardown from one that is in a DIFFERENT session than the one
             // that ended — and every handler here is gated on the session id matching.
             .put("session", runCatching { CallManager.qaSessionId }.getOrDefault(""))
-            .put("last_event", runCatching { CallManager.qaLastCallEvent }.getOrDefault("?")))
+            .put("last_event", runCatching { CallManager.qaLastCallEvent }.getOrDefault("?"))
+            // What we ASKED for and what the OS GRANTED, as two fields — they agree until the
+            // routing is broken, and then the pair names the failure instead of hiding it.
+            .put("speaker_on", runCatching { CallManager.speakerOn.value }.getOrDefault(false))
+            .put("audio_route", runCatching { CallManager.qaAudioRoute }.getOrDefault("?"))
+            // What the hardware even OFFERS. Without it, "speaker-off did not reach the earpiece"
+            // cannot be told apart from "this device has no earpiece" — which is every emulator.
+            .put("audio_devices", runCatching { CallManager.qaAudioDevices }.getOrDefault("?")))
         o.put("circles", circles)
         // What the engine is HOLDING BACK. A short feed alone cannot distinguish "never arrived"
         // from "arrived and could not be opened", and those have opposite fixes — this leg once

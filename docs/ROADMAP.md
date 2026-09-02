@@ -38,8 +38,9 @@ cryptographic device revocation** (S2–S5 core) and the **MLS-style TreeKEM** g
 in 1.0.7 — see Shipped below; **periodic epoch rotation** and the **video EXIF/GPS strip** shipped
 2026-07-15. The MLS-style keying layer is **enabled in 1.0.7 for circles with a verified owner** —
 those created from 1.0.7 on; existing circles keep their current encryption unless their creator
-offers an upgrade each member follows. An **independent cryptographer's review** remains **planned/ongoing** (the audit to
-date is internal) — see Shipped → "Seed-drop + MLS".)*
+offers an upgrade each member follows. The audit to date is **internal**; there is **no paid external
+audit and none is planned** — independent review is open to anyone (private report to
+`apps@wemiller.com`, credit by name) — see Shipped → "Seed-drop + MLS".)*
 
 ### Outstanding — parity / correctness
 
@@ -102,7 +103,8 @@ pinning (≤6, self-syncing), DM-delete watermark, group-DM sender rows.
 > across only when whoever made it **offers an upgrade** and **each member taps once to follow it**.
 > Even on an owned circle it activates only **once every member's devices have updated and joined**;
 > until a circle is fully capable it stays byte-identical to the sender-keys+epochs path. Its audit to date is
-> internal; an external cryptographer's review is planned/ongoing.
+> internal; there is no paid external audit planned — open review instead (`apps@wemiller.com`,
+> private report, credit by name; `docs/SECURITY.md` → Security review).
 > See "Seed-drop + MLS" above and `TREEKEM-DESIGN.md`.
 
 ### ✅ Group keying (epochs)
@@ -182,7 +184,7 @@ export done; enrollment QR/verify flow + UI ship. **Phase 4b** live device-to-de
 waiting out their mailbox poll; strictly additive (the mailbox put is unchanged), core + iOS/macOS +
 Android. **Phase 2 seed-drop (S2–S5 core) and Phase 5 MLS-style TreeKEM both landed in 1.0.7** — see
 "Seed-drop + MLS" above. *(Phase 4b's personal forwarder: not started; live delivery is not wired on
-desktop yet. The MLS keying layer is enabled in 1.0.7 for circles with a verified owner — the ones made from 1.0.7 on; older circles keep their existing encryption unless their creator offers an upgrade each member follows. An external crypto review remains planned/ongoing.)*
+desktop yet. The MLS keying layer is enabled in 1.0.7 for circles with a verified owner — the ones made from 1.0.7 on; older circles keep their existing encryption unless their creator offers an upgrade each member follows. No paid external audit is planned; open review replaces it (`apps@wemiller.com`, private report, credit by name).)*
 
 ### ✅ Apple apps (M3)
 iOS/iPadOS + native macOS SwiftUI on the Rust core via a UniFFI XCFramework. **Live on the App
@@ -278,9 +280,10 @@ push.
   master switch defaults OFF**, and the 1.0.7 clients **enable it** for circles created from 1.0.7 on,
   whose id is cryptographically bound to their creator — activating once every member's devices have
   updated and joined. Circles that already exist have no owner and **do not get it automatically**;
-  their creator can offer an upgrade for each member to follow. An **independent cryptographer's review** (design M7)
-  remains **planned/ongoing** — the audit to date is internal, and that review is the gate before the
-  core default flips ON. See Shipped → "Seed-drop + MLS".
+  their creator can offer an upgrade for each member to follow. The audit to date is **internal**, and
+  **no paid external audit is planned** (Haven is free and unfunded). M7's third-party-review gate is
+  replaced by **open review**: anyone may audit and report privately to `apps@wemiller.com`, credited
+  by name — see `docs/SECURITY.md` → Security review. See Shipped → "Seed-drop + MLS".
 - **D16 Phase 4b**: the always-on personal store-and-forward node (ordered backlog cache). The live
   device-to-device half is **done** (`haven_net::livedelivery`, core + iOS/macOS + Android); what's
   left is the forwarder, plus wiring live delivery on desktop.

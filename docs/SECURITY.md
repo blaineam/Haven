@@ -63,8 +63,9 @@ This document records what Haven protects, how, and the limits — including the
   anchor it (one can't be added after the fact in a way other members could trust), so they keep the
   epoch scheme described above — which still cuts off anyone you remove. Two honest qualifiers: its
   audit to date is an **internal** AI-driven adversarial review (0 critical, 0 high), **not** a formal
-  external one — an independent cryptographer's review is planned — and it is MLS-*shaped*, TreeKEM
-  mechanisms over Haven's own post-quantum primitives, **not** RFC-9420 wire-interoperable.
+  external one, and no paid external audit is planned (see [Security review](#security-review)) — and
+  it is MLS-*shaped*, TreeKEM mechanisms over Haven's own post-quantum primitives, **not** RFC-9420
+  wire-interoperable.
 - **Authentication**: every event is signed and the signer is bound to the event author and circle
   epoch; push notifications are signed (the receiver verifies the sender); push registration is signed
   (the worker verifies the device belongs to the identity). Signatures are domain-separated; there is
@@ -201,6 +202,29 @@ a title — and it cannot happen at all without an explicit tap on that specific
 - **The user's own** relay binary and/or S3-compatible bucket (their infrastructure, blind storage).
 - **WebRTC** (DTLS-SRTP) for calls; STUN for connectivity. No analytics, telemetry, crash reporters,
   or ad SDKs — verified by audit.
+
+## Security review
+
+Haven's audit to date is an **internal adversarial review** (0 critical, 0 high). There is **no paid
+external audit and none is planned** — Haven is free, unfunded, and a paid engagement is not something
+this project can carry.
+
+**Independent review is welcome from anyone.** No permission needed, no scope restrictions, no bug
+bounty. If you find something:
+
+- Report it **privately** to **<apps@wemiller.com>** so it can be fixed before disclosure.
+- Real findings are **credited by name** in the release notes and contributor list, if you want the
+  credit. Say so if you would rather stay anonymous.
+- The interesting surface is the group-keying layer: `core/haven-p2p/src/treekem.rs` (tree math, the
+  epoch key schedule, the fork tie-break and chain rule), `device.rs` (roster authority, credential
+  chaining, admin grants), and the `mls_*` engine wiring in `core/haven-ffi/src/lib.rs`. The design
+  is written up in [`TREEKEM-DESIGN.md`](TREEKEM-DESIGN.md) and [`SEED-DROP-DESIGN.md`](SEED-DROP-DESIGN.md).
+- The wire parsers are continuously fuzzed in CI
+  (`core/haven-p2p/tests/fuzz_wire_parsers.rs`); start above that layer.
+
+Primitives are standard and not homegrown — X25519 + ML-KEM-768, Ed25519 + ML-DSA-65, AES-256-GCM,
+HKDF-SHA256, BLAKE3, via vetted crates. The protocol composed from them is Haven's own, and that is
+where review is worth your time.
 
 ## Export compliance
 

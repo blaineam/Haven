@@ -3124,6 +3124,11 @@ a fixed metadata leak.
 >    **not** a formal external audit; an independent cryptographer's review is planned and we don't
 >    claim it's done. It is **MLS-*shaped*** (TreeKEM mechanisms on Haven's own post-quantum
 >    primitives), **not** RFC-9420 wire-interoperable.
+>
+>    *(Superseded 2026-09-02 — kept as the record of what was said at 1.0.7. The paid external
+>    review is **not** planned: Haven is free and unfunded. It is replaced by open review — anyone
+>    may audit and report privately to `apps@wemiller.com`, credited by name. See
+>    [`docs/SECURITY.md`](docs/SECURITY.md) → Security review. Everything else above still holds.)*
 
 ### Security
 
@@ -3173,6 +3178,8 @@ a fixed metadata leak.
   internal, human-directed adversarial code review; a formal external cryptographer's review is
   planned and remains the gate before the core default flips on (design M7). See
   [`docs/TREEKEM-DESIGN.md`](docs/TREEKEM-DESIGN.md).
+  *(Superseded 2026-09-02 — kept for the record. No paid external review is planned; open review
+  replaces it, reported privately to `apps@wemiller.com` and credited by name.)*
 
 ### Added
 

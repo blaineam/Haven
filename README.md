@@ -109,8 +109,10 @@ nearby Bluetooth/Wi-Fi mesh daily. Done so far:
   stranded, and it only ever changes *which key* seals content, never *whether* content is
   encrypted. Its audit to date is
   an **internal**, AI-driven adversarial code review — 0 critical / 0 high — a
-  strong first pass, **not** a formal external audit; an independent cryptographer's review is
-  planned/ongoing. See [`docs/TREEKEM-DESIGN.md`](docs/TREEKEM-DESIGN.md).
+  strong first pass, **not** a formal external audit. There is **no paid external audit, and none is
+  planned** — Haven is free and unfunded. Independent review is welcome from anyone: report findings
+  privately to <apps@wemiller.com> and they will be fixed before disclosure, with credit by name to
+  whoever reported them. See [`docs/TREEKEM-DESIGN.md`](docs/TREEKEM-DESIGN.md).
 - **Own-device sync that converges** — a user's own iPhone/iPad/Mac share the account
   identity but take **per-device transport identities**, and their divergent per-device
   epoch keys now deterministically converge (both devices adopt the numerically-larger

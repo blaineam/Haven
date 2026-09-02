@@ -16,11 +16,13 @@
 >   `device::mint_owned_circle_id`). Even on an owned circle the tree keys content only once every
 >   member is affirmatively MLS-capable and joined. The gate lives in core
 >   (`device::circle_fully_mls_capable`), not in any client — see `docs/SWITCH-FLIP-1.0.7.md`.
-> - **M7 has not happened.** The audit to date is an **internal, AI-driven adversarial review** (0
->   critical, 0 high) — a strong first pass, **not** a formal external one. §9 gates M7's third-party
->   crypto review on flipping the master switch to default-ON; the switch was flipped first, so that
->   review is outstanding, and the 1.0.7 CHANGELOG says so publicly. Do not cite this document as
->   evidence of an independent audit.
+> - **There has been no external audit, and none is planned.** The audit to date is an **internal,
+>   AI-driven adversarial review** (0 critical, 0 high) — a strong first pass, not a formal external
+>   one. §9's M7 originally gated a paid third-party review on flipping the master switch to
+>   default-ON; the switch went first, and the paid engagement is now **explicitly not happening** —
+>   Haven is free and unfunded. It is replaced by **open review**: anyone may audit this layer and
+>   report findings privately to `apps@wemiller.com`, credited by name (`docs/SECURITY.md` → Security
+>   review). Do not cite this document as evidence of an independent audit.
 >
 > **Locked decisions (do not relitigate):**
 > - **Path B.** An MLS-*style* TreeKEM built on Haven's **own** hybrid post-quantum primitives —
@@ -722,8 +724,9 @@ implementing a known design against a delivery model the reference implementatio
 > shipped together in **1.0.7** — not across the 1.0.8–1.1.x arc the "Realistic release" column
 > projects, and not on the 6–9-month estimate below, both of which were written before the work
 > started. The staging is preserved because the ORDER is the design: every stage additive, nothing
-> before the keying flip changing what a circle seals content under. **M7 is the exception — it is
-> still outstanding** (see the status note at the top).
+> before the keying flip changing what a circle seals content under. **M7 is the exception**: its
+> paid-third-party-review gate has been retired in favour of open review, and its fuzzing obligation
+> landed after 1.0.7 (see the status note at the top).
 
 Sizing honesty up front: **this is materially bigger than seed-drop.** Seed-drop re-pointed
 signers and gated a recipient list over existing rails; this adds a new cryptographic subsystem
@@ -741,7 +744,7 @@ two-release arc. Stages are ordered so every release is additive and shippable, 
 | **M4. Welcome for offline joiners + roster integration** | `register_device`/revocation → Add/Remove proposals+commits (§4.2/4.3); Welcome-over-mailbox with TOUCH liveness + ack; sleeper re-entry (§5.5); tree blob as content-addressed ref. | A device offline 45 days (past TTL) re-enters via Welcome and reads full history via backfill; joiner-secret retention bounds (§6.3-3) hold; Welcome to a revoked-in-the-meantime device fails closed. | **1.0.10–1.0.11** |
 | **M5. PCS cadence + deletion discipline** | Leaf Update on the `rotate_if_stale` chokepoint (§6.4); the full §6.2 deletion table enforced; pruner extended to fork cache + chain; §6.3's five FS-bug tests. | **The PCS test:** exfiltrate a device's full state at epoch n, let it Update, assert the stolen state opens nothing at n+1 (and the converse: without the Update it still would — proving the test has teeth). State-blob byte-scan for dead secrets. | **1.0.11** |
 | **M6. (Optional) per-message sender ratchet for DMs/live lane** | §6.5, only if the M3–M5 soak says the state-management budget exists. | Skipped-key cache bounded under adversarial gap patterns; mailbox contract (days-late open) provably intact. | **1.1.x, explicitly cuttable** |
-| **M7. External review + hardening** | Third-party crypto review of `treekem.rs` + schedule + fork protocol (the Kith security mandate applies: audit every feature); fuzz wire parsers; publish the design + vectors in `docs/`. | Review findings closed; fuzz corpus green in CI. | **before flipping the master switch to default-ON** |
+| **M7. Review + hardening** — *scope changed; see below* | ~~Third-party crypto review~~ → **open review**: this design is published, and anyone may audit `treekem.rs` + schedule + fork protocol and report privately to `apps@wemiller.com`, credited by name. Fuzz wire parsers ✅ (`core/haven-p2p/tests/fuzz_wire_parsers.rs`, in CI). Publish the design ✅ (this file) + vectors (in `treekem.rs` tests, not yet extracted to `docs/`). | Fuzz corpus green in CI ✅; reported findings closed as they arrive. | **Ongoing.** The paid-audit gate is retired — the switch is already ON, and Haven is free and unfunded. |
 
 Release-mapping honesty (the §8.1 discipline): M0–M2 are safe to ride ordinary releases because
 they change no sealing behavior — the same property that let seed-drop S0/S1 ship in 1.0.6. M3 is

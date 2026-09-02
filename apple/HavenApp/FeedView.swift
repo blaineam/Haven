@@ -259,7 +259,27 @@ final class FeedStore: ObservableObject {
     }
     static let shared = FeedStore()
 
-    private var social: HavenSocial?
+    private var social: HavenSocial? {
+        didSet { cachedAccountHex = ""; cachedDeviceHex = "" }   // the identity cache follows the engine instance
+    }
+    // MARK: Identity cache (stall detector, 2026-09-01)
+    //
+    // `social.myNodeHex()` / `myDeviceNodeHex()` each take the engine's global state mutex to read a
+    // CONSTANT — identity is fixed the moment `configure` adopts it. The detector's file sink caught
+    // main parked 2.05s in `bringOnline → syncWithContacts → syncWithContactsNow → dialTargets →
+    // social.myNodeHex() → Mutex::lock` (behind the launch export / first mailbox-drain slices; the
+    // std mutex is unfair, so main lost every re-acquire) and 0.49s more on the same call in
+    // `myOtherDeviceTargets`. Every one of the ~45 call sites paid that lottery per call. Both ids
+    // are now read once after identity adoption (or lazily on first use) and served from here; the
+    // `didSet` above drops them whenever the engine instance changes.
+    private var cachedAccountHex = ""
+    private var cachedDeviceHex = ""
+    /// Re-read identity from the engine after an identity-adopting FFI (`useDeviceIdentity`,
+    /// `newSeedless`). `registerDevice` / roster ingest never change either id.
+    private func refreshIdentityCache() {
+        cachedAccountHex = social?.myNodeHex() ?? ""
+        cachedDeviceHex = social?.myDeviceNodeHex() ?? ""
+    }
     /// Floor between two epoch-change re-seals: each is a hybrid PQ signature per event, so a fleet
     /// registering several devices at once must coalesce into one pass.
     private var lastEpochReseal = Date.distantPast
@@ -609,7 +629,8 @@ final class FeedStore: ObservableObject {
                 // contact card friends pin), never a transport address. Each client hosts its relay on its own
                 // id; friends reach each via the circle's relay list (the set of these ids).
                 _ = social.useDeviceIdentity(deviceSeed: DeviceKeyStore.deviceAccount().secretSeed())
-                HavenLog.net("configure account=\(social.myNodeHex().prefix(10)) instance=\(social.myDeviceNodeHex().prefix(10))")
+                refreshIdentityCache()   // identity is final from here on — every later read is lock-free
+                HavenLog.net("configure account=\(myNodeHex.prefix(10)) instance=\(myDeviceNodeHex.prefix(10))")
             }
         case .seedless(let bundle, let deviceSeed):
             seedless = true
@@ -620,7 +641,8 @@ final class FeedStore: ObservableObject {
                 // Reinstall the primary-signed roster wire we persisted at enrollment (VERBATIM, incl. the
                 // SeedDropCapability trailer) so this device is authorized + rebroadcasts the exact bytes.
                 if let wire = SeedlessRosterStore.load(), !wire.isEmpty { _ = social.ingestRosterWire(wire: wire) }
-                HavenLog.net("configure SEEDLESS account=\(social.myNodeHex().prefix(10)) instance=\(social.myDeviceNodeHex().prefix(10))")
+                refreshIdentityCache()   // identity is final from here on — every later read is lock-free
+                HavenLog.net("configure SEEDLESS account=\(myNodeHex.prefix(10)) instance=\(myDeviceNodeHex.prefix(10))")
             }
         }
         loadPersisted()
@@ -888,7 +910,7 @@ final class FeedStore: ObservableObject {
         liveCallPollInFlight = true
         defer { liveCallPollInFlight = false }
         var mine = [myNodeHex.lowercased()]
-        if let d = social?.myDeviceNodeHex().lowercased(), d.count == 64 { mine.append(d) }
+        let dev = myDeviceNodeHex.lowercased(); if dev.count == 64 { mine.append(dev) }
         // Active call only needs the conversation circle(s), not the entire membership graph.
         // Prefer DMs + default (where invites almost always live); cap so a huge roster can't fan out.
         var ids = circles.map(\.id).filter { $0.hasPrefix("dm:") || $0 == "default" }
@@ -991,7 +1013,7 @@ final class FeedStore: ObservableObject {
         guard let social, AccountStore.storedSeed() != nil else { return }   // seed-holder only
         guard !social.circles().contains(where: { $0.id == "default" }) else { return }
         social.createCircle(id: "default", name: "Your circle")
-        _ = social.setCircleCreator(circleId: "default", accountHex: social.myNodeHex())
+        _ = social.setCircleCreator(circleId: "default", accountHex: myNodeHex)
         CircleCreatorStore.markCreated("default")
         persist()
     }
@@ -1154,7 +1176,7 @@ final class FeedStore: ObservableObject {
     func nonContactMembers(in circleId: String) -> [String] {
         guard let social else { return [] }
         let mine = Set(ContactsStore.shared.contacts.map { $0.idHex })
-        let myHex = social.myNodeHex()
+        let myHex = myNodeHex
         return social.contactNodeIds(circleId: circleId).filter { $0 != myHex && !mine.contains($0) }
     }
 
@@ -1170,8 +1192,8 @@ final class FeedStore: ObservableObject {
     func dialTargets(_ circleId: String) -> [String] {
         guard let social else { return [] }
         if let c = dialTargetsCache[circleId], now() - c.at < 10_000 { return c.targets }
-        let mineAcct = social.myNodeHex().lowercased()
-        let mineDev = social.myDeviceNodeHex().lowercased()
+        let mineAcct = myNodeHex.lowercased()
+        let mineDev = myDeviceNodeHex.lowercased()
         var out = [String]()
         var seen = Set<String>()
         func add(_ h: String) { let l = h.lowercased(); if l != mineAcct && l != mineDev && seen.insert(l).inserted { out.append(h) } }
@@ -1305,8 +1327,8 @@ final class FeedStore: ObservableObject {
     /// reach me before holding my signed roster.
     func inviteDeviceIds() -> [String] {
         guard let social else { return [] }
-        let acct = social.myNodeHex().lowercased()
-        var out = [social.myDeviceNodeHex()]
+        let acct = myNodeHex.lowercased()
+        var out = [myDeviceNodeHex]
         for d in social.deviceNodeIdsFor(accountHex: acct)
         where d.lowercased() != acct && !out.contains(where: { $0.lowercased() == d.lowercased() }) {
             out.append(d)
@@ -1469,7 +1491,7 @@ final class FeedStore: ObservableObject {
         persist(); refreshCircles()
         if let hello = helloPayload(circleId: "default", circleName: "Your circle") {
             sendIroh(0, hello, to: req.idHex); nearbyBroadcast(0, hello)
-            let meHex = social.myNodeHex()
+            let meHex = myNodeHex
             Task { await SharedStore.putHello(circleId: "default", toHex: req.idHex, fromHex: meHex, hello: hello, force: true) }
         }
         // Back-fill your past posts to them (and ensure the shared store has them).
@@ -2046,7 +2068,7 @@ final class FeedStore: ObservableObject {
         // turn as its cancel otherwise (the Bonjour cancel crash).
         nearby?.stop()
         // Nearby Bluetooth / Wi-Fi mesh — works even with no internet at all.
-        if let social {
+        if social != nil {
             // Matrix QA stub is a pure relay host. Multipeer Bonjour discovery on the stub was
             // crashing CFNetwork (`_BrowserCancel` / `_CFAssertMismatchedTypeID`) under matrix
             // bounce load and is not needed for HTTP mailbox QA.
@@ -2057,7 +2079,7 @@ final class FeedStore: ObservableObject {
                 // no-op between them (displayName == displayName) — they NEVER connected over the mesh, which
                 // is why local self-sync silently did nothing. Mix in the per-device key hex. (Identity is
                 // still proven by the Hello bundle, so this only affects who-invites-whom.)
-                let nearbyName = String(social.myNodeHex().prefix(28)) + "-" + String(DeviceKeyStore.deviceNodeHex().prefix(28))
+                let nearbyName = String(myNodeHex.prefix(28)) + "-" + String(DeviceKeyStore.deviceNodeHex().prefix(28))
                 let nt = NearbyTransport(
                     displayName: nearbyName,
                     onInbound: { [weak self] data in Task { @MainActor in self?.handleInbound(data, viaNearby: true) } },
@@ -2133,7 +2155,7 @@ final class FeedStore: ObservableObject {
                 self.fabricBoundUrls = RelayMailboxStore.shared.allDerpUrls()
                 self.internetReady = true
                 self.online = true
-                HavenLog.net("node started id=\(n.nodeIdHex().prefix(10)) account=\(social?.myNodeHex().prefix(10) ?? "?")")
+                HavenLog.net("node started id=\(n.nodeIdHex().prefix(10)) account=\(myNodeHex.isEmpty ? "?" : String(myNodeHex.prefix(10)))")
                 self.publishAccountDevices()   // account id → my device ids, so contacts can dial me relay-free
                 // Matrix QA: dump public identity bundle so Scripts/qa-exchange-bundles.sh can seed
                 // the Android peer when HELLO cannot dial (HTTP-mailbox-only stub path).
@@ -2153,7 +2175,7 @@ final class FeedStore: ObservableObject {
                    let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
                     let line = "haven-seed:" + seed.base64EncodedString()
                     try? line.write(to: dir.appendingPathComponent("qa-account-seed.txt"), atomically: true, encoding: .utf8)
-                    try? (social?.myNodeHex() ?? "").write(
+                    try? myNodeHex.write(
                         to: dir.appendingPathComponent("qa-account-hex.txt"), atomically: true, encoding: .utf8)
                     // HTTP mailbox auth is the DEVICE transport id — stub must authorize this too.
                     try? n.nodeIdHex().write(
@@ -2163,7 +2185,7 @@ final class FeedStore: ObservableObject {
                         try? ss.write(to: dir.appendingPathComponent("qa-selfsync-device-hex.txt"),
                                       atomically: true, encoding: .utf8)
                     }
-                    HavenLog.net("qa-account-seed written account=\(social?.myNodeHex().prefix(12) ?? "?") device=\(n.nodeIdHex().prefix(12))")
+                    HavenLog.net("qa-account-seed written account=\(myNodeHex.isEmpty ? "?" : String(myNodeHex.prefix(12))) device=\(n.nodeIdHex().prefix(12))")
                 }
                 #endif
                 // Ingest staged Android peer bundle (driver copies qa-peer-bundle.bin into App Support).
@@ -2317,11 +2339,20 @@ final class FeedStore: ObservableObject {
     }
 
     // Diagnostics accessors.
-    var myNodeIdShort: String { social.map { String($0.myNodeHex().prefix(16)) } ?? "—" }
-    var myNodeHex: String { social?.myNodeHex() ?? "" }
+    var myNodeIdShort: String { social == nil ? "—" : String(myNodeHex.prefix(16)) }
+    /// ACCOUNT id, served from the identity cache (`cachedAccountHex`) — no engine lock on the main actor.
+    var myNodeHex: String {
+        guard let social else { return "" }
+        if cachedAccountHex.isEmpty { cachedAccountHex = social.myNodeHex() }
+        return cachedAccountHex
+    }
     /// This DEVICE's node id (distinct from the ACCOUNT id above). Anything deciding "is this me?"
     /// against a participant list needs both — a device-transport peer is named by this one.
-    var myDeviceNodeHex: String { social?.myDeviceNodeHex() ?? "" }
+    var myDeviceNodeHex: String {
+        guard let social else { return "" }
+        if cachedDeviceHex.isEmpty { cachedDeviceHex = social.myDeviceNodeHex() }
+        return cachedDeviceHex
+    }
     var contactCount: Int { ContactsStore.shared.contacts.count }
     var handshakedCount: Int { social?.contactNodeIds(circleId: activeCircleId).count ?? 0 }
     /// True once we hold this contact's verified public bundle (handshake complete) —
@@ -3024,7 +3055,7 @@ final class FeedStore: ObservableObject {
             }
             await MainActor.run { [weak self] in
                 guard let self, self.qaDumpGeneration == gen else { return }
-                self.qaWriteDumpFile(snapshot, accountHex: social.myNodeHex(), tsMs: nowMs,
+                self.qaWriteDumpFile(snapshot, accountHex: self.myNodeHex, tsMs: nowMs,
                                      delivery: social.diagDeliveryJson(),
                                      treeChain: social.debugTreeChainJson())
             }
@@ -3478,7 +3509,7 @@ final class FeedStore: ObservableObject {
     // MARK: - Reports (decentralized moderation)
 
     /// My ACCOUNT node hex (the contact handle) — the ledger's pseudonymous actor id.
-    var myAccountHex: String { social?.myNodeHex() ?? "" }
+    var myAccountHex: String { myNodeHex }
 
     /// Apply the "keep my own posts" archive preference live (Settings toggle) + refresh the feed.
     func setKeepOwnPosts(_ on: Bool) { social?.setKeepOwnPosts(on: on); refresh() }
@@ -3997,7 +4028,7 @@ final class FeedStore: ObservableObject {
             if circle.id == "default" {
                 for c in ContactsStore.shared.contacts { targets.insert(c.idHex) }
             }
-            let meHex = social.myNodeHex()
+            let meHex = myNodeHex
             for nodeHex in targets {
                 if skipWarmKeepalives, recentlyHeard(nodeHex, withinMs: 120_000, nowMs: nowMs) {
                     continue
@@ -4846,7 +4877,7 @@ final class FeedStore: ObservableObject {
         }
         let msgs = await SharedStore.pollMailbox(circleIds: ids)
         guard !msgs.isEmpty else { return 0 }
-        let me = social.myNodeHex().lowercased()
+        let me = myNodeHex.lowercased()
         // Control plane first: HELLOs, durable relay announces (__relay__), key commits / rosters,
         // then content. LIST order is a filesystem walk — without this sort a linked host buffers
         // hundreds of events before the commit that opens them.
@@ -4873,7 +4904,7 @@ final class FeedStore: ObservableObject {
         var myIds: Set<String> = [me]
         let tdev = transportNodeHex.lowercased()
         if !tdev.isEmpty { myIds.insert(tdev) }
-        let mdev = social.myDeviceNodeHex().lowercased()
+        let mdev = myDeviceNodeHex.lowercased()
         if !mdev.isEmpty { myIds.insert(mdev) }
         var heldHelloCircles = Set<String>()
         for (cid, key, data) in sorted where key.contains("/__hello__/") {
@@ -5236,8 +5267,8 @@ final class FeedStore: ObservableObject {
     /// contact events that only this device received.
     private func myOtherDeviceTargets() -> [String] {
         guard let social else { return [] }
-        let mineAcct = social.myNodeHex().lowercased()
-        let mineDev = social.myDeviceNodeHex().lowercased()
+        let mineAcct = myNodeHex.lowercased()
+        let mineDev = myDeviceNodeHex.lowercased()
         var out = [String]()
         var seen = Set<String>()
         func add(_ h: String) {
@@ -5245,7 +5276,7 @@ final class FeedStore: ObservableObject {
             guard l.count == 64, l != mineAcct, l != mineDev, seen.insert(l).inserted else { return }
             out.append(l)
         }
-        for d in social.deviceNodeIdsFor(accountHex: social.myNodeHex()) { add(d) }
+        for d in social.deviceNodeIdsFor(accountHex: myNodeHex) { add(d) }
         for h in deviceHints(for: mineAcct) { add(h) }
         return out
     }
@@ -5479,11 +5510,11 @@ final class FeedStore: ObservableObject {
     /// eventually delivers it anyway.
     func requestOlderHistory(circleId: String? = nil) {
         let cid = circleId ?? activeCircleId
-        guard let social else { return }
+        guard social != nil else { return }
         guard let oldest = items.map(\.createdAt).min(), oldest > 0 else { return }
         guard historyAskedBefore[cid] != oldest else { return }
         historyAskedBefore[cid] = oldest
-        var payload = Data(social.myNodeHex().utf8)
+        var payload = Data(myNodeHex.utf8)
         withUnsafeBytes(of: oldest.littleEndian) { payload.append(contentsOf: $0) }
         payload.append(contentsOf: Array(cid.utf8))
         for contact in ContactsStore.shared.contacts { sendIroh(34, payload, to: contact.idHex) }
@@ -5534,7 +5565,7 @@ final class FeedStore: ObservableObject {
         lpAppend(&p, Data(DeviceKeyStore.deviceName.utf8))
         lpAppend(&p, Data(DeviceKeyStore.deviceNodeHex().utf8))
         nearbyBroadcast(24, p)
-        if let hex = social?.myNodeHex() { sendIroh(24, p, to: hex) }  // also try the iroh path
+        if social != nil { sendIroh(24, p, to: myNodeHex) }  // also try the iroh path
         let connected = nearby?.hasConnectedPeers ?? false
         NotificationManager.shared.notify(
             title: connected ? "Asked your primary device" : "Looking for your primary device…",
@@ -5588,7 +5619,7 @@ final class FeedStore: ObservableObject {
         // entire backdated Instagram import.
         social.setKeepOwnPosts(on: true)
         // §2 creator authority root + §5 DM live-ratchet lanes, re-marked for every current circle.
-        let myHex = social.myNodeHex()
+        let myHex = myNodeHex
         for c in social.circles() {
             // §5 mark dm: circles as per-message forward-secrecy lanes (consulted only once keying-live;
             // a no-op for content while the master switch/gate is unmet, so feed circles stay epoch-keyed).
@@ -5888,7 +5919,7 @@ final class FeedStore: ObservableObject {
     /// up; if the two are connected over iroh instead, nearby-only sends silently go nowhere.
     private func sendToMyDevices(_ type: UInt8, _ payload: Data) {
         nearbyBroadcast(type, payload)
-        if let hex = social?.myNodeHex() { sendIroh(type, payload, to: hex) }
+        if social != nil { sendIroh(type, payload, to: myNodeHex) }
     }
 
     /// Push my full account state (profile/circles/contacts slot + every circle's posts) to my other
@@ -5900,7 +5931,7 @@ final class FeedStore: ObservableObject {
         // v1-sealed slot below.
         Task { await SelfSyncCoordinator.shared.publishEpochGrants() }
         if let slot = SelfSyncCoordinator.shared.sealedLocalSlot(social: social) { sendToMyDevices(23, slot) }
-        let myHex = social.myNodeHex()
+        let myHex = myNodeHex
         for circle in circles {
             for env in social.syncEnvelopes(circleId: circle.id) {
                 let payload = eventPayload(circle.id, env)
@@ -6124,7 +6155,7 @@ final class FeedStore: ObservableObject {
     /// in the relay link is still served. Best-effort: a relay that refuses (we aren't served there
     /// ourselves) or predates the verb simply keeps its existing set.
     func enrollMembers(circleId: String) {
-        guard let social else { return }
+        guard social != nil else { return }
         let nowMs = now()
         if let last = lastEnrollMs[circleId], nowMs &- last < 600_000 { return }
         let relays = RelayMailboxStore.shared.relays(forCircle: circleId)
@@ -6132,8 +6163,8 @@ final class FeedStore: ObservableObject {
         guard !relays.isEmpty else { return }
         // Rule (2) of `learn`: we must name OURSELVES or the relay declines outright.
         var members = Set(dialTargets(circleId).map { $0.lowercased() })
-        members.insert(social.myNodeHex().lowercased())
-        members.insert(social.myDeviceNodeHex().lowercased())
+        members.insert(myNodeHex.lowercased())
+        members.insert(myDeviceNodeHex.lowercased())
         guard members.count > 1 else { return }
         lastEnrollMs[circleId] = nowMs
         let list = Array(members)
@@ -6720,8 +6751,8 @@ final class FeedStore: ObservableObject {
     /// answer: with no roster there is no way to address them.
     func myOtherDeviceHexes() -> [String] {
         guard let social else { return [] }
-        let mine = social.myDeviceNodeHex().lowercased()
-        let account = social.myNodeHex().lowercased()
+        let mine = myDeviceNodeHex.lowercased()
+        let account = myNodeHex.lowercased()
         return social.deviceNodeIdsFor(accountHex: account)
             .map { $0.lowercased() }
             .filter { $0 != mine && $0 != account }
@@ -6810,7 +6841,7 @@ final class FeedStore: ObservableObject {
         for d in destBytes.prefix(255) { p.append(d) }
         p.append(inner)
         let myAcct = AccountStore.currentNodeHex().lowercased()
-        let myDev = social?.myDeviceNodeHex().lowercased() ?? ""
+        let myDev = myDeviceNodeHex.lowercased()
         var sent = 0
         for relayHex in RelayMailboxStore.shared.allRelays() {
             let h = relayHex.lowercased()
@@ -6945,7 +6976,7 @@ final class FeedStore: ObservableObject {
         #endif
         let circle = circleId ?? activeCircleId
         mediaReqCircle[ref] = circle   // remember the circle so a peer-delivered blob re-mirrors correctly
-        let myHex = social.myNodeHex()
+        let myHex = myNodeHex
         var payload = Data(myHex.utf8); payload.append(Data(ref.utf8))
         askForMedia(ref: ref, myHex: myHex, plain: payload)   // resumes from a partial when we have one
         // Always include the ref's OWN circle, even if it isn't in `circles` yet — a DM's relay copy
@@ -7056,7 +7087,7 @@ final class FeedStore: ObservableObject {
         let nowMs = now()
         guard nowMs - lastMediaScanMs > 2_000 else { return }
         lastMediaScanMs = nowMs
-        let myHex = social.myNodeHex()
+        let myHex = myNodeHex
         // Skip synthetic refs (geo: location pins): they carry no fetchable bytes, so counting them
         // keeps nbMediaPending pinned above 0 forever and fires a doomed restore each sweep.
         // Skip refs the user DELIBERATELY evicted (cleanup screen / local-limit sweep). Auto-refetching
@@ -7518,9 +7549,9 @@ final class FeedStore: ObservableObject {
     /// independent broadcast so one large/slow item can't stall the rest. `freshPeer` re-pushes everything
     /// for a newly-connected sibling that has nothing yet.
     private func pushOwnMediaNearby(freshPeer: Bool = false) {
-        guard let social, nearby != nil else { return }
+        guard social != nil, nearby != nil else { return }
         if freshPeer { pushedNearby.removeAll() }
-        let me = social.myNodeHex()
+        let me = myNodeHex
         var refs: [String] = []
         for item in items { refs.append(contentsOf: item.media); for c in item.comments { refs.append(contentsOf: c.media) } }
         var budget = 2   // only a couple per pass — the link is slow; the rest follow on later ticks
@@ -7570,7 +7601,7 @@ final class FeedStore: ObservableObject {
         // OWN-device (requester is my own account): read + symmetric-seal + broadcast entirely on a
         // BACKGROUND queue. This loop streams thousands of chunks; running it on the main actor (as it did)
         // made the whole UI lag while syncing. It needs no engine, so it's safe off-main.
-        if requesterHex == social.myNodeHex(), let ownKey = Self.ownMediaKey() {
+        if requesterHex == myNodeHex, let ownKey = Self.ownMediaKey() {
             // NearbyTransport is not Sendable; broadcast/backlog APIs are used from this exclusive
             // utility queue only for the duration of the serve (same process, serialized by us).
             nonisolated(unsafe) let mesh = nearby
@@ -7837,7 +7868,7 @@ final class FeedStore: ObservableObject {
         // it as a stranger's connection request ("connect with yourself") — just trade self-sync slots so
         // the two devices converge. This is the fix for the "asked to connect with an identity of myself
         // when linking my Mac" bug.
-        if idHex == social.myNodeHex() {
+        if idHex == myNodeHex {
             // D8: a seedless device can't MINT its own account-signed profile card (no account key), so it
             // caches the primary's signed card — carried on this self-hello — and rebroadcasts it verbatim.
             if SeedlessState.isEnabled, !profileBlob.isEmpty { social.setCachedProfile(blob: profileBlob) }
@@ -7981,7 +8012,7 @@ final class FeedStore: ObservableObject {
         if let hello = helloPayload(circleId: circleId, circleName: circleName) {
             sendIroh(0, hello, to: idHex)
             if circleId == "default" { nearbyBroadcast(0, hello) }
-            let meHex = social.myNodeHex()
+            let meHex = myNodeHex
             Task { await SharedStore.putHello(circleId: circleId, toHex: idHex, fromHex: meHex, hello: hello, force: true) }
         }
         // A PAGE, not the whole history — see "Lazy history (wire 34)".
@@ -8081,9 +8112,9 @@ final class FeedStore: ObservableObject {
         let nowMs = now()
         if nowMs &- ownDeviceHexCache.at > 15_000 || ownDeviceHexCache.set.isEmpty {
             guard let social else { return false }
-            var s = Set(social.deviceNodeIdsFor(accountHex: social.myNodeHex()).map { $0.lowercased() })
-            s.insert(social.myNodeHex().lowercased())
-            s.insert(social.myDeviceNodeHex().lowercased())
+            var s = Set(social.deviceNodeIdsFor(accountHex: myNodeHex).map { $0.lowercased() })
+            s.insert(myNodeHex.lowercased())
+            s.insert(myDeviceNodeHex.lowercased())
             ownDeviceHexCache = (nowMs, s)
         }
         return ownDeviceHexCache.set.contains(hex.lowercased())

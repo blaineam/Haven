@@ -242,6 +242,9 @@ struct HavenApp: App {
         // Names any main-thread freeze (symbolicated stack in the unified log /
         // stdout) instead of leaving it to guesswork. DEBUG-only; never ships.
         MainThreadStallDetector.shared.start()
+        // Owner's thermal report (build runs warm): thermal state + process CPU% + top threads,
+        // every 30s, to Library/Caches/HavenThermal.log. DEBUG-only; never ships.
+        ThermalSampler.shared.start()
         #endif
     }
 

@@ -10,7 +10,8 @@ protect **content confidentiality, content integrity, and user anonymity** again
 | Relay operator / network observer | See traffic timing & size; see `IP ↔ node id` for peers it serves; store ciphertext | Everything is E2E hybrid-PQ encrypted; a relay holds no key and never sees plaintext. It *does* see your node id — that is how membership authorization works. Nothing is logged or persisted |
 | **Future quantum adversary** ("harvest now, decrypt later") | Store today's ciphertext, decrypt later | Hybrid X25519 + ML-KEM-768 key establishment — must break *both* |
 | Active MITM on a shared link | Substitute their keys for the real recipient's | Link carries a verification hash; in-person QR is the strong anchor; new contacts are *approved*, with safety-phrase confirmation |
-| Lost/stolen device | Read local content & keys | **Every on-device copy of the master seed is Secure-Enclave-wrapped** — the active seed, the NSE's shared-group push-decrypt mirror, and the device-local identity-recovery archive are each ECIES-sealed to a non-extractable P-256 Enclave key, so a raw Keychain dump yields nothing without the Enclave. (The one unsealed copy is the *opt-in* iCloud-synced archive, which must travel between devices and is protected by Apple's E2E iCloud Keychain instead.) Passphrase-encrypted backup; (planned) at-rest content encryption + remote disavow |
+| Lost/stolen device | Read local content & keys | **Every on-device copy of the master seed is Secure-Enclave-wrapped** — the active seed, the NSE's shared-group push-decrypt mirror, and the device-local identity-recovery archive are each ECIES-sealed to a non-extractable P-256 Enclave key, so a raw Keychain dump yields nothing without the Enclave. (The one unsealed copy is the *opt-in* iCloud-synced archive, which must travel between devices and is protected by Apple's E2E iCloud Keychain instead.) Passphrase-encrypted backup. Since **1.0.7**, revoking the device is a *cryptographic* cut rather than a mark in a list — see the next row. *(Still planned: at-rest content encryption.)* |
+| Revoked device (attacker kept its keys) | Keep decrypting everything posted after you revoked it; re-add itself to your device list | **Since 1.0.7 (seed-drop), revocation is cryptographic, not advisory.** Day-to-day operation runs on **per-device keys**, and a device linked through the **seedless** flow never receives the master seed at all. A revoked device is excluded from the circle's next encryption epoch *and* re-keyed out of the account-state self-sync stream (profile / contacts / circles / settings), and it **cannot forge a higher-version device list** to re-add itself, because roster authority is the account key it does not hold. Activates **per circle** as each member's devices update; a dual-seal path keeps un-upgraded peers working until then (`SEED-DROP-DESIGN.md`, `MULTI-DEVICE.md`) |
 | Spammer using a public link | Flood connect requests | Requests are inert until approved; per-link expiring/single-use tokens; block list |
 | A blocked user | Keep contacting you | Client-side refusal + removal from shared groups; no central account to reach you through |
 
@@ -55,7 +56,10 @@ persists it.
   host yourself. There is no onion mode and none is planned (evaluated and declined —
   `TOR.md`).
 - **Protecting against a fully compromised endpoint.** If malware owns the device, it
-  owns the plaintext. Standard for any E2E system.
+  owns the plaintext — standard for any E2E system. Since **1.0.7** a compromised
+  *linked* device can at least be cut off cryptographically (seed-drop, above); a
+  compromised **primary** device — the one that still holds the master seed — is a full
+  account compromise, and the remedy there is rolling a new identity, not revoking.
 - **Moderating content centrally.** There is no server to moderate from (by design).
 
 ## Abuse resistance — the hard part of E2E social

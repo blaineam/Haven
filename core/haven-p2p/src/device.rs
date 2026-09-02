@@ -1128,11 +1128,22 @@ impl<'a> Reader<'a> {
         Self { b, i: 0 }
     }
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        if self.i + n > self.b.len() {
+        // `checked_add`, NOT `self.i + n`: `n` comes from an untrusted u32 length prefix, and
+        // `usize` is 32-BIT on wasm32 — a real target here (the web client; see the wasm32
+        // dependency block in Cargo.toml). There `self.i + n` WRAPS to a small value, this bounds
+        // check passes, and the slice below panics with start > end. Release builds wrap silently,
+        // so that is a remotely triggerable panic on the web client, not a debug-only assertion.
+        // 64-bit hosts cannot reach it, which is precisely why it survived review — the same shape
+        // as the DeviceList reservation that only Linux could see.
+        let end = self
+            .i
+            .checked_add(n)
+            .ok_or(CoreError::Encoding("device wire: length overflow"))?;
+        if end > self.b.len() {
             return Err(CoreError::Encoding("device wire: unexpected end of input"));
         }
-        let s = &self.b[self.i..self.i + n];
-        self.i += n;
+        let s = &self.b[self.i..end];
+        self.i = end;
         Ok(s)
     }
     fn array32(&mut self) -> Result<[u8; 32]> {
@@ -1160,6 +1171,35 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Reader::take` must reject a length that would overflow the cursor, not wrap into a
+    /// backwards slice.
+    ///
+    /// Motivation is wasm32, where `usize` is 32-BIT and this crate genuinely ships (the web
+    /// client; see the wasm32 dependency block in Cargo.toml). There a u32 length prefix near
+    /// `u32::MAX` makes `self.i + n` wrap to a SMALL value, the bounds check passes, and the slice
+    /// panics with start > end — silently in release, where overflow checks are off. A 64-bit host
+    /// cannot reproduce that, so this uses `usize::MAX`, which overflows at any width and
+    /// exercises the same guard.
+    ///
+    /// Four other modules carry a byte-identical `Reader` (treekem, friend_invite, enroll,
+    /// selfsync) and were fixed alongside this one.
+    #[test]
+    fn reader_take_rejects_a_length_that_would_overflow_the_cursor() {
+        let buf = [0u8; 64];
+        let mut r = Reader::new(&buf);
+        r.take(8).expect("first read is in bounds");
+
+        assert!(
+            r.take(usize::MAX).is_err(),
+            "an overflowing length must error, not wrap the cursor into a backwards slice"
+        );
+        // A merely-too-large length still fails the ordinary bounds check.
+        assert!(r.take(1000).is_err());
+        // Neither failure may advance the cursor — a partial consume would desynchronise the parse
+        // and shift every field after the rejected one.
+        assert_eq!(r.rest().len(), 56, "a failed take must not consume");
+    }
 
     /// A hostile element count must be REJECTED, not reserved for.
     ///

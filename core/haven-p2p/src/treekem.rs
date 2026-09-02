@@ -96,11 +96,22 @@ impl<'a> Reader<'a> {
         Self { b, i: 0 }
     }
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        if self.i + n > self.b.len() {
+        // `checked_add`, NOT `self.i + n`: `n` comes from an untrusted u32 length prefix, and
+        // `usize` is 32-BIT on wasm32 — a real target here (the web client; see the wasm32
+        // dependency block in Cargo.toml). There `self.i + n` WRAPS to a small value, this bounds
+        // check passes, and the slice below panics with start > end. Release builds wrap silently,
+        // so that is a remotely triggerable panic on the web client, not a debug-only assertion.
+        // 64-bit hosts cannot reach it, which is precisely why it survived review — the same shape
+        // as the DeviceList reservation that only Linux could see.
+        let end = self
+            .i
+            .checked_add(n)
+            .ok_or(CoreError::Encoding("treekem wire: length overflow"))?;
+        if end > self.b.len() {
             return Err(CoreError::Encoding("treekem wire: unexpected end of input"));
         }
-        let s = &self.b[self.i..self.i + n];
-        self.i += n;
+        let s = &self.b[self.i..end];
+        self.i = end;
         Ok(s)
     }
     fn array<const N: usize>(&mut self) -> Result<[u8; N]> {

@@ -565,15 +565,22 @@ async function main() {
               : hasEarpiece ? 'OFF → earpiece'
               : 'OFF → platform default (this device has no earpiece)';
             await op(devices.android, { op: 'call_speaker', on }, 2000);
-            const ms = await converge(devices.android, (j) => j.call?.audio_route === target, 20_000);
+            const ms = await converge(devices.android,
+              (j) => j.call?.in_call === true && j.call?.audio_route === target, 20_000);
             score(`${label}: speaker ${what} [${tag}]`, ms >= 0,
               ms >= 0 ? `${(ms / 1000).toFixed(1)}s`
                       : JSON.stringify((await freshDump(devices.android))?.call || {}));
           }
         };
         const live = (await freshDump(devices.android))?.call || {};
+        // `in_call`, not just the flag and the route. A device whose ONLY output is the loudspeaker
+        // reports audio_route "speaker" out of a call too, and applySpeaker() is not gated on the
+        // call being up — so without this every routing check here passes against a call that never
+        // established. Measured 2026-09-02 on a tip where `caller goes LIVE on ACCEPT` read never:
+        // all five speaker checks went green anyway, which is the one thing they must not do.
         score(`speaker defaults to the loudspeaker [${tag}]`,
-          live.speaker_on === true && live.audio_route === 'speaker', JSON.stringify(live));
+          live.in_call === true && live.speaker_on === true && live.audio_route === 'speaker',
+          JSON.stringify(live));
         const hasEarpiece = String(live.audio_devices || '').includes('earpiece');
         if (!hasEarpiece) log(`NOTE android offers only [${live.audio_devices}] — the API 31+ earpiece`
           + ` route cannot be proven on this device; the pre-31 sweep below still exercises both ways`);

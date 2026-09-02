@@ -396,6 +396,7 @@ final class FeedStore: ObservableObject {
             #endif
             return
         }
+        flushPersistIfPending()   // a debounced export must not outlive the process
         #if os(iOS)
         // HARD PARK while pocketed. Stretching the idle multipliers was not enough: any wake that
         // holds a UIApplication background-task assertion (media-backup drain, upload flush,
@@ -543,6 +544,7 @@ final class FeedStore: ObservableObject {
         // discovery properly and the static retire pool holds the cancelled objects.
         nearby?.stop()
         nearby = nil
+        flushPersistIfPending()   // the outgoing engine's last debounced export lands before it goes
         social = nil
         items.removeAll()
         circles.removeAll()
@@ -2070,8 +2072,31 @@ final class FeedStore: ObservableObject {
         guard let social, let data = try? Data(contentsOf: stateURL) else { return }
         social.importState(data: data)
     }
+    /// Trailing-edge debounce for `persist()`. Stall detector, 2026-09-01: at launch `configure`'s
+    /// first persist() started a background `exportState` (100s of ms holding the engine mutex) at
+    /// the exact moment the rest of configure / bringOnline still read the engine on the main actor
+    /// — and std::sync::Mutex is unfair, so main lost every re-acquire. Coalescing the launch-time
+    /// calls (default-circle bootstrap, superseded-circle heal, removal reconcile, crypto switches)
+    /// into ONE export 2.5s later moves that hold past the launch reads, and a post/ingest burst
+    /// writes once instead of per call. Background entry and identity teardown flush immediately
+    /// (`flushPersistIfPending`); the mailbox drain keeps an immediate `persistNow()` so the
+    /// seen-marks-after-export ordering it documents still holds.
+    private var persistDebouncePending = false
     private func persist() {
+        guard !DemoEnv.isDemo, social != nil, !persistDebouncePending else { return }
+        persistDebouncePending = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard let self, self.persistDebouncePending else { return }   // satisfied by a persistNow() meanwhile
+            self.persistDebouncePending = false
+            self.persistNow()
+        }
+    }
+    /// Export right now (still off-main). Callers that must ORDER something after the export —
+    /// the mailbox drain's seen-marks — use this directly.
+    private func persistNow() {
         guard !DemoEnv.isDemo, let social else { return }
+        persistDebouncePending = false   // a pending debounce is satisfied by this export
         // exportState() serializes the WHOLE engine (100s of ms on a large account) and the atomic
         // write hits disk — both used to run on the main actor after every post/ingest burst and
         // froze the UI. The actor serializes writers so an older export can never clobber a newer one.
@@ -2079,6 +2104,11 @@ final class FeedStore: ObservableObject {
         Task.detached(priority: .utility) {
             await StatePersister.shared.persist(social: social, to: url)
         }
+    }
+    /// Backgrounding / identity teardown: a debounced export must not outlive the process or the engine.
+    private func flushPersistIfPending() {
+        guard persistDebouncePending else { return }
+        persistNow()
     }
 
     private func bringOnline() {
@@ -5159,7 +5189,7 @@ final class FeedStore: ObservableObject {
         // Persist whenever we ran ANY receive: an envelope that only BUFFERED (event arrived before
         // its key commit / the sender's roster) mutated the now-durable pending_epoch buffer — if we
         // don't save the engine state here, a kill before the key arrives loses the buffered event.
-        persist()
+        persistNow()   // immediate, not debounced: the seen-marks below are ordered after this export
         // Seen-marks STRICTLY AFTER the engine state that contains their events is on disk. Kill
         // before persist(): nothing marked, everything re-fetched, receive() is idempotent. Kill
         // after persist() before marks: events safe, keys re-fetched once and marked as duplicates.
@@ -5997,6 +6027,7 @@ final class FeedStore: ObservableObject {
             try? FileManager.default.moveItem(at: stateURL, to: backup)
         }
         nearby?.stop()   // clean Multipeer teardown before the reference drops (Bonjour cancel crash)
+        flushPersistIfPending()   // the outgoing engine's last debounced export lands before it goes
         node = nil; nearby = nil; social = nil; items.removeAll(); circles.removeAll()
         RelayClients.clearAll()
         configure(mode: .seedless(accountBundle: grant.accountBundle, deviceSeed: deviceSeed))

@@ -20,13 +20,16 @@
 //   profile, circle_create, circle_invite, file, music_post, dump, mark_read.
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, rmSync, statSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ChannelFreshness, judgeDump, fmtDuration, FRESHNESS_DEFAULTS } from './lib/dump-freshness.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = process.env.QA_OUT || join(ROOT, 'build', `e2e-${stamp()}`);
-mkdirSync(OUT, { recursive: true });
+// The directory is created in `main()`, not here. Everything in this file used to happen at MODULE
+// LOAD: `import('./qa-e2e-full.mjs')` — someone's idea of a syntax check — created a run directory
+// AND ran the whole suite, whose bootstrap kills the shared HavenStub and haven-desktop by name.
+// That is how a live run lost its fleet mid-call (2026-09-02). `node --check` is the safe check.
 const MARKER = `E2E_${stamp().replace(/-/g, '').slice(-6)}`;
 const RUN_NONCE = Date.now();   // per-run fixture salt — see the satellite lane
 const REPORT = [];
@@ -585,7 +588,7 @@ function bootstrap() {
   // E2E_BOOTSTRAP=skip lets a dev reuse a hot fleet.
   if (process.env.E2E_BOOTSTRAP === 'skip') { log('bootstrap skipped (E2E_BOOTSTRAP=skip)'); return; }
   const r = spawnSync('bash', [join(ROOT, 'Scripts/qa-e2e-bootstrap.sh')], {
-    encoding: 'utf8', env: { ...process.env, QA_OUT: OUT }, stdio: 'inherit',
+    encoding: 'utf8', env: { ...process.env, QA_OUT: OUT, E2E_RUN_PID: String(process.pid) }, stdio: 'inherit',
   });
   if (r.status !== 0) { console.error('bootstrap failed'); process.exit(1); }
 }
@@ -1257,9 +1260,77 @@ function finish() {
   } catch (e) { log(`history error: ${e.message}`); }
 
   if (process.env.E2E_KILL === '1') {
-    spawnSync('pkill', ['-x', 'HavenStub']); spawnSync('pkill', ['-f', 'target/debug/haven-desktop']);
+    // By PID, from the files the bootstrap wrote — `pkill -x HavenStub` would also take down a
+    // fleet belonging to someone else's run.
+    for (const f of ['stub.pid', 'tauri.pid']) {
+      const pid = Number((existsSync(join(OUT, f)) && readFileSync(join(OUT, f), 'utf8').trim()) || 0);
+      if (pid > 0) { try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ } }
+    }
   }
   process.exit(fail === 0 && !regression ? 0 : 1);
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+// ── one fleet, one run ───────────────────────────────────────────────────────
+// The legs are machine-wide singletons (one HavenStub, one haven-desktop, one emulator, one
+// booted simulator) and the bootstrap's hermetic wipe kills them BY NAME. A second run therefore
+// does not queue behind the first — it silently guts it. On 2026-09-02 a run lost its stub and its
+// desktop within 16 s of each other, with no crash report and no shutdown trace, because something
+// else started the fleet at 14:47; the run then spent its remaining minutes measuring a corpse.
+// The lock is the harness's own, so honouring it is not left to whoever remembers.
+const LOCK = join(ROOT, 'build', '.e2e-run.lock');
+
+function takeRunLock() {
+  mkdirSync(dirname(LOCK), { recursive: true });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      writeFileSync(LOCK, JSON.stringify({ pid: process.pid, out: OUT, startedAt: new Date().toISOString() }, null, 2), { flag: 'wx' });
+      return;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      let holder = null;
+      try { holder = JSON.parse(readFileSync(LOCK, 'utf8')); } catch { /* unreadable → treat as stale */ }
+      const alive = holder?.pid && (() => { try { process.kill(holder.pid, 0); return true; } catch { return false; } })();
+      if (!alive) {
+        console.log(`[e2e] clearing a stale run lock (pid ${holder?.pid ?? '?'} is gone)`);
+        rmSync(LOCK, { force: true });
+        continue;
+      }
+      if (process.env.E2E_WAIT === '1') {
+        if (attempt === 0) console.log(`[e2e] another run is using the fleet (pid ${holder.pid}, started ${holder.startedAt}) — waiting…`);
+        spawnSync('/bin/sleep', ['30']);
+        continue;
+      }
+      console.error(`\n[e2e] REFUSING TO START — another run owns the fleet.\n`
+        + `      pid ${holder.pid}, started ${holder.startedAt}\n`
+        + `      its output: ${holder.out}\n\n`
+        + `      The legs are machine-wide singletons and this suite's bootstrap kills them by name,\n`
+        + `      so starting now would destroy that run rather than queue behind it.\n`
+        + `      Wait for it, run with E2E_WAIT=1 to block until it finishes, or delete\n`
+        + `      ${LOCK} if you are certain that process is gone.\n`);
+      process.exit(2);
+    }
+  }
+}
+
+function releaseRunLock() {
+  try {
+    const holder = JSON.parse(readFileSync(LOCK, 'utf8'));
+    if (holder.pid === process.pid) rmSync(LOCK, { force: true });
+  } catch { /* never let cleanup mask the real result */ }
+}
+
+// Only when this file is what was RUN. Imported (a tool inspecting it, a test reaching for one of
+// its helpers), it must do nothing at all — see the note by `OUT`.
+const invokedDirectly = process.argv[1]
+  && fileURLToPath(import.meta.url) === resolvePath(process.argv[1]);
+
+if (invokedDirectly) {
+  takeRunLock();
+  mkdirSync(OUT, { recursive: true });
+  process.on('exit', releaseRunLock);
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(sig, () => { releaseRunLock(); process.exit(2); });
+  }
+
+  main().catch((e) => { console.error(e); process.exit(1); });
+}

@@ -9,6 +9,26 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 1.8.4 — in development
 
+### Fixed — a second QA run no longer guts the one already running
+
+The e2e fleet is a set of machine-wide singletons: one macOS stub, one desktop client, one
+emulator, one simulator. The bootstrap's hermetic wipe kills the stub and the desktop **by name**,
+so a second run never queued behind the first — it silently ended it. On 2026-09-02 a run lost both
+processes within sixteen seconds of each other, with no crash report and no shutdown trace, and
+spent its remaining minutes measuring a fleet that was no longer there; the new dump-freshness
+check caught it, which is how it was found at all.
+
+Three changes: the suite takes its own lock before it touches anything and a second invocation
+refuses with the holder's pid (or waits, with `E2E_WAIT=1`); a stale lock whose process is gone
+clears itself. The bootstrap refuses to wipe when another run owns the lock, so running it on its
+own is safe too. And teardown kills the processes *this* run started, by recorded pid, instead of
+every process wearing the name.
+
+Also: importing the suite no longer runs it. `import('./qa-e2e-full.mjs')` — someone's idea of a
+syntax check — created a run directory and started a fleet at module load. `node --check` is the
+safe check, and now the mistake costs nothing.
+
+
 ### Fixed — a relay that blinks once no longer takes the desktop app off the air for two minutes
 
 The desktop client reaches a relay over plain HTTP, and a URL that fails to answer is put in a

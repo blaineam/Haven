@@ -30,6 +30,19 @@ log() { echo "[e2e-boot] $*"; }
 # Set E2E_FRESH=0 to reuse a hot fleet when iterating locally. Anything else, including unset, wipes.
 if [[ "${E2E_FRESH:-1}" != "0" ]]; then
   log "hermetic fleet — wiping QA state on all legs (E2E_FRESH=0 to reuse)"
+  # These two pkills are the sharpest edge in this script: the legs are machine-wide singletons, so
+  # they end ANY run that is using them, not just leftovers from a previous one. qa-e2e-full.mjs
+  # takes build/.e2e-run.lock before it gets here, which is what keeps that from happening — refuse
+  # to fire if this script was invoked on its own while a run holds the lock.
+  LOCKFILE="$ROOT/build/.e2e-run.lock"
+  if [[ -f "$LOCKFILE" ]]; then
+    LOCK_PID="$(/usr/bin/sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' "$LOCKFILE" | head -1)"
+    if [[ -n "$LOCK_PID" && "$LOCK_PID" != "${E2E_RUN_PID:-}" ]] && kill -0 "$LOCK_PID" 2>/dev/null; then
+      log "REFUSING to wipe: run $LOCK_PID owns the fleet (its stub and desktop are live)."
+      log "  Wait for it, or delete $LOCKFILE if that process is gone."
+      exit 3
+    fi
+  fi
   pkill -f "HavenStub.app" 2>/dev/null || true
   pkill -f 'target/debug/haven-desktop' 2>/dev/null || true
   sleep 1

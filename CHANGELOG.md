@@ -317,6 +317,64 @@ The durable fix is structural:
 Measured on a fresh simulator account, demo dataset seeded through the engine at launch: the
 one 0.49 s main-thread stall from before is gone, and no engine call runs on main at all.
 
+### Docs
+
+- **The documentation stopped telling people Haven is less secure than it is.** Seed-drop and the
+  MLS-style tree layer shipped in 1.0.7. The docs largely did not notice, and eight minor versions
+  later they were still describing both as unbuilt — in the present tense, as current fact.
+
+  The public docs page was the worst of it, because it contradicted itself in view of itself. One
+  paragraph read "Today a linked device holds a *copy* of your account seed" and called the re-key
+  "planned for release 1.0.7 — not yet shipped"; a callout a few elements down the same page already
+  said correctly that the re-key "is enabled in 1.0.7 and stages per circle as everyone updates", and
+  the features page had said since 1.0.7 that a linked device no longer has to hold a copy. A reader
+  could see both halves without scrolling. That paragraph and the doc-card blurb under it are
+  rewritten across all nine locales — reusing each language's own already-correct wording from the
+  features page rather than inventing new phrasing, because three of them (Spanish, Korean,
+  Simplified Chinese) had the stale claim in the *future* tense, promising a re-key that had already
+  landed.
+
+  Behind the page, the same framing ran through `THREAT-MODEL.md`, `SECURITY.md`, `MULTI-DEVICE.md`
+  and `SEED-DROP-DESIGN.md`, whose header still read "design spike, not built — design only; no
+  product code accompanies it" for the design the release notes cite. `SECURITY.md` was flatly
+  wrong rather than merely dated: it called device revocation "advisory, not cryptographic" and said
+  per-message forward secrecy "needs MLS, which is not built". `MULTI-DEVICE.md` carried a "Known
+  limitation — revocation is not yet adversary-proof" warning and pointed at the roadmap's
+  Outstanding list for a fix the roadmap has filed under Shipped since 1.0.7. `DECISIONS.md` D3 still
+  prescribed RFC 9420 via `mls-rs` with nothing marking it superseded.
+
+  Re-dating these would have replaced one wrong claim with another, because the code moved
+  underneath them. Every citation was re-checked against the tree instead. `SECURITY.md` named
+  `recipients_with_devices` as the function that "always" adds the account key, at a line range that
+  is now unrelated code; production has sealed through `recipients_with_devices_gated` since 1.0.7,
+  which drops the bare account key once every member is affirmatively capable. The `mls-rs`
+  attribution was wrong independently of any timing — there is no such dependency in the workspace,
+  and there cannot usefully be one, since every ratified MLS ciphersuite is classical and
+  interoperating would cost the post-quantum posture the product exists for.
+
+  One thing nearly got recorded backwards. `SWITCH-FLIP-1.0.7.md` says the 1.0.7 crypto "ships
+  **dark** — every switch defaults OFF", which reads as the whole story and is not: all three clients
+  perform the enable sequence at launch, and the gate lives in core, so a circle with one un-upgraded
+  member stays on the dual-seal path while everyone keeps reading. That distinction — the switch is
+  on, the gate decides — is what the corrected pages now say, and it is why the per-circle rollout
+  language was already right.
+
+  The honest limits survive intact, because they are still true: activation is per circle, circles
+  predating 1.0.7 have no verified owner to anchor the tree layer, that layer's audit is internal
+  rather than external, and a fully compromised **primary** device — the one that still holds the
+  seed — is a full account compromise whose remedy is a new identity, not revocation.
+
+- **The source comments were the last holdout, and the most misleading.** Four files still described
+  shipped crypto as pending, and two of them instructed the reader to disbelieve the code they sat
+  in: `device.rs` said "NO SUCH LINK FLOW SHIPS TODAY" and "do not describe revocation as
+  cryptographic", and `DeviceRoster.swift` closed with "Don't let this file's existence imply
+  otherwise". `treekem.rs` introduced itself as "**Types + serialization ONLY.** No tree math, no key
+  schedule, no signing" — 4,469 lines that contain all three, referenced 101 times from `haven-ffi`.
+  `social.rs` credited forward secrecy to `mls-rs`. All four now describe what the code does, keeping
+  the caveats that hold: the legacy dual-seal path still is what a mixed-version circle falls back
+  to, no engine wiring lives in the tree module, and `PersistTree` really is written by nothing in
+  production — kept as an explicit caveat rather than tidied away.
+
 ## 1.8.3 — 2026-09-02
 
 ### Fixed — the freeze after launch and foreground is gone (and so is the 2 AM watchdog kill)

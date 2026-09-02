@@ -90,6 +90,30 @@ since the Instagram import landed. Two independent causes, both about feed-sized
   remaining stick). The timestamp now refreshes at most once every 2s per peer, well inside the 120s
   window both recency consumers use, which collapses that publish churn.
 
+### Fixed — the Shazam song-credit chip actually works
+
+The chip that names the song playing in a video (`Title · Artist` with the Shazam mark, the video
+keeping its own sound) existed only for imported Instagram reels — and rarely even there:
+
+- **Videos you post are now identified.** Nothing you filmed yourself was ever fingerprinted; the
+  only callers were the importer and its retry drain. A post or story with an audible video, no
+  chosen song and no mute now goes through the same retry queue with no first delay, so the credit
+  lands seconds after the post. **Default on**, with *Settings → Song credits → Name the song in my
+  videos* as the opt-out — only a short audio fingerprint goes to Apple's Shazam service, never
+  the video or the post.
+- **Signatures were 0.1 s too long.** Shazam's catalog takes 3–12 s signatures; whole reader
+  buffers were appended "until 12 s" and overshot to 12.07–12.15 s, so every query came back as
+  error 201 (`signatureDurationInvalid`) in 0.0 s — which the code read as a rate limit and
+  retried, for an hour, per post. The signature is now clamped half a second under the catalog's
+  maximum, 201 is treated as the deterministic answer it is, and only genuine refusals (202, 500,
+  no answer) are retried.
+- **Credits reached the wrong feed.** Attaching looked the post up in the *active* circle's items,
+  so a credit for any other circle attached to nothing while the queue deleted the entry as done.
+  It now resolves the post in its own circle (off the main actor) and keeps the entry when the
+  attach fails.
+- **Import sheet:** "Name the song playing in reels (Shazam)" is its own switch, on by default and
+  needing no Apple Music authorization, separate from the opt-in "Suggest a song for silent posts".
+
 ### Fixed — network path churn no longer spins up a rebind storm
 
 The 1.8.0 delivery-recovery work rebinds the transport when the network path changes; on some

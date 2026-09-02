@@ -110,11 +110,17 @@ So a large import costs the people in your circle almost nothing until they choo
   so your stories still play their song; there is just no song credit to display next to it. Nothing
   Haven can do changes this; the information is not in the file Instagram gives you.
 
-  You can optionally have Haven **suggest** a song for the posts that are *silent* — a guess of
-  roughly the right genre and era, drawn from what the caption says, never anything explicit and
-  never a track it has already used elsewhere in the same import. Anything that already makes a
-  sound keeps its own audio and is never given one. (On iPhone and iPad, a reel that shipped with a
-  recognisable soundtrack additionally gets the real song *named* on it.)
+  Two separate switches on the import sheet soften this, and they are independent of each other:
+
+  - **Name the song playing in reels (Shazam)** — on by default. The music is right there in the
+    video, so Haven asks Apple's Shazam service what is playing and shows the real title and artist
+    as a **credit** chip on the reel; the reel keeps its own sound. Only a short audio fingerprint
+    is sent, never the video. A reel Shazam cannot name simply has no chip. (iPhone and iPad; the
+    credit then syncs to every member on every platform.)
+  - **Suggest a song for silent posts** — off by default. A guess of roughly the right genre and
+    era for posts that make *no* sound, drawn from what the caption says, never anything explicit
+    and never a track already used elsewhere in the same import. Anything that already makes a
+    sound keeps its own audio and is never given one.
 - **Likes, comments, and followers** — Haven has no equivalent of a follower count, and other
   people's comments are theirs, not yours to republish.
 - **Direct messages** — the export contains them, but importing other people's messages into a

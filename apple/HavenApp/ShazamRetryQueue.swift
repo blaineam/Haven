@@ -54,18 +54,21 @@ final class ShazamRetryQueue: ObservableObject {
     ///
     /// Idempotent per post: an import can stage the same post twice across a resume, and two
     /// entries would mean two edits attaching the same credit.
-    func enqueue(postId: String, circleId: String, videoRef: String) {
+    /// `firstDelay` defaults to the refusal back-off; a FRESH post that has never been asked about
+    /// (user-authored video — see `FeedStore.identifyAndAttachSong`) passes 0 so the chip lands
+    /// within seconds rather than minutes.
+    func enqueue(postId: String, circleId: String, videoRef: String, firstDelay: TimeInterval = ShazamRetryQueue.firstDelay) {
         guard !postId.isEmpty, !videoRef.isEmpty else { return }
         guard !items.contains(where: { $0.postId == postId }) else { return }
         items.append(Item(postId: postId, circleId: circleId, videoRef: videoRef,
-                          attempts: 0, nextAttemptAt: Date().timeIntervalSince1970 + Self.firstDelay))
+                          attempts: 0, nextAttemptAt: Date().timeIntervalSince1970 + firstDelay))
         save()
         HavenLog.sync("shazam-retry: queued \(postId.prefix(8)) (\(items.count) waiting)")
     }
 
-    /// The first retry waits a while on purpose. Being refused means Shazam wants us to stop asking,
+    /// The first RETRY waits a while on purpose. Being refused means Shazam wants us to stop asking,
     /// and trying again immediately is what got us refused in the first place.
-    private static let firstDelay: TimeInterval = 120
+    nonisolated private static let firstDelay: TimeInterval = 120   // a constant; usable as a default argument
 
     // MARK: - Draining
 

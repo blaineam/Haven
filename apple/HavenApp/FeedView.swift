@@ -3699,9 +3699,32 @@ final class FeedStore: ObservableObject {
         broadcastEvent(cid, env, banner: .forPost(circleId: cid, circleName: name, body: body, media: media, story: story, postId: postId))
         postTick += 1; publishedPostCount += 1; refresh()
         enqueueAuthoredMedia(media, circleId: cid, social: social)
+        identifyAndAttachSong(postId: postId, circleId: cid, media: media, music: music, muteVideo: muteVideo)
         if !media.isEmpty {
             Task { await SharedStore.publishDeviceRoster(social: social) }
             if RelayHost.shared.serving { reannounceOwnRelay() }
+        }
+    }
+
+    /// Name the song playing in a video I just posted (Shazam) and attach it as a CREDIT chip.
+    ///
+    /// User-authored videos were never fingerprinted: the only identify callers were the Instagram
+    /// importer and the retry drain, so the Shazam chip existed for imported reels and for nothing
+    /// anyone filmed themselves. The retry queue already does everything this needs — spills the
+    /// stored clip, paces the catalog, attaches by silent edit, survives a kill — so this is one
+    /// enqueue with no first delay. Skipped for a video that carries a chosen song, a muted video, a
+    /// clip with no audible track, and when the `identifySongsInVideos` switch is off (the audio
+    /// fingerprint goes to Apple's Shazam service).
+    private func identifyAndAttachSong(postId: String?, circleId: String, media: [String],
+                                       music: TrackRefFfi?, muteVideo: Bool) {
+        guard SettingsStore.shared.identifySongsInVideos, music == nil, !muteVideo,
+              let postId, !postId.isEmpty else { return }
+        guard let ref = MediaVariants.displayRefs(media).first(where: { MediaKind(ref: $0) == .video }),
+              let url = MediaStore.shared.storagePath(for: ref) else { return }
+        Task { @MainActor in
+            guard await SongSuggester.hasAudio(url) else { return }
+            ShazamRetryQueue.shared.enqueue(postId: postId, circleId: circleId, videoRef: ref, firstDelay: 0)
+            ShazamRetryQueue.shared.start()
         }
     }
 
@@ -3711,14 +3734,30 @@ final class FeedStore: ObservableObject {
     /// did. Re-emitting the post as an edit is how it catches up — the same mechanism the
     /// re-optimize pass uses, and silent for the same reason: re-pointing an existing post at a
     /// song nobody wrote is not news.
-    func attachSongCredit(postId: String, circleId: String, track: TrackRefFfi) {
-        guard let social, let item = items.first(where: { $0.id == postId }) else { return }
-        guard item.music == nil else { return }   // don't stomp a song already there
+    ///
+    /// Returns whether the credit is now on the post (or was already there). `false` means "not
+    /// attached — keep the queue entry": this used to look the post up in `items`, which is only the
+    /// ACTIVE circle's feed, so a credit for any other circle (an import into a side circle, a
+    /// story) silently attached to nothing while the retry queue deleted the entry as done.
+    @discardableResult
+    func attachSongCredit(postId: String, circleId: String, track: TrackRefFfi) async -> Bool {
+        guard let social else { return false }
+        // Resolve the post in ITS circle, off-main: this runs from the queue's worker and a feed()
+        // is a full decrypt under the engine mutex.
+        let nowMs = now()
+        let item: FeedItemFfi? = await Task.detached(priority: .utility) {
+            await EngineGate.shared.run {
+                social.feed(circleId: circleId, nowMs: nowMs, viewerRetentionSecs: nil).first { $0.id == postId }
+            }
+        }.value
+        guard let item else { return false }
+        guard item.music == nil else { return true }   // a song is already there — nothing to attach, nothing to retry
         guard let env = try? social.edit(circleId: circleId, target: postId, body: item.body,
                                          media: item.media, music: track,
-                                         muteVideo: item.muteVideo, createdAt: now()) else { return }
+                                         muteVideo: item.muteVideo, createdAt: now()) else { return false }
         broadcastEvent(circleId, env, silent: true)
         scheduleRefresh()
+        return true
     }
 
     /// Author a post that came from an ARCHIVE IMPORT (Instagram et al) — silent by construction.
@@ -3907,11 +3946,16 @@ final class FeedStore: ObservableObject {
     }
     func edit(_ id: String, _ body: String, media rawMedia: [String] = [], music: TrackRefFfi? = nil, muteVideo: Bool = false) {
         let media = withPreviewMarkers(withThumbMarkers(rawMedia))
+        let before = Set(items.first(where: { $0.id == id })?.media ?? [])   // pre-edit media, for "was a video added?"
         guard let social, let env = try? social.edit(circleId: activeCircleId, target: id, body: body, media: media, music: music, muteVideo: muteVideo, createdAt: now()) else { return }
         let cid = activeCircleId
         let name = circles.first(where: { $0.id == cid })?.name ?? "your circle"
         broadcastEvent(cid, env, banner: .forEdit(circleId: cid, circleName: name, postId: id)); refresh()
         enqueueAuthoredMedia(media, circleId: cid, social: social)
+        // Only a NEWLY added video is fingerprinted — an edit that merely removed a chip is respected.
+        if MediaVariants.displayRefs(media).contains(where: { MediaKind(ref: $0) == .video && !before.contains($0) }) {
+            identifyAndAttachSong(postId: id, circleId: cid, media: media, music: music, muteVideo: muteVideo)
+        }
     }
     func unsend(_ id: String) {
         guard let social, let env = try? social.unsend(circleId: activeCircleId, target: id, createdAt: now()) else { return }

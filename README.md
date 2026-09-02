@@ -129,7 +129,8 @@ nearby Bluetooth/Wi-Fi mesh daily. Done so far:
   UniFFI XCFramework: circles + multi-circle feed, stories (multi-clip + captions),
   DMs with recency sorting + iMessage-style conversation pinning (self-syncs across your
   devices), group DMs with per-message sender name / timestamp / delivery checkmark,
-  in-app camera with filters, Apple Music on posts, **WebRTC 1:1 and group calls**
+  in-app camera with filters, Apple Music on posts (and Shazam-named song credits on
+  videos, opt-out), **WebRTC 1:1 and group calls**
   (audio+video, screen share), **multi-identity switcher** with per-identity profiles,
   a blind-APNs notification relay with on-device NSE decrypt, and an in-app/standalone
   store-and-forward relay. macOS ships from a **native AppKit/SwiftUI target** (`HavenMac`);

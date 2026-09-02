@@ -67,6 +67,7 @@
   "how-it-works.1dd6a1": "How it works",
   "how-the-rollout-works.c95dbf": "How the rollout works, honestly",
   "if-someone-steals-your.89de84": "If someone steals your unlocked, malware-infected device, they have your device. No app on earth fixes that.",
+  "if-you-post-a.d49a56": "If you post a video with music in it, Haven asks Apple's Shazam service to name the song for a credit chip — a short audio fingerprint goes to Apple, never the video or the post. On by default; off in Settings → Song credits.",
   "if-you-want-to.b4b4d9": "If you want to hide your IP from a relay entirely, run Haven behind your own VPN, or host your own relay. We looked hard at a built-in onion/Tor mode and decided against it: Tor can't carry the kind of traffic Haven's calls and direct connections need, so it would quietly break them.",
   "imagine-a-family-photo.562467": "Imagine a family photo album and a group chat that <span class=\"h-grad\">only your people can ever open</span> — with no company in the middle. That's Haven. The keys that lock your moments live on your phone, not on a server. Even we can't read them.",
   "in-the-secure-enclave.376555": "In the Secure Enclave on Apple devices, the OS secure store elsewhere. The only way they sync between <i>your</i> devices is Apple's end-to-end-encrypted iCloud Keychain, which we can't read either.",

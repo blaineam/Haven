@@ -19,6 +19,7 @@ struct InstagramImportView: View {
     @State private var includeStories = false
     /// Off by default — it attaches a GUESS, so it should be asked for, not assumed.
     @State private var matchSongs = false
+    @State private var identifySongs = true
     /// Stop is destructive and easy to hit by accident next to a progress bar — it confirms.
     @State private var confirmStop = false
 
@@ -277,6 +278,13 @@ struct InstagramImportView: View {
                 }
 
                 Section {
+                    Toggle("Name the song playing in reels (Shazam)", isOn: $identifySongs)
+                        .tint(HavenTheme.pink)
+                } footer: {
+                    Text("Instagram's export doesn't say which song a reel used, but the music is right there in the video — Haven asks Shazam what's playing and shows it as a credit. The reel keeps its own sound; only a short audio fingerprint is sent.")
+                }
+
+                Section {
                     Toggle("Suggest a song for silent posts", isOn: $matchSongs)
                         .tint(HavenTheme.pink)
                         .onChange(of: matchSongs) { _, on in
@@ -290,7 +298,8 @@ struct InstagramImportView: View {
 
                 Section {
                     Button {
-                        importer.run(into: circleId, includeStories: includeStories, matchSongs: matchSongs)
+                        importer.run(into: circleId, includeStories: includeStories, matchSongs: matchSongs,
+                                     identifySongs: identifySongs)
                     } label: {
                         Label("Import \(importCount(s))", systemImage: "square.and.arrow.down")
                             .frame(maxWidth: .infinity)

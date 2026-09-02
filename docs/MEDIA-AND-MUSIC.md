@@ -49,6 +49,27 @@ plays. Each viewer hears it through **their own** Apple Music subscription.
 - **Entitlement note:** the MusicKit capability + `com.apple.developer.musickit`
   entitlement are **granted on the App ID** — live Apple Music attach + playback is shipped.
 
+### 2b. Song credits — naming the music already in a video (Shazam)
+
+A video someone filmed usually has a song *in* it. Haven names it: when a video is posted with
+audible sound, no chosen song and no mute, the app builds a short Shazam signature from the first
+~11.5 s of the clip's audio and asks Apple's Shazam catalog what is playing. A match becomes a
+**credit** chip — `title · artist` with the Shazam mark — attached by a silent edit seconds after
+the post, and the video keeps its own audio (see `TrackRefFfi.creditPrefix`: a credit is encoded
+in `catalogId`, so Android and desktop render it with no protocol change). Imported Instagram reels
+get the same treatment (`docs/instagram-import.md`).
+
+**Privacy & controls**
+- **What leaves the device:** a Shazam audio *signature* (a fingerprint of ~11 s of audio) to
+  Apple's Shazam service, under Apple's ShazamKit terms. Never the video, never the post, never a
+  caption. The catalog answer is a track reference, like any other song on a post.
+- **Default on, one switch off:** *Settings → Song credits → Name the song in my videos*. The
+  Instagram import sheet has its own switch for reels.
+- **Bounded:** one identification per post, paced (2–30 s between catalog requests), and a refused
+  attempt (`matchAttemptFailed` / `internalError` / no answer) is retried from a persisted queue
+  with exponential back-off — never a loop. "Not in catalog" is an answer and is not retried.
+- **Maker holds nothing:** no Haven server is involved; the request goes device → Apple.
+
 ## 3. Audio crossfade (music ↔ video)
 
 When a post has attached music, its **video plays muted** by default while the music

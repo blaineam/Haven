@@ -108,6 +108,11 @@ final class SettingsStore: ObservableObject {
     var tsKeyRet: String { kRet }
     /// When auto-delete is on, keep MY OWN posts even after they'd age out for others (my archive).
     @Published var keepMyPosts: Bool { didSet { d.set(keepMyPosts, forKey: kKeepMine) } }
+    /// Name the song playing in a video I post (Shazam) and show it as a credit chip. DEFAULT ON,
+    /// with this as the opt-out: a short audio FINGERPRINT of the clip goes to Apple's Shazam
+    /// service — never the video, never the post — and only for a video that carries no chosen song
+    /// and is not muted. See `FeedStore.identifyAndAttachSong`.
+    @Published var identifySongsInVideos: Bool { didSet { d.set(identifySongsInVideos, forKey: kIdentifySongs) } }
     /// Global mute — silences post music + video audio so you can browse quietly. DEVICE-LOCAL: it's
     /// seeded from this device's hardware silent switch (iOS) or defaults muted (macOS, which has no
     /// such switch), so it must never sync to your other devices — muting your Mac isn't muting your
@@ -134,6 +139,7 @@ final class SettingsStore: ObservableObject {
     private let kSendOriginal = "haven.sendOriginal"
     private let kRet = "haven.retentionDays"
     private let kKeepMine = "haven.keepMyPosts"
+    private let kIdentifySongs = "haven.identifySongsInVideos"
     private let kSilent = "haven.silent"
     private let kVideoSound = "haven.videoSoundOn"
     private let kLocMaxDays = "haven.localMediaMaxDays"
@@ -154,6 +160,7 @@ final class SettingsStore: ObservableObject {
         shareSuggestions = d.object(forKey: kShareSuggest) as? Bool ?? true   // default ON
         retentionDays = d.object(forKey: kRet) as? Int ?? 0       // default forever
         keepMyPosts = d.object(forKey: kKeepMine) as? Bool ?? true   // default: always keep my own archive
+        identifySongsInVideos = d.object(forKey: kIdentifySongs) as? Bool ?? true   // default ON; the switch is the opt-out
         #if os(macOS)
         // No hardware silent switch to seed from, so there's no signal that the user wants sound:
         // start MUTED and let one explicit unmute stick (same precedent as videoSoundOn — quiet by
@@ -351,6 +358,13 @@ struct SettingsView: View {
                 } header: { Text("Auto-delete — default") }
                 footer: {
                     Text("Hides old posts from your feed only — never deletes anything for anyone else.")
+                }
+                Section {
+                    Toggle("Name the song in my videos", isOn: $settings.identifySongsInVideos)
+                        .tint(HavenTheme.pink)
+                } header: { Text("Song credits") }
+                footer: {
+                    Text("When you post a video with music in it, Haven asks Apple's Shazam service what's playing and shows it as a credit — the video keeps its own sound. Only a short audio fingerprint is sent, never the video or the post.")
                 }
                 Section {
                     HStack {

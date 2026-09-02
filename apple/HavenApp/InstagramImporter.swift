@@ -51,6 +51,8 @@ final class InstagramImporter: ObservableObject {
         var includeStories: Bool
         /// Defaulted so a checkpoint written before song matching existed still decodes.
         var matchSongs: Bool = false
+        /// Name the song in reels via Shazam (default on — needs no MusicKit authorization).
+        var identifySongs: Bool = true
         var done: Int
     }
 
@@ -96,7 +98,7 @@ final class InstagramImporter: ObservableObject {
             self.summary = s
             self.phase = .previewing          // `run` requires this state
             self.run(into: p.circleId, includeStories: p.includeStories,
-                     matchSongs: p.matchSongs, startAt: p.done)
+                     matchSongs: p.matchSongs, identifySongs: p.identifySongs, startAt: p.done)
         }
     }
 
@@ -165,7 +167,7 @@ final class InstagramImporter: ObservableObject {
     /// `startAt` resumes a previous run, skipping items already imported. Only `resumeIfNeeded`
     /// passes it; a fresh import starts at 0.
     func run(into circleId: String, includeStories: Bool = false,
-             matchSongs: Bool = false, startAt: Int = 0) {
+             matchSongs: Bool = false, identifySongs: Bool = true, startAt: Int = 0) {
         guard let summary, let url = archiveURL, case .previewing = phase else { return }
         // NEWEST FIRST — the opposite of what reads naturally, and the reason the feed stopped
         // jumping.
@@ -201,7 +203,8 @@ final class InstagramImporter: ObservableObject {
             let bookmark = try url.bookmarkData(options: bookmarkCreationOptions,
                                                 includingResourceValuesForKeys: nil, relativeTo: nil)
             savePending(Pending(bookmark: bookmark, circleId: circleId,
-                                includeStories: includeStories, matchSongs: matchSongs, done: startAt))
+                                includeStories: includeStories, matchSongs: matchSongs,
+                                identifySongs: identifySongs, done: startAt))
         } catch {
             HavenLog.sync("ig-import: NO checkpoint — bookmark failed (\(error.localizedDescription)); "
                 + "this run cannot resume if the app is killed")
@@ -262,7 +265,7 @@ final class InstagramImporter: ObservableObject {
                 }
                 let began = Date()
                 let (refs, hasAudio, detected, themes, retryRef) = await Self.stage(
-                    item, zip: zip, byName: byName, identify: matchSongs,
+                    item, zip: zip, byName: byName, identify: identifySongs,
                     isCancelled: isCancelled)
                 // Stop means STOP. Staging an item can take a minute (a video transcode), and the
                 // check above happened before all of it — so hitting Stop used to finish the clip
@@ -285,19 +288,21 @@ final class InstagramImporter: ObservableObject {
                     //   silent     → SUGGEST one (Apple Music, by genre + era). A guess, and the
                     //                only case where a guess is harmless, because the alternative
                     //                is silence.
+                    // Two independent switches: naming a reel's real song (Shazam, on by default,
+                    // no MusicKit authorization needed) and suggesting one for silent posts (Apple
+                    // Music, opt-in). They used to be ONE switch, so the credit only ever existed for
+                    // users who had also opted into guessed songs.
                     var music: TrackRefFfi? = nil
-                    if matchSongs {
-                        if hasAudio {
-                            music = detected
-                        } else {
-                            let when = Date(timeIntervalSince1970: TimeInterval(at) / 1000)
-                            let parts = Calendar.current.dateComponents([.year, .month], from: when)
-                            music = await SongSuggester.song(themes: themes, genre: item.musicGenre,
-                                                             year: parts.year ?? 2024,
-                                                             month: parts.month ?? 0,
-                                                             exclude: usedSongs)
-                            if let id = music?.catalogId { usedSongs.insert(id) }
-                        }
+                    if hasAudio {
+                        if identifySongs { music = detected }   // the real song as a credit — or nil, retried below
+                    } else if matchSongs {
+                        let when = Date(timeIntervalSince1970: TimeInterval(at) / 1000)
+                        let parts = Calendar.current.dateComponents([.year, .month], from: when)
+                        music = await SongSuggester.song(themes: themes, genre: item.musicGenre,
+                                                         year: parts.year ?? 2024,
+                                                         month: parts.month ?? 0,
+                                                         exclude: usedSongs)
+                        if let id = music?.catalogId { usedSongs.insert(id) }
                     }
                     // Stories, when the user opted in, land as KEPT stories rather than feed posts:
                     // a personal snapshot on their profile with its media pinned. Keeping

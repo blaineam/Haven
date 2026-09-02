@@ -19,7 +19,7 @@ import java.net.URL
 /** The blind push relay (a Cloudflare Worker) — one shared constant for BOTH the moderation
  *  ledger and the notify/wake push leg (parity with Apple `PushManager.defaultRelay`). The
  *  worker only ever sees node ids + ciphertext sealed to the recipient. */
-const val PUSH_RELAY = "https://haven-push.blaineams3.workers.dev"
+const val PUSH_RELAY = "https://haven-push.wemiller.workers.dev"
 
 /**
  * Fire-and-forget, content-free entries to the developer ledger on the push Worker. Node ids are

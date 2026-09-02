@@ -80,7 +80,7 @@ that makes deleting it a mistake).
 | `android/…/core/Moderation.kt:28` |
 | `desktop/src-tauri/src/engine.rs:30` |
 
-`https://haven-push.blaineams3.workers.dev` — a compile-time constant in three languages. Changing
+`https://haven-push.wemiller.workers.dev` — a compile-time constant in three languages. Changing
 it requires shipping three app updates. This is deliverable 2's problem; see
 `docs/NOTIFICATIONS-FALLBACK.md`.
 

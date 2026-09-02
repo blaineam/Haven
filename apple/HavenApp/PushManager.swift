@@ -43,7 +43,7 @@ final class PushManager: NSObject, ObservableObject {
     }
 
     /// The relay used when nothing has been configured. Still ours, still the fast path.
-    static let defaultRelay = "https://haven-push.blaineams3.workers.dev"
+    static let defaultRelay = "https://haven-push.wemiller.workers.dev"
 
     /// Point this install at a different push relay, or pass `""` to turn push off entirely and
     /// rely on polling. `nil` restores the default.

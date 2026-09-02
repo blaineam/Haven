@@ -44,7 +44,7 @@ use crate::wire;
 pub const DEFAULT_CIRCLE: &str = "default";
 
 /// The push Worker — also hosts the content-free moderation ledger (`/flag`).
-pub const PUSH_RELAY: &str = "https://haven-push.blaineams3.workers.dev";
+pub const PUSH_RELAY: &str = "https://haven-push.wemiller.workers.dev";
 
 /// One configured relay's full state for the Relays hub UI (active + inactive).
 #[derive(Clone)]

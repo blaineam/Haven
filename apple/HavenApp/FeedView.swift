@@ -7255,7 +7255,7 @@ final class FeedStore: ObservableObject {
         // to the old behaviour rather than dropping the call's answer.
         let me = nodeHex.lowercased()
         let member = self.circles.map(\.id).filter { cid in
-            (social?.contactNodeIds(circleId: cid) ?? []).contains { $0.lowercased() == me }
+            cachedMembers(cid).contains { $0.lowercased() == me }   // members cache — no engine lock on main (0.49s park at +12s of launch)
         }
         let cids = member.isEmpty ? self.circles.map(\.id) : member
         Task { await SharedStore.uploadLiveCallFrames(circleIds: cids, dests: liveDests, frame: wire) }

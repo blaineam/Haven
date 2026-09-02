@@ -156,6 +156,12 @@ final class NearbyTransport: NSObject {
 
     private func startDiscovery(parkAfter: TimeInterval) {
         dispatchPrecondition(condition: .onQueue(.main))
+        // HAVEN_NO_NET: Multipeer is the loudest lane of all in a test lab — Bonjour advertise +
+        // browse over AWDL/Bluetooth, and every other Haven client on the same Wi-Fi can invite us.
+        // Gated here rather than in `start`, because `nudgeDiscovery` and the settle-window restart
+        // both re-enter at this point. `bringOnline()` never builds a transport under the flag, so
+        // this is a backstop for a foreground nudge against a transport built before it was set.
+        guard !HavenNet.offline else { return }
         parkWorkItem?.cancel()
         restartWorkItem?.cancel()
         restartWorkItem = nil

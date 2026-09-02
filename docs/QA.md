@@ -63,6 +63,29 @@ npm link`), it's just `soren run Haven`.
 | `vm-windows` | utm | **launches** the `Windows` UTM VM and confirms `started` | UTM + the VM present |
 | `e2e` | cmd | **full cross-device E2E with perf gates** — see below | DEBUG builds of all four clients |
 
+### The `ios` suite is hermetic (`HAVEN_NO_NET`)
+
+`HavenUITests` launches the app with `HAVEN_NO_NET=1`, which means **this process talks to nothing**
+— no iroh node, no relay HTTP, no Multipeer, no push, no S3. The flag is read once in
+`apple/Shared/OfflineGate.swift` (`HavenNet.offline`) and enforced at the transports, not only at
+startup, because the timers that drive the contact fan-out are re-armed on every foreground
+transition and never pass a launch-time guard.
+
+This matters because the simulator carries a **real keychain-backed identity** (the suite signs with
+a team on purpose — see the note at the top of `HavenUITests.swift`), and relay records persist in
+its container. Before the transports were gated, a run greeted whatever was on the network and could
+take an inbound connection request from a stranger mid-test, which surfaced as a flaky Activity
+ordering assertion. If you are adding an outbound transport to the Apple app, gate it on
+`HavenNet.offline` at its own entry point.
+
+To confirm a run is silent, stream the app's diagnostic channel while the suite runs:
+
+```
+xcrun simctl spawn <udid> log stream --predicate 'subsystem == "com.blaineam.haven.diag"'
+```
+
+`http-put`, `fan-out` and `hello claim` lines mean something is not gated.
+
 ## Full cross-device E2E (`soren run Haven e2e`)
 
 `Scripts/qa-e2e-full.mjs` assembles the whole fleet — iOS Simulator + Android

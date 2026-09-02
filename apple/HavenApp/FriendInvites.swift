@@ -179,6 +179,7 @@ final class FriendInviteStore: ObservableObject {
     /// One pass of every pending duty. Called from the mailbox polling loop; cheap when idle
     /// (all four lists empty = no I/O). Single-flight.
     func tick() async {
+        guard !HavenNet.offline else { return }   // HAVEN_NO_NET: every duty here is a relay op
         guard !ticking else { return }
         ticking = true
         defer { ticking = false }

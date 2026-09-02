@@ -159,6 +159,10 @@ final class CloudflaredTunnel: ObservableObject {
     /// then covers media + DERP. Dual free tunnels are only started via `startQuickDerp` when the
     /// path proxy is unavailable.
     func apply(port: UInt16) async -> FrontDoorResult {
+        // HAVEN_NO_NET: a front door is a `cloudflared` connector process holding a live tunnel to
+        // Cloudflare's edge — the most outward-facing thing the app can do. `RelayHost` is the only
+        // caller and is already gated; this is the door itself.
+        guard !HavenNet.offline else { return FrontDoorResult(announceURL: nil, spawnedConnector: false) }
         await stopFully()
         // Brief settle so the previous free hostname/edge releases before we mint a new one.
         try? await Task.sleep(nanoseconds: 500_000_000)
@@ -306,6 +310,7 @@ final class CloudflaredTunnel: ObservableObject {
     /// Sets `derpPublicURL` + `dualTunnelNote` so Settings shows **both** live hostnames —
     /// dual free tunnels must never be invisible.
     func startQuickDerp(port: UInt16) async -> String? {
+        guard !HavenNet.offline else { return nil }   // HAVEN_NO_NET: no second free tunnel either
         #if os(macOS)
         stopDerpOnly()
         usesPathProxy = false
@@ -512,6 +517,7 @@ final class CloudflaredTunnel: ObservableObject {
     /// System getaddrinfo vs Cloudflare DoH for a free hostname. Sets `freeTunnelDNSBroken`.
     /// Free trycloudflare DNS often lags mint by a few seconds — we poll DoH before calling it dead.
     func assessFreeTunnelDNS(publicURL url: String) async {
+        guard !HavenNet.offline else { return }   // HAVEN_NO_NET: no resolver probe, no DoH lookup
         guard url.contains("trycloudflare.com"),
               let host = URL(string: url)?.host, !host.isEmpty else {
             freeTunnelDNSBroken = false

@@ -38,6 +38,7 @@ final class CallHairpin {
 
     /// Open (or keep) a hairpin to `remote` for this call session.
     func open(sessionId: String, me: String, remote: String) {
+        guard !HavenNet.offline else { return }   // HAVEN_NO_NET: no WSS to the path proxy
         guard !sessionId.isEmpty, !me.isEmpty, !remote.isEmpty, me != remote else { return }
         if tasks[remote] != nil { return }
         guard let base = Self.fabricBase(),

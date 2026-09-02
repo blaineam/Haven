@@ -205,6 +205,10 @@ final class RelayHost: ObservableObject {
 
     private func start() {
         guard enabled else { return }
+        // HAVEN_NO_NET: hosting is inbound network. It is also a self-rearming wait — the retry
+        // below fires every second until the messaging node exists, and under the flag it never
+        // will, so this would be an endless timer and a log line every five attempts.
+        guard !HavenNet.offline else { return }
         guard handle == nil else { return }
         // The relay now ATTACHES to the messaging node's endpoint (one iroh node, two ALPNs) — running a
         // second in-process iroh node is what made iroh churn paths unboundedly (the tens-of-GB leak).
@@ -570,6 +574,7 @@ final class RelayHost: ObservableObject {
 
     /// GET that succeeds on any HTTP response (including 4xx) — connection refused / timeout = dead.
     private static func httpReachable(url: String, timeout: TimeInterval) async -> Bool {
+        guard !HavenNet.offline else { return false }   // HAVEN_NO_NET: nothing is reachable
         guard let u = URL(string: url) else { return false }
         var req = URLRequest(url: u)
         req.httpMethod = "GET"
@@ -1598,6 +1603,11 @@ final class RelayMailboxStore: ObservableObject {
     /// announces no HTTP interface at all, so callers go straight to the path that works. Filtering
     /// here gives the Mac relays the same behaviour instead of a broken fast path.
     func httpInterface(_ hex: String) -> (urls: [String], token: String)? {
+        // HAVEN_NO_NET: the whole relay HTTP lane hangs off this lookup — hello put/fetch, mailbox
+        // LIST/GET, announce, self-sync slots, media. Refusing here retires all of it through the
+        // branch every caller already handles, and (unlike failing the requests) records no health
+        // and marks no URL bad, so a harness run leaves the persisted relay state untouched.
+        guard !HavenNet.offline else { return nil }
         guard let e = entries[hex], let t = e.httpToken, !t.isEmpty,
               let u = e.httpUrls, !u.isEmpty else { return nil }
         let usable = u.filter { Self.urlPlausiblyReachable($0) }
@@ -1991,6 +2001,9 @@ enum RelayClients {
     private static var cache: [String: RelayClient] = [:]
     /// A connected client for a relay, honoring per-relay backoff. nil if in backoff or unreachable.
     static func client(_ nodeHex: String) async -> RelayClient? {
+        // HAVEN_NO_NET: the dial below already dead-ends on `transportNode == nil` (the node never
+        // comes up), but state the invariant rather than leaving it to a coincidence downstream.
+        guard !HavenNet.offline else { return nil }
         if let c = cache[nodeHex] { return c }
         // NEVER dial our OWN DEVICE node id (our iroh transport id — Option 1). A node dialing itself
         // sends iroh's path discovery into a tight loop (open_path_on_all_conns), exploding memory by tens

@@ -905,7 +905,7 @@ final class FeedStore: ObservableObject {
         #if DEBUG
         CallManager.shared.debugSimulateIncomingRing()   // HAVEN_RING_TEST=1 only — bounded-ring self-test
         #endif
-        guard ProcessInfo.processInfo.environment["HAVEN_NO_NET"] != "1" else { return }
+        guard !HavenNet.offline else { return }
         bringOnline()
         startMailboxPolling()
         if let engine { MediaRecovery.runOnceIfNeeded(engine: engine) }   // one-time re-seal of my 1.0.7-era media
@@ -1039,6 +1039,12 @@ final class FeedStore: ObservableObject {
     func armMailboxTimer() {
         mailboxTimer?.invalidate()
         mailboxTimer = nil
+        // HAVEN_NO_NET: `configureForCurrentIdentity` returns before `startMailboxPolling()`, but
+        // `setForeground(true) → armHeartbeats()` re-arms both heartbeats on every foreground
+        // transition and never passed through that guard — which is exactly how a UI-test run
+        // ended up doing live mailbox LISTs and hello fan-outs against relays left on the
+        // simulator's disk. The transports refuse now; don't schedule the wakeups either.
+        guard !HavenNet.offline else { return }
         #if os(iOS)
         // A cold BACKGROUND launch (content-available push, VoIP, BGAppRefresh after a kill) runs
         // `startMailboxPolling` with no scenePhase ever arriving. Arming here would schedule a 15s
@@ -2901,6 +2907,7 @@ final class FeedStore: ObservableObject {
     private func startSyncTimer() {
         syncTimer?.invalidate()
         syncTimer = nil
+        guard !HavenNet.offline else { return }   // HAVEN_NO_NET — see `armMailboxTimer`
         #if os(iOS)
         // Same trap as `armMailboxTimer`: a pocketed cold launch must schedule nothing.
         guard appIsForeground else {
@@ -4642,6 +4649,12 @@ final class FeedStore: ObservableObject {
     private var lastSyncContactsMs: UInt64 = 0
 
     func syncWithContacts(force: Bool = false) {
+        // HAVEN_NO_NET: the fan-out has a dozen event-driven callers (a relay learned, a fabric
+        // rebind, a member change, an invite accepted) that reach it without passing any launch
+        // guard — this is where `hello fan-out circle=… accounts=…` came from in a UI test. The
+        // pass is also real hybrid-PQ sealing per member, so refuse before doing that work for a
+        // lane that would drop it. `force: true` is a user action and offline is still offline.
+        guard !HavenNet.offline else { return }
         #if os(iOS)
         // Pocketed: never fan hello/roster. Event-driven callers (relay learned, fabric rebind,
         // member change) used to bypass the timer gate and keep the radio warm under a leftover
@@ -5570,6 +5583,7 @@ final class FeedStore: ObservableObject {
     /// listing every circle to discover nothing was the bulk of an idle wake's radio time.
     /// Push HINTS are still fetched in both cases: those are targeted single-key GETs.
     func slimBackgroundSync(allowMailboxPull: Bool = true) async -> Bool {
+        guard !HavenNet.offline else { return false }   // HAVEN_NO_NET — see `armMailboxTimer`
         // Re-pin the park at the start of every wake. A concurrent scenePhase blip or an
         // earlier configure that raced us must not leave Multipeer / media timers warm.
         #if os(iOS)
@@ -5614,6 +5628,7 @@ final class FeedStore: ObservableObject {
 
     func pollMailboxNow() {
         guard engine != nil else { return }
+        guard !HavenNet.offline else { return }   // HAVEN_NO_NET — see `armMailboxTimer`
         // Offline friend invites ride the same cadence: cheap no-op when nothing is pending.
         Task { await FriendInviteStore.shared.tick() }
         // Multi-device self-sync (profile, pins, contacts, read watermarks, circles) syncs the user's
@@ -5663,6 +5678,7 @@ final class FeedStore: ObservableObject {
     /// sweep of all circles after the current pass (and its marks) complete.
     @discardableResult
     @MainActor func pullMailbox(circleIds ids: [String]) async -> Int {
+        guard !HavenNet.offline else { return 0 }   // HAVEN_NO_NET — see `armMailboxTimer`
         // THE EPOCH MOVED -> re-seal my history under it, so a member who joined or advanced past
         // the old epoch can still read what I already posted. Asked of the engine directly rather
         // than inferred from a roster change: the epoch also advances on periodic rotation and on

@@ -182,6 +182,7 @@ enum SharedPushPrefetch {
     /// whole prefetch lives inside the NSE's ~10s slice of its budget.
     private static func get(_ ifaces: [SharedRelayDirectory.RelayInterface],
                             seed: Data, key: String) async -> Data? {
+        guard !HavenNet.offline else { return nil }   // HAVEN_NO_NET: no prefetch from the extension
         let enc = key.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? key
         for iface in ifaces {
             for base in iface.u {

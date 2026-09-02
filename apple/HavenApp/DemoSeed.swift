@@ -15,7 +15,8 @@ import AppKit
 //
 //   HAVEN_DEMO=1            seed the PII-free synthetic dataset (DemoSeeder)
 //   HAVEN_SKIP_ONBOARDING=1 jump straight into the app (no onboarding flow)
-//   HAVEN_NO_NET=1          never bring the live P2P node online (offline, fast, deterministic)
+//   HAVEN_NO_NET=1          talk to NOTHING — no iroh node, no relay HTTP, no Multipeer, no
+//                           push, no S3 (offline, fast, deterministic). See `HavenNet`.
 //   HAVEN_TAB=<circle|messages|you>   which tab is selected at launch
 //   HAVEN_SCENE=<scene>     auto-present a specific scene for its hero shot
 //

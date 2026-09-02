@@ -60,6 +60,9 @@ final class PushManager: NSObject, ObservableObject {
 
     /// Ask for permission + register for remote notifications (call at launch).
     func start() {
+        // HAVEN_NO_NET: registering for remote notifications is an APNs round trip whose token then
+        // goes to the relay. The two `HavenApp` call sites already guard; this covers the rest.
+        guard !HavenNet.offline else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
             guard granted else { return }
             DispatchQueue.main.async { PlatformApp.registerForRemoteNotifications() }
@@ -77,6 +80,7 @@ final class PushManager: NSObject, ObservableObject {
     /// No PushKit on native macOS — no-op there.
     func startVoip() {
         #if os(iOS)
+        guard !HavenNet.offline else { return }   // HAVEN_NO_NET: the VoIP token goes to the relay
         guard voipRegistry == nil else { return }
         let r = PKPushRegistry(queue: .main)
         r.delegate = self
@@ -175,6 +179,10 @@ final class PushManager: NSObject, ObservableObject {
     /// FAILING status — it carries no secret (tokens are already the thing being registered), and on
     /// success there's nothing to say.
     private func post(_ path: String, _ body: [String: Any]) {
+        // HAVEN_NO_NET: every push-worker call funnels through here — register, remint, /call, /flag.
+        // Gated at the transport rather than by forcing `pushEnabled` false, which would also flip
+        // the settings copy the screenshot harness captures.
+        guard !HavenNet.offline else { return }
         // No relay configured = push deliberately off. Fail silently and let polling carry it;
         // `URL(string: "/register")` would otherwise be a relative URL and a confusing failure.
         guard Self.pushEnabled, let url = URL(string: Self.relay + path) else { return }

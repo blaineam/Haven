@@ -15,7 +15,11 @@ final class HavenUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchEnvironment["HAVEN_SKIP_ONBOARDING"] = "1"
         app.launchEnvironment["HAVEN_TAB"] = tab
-        app.launchEnvironment["HAVEN_NO_NET"] = "1"   // don't start the live P2P node in UI tests
+        // Hermetic: no iroh node, no relay HTTP, no Multipeer, no push, no S3 (see `HavenNet`).
+        // This used to gate only the node, so a simulator holding relay records from a real run
+        // still greeted the world over HTTP — and a stranger's inbound hello could raise a live
+        // connection request in the middle of a test. These tests drive local state only.
+        app.launchEnvironment["HAVEN_NO_NET"] = "1"
         return app
     }
 

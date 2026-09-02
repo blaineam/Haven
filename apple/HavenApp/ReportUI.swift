@@ -15,6 +15,7 @@ import SwiftUI
 enum ModerationLedger {
     @MainActor
     static func report(subject: String, reason: String) {
+        guard !HavenNet.offline else { return }   // HAVEN_NO_NET: no ledger row leaves the harness
         // The moderation ledger lives on the same worker as push, so it inherits the same
         // configurability — and the same "not configured = don't send" rule.
         guard !subject.isEmpty, PushManager.pushEnabled,

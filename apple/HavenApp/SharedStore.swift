@@ -145,6 +145,10 @@ final class MediaBackupQueue {
     func drainPersisted(engine: Engine) { drain(engine: engine) }
 
     private func drain(engine: Engine) {
+        // HAVEN_NO_NET: media backup is an outbound lane, and `configureForCurrentIdentity` calls
+        // `drainPersisted` BEFORE its offline guard. The queue is persisted, so refusing here only
+        // defers the work to a run that can actually deliver it — it never drops anything.
+        guard !HavenNet.offline else { return }
         guard !draining, !pending.isEmpty || !priorityPending.isEmpty else { return }
         draining = true
         Task { @MainActor in
@@ -1761,6 +1765,7 @@ enum SharedStore {
     /// speak the header simply never answers 204 and never hands us a digest — today's behavior.
     private static func httpListDelta(_ base: String, _ token: String, _ prefix: String,
                                       digest: String?) async -> Result<(keys: [String]?, digest: String?), Error> {
+        guard !HavenNet.offline else { return .failure(URLError(.notConnectedToInternet)) }
         guard let url = httpListURL(base, prefix) else { return .failure(URLError(.badURL)) }
         guard let auth = httpAuth(token, "GET", prefix, Data()) else { return .failure(URLError(.userAuthenticationRequired)) }
         var req = URLRequest(url: url, timeoutInterval: 60)
@@ -1812,6 +1817,7 @@ enum SharedStore {
     struct RelayForbidden: Error {}
 
     private static func httpGet(_ base: String, _ token: String, _ key: String) async -> Result<Data?, Error> {
+        guard !HavenNet.offline else { return .failure(URLError(.notConnectedToInternet)) }
         guard let url = httpKeyURL(base, key) else { return .failure(URLError(.badURL)) }
         guard let auth = httpAuth(token, "GET", key, Data()) else { return .failure(URLError(.userAuthenticationRequired)) }
         // 20s not 60s: a dead NAS / expired trycloudflare was burning a full minute *before*
@@ -1836,6 +1842,10 @@ enum SharedStore {
     /// needs — so the blob never lands, and the damage surfaces much later as a fetch that genuinely
     /// 404s. A real absence, manufactured by a permissions problem.
     private static func httpPut(_ base: String, _ token: String, _ key: String, _ body: Data) async -> Result<Void, Error> {
+        // HAVEN_NO_NET backstop. `httpInterface` already refuses, so no live caller reaches here —
+        // but these four primitives are the only place the app's own bytes hit the relay wire, and
+        // a future route built from a base URL and token some other way must not slip past.
+        guard !HavenNet.offline else { return .failure(URLError(.notConnectedToInternet)) }
         guard let url = httpKeyURL(base, key) else { return .failure(URLError(.badURL)) }
         // Digest over the EXACT bytes that go on the wire — `upload(for:from:)` sends `body` verbatim.
         guard let auth = httpAuth(token, "PUT", key, body) else { return .failure(URLError(.userAuthenticationRequired)) }

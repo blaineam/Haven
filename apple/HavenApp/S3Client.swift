@@ -100,6 +100,9 @@ struct S3Client {
     // MARK: - SigV4
 
     private func signedRequest(method: String, path: String, query: [(String, String)], payload: Data) throws -> URLRequest {
+        // HAVEN_NO_NET: every bucket op is signed here first, so one guard closes PUT/GET/HEAD/LIST.
+        // `headObjectExists` reads the throw as nil — "no HTTP response at all", which is the truth.
+        guard !HavenNet.offline else { throw S3Error.bad("offline (HAVEN_NO_NET)") }
         let host = endpoint
         let now = Date()
         let amzDate = Self.iso8601.string(from: now)
@@ -173,12 +176,14 @@ struct S3Client {
 
     /// Plain HTTPS GET of a pre-signed URL (members fetching the mailbox).
     static func getURL(_ url: URL) async -> Data? {
+        guard !HavenNet.offline else { return nil }
         guard let (data, resp) = try? await URLSession.shared.data(from: url),
               let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
         return data
     }
     /// Plain HTTPS PUT to a pre-signed URL (members writing to the mailbox).
     static func putURL(_ url: URL, data: Data) async -> Bool {
+        guard !HavenNet.offline else { return false }
         var req = URLRequest(url: url); req.httpMethod = "PUT"; req.httpBody = data
         guard let (_, resp) = try? await URLSession.shared.upload(for: req, from: data),
               let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return false }

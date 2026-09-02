@@ -94,6 +94,10 @@ final class BackgroundUploader {
     /// Upload everything still pending, holding a background-task assertion so it can finish
     /// after the app leaves the foreground. Items that fail stay queued for the next attempt.
     func flush() async {
+        // HAVEN_NO_NET: authoring still queues (and the queue is persisted, so nothing is lost —
+        // a later online run delivers it), but a flush that cannot reach a relay would just
+        // re-arm `scheduleRetry` every few seconds for the length of a UI-test run.
+        guard !HavenNet.offline else { return }
         guard !flushing, !queue.isEmpty else { return }
         flushing = true
         defer { flushing = false }

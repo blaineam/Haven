@@ -44,11 +44,11 @@ final class HavenAppDelegate: NSObject, UIApplicationDelegate {
         // since boot. Synchronous on purpose (a queued Task can land after launch returns);
         // didFinishLaunching runs on the main thread, so main-actor isolation holds. The
         // onAppear call remains — startVoip is idempotent.
-        // …except under the offline/screenshot harness: HAVEN_NO_NET means "never bring the node
-        // online or touch the push relay", and PushKit registration does exactly that (it goes on
-        // to register a VoIP token with the relay). The onAppear startVoip below is already gated
-        // the same way — this is the launch path that wasn't.
-        if ProcessInfo.processInfo.environment["HAVEN_NO_NET"] != "1" {
+        // …except under the offline/screenshot harness: HAVEN_NO_NET means "this process talks to
+        // nothing" (see `HavenNet`), and PushKit registration is a relay round trip — it registers
+        // a VoIP token with the push worker. The onAppear startVoip below is already gated the same
+        // way; `PushManager` refuses at its own door too, so neither is load-bearing on its own.
+        if !HavenNet.offline {
             MainActor.assumeIsolated { PushManager.shared.startVoip() }
         }
         #if os(iOS)
@@ -356,7 +356,7 @@ struct HavenApp: App {
                 #endif
                 // Screenshot/offline harness: never raise the system notification prompt or
                 // touch the push relay — it would photobomb the captures and needs the network.
-                guard ProcessInfo.processInfo.environment["HAVEN_NO_NET"] != "1" else { return }
+                guard !HavenNet.offline else { return }
                 NotificationManager.shared.requestAuthorization()
                 PushManager.shared.start()   // register for real push via the relay
                 PushManager.shared.startVoip()   // PushKit VoIP so calls ring from killed/locked

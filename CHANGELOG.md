@@ -31,6 +31,30 @@ only a completed refresh moves that mark — to an event's own time, never to th
 that arrives late still lands. The first launch on this build asks for everything once, which fills
 back in whatever the old behaviour had already dropped.
 
+### Fixed — the offline test harness is now genuinely offline
+
+`HAVEN_NO_NET=1` is the flag the UI tests and the screenshot capture run under, and it only ever
+skipped bringing the iroh node up. That was never the whole app. The relay **HTTP** lane is a plain
+`URLSession` against relay records already on disk — no node, no discovery, no handshake — so a
+simulator that had ever carried a real identity kept talking to the world with the flag set. A
+captured `HavenUITests` run put hellos on a relay, fanned out to five accounts, and pulled in an
+inbound connection request from a stranger's account that raised a live "wants to connect" banner
+in the middle of a test.
+
+The leak was structural rather than a missed call site: the timers that drive the fan-out are
+re-armed by every foreground transition, which never passed through the launch-time guard at all.
+So the flag is enforced where the bytes leave. No relay reports a usable HTTP interface; the raw
+relay HTTP primitives refuse behind that; and S3 and pre-signed URLs, the push relay, the
+moderation ledger, the WebSocket call hairpin, cloudflared, the hosted relay server, Multipeer
+discovery and the notification extension's mailbox prefetch each refuse at their own entry point.
+The schedulers that would seal envelopes for a lane that will drop them don't arm either, so a
+harness run is quiet and cheap instead of merely doomed.
+
+Measured on the same binary, same simulator, same log predicate, with only the flag differing: 150
+seconds under the flag produced zero network lines, where 35 seconds without it produced a hello
+fan-out, a relay HTTP PUT and 127 further transport lines. That non-determinism is what turned the
+Activity ordering bug above into an intermittent one.
+
 ### Changed — Android in-call audio routing now uses the API the platform still supports
 
 The speaker button drove `AudioManager.isSpeakerphoneOn`, which Android deprecated in API 31 in

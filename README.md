@@ -52,15 +52,13 @@ S3-compatible bucket, or a direct peer-to-peer link.
 
 ## Status
 
-**1.1 is live on the App Store for iPhone, iPad, and Mac**
-(https://apps.apple.com/app/id6782147901 — **1.1.0** is a reliability + polish release: multi-device
-changes reconciled by who changed them last, durable story/media uploads, a rebuilt story video
-camera, a much steadier feed, and story-sound previewing. It builds on **1.0.7**, the security release:
-seedless device linking, the cryptographic-revocation machinery, storage management,
-and an MLS-style group layer that is enabled for circles with a verified owner, i.e. the ones you
-make from 1.0.7 on (existing circles keep the encryption they already have unless their creator
-offers an upgrade and each member follows it) — see
-[`CHANGELOG.md`](CHANGELOG.md))
+**1.8.3 is live on the App Store for iPhone and iPad**
+(https://apps.apple.com/app/id6782147901 — the **Mac** build of 1.8.3 is in review; 1.8.1 is what's
+live on the Mac today). 1.8.x is the delivery-and-responsiveness stretch: **offline friend invites**
+(add someone while their app is closed), authored posts and reactions that retry until they land
+instead of waiting for the author to relaunch, a feed that stopped re-decoding its own thumbnails,
+and a launch/foreground freeze chased stack by stack until the main thread no longer waits on the
+engine at all — see [`CHANGELOG.md`](CHANGELOG.md))
 and **Windows is live on the Microsoft Store**
 (https://apps.microsoft.com/store/detail/9NKTFH1MF4LM).
 **Android is live on Google Play**
@@ -70,7 +68,7 @@ anymore. The **Linux** installers and
 the `haven-relay` daemon still ship on GitHub Releases (free). Per the
 [channel policy](docs/RELEASING.md), each platform ships through its own store and
 **GitHub Releases carry only the storeless Linux + relay builds** — so you download
-the paid iPhone/Mac/Android/Windows app from its store, never from a release tarball. It's been used device-to-device over the real internet and a
+the free iPhone/Mac/Android/Windows app from its store, never from a release tarball. It's been used device-to-device over the real internet and a
 nearby Bluetooth/Wi-Fi mesh daily. Done so far:
 
 - **Hybrid post-quantum core** (`haven-p2p`) — identity (Ed25519+ML-DSA, X25519+ML-KEM-768),

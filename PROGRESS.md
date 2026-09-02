@@ -5,7 +5,122 @@ Updated continuously. (Times in your local day.)
 
 ---
 
-## 🆕 Latest wave (built, batched for next upload)
+## 🆕 Latest waves (newest first)
+- **1.8.4 — the UI stops touching the engine (in development, nothing shipped yet)** — 1.8.3 fixed
+  the launch freeze one stack at a time; this wave is the *shape* that kept producing them.
+  `FeedStore` held the engine handle directly and ~175 of its calls still ran on the main actor:
+  every post, comment and reaction sealed a hybrid post-quantum signature there, approving a friend
+  re-sealed the whole history there, and the circle/member/device reads views paint from fell back
+  to the engine on a cache miss — each one a lottery against an unfair mutex a background drain
+  might hold for seconds. There is one door now: an `Engine` actor that owns the handle and can only
+  be called as `await engine.run { … }`, so a synchronous main-actor call no longer compiles; a read
+  model of plain value snapshots for the views; mutations as fire-and-forget requests whose seal
+  runs on the actor; and a tripwire that crashes development and QA builds naming the caller if an
+  engine call ever lands on main — which makes the four-client e2e fleet the proof that nothing
+  slipped back, not just that the features work. Alongside it: a single connection request could
+  blank the Activity bell of everything older than an hour, permanently (the incremental window was
+  measured from whichever row was newest, and app-layer rows are stamped with the clock, so it
+  clamped itself to "the last hour" and stayed there); an Android hangup now ends the call it
+  *names* — the release matrix caught the previous call's replayed BYE arriving 0.9 s into the next
+  ring, tearing it down and tombstoning the new session, so the thirty-odd invite retransmits over
+  the next 34 s were all dropped as "we already left it";
+  Android in-call routing moved to `setCommunicationDevice` on API 31+ without yanking a live call
+  out of a paired headset; the desktop leg stopped fighting itself for its own relay slot (its
+  lockfile still pinned the iroh 1.0.0 the core left in July, a fallback client bound a *second*
+  endpoint under the same device key and stole the registration from the real node, roster
+  verification held the engine and prefs locks, and it was the only leg of the fleet running the
+  Rust core unoptimized — 17–49 s parks behind single `receive()` calls); and `HAVEN_NO_NET=1`
+  finally means the process talks to nothing at all, enforced where the bytes leave rather than at
+  launch. Measured on the same binary: 150 s under the flag produced zero network lines, where 35 s
+  without it produced a hello fan-out, a relay PUT and 127 more transport lines — a test simulator
+  had been pulling in live connection requests from strangers mid-run, which is what made the
+  Activity bug intermittent in the first place. **Next:** finish the wave, then cut it once 1.8.3
+  is approved everywhere.
+- **1.8.3 — the freeze after launch is gone (2026-09-02, Apple + Android)** — reported as "locks up
+  for a few seconds right after launch or foregrounding, then runs silky". A main-thread stall
+  detector in development builds made every freeze name itself, and every one was the same shape:
+  the main thread waiting on the engine's lock while a background job held it, or doing engine work
+  itself. All of them, in the order they were caught — the mailbox drain runs 6 envelopes per hold
+  with 3 ms of air between slices, so a parked main thread wins the lock inside a slice; the upload
+  retry queue moved off a synchronous cfprefsd round-trip (0.65 s on launch's first enqueue) into a
+  file a serialized background actor writes; self-sync roster ingest runs off-main one wire at a
+  time (it was blocking 1.4–1.9 s per foreground sync, once 9.5 s); the relay LIST-delta parse and
+  the contact device-hint decode came off main (0.5 s, and 0.40–0.50 s on *every* send); the account
+  and device ids are cached once identity is adopted, turning 47 lock-taking FFI reads into string
+  copies; and `persist()` is a 2.5 s trailing debounce so the launch export stops contending with
+  the launch reads. Measured on the reporting phone across successive launches: 2.05 s → 0.49 s →
+  **zero** blocked entries after the first render. The same parks were the 2 AM background watchdog
+  kill (0x8BADF00D) — the system created a scene to drain an overnight push, the main thread parked
+  behind that drain, and it crossed the 30 s watchdog. One root cause, two symptoms.
+  The phone also runs cooler: per-chunk download progress was published on the whole feed store
+  (a captured `1101 publishes in 5 s`, each re-rendering every visible post) and now lives on its
+  own small observable that only the media placeholders watch — 7 publishes and 1 post-body
+  evaluation per 5 s, and the main thread's share of the first 30 s of CPU fell from ~55–70 % to
+  ~24 %, thermal state nominal through every sample.
+  Two things rode along. The Shazam song-credit chip now names the song in videos *you* film —
+  nothing you shot yourself had ever been fingerprinted, only imported reels — and the reason it
+  rarely worked even there was that every signature overshot Shazam's 12 s catalog limit by about a
+  tenth of a second and came back as error 201, which the code read as a rate limit and retried for
+  an hour, per post. Default on, opt-out in Settings ▸ Song credits; only a short audio fingerprint
+  ever leaves, never the video. And the Mac app went Apple-silicon-only — Apple's 2026-09 notice
+  lets a macOS 13+ Mac App Store app drop Intel, and macOS 27 is arm64 anyway — with a post-embed
+  phase stripping the slices out of the WebRTC binary Xcode copies whole: 121 MB → 107 MB.
+  **Where it actually is:** live on the App Store for iPhone and iPad; the Mac build is *waiting for
+  review*; Google Play has it in production; the Microsoft Store submission is in certification; the
+  Linux packages and relay binaries are on the `v1.8.3` GitHub release.
+- **1.8.1 — a feed that stops cooking the phone (2026-08-29, Apple)** — the feed had gone choppy and
+  the phone ran hot browsing media *already on the device*, worst since the Instagram import landed.
+  Four independent causes, all about feed-sized bytes. iOS feed thumbnails re-decoded the multi-MB
+  source on every scroll-back once the 48 MB in-memory cache churned — off-main, but the sustained
+  CPU thermal-throttled the phone into dropped frames, which was the choppiness *and* the
+  heat-with-nothing-to-sync; each ref decodes once now and persists as a small JPEG in Caches
+  (content-addressed refs never need invalidating, and Caches stays evictable). The import's raw
+  fallback sealed full-res originals whenever the webview refused a file, so a multi-megapixel still
+  synced to every phone; it re-encodes in Rust to the composer's own 1600px target with a matching
+  ≤32 KB thumbnail. Every `PostCard` observed the audio coordinator solely to ask "am I the centred
+  post?", so each post crossing centre re-evaluated every visible card's ~1,500-line body — the
+  check moved down to the media leaf that already watches that signal. And presence updates
+  republished the whole store on every received packet, re-diffing the list mid-scroll; that
+  timestamp now refreshes at most once per 2 s per peer. Also here: 1.8.0's path-change recovery
+  flapped on some devices into a rebind loop that heated the phone all by itself, so the path
+  signature keys off the primary interface class only and rebinds are capped at one per 60 s. And
+  offline invite links got a lifetime you choose (7 days, 30, 90, a year, or never) plus a one-tap
+  regenerate that retires the live ticket.
+- **1.8.0 — add friends without being online together (2026-08-28, all platforms)** — invite links
+  now carry a one-time ticket (a secret plus the inviter's relays and dial hints), and both halves
+  of the first-contact handshake become sealed blobs parked under unguessable token-derived keys on
+  the inviter's own relays. Accept while the inviter's app is closed; they get the normal approval
+  prompt next launch; approve while the acceptor is offline; the acceptor completes from the parked
+  grant alone. The token path *is* the write capability, so the lane sits above the membership gate,
+  bodies are structurally verified on both transports, and everything is sealed and MAC'd from the
+  ticket secret — relays stay blind. Live handshakes still run first and win when both are online.
+  All four platforms, and the e2e `invite_offline` scenario kills the inviter mid-handshake to prove
+  it: the drop lands in 2.5 s with the inviter dead, and each side completes in ~6 s after relaunch.
+  The other half of the wave came from a field report — posts, reactions and comments sometimes
+  reached nobody until the AUTHOR closed and relaunched Haven — and the cause was structural rather
+  than a bug: every authored event got exactly one best-effort attempt per lane and no per-event
+  retry, so all recovery was bulk re-asserts that little except a relaunch re-armed. Five fixes: the
+  Apple outbox re-arms itself (an event enqueued while a flush was in flight had *nothing* scheduled
+  to send it, which every reaction burst hit, and a failed upload had no retry timer at all); a real
+  network path transition now forces the same rebind, re-announce and re-sync a relaunch performs,
+  because Wi-Fi↔cellular, VPN toggles and router reboots kill every socket while leaving the DERP
+  set — the only thing that used to trigger a rebind — untouched; `send` watches the transport's own
+  delivery ack and evicts a cached connection after 20 s without one, so a path that swallows
+  outbound while inbound keep-alives still arrive stops "succeeding" into local buffers forever;
+  desktop authored-event uploads retry with backoff until they reach a durable mailbox; and desktop
+  `comment`/`react`/`unreact` stopped vanishing on an empty circle id. QA now authors reactions and
+  comments from *every* leg, because iOS and Android had never been reaction authors under test — a
+  broken send path there was invisible.
+  **And Haven became free.** The $9.99 one-time price is gone: Google Play and the Microsoft Store
+  went Free in their consoles on 2026-08-23 (Play's switch is one-way) and the App Store followed,
+  and the site's pricing card became a *Support future development* block instead — GitHub Sponsors,
+  Ko-fi, wemiller.com/support. No ads, no tracking, no subscription, no in-app purchases; the $99/yr
+  developer account is the only thing it costs to run. Store policy became data in the same pass:
+  `appstore-metadata.md` carries the availability and price sections `rocket` audits and applies,
+  France (ANSSI crypto filing) and China (ICP filing) stay excluded, and the EU stays **on**,
+  because a free app with no IAP owes no DSA trader declaration. A plain `vX.Y.Z` tag also submits
+  iOS and macOS for review from the Xcode Cloud build of that exact commit, and Play release notes
+  finally ship in all nine locales (de-DE had been sitting at 1.3.1, zh-CN at 1.4.0).
 - **1.7.0 — calls you can trust (2026-08-23, all platforms)** — the call protocol settled for
   good: transport events never answer calls (in-call moves only on an explicit accept, on every
   platform), accepts are un-losable (answerers re-send on the caller's own invite retransmits),
@@ -401,14 +516,20 @@ Updated continuously. (Times in your local day.)
 
 ## 🚦 Shipping status
 
-- **Live on TestFlight:** build 26
-- **Built + committed, batched for next upload (one binary):** build 27
-  - 🐛 Crash-on-open fix (panic contained at the Swift-callback boundary)
-  - 🎞️ Real media optimization — 1080p video, ≤2560px photos (the toggle was cosmetic before; this is what fixes videos not sending)
-  - 📦 Chunked media transfer (512KB sealed chunks → large videos send, flat memory)
-  - 🔇 Silent mode · ❤️ double-tap heart · 🔈 tap-to-mute · 👀 see-who-reacted · 🕑 relative timestamps
-  - Honest connection status on the You page
-- ⏳ Holding uploads ~24h (hit Apple's daily upload limit) — everything below rolls into the same single build.
+Where **1.8.3** actually is, platform by platform (2026-09-02):
+
+- 📱 **iPhone · iPad** — **live on the App Store.**
+- 💻 **Mac** — **waiting for review.** 1.8.1 is what's live on the Mac today.
+- 🤖 **Android** — submitted to **Google Play production.**
+- 🪟 **Windows** — the package is in the **Microsoft Store's certification** queue. (Partner Center
+  submissions are still made by hand; CI builds the MSIX but doesn't publish it.)
+- 🐧 **Linux · Steam Deck · the `haven-relay` daemon** — **published**, on the
+  [`v1.8.3` GitHub release](https://github.com/blaineam/Haven/releases/tag/v1.8.3): `.deb`, `.rpm`,
+  AppImage, Flatpak, and relay binaries for x86_64 / aarch64 / armv7 / armv6 plus macOS and Windows.
+- 🛠️ **1.8.4** — in development. Nothing from it has shipped anywhere yet.
+
+Each platform ships through its own store; GitHub Releases carry only the storeless Linux and relay
+builds. Haven is free everywhere.
 
 ## ✅ Proven working (device-to-device, user + mom)
 Post-quantum E2E identity · invite QR + scanner + verified handshake · **two-way messaging over internet AND nearby Bluetooth/Wi-Fi mesh** · encrypted media · persistence · circle management · retention · Apple Music · scroll-driven playback.

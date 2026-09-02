@@ -344,11 +344,11 @@
     </div>
   </section>
 
-  <!-- ── What's new in 1.0.7 / security story ── -->
+  <!-- ── Security story (the 1.0.7 wave; kept version-free so it doesn't read as stale) ── -->
   <section class="section" id="security" style="padding-top:24px">
     <div class="container">
       <div class="center reveal">
-        <span class="eyebrow" data-i18n="new-in-1-0.1b500c">New in 1.0.7 · Security &amp; polish</span>
+        <span class="eyebrow" data-i18n="new-in-1-0.1b500c">Security &amp; polish</span>
         <h2 style="font-size:clamp(26px,4.5vw,40px)" data-i18n-html="harder-to-break-into.184a57">Harder to break into, <span class="h-grad">easier to tidy up.</span></h2>
         <p class="lead" data-i18n-html="the-big-security-release.edef94">
           The big security release. It quietly upgrades how your devices trust each other and how
@@ -644,7 +644,8 @@ var DOWNLOADS = {
   // Apple: legacy public TestFlight invite link. Now vestigial — iOS + macOS are LIVE on the
   // App Store, so APP_STORE_URL below always wins. Kept only as the fallback if that ever 404s.
   APPLE_BETA_URL: "",        /* TODO: paste public TestFlight invite URL only if external testing reopens */
-  // App Store product URL — live since 1.0.0; 1.0.4 is the current public build (iOS + macOS).
+  // App Store product URL — iOS + macOS both ship here. Deliberately version-free: the live
+  // build is whatever the store is serving (PROGRESS.md carries the per-platform state).
   APP_STORE_URL: "https://apps.apple.com/app/id6782147901",
   MAC_APP_STORE_URL: "https://apps.apple.com/app/id6782147901",
   // Android: store-only. The GUI app is no longer attached to GitHub releases — it ships

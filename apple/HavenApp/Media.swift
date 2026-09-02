@@ -629,7 +629,7 @@ final class MediaStore: ObservableObject {
         let cutoff = Date().addingTimeInterval(-graceSeconds)
         var bytes: Int64 = 0
         var files = 0
-        var skippedFresh = 0
+        let skippedFresh = 0
         for url in items {
             let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey])
             if vals?.isDirectory == true { continue }

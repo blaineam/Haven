@@ -166,13 +166,19 @@ struct PostMediaView: View {
         Color.clear.onAppear {
             let vids = refs.filter { isVideo($0) }
             guard !vids.isEmpty else { return }
-            let tracks = vids.map { ref -> String in
-                guard let url = MediaStore.shared.storagePath(for: ref) else { return "no-file" }
-                let n = AVURLAsset(url: url).tracks(withMediaType: .audio).count
-                return "\(ref.prefix(10))=\(n)track"
-            }.joined(separator: " ")
-            HavenLog.sync("post-audio: muteVideo=\(item.muteVideo) song=\(item.music != nil) "
-                + "silent=\(SettingsStore.shared.silent) [\(tracks)]")
+            // `tracks(withMediaType:)` is deprecated (iOS 16) in favour of the async load; same
+            // one-line summary, written once every load has settled. A failed load counts as 0
+            // tracks — what the synchronous accessor answered for an unreadable file.
+            Task {
+                var tracks: [String] = []
+                for ref in vids {
+                    guard let url = MediaStore.shared.storagePath(for: ref) else { tracks.append("no-file"); continue }
+                    let n = (try? await AVURLAsset(url: url).loadTracks(withMediaType: .audio))?.count ?? 0
+                    tracks.append("\(ref.prefix(10))=\(n)track")
+                }
+                HavenLog.sync("post-audio: muteVideo=\(item.muteVideo) song=\(item.music != nil) "
+                    + "silent=\(SettingsStore.shared.silent) [\(tracks.joined(separator: " "))]")
+            }
         }
         #else
         EmptyView()

@@ -26,8 +26,8 @@ final class AccountStore: ObservableObject {
     /// `HavenSocial.newSeedless`, and every seed-holder path is gated on `storedSeed() == nil`).
     @Published private(set) var seedless = false
 
-    private static let service = "com.blaineam.kith"
-    private static let seedKey = "account-master-seed"
+    nonisolated private static let service = "com.blaineam.kith"
+    nonisolated private static let seedKey = "account-master-seed"
     private static let syncDefaultsKey = "haven.icloud.identitySync"
 
     init() {
@@ -278,10 +278,10 @@ final class AccountStore: ObservableObject {
     // roll another device's identity. Cross-device is only ever via an explicit, user-confirmed
     // transfer code. (SE-wrapped blobs are inherently device-bound: the Enclave key can't sync.)
 
-    private static let wrappedSeedKey = "account-master-seed-se"            // ciphertext blob
+    nonisolated private static let wrappedSeedKey = "account-master-seed-se"            // ciphertext blob
     /// App-only Secure-Enclave key (default access group → unreachable by the NSE) that wraps the
     /// authoritative seed and the device-local recovery archive.
-    private static let seedBox = SecureEnclaveBox(tag: "com.blaineam.kith.seed-se-key")
+    nonisolated private static let seedBox = SecureEnclaveBox(tag: "com.blaineam.kith.seed-se-key")
 
     /// Generic-password blobs live in the **data-protection keychain** (entitlement-governed → a single
     /// implicit grant for the app, no repeated "X wants to use your keychain" prompts on macOS) rather
@@ -292,11 +292,11 @@ final class AccountStore: ObservableObject {
     /// read probes or the both-domain deletes. Its binary is re-signed every QA build, so any legacy
     /// item access re-prompts, and its items are QA fixtures with nothing to migrate. See
     /// `SecureEnclaveBox.dataProtectionKeychainOnly`; `keychainDomains` below gates the delete loops.
-    private static var keychainDomains: [Bool] {
+    nonisolated private static var keychainDomains: [Bool] {
         SecureEnclaveBox.dataProtectionKeychainOnly ? [true] : [true, false]
     }
 
-    private static func baseQuery(dataProtection: Bool = true) -> [String: Any] {
+    nonisolated private static func baseQuery(dataProtection: Bool = true) -> [String: Any] {
         var q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -308,7 +308,7 @@ final class AccountStore: ObservableObject {
 
     /// Keychain query for the SE-wrapped ciphertext blob (a generic-password item, distinct
     /// account from the legacy plaintext seed so the two can coexist during migration).
-    private static func wrappedQuery(dataProtection: Bool = true) -> [String: Any] {
+    nonisolated private static func wrappedQuery(dataProtection: Bool = true) -> [String: Any] {
         var q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -317,6 +317,11 @@ final class AccountStore: ObservableObject {
         if dataProtection { q[kSecUseDataProtectionKeychain as String] = true }
         return q
     }
+
+    /// Main-queue-only holder for a one-shot observer's token. A class, so the observer block can
+    /// read what `addObserver` returned AFTER the block was created — assigning a captured local
+    /// `var` after the capture is what Swift 6 rejects ("mutated after capture by sendable closure").
+    private final class ObserverSlot: @unchecked Sendable { var token: NSObjectProtocol? }
 
     /// Persist the seed. Prefers Secure-Enclave wrapping; falls back to a device-local plaintext
     /// item only when no Enclave is available. Always clears the *other* representation first so a
@@ -328,18 +333,20 @@ final class AccountStore: ObservableObject {
     private static func migrateLegacySeedWhenUnlocked(_ seed: Data) {
         // saveSeed → deleteSeed clears BOTH keychain domains (DP + legacy) before wrapping, so a
         // single call retires every plaintext representation.
-        func run() { DispatchQueue.global(qos: .utility).async { saveSeed(seed) } }
+        // A @Sendable closure, not a nested func: a nested func inherits this method's main-actor
+        // isolation, which the protected-data observer below (a Sendable block) cannot call.
+        let run: @Sendable () -> Void = { DispatchQueue.global(qos: .utility).async { saveSeed(seed) } }
         #if canImport(UIKit)
         DispatchQueue.main.async {
             if UIApplication.shared.isProtectedDataAvailable {
                 run()
             } else {
-                var token: NSObjectProtocol?
-                token = NotificationCenter.default.addObserver(
+                let slot = ObserverSlot()
+                slot.token = NotificationCenter.default.addObserver(
                     forName: UIApplication.protectedDataDidBecomeAvailableNotification,
                     object: nil, queue: .main
                 ) { _ in
-                    if let token { NotificationCenter.default.removeObserver(token) }
+                    if let token = slot.token { NotificationCenter.default.removeObserver(token) }
                     run()
                 }
             }
@@ -349,7 +356,11 @@ final class AccountStore: ObservableObject {
         #endif
     }
 
-    private static func saveSeed(_ data: Data, synced: Bool = false) {
+    // NONISOLATED on purpose (and everything it reaches): `migrateLegacySeedWhenUnlocked` runs this
+    // on a utility queue — a keychain write on a locked device parks in securityd (see init) — and
+    // the class-level @MainActor made that an isolation violation. These are pure keychain /
+    // Secure-Enclave helpers plus the NSLock-guarded seed cache; none touch main-actor state.
+    nonisolated private static func saveSeed(_ data: Data, synced: Bool = false) {
         invalidateSeedCache()
         deleteSeed()
         if wrapAndStore(data) { return }   // Secure-Enclave path (device hardware).
@@ -369,10 +380,10 @@ final class AccountStore: ObservableObject {
     // lifetime, so caching the successful load adds no new exposure class. Only `.found` is
     // cached — locked/SE-error keep retrying so a pre-first-unlock launch still heals — and
     // every seed mutation invalidates.
-    private static let seedCacheLock = NSLock()
-    private static var cachedSeed: Data?
-    private static var cachedNodeHex: String?
-    private static func invalidateSeedCache() {
+    nonisolated private static let seedCacheLock = NSLock()
+    nonisolated(unsafe) private static var cachedSeed: Data?       // guarded by seedCacheLock
+    nonisolated(unsafe) private static var cachedNodeHex: String?  // guarded by seedCacheLock
+    nonisolated private static func invalidateSeedCache() {
         seedCacheLock.lock(); defer { seedCacheLock.unlock() }
         cachedSeed = nil
         cachedNodeHex = nil
@@ -468,7 +479,7 @@ final class AccountStore: ObservableObject {
     /// Deletes both seed representations (the SE-wrapped ciphertext and any plaintext copy). The
     /// Secure-Enclave private key itself is intentionally LEFT in place: it holds no identity (it
     /// only wraps the seed) and is reused for the next `saveSeed`, avoiding needless key churn.
-    private static func deleteSeed() {
+    nonisolated private static func deleteSeed() {
         invalidateSeedCache()
         // Clear both the data-protection AND legacy keychains so neither representation lingers
         // (stub: DP only — see keychainDomains).
@@ -527,7 +538,7 @@ final class AccountStore: ObservableObject {
     /// Encrypt the seed to the Secure-Enclave key and persist the ciphertext blob (device-local,
     /// non-synchronizable). Returns false on any SE unavailability so `saveSeed` falls back to a
     /// plaintext item (Simulator / no-Enclave hardware only).
-    private static func wrapAndStore(_ seed: Data) -> Bool {
+    nonisolated private static func wrapAndStore(_ seed: Data) -> Bool {
         guard let cipher = seedBox.seal(seed) else { return false }
         var add = wrappedQuery()
         add[kSecValueData as String] = cipher

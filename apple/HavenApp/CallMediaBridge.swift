@@ -138,7 +138,7 @@ final class CallMediaBridge {
         #if !os(macOS)
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playAndRecord, mode: .voiceChat,
-                                 options: [.allowBluetooth, .defaultToSpeaker])
+                                 options: [.allowBluetoothHFP, .defaultToSpeaker])
         try? session.setActive(true, options: [])
         #endif
         // Hardware echo cancellation / noise suppression / AGC — the same processing WebRTC uses.

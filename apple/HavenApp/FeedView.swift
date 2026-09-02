@@ -826,11 +826,15 @@ final class FeedStore: ObservableObject {
         // repair waited for the next periodic backfill (posts invisible to a peer for a whole run).
         NotificationCenter.default.addObserver(forName: SharedStore.rosterEpochChangedNotification,
                                                object: nil, queue: .main) { [weak self] _ in
-            guard let self else { return }
-            let now = Date()
-            guard now.timeIntervalSince(self.lastEpochReseal) > 30 else { return }   // coalesce bursts
-            self.lastEpochReseal = now
-            self.backfillMailbox(circleIds: (self.social?.circles() ?? []).map(\.id))
+            // The observer block is @Sendable, so the compiler cannot see that `queue: .main` already
+            // delivers it on the main thread; hop explicitly before touching the store's state.
+            Task { @MainActor in
+                guard let self else { return }
+                let now = Date()
+                guard now.timeIntervalSince(self.lastEpochReseal) > 30 else { return }   // coalesce bursts
+                self.lastEpochReseal = now
+                self.backfillMailbox(circleIds: (self.social?.circles() ?? []).map(\.id))
+            }
         }
     }
 

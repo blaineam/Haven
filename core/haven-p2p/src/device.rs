@@ -420,12 +420,28 @@ impl DeviceList {
         let account_id = r.array32()?;
         let version = r.u64()?;
         let updated_at = r.u64()?;
+        // UNTRUSTED COUNTS. `with_capacity(n)` reserves 32·n bytes BEFORE a single entry is read,
+        // so a 4-byte wire field could ask for 137 GB; the allocator fails and the process ABORTS
+        // rather than returning an error. Rosters arrive from peers, so that is a remote DoS — one
+        // crafted blob kills the app, and no `Result` ever comes back to reject it. Found by
+        // `tests/fuzz_wire_parsers.rs` on Linux CI (a 114 GB reservation); macOS had masked it,
+        // because an over-large mapping that is never touched succeeds there.
+        //
+        // Every entry is exactly 32 bytes, so a count the remaining buffer cannot possibly hold is
+        // malformed by definition — reject it before reserving anything. The loop below would have
+        // failed on its first short read; the point is to get there without allocating first.
         let n_dev = r.u32()? as usize;
+        if n_dev > r.rest().len() / 32 {
+            return Err(CoreError::Encoding("device list: device count exceeds remaining input"));
+        }
         let mut devices = Vec::with_capacity(n_dev);
         for _ in 0..n_dev {
             devices.push(r.array32()?);
         }
         let n_rev = r.u32()? as usize;
+        if n_rev > r.rest().len() / 32 {
+            return Err(CoreError::Encoding("device list: revoked count exceeds remaining input"));
+        }
         let mut revoked = Vec::with_capacity(n_rev);
         for _ in 0..n_rev {
             revoked.push(r.array32()?);
@@ -1143,6 +1159,59 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A hostile element count must be REJECTED, not reserved for.
+    ///
+    /// `DeviceList::from_bytes` used to `Vec::with_capacity(n)` straight off a 4-byte wire field,
+    /// so `n = u32::MAX` asked the allocator for 32 × 4.29e9 = 137 GB. On Linux that aborts the
+    /// process (SIGABRT on allocation failure) — a remote DoS, because rosters come from peers and
+    /// no `Result` is ever returned to reject the blob. macOS masked it: an over-large mapping that
+    /// is never written succeeds there, which is why this only turned red in CI.
+    ///
+    /// Asserts the parser RETURNS (an error, promptly) instead of dying. If this regresses, the
+    /// test process aborts rather than failing — that abort IS the signal.
+    #[test]
+    fn hostile_device_counts_are_rejected_without_allocating() {
+        for count in [u32::MAX, 0x7FFF_FFFF, 0x0FFF_FFFF] {
+            for which in ["devices", "revoked"] {
+                let mut b = Vec::new();
+                b.extend_from_slice(&[0u8; 32]); // account_id
+                b.extend_from_slice(&7u64.to_le_bytes()); // version
+                b.extend_from_slice(&0u64.to_le_bytes()); // updated_at
+                if which == "devices" {
+                    b.extend_from_slice(&count.to_le_bytes()); // hostile device count
+                } else {
+                    b.extend_from_slice(&0u32.to_le_bytes()); // no devices
+                    b.extend_from_slice(&count.to_le_bytes()); // hostile revoked count
+                }
+                b.extend_from_slice(&[0xAB; 8]); // far less data than the count claims
+                assert!(
+                    DeviceList::from_bytes(&b).is_err(),
+                    "{which} count {count:#x} backed by 8 bytes must be rejected, not reserved for"
+                );
+            }
+        }
+    }
+
+    /// The bound must not reject a LEGITIMATE roster — the guard is `count > remaining/32`, so an
+    /// honest list whose entries are all present still parses. Without this the fix could "pass"
+    /// by rejecting everything.
+    #[test]
+    fn honest_device_list_still_round_trips_after_the_count_bound() {
+        let l = DeviceList {
+            account_id: [1u8; 32],
+            version: 3,
+            updated_at: 99,
+            devices: vec![[2u8; 32], [3u8; 32]],
+            revoked: vec![[4u8; 32]],
+            account_leaf_retired: true,
+            sig: vec![0xEE; 96],
+        };
+        let parsed = DeviceList::from_bytes(&l.to_bytes()).expect("honest roster must parse");
+        assert_eq!(parsed, l);
+    }
+
     use super::*;
     use crate::identity::Identity;
 

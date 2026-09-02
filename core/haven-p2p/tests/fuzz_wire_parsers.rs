@@ -656,7 +656,11 @@ fn hostile_element_counts_do_not_preallocate() {
     let _quiet = QuietPanics::install();
     for t in &ts {
         for count in [u32::MAX, 0x7FFF_FFFF, 0x00FF_FFFF] {
-            for prefix_len in [0usize, 1, 4, 8, 16, 32] {
+            // Sweep every offset a count could sit at, not a hand-picked few. The
+            // DeviceList pre-allocation DoS lived at offset 48 (32 id + 8 version + 8
+            // updated_at) and this test walked straight past it — the mutation fuzzer
+            // caught it instead. A dense sweep makes this the direct regression guard.
+            for prefix_len in 0usize..=64 {
                 let mut b = vec![0u8; prefix_len];
                 b.extend_from_slice(&count.to_le_bytes());
                 b.extend_from_slice(&[0u8; 8]);

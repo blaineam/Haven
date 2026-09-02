@@ -34,11 +34,12 @@ privado,cifrado,familia,amigos,mensajería,seguro,sin conexión,llamadas,sin anu
 Gratis. Un hogar privado y cifrado de extremo a extremo para los tuyos: sin anuncios, sin rastreo, sin suscripción. Peer-to-peer, poscuántico, tuyo.
 
 ## whats_new
-1.8.1 — Feed más fluido, teléfono más fresco.
+1.8.3 — Se acabaron los bloqueos al abrir, y tus vídeos saben qué canción suena.
 
-• El feed vuelve a desplazarse con fluidez y Haven ya no calienta el teléfono mientras ves fotos y vídeos que ya están en tu dispositivo, incluso bibliotecas grandes importadas de Instagram.
-• Ahora tú controlas tus enlaces de invitación sin conexión: elige cuánto tiempo sigue siendo válido un enlace —7 días, 30, 90, un año o nunca— y vuelve a generarlo cuando quieras para anular el anterior.
-• Además, una corrección de red para que la app trabaje menos cuando cambia tu conexión.
+• El bloqueo de unos segundos justo después de abrir Haven, o de volver a la app, ha desaparecido — y con él el cierre inesperado nocturno en segundo plano que provocaba.
+• El teléfono se mantiene más fresco: el feed ya no redibuja todas las publicaciones mientras una foto o un vídeo siguen descargándose.
+• Créditos de canción en los vídeos: publica un vídeo con música y Haven identifica la canción como un pequeño crédito; el vídeo conserva su propio sonido. Los vídeos antiguos reciben el suyo la primera vez que los reproduces, y en Ajustes → Créditos de canción puedes volver a analizar los importados. Al servicio Shazam de Apple solo se envía una breve huella de audio, nunca el vídeo; puedes desactivarlo en Ajustes.
+• En el Mac, Haven ahora se compila solo para chips de Apple y la descarga es más ligera.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

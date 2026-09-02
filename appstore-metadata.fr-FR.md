@@ -34,11 +34,12 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Gratuit. Un espace privé, chiffré de bout en bout, pour vos proches — sans pub, sans suivi, sans abonnement. Pair‑à‑pair, post‑quantique, à vous.
 
 ## whats_new
-1.8.1 — Fil plus fluide, téléphone plus frais.
+1.8.3 — Plus de blocage à l'ouverture, et vos vidéos connaissent leurs chansons.
 
-• Le fil défile de nouveau sans à-coups, et Haven ne fait plus chauffer votre téléphone lorsque vous parcourez des photos et vidéos déjà présentes sur l'appareil — même les grandes bibliothèques importées d'Instagram.
-• Vos liens d'invitation hors ligne sont désormais entre vos mains : choisissez leur durée de validité — 7 jours, 30, 90, un an ou jamais — et régénérez-en un à tout moment pour révoquer l'ancien.
-• Et une correction réseau pour que l'app travaille moins lorsque votre connexion change.
+• Le blocage de quelques secondes juste après l'ouverture de Haven, ou au retour dans l'app, a disparu — et avec lui le plantage nocturne en arrière-plan qu'il provoquait.
+• Votre téléphone reste plus frais : le fil ne redessine plus chaque publication pendant qu'une photo ou une vidéo se télécharge encore.
+• Crédits musicaux sur les vidéos : publiez une vidéo avec de la musique et Haven nomme la chanson dans un petit crédit — la vidéo garde son propre son. Vos anciennes vidéos reçoivent le leur à la première lecture, et Réglages → Crédits musicaux permet de réanalyser celles que vous avez importées. Seule une courte empreinte audio est envoyée au service Shazam d'Apple, jamais la vidéo ; désactivable dans les Réglages.
+• Sur Mac, Haven est désormais conçu uniquement pour les puces Apple, et le téléchargement est plus léger.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

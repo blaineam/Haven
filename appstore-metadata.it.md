@@ -34,11 +34,12 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Gratis. Una casa privata e crittografata end‑to‑end per i tuoi cari — niente pubblicità, niente tracciamento, nessun abbonamento. Peer‑to‑peer, post‑quantistica, tua.
 
 ## whats_new
-1.8.1 — Feed più fluido, telefono più fresco.
+1.8.3 — Niente più blocchi all'apertura, e i tuoi video conoscono le loro canzoni.
 
-• Il feed scorre di nuovo in modo fluido e Haven non surriscalda più il telefono mentre sfogli foto e video già presenti sul dispositivo, comprese le raccolte di grandi dimensioni importate da Instagram.
-• Ora i tuoi link d'invito offline sono nelle tue mani: scegli per quanto tempo un link resta valido — 7 giorni, 30, 90, un anno o mai — e rigeneralo quando vuoi per revocare quello vecchio.
-• Inoltre una correzione di rete per far lavorare meno l'app quando cambia la connessione.
+• Il blocco di qualche secondo subito dopo l'apertura di Haven, o al ritorno nell'app, è sparito — e con lui l'arresto notturno in background che causava.
+• Il telefono resta più fresco: il feed non ridisegna più ogni post mentre una foto o un video è ancora in download.
+• Crediti musicali sui video: pubblica un video con della musica e Haven ne indica la canzone con un piccolo credito — il video mantiene il proprio audio. I video più vecchi ricevono il loro alla prima riproduzione, e da Impostazioni → Crediti musicali puoi rianalizzare quelli importati. Al servizio Shazam di Apple viene inviata solo una breve impronta audio, mai il video; puoi disattivarlo nelle Impostazioni.
+• Su Mac, Haven ora è compilato solo per i chip Apple e il download è più leggero.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

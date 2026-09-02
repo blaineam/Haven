@@ -34,11 +34,12 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Kostenlos. Ein privates, Ende-zu-Ende verschlüsseltes Zuhause für deine Liebsten – keine Werbung, kein Tracking, kein Abo. Peer-to-Peer, Post-Quanten-sicher, deins.
 
 ## whats_new
-1.8.1 — Flüssigerer Feed, kühleres Telefon.
+1.8.3 — Kein Einfrieren mehr beim Öffnen, und deine Videos kennen ihre Songs.
 
-• Der Feed scrollt wieder flüssig, und Haven erhitzt dein Telefon nicht mehr, während du bereits geladene Fotos und Videos durchblätterst — selbst große aus Instagram importierte Sammlungen.
-• Deine Offline-Einladungslinks liegen jetzt in deiner Hand: Lege fest, wie lange ein Link gültig bleibt — 7 Tage, 30, 90, ein Jahr oder nie — und erzeuge ihn jederzeit neu, um den alten Link außer Kraft zu setzen.
-• Außerdem eine Netzwerk-Korrektur, damit die App bei einem Verbindungswechsel weniger arbeitet.
+• Das kurze Einfrieren direkt nach dem Öffnen von Haven oder beim Zurückkehren in die App ist behoben — und damit auch der nächtliche Absturz im Hintergrund, den es verursacht hat.
+• Dein Telefon bleibt kühler: Der Feed zeichnet nicht mehr jeden Beitrag neu, solange ein Foto oder Video noch lädt.
+• Song-Credits auf Videos: Poste ein Video mit Musik, und Haven nennt den Song als kleinen Hinweis — das Video behält seinen eigenen Ton. Ältere Videos bekommen ihren Credit beim ersten Abspielen, und unter Einstellungen → Song-Credits kannst du importierte Videos erneut prüfen lassen. An Apples Shazam-Dienst geht nur ein kurzer Audio-Fingerabdruck, nie das Video; in den Einstellungen lässt sich das abschalten.
+• Auf dem Mac ist Haven jetzt nur noch für Apple-Chips gebaut, und der Download ist kleiner.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

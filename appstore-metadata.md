@@ -32,21 +32,19 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Free. A private, end‑to‑end encrypted home for your closest people — no ads, no tracking, no subscription. Peer‑to‑peer, post‑quantum, yours.
 
 ## whats_new
+1.8.3 — No more freeze on open, and your videos name their songs.
+
+• The few-second lockup right after opening Haven, or coming back to it, is gone — and with it the overnight crash it was causing in the background.
+• Your phone stays cooler: the feed no longer redraws every post while a photo or video is still downloading.
+• Song credits on videos: post a video with music in it and Haven names the song as a small credit — the video keeps its own sound. Older videos get theirs the first time you play them, and Settings → Song credits can rescan the ones you imported. Only a short audio fingerprint goes to Apple's Shazam service, never the video; switch it off in Settings if you prefer.
+• On the Mac, Haven is now built for Apple silicon only, and the download is smaller.
+
+## whats_new_previous
 1.8.1 — Smoother feed, cooler phone.
 
 • Scrolling the feed is smooth again, and Haven no longer heats up while you browse photos and videos already on your device — even large libraries you brought in from Instagram.
 • You control your offline invite links now: choose how long a link stays valid — 7 days, 30, 90, a year, or never — and regenerate one any time to retire the old link.
 • Plus a networking fix so the app works less hard when your connection changes.
-
-## whats_new_previous
-1.7.0 — Calls, rebuilt to be trustworthy.
-
-• Answering now always takes effect: a call can no longer connect "underneath" your ring screen — accept works the moment you tap it, on every platform.
-• Callers only see "Connected" when the other side has actually answered — never before, and never stuck on "Calling…" while audio is already flowing.
-• Unanswered calls end cleanly after a minute on both ends — no more phantom calls that ring forever.
-• The desktop call screen was rebuilt: full-screen stage, picture-in-picture camera, live speaker highlighting, device pickers — and minimizing docks the call into a tab so you can keep browsing.
-• Faces everywhere: contacts' chosen emoji and photos now appear in calls and threads on desktop.
-• Includes the 1.6.1 stability wave: the multi-device circle key fork is fixed for good, an iPhone launch crash is gone, roster changes finish in seconds, and photo previews cross satellite links.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

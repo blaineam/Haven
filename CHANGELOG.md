@@ -7,66 +7,99 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 1.8.2 — 2026-09-01
+## 1.8.3 — 2026-09-02
 
-### Fixed — the foreground freeze finally has names (and so does the 2 AM watchdog kill)
+### Fixed — the freeze after launch and foreground is gone (and so is the 2 AM watchdog kill)
 
 Field report: Haven locked up for a few seconds right after launch or foregrounding, then ran
-silky. A DEBUG-only main-thread stall detector (ported from Ari; it probes the main queue and
-appends a symbolicated main-thread stack to `Library/Caches/HavenStalls.log` whenever a probe
-misses by 0.4 s, pullable with `devicectl device copy`) made every freeze name itself. Five parks,
-all inside the sync burst a foreground kicks off, each caught on a real account:
+silky. A main-thread stall detector in development builds made every freeze name itself, and the
+answer was always the same shape: the main thread waiting on the engine's lock while a background
+job held it, or doing engine work itself. Every one of those, in the order they were caught:
 
-- **The mailbox drain is sliced.** One monolithic EngineGate pass re-acquired the barging engine
-  mutex back-to-back for the whole backlog, so any main-thread `social.*` touch parked for the entire
-  drain. Now 6 envelopes per hold with 3 ms of air between slices — a parked main thread wins the
-  lock within a slice.
-- **The upload queue is off cfprefsd.** `BackgroundUploader` persisted its queue (full sealed
-  envelopes) into UserDefaults on the main actor per enqueue/flush — a synchronous cfprefsd XPC
-  round-trip caught blocking main 0.65 s on launch's first enqueue. The queue now lives in an
-  Application Support file written by a serialized background actor (debounced 100 ms), with a
-  one-time migration off the legacy prefs blob.
-- **SelfSync roster ingest runs off-main.** `applyLocal`'s roster loop drained pending epoch events
-  on the main actor, and every drained event re-verified device credentials — cloning ML-DSA-65
-  verifying keys per contact device: 1.4–1.9 s blocked per foreground sync. The loop now hops to a
-  utility task inside EngineGate like every other engine mutation.
+- **The mailbox drain is sliced.** One monolithic pass re-acquired the engine lock back-to-back for
+  the whole backlog, so any main-thread engine touch parked for the entire drain. Now 6 envelopes
+  per hold with 3 ms of air between slices — a parked main thread wins the lock within a slice.
+- **The upload queue is off cfprefsd.** The retry queue persisted full sealed envelopes into
+  UserDefaults on the main actor per enqueue/flush — a synchronous cfprefsd round-trip caught
+  blocking main 0.65 s on launch's first enqueue. The queue now lives in an Application Support
+  file written by a serialized background actor, with a one-time migration off the prefs blob.
+- **Self-sync roster ingest runs off-main, one wire at a time.** Every roster wire drains pending
+  epoch events and re-verifies device credentials (ML-DSA key expansion per contact device):
+  1.4–1.9 s blocked per foreground sync, and later a single 9.5 s hold of the engine. The loop runs
+  off the main actor and holds the engine one wire at a time with air between wires.
 - **The relay LIST-delta parse runs off-main.** Tens of thousands of newline-split keys were split
-  on the main actor (0.5 s caught). Detached utility parse, zero isolation ripple.
-- **Contact device hints decode once.** The last capture — repeated 0.40–0.50 s blocks on every
-  iroh send: `FeedStore.contactDeviceHints` re-read the invite-hint dictionary out of UserDefaults
-  and conditionally bridged the whole thing to `[String: [String]]` on the main actor per
-  `sendIroh`. It, and the per-DM "cleared before" watermark that sat on the chat-body paint path,
-  now decode once into a typed mirror the single writer keeps in step: each lookup is a native O(1)
-  dictionary read.
-- **The engine mutex is no longer taken on the main actor during launch or foreground.** With the
-  parks above gone, the detector's next captures were the sync burst itself losing the engine's
-  unfair `std::sync::Mutex` to the launch export and the first mailbox-drain slices: 2.05 s in
-  `bringOnline → syncWithContacts → dialTargets → myNodeHex()`, 4.09 s in `pullMailbox →
-  handleRelayNode → contactNodeIds`, 0.98 s in `sendIroh`'s device-id expansion (a `Task {}` inherits
-  the main actor), 0.49 s in the own-device live-deliver lane. Three fixes: the account and device
-  ids are cached once identity is adopted (47 lock-taking reads become string copies); the sync pass
-  snapshots its inputs, gathers every engine read in one `EngineGate` pass off-main and applies on
-  main against that snapshot (`sendIroh`, live-deliver, relay announces, the epoch-head publish and
-  the held-media probe follow the same shape); and `persist()` is a 2.5 s trailing-edge debounce, so
-  the launch export runs after the launch reads instead of under them (the mailbox drain keeps an
-  immediate export ahead of its seen-marks; backgrounding and identity teardown flush). Measured on
-  the reporting phone: zero `blocked` entries after the first render.
-- **The engine boot, the launch flush, media backfill and the DM member reads followed.** With
-  the hold log naming the lock holder (`[EngineHold]` lines next to each stall), the last parks
-  were the boot's ML-DSA key expansion under the first render, the launch upload flush hashing keys
-  and loading the seen-set on main, the Watch snapshot reading every DM's members per store
-  publish, the media backfill's feed walk, and `SharedStore`'s roster publish/adopt/fetch — all now
-  off the main actor; the self-sync roster ingest holds the engine one wire at a time instead of
-  9.5 s in one go, and the media-backup seal runs under the same gate as everything else.
-- **Media transfer state is its own observable.** Per-chunk download progress was `@Published` on
-  the whole feed store — most of a `1101 publishes in 5 s` capture — and every publish re-rendered
-  every visible post. It now lives on `MediaTransferState`, observed only by the placeholders,
-  publishing on change and at most ~10×/s.
-- **Debug builds only:** a thermal + CPU sampler (`Library/Caches/HavenThermal.log`, every 30 s,
-  top threads by name, with the publish/body census lines) sits next to the stall detector, and
-  the matrix-QA heartbeat dump — which serialized the whole account every 5 s in every Debug
-  build — now runs only where an orchestrator can be watching (simulator, a QA launch env, or
-  after a QA command).
+  on the main actor (0.5 s caught).
+- **Contact device hints decode once.** The invite-hint dictionary was re-read out of UserDefaults
+  and bridged to `[String: [String]]` on the main actor on every send (0.40–0.50 s each); it, and
+  the per-DM "cleared before" watermark on the chat-body paint path, now decode once into a typed
+  mirror the single writer keeps in step.
+- **The engine lock is no longer taken on the main actor during launch or foreground.** The sync
+  burst lost the engine's unfair mutex to the launch export and the first drain: 2.05 s in
+  `dialTargets → myNodeHex()`, 4.09 s in `handleRelayNode → contactNodeIds`, 0.98 s in `sendIroh`'s
+  device-id expansion, 0.49 s in the own-device live-deliver lane. The account and device ids are
+  cached once identity is adopted (47 lock-taking reads become string copies); the sync pass
+  snapshots its inputs, gathers every engine read in one gated pass off-main and applies on main
+  against that snapshot; `sendIroh`, live-deliver, relay announces, the epoch-head publish and the
+  held-media probe follow the same shape; and `persist()` is a 2.5 s trailing-edge debounce so the
+  launch export runs after the launch reads instead of under them (the mailbox drain keeps an
+  immediate export ahead of its seen-marks; backgrounding and identity teardown flush).
+- **The engine boot, the launch flush, media backfill and the DM member reads followed.** The
+  boot's ML-DSA key expansion ran under the first render (0.83 s); the launch upload flush hashed
+  keys and loaded the seen-set on main (0.6 + 0.5 s); the Watch snapshot read every DM's members
+  from the engine on every store publish (2.59 s); the media backfill walked feeds on main
+  (1.66 s); `SharedStore`'s roster publish/adopt/fetch called the engine from the main actor. All
+  of it now runs off the main actor — the boot in one gated pass, circle members from a cache that
+  is filled right after boot and kept fresh by the off-main readers — and the media-backup seal
+  runs under the same gate as everything else, so nothing holds the engine lock unseen.
+
+Measured on the reporting phone across successive launches: 2.05 s → 0.49 s → **zero** blocked
+entries after the first render.
+
+The same parks were the 2 AM background scene-create watchdog kill (0x8BADF00D): the system created
+the scene to drain an overnight push, the main thread parked behind that same drain, and it crossed
+the 30 s watchdog. One root cause, two symptoms.
+
+### Fixed — a cooler phone
+
+Per-chunk download progress was published on the whole feed store — most of a captured
+`1101 publishes in 5 s` — and every publish re-rendered every visible post. Transfer state now lives
+on its own small observable that only the media placeholders watch, publishing on change and at
+most ~10×/s. Measured after launch on the reporting phone: 7 store publishes and 1 post-body
+evaluation per 5 s (from 1101 and 24), and the main thread's share of the first 30 s of CPU fell
+from ~55–70 % to ~24 %; the thermal state stayed nominal through every sample.
+
+### Fixed — the Shazam song-credit chip actually works
+
+The chip that names the song playing in a video (`Title · Artist` with the Shazam mark, the video
+keeping its own sound) existed only for imported Instagram reels — and rarely even there:
+
+- **Videos you post are now identified.** Nothing you filmed yourself was ever fingerprinted; the
+  only callers were the importer and its retry drain. A post or story with an audible video, no
+  chosen song and no mute now goes through the same retry queue with no first delay, so the credit
+  lands seconds after the post. **Default on**, with *Settings → Song credits → Name the song in my
+  videos* as the opt-out — only a short audio fingerprint goes to Apple's Shazam service, never
+  the video or the post.
+- **Signatures were 0.1 s too long.** Shazam's catalog takes 3–12 s signatures; whole reader
+  buffers were appended "until 12 s" and overshot to 12.07–12.15 s, so every query came back as
+  error 201 (`signatureDurationInvalid`) in 0.0 s — which the code read as a rate limit and
+  retried, for an hour, per post. The signature is now clamped half a second under the catalog's
+  maximum, 201 is treated as the deterministic answer it is, and only genuine refusals (202, 500,
+  no answer) are retried.
+- **Credits reached the wrong feed.** Attaching looked the post up in the *active* circle's items,
+  so a credit for any other circle attached to nothing while the queue deleted the entry as done.
+  It now resolves the post in its own circle (off the main actor) and keeps the entry when the
+  attach fails.
+- **Older videos inherit their chip when you play them.** The first time one of your own untagged
+  videos (an imported reel included) starts playing, it is scanned — after playback has started,
+  off the main actor, through the same one-at-a-time queue — and the chip lands on that row in
+  place. A per-post scan ledger (a small file in Application Support) remembers the answer, so a
+  clip is fingerprinted at most once for a definitive one and re-asked only after a back-off for a
+  transient refusal, a bounded number of times. Other people's videos are never scanned.
+- **Settings → Song credits → Rescan imported videos** walks every video of yours that still has
+  no chip — the import backlog — through that queue, with a "12 of 81 checked · 9 named" line.
+  Manual on purpose: a bulk pass never runs unasked.
+- **Import sheet:** "Name the song playing in reels (Shazam)" is its own switch, on by default and
+  needing no Apple Music authorization, separate from the opt-in "Suggest a song for silent posts".
 
 ### Changed — the Mac app ships Apple-silicon-only, and its frameworks follow
 
@@ -75,10 +108,6 @@ is Apple-silicon-only, so the Mac app now builds `arm64` only. Xcode thins what 
 upstream WebRTC binary is copied out of its xcframework whole, so a post-embed build phase (ported
 from Enter Space) strips the slices the app is not built for and re-signs: the Release bundle goes
 from 121 MB to 107 MB.
-
-The same parks were the 2 AM background scene-create watchdog kill (0x8BADF00D): the system created
-the scene to drain an overnight push, the main thread parked behind that same drain, and it crossed
-the 30 s watchdog. One root cause, two symptoms.
 
 ## 1.8.1 — 2026-08-29
 
@@ -109,39 +138,6 @@ since the Instagram import landed. Two independent causes, both about feed-sized
   whole store, so ordinary traffic periodically re-diffed the list mid-scroll (the occasional
   remaining stick). The timestamp now refreshes at most once every 2s per peer, well inside the 120s
   window both recency consumers use, which collapses that publish churn.
-
-### Fixed — the Shazam song-credit chip actually works
-
-The chip that names the song playing in a video (`Title · Artist` with the Shazam mark, the video
-keeping its own sound) existed only for imported Instagram reels — and rarely even there:
-
-- **Videos you post are now identified.** Nothing you filmed yourself was ever fingerprinted; the
-  only callers were the importer and its retry drain. A post or story with an audible video, no
-  chosen song and no mute now goes through the same retry queue with no first delay, so the credit
-  lands seconds after the post. **Default on**, with *Settings → Song credits → Name the song in my
-  videos* as the opt-out — only a short audio fingerprint goes to Apple's Shazam service, never
-  the video or the post.
-- **Signatures were 0.1 s too long.** Shazam's catalog takes 3–12 s signatures; whole reader
-  buffers were appended "until 12 s" and overshot to 12.07–12.15 s, so every query came back as
-  error 201 (`signatureDurationInvalid`) in 0.0 s — which the code read as a rate limit and
-  retried, for an hour, per post. The signature is now clamped half a second under the catalog's
-  maximum, 201 is treated as the deterministic answer it is, and only genuine refusals (202, 500,
-  no answer) are retried.
-- **Credits reached the wrong feed.** Attaching looked the post up in the *active* circle's items,
-  so a credit for any other circle attached to nothing while the queue deleted the entry as done.
-  It now resolves the post in its own circle (off the main actor) and keeps the entry when the
-  attach fails.
-- **Import sheet:** "Name the song playing in reels (Shazam)" is its own switch, on by default and
-  needing no Apple Music authorization, separate from the opt-in "Suggest a song for silent posts".
-- **Older videos inherit their chip when you play them.** The first time one of your own untagged
-  videos (an imported reel included) starts playing, it is scanned — after playback has started,
-  off the main actor, through the same one-at-a-time queue — and the chip lands on that row in
-  place. A per-post scan ledger (a small file in Application Support) remembers the answer, so a
-  clip is fingerprinted at most once for a definitive one and re-asked only after a back-off for a
-  transient refusal, a bounded number of times. Other people's videos are never scanned.
-- **Settings → Song credits → Rescan imported videos** walks every video of yours that still has
-  no chip — the import backlog — through that queue, with a "12 of 81 checked · 9 named" line.
-  Manual on purpose: a bulk pass never runs unasked.
 
 ### Fixed — network path churn no longer spins up a rebind storm
 

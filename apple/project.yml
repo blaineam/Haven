@@ -227,6 +227,20 @@ targets:
           - $(SRCROOT)/Scripts/embed-cloudflared.sh
         outputFiles:
           - $(TARGET_BUILD_DIR)/$(FULL_PRODUCT_NAME)/Contents/Helpers/cloudflared
+      # LAST: drop the architectures the app is not built for from the embedded frameworks.
+      # ARCHS[sdk=macosx*] = arm64 thins what Xcode links, but the upstream WebRTC binary is
+      # copied out of its xcframework WHOLE (arm64 + x86_64, ~24 MB). Ported from Enter Space;
+      # why and how in apple/Scripts/thin-embedded-frameworks.sh. Runs every build (it inspects
+      # the bundle and is a no-op when nothing is fat), macOS only, re-signs what it touches.
+      - path: Scripts/thin-embedded-frameworks.sh
+        name: Thin Embedded Frameworks
+        basedOnDependencyAnalysis: false
+        showEnvVars: false
+        # The embedded binary is declared as an INPUT so the build system orders this phase after
+        # "Embed Frameworks" in incremental builds too — without it the copy could land after the
+        # thin (seen once: the phase logged the thin, the fat copy was written a moment later).
+        inputFiles:
+          - $(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/WebRTC.framework/Versions/A/WebRTC
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith

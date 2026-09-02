@@ -51,10 +51,30 @@ all inside the sync burst a foreground kicks off, each caught on a real account:
   the launch export runs after the launch reads instead of under them (the mailbox drain keeps an
   immediate export ahead of its seen-marks; backgrounding and identity teardown flush). Measured on
   the reporting phone: zero `blocked` entries after the first render.
+- **The engine boot, the launch flush, media backfill and the DM member reads followed.** With
+  the hold log naming the lock holder (`[EngineHold]` lines next to each stall), the last parks
+  were the boot's ML-DSA key expansion under the first render, the launch upload flush hashing keys
+  and loading the seen-set on main, the Watch snapshot reading every DM's members per store
+  publish, the media backfill's feed walk, and `SharedStore`'s roster publish/adopt/fetch — all now
+  off the main actor; the self-sync roster ingest holds the engine one wire at a time instead of
+  9.5 s in one go, and the media-backup seal runs under the same gate as everything else.
+- **Media transfer state is its own observable.** Per-chunk download progress was `@Published` on
+  the whole feed store — most of a `1101 publishes in 5 s` capture — and every publish re-rendered
+  every visible post. It now lives on `MediaTransferState`, observed only by the placeholders,
+  publishing on change and at most ~10×/s.
 - **Debug builds only:** a thermal + CPU sampler (`Library/Caches/HavenThermal.log`, every 30 s,
-  top threads by name) sits next to the stall detector, and the matrix-QA heartbeat dump — which
-  serialized the whole account every 5 s in every Debug build — now runs only where an orchestrator
-  can be watching (simulator, a QA launch env, or after a QA command).
+  top threads by name, with the publish/body census lines) sits next to the stall detector, and
+  the matrix-QA heartbeat dump — which serialized the whole account every 5 s in every Debug
+  build — now runs only where an orchestrator can be watching (simulator, a QA launch env, or
+  after a QA command).
+
+### Changed — the Mac app ships Apple-silicon-only, and its frameworks follow
+
+Apple's 2026-09 notice lets Mac App Store apps that require macOS 13+ drop Intel, and macOS 27
+is Apple-silicon-only, so the Mac app now builds `arm64` only. Xcode thins what it links, but the
+upstream WebRTC binary is copied out of its xcframework whole, so a post-embed build phase (ported
+from Enter Space) strips the slices the app is not built for and re-signs: the Release bundle goes
+from 121 MB to 107 MB.
 
 The same parks were the 2 AM background scene-create watchdog kill (0x8BADF00D): the system created
 the scene to drain an overnight push, the main thread parked behind that same drain, and it crossed

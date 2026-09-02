@@ -66,6 +66,11 @@ desktop/src-tauri/binaries/*.version
 # QA harness artifacts + local build scratch
 build/
 
+# Soren's run reports, written into the repo root by _shared/soren/soren.mjs on every `soren run`.
+# Named, not globbed as `soren-*` — the config beside them (soren.config.mjs) is tracked.
+soren-junit.xml
+soren-results.json
+
 # iCloud CONFLICT COPIES. This repo lives under ~/Documents, which iCloud syncs, and it resolves a
 # conflict by duplicating the entry with " 2" appended — "target 2/", "foo 2.dex", and so on. Those
 # names match no existing ignore rule, so `git add -A` swept a 15GB copy of the Rust build directory

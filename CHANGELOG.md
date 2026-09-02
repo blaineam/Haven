@@ -38,6 +38,23 @@ all inside the sync burst a foreground kicks off, each caught on a real account:
   `sendIroh`. It, and the per-DM "cleared before" watermark that sat on the chat-body paint path,
   now decode once into a typed mirror the single writer keeps in step: each lookup is a native O(1)
   dictionary read.
+- **The engine mutex is no longer taken on the main actor during launch or foreground.** With the
+  parks above gone, the detector's next captures were the sync burst itself losing the engine's
+  unfair `std::sync::Mutex` to the launch export and the first mailbox-drain slices: 2.05 s in
+  `bringOnline → syncWithContacts → dialTargets → myNodeHex()`, 4.09 s in `pullMailbox →
+  handleRelayNode → contactNodeIds`, 0.98 s in `sendIroh`'s device-id expansion (a `Task {}` inherits
+  the main actor), 0.49 s in the own-device live-deliver lane. Three fixes: the account and device
+  ids are cached once identity is adopted (47 lock-taking reads become string copies); the sync pass
+  snapshots its inputs, gathers every engine read in one `EngineGate` pass off-main and applies on
+  main against that snapshot (`sendIroh`, live-deliver, relay announces, the epoch-head publish and
+  the held-media probe follow the same shape); and `persist()` is a 2.5 s trailing-edge debounce, so
+  the launch export runs after the launch reads instead of under them (the mailbox drain keeps an
+  immediate export ahead of its seen-marks; backgrounding and identity teardown flush). Measured on
+  the reporting phone: zero `blocked` entries after the first render.
+- **Debug builds only:** a thermal + CPU sampler (`Library/Caches/HavenThermal.log`, every 30 s,
+  top threads by name) sits next to the stall detector, and the matrix-QA heartbeat dump — which
+  serialized the whole account every 5 s in every Debug build — now runs only where an orchestrator
+  can be watching (simulator, a QA launch env, or after a QA command).
 
 The same parks were the 2 AM background scene-create watchdog kill (0x8BADF00D): the system created
 the scene to drain an overnight push, the main thread parked behind that same drain, and it crossed

@@ -483,14 +483,17 @@ pub fn recipients_with_devices(
         }
         // PLUS each currently-authorized device bundle, so a LINK-FLOW device can also open.
         //
-        // ⚠️ Revocation cuts a device off ONLY if that device does not hold the account seed. Dropping it
-        // from here closes the device-key path, but the account-key path above stays open to anyone
-        // holding the seed. NO SUCH LINK FLOW SHIPS TODAY: linking copies the master seed
-        // (`haven-seed:` / `haven-link:`), and enrollment only ADDS a device key to a device that already
-        // has the seed. So against a device whose seed was extracted, revoking is advisory — it stops a
-        // lost phone, not a compromised one. Closing this needs the D16 Phase 2 seed-drop (a linked device
-        // runs under its device key + credential and holds no seed); until then, do not describe
-        // revocation as cryptographic. See MULTI-DEVICE.md.
+        // ⚠️ This is the LEGACY DUAL-SEAL path, and it is the compatibility fallback as of 1.0.7 — not
+        // the live one. Because it always seals to the bare account key above, dropping a device from
+        // here closes only the device-key path: revocation still cuts off a device that does NOT hold
+        // the account seed, and is advisory against one whose seed was extracted. The live path is
+        // [`recipients_with_devices_gated`], which retires the bare account-key seal once the retirement
+        // switch is ON *and* every member affirmatively advertises seed-drop capability — that makes
+        // revocation a cryptographic cut even against a seed-holding member. A circle with even one
+        // un-upgraded member falls back to this function so everyone keeps reading, which is exactly
+        // what the gate is for (`docs/SWITCH-FLIP-1.0.7.md`). Seedless enrollment ships on all four
+        // clients: a device linked that way holds only its device key + credential and never receives
+        // the master seed. See MULTI-DEVICE.md and SEED-DROP-DESIGN.md.
         if let Some(d) = devices_by_account.get(&acct) {
             for b in d.authorized_bundles() {
                 if seen.insert(b.node_id_bytes()) {

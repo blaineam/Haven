@@ -8,16 +8,20 @@ import UIKit
 /// device. Multi-device (D16): a linked device acts under this key plus an account-signed credential,
 /// so the account can authorize it and revoke it individually.
 ///
-/// ⚠️ **This key is additive today, not the device's operative identity.** The engine still runs under
-/// the copied master seed (`HavenSocial(seed:)`), because linking transfers the seed itself
-/// (`AccountStore.transferCode` → `haven-seed:` / `haven-link:`) and enrollment only hands a
-/// credential to a device that already has it. So a linked device is cryptographically the account,
-/// and revoking it does not take that away — see `DeviceRosterManager.revoke`.
+/// **As of 1.0.7 (seed-drop) this key is the device's operative identity, not an additive extra.** A
+/// device enrolled through the **seedless** flow gets a credential for THIS key and never receives the
+/// master seed; the engine authors and signs under it, and peers verify the device→account credential
+/// chain. Revoking such a device is a cryptographic cut — it is excluded from the circle's next epoch
+/// *and* re-keyed out of the account-state self-sync stream, and it cannot forge a higher-version
+/// roster to re-add itself, because roster authority is the account key it does not hold. See
+/// `DeviceRosterManager.revoke`.
 ///
-/// The finishing move is D16 Phase 2's **seed-drop**: a device links by getting a credential for THIS
-/// key and never receives the seed, and the engine runs under the device key with peers verifying the
-/// device→account credential chain. Until that lands, revocation is honest only against a device that
-/// is lost, not one that is compromised. Don't let this file's existence imply otherwise.
+/// ⚠️ Two things to keep straight before relying on that. Activation is **per circle and gated in
+/// core**, not decided here: until every member's devices affirmatively advertise capability, sealing
+/// stays on the legacy dual-seal path and revocation is only as strong as it was before
+/// (`docs/SWITCH-FLIP-1.0.7.md`; the switch itself is set in `FeedStore.applyCryptoSwitches`). And the
+/// **primary** device still holds the master seed, so compromising *it* is a full account compromise
+/// that revoking another device cannot undo — the remedy there is rolling a new identity.
 enum DeviceKeyStore {
     private static let service = "com.blaineam.kith"
     private static let accountKey = "haven.device-key-seed"

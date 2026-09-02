@@ -11,9 +11,16 @@
 //!
 //! [`build_feed`] reduces a stream of decrypted events into a timeline: posts with
 //! their comments and reactions, edits applied (with an "edited" flag), and unsends
-//! marked. This is multi-recipient public-key encryption, not yet MLS — it works and
-//! is fully tested; forward-secrecy via MLS (`mls-rs`) is a later hardening (see
-//! `docs/DECISIONS.md` D3).
+//! marked. The sealing described above is multi-recipient public-key encryption. As of
+//! 1.0.7 that is no longer the only keying path: per-message forward secrecy and
+//! post-compromise security come from the MLS-style ratchet-tree layer in
+//! [`crate::treekem`] — TreeKEM over Haven's own post-quantum primitives, deliberately
+//! **not** RFC-9420 wire-interoperable and **not** `mls-rs` (every ratified MLS
+//! ciphersuite is classical, so interop would regress the PQ posture). It is enabled
+//! for circles with a verified owner and activates per circle as members update, so
+//! both paths stay live. This module's envelope format is unchanged either way — the
+//! tree only changes how the epoch key is *agreed*. See `docs/TREEKEM-DESIGN.md` and
+//! `docs/DECISIONS.md` D3.
 
 use std::collections::BTreeMap;
 

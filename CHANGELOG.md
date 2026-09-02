@@ -9,6 +9,35 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 1.8.4 — in development
 
+### Fixed — a relay that blinks once no longer takes the desktop app off the air for two minutes
+
+The desktop client reaches a relay over plain HTTP, and a URL that fails to answer is put in a
+back-off window so that a dead LAN address doesn't cost a four-second connect timeout on every chunk.
+That window was two minutes long, and it started at two minutes on the *first* failure. For a relay
+that publishes several addresses this is invisible — the other URLs carry the traffic while the dud
+sits out. For the shape most people actually run it is not: a NAS or Docker relay behind one
+hostname, a free-tunnel front door, a phone and a laptop sharing a single relay. There the HTTP lane
+*is* the relay — a host that speaks only HTTP is never dialled the other way — so parking its one URL
+parks the mailbox, self-sync, device hellos and media together. The app isn't slow at that point; it
+is off the air.
+
+One refused connect was enough to start it. A laptop opening its lid a moment before Wi-Fi is up, a
+relay restarting, a tunnel re-establishing — the first request fails, and the next two minutes are
+dark, with nothing in the log that says so. Five of the last eighty cross-device test runs hit it. In
+the worst of them a profile edit made on the iPhone took 94.6 seconds to appear on the desktop, while
+the same edit reached the other devices in seconds and every step after it converged in 2.5. The
+self-sync log read `listed=0` throughout, which sounds like "the relay is empty" and actually meant
+"we never asked".
+
+So the back-off escalates now instead of opening at its own ceiling: five seconds, then ten, twenty,
+forty, eighty, and two minutes from there on. An address that is genuinely dead still lands exactly
+where it used to, about two and a half minutes in, so the connect-timeout-per-chunk this was written
+to prevent is still prevented. A one-off transient costs a single heartbeat instead. Measured against
+a relay that disappears at launch and comes back two seconds later, the app used to notice 120.1
+seconds after start-up and now notices at 10.0 — the same moment a run where nothing went wrong first
+reaches its relay. And the parking is no longer silent: it names the URL, how many failures in a row,
+and how long the window is.
+
 ### Fixed — on Android, a photo in a DM no longer vanishes the day after it is sent
 
 A story reply used to be a resealed copy of the story's own media, so the Messages bubble tried to

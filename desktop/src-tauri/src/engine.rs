@@ -446,9 +446,10 @@ pub struct Engine {
     s3: TokioMutex<Option<Arc<S3Mailbox>>>,
     /// Client for relays' plain-HTTP media interfaces — the DEFAULT cross-NAT media transport.
     http: reqwest::Client,
-    /// HTTP relay URLs that recently failed to answer → retry-after epoch ms (2-min backoff), so a
-    /// dead LAN address doesn't cost a connect-timeout per chunk.
-    http_url_bad: StdMutex<HashMap<String, u64>>,
+    /// HTTP relay URLs that recently failed to answer → escalating back-off (5s, 10s, 20s … 2m), so
+    /// a dead LAN address doesn't cost a connect-timeout per chunk WITHOUT one transient at startup
+    /// taking an HTTP-only relay dark for two minutes. See `relayhealth::HttpUrlHealth`.
+    http_url_bad: StdMutex<HashMap<String, crate::relayhealth::HttpUrlHealth>>,
     /// Last `haven/relay/__interface__` fetch attempt per relay (epoch ms), so a media-miss storm
     /// can't hammer the same relay — one attempt per relay per 5 min (iOS relayInterfaceRefreshMs).
     relay_interface_refresh_ms: StdMutex<HashMap<String, u64>>,
@@ -8927,14 +8928,39 @@ impl Engine {
     // ---- Relay plain-HTTP media interface (client side) -----------------------------------------
     // GET/PUT against a relay's HTTP interface (core httprelay.rs): `<base>/k/<key>` with the relay's
     // bearer token (learned from the sealed frame-19 announce). This is the DEFAULT cross-NAT media
-    // transport; a URL that doesn't answer is backed off 2 minutes so a dead LAN address doesn't cost
-    // a connect-timeout per chunk. Keys are already URL-path-safe (haven/media/… ascii), so no encoding.
+    // transport; a URL that doesn't answer is backed off 5s, then 10s, 20s … up to 2 minutes, so a
+    // dead LAN address doesn't cost a connect-timeout per chunk and a startup transient doesn't cost
+    // two minutes. Keys are already URL-path-safe (haven/media/… ascii), so no encoding.
 
     fn http_url_bad(&self, base: &str) -> bool {
-        self.http_url_bad.lock().get(base).map(|&t| t > now_ms()).unwrap_or(false)
+        let now = now_ms();
+        self.http_url_bad.lock().get(base).map(|h| !h.available(now)).unwrap_or(false)
     }
+    /// One URL didn't answer. Park it — briefly the first time, harder each time it keeps failing.
+    ///
+    /// This used to be a flat `now + 120_000` from the FIRST failure, and that is how a single
+    /// refused connect turned into a two-minute outage: a relay that speaks only plain HTTP (the
+    /// matrix stub on one loopback port, a free-CF/NAS relay behind one hostname) has NOTHING under
+    /// the HTTP lane — the iroh fallback every caller drops to cannot reach it — so parking its only
+    /// URL parks mailbox, self-sync, hello and media together. Measured on the desktop e2e leg: the
+    /// app's very first mailbox PUT was refused ~300ms after launch (the stub was mid relay-rebind),
+    /// and the next 140s of self-sync passes all read `listed=0` — not "the relay is empty", but
+    /// "we never asked" — until the window expired. A profile edit made on iPhone took 94.6s to
+    /// reach the desktop; every step after it converged in 2.5s.
     fn mark_http_url_bad(&self, base: &str) {
-        self.http_url_bad.lock().insert(base.to_string(), now_ms() + 120_000);
+        let (fails, window) = {
+            let mut m = self.http_url_bad.lock();
+            let h = m.entry(base.to_string()).or_default();
+            let window = h.record_failure(now_ms());
+            (h.fails, window)
+        };
+        // Permanent breadcrumb: this back-off is invisible from the outside — every caller just
+        // skips the URL — so the blackout it can cause has to say its own name in the log.
+        log::info!(
+            "relay http {base} did not answer ({fails} in a row) — parked {}s; a relay that speaks \
+             only HTTP has no fallback under this, so the window is a blackout, not a detour",
+            window / 1000
+        );
     }
     /// Forget a URL's bad window — a just-adopted relay interface must be tried immediately.
     fn clear_http_url_bad(&self, base: &str) {

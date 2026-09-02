@@ -276,7 +276,24 @@ object CallManager {
     fun addableContacts(): List<Contact> =
         HavenNet.contacts.filter { !roster.contains(it.idHex) && !HavenNet.blocked.contains(it.idHex) }
 
+    /**
+     * Answer the ringing call.
+     *
+     * ANSWERING A CALL THAT IS NOT THERE IS NOT AN ANSWER. This picked up unconditionally, so a
+     * stale answer — a notification tapped after the caller gave up, or a ring a replayed frame had
+     * already torn down — left the device `in_call` with an EMPTY session: `invitees()` is empty so
+     * no ACCEPT frame goes anywhere, the caller never connects, and only the local hangup button
+     * clears the state. It is the same "no session means no negotiation" hole [validSession] closes
+     * on the receive side, reached from the UI instead of the wire, and it made the QA matrix report
+     * a green accept for a call that had never rung. The already-answered guard is iOS
+     * `reallyAccept` parity (CallKit echoes the answer back).
+     */
     fun accept() {
+        if (inCall.value) { Log.i(TAG, "accept ignored — already in the call"); return }
+        if (sessionId.isEmpty() || !ringing.value) {
+            Log.i(TAG, "accept ignored — nothing ringing (session=${sessionId.take(8)} ringing=${ringing.value})")
+            return
+        }
         runCatching { Notifications.clearIncomingCall(appContext) }
         mainHandler.removeCallbacks(ringTimeoutRunnable)
         ringing.value = false
@@ -566,9 +583,13 @@ object CallManager {
         // outgoing call whose screen appears and vanishes, or a connected call that hangs itself up
         // for no visible reason. Frames from older builds carry no session id; those still apply, so
         // this only ever tightens behaviour.
-        val s = runCatching { CallWire.parseSignal(body, sessionId) }.getOrNull()
-        if (s != null && s.sessionId.isNotEmpty() && !validSession(s.sessionId)) {
-            Log.i(TAG, "HANGUP IGNORED from ${from.take(8)} for session ${s.sessionId.take(8)} — ours is ${sessionId.take(8)} (stale/replayed)")
+        //
+        // Read the session with the ACCEPT-shaped parser, which is the shape frame 12 actually has.
+        // Reading it with parseSignal looked identical and gated NOTHING — see
+        // [CallWire.hangupAppliesTo], which owns this decision so a unit test can hold it.
+        if (!CallWire.hangupAppliesTo(body, sessionId)) {
+            val sid = CallWire.parseAccept(body)?.sessionId ?: ""
+            Log.i(TAG, "HANGUP IGNORED from ${from.take(8)} for session ${sid.take(8)} — ours is ${sessionId.take(8)} (stale/replayed)")
             return
         }
         dropPeer(from)

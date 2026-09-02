@@ -75,6 +75,13 @@ story + caption · file post · music card · DMs both directions (+ own-device
 echo) · reactions from two devices · comments — plus the **media-blob gate**:
 the post's media must actually be present (not just the event) on every device.
 
+The **call matrix** runs every caller × answerer pair (each platform dials the
+stub *and* answers a stub-originated call). Per pair: the callee rings, the ring
+**survives early media** — asserted as `ringing == true` *and* `in_call != true`,
+both halves, so a callee that never rang cannot pass it for free — accept clears
+the ring, the caller goes live on the **ACCEPT** (never on transport), and the
+hangup ends the call on every device.
+
 Every step records propagation latency (author → each device) against budgets
 (`E2E_BUDGET_TEXT` 30s, `E2E_BUDGET_MEDIA_EVENT` 45s, `E2E_BUDGET_MEDIA_BLOB`
 120s), and each run appends to `build/e2e-history.jsonl` — a step that gets

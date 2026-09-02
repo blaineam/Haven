@@ -9,6 +9,28 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 1.8.4 — in development
 
+### Fixed — on Android, the call that just ended no longer hangs up the next one
+
+An Android phone could stop ringing for an incoming call about a second after it started, and then
+refuse to ring for that caller at all — the caller sat listening to a dial tone that could never
+connect. The BYE frame names the session it ends, and every handler is supposed to ignore one that
+names a call this device has already left; Android's read that session id with the *signal* parser,
+whose legacy branch hands back the caller-supplied fallback — our own live session — for any body
+with no JSON after the id. A hangup never has one. So the gate compared the live session with
+itself, passed every frame, and was the same as no gate at all.
+
+Hangups are sent three times and relays replay them, so the BYE of the call that just ended lands a
+second or two into the next one. Caught in the release matrix: the phone rang at 10:09:26.809,
+the previous call's replayed BYE arrived at 10:09:27.697 and tore the ring down, teardown tombstoned
+the *new* session, and all thirty-odd invite retransmits over the next 34 s were dropped as "we
+already left it". Android now reads the session the frame actually names — what iOS `handleHangup`
+and the desktop's `parse_hangup` already do — and ignores a BYE for anything but the live session.
+
+Answering is tightened the same way: `accept()` refuses when nothing is ringing. Picking up a call
+that had already gone away (a notification tapped after the caller gave up, or a ring a stale frame
+had just killed) used to park the device *in a call* with no session — nobody to send the ACCEPT to,
+nothing to negotiate, and only the local hangup button to get out.
+
 ### Fixed — the desktop leg stopped fighting itself for its own relay slot
 
 Release QA showed the Tauri desktop leg doing three things the phones never did: its log filled

@@ -500,8 +500,12 @@ async function main() {
         (j) => j.call?.ringing || j.call?.in_call, BUDGET.text));
       await sleep(8000);   // early-media window: negotiation runs while the callee still rings
       const midRing = await freshDump(devices[pr.answerer]);
+      // BOTH halves — still ringing AND not yet in the call — or the check is vacuous. Asserting
+      // only `!in_call` passed for free on a callee that was not ringing at all, so when a stale
+      // BYE killed android's fresh ring 0.9s in, this printed a GREEN "ringing survives early
+      // media" carrying {"ringing":false} right underneath the RED `rings` it was contradicting.
       score(`ringing survives early media [${tag}]`,
-        midRing?.call?.in_call !== true, JSON.stringify(midRing?.call));
+        midRing?.call?.ringing === true && midRing?.call?.in_call !== true, JSON.stringify(midRing?.call));
       await callOps[pr.answerer].accept();
       perfGate(`accept clears the ring [${tag}]`, pr.answerer, await converge(devices[pr.answerer],
         (j) => j.call?.in_call === true && !j.call?.ringing, BUDGET.text));

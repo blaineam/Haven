@@ -132,6 +132,30 @@ object CallWire {
 
     fun parseHangup(payload: ByteArray): String? = hexHead(payload)
 
+    /**
+     * Does a received BYE (frame 12) apply to the session this device is in?
+     *
+     * Frame 12 is ACCEPT-SHAPED — `[hex64][lp sessionId]` — and has to be read that way. It was read
+     * with [parseSignal] instead, and a hangup body carries no JSON after the session id, so
+     * parseSignal always took its legacy branch and handed back the caller-supplied FALLBACK — the
+     * receiver's own live session. The gate then compared our session with itself and let every
+     * frame through, which is the same as having no gate at all.
+     *
+     * That is not theoretical: hangups are retransmitted and the relay replays them, so the BYE of
+     * the call that just ended lands a second or two into the NEXT one. Measured on the QA fleet
+     * (2026-09-02): an incoming call rang for 0.9s, the previous call's replayed BYE tore it down,
+     * and the session was tombstoned — so all 30-odd invite retransmits that followed were dropped
+     * and the phone never rang again for that call. iOS handleHangup / desktop parse_hangup parity.
+     *
+     * Senders that predate the session id send a bare hex; those still apply, so this only ever
+     * tightens behaviour.
+     */
+    fun hangupAppliesTo(payload: ByteArray, mySession: String): Boolean {
+        val sid = parseAccept(payload)?.sessionId ?: return false
+        if (sid.isEmpty()) return true                       // legacy sender: nothing to match on
+        return mySession.isNotEmpty() && sid == mySession
+    }
+
     fun parseInviteName(payload: ByteArray): Pair<String, String>? {
         val from = hexHead(payload) ?: return null
         val name = if (payload.size > 64) String(payload.copyOfRange(64, payload.size), Charsets.UTF_8) else "Someone"

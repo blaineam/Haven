@@ -2,7 +2,9 @@ package com.blaineam.haven.core
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Locks the call-signaling frame layout to iOS CallManager so Android <-> iPhone calls negotiate. */
@@ -67,6 +69,33 @@ class CallWireTest {
         val frame = CallWire.hangup(hexB, "sid")
         assertEquals(hexB, CallWire.parseHangup(frame))
         assertEquals("sid", CallWire.parseAccept(frame)!!.sessionId)
+    }
+
+    // A BYE from a call that ALREADY ENDED must not touch the call running now. Hangups are
+    // retransmitted and relays replay them, so the previous call's BYE routinely lands a second or
+    // two into the next one — on the QA fleet it killed a fresh incoming ring 0.9s in, tombstoned
+    // that session, and every invite retransmit after it was dropped: the phone simply never rang.
+    @Test fun stale_hangup_does_not_apply_to_the_live_session() {
+        val bye = CallWire.hangup(hexB, "ended-session")
+        assertFalse(CallWire.hangupAppliesTo(bye, "live-session"))
+        // The trap that hid this: a hangup body has no JSON after the session id, so parseSignal
+        // always takes its legacy branch and hands back the FALLBACK — our own live session. A gate
+        // built on that compares the live session with itself and lets every stale frame through.
+        assertEquals("live-session", CallWire.parseSignal(bye, "live-session")!!.sessionId)
+    }
+
+    @Test fun hangup_for_the_live_session_applies() {
+        assertTrue(CallWire.hangupAppliesTo(CallWire.hangup(hexB, "live-session"), "live-session"))
+    }
+
+    @Test fun legacy_hangup_without_a_session_still_applies() {
+        // Senders that predate the session id send the bare hex — gating must not silence them.
+        assertTrue(CallWire.hangupAppliesTo(hexB.toByteArray(), "live-session"))
+        assertFalse(CallWire.hangupAppliesTo(ByteArray(63), "live-session"))   // not even a sender
+    }
+
+    @Test fun hangup_applies_to_nothing_when_we_are_in_no_call() {
+        assertFalse(CallWire.hangupAppliesTo(CallWire.hangup(hexB, "some-session"), ""))
     }
 
     @Test fun signal_with_session_roundtrip() {

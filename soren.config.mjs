@@ -152,6 +152,19 @@ export default {
       tags: ['e2e', 'relay', 'perf'],
     },
 
+    // ── The e2e harness's OWN unit tests. Only one piece of that harness can invent a failure
+    //    rather than find one — the dump-channel freshness decision — so it is the piece that gets
+    //    tested here, off the fleet, in under a second. It is in the release gate for the same
+    //    reason `e2e` is: a check that can fail a release must not itself be unverified, and this
+    //    one needs no simulator, no emulator and no relay to run.
+    'qa-harness': {
+      type: 'cmd',
+      cmd: 'node',
+      args: ['--test', 'Scripts/lib/dump-freshness.test.mjs'],
+      description: 'e2e harness unit tests (dump-channel freshness decision)',
+      tags: ['e2e'],
+    },
+
     // ── Fabric / path-proxy / WebSocket hairpin (Mac host + sim/emu consumers).
     //    Automated gate for Haven-first policy + free-CF-compatible call hairpin.
     //    Multi-device (iOS sim / Android emu / Mac) points at the Mac host path proxy;
@@ -199,7 +212,7 @@ export default {
     // different product.
     requireGreen: [
       'core', 'fabric', 'ios', 'macos', 'android-native', 'android',
-      'desktop', 'desktop-ui', 'desktop-build', 'e2e',
+      'desktop', 'desktop-ui', 'desktop-build', 'qa-harness', 'e2e',
     ],
   },
 };

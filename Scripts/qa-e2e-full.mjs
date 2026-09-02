@@ -19,9 +19,10 @@
 //   broadcast), then read qa-dump.json back. Ops: post, story, dm, react, comment,
 //   profile, circle_create, circle_invite, file, music_post, dump, mark_read.
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, rmSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ChannelFreshness, judgeDump, fmtDuration, FRESHNESS_DEFAULTS } from './lib/dump-freshness.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = process.env.QA_OUT || join(ROOT, 'build', `e2e-${stamp()}`);
@@ -66,6 +67,34 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 // hot. Only the no-args full matrix runs to completion by default — that is the release gate.
 const FAIL_FAST = process.env.E2E_FAIL_FAST === '1'
   || (process.env.E2E_FAIL_FAST !== '0' && !!process.env.E2E_STEPS);
+
+// DUMP-CHANNEL FRESHNESS (Scripts/lib/dump-freshness.mjs).
+//
+// Every assertion in this file is a statement about a JSON file a leg wrote. If that file stops
+// being rewritten, every later assertion against the leg measures the HARNESS and reports it as
+// the product. That is not hypothetical: an orphaned MediaStore row on Android froze the dump for
+// a whole August run (healthy legs read as 7x perf regressions, then as "never"), and the same
+// signature showed up again on 2026-09-02 while the real bug was elsewhere.
+//
+// So: every read is checked for freshness relative to the command that asked for it, and a leg
+// whose channel has stopped delivering is named as such instead of being scored as a delivery
+// failure. See the module for the rule and — importantly — for why it cannot fire on a leg that
+// is merely slow, or on one whose dump is unchanged because nothing happened.
+const FRESH = {
+  toleranceMs: +(process.env.E2E_DUMP_TOLERANCE || FRESHNESS_DEFAULTS.toleranceMs),
+  graceMs: +(process.env.E2E_DUMP_GRACE || FRESHNESS_DEFAULTS.graceMs),
+  minObservations: FRESHNESS_DEFAULTS.minObservations,
+};
+// A condemned channel ABORTS the run by default: the alternative is the thing this exists to stop
+// — twenty phantom reds blaming the product for a file that was never rewritten. Set
+// E2E_STALE_ABORT=0 to log and carry on (every later result for that leg is then suspect).
+const STALE_ABORT = process.env.E2E_STALE_ABORT !== '0';
+/** label → measured leg-clock-minus-host-clock (ms). Measured, never assumed — see measureSkew. */
+const SKEW = {};
+/** label → ChannelFreshness */
+const CHANNELS = {};
+const channelFor = (dev) => (CHANNELS[dev.label] ??= new ChannelFreshness(dev.label, FRESH));
+const lastSlowWarn = {};
 
 function score(name, ok, detail = '') {
   REPORT.push({ name, ok, detail });
@@ -132,6 +161,11 @@ function makeIos(udid) {
     poke: () => shOk('xcrun', ['simctl', 'openurl', udid, 'haven://qa?x=1']),
     dump: () => readJson(join(dir(), 'qa-dump.json')),
     stage: (src, name) => { const p = join(dir(), name); writeFileSync(p, readFileSync(src)); return p; },
+    // Stale-channel plumbing — see the FRESH block near the top.
+    skew: () => 0,                        // the simulator runs on the host clock
+    wipe: () => wipeLocalQaFiles(dir()),
+    diagnose: () => [procLine('the simulator app (Haven.app/Haven)', hostProcAlive('Haven\\.app/Haven')),
+                     ...localDumpDiag(join(dir(), 'qa-dump.json'))],
   };
 }
 
@@ -158,6 +192,84 @@ function makeAndroid() {
       return readJson(tmp);
     },
     stage: (src, name) => { guarded(['push', src, `${dev}/${name}`]); return `${dev}/${name}`; },
+
+    // ── stale-channel plumbing (see the FRESH block near the top) ──────────────────────────
+    // The emulator keeps its OWN clock and it drifts from the host's — 782 ms behind when this was
+    // written, and an AVD resumed from a snapshot can be minutes out. Measure it; never assume it.
+    skew: () => {
+      const s = [];
+      for (let i = 0; i < 5; i++) {
+        const t0 = Date.now();
+        const out = shOk('adb', ['shell', 'date', '+%s%3N']);
+        const t1 = Date.now();
+        if (out === null) continue;
+        const txt = String(out).trim();
+        // toybox honors %3N (milliseconds). A date that does not answers seconds only, and a date
+        // that echoes the format back must be discarded rather than digit-stripped into nonsense.
+        const ms = /^\d{13,}$/.test(txt) ? Number(txt.slice(0, 13))
+                 : /^\d{10}$/.test(txt) ? Number(txt) * 1000 + 500
+                 : null;
+        if (ms === null) continue;
+        s.push({ skew: ms - (t0 + t1) / 2, rtt: t1 - t0 });
+      }
+      if (!s.length) return null;
+      // NTP's estimator: the tightest round trip carries the least ambiguity about when the
+      // device read its own clock.
+      s.sort((a, b) => a.rtt - b.rtt);
+      return Math.round(s[0].skew);
+    },
+    // Exactly the bootstrap's post-install wipe. Virgin files make MediaStore mint fresh rows
+    // owned by the current install, which is the documented cure for the orphaned-row freeze.
+    wipe: () => {
+      const out = guarded(['shell', 'rm', '-f', `${dev}/qa-dump-${AND_PKG}.json`,
+                           `${dev}/qa-dump-${AND_PKG}.json.tmp`, `${dev}/qa-cmd.json`]);
+      if (out === null) return ['adb shell rm failed outright'];
+      // `rm -f` exits 0 even when the unlink is refused, so its OUTPUT is the only signal.
+      return String(out).trim() ? [String(out).trim()] : [];
+    },
+    diagnose: () => {
+      const out = [];
+      // Two questions before anything else: is the app even running, and is it FOREGROUNDED?
+      // QaDriver polls the drop file only between onResume and onPause, so a backgrounded
+      // activity is a dead dump channel that has nothing to do with MediaStore.
+      const pid = String(shOk('adb', ['shell', 'pidof', AND_PKG]) || '').trim();
+      out.push(pid ? `process:    ${AND_PKG} is RUNNING (pid ${pid})`
+                   : `process:    ${AND_PKG} is GONE — THIS IS THE CAUSE. Nothing is writing the dump.`);
+      const resumed = String(shOk('adb', ['shell', 'dumpsys activity activities | grep -m1 mResumedActivity']) || '').trim();
+      if (resumed) {
+        out.push(`foreground: ${resumed.slice(0, 140)}`);
+        if (pid && !resumed.includes(AND_PKG)) {
+          out.push(`            NOT Haven — the driver polls the drop file only while the activity is`);
+          out.push(`            resumed (onResume/onPause), so a backgrounded app is a dead channel.`);
+        }
+      }
+      const p = `${dev}/qa-dump-${AND_PKG}.json`;
+      // Age computed ON THE DEVICE so neither clock skew nor date parsing can distort it.
+      const st = shOk('adb', ['shell', `p=${p}; echo "$(stat -c "%s|%U|%Y" "$p")|$(date +%s)"`]);
+      const [size, owner, mtime, now] = String(st || '').trim().split('|');
+      if (mtime && now) {
+        out.push(`dump file:  ${p}`);
+        out.push(`            ${size} B, owner ${owner}, mtime ${fmtDuration((Number(now) - Number(mtime)) * 1000)} ago`);
+      } else {
+        out.push(`dump file:  ${p} — cannot stat (${String(st || '(adb failed)').trim().split('\n')[0]})`);
+      }
+      // THE SIGNATURE. A reinstall can orphan MediaStore's row for this file; every `renameTo` the
+      // driver does then fails with this line while the app itself stays perfectly healthy, and the
+      // harness reads the same frozen file forever.
+      const lg = shOk('adb', ['logcat', '-d', '-t', '4000']) || '';
+      const hits = lg.split('\n').filter((l) => /Database update failed/.test(l));
+      if (hits.length) {
+        out.push(`logcat:     ${hits.length} x "MediaProvider: Database update failed while renaming"`
+                 + ` in the last 4000 lines — THIS IS THE KNOWN CAUSE.`);
+        out.push(`            ${hits[hits.length - 1].trim().slice(0, 160)}`);
+        out.push(`            The install orphaned the provider's row for the dump file: every rename`);
+        out.push(`            fails, the app keeps writing, and nothing the harness reads ever changes.`);
+      } else {
+        out.push('logcat:     no "Database update failed" lines in the last 4000 — NOT the MediaStore'
+                 + ' row rot; look at whether the activity is foregrounded (the driver polls only while it is).');
+      }
+      return out;
+    },
   };
 }
 
@@ -171,6 +283,10 @@ function makeStub() {
     poke: () => {},                       // stub polls the drop file
     dump: () => readJson(join(as, 'qa-dump.json')),
     stage: (src, name) => { const p = join(as, name); writeFileSync(p, readFileSync(src)); return p; },
+    skew: () => 0,                        // same machine, same clock
+    wipe: () => wipeLocalQaFiles(as),
+    diagnose: () => [procLine('HavenStub.app', hostProcAlive('HavenStub\\.app')),
+                     ...localDumpDiag(join(as, 'qa-dump.json'))],
   };
 }
 
@@ -181,10 +297,54 @@ function makeDesktop() {
     poke: () => {},                       // desktop watches the file
     dump: () => readJson(join(DESK_DATA, 'qa-dump.json')),
     stage: (src, name) => { const p = join(DESK_DATA, name); writeFileSync(p, readFileSync(src)); return p; },
+    skew: () => 0,                        // same machine, same clock
+    wipe: () => wipeLocalQaFiles(DESK_DATA),
+    diagnose: () => [procLine('haven-desktop', hostProcAlive('target/debug/haven-desktop')),
+                     ...localDumpDiag(join(DESK_DATA, 'qa-dump.json'))],
   };
 }
 
 function readJson(p) { try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return null; } }
+
+/// Drop a host-side leg's qa files so the driver mints them again — the file-based twin of the
+/// android MediaStore wipe. Both drivers rewrite the dump on their next heartbeat (<=5s).
+/// Returns the problems it hit: a wipe that CANNOT remove the file is itself the diagnosis, and
+/// silently swallowing it would leave the failure looking like the re-dump never happened.
+function wipeLocalQaFiles(dir) {
+  const problems = [];
+  for (const n of ['qa-dump.json', 'qa-dump.json.tmp', 'qa-cmd.json']) {
+    try { rmSync(join(dir, n), { force: true }); }
+    catch (e) { problems.push(`could not remove ${n}: ${e.code || e.message}`); }
+  }
+  return problems;
+}
+
+/// Is the leg's process still there at all? THE first question, and the one the 2026-09-02 run
+/// answered the hard way: the mac stub exited mid-call, so its dump froze, its `dump_seq` stuck,
+/// and every remaining assertion against it would have been a measurement of a dead process.
+/// `null` when the answer is unknown — never assert a death we did not observe.
+function hostProcAlive(pattern) {
+  const r = spawnSync('pgrep', ['-f', pattern], { encoding: 'utf8' });
+  if (r.error) return null;
+  return r.status === 0 && String(r.stdout || '').trim().length > 0;
+}
+
+const procLine = (what, alive) => alive === null
+  ? `process:    ${what} — could not tell (pgrep unavailable)`
+  : alive ? `process:    ${what} is RUNNING — the app is alive, its dump writer is not`
+          : `process:    ${what} is GONE — THIS IS THE CAUSE. The leg exited; nothing is writing the dump.`;
+
+/// The dump file's mtime, which is the fact that separates "the leg wrote nothing" from "the leg
+/// wrote and the harness is reading something else".
+function localDumpDiag(p) {
+  try {
+    const st = statSync(p);
+    return [`dump file:  ${p}`,
+            `            ${st.size} B, mtime ${fmtDuration(Date.now() - st.mtimeMs)} ago`];
+  } catch (e) {
+    return [`dump file:  ${p} — cannot stat (${e.code || e.message})`];
+  }
+}
 
 // ── driver ops ──────────────────────────────────────────────────────────────
 
@@ -193,8 +353,149 @@ async function op(dev, cmd, settleMs = 4000) {
 }
 
 async function freshDump(dev) {
+  // `issuedAt` is taken BEFORE the command is written: the dump we read must have been
+  // regenerated after this instant, or the leg answered us with a file it wrote earlier.
+  const issuedAt = Date.now();
   await op(dev, { op: 'dump' }, 2500);
-  return dev.dump();
+  const d = dev.dump();
+  await noteDumpFreshness(dev, issuedAt, d);
+  return d;
+}
+
+// ── dump-channel freshness ──────────────────────────────────────────────────
+//
+// The ordering every leg honors: command written → leg notices (a poke, or its own <=1.5s poll
+// tick) → op runs → dump rewritten with a new `ts_ms` → harness reads. The check asks only whether
+// that rewrite happened. It never compares CONTENT: a dump identical to the last one because
+// nothing happened is fresh, and treating it otherwise would be a new false-failure factory.
+//
+// Cadence differs per leg and the check is deliberately indifferent to it. Apple (ios + stub) and
+// desktop also rewrite on a 5s heartbeat, so their ts moves even with no command outstanding;
+// Android rewrites ONLY in response to a command, so between two commands its ts legitimately
+// stands still — which is why nothing here is measured against wall-clock age. It is measured
+// against the command WE issued, and only sustained, frozen staleness condemns anything.
+
+/** Measure a leg's clock offset once and remember it (re-measured before any condemnation). */
+function measureSkew(dev, why = '') {
+  const s = dev.skew?.();
+  if (s === null || s === undefined || !Number.isFinite(s)) {
+    // Unmeasurable is not fatal: a wrong skew shifts every lag by a constant, and a constant can
+    // never make a live file's timestamp stand still — the frozen-ts half of the rule still holds.
+    if (!(dev.label in SKEW)) log(`WARN ${dev.label}: clock skew unmeasurable — assuming 0`);
+    SKEW[dev.label] ??= 0;
+    return SKEW[dev.label];
+  }
+  const before = SKEW[dev.label];
+  SKEW[dev.label] = s;
+  if (before !== undefined && Math.abs(s - before) > 1000) {
+    log(`clock skew ${dev.label} MOVED: ${fmtDuration(before)} → ${fmtDuration(s)}${why ? ` (${why})` : ''}`);
+  }
+  return s;
+}
+
+/// `null` = no dump at all (counts against the channel); `undefined` = a dump with no usable
+/// timestamp, which is unjudgeable and must never be able to condemn a leg. Keeping the two apart
+/// is the difference between a dead channel and a leg this check simply has no opinion about.
+const dumpTsOf = (dump) => (dump == null ? null : (typeof dump.ts_ms === 'number' ? dump.ts_ms : undefined));
+
+async function noteDumpFreshness(dev, issuedAt, dump) {
+  const ch = channelFor(dev);
+  if (ch.suspended) return;                    // a recovery's own reads must not re-trip this
+  const r = ch.observe({ issuedAt, dumpTsMs: dumpTsOf(dump), skewMs: SKEW[dev.label] ?? 0 });
+  if (r.verdict === 'fresh' || r.verdict === 'unknown') return;
+  if (!r.condemned) {
+    // Lagging but still being rewritten — a slow leg, not a dead channel. Worth saying, at most
+    // once a minute, because it is the shape a real perf problem takes on this file too.
+    if (r.advancing && Date.now() - (lastSlowWarn[dev.label] || 0) > 60_000) {
+      lastSlowWarn[dev.label] = Date.now();
+      log(`WARN ${dev.label}: dump is ${fmtDuration(r.lagMs)} behind the command but STILL BEING REWRITTEN`
+          + ` — a slow leg, not a dead channel (freshness tolerance ${fmtDuration(FRESH.toleranceMs)})`);
+    }
+    return;
+  }
+  await handleStaleChannel(dev, r);
+}
+
+/// A leg's dump channel has stopped delivering. Say exactly that — with the diagnostics the owner
+/// would otherwise have to go and collect — try the one recovery that is known to work, and fail
+/// the run if it does not clear. Never carry on quietly: every assertion from here would be a
+/// statement about a file nobody is writing.
+async function handleStaleChannel(dev, r) {
+  const ch = channelFor(dev);
+  log('');
+  log(`STALE DUMP CHANNEL — ${dev.label}`);
+  log(`  the ${dev.label} leg is returning a dump from ${fmtDuration(r.lagMs)} ago; its dump channel is not delivering.`);
+  log(`  Its ts_ms has not moved for ${fmtDuration(r.frozenForMs)} across ${r.observations} reads, each of which`);
+  log(`  issued a fresh {"op":"dump"} — so this is the HARNESS's view of the leg, not the product's`);
+  log(`  behaviour. Left alone it reads as "never converged" on content the device may already hold.`);
+  for (const line of dev.diagnose?.() || []) log(`  ${line}`);
+
+  // A clock that JUMPED (an emulator resyncing NTP mid-run) produces the same lag as a dead
+  // channel. Re-measure before accusing anything, and re-judge the reading that got us here.
+  const skewMs = measureSkew(dev, 'stale-channel re-measure');
+  const issuedAt = Date.now();
+  ch.suspend();
+  try {
+    const recheck = judgeDump({ issuedAt, dumpTsMs: dumpTsOf(dev.dump()), skewMs, toleranceMs: FRESH.toleranceMs });
+    if (recheck.verdict === 'fresh') {
+      log(`  the re-measured skew explains it (${recheck.reason || 'dump is fresh under the new offset'}) — carrying on.`);
+      ch.reset('skew re-measured').resume();
+      return;
+    }
+
+    if (!ch.recoveryAttempted && dev.wipe) {
+      ch.markRecoveryAttempted();
+      log(`  RECOVERY (one shot): wiping ${dev.label}'s qa drop files — the same thing the bootstrap does`);
+      log(`  around an install — and asking the leg to re-dump.`);
+      for (const problem of dev.wipe() || []) log(`  WIPE PROBLEM: ${problem}`);
+      for (let i = 0; i < 8; i++) {
+        const at = Date.now();
+        dev.qaWrite({ op: 'dump' });
+        dev.poke();
+        await sleep(4000);
+        const j = judgeDump({ issuedAt: at, dumpTsMs: dumpTsOf(dev.dump()), skewMs, toleranceMs: FRESH.toleranceMs });
+        if (j.verdict === 'fresh') {
+          log(`  RECOVERED after ${i + 1} re-dump attempt(s) — the channel is delivering again`);
+          log(`  (lag now ${fmtDuration(j.lagMs)}). The run continues; treat this leg's earlier`);
+          log(`  latencies with suspicion.`);
+          log('');
+          ch.reset('recovered').resume();
+          return;
+        }
+      }
+      log(`  RECOVERY FAILED — the channel is still frozen after a wipe and 8 re-dump requests.`);
+    } else if (ch.recoveryAttempted) {
+      log(`  recovery was already attempted once for this leg and the channel went stale AGAIN.`);
+      log(`  A repeatedly stale channel is not something to paper over.`);
+    }
+  } finally {
+    ch.resume();
+  }
+
+  if (!STALE_ABORT) {
+    log(`  E2E_STALE_ABORT=0 — carrying on anyway. EVERY later result for ${dev.label} is suspect.`);
+    log('');
+    ch.reset('abort disabled');
+    return;
+  }
+
+  REPORT.push({
+    name: `${dev.label} dump channel is delivering`,
+    ok: false,
+    detail: `dump frozen ${fmtDuration(r.lagMs)} behind the command — the leg's dump channel is dead`,
+  });
+  log('');
+  log(`ABORTING: ${dev.label}'s dump channel is dead, so nothing measured after this point would`);
+  log(`mean anything. This is the failure that has twice been misread as a product regression`);
+  log(`(August: healthy android legs scored as 7x perf regressions and then as "never").`);
+  log('');
+  log(`  what to do: re-run the bootstrap (it wipes the qa drop files on every install), and on`);
+  log(`  android confirm the app is FOREGROUNDED — its driver polls only while it is. If the`);
+  log(`  MediaProvider lines above are present, the reinstall orphaned the provider row and the`);
+  log(`  wipe is the cure. Set E2E_STALE_ABORT=0 to run on regardless.`);
+  log('');
+  writeReport();
+  process.exit(1);
 }
 
 // Wait until predicate(dump) is true on device; returns latency ms or -1.
@@ -310,6 +611,13 @@ async function main() {
 
   const fleet = ['ios', 'desktop', ...(devices.android ? ['android'] : [])]; // account A
   const all = [...fleet, 'stub'];                                            // + account B
+
+  // Clock skew, MEASURED, before a single freshness judgement is made. The host legs share our
+  // clock; the android emulator keeps its own and drifts from it (782 ms when this was written,
+  // and an AVD resumed from a snapshot can be minutes out). Assuming zero here would make a
+  // healthy leg's dumps look permanently late.
+  for (const name of all) measureSkew(devices[name], 'fleet start');
+  log(`clock skew vs host: ${all.map((n) => `${n}=${fmtDuration(SKEW[n] ?? 0)}`).join('  ')}`);
 
   // Sanity: every device answers a dump.
   for (const name of all) {
@@ -878,6 +1186,10 @@ async function main() {
     // Resurrect the inviter: its poll must find the drop, auto-grant (mutual-add), consume.
     shOk('xcrun', ['simctl', 'launch', IOS_UDID, IOS_BUNDLE]);
     await new Promise((r) => setTimeout(r, 4000));
+    // The app was dead ON PURPOSE, so its dump is stale by construction and the freshness detector
+    // must not be allowed to read that as a broken channel. This is the one place in the suite that
+    // stops a leg from dumping deliberately, and it is the one place that clears the tracker.
+    channelFor(devices.ios).reset('ios relaunched after the deliberate invite_offline kill');
     devices.ios.poke();
     await convergeAll(['ios'], (j) => j.friend_invites?.issued?.some((i) => i.consumed),
       BUDGET.text * 3, 'drop opened + grant parked (on relaunch)');

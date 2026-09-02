@@ -312,11 +312,21 @@ STALE DUMP CHANNEL — android
   Its ts_ms has not moved for 1m20s across 21 reads, each of which
   issued a fresh {"op":"dump"} — so this is the HARNESS's view of the leg, not the product's
   behaviour. Left alone it reads as "never converged" on content the device may already hold.
+  process:    com.blaineam.haven is RUNNING (pid 22317)
+  foreground: mResumedActivity: ActivityRecord{… com.blaineam.haven/.MainActivity …}
   dump file:  /sdcard/Download/qa-dump-com.blaineam.haven.json
               41231 B, owner u0_a191, mtime 4m14s ago
   logcat:     3 x "MediaProvider: Database update failed while renaming" in the last 4000 lines — THIS IS THE KNOWN CAUSE.
   RECOVERY (one shot): wiping android's qa drop files …
 ```
+
+The `process:` line is asked first because it is the answer most often, and it was the answer the
+2026-09-02 run needed: `HavenStub.app is GONE — THIS IS THE CAUSE. The leg exited; nothing is
+writing the dump.` The mac stub had exited during an iOS↔stub call, and without this the run would
+have spent its remaining half hour scoring a dead process as delivery failures. On Android the
+`foreground:` line answers the second-most-common cause — `QaDriver` polls the drop file only
+between `onResume` and `onPause`, so a backgrounded activity is a dead channel with nothing to do
+with MediaStore.
 
 **The one-shot recovery.** Because the cure is known and cheap, the harness tries it before
 complaining: it wipes that leg's qa drop files — exactly what `qa-e2e-bootstrap.sh` does around
@@ -327,9 +337,12 @@ channel that goes stale *again* is not papered over.
 
 **What to do when it aborts.**
 
+0. Read the `process:` line first. `… is GONE` means the leg exited — the dump channel is a
+   symptom, and the bug is whatever killed the app.
 1. Re-run the bootstrap — it wipes the qa drop files on every install.
-2. On Android, check the app is **foregrounded**: `QaDriver` polls the drop file only while it is
-   (`onResume`/`onPause`), so a backgrounded activity is a dead channel too.
+2. On Android, check the app is **foregrounded** (the `foreground:` line): `QaDriver` polls the
+   drop file only while it is (`onResume`/`onPause`), so a backgrounded activity is a dead channel
+   too.
 3. If the `MediaProvider` lines are in the output, the reinstall orphaned the provider row —
    `adb shell rm -f /sdcard/Download/qa-dump-com.blaineam.haven.json*` is the cure, and the wipe
    above has already tried it. A wipe that *cannot* remove the file prints `WIPE PROBLEM:` and is

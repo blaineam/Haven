@@ -109,6 +109,13 @@ upstream WebRTC binary is copied out of its xcframework whole, so a post-embed b
 from Enter Space) strips the slices the app is not built for and re-signs: the Release bundle goes
 from 121 MB to 107 MB.
 
+### Also in 1.8.3
+
+- **Completed invite acceptances linger for a day.** An accepted ticket used to be forgotten the
+  moment the inviter's grant completed the friendship, so re-scanning the same link parked a
+  fresh drop for a friendship that already existed. The record now stays 24 hours and a re-scan
+  is a no-op. (This also let the release QA observe the completion instead of racing it.)
+
 ## 1.8.1 — 2026-08-29
 
 ### Fixed — a smooth feed that no longer cooks the phone

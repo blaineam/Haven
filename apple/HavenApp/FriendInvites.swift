@@ -152,7 +152,12 @@ final class FriendInviteStore: ObservableObject {
               let idx = issued.firstIndex(where: { $0.consumedAt == nil }) {
             issued.remove(at: idx)
         }
-        accepted.removeAll { $0.granted || !isLive($0.acceptedAt) }
+        // Completed acceptances linger for a day instead of vanishing on the next tick: a re-scan
+        // of the same ticket then de-dups (the friendship is already made) instead of parking a
+        // fresh drop, and the QA dump can observe `granted` — pruning it on the tick right after
+        // pollGrants set it made the e2e's "friendship async-complete" step a race (2026-09-01).
+        let grantedLinger: UInt64 = 24 * 3600
+        accepted.removeAll { ($0.granted && Self.now() - min($0.acceptedAt, Self.now()) > grantedLinger) || !isLive($0.acceptedAt) }
         if issued.count != before { save() }
     }
 

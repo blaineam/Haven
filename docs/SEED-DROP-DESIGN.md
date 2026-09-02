@@ -1,8 +1,12 @@
 # Seed-drop: making device revocation adversary-proof (D16 Phase 2)
 
-> **Status — design spike, not built.** This document is the implementation plan for the top
-> outstanding security item in `ROADMAP.md` and the "revocation is not adversary-proof" finding in
-> `docs/SECURITY-AUDIT-2026-07.md` (R2/R3). It is **design only**; no product code accompanies it.
+> **Status — shipped in 1.0.7 (S2–S5 core); this document is the design it was built from.** It began
+> as the implementation plan for what was then the top outstanding security item in `ROADMAP.md` and
+> the "revocation is not adversary-proof" finding in `docs/SECURITY-AUDIT-2026-07.md` (R2/R3). Both are
+> now closed: per-device keys, seedless enrollment, the gated retirement of the bare account-key seal,
+> and self-sync re-keying on revocation all ship, with onboarding UI on iOS, macOS, Android and
+> desktop. Read the sections below as the design of record, not as pending work — the client
+> enable-sequence and the per-circle gate that governs activation are in `docs/SWITCH-FLIP-1.0.7.md`.
 >
 > **Mandate (from the maker, 2026-07):** seed-drop is **mandatory for a near-term release** and must
 > be a **proper cryptographic fix**, not "advisory revocation with better docs." The upgrade must be
@@ -14,12 +18,12 @@
 
 ## 0. TL;DR
 
-Today every one of a user's linked devices holds a **copy of the account master seed** and the engine
-runs under it. Revocation marks a device revoked in a signed `DeviceList`, but the seed it already
-holds keeps decrypting everything, and — because the roster's authority *is* the account key — a
-seed-holder can sign a fresh higher-version `DeviceList` and re-add itself. Revocation is therefore
-real against a **lost** device (honest holder stops) and **advisory** against a **compromised** one
-(attacker extracted the seed). That is the exact gap.
+**The gap this closed.** Before 1.0.7, every one of a user's linked devices held a **copy of the
+account master seed** and the engine ran under it. Revocation marked a device revoked in a signed
+`DeviceList`, but the seed it already held kept decrypting everything, and — because the roster's
+authority *is* the account key — a seed-holder could sign a fresh higher-version `DeviceList` and
+re-add itself. Revocation was therefore real against a **lost** device (honest holder stops) and
+**advisory** against a **compromised** one (attacker extracted the seed).
 
 **Seed-drop closes it by re-rooting day-to-day operation on per-device keys.** After migration a
 non-primary device holds only its own device keypair plus an account-signed `DeviceCredential`; it
@@ -29,14 +33,14 @@ seed lives on **exactly one primary device (Secure-Enclave-wrapped) plus the SE-
 escrow** for recovery. A revoked device's key is then cut off by epoch rotation, and a seedless device
 **cannot forge a higher-version roster** because roster authority is the account key it no longer holds.
 
-**The good news, established by tracing the real tree:** the foundation is substantially built and
-shipped. Per-device keys, account-signed credentials, versioned rollback-defended `DeviceList`s,
-device-bundle sealing, **dual-open**, per-device transport, and account-state self-sync all exist and
-are tested. The remaining work is concentrated and nameable: (a) **move the signer** from the account
-key to the device key with credential-chain verification on the receive side; (b) **gate off the
-unconditional account-key seal**; (c) **hand each device the self-sync key without the seed**; (d)
-**stop shipping the seed** at link time; (e) a **capability-negotiated, absence-safe migration** that
-keeps 1.0.x peers readable throughout. This is landable in stages.
+**How it was staged.** The foundation already existed when this plan was written — per-device keys,
+account-signed credentials, versioned rollback-defended `DeviceList`s, device-bundle sealing,
+**dual-open**, per-device transport, and account-state self-sync. Five pieces were named as the
+remaining work, and **all five shipped in 1.0.7**: (a) **move the signer** from the account key to the
+device key with credential-chain verification on the receive side; (b) **gate off the unconditional
+account-key seal**; (c) **hand each device the self-sync key without the seed**; (d) **stop shipping
+the seed** at link time; (e) a **capability-negotiated, absence-safe migration** that keeps 1.0.x peers
+readable throughout.
 
 ---
 

@@ -831,20 +831,34 @@ function finish() {
   // after every expensive assertion had already been paid for.
   const pass = REPORT.filter((r) => r.ok).length, fail = REPORT.length - pass;
 
-  // history + regression check (>2x latency vs last green run of the same step+device)
+  // history + regression check: >2x AND >10s slower than the MEDIAN of the last five runs that
+  // measured the same step+device, and only when the previous run flagged the same leg too.
+  // A single prior sample is a bad baseline here — the "completes on return" legs are bimodal
+  // (2.5s when the return lands just before a mailbox poll, 15-20s when it lands just after), so
+  // comparing one sample against the next tripped phantom REDs on healthy builds (2026-09-01:
+  // 3.2s → 15.0s on a leg whose ledger ranges 2.6-22.6s). First occurrence is a WARN; the same leg
+  // regressing two runs in a row is the drift this check exists to catch, and that still fails.
   let regression = false;
+  const flagged = [];
   try {
-    const rows = existsSync(HISTORY) ? readFileSync(HISTORY, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : [];
+    const rows = existsSync(HISTORY) ? readFileSync(HISTORY, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
     const last = rows[rows.length - 1];
-    if (last) for (const p of PERF) {
-      const prev = last.perf?.find((q) => q.step === p.step && q.device === p.device);
-      if (prev && prev.ms > 0 && p.ms > 0 && p.ms > prev.ms * 2 && p.ms - prev.ms > 10_000) {
-        log(`PERF REGRESSION ${p.step}→${p.device}: ${(prev.ms / 1000).toFixed(1)}s → ${(p.ms / 1000).toFixed(1)}s`);
-        regression = true;
+    const median = (xs) => { const a = [...xs].sort((x, y) => x - y); const m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
+    for (const p of PERF) {
+      if (!(p.ms > 0)) continue;
+      const prior = rows.map((r) => r.perf?.find((q) => q.step === p.step && q.device === p.device)?.ms)
+        .filter((ms) => ms > 0).slice(-5);
+      if (!prior.length) continue;
+      const base = median(prior);
+      if (p.ms > base * 2 && p.ms - base > 10_000) {
+        const again = !!last?.regressions?.some((r) => r.step === p.step && r.device === p.device);
+        flagged.push({ step: p.step, device: p.device });
+        log(`PERF ${again ? 'REGRESSION' : 'WARN (first occurrence, not fatal)'} ${p.step}→${p.device}: median ${(base / 1000).toFixed(1)}s → ${(p.ms / 1000).toFixed(1)}s`);
+        if (again) regression = true;
       }
     }
     const git = shOk('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT })?.trim();
-    appendFileSync(HISTORY, JSON.stringify({ ts: Date.now(), git, marker: MARKER, pass, fail, perf: PERF }) + '\n');
+    appendFileSync(HISTORY, JSON.stringify({ ts: Date.now(), git, marker: MARKER, pass, fail, perf: PERF, regressions: flagged }) + '\n');
   } catch (e) { log(`history error: ${e.message}`); }
 
   if (process.env.E2E_KILL === '1') {

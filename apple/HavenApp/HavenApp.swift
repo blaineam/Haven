@@ -637,9 +637,12 @@ struct RootView: View {
                 #if os(iOS)
                 Task { await ShareRouter.shared.ingest() }
                 #endif
+                // Screenshot harness: bring up the group-call overlay over the seeded feed. This
+                // must run AFTER the boot: the demo cast is seeded inside it, and `startDemoCall`
+                // bails on an empty cast. With the boot off the main actor (1.8.3) the old
+                // placement below fired first and the call scene silently never appeared.
+                if DemoEnv.scene == .call { DemoSeeder.startDemoCall() }
             }
-            // Screenshot harness: bring up the group-call overlay over the seeded feed.
-            if DemoEnv.scene == .call { DemoSeeder.startDemoCall() }
             if ProcessInfo.processInfo.environment["HAVEN_OPEN_CONNECT"] == "1" {
                 showConnect = true
                 return

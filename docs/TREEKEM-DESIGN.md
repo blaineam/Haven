@@ -1,9 +1,26 @@
 # TreeKEM: MLS-style group ratcheting on Haven's own PQ primitives (D16 Phase 5)
 
-> **Status — design spike, not built.** This is the implementation plan for the "MLS hardening"
-> line in `ROADMAP.md` (Later/Nice-to-have) and the honest closure of `docs/SECURITY.md:47`
-> ("does **not** have per-message forward secrecy or post-compromise security; that needs MLS").
-> It is **design only**; no product code accompanies it.
+> **Status — shipped in 1.0.7 (M0–M6); this document is the design it was built from.** It began as
+> the implementation plan for the "MLS hardening" line in `ROADMAP.md` and the honest closure of the
+> forward-secrecy gap `docs/SECURITY.md` named. That gap is now closed for the circles described
+> below. The code is `core/haven-p2p/src/treekem.rs` — the pure tree (wire formats, tree math, node
+> keys and path secrets, UpdatePath, the epoch key schedule and its deletion discipline,
+> propose/commit/welcome, the fork tie-break and chain rule, the DM/live sender ratchet) — driven by
+> the `mls_*` engine wiring in `core/haven-ffi/src/lib.rs`. Read the sections below as the design of
+> record, not as pending work.
+>
+> **Two things this status must not overstate.**
+> - **It is enabled for circles with a verified owner** — every circle created from 1.0.7 on. A
+>   legacy circle has no recorded creator, so it keeps sender-keys+epochs unless its creator offers a
+>   creator-bound successor and each member chooses to follow (§4.3,
+>   `device::mint_owned_circle_id`). Even on an owned circle the tree keys content only once every
+>   member is affirmatively MLS-capable and joined. The gate lives in core
+>   (`device::circle_fully_mls_capable`), not in any client — see `docs/SWITCH-FLIP-1.0.7.md`.
+> - **M7 has not happened.** The audit to date is an **internal, AI-driven adversarial review** (0
+>   critical, 0 high) — a strong first pass, **not** a formal external one. §9 gates M7's third-party
+>   crypto review on flipping the master switch to default-ON; the switch was flipped first, so that
+>   review is outstanding, and the 1.0.7 CHANGELOG says so publicly. Do not cite this document as
+>   evidence of an independent audit.
 >
 > **Locked decisions (do not relitigate):**
 > - **Path B.** An MLS-*style* TreeKEM built on Haven's **own** hybrid post-quantum primitives —
@@ -700,6 +717,13 @@ implementing a known design against a delivery model the reference implementatio
 ---
 
 ## 9. Staged plan (M0…M7)
+
+> **Read this section as the record of how the work was ordered, not as a schedule.** M0–M6 all
+> shipped together in **1.0.7** — not across the 1.0.8–1.1.x arc the "Realistic release" column
+> projects, and not on the 6–9-month estimate below, both of which were written before the work
+> started. The staging is preserved because the ORDER is the design: every stage additive, nothing
+> before the keying flip changing what a circle seals content under. **M7 is the exception — it is
+> still outstanding** (see the status note at the top).
 
 Sizing honesty up front: **this is materially bigger than seed-drop.** Seed-drop re-pointed
 signers and gated a recipient list over existing rails; this adds a new cryptographic subsystem

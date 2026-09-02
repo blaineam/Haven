@@ -131,7 +131,7 @@ final class ShareRouter: ObservableObject {
         refs = imported
 
         // The extension already asked where this goes — act on it rather than asking again.
-        if payload.route != .undecided { return deliver(payload) }
+        if payload.route != .undecided { return await deliver(payload) }
 
         // Only honor a suggested thread that still exists on this device and isn't locked — a stale
         // donation (thread since deleted, circle since locked) falls back to the normal sheet.
@@ -146,7 +146,7 @@ final class ShareRouter: ObservableObject {
     /// composer (that's the point: circle picker, music, location, story layout), so they report
     /// `.needsUser`. A send the engine refused reports `.retry` and the share stays queued —
     /// silently eating someone's message because the engine wasn't up yet is the worst outcome here.
-    private func deliver(_ payload: ShareInbox.Payload) -> Outcome {
+    private func deliver(_ payload: ShareInbox.Payload) async -> Outcome {
         let store = FeedStore.shared
         let body = [payload.caption, text]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -184,7 +184,7 @@ final class ShareRouter: ObservableObject {
                 present = true
                 return .needsUser
             }
-            guard store.sendMessage(to: target, body, media: refs, music: nil) else {
+            guard await store.authorMessage(to: target, body, media: refs, music: nil) else {
                 // The engine refused it (not configured, or the post threw). Keep the share queued
                 // and leave nothing on screen — the next drain tries again.
                 HavenLog.sync("share: DM send refused for \(target.prefix(16)) — keeping queued")

@@ -96,9 +96,29 @@ final class SelfSyncCoordinator {
 
     // MARK: state ↔ CRDT mapping (v1: profile + global settings)
 
-    /// The current local state as namespaced key → value bytes (no stamps). `social` (when
+    /// What a pass reads from the engine BEFORE the main-actor merge — one engine pass, off-main,
+    /// instead of the seven engine calls `currentLocal` used to make on the main actor.
+    struct EngineReads {
+        var myNodeHex = ""
+        var circles: [(id: String, name: String, memberBundles: [Data])] = []
+        var contactRosters: [ContactRosterWire] = []
+        var ownRoster: [ContactRosterWire] = []
+    }
+    private func engineReads(_ engine: Engine?) async -> EngineReads? {
+        guard let engine else { return nil }
+        return await engine.run { s in
+            var r = EngineReads()
+            r.myNodeHex = s.myNodeHex()
+            r.circles = s.circles().map { ($0.id, $0.name, s.circleMemberBundles(circleId: $0.id)) }
+            r.contactRosters = s.exportContactRosters()
+            r.ownRoster = s.exportOwnRoster()
+            return r
+        }
+    }
+
+    /// The current local state as namespaced key → value bytes (no stamps). `reads` (when
     /// available) contributes circle structure; without it, circles are simply not snapshotted.
-    private func currentLocal(social: HavenSocial?) -> [String: Data] {
+    private func currentLocal(snapshot: EngineReads?) -> [String: Data] {
         var m: [String: Data] = [:]
         let p = ProfileStore.shared
         // Only broadcast NON-EMPTY profile scalars. A fresh/empty device must never stamp a blank value
@@ -204,18 +224,18 @@ final class SelfSyncCoordinator {
         }
         // Circles: name + member bundles + relay nodes, so another device can reconstruct each
         // circle and seal to every member. (Additive in v1 — member/circle removal is a follow-up.)
-        if let social = social {
+        if let reads = snapshot {
             // Switch-Flip §2: carry the circle CREATOR (authority root) along the authenticated
             // circle-sync path so another of my devices / a shared-circle peer can pin it. I only
             // assert it for circles I own (the ones I created + the default "My Circle"); nil otherwise
             // (the real creator's own export carries it — absence never fabricates a creator).
-            let myCreator = DeviceRosterManager.hexToData(social.myNodeHex())
-            for ci in social.circles() {
+            let myCreator = DeviceRosterManager.hexToData(reads.myNodeHex)
+            for ci in reads.circles {
                 let creator = (CircleCreatorStore.iCreated(ci.id) || ci.id == "default") ? myCreator : nil
                 // Shared FFI encoder → byte-identical circle records across iOS/desktop/Android.
                 m["circle:\(ci.id)"] = encodeCircleSync(
                     name: ci.name,
-                    memberBundles: social.circleMemberBundles(circleId: ci.id),
+                    memberBundles: ci.memberBundles,
                     relays: RelayMailboxStore.shared.relays(forCircle: ci.id),
                     creator: creator)
             }
@@ -223,13 +243,13 @@ final class SelfSyncCoordinator {
             // DIAL/seal for each friend directly from a sibling that already knows them, instead of dialing
             // dead account ids and timing out (the regression that made friend comms fail on the Mac). Keyed
             // by account hex so a newer roster version replaces the old. Additive (never tombstoned).
-            for r in social.exportContactRosters() { m["roster:\(r.accountHex)"] = r.wire }
+            for r in reads.contactRosters { m["roster:\(r.accountHex)"] = r.wire }
             // My OWN device roster — the fix for the own-device bootstrap deadlock. Without this a
             // sibling device never learns THIS device's id, so its relay rejects us (`ERR forbidden`)
             // and our relay-deletion tombstones never reach it (deleted relays keep returning). Shares
             // the `roster:` namespace, so the ingest loop already applies it (union-merging our device
             // id into the sibling's own-account list). Converges over any relay both devices can reach.
-            for r in social.exportOwnRoster() { m["roster:\(r.accountHex)"] = r.wire }
+            for r in reads.ownRoster { m["roster:\(r.accountHex)"] = r.wire }
         }
         return m
     }
@@ -240,8 +260,13 @@ final class SelfSyncCoordinator {
     private static let dynamicPrefixes = ["contact:", "blocked:", "circle:"]
 
     /// Write a merged state back into the local stores (only when a value actually differs, to
-    /// avoid feedback loops through the stores' didSet broadcasts).
-    private func applyLocal(_ h: AccountStateHandle, social: HavenSocial?) async {
+    /// avoid feedback loops through the stores' didSet broadcasts). Engine mutations — circle
+    /// severances, deletions, the synced circles' create/rename/creator-pin/member adds — are
+    /// decided here on the main actor and applied in ONE engine pass at the end; the roster wires
+    /// keep their one-hold-per-wire ingest.
+    private func applyLocal(_ h: AccountStateHandle, engine: Engine?, reads: EngineReads?) async {
+        /// Engine work this apply decided on, run in one pass below.
+        var engineOps: [(HavenSocial) -> Void] = []
         let p = ProfileStore.shared
         // Profile fields are LAST-WRITER-WINS by per-field timestamp — a remote value is applied only if
         // it was edited MORE RECENTLY than our local one. This ends the endless ping-pong where two
@@ -377,13 +402,16 @@ final class SelfSyncCoordinator {
             guard !circleId.isEmpty, !hex.isEmpty else { continue }
             let rem = cRemovedMs[key] ?? 0, readd = cReaddMs[key] ?? 0
             if rem >= readd, rem > 0 {
-                if conn.mergeRemovedAt(key, ms: rem),
-                   social?.contactNodeIds(circleId: circleId).contains(hex) == true {
-                    social?.removeFromCircle(circleId: circleId, nodeHex: hex)   // purge + engine tombstone (present)
+                if conn.mergeRemovedAt(key, ms: rem) {
+                    engineOps.append { s in
+                        if s.contactNodeIds(circleId: circleId).contains(hex) {
+                            s.removeFromCircle(circleId: circleId, nodeHex: hex)   // purge + engine tombstone (present)
+                        }
+                    }
                 }
             } else if readd > 0 {
                 if !conn.mergeReaddedAt(key, ms: readd) {
-                    social?.clearCircleRemoval(circleId: circleId, nodeHex: hex)  // newest is a re-add → lift tombstone
+                    engineOps.append { $0.clearCircleRemoval(circleId: circleId, nodeHex: hex) }  // newest is a re-add → lift tombstone
                 }
             }
         }
@@ -418,32 +446,29 @@ final class SelfSyncCoordinator {
         // each friend's CURRENT devices (verified against the account bundle carried inside the wire). This
         // is what lets a linked Mac reach friends it never contacted directly — it inherits their device ids
         // from the phone. Idempotent + version-checked in the engine, so a stale roster can't roll anything back.
-        if let social = social {
+        if let engine {
             // A roster arriving here is very often MY OWN account's — a sibling device registering.
             // That advances the circle's epoch just as a contact's roster change does, so it needs the
             // same re-seal, and it was the door the first fix missed: the re-seal was wired only into
             // the CONTACT pull path, while a sibling's registration comes through self-sync. The
             // symptom was an Android leg parked on `@…777` while everyone else had moved to `@…778`.
             //
-            // OFF-MAIN + EngineGate: ingest drains pending epoch events, and each drained event
+            // On the engine actor: ingest drains pending epoch events, and each drained event
             // re-verifies device credentials — cloning ML-DSA verifying keys per contact device.
             // The stall detector caught this exact loop blocking main 1.4–1.9s per foreground
             // sync on a real account; it is engine work like any other and queues behind the
             // mailbox drain instead of parking the UI.
             let wires = live.filter { $0.key.hasPrefix("roster:") }.map(\.value)
             if !wires.isEmpty {
-                // ONE gate hold PER WIRE with air between them (the mailbox drain's shape). The hold
+                // ONE engine hold PER WIRE with air between them (the mailbox drain's shape). The hold
                 // log showed this loop holding the engine for 9.5s on the owner's account — every
                 // wire drains pending epoch events and re-verifies device credentials — and any
                 // main-actor engine read in that window parked for the whole of it.
-                let rosterChanged = await Task.detached(priority: .utility) {
-                    var changed = false
-                    for (i, wire) in wires.enumerated() {
-                        if i > 0 { try? await Task.sleep(nanoseconds: 3_000_000) }
-                        if await EngineGate.shared.run({ social.ingestRosterWireStatus(wire: wire) }) > 0 { changed = true }
-                    }
-                    return changed
-                }.value
+                var rosterChanged = false
+                for (i, wire) in wires.enumerated() {
+                    if i > 0 { try? await Task.sleep(nanoseconds: 3_000_000) }
+                    if await engine.run({ $0.ingestRosterWireStatus(wire: wire) }) > 0 { rosterChanged = true }
+                }
                 if rosterChanged {
                     NotificationCenter.default.post(name: SharedStore.rosterEpochChangedNotification, object: nil)
                 }
@@ -467,45 +492,47 @@ final class SelfSyncCoordinator {
             let del = cdDeletedMs[id] ?? 0, rec = cdRecreatedMs[id] ?? 0
             if del >= rec, del > 0 {
                 if CircleDeletionStore.mergeDeletedAt(id, ms: del),
-                   social?.circles().contains(where: { $0.id == id }) == true {
-                    social?.leaveCircle(id: id)
+                   reads?.circles.contains(where: { $0.id == id }) == true {
+                    engineOps.append { $0.leaveCircle(id: id) }
                 }
             } else if rec > 0 {
                 CircleDeletionStore.mergeRecreatedAt(id, ms: rec)
             }
         }
 
-        if let social = social {
-            let existing = social.circles()
+        if let reads {
+            let existing = reads.circles
             for e in live where e.key.hasPrefix("circle:") {
                 let id = String(e.key.dropFirst("circle:".count))
                 guard let rec = decodeCircleSync(bytes: e.value) else { continue }
                 // Don't RESURRECT a circle/DM the user deleted (LWW): a sibling still listing it must not
                 // re-create it every sync. A newer re-creation (below via markRecreated) lifts this.
                 if CircleDeletionStore.isDeleted(id) { continue }
-                social.createCircle(id: id, name: rec.name)   // no-op if it already exists
-                if let cur = existing.first(where: { $0.id == id }), cur.name != rec.name {
-                    social.renameCircle(id: id, name: rec.name)
-                }
+                let rename = existing.first(where: { $0.id == id }).map { $0.name != rec.name } ?? false
                 // Switch-Flip §2: pin the CREATOR carried on the authenticated circle-sync record (the
                 // "learned out-of-band" path). set_circle_creator is DEFINITION-bound — it overrides any
                 // weakly-TOFU'd creator and can't be dislodged by a later disagreeing grant.
-                if let creator = rec.creator, creator.count == 32 {
-                    _ = social.setCircleCreator(circleId: id,
-                                                accountHex: creator.map { String(format: "%02x", $0) }.joined())
-                }
+                let creatorHex: String? = (rec.creator?.count == 32)
+                    ? rec.creator!.map { String(format: "%02x", $0) }.joined() : nil
                 // STRICTLY ADDITIVE: register each synced member. We do NOT remove members or leave
                 // circles based on a peer's state. Absence-based removal caused catastrophic data loss:
                 // a freshly-restored device has an empty engine, so it looked like "every circle/member
                 // was removed", which tombstoned + propagated to the primary and wiped its posts. Real
                 // circle-leave / member-removal must be driven by an explicit intent, not by absence.
-                for bundle in rec.memberBundles {
-                    // Don't re-add someone we EXPLICITLY removed from this circle. Additive sync was
-                    // re-registering removed members from a peer's roster — which is exactly why "remove
-                    // someone" never stuck. An explicit removal wins over a peer still listing them.
+                //
+                // Don't re-add someone we EXPLICITLY removed from this circle. Additive sync was
+                // re-registering removed members from a peer's roster — which is exactly why "remove
+                // someone" never stuck. An explicit removal wins over a peer still listing them.
+                let bundles = rec.memberBundles.filter { bundle in
                     let hex = bundle.prefix(32).map { String(format: "%02x", $0) }.joined()
-                    if conn.isRemovedFromCircle(hex, circleId: id) { continue }
-                    _ = try? social.addContactBundle(circleId: id, bundle: bundle)
+                    return !conn.isRemovedFromCircle(hex, circleId: id)
+                }
+                let name = rec.name
+                engineOps.append { s in
+                    s.createCircle(id: id, name: name)   // no-op if it already exists
+                    if rename { s.renameCircle(id: id, name: name) }
+                    if let creatorHex { _ = s.setCircleCreator(circleId: id, accountHex: creatorHex) }
+                    for bundle in bundles { _ = try? s.addContactBundle(circleId: id, bundle: bundle) }
                 }
                 for node in rec.relays {
                     // Non-stamping add: a sync-learned relay must NOT get a fresh addedAt=now() (that
@@ -514,6 +541,11 @@ final class SelfSyncCoordinator {
                     RelayMailboxStore.shared.addSynced(circleId: id, nodeHex: node)
                 }
             }
+        }
+        // The engine half of this apply, in one pass on the actor.
+        if let engine, !engineOps.isEmpty {
+            let ops = engineOps
+            await engine.run { s in for op in ops { op(s) } }
         }
     }
 
@@ -557,7 +589,7 @@ final class SelfSyncCoordinator {
     /// Returns `true` if the merge brought in changes from another device (so the caller can
     /// persist the engine state + refresh the UI — relevant when circles arrive).
     @discardableResult
-    func sync(social: HavenSocial?, force: Bool = false) async -> Bool {
+    func sync(engine: Engine?, force: Bool = false) async -> Bool {
         guard !inFlight else { return false }
         guard canSelfSync() else { return false }
         // A warm device defers the whole pass — this is multi-transport LIST+FETCH+crypto and the
@@ -584,10 +616,12 @@ final class SelfSyncCoordinator {
             base = AccountStateHandle()
         }
 
-        // 2. Fold in whatever changed locally since last sync (stamp = now, this device).
+        // 2. Fold in whatever changed locally since last sync (stamp = now, this device). The
+        // engine's part of the snapshot is one pass on its actor.
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
         let device = SelfSyncDevice.id
-        let local = currentLocal(social: social)
+        let reads = await engineReads(engine)
+        let local = currentLocal(snapshot: reads)
         for (key, value) in local {
             if base.get(key: key) != value {
                 _ = try? base.set(key: key, value: value, ts: now, device: device)
@@ -638,7 +672,7 @@ final class SelfSyncCoordinator {
         let changed = base.toBytes() != preMerge
 
         // 4. Apply the converged state locally + persist the new base.
-        await applyLocal(base, social: social)
+        await applyLocal(base, engine: engine, reads: reads)
         let converged = base.toBytes()
         try? converged.write(to: baseURL, options: .atomic)
 
@@ -680,10 +714,10 @@ final class SelfSyncCoordinator {
 
     /// Fold local changes (with fresh stamps) into `base`, including removal tombstones. Mirrors the
     /// relay `sync()`'s steps 1–2.
-    private func foldLocal(into base: AccountStateHandle, social: HavenSocial?) {
+    private func foldLocal(into base: AccountStateHandle, reads: EngineReads?) {
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
         let device = SelfSyncDevice.id
-        let local = currentLocal(social: social)
+        let local = currentLocal(snapshot: reads)
         for (key, value) in local where base.get(key: key) != value {
             _ = try? base.set(key: key, value: value, ts: now, device: device)
         }
@@ -721,10 +755,11 @@ final class SelfSyncCoordinator {
 
     /// This device's sealed self-sync slot, folding in local changes first — the payload to hand a
     /// peer device directly over the nearby mesh. No relay/S3 involved.
-    func sealedLocalSlot(social: HavenSocial?) -> Data? {
+    func sealedLocalSlot(engine: Engine?) async -> Data? {
         guard canSelfSync() else { return nil }
+        let reads = await engineReads(engine)
         let base = loadBase()
-        foldLocal(into: base, social: social)
+        foldLocal(into: base, reads: reads)
         try? base.toBytes().write(to: baseURL, options: .atomic)
         return sealState(base)
     }
@@ -732,13 +767,13 @@ final class SelfSyncCoordinator {
     /// Merge a peer device's sealed slot received over a direct transport, apply + persist. Returns
     /// true if anything new arrived (so the caller can refresh the feed).
     @discardableResult
-    func ingestPeerSlot(_ blob: Data, social: HavenSocial?) async -> Bool {
+    func ingestPeerSlot(_ blob: Data, engine: Engine?) async -> Bool {
         guard let peer = openState(blob) else { return false }
         let base = loadBase()
         let before = base.toBytes()
         base.merge(other: peer)
         let changed = base.toBytes() != before
-        await applyLocal(base, social: social)
+        await applyLocal(base, engine: engine, reads: await engineReads(engine))
         try? base.toBytes().write(to: baseURL, options: .atomic)
         return changed
     }

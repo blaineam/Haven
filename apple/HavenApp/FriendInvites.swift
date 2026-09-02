@@ -241,7 +241,7 @@ final class FriendInviteStore: ObservableObject {
                 // them as a contact at accept time, so the known-account branch consumes it),
                 // adopt the ticket relays as REAL relays, and let standard sync carry the rest
                 // (epoch keys, history, relay entries).
-                FeedStore.shared.ingestInviteHello(hello)
+                await FeedStore.shared.ingestInviteHello(hello)
                 RelayMailboxStore.shared.adoptBootstrapRelays(t.relays)
                 accepted[i].granted = true
                 save()
@@ -293,7 +293,7 @@ final class FriendInviteStore: ObservableObject {
                 save()
             }
             HavenLog.net("friend-invite: acceptance drop opened (from \(acceptor?.prefix(8) ?? "?")) — surfacing prompt")
-            let consumed = FeedStore.shared.ingestInviteHello(hello)
+            let consumed = await FeedStore.shared.ingestInviteHello(hello)
             // Auto-consumed = we had ALREADY added them (mutual invite race): there will be no
             // approval tap, so the approval IS implicit — park the grant right now, or an offline
             // acceptor would wait on reply lanes that need them online (the exact bug this

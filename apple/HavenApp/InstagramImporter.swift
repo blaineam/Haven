@@ -315,19 +315,23 @@ final class InstagramImporter: ObservableObject {
                     // Frozen before the hop: `music` is a var, and capturing a mutable local in
                     // concurrently-executing code is a Swift 6 error.
                     let picked = music
-                    await MainActor.run {
-                        if kind == .story {
+                    if kind == .story {
+                        await MainActor.run {
                             KeptStoriesStore.shared.keep(id: keptId, body: body, media: refs,
                                                          createdAt: at, music: picked)
-                        } else {
-                            FeedStore.shared.postImported(circleId: circleId, body: body, media: refs,
-                                                          music: picked, story: false, createdAt: at)
-                            // Shazam refused rather than answered — ask again later, against the
-                            // post that now exists, instead of losing the credit entirely.
-                            if let retryRef, picked == nil,
-                               let newId = FeedStore.shared.lastImportedPostId {
-                                ShazamRetryQueue.shared.enqueue(postId: newId, circleId: circleId,
-                                                                videoRef: retryRef)
+                        }
+                    } else {
+                        // The seal runs on the engine actor; the store hops to main around it.
+                        await FeedStore.shared.postImported(circleId: circleId, body: body, media: refs,
+                                                            music: picked, story: false, createdAt: at)
+                        // Shazam refused rather than answered — ask again later, against the
+                        // post that now exists, instead of losing the credit entirely.
+                        if let retryRef, picked == nil {
+                            await MainActor.run {
+                                if let newId = FeedStore.shared.lastImportedPostId {
+                                    ShazamRetryQueue.shared.enqueue(postId: newId, circleId: circleId,
+                                                                    videoRef: retryRef)
+                                }
                             }
                         }
                     }

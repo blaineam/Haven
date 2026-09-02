@@ -170,9 +170,11 @@ struct ReportSheet: View {
 
     private func submit() {
         guard let reason else { return }
-        let author = feed.report(circleId: feed.activeCircleId, target: item.id,
-                                 reason: reason.rawValue, comment: comment)
-        if alsoBlock, let author { feed.blockConnection(author) }
+        let cid = feed.activeCircleId, target = item.id, block = alsoBlock, why = reason.rawValue, note = comment
+        Task { @MainActor in
+            let author = await feed.report(circleId: cid, target: target, reason: why, comment: note)
+            if block, let author { feed.blockConnection(author) }
+        }
         dismiss()
     }
 }

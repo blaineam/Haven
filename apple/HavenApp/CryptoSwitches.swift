@@ -30,6 +30,8 @@ enum CircleCreatorStore {
     static func iCreated(_ id: String) -> Bool {
         (UserDefaults.standard.stringArray(forKey: key) ?? []).contains(id)
     }
+    /// Every circle I created — a value snapshot for the boot pass, which re-pins their creator off-main.
+    static func createdIds() -> Set<String> { Set(UserDefaults.standard.stringArray(forKey: key) ?? []) }
 
     static func clear() { UserDefaults.standard.removeObject(forKey: key) }
 }

@@ -4,7 +4,7 @@ import SwiftUI
 /// The in-app activity list (the bell): who reacted / commented / voted / posted / messaged,
 /// merged from two sources —
 ///   • the engine's `activity(sinceMs:nowMs:)` reduction (one pass across every circle, own
-///     actions excluded), pulled OFF-MAIN via EngineGate after ingest bursts and on foreground;
+///     actions excluded), pulled OFF-MAIN on the engine actor after ingest bursts and on foreground;
 ///   • app-layer moments that never enter a circle's event log — connection requests,
 ///     added-to-a-circle, device linking — appended at the same sites that post their banners.
 ///
@@ -64,9 +64,9 @@ final class ActivityStore: ObservableObject {
 
     // MARK: - Intake
 
-    /// Engine rows. The FFI runs off-main under EngineGate (it takes the engine lock); the merge
+    /// Engine rows. The FFI runs on the engine actor (it takes the engine lock); the merge
     /// publishes back on the main actor. Coalesced — an ingest burst pulls once.
-    func pull(social: HavenSocial) {
+    func pull(engine: Engine) {
         guard !pullInFlight else { return }
         pullInFlight = true
         // Overlap the newest known row by an hour so an event that raced the previous pull isn't
@@ -75,9 +75,7 @@ final class ActivityStore: ObservableObject {
         let since = newest > 3_600_000 ? newest - 3_600_000 : 0
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         Task { @MainActor [weak self] in
-            let rows = await Task.detached(priority: .utility) {
-                await EngineGate.shared.run { social.activity(sinceMs: since, nowMs: nowMs) }
-            }.value
+            let rows = await engine.run { $0.activity(sinceMs: since, nowMs: nowMs) }
             guard let self else { return }
             self.pullInFlight = false
             self.ingest(rows)

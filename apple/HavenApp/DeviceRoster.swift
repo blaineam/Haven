@@ -185,20 +185,20 @@ final class DeviceRosterManager: ObservableObject {
 
     /// Turn multi-device on: register the account key as the primary "device #0". Idempotent.
     @discardableResult
-    func enable(social: HavenSocial?, accountSeed: Data, accountBundle: Data, accountHex: String) -> Bool {
+    func enable(engine: Engine?, accountSeed: Data, accountBundle: Data, accountHex: String) async -> Bool {
         primaryHex = accountHex
         if entries[accountHex] == nil {
             entries[accountHex] = Entry(bundle: accountBundle, name: "Primary (this account's master key)", isPrimary: true)
         }
-        return resign(social: social, accountSeed: accountSeed)
+        return await resign(engine: engine, accountSeed: accountSeed)
     }
 
     /// Authorize a newly-linked device. Returns that device's credential (to hand back via QR-C), or nil.
     func addLinkedDevice(bundle: Data, nodeHex: String, name: String,
-                         social: HavenSocial?, accountSeed: Data) -> Data? {
+                         engine: Engine?, accountSeed: Data) async -> Data? {
         revoked.remove(nodeHex)
         entries[nodeHex] = Entry(bundle: bundle, name: name, isPrimary: false)
-        guard resign(social: social, accountSeed: accountSeed) else { return nil }
+        guard await resign(engine: engine, accountSeed: accountSeed) else { return nil }
         let now = UInt64(Date().timeIntervalSince1970)
         return try? issueDeviceCredential(accountSeed: accountSeed, deviceBundle: bundle, name: name, createdAt: now)
     }
@@ -215,11 +215,11 @@ final class DeviceRosterManager: ObservableObject {
     /// intact — a lost or stolen phone, the ordinary case. For a device you believe was compromised,
     /// the only real remedy today is a new identity. See [`revocationCaveat`].
     @discardableResult
-    func revoke(_ nodeHex: String, social: HavenSocial?, accountSeed: Data) -> Bool {
+    func revoke(_ nodeHex: String, engine: Engine?, accountSeed: Data) async -> Bool {
         guard nodeHex != primaryHex else { return false }   // never revoke the master key
         entries[nodeHex] = nil
         revoked.insert(nodeHex)
-        return resign(social: social, accountSeed: accountSeed)
+        return await resign(engine: engine, accountSeed: accountSeed)
     }
 
     /// Step DOWN as primary: forget this device's roster entirely so it stops asserting the master key.
@@ -232,9 +232,10 @@ final class DeviceRosterManager: ObservableObject {
         rebuild(); save()
     }
 
-    /// Re-issue every active device's credential + a fresh signed DeviceList and push to the engine.
+    /// Re-issue every active device's credential + a fresh signed DeviceList and push to the engine
+    /// (on its actor — the roster install re-verifies every credential).
     @discardableResult
-    private func resign(social: HavenSocial?, accountSeed: Data) -> Bool {
+    private func resign(engine: Engine?, accountSeed: Data) async -> Bool {
         version &+= 1
         let now = UInt64(Date().timeIntervalSince1970)
         var creds: [Data] = []
@@ -249,7 +250,7 @@ final class DeviceRosterManager: ObservableObject {
         let revokedIds = revoked.compactMap { Self.hexToData($0) }
         guard let list = try? signDeviceList(accountSeed: accountSeed, version: version, updatedAt: now,
                                              devices: activeIds, revoked: revokedIds) else { return false }
-        let ok = social?.setMyDeviceRoster(list: list, credentials: creds) ?? false
+        let ok = await engine?.run { $0.setMyDeviceRoster(list: list, credentials: creds) } ?? false
         rebuild(); save()
         return ok
     }

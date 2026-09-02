@@ -85,7 +85,13 @@ Because there's no central store, large content for an offline peer falls throug
   a **native AppKit/SwiftUI target** (`HavenMac`); **Mac Catalyst was dropped 2026-06-23**
   (see [`MACOS-NATIVE-PORT.md`](MACOS-NATIVE-PORT.md)). A user's own Apple devices take
   per-device transport identities and converge their epoch keys, so posts/DMs sync across
-  them (see [`MULTI-DEVICE.md`](MULTI-DEVICE.md)).
+  them (see [`MULTI-DEVICE.md`](MULTI-DEVICE.md)). The UI is severed from the engine: an
+  `Engine` actor (`apple/HavenApp/Engine.swift`) is the only holder of the `HavenSocial`
+  handle and every call runs on it, off the main thread; `FeedStore`
+  (`apple/HavenApp/FeedStore.swift`) is a `@MainActor` **read model** of value snapshots the
+  views render, and every mutation is a request whose engine work runs on the actor and
+  republishes. DEBUG builds crash on any engine call that reaches the main thread, so the
+  e2e fleet doubles as the regression test for that invariant.
 - **Android (native, in progress):** Jetpack Compose + the *same* Rust core via UniFFI
   Kotlin bindings — a real iroh peer, not a browser. Android Keystore for keys. Feed, DMs
   (incl. the delete-watermark, group-DM sender rows, pinned+sorted conversations, and

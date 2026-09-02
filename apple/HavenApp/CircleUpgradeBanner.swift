@@ -33,8 +33,10 @@ struct CircleUpgradeBanner: View {
     /// core still refuses to author one on a circle that already names its creator — the follow side
     /// names each claimant so members choose the real creator. (Previously this required a per-device
     /// created-circles record that legacy circles never had, so the offer never appeared at all.)
+    /// Read by `reload` (an engine pass) — never from the body.
+    @State private var upgradable = false
     private var iCanOffer: Bool {
-        guard store.circleIsUpgradable(circleId) else { return false }
+        guard upgradable else { return false }
         return offers.first(where: { $0.mine }) == nil
     }
 
@@ -52,7 +54,13 @@ struct CircleUpgradeBanner: View {
     }
 
     private func reload() {
-        offers = store.pendingUpgrades(circleId)
+        let cid = circleId
+        Task { @MainActor in
+            let (pending, canOffer) = (await store.pendingUpgrades(cid), await store.circleIsUpgradable(cid))
+            guard cid == circleId else { return }
+            offers = pending
+            upgradable = canOffer
+        }
     }
 
     // MARK: - Member: someone is asking us to follow
@@ -73,9 +81,11 @@ struct CircleUpgradeBanner: View {
             Spacer(minLength: 0)
             Button {
                 busy = true
-                store.followCircleUpgrade(circleId, to: o.newCircleId)
-                busy = false
-                reload()
+                Task { @MainActor in
+                    await store.followCircleUpgrade(circleId, to: o.newCircleId)
+                    busy = false
+                    reload()
+                }
             } label: {
                 Text("Follow").font(.subheadline.weight(.semibold))
             }
@@ -103,9 +113,11 @@ struct CircleUpgradeBanner: View {
             Spacer(minLength: 0)
             Button {
                 busy = true
-                store.offerCircleUpgrade(circleId)
-                busy = false
-                reload()
+                Task { @MainActor in
+                    await store.offerCircleUpgrade(circleId)
+                    busy = false
+                    reload()
+                }
             } label: {
                 Text("Upgrade").font(.subheadline.weight(.semibold))
             }

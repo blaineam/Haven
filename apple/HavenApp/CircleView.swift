@@ -323,8 +323,11 @@ struct CircleView: View {
         // is tombstoned so they can't rejoin), for when removing from one circle keeps leaving them in
         // the others. DMs are left intact.
         Button(role: .destructive) {
-            let n = store.removeFromAllCircles(c.idHex)
-            if isDefault || n > 0 { contacts.remove(c) }
+            let hex = c.idHex, dropContact = isDefault
+            Task { @MainActor in
+                let n = await store.removeFromAllCircles(hex)
+                if dropContact || n > 0 { contacts.remove(c) }
+            }
         } label: {
             Label("Remove from all circles", systemImage: "person.2.slash")
         }

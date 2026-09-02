@@ -121,7 +121,7 @@ final class MediaBackupQueue {
     /// `priority`: a just-authored event's media — drained before any backfill backlog. Callers
     /// enqueue in the media list's order (thumbs/posters ride before the video), which the lane
     /// preserves, so a poster is on the relay before its (much larger) video starts.
-    func enqueue(_ ref: String, circleId: String, social: HavenSocial, priority: Bool = false) {
+    func enqueue(_ ref: String, circleId: String, engine: Engine, priority: Bool = false) {
         if MediaStore.isSynthetic(ref) { return }   // geo: pins et al. carry no bytes — never relay-storable
         let queued = (inFlightHi + inFlightLo).contains(where: { $0.ref == ref && $0.cid == circleId })
             || pending.contains(where: { $0.ref == ref && $0.cid == circleId })
@@ -137,14 +137,14 @@ final class MediaBackupQueue {
             }
             save()
         }
-        drain(social: social)
+        drain(engine: engine)
     }
 
     /// Kick a drain for anything persisted from a prior session — call on launch so media that was
     /// mid-upload when the app was killed still reaches the relay.
-    func drainPersisted(social: HavenSocial) { drain(social: social) }
+    func drainPersisted(engine: Engine) { drain(engine: engine) }
 
-    private func drain(social: HavenSocial) {
+    private func drain(engine: Engine) {
         guard !draining, !pending.isEmpty || !priorityPending.isEmpty else { return }
         draining = true
         Task { @MainActor in
@@ -225,7 +225,7 @@ final class MediaBackupQueue {
             for (job, isPriority) in hiWork.map({ ($0, true) }) + loWork.map({ ($0, false) }) {
                 // Own hosted store: if the blob is already local under the media key, ledger it and
                 // skip the expensive seal path for that dest (backup still mirrors to remote peers).
-                let ok = await SharedStore.backup(ref: job.ref, circleId: job.cid, social: social)
+                let ok = await SharedStore.backup(ref: job.ref, circleId: job.cid, engine: engine)
                 if !ok {
                     // RECORD THE STALL HERE, at the one choke point, instead of trusting every path
                     // inside backup() to do it — three of them did not:
@@ -287,14 +287,14 @@ final class MediaBackupQueue {
                 } else {
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        MediaBackupQueue.shared.drainPersisted(social: social)
+                        MediaBackupQueue.shared.drainPersisted(engine: engine)
                     }
                 }
                 #else
                 // Continue later without stacking concurrent drains.
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    MediaBackupQueue.shared.drainPersisted(social: social)
+                    MediaBackupQueue.shared.drainPersisted(engine: engine)
                 }
                 #endif
             } else if !queuedRefs.isEmpty {
@@ -419,15 +419,19 @@ enum MediaRecovery {
     private static let maxAttempts = 10
     private static var inFlight = false
 
-    static func runOnceIfNeeded(social: HavenSocial) {
+    static func runOnceIfNeeded(engine: Engine) {
         guard !UserDefaults.standard.bool(forKey: doneKey), !inFlight else { return }
         inFlight = true
-        Task.detached(priority: .background) {
+        // `.utility`, not `.background`: the feed walk below is one hold of the engine actor, and a
+        // background-QoS job starves under the launch burst — the hold log caught a trivial walk on an
+        // EMPTY account holding the actor 4.3s of wall time, with every user-initiated pass queued
+        // behind it. Utility matches the other maintenance passes.
+        Task.detached(priority: .utility) {
             defer { Task { @MainActor in inFlight = false } }
             let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
-            // Under EngineGate like every other engine walk: un-gated, this feed sweep held the Rust
-            // mutex outside the gate's serialization — a holder the hold log could not name.
-            let owned: [(ref: String, cid: String)] = await EngineGate.shared.run {
+            // On the engine actor like every other engine walk: un-gated, this feed sweep held the Rust
+            // mutex outside the actor's serialization — a holder the hold log could not name.
+            let owned: [(ref: String, cid: String)] = await engine.run { social in
                 var owned: [(ref: String, cid: String)] = []
                 var seen = Set<String>()
                 for c in social.circles() {
@@ -450,7 +454,7 @@ enum MediaRecovery {
             var done = Set(UserDefaults.standard.stringArray(forKey: refsKey) ?? [])
             let todo = held.filter { !done.contains($0.ref) }
             for m in todo {
-                if await SharedStore.backup(ref: m.ref, circleId: m.cid, social: social, force: true, reseal: true) {
+                if await SharedStore.backup(ref: m.ref, circleId: m.cid, engine: engine, force: true, reseal: true) {
                     done.insert(m.ref)   // a destination accepted the fresh blob → this ref is repaired
                 }
             }
@@ -755,16 +759,16 @@ enum SharedStore {
     /// truthfully reporting success. Media is sealed once and never re-sealed, so a member who joins
     /// after a blob was posted is not one of its recipients and can never open it — the roster-skew
     /// case the seal-reuse guard below silently made permanent.
-    static func backup(ref: String, circleId: String, social: HavenSocial, force: Bool = false,
+    static func backup(ref: String, circleId: String, engine: Engine, force: Bool = false,
                        reseal: Bool = false) async -> Bool {
-        if await backupOnce(ref: ref, circleId: circleId, social: social, force: force, reseal: reseal) { return true }
+        if await backupOnce(ref: ref, circleId: circleId, engine: engine, force: force, reseal: reseal) { return true }
         // Nothing took the blob and at least one relay REFUSED it rather than being down: publish our
         // roster to the refusers and try once more, exactly as `restore` does for the read side. A
         // device that has never been authorized anywhere otherwise never gets its FIRST blob up — and
         // because that upload failure is invisible, the damage surfaces much later as a fetch that
         // genuinely 404s, an absence manufactured entirely by a permissions problem.
-        guard await healForbiddenRelays(social: social) else { return false }
-        return await backupOnce(ref: ref, circleId: circleId, social: social, force: force, reseal: reseal)
+        guard await healForbiddenRelays(engine: engine) else { return false }
+        return await backupOnce(ref: ref, circleId: circleId, engine: engine, force: force, reseal: reseal)
     }
 
     /// Copy a sealed blob from a relay that HOLDS it to the circle's relays that don't, for a ref this
@@ -875,7 +879,7 @@ enum SharedStore {
         return true   // the blob is safe on at least one relay either way
     }
 
-    private static func backupOnce(ref: String, circleId: String, social: HavenSocial, force: Bool = false,
+    private static func backupOnce(ref: String, circleId: String, engine: Engine, force: Bool = false,
                                    reseal: Bool = false) async -> Bool {
         // Skip entirely if this blob is already confirmed on EVERY destination — before the expensive
         // file read + seal. Content-addressed keys never change, so a confirmed upload is permanent.
@@ -1076,14 +1080,12 @@ enum SharedStore {
         } else {
             if reseal { HavenLog.sync("backup ref=\(ref): RE-SEALING (repair — the recipient set may have changed)") }
             if existing != nil { try? FileManager.default.removeItem(at: sealedURL) }   // stale → re-seal
-            // Gated: the seal holds the engine's state mutex for the whole seal (read → lock → seal),
-            // and un-gated it was a holder the hold log could not name — gated bodies were seen
-            // waiting 2.2s for the mutex with no gated holder to blame.
-            sealedOK = await Task.detached(priority: .utility) { () -> Bool in
-                await EngineGate.shared.run {
-                    social.sealCircleMediaFile(circleId: circleId, inPath: url.path, outPath: sealedURL.path)
-                }
-            }.value
+            // On the engine actor: the seal holds the engine's state mutex for the whole seal (read →
+            // lock → seal), and un-gated it was a holder the hold log could not name — gated bodies
+            // were seen waiting 2.2s for the mutex with no gated holder to blame.
+            sealedOK = await engine.run {
+                $0.sealCircleMediaFile(circleId: circleId, inPath: url.path, outPath: sealedURL.path)
+            }
         }
         guard sealedOK,
               let sealedSize = (try? FileManager.default.attributesOfItem(atPath: sealedURL.path)[.size] as? Int) ?? nil
@@ -1232,11 +1234,11 @@ enum SharedStore {
     private static var rosterPublished: [String: (hash: Int, at: Date)] = [:]
     private static let rosterRepublish: TimeInterval = 1800   // 30 min
 
-    static func publishDeviceRoster(social: HavenSocial, force: Bool = false) async {
+    static func publishDeviceRoster(engine: Engine, force: Bool = false) async {
         // SharedStore is a @MainActor enum: every engine call here used to take the Rust mutex ON
         // MAIN (stall detector, 2026-09-01: 0.50s parked in publishDeviceRoster → exportOwnRoster
-        // behind the sync pass's seal). Hop through EngineGate for each one.
-        guard let r = await EngineGate.shared.run({ social.exportOwnRoster().first }) else { HavenLog.sync("devroster SKIP — no own roster yet"); return }
+        // behind the sync pass's seal). Each one is a pass on the engine actor.
+        guard let r = await engine.run({ $0.exportOwnRoster().first }) else { HavenLog.sync("devroster SKIP — no own roster yet"); return }
         let key = "haven/devroster/\(r.accountHex)"
         let wire = r.wire
         let wireHash = wire.hashValue
@@ -1265,7 +1267,7 @@ enum SharedStore {
                         // path below. This is the rung the phone actually uses, so the self-adopt
                         // has to hang off THIS success or a device whose roster version regressed
                         // never climbs back above the fleet's copy.
-                        await adoptOwnRosterIfOutranked(social: social)
+                        await adoptOwnRosterIfOutranked(engine: engine)
                         done = true
                     case .failure(is RelayForbidden):
                         // The devroster key is permission-FREE, so a refusal here is the relay rejecting
@@ -1303,7 +1305,7 @@ enum SharedStore {
                 // frames fail their declared-vs-signer check. Pulling our own roster back fixes it at
                 // the source: the `acct_id == my_id` branch UNION-merges and re-signs, so the version
                 // climbs past whatever the fleet holds instead of racing it from underneath.
-                await adoptOwnRosterIfOutranked(social: social)
+                await adoptOwnRosterIfOutranked(engine: engine)
             } catch {
                 HavenLog.sync("devroster blob-put FAIL relay=\(node.prefix(8)): \(error.localizedDescription)")
                 // Record it, like every OTHER failure path does. Without this a relay that never
@@ -1313,7 +1315,7 @@ enum SharedStore {
                 // `available()` is what gates the other paths, and it can only hold a relay off if
                 // somebody tells it the relay is failing.
                 RelayHealth.shared.recordFailure(node)
-                await adoptNewerOwnRosterAndRetry(node: node, key: key, sent: wire, social: social, error: error)
+                await adoptNewerOwnRosterAndRetry(node: node, key: key, sent: wire, engine: engine, error: error)
             }
         }
         if skipped > 0 {
@@ -1331,12 +1333,12 @@ enum SharedStore {
     /// account the engine unions devices and revocations (both grow-only) and re-signs, so this can
     /// only ever move the version FORWARD and can never drop a device another of our devices
     /// registered. Throttled: the wire is tens of KB and the answer changes rarely.
-    private static func adoptOwnRosterIfOutranked(social: HavenSocial) async {
+    private static func adoptOwnRosterIfOutranked(engine: Engine) async {
         guard Date().timeIntervalSince(lastOwnRosterAdopt) > 600 else { return }
         lastOwnRosterAdopt = Date()
-        let mine = await EngineGate.shared.run { social.myNodeHex() }   // off-main (0.53s parked here at launch)
+        let mine = await engine.run { $0.myNodeHex() }   // off-main (0.53s parked here at launch)
         guard mine.count == 64 else { return }
-        if await fetchContactRoster(accountHex: mine, social: social) {
+        if await fetchContactRoster(accountHex: mine, engine: engine) {
             HavenLog.sync("devroster: adopted + union-merged our OWN roster — version now moves ahead of the fleet's copy")
         }
     }
@@ -1354,15 +1356,15 @@ enum SharedStore {
     /// So adopt what we're being out-versioned by, then publish again at that version. Pulling our own
     /// roster is safe for the same reason the relay's check is: `ingestRosterWire` verifies the account
     /// signature, and only our account key could have produced it — a relay can serve it, never forge it.
-    private static func adoptNewerOwnRosterAndRetry(node: String, key: String, sent: Data, social: HavenSocial, error: Error) async {
+    private static func adoptNewerOwnRosterAndRetry(node: String, key: String, sent: Data, engine: Engine, error: Error) async {
         guard error.localizedDescription.lowercased().contains("forbidden") else { return }
-        guard let acct = await EngineGate.shared.run({ social.exportOwnRoster().first?.accountHex }) else { return }
+        guard let acct = await engine.run({ $0.exportOwnRoster().first?.accountHex }) else { return }
         HavenLog.sync("devroster refused by \(node.prefix(8)) — pulling the newer roster it holds and re-publishing")
-        guard await fetchContactRoster(accountHex: acct, social: social) else {
+        guard await fetchContactRoster(accountHex: acct, engine: engine) else {
             HavenLog.sync("devroster: could not read our own stored roster back from any relay — still unauthorized on \(node.prefix(8))")
             return
         }
-        guard let fresh = await EngineGate.shared.run({ social.exportOwnRoster().first }), fresh.wire != sent else {
+        guard let fresh = await engine.run({ $0.exportOwnRoster().first }), fresh.wire != sent else {
             HavenLog.sync("devroster: adopted roster is identical to the one refused — refusal is NOT a version rollback on \(node.prefix(8))")
             return
         }
@@ -1420,7 +1422,7 @@ enum SharedStore {
     /// device to a stale roster while its siblings move on. Only a roster that actually CHANGED ends
     /// the search — and that is also the only case that must re-seal history under the new epoch.
     @discardableResult
-    static func fetchContactRoster(accountHex: String, social: HavenSocial) async -> Bool {
+    static func fetchContactRoster(accountHex: String, engine: Engine) async -> Bool {
         let acct = accountHex.lowercased()
         guard acct.count == 64 else { return false }
         let key = "haven/devroster/\(acct)"
@@ -1430,7 +1432,7 @@ enum SharedStore {
         func ingest(_ wire: Data, from node: String?) async -> Bool {
             // The ingest drains pending epoch envelopes (deserialize + verify per event) — real CPU,
             // and it ran on main (0.63s at launch). Off-main under the gate.
-            let status = await EngineGate.shared.run { social.ingestRosterWireStatus(wire: wire) }
+            let status = await engine.run { $0.ingestRosterWireStatus(wire: wire) }
             if status < 0 {
                 HavenLog.sync("devroster REFUSED \(acct.prefix(8)) — forged, or a rollback to an older version")
                 return false
@@ -1720,7 +1722,7 @@ enum SharedStore {
     /// Returns true if anything was published (i.e. a retry is worth making). Rate-limited: a relay
     /// that refuses us for some OTHER reason must not turn every media miss into a publish storm.
     @discardableResult
-    static func healForbiddenRelays(social: HavenSocial) async -> Bool {
+    static func healForbiddenRelays(engine: Engine) async -> Bool {
         guard !rosterNeeded.isEmpty, Date().timeIntervalSince(lastHeal) > 30 else { return false }
         let nodes = rosterNeeded.map { $0.prefix(8) }.joined(separator: ",")
         HavenLog.relay("re-publishing device roster after refusal from [\(nodes)]")
@@ -1728,7 +1730,7 @@ enum SharedStore {
         rosterNeeded.removeAll()
         // force: a refusal means the relay does NOT have a usable roster from us, so the
         // "already holds these bytes" skip must not suppress the very publish that fixes it.
-        await publishDeviceRoster(social: social, force: true)
+        await publishDeviceRoster(engine: engine, force: true)
         return true
     }
 
@@ -1931,7 +1933,7 @@ enum SharedStore {
     /// Fetch a media blob from the circle's mailbox and open it for whichever circle it belongs to.
     /// If the mailbox holds a chunked manifest (large media), reassemble the sealed bytes by streaming
     /// each 8 MB chunk to a temp file on disk — the full sealed blob is NEVER held in RAM during transfer.
-    static func restore(ref: String, circleIds: [String], social: HavenSocial) async -> Data? {
+    static func restore(ref: String, circleIds: [String], engine: Engine) async -> Data? {
         var chosen: MediaSource?
         var head: Data?
         var src = "none"
@@ -2080,7 +2082,7 @@ enum SharedStore {
                     // bypasses the ledger (which believes this landed) and re-uploads every window —
                     // the same remedy the present-but-undecryptable case below uses.
                     HavenLog.relay("media restore \(ref.prefix(12)): we hold the plaintext — re-uploading to replace the incomplete copy")
-                    Task { @MainActor in _ = await SharedStore.backup(ref: ref, circleId: cid, social: social, force: true, reseal: true) }
+                    Task { @MainActor in _ = await SharedStore.backup(ref: ref, circleId: cid, engine: engine, force: true, reseal: true) }
                 } else {
                     // Only a device holding the original can repair this. Tell the UI the truth: we
                     // are waiting on the sender to put it (all) up — a different thing from
@@ -2097,10 +2099,10 @@ enum SharedStore {
             HavenLog.relay("media restore \(ref.prefix(12)): reassembled read FAIL via \(src)"); return nil
         }
         // The open is real crypto over the whole blob and used to run on main per restore
-        // (@MainActor enum). Off-main under the gate; same first-circle-that-opens semantics.
-        let opened: Data? = await EngineGate.shared.run {
+        // (@MainActor enum). On the engine actor; same first-circle-that-opens semantics.
+        let opened: Data? = await engine.run { s in
             for cid in circleIds {
-                if let data = social.openCircleMedia(circleId: cid, sealed: blob) { return data }
+                if let data = s.openCircleMedia(circleId: cid, sealed: blob) { return data }
             }
             return nil
         }
@@ -2127,7 +2129,7 @@ enum SharedStore {
         // the only one that can fix it.
         if MediaStore.shared.hasLocalFile(ref), let cid = circleIds.first {
             HavenLog.relay("media restore \(ref.prefix(12)): we hold the plaintext — re-sealing and overwriting the bad copy")
-            Task { @MainActor in _ = await SharedStore.backup(ref: ref, circleId: cid, social: social, force: true, reseal: true) }
+            Task { @MainActor in _ = await SharedStore.backup(ref: ref, circleId: cid, engine: engine, force: true, reseal: true) }
         }
         return nil
     }

@@ -24,6 +24,8 @@ enum CircleDeletionStore {
 
     /// Currently deleted? (deletion newer than any re-creation) — the self-sync `circle:` apply skips these.
     static func isDeleted(_ id: String) -> Bool { (deletedAt[id] ?? 0) > (recreatedAt[id] ?? 0) }
+    /// Every currently-deleted id — a value snapshot for an engine pass that runs off the main actor.
+    static func deletedIds() -> Set<String> { Set(deletedAt.keys.filter(isDeleted)) }
 
     /// The user deleted this circle/DM NOW.
     static func markDeleted(_ id: String) { deletedAt[id] = nowMs(); persist() }

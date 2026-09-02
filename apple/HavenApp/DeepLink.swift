@@ -472,13 +472,12 @@ struct PostLinkView: View {
     /// and flashing "unavailable" at something that shows up 300ms later is the worst of both.
     @State private var settled = false
 
-    private var post: FeedItemFfi? {
-        // Retention-free lookup — see FeedStore.post(_:in:). Tapping a notification is an explicit
-        // request for THIS post; a "hide older than N days" display preference must not turn it
-        // into "unavailable" for something the feed is still showing. The same lookup resolves an
-        // id that names a COMMENT to the post carrying it.
-        store.post(postId, in: circleId)
-    }
+    /// Retention-free lookup — see FeedStore.post(_:in:). Tapping a notification is an explicit
+    /// request for THIS post; a "hide older than N days" display preference must not turn it
+    /// into "unavailable" for something the feed is still showing. The same lookup resolves an
+    /// id that names a COMMENT to the post carrying it. Filled by the poll in `.task` (an engine
+    /// read, never from the body).
+    @State private var post: FeedItemFfi?
 
     /// Non-nil when the link named a comment rather than the post itself — a reaction on, or a reply
     /// to, a comment of mine. The post opens with that comment shown and marked.
@@ -529,7 +528,10 @@ struct PostLinkView: View {
                 var graceLeft = 6.0            // seconds of "engine is up but the post hasn't landed"
                 var ticks = 0                  // absolute cap, so a dead engine can't spin forever
                 while graceLeft > 0, ticks < 160 {
-                    if post != nil { return }  // found it — never show the failure state
+                    if let found = await store.post(postId, in: circleId) {
+                        post = found
+                        return                 // found it — never show the failure state
+                    }
                     try? await Task.sleep(nanoseconds: 250_000_000)
                     ticks += 1
                     if store.engineReady { graceLeft -= 0.25 }
@@ -622,17 +624,24 @@ struct StoryLinkView: View {
 
     /// Live (within 24h) or kept story for a DM reply card — nil once expired and not kept.
     /// Enforces the story lifetime even if the event is still briefly present in a feed cache.
+    /// Synchronous and read-model only (it is read from view bodies): the kept snapshot, then the
+    /// circle's feed snapshot. `resolveNow` is the engine-backed form the settle polls use, which
+    /// also finds a story the viewer's retention preference hides.
     static func resolve(circleId: String, postId: String) -> FeedItemFfi? {
         if KeptStoriesStore.shared.isKept(postId), let kept = keptItem(postId) { return kept }
-        // Prefer retention-free lookup so a story still in the store but past viewer prefs can be
-        // found — then apply the hard 24h story window ourselves.
-        if let live = FeedStore.shared.post(postId, in: circleId),
-           live.story, !live.unsent, !live.media.isEmpty {
+        if let live = FeedStore.shared.messages(in: circleId)
+            .first(where: { $0.id == postId && $0.story && !$0.unsent && !$0.media.isEmpty }) {
             if DeepLink.isPastStoryWindow(createdAt: live.createdAt) { return nil }
             return live
         }
-        if let live = FeedStore.shared.messages(in: circleId)
-            .first(where: { $0.id == postId && $0.story && !$0.unsent && !$0.media.isEmpty }) {
+        return nil
+    }
+    /// `resolve`, with a retention-free engine lookup so a story still in the store but past viewer
+    /// prefs can be found — then the hard 24h story window applies as usual.
+    static func resolveNow(circleId: String, postId: String) async -> FeedItemFfi? {
+        if let found = resolve(circleId: circleId, postId: postId) { return found }
+        if let live = await FeedStore.shared.post(postId, in: circleId),
+           live.story, !live.unsent, !live.media.isEmpty {
             if DeepLink.isPastStoryWindow(createdAt: live.createdAt) { return nil }
             return live
         }
@@ -715,13 +724,13 @@ struct StoryReplyCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .task(id: "\(circleId)/\(postId)") {
                     // Brief settle so a cold open doesn't flash unavailable before the engine is up.
-                    if StoryLinkView.resolve(circleId: circleId, postId: postId) != nil {
+                    if await StoryLinkView.resolveNow(circleId: circleId, postId: postId) != nil {
                         settled = true; return
                     }
                     var grace = 4.0
                     var ticks = 0
                     while grace > 0, ticks < 80,
-                          StoryLinkView.resolve(circleId: circleId, postId: postId) == nil {
+                          await StoryLinkView.resolveNow(circleId: circleId, postId: postId) == nil {
                         try? await Task.sleep(nanoseconds: 250_000_000)
                         ticks += 1
                         if store.engineReady { grace -= 0.25 }

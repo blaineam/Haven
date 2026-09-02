@@ -52,7 +52,7 @@ final class PresignStore: ObservableObject {
         if let p = pools[circleId], p.expires > Date().timeIntervalSince1970 + 60 { return p }
         guard let boot = d.string(forKey: bootKey(circleId)), let url = URL(string: boot),
               let sealed = await S3Client.getURL(url),
-              let data = FeedStore.shared.openCirclePresign(circleId: circleId, sealed: sealed),
+              let data = await FeedStore.shared.openCirclePresign(circleId: circleId, sealed: sealed),
               let p = try? JSONDecoder().decode(Pool.self, from: data) else { return nil }
         pools[circleId] = p
         return p
@@ -95,7 +95,7 @@ final class PresignStore: ObservableObject {
         let pool = Pool(circleId: circleId, expires: Date().timeIntervalSince1970 + Self.ttl,
                         puts: puts, gets: gets, listURL: listURL)
         guard let data = try? JSONEncoder().encode(pool),
-              let sealed = FeedStore.shared.sealCirclePresign(circleId: circleId, data: data) else { return }
+              let sealed = await FeedStore.shared.sealCirclePresign(circleId: circleId, data: data) else { return }
         let poolKey = "haven/presign/\(circleId)/pool"
         try? await s3.putObject(key: poolKey, data: sealed)
         guard let boot = s3.presignedURL(method: "GET", key: poolKey) else { return }

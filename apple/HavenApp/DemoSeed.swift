@@ -70,20 +70,13 @@ enum DemoSeeder {
     private(set) static var callParticipants: [String] = []
     private(set) static var callName = "Weekend Crew"
 
-    /// A fictional person in the demo dataset.
-    private struct Persona {
-        let name: String
-        let emoji: String
-        let bio: String
-        let avatar: String      // bundled synthetic-face asset name (AI-generated, not a real person)
-        let seedByte: UInt8     // fills a deterministic 32-byte account seed
-        var engine: HavenSocial?
-        var hex: String = ""
-    }
-
-    /// Seed the dataset once. Safe to call repeatedly (idempotent within a launch).
-    static func seed(feed: FeedStore) {
-        guard DemoEnv.isDemo, !didSeed, let main = feed.demoEngine else { return }
+    /// Seed the dataset once. Safe to call repeatedly (idempotent within a launch). The whole
+    /// cast — four persona engines, every sealed post, reaction, comment, story and DM — is built
+    /// in ONE pass on the engine actor (it is real hybrid-PQ crypto, and it used to run on the
+    /// main actor under the first render); only the profile, contacts, media and the read-model
+    /// refresh touch the main actor.
+    static func seed(feed: FeedStore) async {
+        guard DemoEnv.isDemo, !didSeed, let engine = feed.demoEngine else { return }
         didSeed = true
 
         // ── The user ("me") ───────────────────────────────────────────────────────
@@ -94,13 +87,58 @@ enum DemoSeeder {
         me.link = "rileyavery.studio"
         if let avatar = DemoArt.bundledImage("avatar-me") { me.setAvatar(avatar) }
 
-        let mainHex = main.myNodeHex()
-        main.createCircle(id: "default", name: "Your circle")
-
         // The nudge is a PROBLEM state — "this circle has no relay yet". A seeded circle would
         // trip it (4 members, no relay), so every App Store screenshot would open on a banner
         // advertising something missing. A relay is the normal setup, so the demo starts past it.
         RelayNudgeStore.shared.dismiss("default")
+
+        // ── Demo media (abstract, unmistakably synthetic gradient "photos") ─────────
+        DemoArt.installPhotos()
+
+        // ── The cast, the feed, the second circle and the DM threads: the engine pass ──
+        let cast = await engine.run { main in DemoSeedEngine.seed(into: main) }
+        for p in cast {
+            ContactsStore.shared.add(name: p.name, idHex: p.hex)
+            ContactsStore.shared.setCard(idHex: p.hex, name: p.name, bio: p.bio, link: "",
+                                         avatar: DemoArt.avatarBase64(p.avatar), emoji: p.emoji)
+            feed.recordHeard(p.hex)   // shows a live green "Connected" dot
+        }
+        callParticipants = Array(cast.prefix(3).map(\.hex))
+
+        await feed.reloadCircles()
+        feed.refresh()
+        feed.demoPersist()
+    }
+
+    /// Kick off a demo group-call overlay (used by the `call` scene). Slight delay so the
+    /// overlay animates in over the seeded feed.
+    static func startDemoCall() {
+        guard DemoEnv.isDemo, !callParticipants.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            CallManager.shared.enterDemoCall(participants: callParticipants, name: callName)
+        }
+    }
+}
+
+/// The engine half of the demo seed — pure functions over `HavenSocial` handles, run inside one
+/// `Engine.run` pass. Nothing here may touch a main-actor store.
+enum DemoSeedEngine {
+    /// A fictional person in the demo dataset.
+    struct Persona {
+        let name: String
+        let emoji: String
+        let bio: String
+        let avatar: String      // bundled synthetic-face asset name (AI-generated, not a real person)
+        let seedByte: UInt8     // fills a deterministic 32-byte account seed
+        var engine: HavenSocial?
+        var hex: String = ""
+    }
+
+    /// Drive the whole seed against `main`. Returns the cast that landed (name, card, hex) for the
+    /// main actor to register as contacts.
+    static func seed(into main: HavenSocial) -> [Persona] {
+        let mainHex = main.myNodeHex()
+        main.createCircle(id: "default", name: "Your circle")
 
         // ── The cast ──────────────────────────────────────────────────────────────
         var people = [
@@ -124,18 +162,8 @@ enum DemoSeeder {
             do { _ = try engine.addContactBundle(circleId: "default", bundle: main.myBundle()) }
             catch { NSLog("DEMO reverse addContactBundle FAILED: %@", String(describing: error)) }
             people[i].hex = hex
-            guard !hex.isEmpty else { continue }
-            let p = people[i]
-            ContactsStore.shared.add(name: p.name, idHex: hex)
-            ContactsStore.shared.setCard(idHex: hex, name: p.name, bio: p.bio, link: "",
-                                         avatar: DemoArt.avatarBase64(p.avatar), emoji: p.emoji)
-            feed.recordHeard(hex)   // shows a live green "Connected" dot
         }
         let valid = people.filter { $0.engine != nil && !$0.hex.isEmpty }
-        callParticipants = Array(valid.prefix(3).map(\.hex))
-
-        // ── Demo media (abstract, unmistakably synthetic gradient "photos") ─────────
-        DemoArt.installPhotos()
 
         // ── Stories tray (me + two friends) ─────────────────────────────────────────
         story(main, by: valid.first, refs: ["img_demo_sunset"], caption: "golden hour at the cove 🌅", at: mins(40))
@@ -212,19 +240,7 @@ enum DemoSeeder {
             (true,  "sending the gpx now 🗺️", mins(496), nil),
             (false, "🙌", mins(495), nil),
         ]) }
-
-        feed.refreshCircles()
-        feed.refresh()
-        feed.demoPersist()
-    }
-
-    /// Kick off a demo group-call overlay (used by the `call` scene). Slight delay so the
-    /// overlay animates in over the seeded feed.
-    static func startDemoCall() {
-        guard DemoEnv.isDemo, !callParticipants.isEmpty else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            CallManager.shared.enterDemoCall(participants: callParticipants, name: callName)
-        }
+        return valid
     }
 
     // MARK: - Authoring helpers

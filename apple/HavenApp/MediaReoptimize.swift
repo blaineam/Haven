@@ -169,7 +169,7 @@ final class MediaReoptimizer: ObservableObject {
         lastWarning = nil
         defer { scanning = false }
 
-        let targets = FeedStore.shared.reoptimizeTargets()
+        let targets = await FeedStore.shared.reoptimizeTargets()
         // Earliest time each ref was shared by me. A ref used by several posts is ONE encode.
         var firstShared: [String: UInt64] = [:]
         // Videos that appear on at least one of my posts without a poster marker.
@@ -330,7 +330,7 @@ final class MediaReoptimizer: ObservableObject {
         // stale copy that would silently revert the user's own change.
         var reshared = 0
         if !swap.isEmpty || !posters.isEmpty {
-            for target in FeedStore.shared.reoptimizeTargets() {
+            for target in await FeedStore.shared.reoptimizeTargets() {
                 // Poster map is per-post: only videos this post names, and only when the post
                 // still lacks a marker (or the video itself is being swapped — re-pair then).
                 var postPosters: [String: String] = [:]
@@ -343,7 +343,7 @@ final class MediaReoptimizer: ObservableObject {
                 let needsSwap = target.media.contains { swap[$0] != nil }
                 guard needsSwap || !postPosters.isEmpty else { continue }
                 let media = MediaVariants.rewriteMedia(target.media, swap: swap, posters: postPosters)
-                if media != target.media, FeedStore.shared.applyReoptimized(target, media: media) {
+                if media != target.media, await FeedStore.shared.applyReoptimized(target, media: media) {
                     reshared += 1
                 }
             }

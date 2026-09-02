@@ -14,6 +14,13 @@
 //  main queue, and when a probe goes unanswered past the threshold it suspends
 //  the main thread just long enough to walk its frame pointers.
 //
+//  Since the read model (1.8.4) the engine is never called from the main thread
+//  at all — `Engine.run` asserts it in DEBUG — so a `[MainStall]` entry here can
+//  no longer be an engine wait. What it still names: main-actor work that is
+//  simply too slow (a decode, a synchronous disk read, a SwiftUI graph storm),
+//  and the `[EngineHold]` lines the engine actor appends next to it show what
+//  the engine was busy with at the time, for the passes that publish late.
+//
 //  Safety notes, because this pokes at mach thread state:
 //    • Addresses are collected while main is SUSPENDED, and nothing is
 //      allocated in that window — `dladdr` (which can malloc) runs only after
@@ -223,7 +230,7 @@ final class MainThreadStallDetector: @unchecked Sendable {
     }
 }
 
-/// DEBUG sink for `EngineGate`'s hold timer — see `EngineGate.run`.
+/// DEBUG sink for the engine actor's hold timer — see `Engine.run`.
 enum EngineHoldLog {
     static func note(_ line: String) { MainThreadStallDetector.shared.note(line) }
 }

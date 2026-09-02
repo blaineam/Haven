@@ -31,7 +31,61 @@
 //!      warns about.
 //!   4. A hostile element count fails closed instead of pre-allocating from an untrusted number.
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+// ── Allocation watchdog ───────────────────────────────────────────────────────────────────
+//
+// The DeviceList pre-allocation DoS (137 GB from a u32 count) was INVISIBLE on macOS and only
+// turned red on Linux CI: an over-large mapping that is never written succeeds on macOS, so the
+// parser "worked". Relying on a Linux round-trip to catch that class is a bad deal — the bug
+// ships to a dev's machine looking fine.
+//
+// So watch the allocator directly. This records the largest single request rather than failing
+// it, which is portable and side-effect-free: on any platform, a parser that reserves from an
+// untrusted count trips the threshold and gets NAMED, instead of aborting anonymously.
+//
+// Caveat, stated rather than hidden: a global allocator is process-wide and Rust runs tests in
+// parallel threads, so a reading is not strictly attributable to one parser. The threshold is set
+// far above anything this binary legitimately allocates (seeds are ~1.2 KB), so in practice only a
+// genuine runaway reservation trips it.
+
+static PEAK_ALLOC: AtomicUsize = AtomicUsize::new(0);
+
+struct WatchedAlloc;
+
+unsafe impl GlobalAlloc for WatchedAlloc {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        PEAK_ALLOC.fetch_max(l.size(), Ordering::Relaxed);
+        System.alloc(l)
+    }
+    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+        PEAK_ALLOC.fetch_max(l.size(), Ordering::Relaxed);
+        System.alloc_zeroed(l)
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        System.dealloc(p, l)
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, new_size: usize) -> *mut u8 {
+        PEAK_ALLOC.fetch_max(new_size, Ordering::Relaxed);
+        System.realloc(p, l, new_size)
+    }
+}
+
+#[global_allocator]
+static GLOBAL: WatchedAlloc = WatchedAlloc;
+
+/// No wire type here decodes to anything near this. A parse that asks for more is reserving from
+/// a hostile count, not decoding a real message.
+const MAX_SANE_ALLOC: usize = 64 * 1024 * 1024; // 64 MB
+
+/// Parse with the allocator watched. Returns the largest single allocation the call requested.
+fn parse_watching_allocs(t: &Target, bytes: &[u8]) -> (std::result::Result<bool, ()>, usize) {
+    PEAK_ALLOC.store(0, Ordering::Relaxed);
+    let r = catch_unwind(AssertUnwindSafe(|| (t.parse)(bytes))).map_err(|_| ());
+    (r, PEAK_ALLOC.load(Ordering::Relaxed))
+}
 
 use haven_p2p::device::{AdminGrant, CircleUpgrade, DeviceCredential, DeviceList, SeedDropCapability};
 use haven_p2p::groupkey::{seal_event_in_epoch, EpochEnvelope};
@@ -653,7 +707,10 @@ fn hostile_element_counts_do_not_preallocate() {
     // code. A parser that reserves from the count first never reaches the assertion at all — it
     // aborts on allocation failure, which is exactly the failure this is here to catch.
     let ts = targets();
-    let _quiet = QuietPanics::install();
+    // Deliberately NOT silencing panics here. This test does ~3k parses, so there is no
+    // spam to suppress — and the quiet guard swallowed the allocation assertion's message,
+    // which is the single most useful line this file can print. Proven by reverting the
+    // DeviceList bound: the test failed, but said nothing about WHY.
     for t in &ts {
         for count in [u32::MAX, 0x7FFF_FFFF, 0x00FF_FFFF] {
             // Sweep every offset a count could sit at, not a hand-picked few. The
@@ -672,13 +729,42 @@ fn hostile_element_counts_do_not_preallocate() {
                     eprintln!("  probing {} count={count:#x} offset={prefix_len}", t.name);
                     let _ = std::io::stderr().flush();
                 }
-                if parse_caught(t, &b).is_err() {
+                let (res, peak) = parse_watching_allocs(t, &b);
+                if res.is_err() {
                     panic!(
                         "PANIC in {} on hostile count {count:#x} at offset {prefix_len}",
                         t.name
                     );
                 }
+                assert!(
+                    peak <= MAX_SANE_ALLOC,
+                    "{} RESERVED {peak} bytes parsing a {}-byte buffer whose count field at offset \
+                     {prefix_len} claims {count:#x}. That is pre-allocation from an untrusted count \
+                     — on Linux the allocator fails and the process ABORTS (remote DoS). Bound the \
+                     count against the remaining input before reserving.",
+                    t.name,
+                    b.len()
+                );
             }
         }
     }
+}
+
+/// The watchdog must actually fire. Without this, a broken threshold or a mis-wired allocator
+/// would make `hostile_element_counts_do_not_preallocate` pass vacuously forever — the same
+/// failure mode as a fuzz corpus that never runs.
+#[test]
+fn allocation_watchdog_detects_an_oversized_reservation() {
+    PEAK_ALLOC.store(0, Ordering::Relaxed);
+    {
+        let v: Vec<u8> = Vec::with_capacity(MAX_SANE_ALLOC + 1);
+        std::hint::black_box(&v);
+    }
+    let peak = PEAK_ALLOC.load(Ordering::Relaxed);
+    assert!(
+        peak > MAX_SANE_ALLOC,
+        "watchdog failed to observe a {}-byte reservation (saw {peak}) — the pre-allocation \
+         check above would be vacuous",
+        MAX_SANE_ALLOC + 1
+    );
 }

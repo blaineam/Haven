@@ -382,6 +382,29 @@ one 0.49 s main-thread stall from before is gone, and no engine call runs on mai
   to, no engine wiring lives in the tree module, and `PersistTree` really is written by nothing in
   production — kept as an explicit caveat rather than tidied away.
 
+  Correcting those comments left one citation self-refuting. `MULTI-DEVICE.md` opened its
+  "receiving on all devices" section with "**This is not MLS.** MLS is **not implemented** … it
+  appears only in comments describing future work", and named `social.rs:14-16` and `device.rs:13-17`
+  as the proof — the exact two comments rewritten above. The "no `mls-rs` dependency" half is true
+  and stays; the section now says what it actually documents, which is the sender-key/epoch path a
+  circle uses until the tree layer is active for it.
+
+- **A sweep of every remaining "not built" claim in the docs, which found one wrong rating.** Most of
+  that language is honest and stays: the LoRa, satellite, preview-tier and resilience documents
+  really are design-only, Tor really was evaluated and declined without product code,
+  `DECENTRALIZED-DISCOVERY.md`'s shim really is staged behind a flag that defaults OFF — checked, not
+  assumed: nothing in `haven-ffi` or the desktop app references the relay policy — and `MEDIA.md`'s
+  recompress-on-receive really is unshipped.
+
+  `WINDOWS-PORT.md` was the exception. It rated desktop sensitive-content blur "**Not built** — no
+  classifier *and* no blur", and said a photo an iPhone flags sensitive "renders **unblurred** on
+  desktop". Half of that had shipped: the desktop app fetches `sensitive_refs` and draws the
+  tap-to-reveal cover, so a flagged photo does blur there. The rating is now **Partial**, which is
+  the useful answer rather than the flattering one — there is still no classifier on desktop, so it
+  consumes flags an Apple device authors and can never originate one itself. A parity table that
+  under-reports a shipped safety feature is the kind of error that gets a gap planned twice and a
+  real one missed.
+
 ## 1.8.3 — 2026-09-02
 
 ### Fixed — the freeze after launch and foreground is gone (and so is the 2 AM watchdog kill)

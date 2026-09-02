@@ -34,6 +34,11 @@ jobs:
         run: tools/fetch-cloudflared.sh --force
       - name: Unit tests (core + desktop wire/call)
         run: |
+          # haven-p2p is the crypto core (identity, groupkey, device roster, treekem) and its
+          # 180 tests — including the wire-parser fuzz harness — ran nowhere in CI until this
+          # was added: only haven-s3 and the desktop lib were covered. ~50s, and it is the one
+          # crate where a silent regression is a security regression, so it runs first.
+          cargo test -p haven-p2p --manifest-path core/Cargo.toml
           cargo test -p haven-s3 --manifest-path core/Cargo.toml
           # System webkit deps so the desktop lib's tauri build deps resolve.
           sudo apt-get update

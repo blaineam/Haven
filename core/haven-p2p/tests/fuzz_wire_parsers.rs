@@ -5,8 +5,14 @@
 //!
 //! **Why it lives in `tests/` rather than a `cargo-fuzz` crate.** `cargo-fuzz` needs nightly and a
 //! separate target, so it runs only when someone remembers to run it — which for this project means
-//! never. This runs under plain `cargo test` on stable, so it rides the existing CI on every push
-//! and a regression fails the build the day it lands. It is not coverage-guided, so it trades
+//! never. This runs under plain `cargo test` on stable so CI can execute it every push.
+//!
+//! That last part was NOT free, and the assumption is worth recording: `desktop.yml` ran only
+//! `cargo test -p haven-s3` and the desktop lib, so haven-p2p — this crate, the crypto core — had
+//! **no CI coverage at all**, and adding a test file here would have run nowhere. The workflow now
+//! runs `cargo test -p haven-p2p` too. If that line ever goes away, this harness goes quiet without
+//! failing anything, which is the worst way for a security test to die. It is not coverage-guided,
+//! so it trades
 //! ultimate depth for actually running; the mutators below are structure-aware to buy most of that
 //! depth back (purely random bytes bounce off the first length check and never reach the
 //! interesting code).

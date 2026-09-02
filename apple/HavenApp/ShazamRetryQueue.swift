@@ -2,10 +2,11 @@ import Foundation
 
 /// Posts whose music could not be identified YET, held for another try.
 ///
-/// Shazam refuses far more often than it fails: in a real import run, 50 of 81 attempts came back
-/// rate-limited (error 201) in 0.0s — the audio was never even looked at. Dropping those on the
-/// floor threw away most of the credits the feature exists to produce, and they are not recoverable
-/// afterwards because the post has already published.
+/// Shazam refuses more often than it fails outright (202 `matchAttemptFailed`, 500, or a session
+/// that never answers), and dropping a refusal on the floor threw away credits the feature exists
+/// to produce — they are not recoverable afterwards because the post has already published. (The
+/// original "50 of 81 came back 201 in 0.0s" was the signature-length bug, fixed in the detector;
+/// 201 is deterministic and is NOT retried here.)
 ///
 /// So a refusal parks the post here instead. A single worker drains the queue slowly, backing off
 /// hard whenever it is refused again, and attaches the credit by EDITING the published post once an
@@ -98,15 +99,21 @@ final class ShazamRetryQueue: ObservableObject {
             defer { try? FileManager.default.removeItem(at: clip) }
 
             let outcome = await ShazamDetector.identifyDetailed(clip)
+            var refused = outcome.retryable
             if let track = outcome.track {
-                HavenLog.sync("shazam-retry: MATCHED \(track.title) for \(item.postId.prefix(8))")
-                FeedStore.shared.attachSongCredit(postId: item.postId, circleId: item.circleId, track: track)
-                remove(item.postId)
-                continue
+                // The attach can fail honestly — the engine is not up yet, or the post is not in
+                // that circle's feed at this moment. That used to be treated as done and the entry
+                // deleted; now it counts as a refusal and the entry stays for another pass.
+                if await FeedStore.shared.attachSongCredit(postId: item.postId, circleId: item.circleId, track: track) {
+                    HavenLog.sync("shazam-retry: MATCHED \(track.title) for \(item.postId.prefix(8))")
+                    remove(item.postId)
+                    continue
+                }
+                HavenLog.sync("shazam-retry: matched \(track.title) but could not attach to \(item.postId.prefix(8)) — keeping")
+                refused = true
             }
 
-            // A definitive answer is not worth retrying — only a refusal is.
-            let refused = outcome.reason.contains("201") || outcome.reason.contains("no result")
+            // A definitive answer is not worth retrying — only a refusal is (see identifyDetailed).
             guard refused, item.attempts + 1 < Self.maxAttempts else {
                 HavenLog.sync("shazam-retry: giving up on \(item.postId.prefix(8)) — \(outcome.reason)")
                 remove(item.postId); continue

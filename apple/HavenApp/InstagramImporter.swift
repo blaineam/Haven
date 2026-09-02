@@ -443,12 +443,11 @@ final class InstagramImporter: ObservableObject {
                             let began = Date()
                             let outcome = await ShazamDetector.identifyDetailed(clip)
                             await box.set(outcome.track)
-                            // A REFUSAL is not an answer. Rate limits accounted for 50 of 81
-                            // attempts in a real run, and dropping them threw away most of the
-                            // credits this feature exists to produce — so park it for a retry
-                            // instead of losing it.
-                            if outcome.track == nil,
-                               outcome.reason.contains("201") || outcome.reason.contains("no result") {
+                            // A REFUSAL is not an answer (202 / 500 / no answer — the detector
+                            // decides). Dropping those threw away credits this feature exists to
+                            // produce, so park the post for a retry instead of losing it. A
+                            // definitive miss (not in catalog, bad signature) is not retried.
+                            if outcome.track == nil, outcome.retryable {
                                 await box.setRetryable(true)
                             }
                             HavenLog.sync("ig-import: shazam \(outcome.reason) in "

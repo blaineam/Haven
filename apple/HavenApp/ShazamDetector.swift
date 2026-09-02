@@ -21,7 +21,17 @@ enum ShazamDetector {
 
     /// Sampling the whole clip is wasted work — Shazam matches from a few seconds. This bounds both
     /// the read and the signature, which matters when it runs across a few hundred videos.
-    static let maxSampleSeconds: Double = 12
+    ///
+    /// HARD CAP, half a second under the catalog's own maximum (12 s). The catalog accepts
+    /// 3.0–12.0 s signatures and nothing else; appending whole reader buffers "until 12 s" overshot
+    /// to 12.07–12.15 s, and every one of those came back as error 201 —
+    /// `SHErrorCode.signatureDurationInvalid` — instantly and deterministically. That is the "50 of
+    /// 81 in 0.0s" run: not a rate limit, a signature Shazam refused to look at. `signature(for:)`
+    /// clamps the last buffer so `appended` can never exceed this.
+    static let maxSampleSeconds: Double = {
+        let catalogMax = SHSession().catalog.maximumQuerySignatureDuration
+        return catalogMax > 1 ? min(12, catalogMax - 0.5) : 11.5
+    }()
 
     /// Below this there is not enough audio to fingerprint, and asking anyway just returns a
     /// confident-looking nothing. Instagram stories are frequently shorter than this, which is a
@@ -40,15 +50,20 @@ enum ShazamDetector {
         await identifyDetailed(url).track
     }
 
-    /// Same work, but says WHY it came back empty.
+    /// Same work, but says WHY it came back empty — and whether asking again could change the answer.
     ///
     /// "no match" and "never ran" are indistinguishable from the outside, and they call for
     /// completely different fixes — one is Shazam telling you the audio isn't in its catalog, the
     /// other is the audio never reaching Shazam at all. A run of no-matches returning in 0.0s is
     /// the second, and this is what tells them apart.
-    static func identifyDetailed(_ url: URL) async -> (track: TrackRefFfi?, reason: String) {
+    ///
+    /// `retryable` is the ONLY thing the retry queue and the importer should key on: a transient
+    /// refusal (202 `matchAttemptFailed`, 500 `internalError`, or a session that never answered)
+    /// is worth another try later; "not in catalog", a bad signature (201), or a clip with no usable
+    /// audio is an answer, and retrying an answer is just more heat.
+    static func identifyDetailed(_ url: URL) async -> (track: TrackRefFfi?, reason: String, retryable: Bool) {
         guard let signature = await signature(for: url) else {
-            return (nil, await signatureFailureReason(url))
+            return (nil, await signatureFailureReason(url), false)
         }
         await Throttle.shared.waitForTurn()
         let session = SHSession()
@@ -75,26 +90,41 @@ enum ShazamDetector {
         switch result {
         case .noMatch:
             await Throttle.shared.succeeded()
-            return (nil, "not in catalog")
+            return (nil, "not in catalog", false)
         case .error(let e, _):
-            // 201 (matchAttemptFailed) is overwhelmingly a RATE LIMIT here: 50 of 81 attempts in a
-            // single import run came back with it in 0.0s. Back off rather than keep hammering.
-            await Throttle.shared.failed(rateLimited: (e as NSError).code == 201)
-            return (nil, "shazam error: \(e.localizedDescription)")
+            let code = (e as NSError).code
+            switch code {
+            case 201:
+                // SHErrorCode.signatureDurationInvalid: the signature is outside the catalog's 3–12 s
+                // window. Deterministic and OUR fault (see maxSampleSeconds) — it was misread as a
+                // rate limit for a long time because it returns in 0.0s. Never retry, never widen
+                // the throttle: the service was not even asked.
+                return (nil, "signature duration invalid (201) — \(e.localizedDescription)", false)
+            case 202, 500:
+                // matchAttemptFailed / internalError: the catalog was asked and did not answer.
+                // Transient — back off and let the queue try again later.
+                await Throttle.shared.failed(rateLimited: true)
+                return (nil, "shazam refused (\(code)): \(e.localizedDescription)", true)
+            default:
+                await Throttle.shared.failed(rateLimited: false)
+                return (nil, "shazam error (\(code)): \(e.localizedDescription)", false)
+            }
         case .none:
+            // The session never produced a result inside `matchTimeout` — the classic "quietly
+            // decided not to answer". Worth one more try later.
             await Throttle.shared.failed(rateLimited: false)
-            return (nil, "no result")
+            return (nil, "no result", true)
         case .match:
             await Throttle.shared.succeeded()
         }
         guard case .match(let m) = result, let item = m.mediaItems.first,
-              let title = item.title else { return (nil, "match had no title") }
+              let title = item.title else { return (nil, "match had no title", false) }
         return (TrackRefFfi(
             catalogId: TrackRefFfi.creditPrefix + (item.appleMusicID ?? item.shazamID ?? title) + "~",
             title: title,
             artist: item.artist ?? "",
             artworkUrl: item.artworkURL?.absoluteString ?? "",
-            durationMs: 0), "matched")
+            durationMs: 0), "matched", false)
     }
 
     /// Why `signature(for:)` gave up — checked only on failure, so it costs nothing in the normal
@@ -136,11 +166,15 @@ enum ShazamDetector {
             defer { CMSampleBufferInvalidate(sample) }
             guard let block = CMSampleBufferGetDataBuffer(sample) else { continue }
             let length = CMBlockBufferGetDataLength(block)
-            let frames = AVAudioFrameCount(length / MemoryLayout<Float>.size)
+            // CLAMP the last buffer to the cap: a whole reader buffer past the limit is what produced
+            // 12.07–12.15 s signatures and the deterministic 201 (see maxSampleSeconds).
+            let remaining = AVAudioFrameCount(max(0, (maxSampleSeconds - appended) * 44100))
+            let frames = min(AVAudioFrameCount(length / MemoryLayout<Float>.size), remaining)
             guard frames > 0, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames),
                   let channel = buffer.floatChannelData else { continue }
             buffer.frameLength = frames
-            CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: channel[0])
+            CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: Int(frames) * MemoryLayout<Float>.size,
+                                       destination: channel[0])
             try? generator.append(buffer, at: nil)
             appended += Double(frames) / 44100
         }
@@ -174,10 +208,11 @@ private final class ResumeOnce: @unchecked Sendable {
 
 /// Paces catalog requests so an import doesn't get itself throttled.
 ///
-/// Shazam is built for a person tapping a button, not a loop asking 372 times as fast as it can.
-/// Hammering it earned error 201 on 50 of 81 attempts in one run — the audio was fine and was never
-/// even looked at. A gap between requests, widening whenever we're refused, converts most of those
-/// into real answers.
+/// Shazam is built for a person tapping a button, not a loop asking 372 times as fast as it can. A
+/// gap between requests, widening whenever the service actually refuses (202 / 500 / no answer),
+/// keeps a long import from talking itself into a throttle. (The "201 on 50 of 81" run that
+/// motivated this turned out to be the signature-length bug, not a rate limit — see
+/// `maxSampleSeconds` — but the pacing is still right for a loop over hundreds of clips.)
 actor ShazamThrottle {
     static let shared = ShazamThrottle()
 

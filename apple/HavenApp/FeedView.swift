@@ -780,9 +780,17 @@ final class FeedStore: ObservableObject {
         // Cheap: the commit is cached until the epoch/recipients change, and the per-(relay,key)
         // upload marks make repeat launches a set-lookup no-op.
         if let social {
-            for cid in circles.map(\.id) {
-                for head in social.exportEpochHead(circleId: cid) {
-                    BackgroundUploader.shared.enqueue(circleId: cid, env: head)
+            // Engine read OFF the main actor: this ran synchronously on main at the exact moment the
+            // launch feed rebuild holds the engine mutex (stall detector, 2026-09-01).
+            let cids = circles.map(\.id)
+            Task.detached(priority: .userInitiated) {
+                let heads: [(String, [Data])] = await EngineGate.shared.run {
+                    cids.map { ($0, social.exportEpochHead(circleId: $0)) }
+                }
+                await MainActor.run {
+                    for (cid, envs) in heads {
+                        for head in envs { BackgroundUploader.shared.enqueue(circleId: cid, env: head) }
+                    }
                 }
             }
         }
@@ -1192,15 +1200,26 @@ final class FeedStore: ObservableObject {
     func dialTargets(_ circleId: String) -> [String] {
         guard let social else { return [] }
         if let c = dialTargetsCache[circleId], now() - c.at < 10_000 { return c.targets }
+        // Cache miss on the main actor: read the engine here. The sync pass pre-seeds every circle
+        // from its off-main `SyncReads` snapshot, so this path is the exception, not the 20s tick.
+        let members = social.contactNodeIds(circleId: circleId)
+        var deviceIds: [String: [String]] = [:]
+        for a in members { deviceIds[a.lowercased()] = social.deviceNodeIdsFor(accountHex: a) }
+        return seedDialTargets(circleId, members: members, deviceIds: deviceIds)
+    }
+    /// The engine-free half of `dialTargets`: build the dial set from already-read members + device
+    /// ids, store it in the 10s cache, and kick the directory lookup for members with no dialable id.
+    @discardableResult
+    private func seedDialTargets(_ circleId: String, members: [String], deviceIds: [String: [String]]) -> [String] {
         let mineAcct = myNodeHex.lowercased()
         let mineDev = myDeviceNodeHex.lowercased()
         var out = [String]()
         var seen = Set<String>()
         func add(_ h: String) { let l = h.lowercased(); if l != mineAcct && l != mineDev && seen.insert(l).inserted { out.append(h) } }
         var undialable = [String]()
-        for a in social.contactNodeIds(circleId: circleId) {
+        for a in members {
             add(a)                                              // account id (contact handle; reaches old-build peers)
-            let devices = social.deviceNodeIdsFor(accountHex: a)
+            let devices = deviceIds[a.lowercased()] ?? [a.lowercased()]   // the engine's answer, or its no-roster fallback
             for d in devices { add(d) }                         // their device node ids (actual reach)
             let hints = deviceHints(for: a)
             for h in hints { add(h) }                           // invite-link hints (until their roster lands)
@@ -3929,7 +3948,66 @@ final class FeedStore: ObservableObject {
         syncWithContactsNow()
     }
 
+    /// Everything `syncWithContactsApply` used to read from the engine ON THE MAIN ACTOR, gathered in
+    /// one EngineGate pass off-main instead. Stall detector, 2026-09-01: `bringOnline → syncWithContacts
+    /// → syncWithContactsNow → dialTargets → Mutex::lock` parked main 2.05s behind the launch export /
+    /// first drain slices — and the pass then re-took the lock for `myDeviceRosterWire`, `myBundle`,
+    /// `mySignedProfile`, `contactNodeIds` and `deviceNodeIdsFor` PER MEMBER, each another chance to
+    /// lose the unfair mutex. The apply half runs on main against this snapshot and never touches the
+    /// engine synchronously (the sealing/export work inside it was already off-main).
+    private struct SyncReads: Sendable {
+        var rosterWire = Data()
+        var bundle = Data()
+        var profileCard = Data()
+        var members: [String: [String]] = [:]      // circle id → member ACCOUNT ids
+        var deviceIds: [String: [String]] = [:]    // lowercased account id → dial ids (roster, or [account])
+    }
+    nonisolated private static func gatherSyncReads(_ social: HavenSocial, circleIds: [String], contactIds: [String],
+                                        mineAcct: String,
+                                        profile: (name: String, bio: String, link: String, avatar: String, emoji: String)) -> SyncReads {
+        var r = SyncReads()
+        r.rosterWire = social.myDeviceRosterWire()
+        r.bundle = social.myBundle()
+        r.profileCard = social.mySignedProfile(name: profile.name, bio: profile.bio, link: profile.link,
+                                               avatar: profile.avatar, emoji: profile.emoji)
+        var accounts = Set(contactIds.map { $0.lowercased() })
+        accounts.insert(mineAcct)
+        for cid in circleIds {
+            let members = social.contactNodeIds(circleId: cid)
+            r.members[cid] = members
+            for a in members { accounts.insert(a.lowercased()) }
+        }
+        for a in accounts where !a.isEmpty { r.deviceIds[a] = social.deviceNodeIdsFor(accountHex: a) }
+        return r
+    }
+    private var syncPassGeneration: UInt64 = 0
     private func syncWithContactsNow() {
+        guard let social else { return }
+        // Snapshot the main-actor inputs, read the engine once off-main, apply on main (see SyncReads).
+        let circleIds = circles.map(\.id)
+        let contactIds = ContactsStore.shared.contacts.map(\.idHex)
+        let mineAcct = myNodeHex.lowercased()
+        let ps = ProfileStore.shared
+        let profile = (name: ps.displayName.isEmpty ? "Someone" : ps.displayName, bio: ps.bio, link: ps.link,
+                       avatar: ps.avatarBase64, emoji: ps.emoji)
+        syncPassGeneration &+= 1
+        let gen = syncPassGeneration
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let reads = await EngineGate.shared.run {
+                Self.gatherSyncReads(social, circleIds: circleIds, contactIds: contactIds, mineAcct: mineAcct, profile: profile)
+            }
+            await MainActor.run { [weak self] in
+                // A newer pass superseded this snapshot, or the engine was replaced meanwhile: drop it.
+                guard let self, self.syncPassGeneration == gen, self.social === social else { return }
+                for cid in circleIds {
+                    self.seedDialTargets(cid, members: reads.members[cid] ?? [], deviceIds: reads.deviceIds)
+                }
+                self.syncWithContactsApply(reads)
+            }
+        }
+    }
+
+    private func syncWithContactsApply(_ reads: SyncReads) {
         guard let social else { return }
         // Re-blasting our ENTIRE history (every post → every contact) on every 20s tick flooded the
         // network with hundreds of thousands of frames (drowning real delivery). The hello goes out every
@@ -3941,7 +4019,7 @@ final class FeedStore: ObservableObject {
         // the receiver version-checks + dedups). Device-id transport means a friend can only AUTHORIZE +
         // dial my specific device once they hold my roster; without this it rode only rare circle
         // key-commits, so a freshly-flipped device stayed "forbidden" at friends' relays. Type 27.
-        let rosterWire = social.myDeviceRosterWire()
+        let rosterWire = reads.rosterWire
         // The nearby broadcast is a single LOCAL fan-out (not × contacts) and is the own-device
         // (iPhone↔Mac) sync path, so it stays every cycle.
         // ~3 min at the tight cadence, stretching with the SAME idle/thermal multiplier as the
@@ -4021,7 +4099,7 @@ final class FeedStore: ObservableObject {
             }
         }
         for circle in circles {
-            guard let hello = helloPayload(circleId: circle.id, circleName: circle.name) else { continue }
+            guard let hello = helloPayload(circleId: circle.id, circleName: circle.name, reads: reads) else { continue }
             // The default circle bootstraps with ALL QR contacts (newly-added ones aren't
             // members yet — this is how we get their bundle). Other circles target members.
             var targets = Set(dialTargets(circle.id))   // account id (handle) + device ids (actual reach)
@@ -4042,7 +4120,7 @@ final class FeedStore: ObservableObject {
             // slot nobody ever claims, and the circle invite riding the hello silently vanishes
             // (the lost-invite bug). Device ids stay exactly what they are: iroh DIAL targets
             // (the loop above). The account hex is the stable handle every fleet claims.
-            var helloAccounts = Set(social.contactNodeIds(circleId: circle.id).map { $0.lowercased() })
+            var helloAccounts = Set((reads.members[circle.id] ?? []).map { $0.lowercased() })
             if circle.id == "default" {
                 for c in ContactsStore.shared.contacts { helloAccounts.insert(c.idHex.lowercased()) }
             }
@@ -4129,7 +4207,7 @@ final class FeedStore: ObservableObject {
         if !rosterPullInFlight {
             let due = ContactsStore.shared.contacts
                 .map(\.idHex)
-                .filter { hex in social.deviceNodeIdsFor(accountHex: hex).allSatisfy { $0.lowercased() == hex.lowercased() } }
+                .filter { hex in (reads.deviceIds[hex.lowercased()] ?? [hex]).allSatisfy { $0.lowercased() == hex.lowercased() } }
                 .filter { SharedStore.rosterPullDue($0) }
                 .prefix(3)
             if !due.isEmpty {
@@ -4186,7 +4264,7 @@ final class FeedStore: ObservableObject {
         #endif
         if !thermalBlocksCatchup,
            nowMs - lastOwnDeviceCatchupMs > catchupEvery,
-           !myOtherDeviceTargets().isEmpty {
+           !myOtherDeviceTargets(ownDeviceIds: reads.deviceIds[myNodeHex.lowercased()] ?? []).isEmpty {
             lastOwnDeviceCatchupMs = nowMs
             // Cover ALL circles via a persisted round-robin. The old "DMs + default + first 2"
             // shape meant a custom circle past the first two NEVER reconciled between own devices
@@ -4488,6 +4566,16 @@ final class FeedStore: ObservableObject {
         // rest = signed business card (name + bio + link)
         p.append(social.mySignedProfile(name: myName, bio: ProfileStore.shared.bio, link: ProfileStore.shared.link,
                                         avatar: ProfileStore.shared.avatarBase64, emoji: ProfileStore.shared.emoji))
+        return p
+    }
+    /// `helloPayload` from an off-main `SyncReads` snapshot — no engine touch on the main actor.
+    private func helloPayload(circleId: String, circleName: String, reads: SyncReads) -> Data? {
+        guard social != nil else { return nil }
+        var p = Data()
+        lpAppend(&p, Data(circleId.utf8))
+        lpAppend(&p, Data(circleName.utf8))
+        lpAppend(&p, reads.bundle)
+        p.append(reads.profileCard)   // signed business card (name + bio + link), minted in the same pass
         return p
     }
 
@@ -4939,7 +5027,7 @@ final class FeedStore: ObservableObject {
         // Durable frame-19: friends who can't iroh-dial the host still learn the relay + public
         // media URL from the mailbox ("no available relays" while the owner sees them all on).
         for (_, key, data) in sorted where key.contains("/__relay__/") {
-            handleRelayNode(data)
+            await handleRelayNode(data)
             SharedStore.markSeenPublic(key)
             relayIngested = true
         }
@@ -5226,17 +5314,22 @@ final class FeedStore: ObservableObject {
         // Option 1 transport edge: callers pass an ACCOUNT id (so all the social/allow logic stays on
         // account ids); here we expand to that account's authorized DEVICE ids (or the account id itself
         // for a pre-multidevice peer) and deliver to each, so the post reaches whichever device is online.
-        Task { [weak self] in
-            // Expand to device ids OFF the main thread — this crosses the FFI, and on a busy sync cycle
-            // sendIroh fires dozens of times; doing it (and the send) on a background Task keeps the feed
-            // scroll smooth. (Per-send logging was removed: building those strings on every send was itself
-            // measurable main-thread churn during sync.)
-            var targets = self?.social?.deviceNodeIdsFor(accountHex: nodeHex) ?? [nodeHex]
+        //
+        // The expansion is an engine read, and this fires dozens of times per sync burst. It used to
+        // run in a `Task {}` — which INHERITS the main actor, so every send took the engine mutex on
+        // main (stall detector, 2026-09-01: 0.98s parked in `sendIroh → deviceNodeIdsFor →
+        // Mutex::lock`). Detached + EngineGate: the read queues behind the other engine work off-main,
+        // and only the one-line error flag hops back. (Per-send logging stays removed: building those
+        // strings on every send was itself measurable churn during sync.)
+        let social = self.social
+        let hints = deviceHints(for: nodeHex)   // typed mirror — O(1), no lock
+        Task.detached(priority: .userInitiated) { [weak self] in
+            var targets: [String]
+            if let social { targets = await EngineGate.shared.run { social.deviceNodeIdsFor(accountHex: nodeHex) } }
+            else { targets = [nodeHex] }
             // Invite-link dial hints bridge the roster bootstrap: until this contact's signed
             // roster lands, their account id resolves to no node — the hint is the only real id.
-            if let hints = self?.deviceHints(for: nodeHex) {
-                for h in hints where !targets.contains(where: { $0.lowercased() == h }) { targets.append(h) }
-            }
+            for h in hints where !targets.contains(where: { $0.lowercased() == h }) { targets.append(h) }
             var anyOk = false
             var lastErr: String?
             for t in targets {
@@ -5252,9 +5345,10 @@ final class FeedStore: ObservableObject {
             // propagate_dirty / UpdateStack::update / CA commits) with only 16% of samples containing
             // ANY Haven frame — the signature of something dirtying the graph rather than one slow
             // function.
-            await MainActor.run {
-                let v = anyOk ? nil : lastErr
-                if self?.lastSendError != v { self?.lastSendError = v }
+            let v: String? = anyOk ? nil : lastErr
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if self.lastSendError != v { self.lastSendError = v }
             }
         }
     }
@@ -5267,8 +5361,16 @@ final class FeedStore: ObservableObject {
     /// contact events that only this device received.
     private func myOtherDeviceTargets() -> [String] {
         guard let social else { return [] }
+        return myOtherDeviceTargets(ownDeviceIds: social.deviceNodeIdsFor(accountHex: myNodeHex))
+    }
+    /// The engine-free half: filter an already-read own-roster device list (+ invite hints) down to
+    /// the fan-out set. The sync pass and the live-deliver lanes read the roster off-main and pass it in.
+    private func myOtherDeviceTargets(ownDeviceIds: [String]) -> [String] {
         let mineAcct = myNodeHex.lowercased()
-        let mineDev = myDeviceNodeHex.lowercased()
+        return Self.otherDeviceTargets(ownDeviceIds: ownDeviceIds, hints: deviceHints(for: mineAcct),
+                                       mineAcct: mineAcct, mineDev: myDeviceNodeHex.lowercased())
+    }
+    nonisolated private static func otherDeviceTargets(ownDeviceIds: [String], hints: [String], mineAcct: String, mineDev: String) -> [String] {
         var out = [String]()
         var seen = Set<String>()
         func add(_ h: String) {
@@ -5276,8 +5378,8 @@ final class FeedStore: ObservableObject {
             guard l.count == 64, l != mineAcct, l != mineDev, seen.insert(l).inserted else { return }
             out.append(l)
         }
-        for d in social.deviceNodeIdsFor(accountHex: myNodeHex) { add(d) }
-        for h in deviceHints(for: mineAcct) { add(h) }
+        for d in ownDeviceIds { add(d) }
+        for h in hints { add(h) }
         return out
     }
 
@@ -5286,22 +5388,24 @@ final class FeedStore: ObservableObject {
     /// never touches `lastSendError` (that surfaces "we couldn't reach your contact", which this isn't)
     /// and the caller's durable mailbox path always runs regardless of what happens here.
     private func liveDeliverToMyDevices(_ type: UInt8, _ payload: Data) {
-        let targets = myOtherDeviceTargets()
-        guard !targets.isEmpty, let node else { return }
-        let f = frame(type, payload)
-        Task {
-            for t in targets { try? await node.sendToNode(nodeIdHex: t, payload: f) }
-        }
+        liveDeliverManyToMyDevices(type, [payload])
     }
 
     /// Batched [`liveDeliverToMyDevices`] — one Task for MANY frames rather than one per frame.
     /// A catch-up sweep hands over dozens of envelopes at once; spawning a Task each would be a
     /// needless pile of concurrent sends to the same few devices.
     private func liveDeliverManyToMyDevices(_ type: UInt8, _ payloads: [Data]) {
-        let targets = myOtherDeviceTargets()
-        guard !targets.isEmpty, !payloads.isEmpty, let node else { return }
+        guard !payloads.isEmpty, let node, let social else { return }
         let frames = payloads.map { frame(type, $0) }
-        Task {
+        let mineAcct = myNodeHex.lowercased()
+        let mineDev = myDeviceNodeHex.lowercased()
+        let hints = deviceHints(for: mineAcct)
+        // The own-roster read runs OFF the main actor (stall detector, 2026-09-01: 0.49s parked in
+        // `askForMedia → liveDeliverToMyDevices → myOtherDeviceTargets → Mutex::lock`).
+        Task.detached(priority: .userInitiated) {
+            let own = await EngineGate.shared.run { social.deviceNodeIdsFor(accountHex: mineAcct) }
+            let targets = Self.otherDeviceTargets(ownDeviceIds: own, hints: hints, mineAcct: mineAcct, mineDev: mineDev)
+            guard !targets.isEmpty else { return }
             for t in targets {
                 for f in frames { try? await node.sendToNode(nodeIdHex: t, payload: f) }
             }
@@ -5457,7 +5561,7 @@ final class FeedStore: ObservableObject {
         case 16: CallManager.shared.handleOffer(payload)    // WebRTC SDP offer
         case 17: CallManager.shared.handleAnswer(payload)   // WebRTC SDP answer
         case 18: CallManager.shared.handleIce(payload)      // WebRTC ICE candidate
-        case 19: handleRelayNode(payload)                   // circle relay/mailbox node id
+        case 19: Task { await self.handleRelayNode(payload) }   // circle relay/mailbox node id
         case 20: handlePresignBootstrap(payload)            // pre-signed S3 pool bootstrap url
         case 21: CallManager.shared.handleGroupInvite(payload)  // WebRTC mesh group-call invite
         case 22: CallManager.shared.handleCameraState(payload)  // peer toggled their camera on/off
@@ -6228,17 +6332,23 @@ final class FeedStore: ObservableObject {
         adoptRelayNode(nodeHex, circleIds: circles.map(\.id), setDefault: true)
     }
 
-    private func handleRelayNode(_ payload: Data) {
+    private func handleRelayNode(_ payload: Data) async {
         guard let social else { return }
         var off = 0
         guard let cidData = lpRead(payload, &off) else { return }
         let circleId = String(data: cidData, encoding: .utf8) ?? ""
         let sealed = payload.subdata(in: (payload.startIndex + off)..<payload.endIndex)
-        guard !circleId.isEmpty, !sealed.isEmpty,
-              let opened = social.openCircleMediaSender(circleId: circleId, sealed: sealed),
-              var nodeHex = String(data: opened.data, encoding: .utf8) else { return }
-        _ = opened.senderHex.lowercased()   // authenticated envelope sender (account id); reserved for future owner-gate
-        let data = opened.data
+        guard !circleId.isEmpty, !sealed.isEmpty else { return }
+        // Both engine reads (open the announce, list the members for the stale-relay sweep below) in
+        // ONE gate hold off the main actor. Stall detector, 2026-09-01: 4.09s parked on main in
+        // `pullMailbox → handleRelayNode → memberHexes → contactNodeIds` during a foreground drain.
+        // (The sender hex the open returns was never used; the envelope is authenticated by the open.)
+        let read: (data: Data, members: [String])? = await EngineGate.shared.run {
+            guard let opened = social.openCircleMediaSender(circleId: circleId, sealed: sealed) else { return nil }
+            return (opened.data, social.contactNodeIds(circleId: circleId))
+        }
+        guard let read, var nodeHex = String(data: read.data, encoding: .utf8) else { return }
+        let data = read.data
         // Extended announce: JSON {node, urls, token} also carries the relay's plain-HTTP media
         // interface (the reliable cross-NAT path). Legacy announces are the bare 64-hex id.
         var announcedUrls: [String] = []
@@ -6332,7 +6442,7 @@ final class FeedStore: ObservableObject {
         // and every media fetch burns a full 30s timeout on it (the "2 relays, one is the account id" bug).
         // Learning a real (device) relay for this circle means those account-id entries are obsolete → drop
         // them so the reachable device relay is what gets dialed. (Safe under the all-devices-on-154 cutover.)
-        var staleAccounts = Set(memberHexes(circleId: circleId).map { $0.lowercased() })
+        var staleAccounts = Set(read.members.map { $0.lowercased() })
         staleAccounts.insert(AccountStore.currentNodeHex().lowercased())
         for a in staleAccounts where a != lower && a.count == 64 {
             RelayMailboxStore.shared.remove(circleId: circleId, nodeHex: a)
@@ -6493,25 +6603,54 @@ final class FeedStore: ObservableObject {
     /// So actually TEST a few held refs per pass and ask the author to re-seal the failures. Bounded
     /// per pass (an open attempt is real crypto over real bytes) and once per ref per launch, so the
     /// total cost is the size of the library rather than a rate.
+    private var verifyHeldMediaInFlight = false
     func verifyHeldMedia(limit: Int = 6) {
-        guard let social else { return }
-        var tested = 0
-        for c in circles {
-            if tested >= limit { break }
-            for item in social.feed(circleId: c.id, nowMs: now(), viewerRetentionSecs: nil) {
-                if tested >= limit { break }
-                for ref in item.media {
-                    if tested >= limit { break }
-                    if MediaStore.isSynthetic(ref) || Self.mediaProbed.contains(ref) { continue }
-                    guard MediaStore.shared.has(ref), let sealed = MediaStore.shared.rawBytes(ref) else { continue }
-                    Self.mediaProbed.insert(ref)
-                    tested += 1
-                    if social.openCircleMedia(circleId: c.id, sealed: sealed) != nil { continue }
-                    guard !Self.mediaAskedForReseal.contains(ref) else { continue }
-                    Self.mediaAskedForReseal.insert(ref)
-                    HavenLog.sync("held-but-unreadable \(ref.prefix(10)) — asking \(item.authorShort.prefix(8)) to re-seal")
-                    requestMediaWhenAvailable(ref: ref, circleId: c.id, postId: item.id,
-                                              authorShort: item.authorShort)
+        guard let social, !verifyHeldMediaInFlight else { return }
+        // This walked `social.feed` for EVERY circle and ran up to `limit` media decrypts ON THE MAIN
+        // ACTOR every pass (stall detector, 2026-09-01: 0.61s in `syncWithContactsNow →
+        // requestMissingMedia → verifyHeldMedia → openCircleMedia`, exposed once the mutex park in
+        // front of it was gone). Three hops now: the feed walk off-main under EngineGate, the held-bytes
+        // lookup on main (MediaStore is main-actor), the open attempts off-main again, bookkeeping and
+        // the re-seal asks back on main. Same bounds — `limit` opens per pass, once per ref per launch,
+        // the same circle → post → media order — and one pass in flight at a time.
+        verifyHeldMediaInFlight = true
+        let circleIds = circles.map(\.id)
+        let nowMs = now()
+        Task.detached(priority: .utility) { [weak self] in
+            // 1. Every media ref in feed order (cheap strings; the per-pass bound is applied on main).
+            let refs: [(cid: String, postId: String, authorShort: String, ref: String)] = await EngineGate.shared.run {
+                var out: [(cid: String, postId: String, authorShort: String, ref: String)] = []
+                for cid in circleIds {
+                    for item in social.feed(circleId: cid, nowMs: nowMs, viewerRetentionSecs: nil) {
+                        for ref in item.media { out.append((cid, item.id, item.authorShort, ref)) }
+                    }
+                }
+                return out
+            }
+            // 2. The first `limit` unprobed, HELD refs, with their sealed bytes (main actor).
+            let picked: [(cid: String, postId: String, authorShort: String, ref: String, sealed: Data)] = await MainActor.run {
+                var out: [(cid: String, postId: String, authorShort: String, ref: String, sealed: Data)] = []
+                for r in refs where out.count < limit {
+                    if MediaStore.isSynthetic(r.ref) || Self.mediaProbed.contains(r.ref) { continue }
+                    guard MediaStore.shared.has(r.ref), let sealed = MediaStore.shared.rawBytes(r.ref) else { continue }
+                    Self.mediaProbed.insert(r.ref)
+                    out.append((r.cid, r.postId, r.authorShort, r.ref, sealed))
+                }
+                return out
+            }
+            // 3. The actual crypto, off-main.
+            let unreadable: [(cid: String, postId: String, authorShort: String, ref: String)] = await EngineGate.shared.run {
+                picked.filter { social.openCircleMedia(circleId: $0.cid, sealed: $0.sealed) == nil }
+                      .map { ($0.cid, $0.postId, $0.authorShort, $0.ref) }
+            }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.verifyHeldMediaInFlight = false
+                for u in unreadable {
+                    guard !Self.mediaAskedForReseal.contains(u.ref) else { continue }
+                    Self.mediaAskedForReseal.insert(u.ref)
+                    HavenLog.sync("held-but-unreadable \(u.ref.prefix(10)) — asking \(u.authorShort.prefix(8)) to re-seal")
+                    self.requestMediaWhenAvailable(ref: u.ref, circleId: u.cid, postId: u.postId, authorShort: u.authorShort)
                 }
             }
         }
@@ -7080,13 +7219,15 @@ final class FeedStore: ObservableObject {
         // push wake re-arm the 5s lane and keep the radio warm past completionHandler.
         guard appIsForeground else { return }
         #endif
-        verifyHeldMedia()   // held != readable — a blob we hold but cannot open is invisible here
         guard let social, node != nil || nearby != nil else { return }
         // The scan below is O(items × media) with a stat() per ref (MediaStore.has) — cap it to
         // once per 2s on the main actor; per-ref request throttles below stay unchanged.
         let nowMs = now()
         guard nowMs - lastMediaScanMs > 2_000 else { return }
         lastMediaScanMs = nowMs
+        // held != readable — a blob we hold but cannot open is invisible to the scan below. Runs
+        // off-main now, and rides this 2s cap instead of walking every circle's feed per call.
+        verifyHeldMedia()
         let myHex = myNodeHex
         // Skip synthetic refs (geo: location pins): they carry no fetchable bytes, so counting them
         // keeps nbMediaPending pinned above 0 forever and fires a doomed restore each sweep.

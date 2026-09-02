@@ -104,6 +104,8 @@ jobs:
     needs: meta
     # rc → TestFlight-only: ensure the Xcode Cloud build of the tagged commit exists and reaches
     # VALID (testers have it); no App Store version or review. Full releases submit as before.
+    permissions:
+      contents: write           # the post-submit step moves main to the next patch version
     runs-on: ubuntu-latest
     timeout-minutes: 240          # Xcode Cloud can take an hour; processing another; review is not waited on
     steps:
@@ -150,3 +152,45 @@ jobs:
           [ "${IS_RC:-false}" = "true" ] && extra+=(--testflight-only)
           node Scripts/asc-autosubmit.mjs --version "$VERSION" --commit "$COMMIT" --tag "v$VERSION" \
             --platforms IOS,MAC_OS --wait-build 120 --wait-process 45 --notes-dir . "${extra[@]}"
+
+      # Only now — with the tagged commit's Xcode Cloud build attached and submitted — may main
+      # move on. Doing this in cut-release (seconds after the tag) made XCC cancel/supersede the
+      # release build and left only NEXT-version builds (1.8.3 shipped 1.8.4 builds, twice).
+      # Apple closes the released train on approval and XCC builds every main push for
+      # TestFlight, so main must not stay at the released version for long either — hence
+      # the bump rides on the successful submission. rc tags keep the version (train still open).
+      # If the submit step failed, main stays at the released version: fix, re-run this lane, and
+      # the bump follows. Runs with GITHUB_TOKEN, so it triggers no other GitHub workflow.
+      - name: Move main to the next patch version
+        if: steps.gate.outputs.ready == 'true' && needs.meta.outputs.is_rc != 'true' && github.event.inputs.dry_run != 'true'
+        env:
+          V: ${{ needs.meta.outputs.version }}
+          COMMIT: ${{ needs.meta.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git fetch -q origin main
+          TIP=$(git rev-parse origin/main)
+          if [ "$TIP" != "$COMMIT" ]; then
+            echo "::notice title=version bump skipped::main moved past the tagged commit (${TIP:0:10} vs ${COMMIT:0:10}) — bump it by hand if needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -B main origin/main
+          NEXT="${V%.*}.$(( ${V##*.} + 1 ))"
+          python3 - <<PY
+          import re, os
+          v = "$NEXT"
+          p='desktop/src-tauri/tauri.conf.json'; s=open(p).read()
+          s=re.sub(r'"version": "[0-9.]+",', f'"version": "{v}",', s, count=1); open(p,'w').write(s)
+          p='apple/project.yml'; s=open(p).read()
+          s=re.sub(r'MARKETING_VERSION: "[0-9.]+"', f'MARKETING_VERSION: "{v}"', s); open(p,'w').write(s)
+          p='apple/Haven.xcodeproj/project.pbxproj'
+          if os.path.exists(p):   # xcodegen-generated, gitignored — normally absent in CI
+              s=open(p).read()
+              s=re.sub(r'MARKETING_VERSION = [0-9.]+;', f'MARKETING_VERSION = {v};', s); open(p,'w').write(s)
+          print("main ->", v)
+          PY
+          git add -A && git commit -q -m "back to development: $NEXT (the $V train closes on approval)" && git push origin HEAD:main
+          echo "::notice title=version bump::main is now $NEXT"
+          echo "- 🔁 main moved to $NEXT (the $V train closes on approval)" >> "$GITHUB_STEP_SUMMARY"

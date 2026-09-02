@@ -73,29 +73,11 @@ jobs:
           git tag "$TAG" && git push origin "$TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "::notice title=cut-release::$TAG tagged at $(git rev-parse --short HEAD)"
-          # After a FULL release, main moves to the NEXT patch version immediately: Apple closes
-          # the released train once approved, and Xcode Cloud builds every main push for
-          # TestFlight — a same-version delivery then bounces (ITMS-90062/90186, seen on Blip
-          # 1.8.0 build 94). rc tags keep the version (the train is still open).
-          if [ -z "$RC" ]; then
-            NEXT="${V%.*}.$(( ${V##*.} + 1 ))"
-            python3 - <<PY
-          import re
-          v = "$NEXT"
-          p='desktop/src-tauri/tauri.conf.json'; s=open(p).read()
-          s=re.sub(r'"version": "[0-9.]+",', f'"version": "{v}",', s, count=1); open(p,'w').write(s)
-          p='apple/project.yml'; s=open(p).read()
-          s=re.sub(r'MARKETING_VERSION: "[0-9.]+"', f'MARKETING_VERSION: "{v}"', s); open(p,'w').write(s)
-          import os
-          p='apple/Haven.xcodeproj/project.pbxproj'
-          if not os.path.exists(p):
-              raise SystemExit(0)   # xcodegen-generated, gitignored — absent in CI
-          s=open(p).read()
-          s=re.sub(r'MARKETING_VERSION = [0-9.]+;', f'MARKETING_VERSION = {v};', s); open(p,'w').write(s)
-          print("main -> ", v)
-          PY
-            git add -A && git commit -m "back to development: $NEXT (the $V train closes on approval)" && git push origin HEAD:main
-          fi
+          # The "back to development: NEXT" bump used to happen HERE, seconds after the tag. That
+          # push superseded Xcode Cloud's build of the tagged commit (XCC cancels the in-flight run
+          # of a branch on every push), so the Apple lane only ever found NEXT-version builds
+          # (1.8.3 → built 1.8.4, twice). The bump now lives at the end of apple-store.yml: main
+          # stays byte-identical to the tag until the tagged commit's build is VALID and submitted.
       - name: Fan out pipelines at the tag ref
         env:
           GH_TOKEN: ${{ github.token }}

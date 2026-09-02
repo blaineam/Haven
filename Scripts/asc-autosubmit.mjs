@@ -436,8 +436,10 @@ async function main() {
 	if (!run) {
 		// XCC builds every push to main and lists the run with some lag. A commit pushed minutes
 		// ago almost certainly HAS a run incoming — poll before resorting to a manual start.
-		for (let i = 0; i < 8 && !run; i++) {
-			log(`no Xcode Cloud run listed for ${args.commit.slice(0, 10)} yet — waiting for the push-triggered one (${i + 1}/8)…`);
+		// Ten minutes, not four: the tag lands seconds after the push and XCC's listing lags; giving
+		// up early used to start a run on `main` — which, once main had moved on, built the wrong version.
+		for (let i = 0; i < 20 && !run; i++) {
+			log(`no Xcode Cloud run listed for ${args.commit.slice(0, 10)} yet — waiting for the push-triggered one (${i + 1}/20)…`);
 			await sleep(30_000);
 			run = await findRun(product.id, args.commit);
 			if (run && run.attributes.executionProgress === 'COMPLETE' && run.attributes.completionStatus !== 'SUCCEEDED') run = null;

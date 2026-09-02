@@ -442,3 +442,9 @@ Two more variables gate the store submissions themselves:
 **Renaming or replacing `.github/workflows/android.yml` resets it to 1**, and Play permanently
 rejects a `versionCode` at or below one it has already seen. If that file ever has to be
 renamed, switch `versionCode` to an explicit offset first. (It's at ~483 as of 1.0.5.)
+
+> **Where the post-release version bump happens (since 1.8.3):** `cut-release` only stamps and
+> tags. The "back to development: NEXT" commit is pushed by `apple-store.yml` *after* the tagged
+> commit's Xcode Cloud build is attached and submitted — pushing it from the cut superseded that
+> build and left only NEXT-version builds. If the Apple lane fails, main stays at the released
+> version until the lane is re-run (or bump by hand: tauri.conf.json + apple/project.yml).

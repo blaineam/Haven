@@ -22,6 +22,12 @@ packages:
 
 settings:
   base:
+    # APPLE SILICON ONLY (Apple, 2026-09: MAS apps requiring macOS 13+ may drop
+    # Intel; macOS 27 is Apple-silicon-only). PROJECT level, not just the Mac
+    # target: SwiftPM package targets take the PROJECT settings, so a
+    # target-only setting leaves packages compiling x86_64.
+    ARCHS[sdk=macosx*]: arm64
+    EXCLUDED_ARCHS[sdk=macosx*]: x86_64
     SWIFT_VERSION: "5.0"
     DEVELOPMENT_TEAM: "8ZVSPZYSVF"
     CODE_SIGN_STYLE: Automatic

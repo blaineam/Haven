@@ -334,9 +334,12 @@ one 0.49 s main-thread stall from before is gone, and no engine call runs on mai
   Simplified Chinese) had the stale claim in the *future* tense, promising a re-key that had already
   landed.
 
-  Behind the page, the same framing ran through `THREAT-MODEL.md`, `SECURITY.md`, `MULTI-DEVICE.md`
-  and `SEED-DROP-DESIGN.md`, whose header still read "design spike, not built — design only; no
-  product code accompanies it" for the design the release notes cite. `SECURITY.md` was flatly
+  Behind the page, the same framing ran through `THREAT-MODEL.md`, `SECURITY.md` and
+  `MULTI-DEVICE.md`, and both design documents — `SEED-DROP-DESIGN.md` and `TREEKEM-DESIGN.md` —
+  still opened "Status — design spike, not built … no product code accompanies it" for designs the
+  release notes cite by name. That pair is the trap the whole sweep started from: they are what the
+  corrected source comments now point at for ground truth, so the files a reader is sent to for
+  proof that the code exists were the last ones still denying it. `SECURITY.md` was flatly
   wrong rather than merely dated: it called device revocation "advisory, not cryptographic" and said
   per-message forward secrecy "needs MLS, which is not built". `MULTI-DEVICE.md` carried a "Known
   limitation — revocation is not yet adversary-proof" warning and pointed at the roadmap's
@@ -359,9 +362,13 @@ one 0.49 s main-thread stall from before is gone, and no engine call runs on mai
   on, the gate decides — is what the corrected pages now say, and it is why the per-circle rollout
   language was already right.
 
-  The honest limits survive intact, because they are still true: activation is per circle, circles
-  predating 1.0.7 have no verified owner to anchor the tree layer, that layer's audit is internal
-  rather than external, and a fully compromised **primary** device — the one that still holds the
+  The honest limits survive intact, because they are still true: activation is per circle, and
+  circles predating 1.0.7 have no recorded creator to anchor the tree layer, so they keep
+  sender-keys-and-epochs unless their creator offers a successor each member chooses to follow. The
+  tree layer's only audit remains the internal adversarial review — `TREEKEM-DESIGN.md` §9 had gated
+  a third-party review on flipping the master switch to default-ON, and the switch went first, so
+  that review is outstanding and the document now says so rather than leaving a design doc to be
+  waved as audit evidence. And a fully compromised **primary** device — the one that still holds the
   seed — is a full account compromise whose remedy is a new identity, not revocation.
 
 - **The source comments were the last holdout, and the most misleading.** Four files still described

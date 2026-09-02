@@ -1,9 +1,27 @@
-//! TreeKEM wire formats — MLS stage **M0** (see `docs/TREEKEM-DESIGN.md` §3.4, §5.4, §9).
+//! TreeKEM — MLS-style group ratcheting on Haven's own PQ primitives, shipped in 1.0.7
+//! (see `docs/TREEKEM-DESIGN.md` §3-§6).
 //!
-//! **Types + serialization ONLY.** No tree math, no key schedule, no signing, no engine
-//! wiring lives here yet — that is stage M1+. Shipping the byte layouts first (the
-//! `groupkey.rs` increment-1 pattern) pins the wire contract while nothing depends on it,
-//! so later stages can interoperate with blobs an M0 build may already have persisted.
+//! **This is the whole pure tree, not a type skeleton.** It carries the wire formats
+//! (§3.4) and their serialization, array-tree math (§3.1), node key material and
+//! path-secret hybrid encryption (§3.2), UpdatePath build/apply (§4.4), the epoch key
+//! schedule (§3.3) with the §6.2 deletion discipline, the proposal/commit builders and
+//! their receiver-side appliers (§4), the Welcome joiner rail (§4.2), the fork tie-break
+//! and chain rule (§5.1), the per-message sender ratchet for the DM/live lane (§6.5),
+//! and `PersistTree` with the bounded KEEP_EPOCHS/KEEP_FORKS pruner that WIPES what ages
+//! out rather than merely dropping it.
+//!
+//! **What is deliberately NOT here: engine wiring.** No `NetState`, no receive router, no
+//! shadow trees, no keying flip, no creator/admin authority — those live in
+//! `core/haven-ffi/src/lib.rs` (the `mls_*` functions) and `device.rs`. Everything here is
+//! PURE: signatures arrive as caller-supplied closures and all randomness expands from a
+//! caller-supplied `entropy` seed, so identical inputs yield identical bytes on every
+//! replica. That is what makes the tree testable against fixed vectors and WASM-clean, and
+//! it is load-bearing — do not reach for the clock, the OS RNG, or engine state in here.
+//!
+//! Whether a circle actually keys under the tree is the ENGINE's decision, gated per circle:
+//! it needs a verified owner and every member affirmatively MLS-capable, else the circle
+//! stays on the legacy sender-key epochs (`device::circle_fully_mls_capable`,
+//! `docs/SWITCH-FLIP-1.0.7.md`).
 //!
 //! Layout conventions match `device.rs`: all integers little-endian, `lp(x)` = u32 length
 //! ‖ bytes, parsed by a minimal cursor `Reader`. Every top-level `from_bytes` demands the
@@ -17,9 +35,10 @@ use crate::{CoreError, Result};
 
 // ── Domain-separation tags (§3.4) ────────────────────────────────────────────────────────
 //
-// Defined with the wire formats because they are part of the byte contract: stage M1+'s
-// sign/verify uses them, and pinning them now means an M0 build and an M1 build agree on
-// what any given signature covers. Follows the `CRED_DOMAIN`/`LIST_DOMAIN` discipline.
+// Defined with the wire formats because they are part of the byte contract: the sign/verify
+// paths below consume them, and pinning them with the layouts is what lets builds from
+// different stages agree on what any given signature covers. Follows the
+// `CRED_DOMAIN`/`LIST_DOMAIN` discipline.
 
 /// Signed by the DEVICE over `LEAF_DOMAIN ‖ group_id ‖ leaf keys` — binds a leaf public key
 /// to the device so a stolen credential can't be replayed onto an attacker-chosen leaf key.
@@ -642,12 +661,12 @@ impl Welcome {
     }
 }
 
-// ── PersistTree (§5.4) — serialization skeleton only ─────────────────────────────────────
+// ── PersistTree (§5.4) — persisted tree state + its pruner ───────────────────────────────
 
 /// One losing-fork sender-key cache entry (§5.2 step 2): keys derived from a commit that
 /// lost the hash tie-break, kept so events sealed under it before its author learned it
-/// lost still open. Bounded by KEEP_FORKS within the KEEP_EPOCHS window (pruning is M5;
-/// this stage only pins the byte layout).
+/// lost still open. Bounded by KEEP_FORKS within the KEEP_EPOCHS window, enforced by
+/// [`PersistTree::prune`] (which wipes the sender keys it ages out, §6.3-2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForkCacheEntry {
     pub epoch: u64,
@@ -657,9 +676,10 @@ pub struct ForkCacheEntry {
     pub sender_keys: Vec<([u8; 32], [u8; 32])>,
 }
 
-/// Per-circle tree state as it will ride the platform-encrypted state blob alongside
-/// `PersistCircle` — **serialization skeleton only** in M0; nothing writes or reads one in
-/// production yet.
+/// Per-circle tree state, shaped to ride the platform-encrypted state blob alongside
+/// `PersistCircle`. The codec and the §6.2 pruner below are complete, but **nothing in
+/// production writes or reads one yet** — `PersistTree` appears nowhere in `haven-ffi`, so
+/// the engine's live tree state is not persisted through this type.
 ///
 /// Deliberately absent, and this is a constraint not an omission (§6.3-1): `commit_secret`
 /// and `init_secret` have **no field here** — they are consumed at commit application and
@@ -691,8 +711,8 @@ pub struct PersistTree {
     /// Path secrets from my leaf toward the root, leaf→root order.
     pub my_path_secrets: Vec<[u8; 32]>,
     pub fork_cache: Vec<ForkCacheEntry>,
-    /// Derived-epoch cache: `(epoch, epoch_secret)` for the retained window. Subject to the
-    /// same KEEP_EPOCHS pruning as today's `my_epoch_keys` (enforced in M5).
+    /// Derived-epoch cache: `(epoch, epoch_secret)` for the retained window. Held to the same
+    /// KEEP_EPOCHS depth as lib.rs's `my_epoch_keys`, enforced by [`PersistTree::prune`].
     pub epoch_secrets: Vec<(u64, [u8; 32])>,
 }
 

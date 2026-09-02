@@ -904,7 +904,10 @@ object HavenNet : InboundListener {
             if (idx < 0) break
             issuedInvites.removeAt(idx)
         }
-        acceptedInvites.removeAll { it.granted || !inviteLive(it.acceptedAt) }
+        // Completed acceptances linger a day (parity with Apple): a re-scan of the same ticket
+        // de-dups instead of parking a fresh drop for a friendship that already exists.
+        val grantedLinger = 24L * 3600L
+        acceptedInvites.removeAll { (it.granted && inviteNow() - it.acceptedAt > grantedLinger) || !inviteLive(it.acceptedAt) }
     }
 
     /** The `?t=` value for the share link: newest live ticket, minted on demand; null without relays. */

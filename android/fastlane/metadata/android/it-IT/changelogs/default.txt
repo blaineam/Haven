@@ -1,3 +1,3 @@
-1.8.1 — Feed più fluido, telefono più fresco.
-• Il feed torna a scorrere fluido e Haven non surriscalda più il telefono mentre sfogli foto e video già sul dispositivo, comprese le grandi raccolte importate da Instagram.
-• Ora gestisci tu i link d'invito offline: scegli la validità (da 7 giorni a mai) e rigenerali quando vuoi per revocare quello vecchio.
+1.8.3 — Niente più blocchi all'apertura, e i tuoi video conoscono le loro canzoni.
+• Il blocco di qualche secondo subito dopo l'apertura di Haven, o al ritorno nell'app, è sparito — e con lui l'arresto notturno in background che causava.
+• Il telefono resta più fresco: il feed non ridisegna più ogni post mentre una foto o un video è ancora in download.

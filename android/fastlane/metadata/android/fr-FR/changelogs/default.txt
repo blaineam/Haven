@@ -1,3 +1,3 @@
-1.8.1 — Fil plus fluide, téléphone plus frais.
-• Le fil défile de nouveau sans à-coups et Haven ne fait plus chauffer votre téléphone quand vous parcourez des photos et vidéos déjà sur l'appareil, même les grandes bibliothèques importées d'Instagram.
-• Vous gérez vos liens d'invitation hors ligne : choisissez leur validité (7 jours à jamais) et régénérez-les quand vous voulez.
+1.8.3 — Plus de blocage à l'ouverture, et vos vidéos connaissent leurs chansons.
+• Le blocage de quelques secondes juste après l'ouverture de Haven, ou au retour dans l'app, a disparu — et avec lui le plantage nocturne en arrière-plan qu'il provoquait.
+• Votre téléphone reste plus frais : le fil ne redessine plus chaque publication pendant qu'une photo ou une vidéo se télécharge encore.

@@ -1,3 +1,3 @@
-1.8.1 — Smoother feed, cooler phone.
-• The feed scrolls smoothly again and Haven no longer heats up while you browse photos and videos already on your device, even large Instagram-imported libraries.
-• You control offline invite links now: pick how long a link lasts (7 days to never) and regenerate any time to retire the old one.
+1.8.3 — No more freeze on open, and your videos name their songs.
+• The few-second lockup right after opening Haven, or coming back to it, is gone — and with it the overnight crash it was causing in the background.
+• Your phone stays cooler: the feed no longer redraws every post while a photo or video is still downloading.

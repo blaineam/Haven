@@ -42,6 +42,8 @@ export default {
       type: 'xcodebuild-test',
       project: 'apple/Haven.xcodeproj',
       scheme: 'Haven',
+      xcodegen: true,          // apple/Haven.xcodeproj is generated + gitignored — regenerate so the
+                               // compiled source list is the tree's, never a previous run's
       // By UDID, not name: 'name=iPhone 17 Pro' resolves to whichever runtime is installed first —
       // with the OS 27 beta present that was the iOS 27.0 device even under Xcode 26.6.
       // This is the iOS 26.5 iPhone 17 Pro (see `xcrun simctl list devices available`).
@@ -65,6 +67,8 @@ export default {
       platform: 'macos',
       project: 'apple/Haven.xcodeproj',
       scheme: 'HavenMac',
+      xcodegen: true,          // apple/Haven.xcodeproj is generated + gitignored — regenerate so the
+                               // compiled source list is the tree's, never a previous run's
       destination: 'platform=macOS',
       env: { DEVELOPER_DIR: '/Applications/Xcode.app/Contents/Developer' },
       description: 'macOS build (HavenMac scheme)',

@@ -194,6 +194,13 @@ Two contract points every driver honors:
 | `ios` | XCUITest on simulator (launches Haven for those tests only) |
 | `macos` | **xcodebuild build only** — does **not** launch the Mac app |
 
+The Apple legs of the fleet (the iOS simulator and the HavenStub Mac relay host) are DEBUG
+builds, and a DEBUG build **crashes** on any engine call that reaches the main thread
+(`EngineTripwire`, see `apple/HavenApp/Engine.swift`). A green e2e run is therefore also the
+proof that the SwiftUI layer stayed on its read model — every `HavenSocial` call ran on the
+engine actor. A leg that dies with `engine call on main: <function> (line N)` in its log is a
+regression of that invariant, never an environmental failure.
+
 **Soren green is not “three devices held a mesh call through a Haven relay.”** Treating it as that is a false positive.
 
 #### Live multi-device smoke (required before claiming device QA)

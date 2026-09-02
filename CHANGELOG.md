@@ -92,6 +92,46 @@ hold over a second is logged with the call site that took it
   clock while a parallel rotation test skewed the engine's test clock by days, and flaked (1 of 70
   under load). It holds the shared clock guard now, like the rotation tests.
 
+### Changed — the app never touches the engine from the main thread
+
+1.8.3 fixed the launch/foreground freeze one stack at a time: a stall detector named each place
+the main thread parked behind the engine's lock, and each one was moved off. That left the shape
+that produced them. `FeedStore` — the SwiftUI layer's store — held the engine handle directly,
+and ~175 of its calls still ran on the main actor: every post, comment and reaction sealed its
+event on main (a hybrid post-quantum signature each); approving a friend re-sealed the whole
+history on main; the circle, member, device-id and DM-thread reads that views paint from fell
+back to the engine on a cache miss; and the mailbox drain, roster ingest and media backfill hold
+that same lock for seconds. Any of those reads was a lottery against an unfair mutex.
+
+The durable fix is structural:
+
+- **One door.** A new `Engine` actor owns the engine handle; the only way to call it is
+  `await engine.run { … }`, which runs on the actor — one call at a time, never on the main
+  thread. Nothing else in the app holds a `HavenSocial` any more (`FeedStore`, self-sync, the
+  media backup/restore paths, the activity list, the device roster, the demo seeder and the QA
+  driver all go through it), so a synchronous main-actor call no longer compiles.
+- **A read model.** Views and the other stores read plain value snapshots that engine passes hand
+  back: the circle list and every circle's members, each contact's dialable device ids, my
+  identity, bundle and signed profile card, per-circle feed snapshots for the DM threads and the
+  Messages list, the active circle's sensitive-media set and reports. A cache miss answers with
+  what it has and schedules the pass; the pass publishes when it lands, so a view that asked
+  repaints with the answer. The boot itself is two engine passes (construct + import + register,
+  then the default circle, the superseded-circle heal, the removal reconcile, the crypto switches
+  and the first snapshot) with the main actor publishing at the end.
+- **Mutations are requests.** A post, reaction, comment, edit, DM, circle change, invite step or
+  call frame is a fire-and-forget request whose engine work runs on the actor; the seal, the
+  event id the engine derived, the member list and the epoch head come back from one pass and
+  the broadcast fans out from those values. Awaitable forms exist where a caller needs the
+  outcome (the share-sheet drain, the QA driver, which dumps after each op completes).
+- **A tripwire.** In development and QA builds every engine call asserts it is off the main
+  thread and crashes with the caller's name if not — so the four-client e2e fleet (all DEBUG) is
+  now the proof that nothing slipped back, not just that the features work. Release builds
+  compile it out.
+
+`FeedStore` moved into its own file (`FeedStore.swift`); `FeedView.swift` keeps the views.
+Measured on a fresh simulator account, demo dataset seeded through the engine at launch: the
+one 0.49 s main-thread stall from before is gone, and no engine call runs on main at all.
+
 ## 1.8.3 — 2026-09-02
 
 ### Fixed — the freeze after launch and foreground is gone (and so is the 2 AM watchdog kill)

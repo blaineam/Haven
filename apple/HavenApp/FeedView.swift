@@ -520,6 +520,9 @@ final class FeedStore: ObservableObject {
         watch($relayReachable, "relayReachable"); watch($internetReady, "internetReady")
         watch($unseenCircle, "unseenCircle"); watch($unseenMessages, "unseenMessages")
         watch($hiddenInActiveCircle, "hiddenInActive")
+        // The three that were missing from the census — the 1101x capture attributed only 3 of them.
+        watch($activeCircleId, "activeCircleId"); watch($nodeError, "nodeError")
+        watch($publishedPostCount, "publishedPostCount")
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.willChangeCount > 0 else { return }
@@ -1999,13 +2002,30 @@ final class FeedStore: ObservableObject {
 
     /// Refs a Download tap is actively fetching, and refs the relay no longer has — drive the
     /// placeholder's spinner / "no longer available" states.
-    @Published var downloadingMedia: Set<String> = []
-    @Published var unavailableMedia: Set<String> = []
+    ///
+    /// NOT @Published on the store any more — see `MediaTransferState` (owner's thermal report:
+    /// per-chunk progress here was most of `FeedStore published 1101x in 5s`, and every one of those
+    /// invalidated every PostCard on screen). These forward to it so the writers below keep their
+    /// shape; only the placeholders observe the changes.
+    var downloadingMedia: Set<String> {
+        get { MediaTransferState.shared.downloading }
+        set { MediaTransferState.shared.setDownloading(newValue) }
+    }
+    var unavailableMedia: Set<String> {
+        get { MediaTransferState.shared.unavailable }
+        set { MediaTransferState.shared.setUnavailable(newValue) }
+    }
     /// Relays were reachable and NONE holds the blob — we're waiting on the SENDER's device to
     /// upload it. Drives the placeholder's honest "Waiting for sender…" state.
-    @Published var waitingForSenderMedia: Set<String> = []
+    var waitingForSenderMedia: Set<String> {
+        get { MediaTransferState.shared.waitingForSender }
+        set { MediaTransferState.shared.setWaitingForSender(newValue) }
+    }
     /// Chunk progress for large chunked relay restores (ref → done/total) — the placeholder's i/n.
-    @Published var mediaRestoreProgress: [String: (done: Int, total: Int)] = [:]
+    var mediaRestoreProgress: [String: MediaRestoreProgress] {
+        get { MediaTransferState.shared.restoreProgress }
+        set { MediaTransferState.shared.setRestoreProgress(newValue) }
+    }
     /// Present-but-undecryptable blobs (bytes fetched, every circle failed to open them). SESSION
     /// scoped, Android/desktop parity: without it the missing-media sweep re-downloaded the same
     /// bad blob every cycle forever. A tap-retry (downloadEvicted) or relaunch clears it — by then
@@ -2018,11 +2038,10 @@ final class FeedStore: ObservableObject {
     }
     func noteUnopenableMedia(_ ref: String) { unopenableMedia.insert(ref) }
     func noteRestoreProgress(_ ref: String, done: Int, total: Int) {
-        mediaRestoreProgress[ref] = (done, total)
-        downloadingMedia.insert(ref)   // a chunked pull IS a download — say so
+        MediaTransferState.shared.noteRestoreProgress(ref, done: done, total: total)   // coalesced, ~10 Hz
     }
     func clearRestoreProgress(_ ref: String) {
-        mediaRestoreProgress.removeValue(forKey: ref)
+        MediaTransferState.shared.clearRestoreProgress(ref)
     }
     /// The bytes for `ref` just landed — clear every transient placeholder state it held.
     private func mediaArrived(_ ref: String) {
@@ -2033,7 +2052,7 @@ final class FeedStore: ObservableObject {
         waitingForSenderMedia.remove(ref)
         unavailableMedia.remove(ref)
         unopenableMedia.remove(ref)
-        mediaRestoreProgress.removeValue(forKey: ref)
+        MediaTransferState.shared.clearRestoreProgress(ref)   // drops pending chunk progress too
     }
 
     /// User tapped "Download" on a placeholder for a blob we deliberately evicted: clear the eviction
@@ -10072,6 +10091,7 @@ struct PostMasonryTile: View {
     let ref: String
     let height: CGFloat
     @Binding var zoomTarget: ZoomTarget?
+    @ObservedObject private var transfer = MediaTransferState.shared   // the download badge's source of truth
 
     var body: some View { tile(ref, height: height) }
 
@@ -10089,7 +10109,7 @@ struct PostMasonryTile: View {
             Button { FeedStore.shared.downloadEvicted(ref) } label: {
                 ZStack {
                     RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemFill))
-                    Image(systemName: FeedStore.shared.downloadingMedia.contains(ref) ? "arrow.down.circle" : "arrow.down.circle.fill")
+                    Image(systemName: transfer.downloading.contains(ref) ? "arrow.down.circle" : "arrow.down.circle.fill")
                         .font(.title2).foregroundStyle(HavenTheme.pink)
                 }
                 .frame(width: height * 1.2, height: height)

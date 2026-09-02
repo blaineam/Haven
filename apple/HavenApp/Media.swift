@@ -2315,6 +2315,7 @@ struct MissingMediaPlaceholder: View {
     /// The post's full media list — how the placeholder finds this ref's `thumb:` companion.
     var mediaList: [String] = []
     @ObservedObject private var feed = FeedStore.shared
+    @ObservedObject private var transfer = MediaTransferState.shared   // spinner / i-of-n / waiting / gone
     @ObservedObject private var evicted = EvictedMediaStore.shared
     @ObservedObject private var wanted = MediaWantedStore.shared
 
@@ -2396,22 +2397,22 @@ struct MissingMediaPlaceholder: View {
             // the real view swaps in on the next refresh. No spinner over finished media.
             EmptyView()
         } else if thumbImage != nil,
-                  feed.downloadingMedia.contains(ref) || feed.waitingForSenderMedia.contains(ref),
-                  !feed.unavailableMedia.contains(ref) {
+                  transfer.downloading.contains(ref) || transfer.waitingForSender.contains(ref),
+                  !transfer.unavailable.contains(ref) {
             // We are holding a picture of it and it is on its way. Show the picture. A spinner and a
             // "Waiting for sender…" caption over a photo that is visibly there reads as an error, and
             // it is not one — nothing here needs the user to do anything. The full-res version
             // cross-fades in when it lands.
             EmptyView()
-        } else if feed.downloadingMedia.contains(ref) {
+        } else if transfer.downloading.contains(ref) {
             // No thumb to show, so the tile would be a blank grey box: say something.
             VStack(spacing: 8) {
                 ProgressView()
-                if let p = feed.mediaRestoreProgress[ref], p.total > 1 {
+                if let p = transfer.restoreProgress[ref], p.total > 1 {
                     Text("Downloading… \(p.done)/\(p.total)").font(.caption).foregroundStyle(overlayStyle)
                 }
             }
-        } else if feed.waitingForSenderMedia.contains(ref), !feed.unavailableMedia.contains(ref) {
+        } else if transfer.waitingForSender.contains(ref), !transfer.unavailable.contains(ref) {
             // The relays answered and none holds it — the SENDER hasn't uploaded it yet. A different
             // truth from "downloading" (we aren't) and from "gone" (it never arrived anywhere). Only
             // said out loud when there is no thumb, i.e. when the tile is otherwise empty.
@@ -2419,7 +2420,7 @@ struct MissingMediaPlaceholder: View {
                 Image(systemName: "clock.arrow.circlepath").font(.title3).foregroundStyle(overlayStyle)
                 Text("Waiting for sender…").font(.caption).foregroundStyle(overlayStyle)
             }
-        } else if feed.unavailableMedia.contains(ref) {
+        } else if transfer.unavailable.contains(ref) {
             VStack(spacing: 8) {
                 Image(systemName: "wifi.slash").font(.title2).foregroundStyle(.secondary)
                 Text("No longer available").font(.caption).foregroundStyle(.secondary)

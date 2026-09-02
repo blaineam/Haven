@@ -2571,6 +2571,22 @@ final class FeedStore: ObservableObject {
     nonisolated(unsafe) static var qaDumpSeq: Int = 0
     nonisolated(unsafe) static var qaLastDumpAt = Date.distantPast
 
+    /// The 5s heartbeat dump serializes the WHOLE account (every circle's feed + members + the
+    /// delivery/tree diagnostics, then a JSON encode + write) — fine on a QA simulator, a steady
+    /// heat source on the owner's daily-driver phone running a Debug build (thermal report,
+    /// 2026-09-01: .fair with nothing going on). So the heartbeat only runs where an orchestrator
+    /// can actually be watching: the simulator, a launch carrying a QA env (`HAVEN_QA_DUMP=1`, or
+    /// the rigs' `HAVEN_SKIP_ONBOARDING`), or once a QA command (drop file / `haven://qa`) has been
+    /// processed this launch. The 1.5s drop-file poll itself stays — it is one failed open().
+    private static var qaEngaged: Bool = {
+        #if targetEnvironment(simulator)
+        return true
+        #else
+        let env = ProcessInfo.processInfo.environment
+        return env["HAVEN_QA_DUMP"] == "1" || env["HAVEN_SKIP_ONBOARDING"] != nil
+            || env.keys.contains { $0.hasPrefix("HAVEN_QA_") }
+        #endif
+    }()
     private func startMatrixQaPoller() {
         matrixQaTimer?.invalidate()
         matrixQaTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
@@ -2582,6 +2598,7 @@ final class FeedStore: ObservableObject {
                 // landing in that window reads an empty file), and a failed dump write leaves the
                 // file frozen with nothing to say so. Refreshing on a timer decouples the two, so a
                 // lost command costs one interval rather than every assertion that follows.
+                guard Self.qaEngaged else { return }   // see qaEngaged — no orchestrator, no heartbeat
                 if Date().timeIntervalSince(Self.qaLastDumpAt) >= 5 { self.qaWriteDump() }
             }
         }
@@ -2597,6 +2614,7 @@ final class FeedStore: ObservableObject {
     @discardableResult
     func handleMatrixQaURL(_ url: URL) -> Bool {
         guard url.scheme == "haven", url.host == "qa" else { return false }
+        Self.qaEngaged = true   // an orchestrator is driving this device — the heartbeat dump may run
         processMatrixQaDropFile()
         var items: [String: String] = [:]
         URLComponents(url: url, resolvingAgainstBaseURL: false)?
@@ -2611,6 +2629,7 @@ final class FeedStore: ObservableObject {
         let url = dir.appendingPathComponent("qa-cmd.json")
         guard let data = try? Data(contentsOf: url), !data.isEmpty else { return }
         try? FileManager.default.removeItem(at: url)
+        Self.qaEngaged = true   // an orchestrator is driving this device — the heartbeat dump may run
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             HavenLog.net("matrix-qa drop: invalid JSON")
             return

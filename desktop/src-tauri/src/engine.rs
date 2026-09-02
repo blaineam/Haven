@@ -2569,6 +2569,8 @@ impl Engine {
         // Apply the primary's converged state locally (circles/contacts/settings) + persist as the base.
         let entries: Vec<(String, Vec<u8>)> =
             base.entries().map(|(k, v)| (k.to_string(), v.to_vec())).collect();
+        // Rosters outside the prefs lock (see poll_self_sync for why).
+        crate::selfsync::ingest_synced_rosters(&entries, &self.social);
         {
             let mut prefs = self.prefs.lock();
             if crate::selfsync::apply_local(&entries, &mut prefs, &self.social) {
@@ -6283,6 +6285,12 @@ impl Engine {
             .await
             .map_err(|e| anyhow::anyhow!("HavenNode::start after fabric rebind: {e}"))?;
         *self.node.lock() = Some(node);
+        // Clear the relay-client cache AGAIN now that the new node is live: a client minted between
+        // the clear above and the `take()` rode the OLD endpoint (closed since), and one that would
+        // have been minted inside the window no longer exists at all (`relay_client_for` answers
+        // None while the node is down instead of binding a same-key clone). Everything from here on
+        // dials warm over this endpoint.
+        self.relay_clients.lock().await.clear();
         self.fabric_rebind.lock().bound_derp_urls = haven_net::active_derp_urls();
         self.dyn_state.lock().started = true;
 
@@ -7342,20 +7350,27 @@ impl Engine {
         // Clone the node OUT of the lock before awaiting: `relay_client` is async, and holding a
         // std::sync MutexGuard across an await point is what makes the future non-Send.
         let node = self.node.lock().clone();
-        let warm = match node {
-            Some(n) => n.relay_client(node_hex.to_string()).await.ok(),
-            None => None,
+        let Some(node) = node else {
+            // No messaging node right now: boot, or the fabric rebind's stop→start window. This used
+            // to fall back to `RelayClient::connect(device_seed, …)` — a SECOND iroh endpoint bound
+            // under this device's key. A relay delivers to the most recent registration of an id,
+            // so that clone stole the DERP registration from the real node the moment it came (back)
+            // up: the relay actor logged "Another endpoint connected with the same endpoint id. No
+            // more messages will be received" (63 times in one e2e run) and inbound relay-path
+            // delivery to this leg was dead until the next reconnect kicked it back — the desktop
+            // "received after the budget" while its peers were fine. The clone also stayed cached in
+            // `relay_clients`, so the fight never ended, and every extra endpoint ran its own
+            // net-report loop (a QAD + HTTPS probe of every relay every ~20 s — the net-report storm
+            // in tauri.log). Same family as the same-key traps haven-net documents: never a second
+            // endpoint under a live key. Not a relay failure either, so no backoff — the next tick
+            // finds the node up and dials warm.
+            log::debug!(
+                "relay {}: messaging node not up — no client this tick",
+                &node_hex[..node_hex.len().min(8)]
+            );
+            return None;
         };
-        let res = match warm {
-            Some(c) => Ok(c),
-            // No messaging node yet → cold connect under the DEVICE seed (never the account seed:
-            // the account id is identity-only and must not appear as a transport node).
-            None => {
-                let device_seed = self.roster.lock().device_seed.clone();
-                RelayClient::connect(device_seed, node_hex.to_string()).await
-            }
-        };
-        match res {
+        match node.relay_client(node_hex.to_string()).await {
             Ok(c) => {
                 self.relay_clients.lock().await.insert(node_hex.to_string(), c.clone());
                 Some(c)
@@ -11201,6 +11216,12 @@ impl Engine {
         // 4. Apply the converged state locally + persist the new base.
         let entries: Vec<(String, Vec<u8>)> =
             base.entries().map(|(k, v)| (k.to_string(), v.to_vec())).collect();
+        // Synced contact rosters FIRST, with no lock held. Each wire re-verifies a contact's device
+        // credentials (ML-DSA per device) — the expensive part of a pass — and it used to run INSIDE
+        // the prefs lock below, so every prefs reader (feed, DM threads, profile, the QA dump)
+        // parked behind the whole apply. Measured on the e2e desktop leg (a debug build): QA dumps
+        // of 5–53 s, every one of them coinciding with a self-sync apply.
+        crate::selfsync::ingest_synced_rosters(&entries, &self.social);
         let applied = {
             let mut prefs = self.prefs.lock();
             let applied = crate::selfsync::apply_local(&entries, &mut prefs, &self.social);

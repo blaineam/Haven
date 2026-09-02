@@ -7,6 +7,69 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 1.8.4 — in development
+
+### Fixed — the desktop leg stopped fighting itself for its own relay slot
+
+Release QA showed the Tauri desktop leg doing three things the phones never did: its log filled
+with iroh net-report lines (2,000–6,000 `QADv4/QADv6` / `reportgen-actor` warnings a run), the
+relay kept answering it with *"Another endpoint connected with the same endpoint id. No more
+messages will be received"* (63 times in one run), and its QA dump parked for 5–53 s at a time —
+which the harness read as posts "received after the budget" and a photo post that took 36 s to
+reach anyone. One tree, three causes:
+
+- **Two iroh stacks.** `desktop/src-tauri` has its own lockfile, and it still pinned iroh 1.0.0 /
+  noq 1.0.0 — the path-management OOM build the core moved off on 2026-07-10 (iroh 1.0.2, noq
+  1.0.1). The desktop had been shipping the crash the phones were fixed for, and iroh 1.0.0 also
+  opens every net-report span at `warn`, which the desktop's log bridge prints. The desktop lock
+  now pins the exact iroh/noq/netwatch/portmapper versions the core lock does.
+- **A second endpoint under the device key.** When the messaging node was down — at boot, or
+  during the fabric rebind's stop→start window — `relay_client_for` fell back to
+  `RelayClient::connect(device_seed, …)`: a fresh iroh endpoint bound under the SAME key, which
+  then stole the relay registration from the real node the moment it came back (the "another
+  endpoint" message is the relay saying so), stayed cached so the fight never ended, and ran its
+  own net-report loop — a full QAD + HTTPS probe of every relay every ~20 s per extra endpoint,
+  which is what the storm was. Measured: one endpoint = 3.2 reports/min; the e2e leg ran at
+  5–7.4/min. With no node up the client is now simply not minted this tick (no backoff, no clone),
+  and the rebind clears the client cache again once the new node is live.
+- **Roster verification held the locks.** A self-sync pass re-verifies every contact's device
+  roster (an ML-DSA check per device), and it ran (a) inside the engine lock and (b) on desktop
+  inside the prefs lock too — so the feed, DM threads, the profile and the QA dump all waited for
+  the whole apply. In a debug build under a loaded host that was the 16–53 s dump. The core now
+  decodes and signature-checks a roster with no lock held (`ingest_roster_wire`, the mailbox arm
+  of `receive`, `ingest_device_roster`) and only the version check + store run under the lock;
+  the desktop ingests synced rosters before taking prefs, and warns when a pass's rosters took
+  over a second. (Every platform gets the shorter engine hold — the Apple side measured 1.4–1.9 s
+  of it per foreground sync in 1.8.3.)
+
+The desktop QA dump also names where its time went now (`feed=…ms dms=…ms meta=…ms diag=…ms
+write=…ms`), times its 5 s heartbeat like an op — a 19 s heartbeat used to park the next command
+silently, which is where most of that 36 s photo post went — fetches the circle list once and
+answers each `media_present` stat once per dump. That breakdown is what found the last holder:
+with the rosters out of the way the feed still parked 17–49 s behind single `receive()` calls,
+because the e2e desktop is the only leg of the fleet running the Rust core UNOPTIMIZED (Android
+links a `--release` `libhaven_ffi.so`, the Apple apps the release XCFramework), and one key/tree
+commit's ML-KEM decapsulations under the engine lock take that long at `opt-level = 0`. The
+desktop's dev profile now optimizes the core and its crypto crates (the app crate itself stays
+unoptimized), which is also where "desktop converges on a materially longer cycle than the mobile
+legs" came from. And the engine lock itself now carries a hold watchdog on every platform: any
+hold over a second is logged with the call site that took it
+(`engine lock held 1840 ms by …/lib.rs:7091`), so the next stall names itself.
+
+### Fixed — the e2e harness survives a missing leg
+
+- A leg that never came up (the android emulator missing its boot window) is REPORTED, as
+  promised — but the author matrix, the DM matrix and the call matrix still dereferenced it and
+  threw, taking the whole run down with every later step unscored and no ledger row. Absent legs
+  are now skipped in those loops and scored absent in the call pairs.
+- The emulator's cold boot (no snapshot) takes 5–6 minutes on a host that is also building the
+  iOS app and the desktop; the bootstrap waited three. Two consecutive release-QA runs skipped the
+  android leg while its emulator finished booting a minute after the deadline. The waits are eight
+  and five minutes now, still bounded.
+- `haven_ffi`'s `bundles_auto_drop_sender_expired_content_after_the_reseal_grace` read the wall
+  clock while a parallel rotation test skewed the engine's test clock by days, and flaked (1 of 70
+  under load). It holds the shared clock guard now, like the rotation tests.
+
 ## 1.8.3 — 2026-09-02
 
 ### Fixed — the freeze after launch and foreground is gone (and so is the 2 AM watchdog kill)

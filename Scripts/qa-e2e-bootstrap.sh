@@ -236,7 +236,11 @@ if command -v adb >/dev/null 2>&1; then
     if [[ -n "$EMU" ]]; then
       log "booting android emulator haven_phone"
       nohup "${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}/emulator/emulator" -avd haven_phone -no-snapshot-save -no-boot-anim >"$OUT/emulator.log" 2>&1 &
-      for i in $(seq 1 60); do [[ "$(adb get-state 2>/dev/null || true)" == "device" ]] && break; sleep 3; done
+      # A COLD boot (no snapshot) on a host that is also building the iOS app and the desktop takes
+      # 5–6 minutes to even answer adb here. The old 3-minute wait gave up while it was still
+      # booting, so two consecutive release-QA runs skipped the android leg — and the emulator that
+      # finished booting a minute later sat idle for the whole run. Eight minutes, still bounded.
+      for i in $(seq 1 160); do [[ "$(adb get-state 2>/dev/null || true)" == "device" ]] && break; sleep 3; done
     fi
   fi
   if [[ "$(adb get-state 2>/dev/null || true)" == "device" ]]; then
@@ -245,7 +249,7 @@ if command -v adb >/dev/null 2>&1; then
     # any failure degrades to a WARN, never kills the fleet.
     log "waiting for android boot_completed…"
     booted=0
-    for i in $(seq 1 60); do
+    for i in $(seq 1 100); do
       [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == "1" ]] && { booted=1; break; }
       sleep 3
     done

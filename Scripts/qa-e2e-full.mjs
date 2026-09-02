@@ -399,7 +399,10 @@ async function main() {
     // all actions between any platform direction"). iOS authored nearly everything above; a
     // broken android/desktop SEND path was invisible. Text + photo per author, asserted on
     // every other leg (and blob presence when the media step is on).
-    for (const author of ['android', 'desktop']) {
+    // A leg that never came up (the android emulator missing its boot window) is REPORTED, not
+    // authored from: `devices[author]` is undefined for it, and driving it threw a TypeError that
+    // took the whole run down at this exact line — every step after it unscored.
+    for (const author of ['android', 'desktop'].filter((a) => devices[a])) {
       const tag = `${MARKER}_From_${author}`;
       await op(devices[author], { op: 'post', body: tag, circle_id: cid() });
       await convergeAll(audienceFor(true).filter((x) => x !== author),
@@ -451,7 +454,7 @@ async function main() {
     // DM AUTHOR MATRIX: A's other devices author into the same thread — the stub must get each,
     // and A's remaining devices must echo it (self-sync), or a device's DM SEND path is broken
     // while everything it receives looks fine.
-    for (const author of ['android', 'desktop']) {
+    for (const author of ['android', 'desktop'].filter((a) => devices[a])) {
       const tag = `${MARKER}_DM_${author}B`;
       await op(devices[author], { op: 'dm', dm_to: B, body: tag });
       perfGate(`dm [${author}→stub]`, 'stub', await converge(devices.stub,
@@ -490,6 +493,8 @@ async function main() {
     for (const pr of pairs) {
       const tag = `${pr.caller}→${pr.answerer}`;
       if (!pr.to) { score(`call matrix ${tag}`, false, 'no target hex'); continue; }
+      // Same rule as the author matrix: a leg that is not in the fleet is scored absent, not driven.
+      if (!devices[pr.caller] || !devices[pr.answerer]) { score(`call matrix ${tag}`, false, 'leg not in fleet'); continue; }
       await callOps[pr.caller].dial(pr.to);
       perfGate(`rings [${tag}]`, pr.answerer, await converge(devices[pr.answerer],
         (j) => j.call?.ringing || j.call?.in_call, BUDGET.text));
@@ -513,7 +518,8 @@ async function main() {
       if (pr.answerer !== 'stub') {
         // Stub dialed the ACCOUNT: the two NON-answering A devices rang too and must stand down
         // (handled-elsewhere) instead of ringing forever next to a live call.
-        const others = ['ios', 'android', 'desktop'].filter((d) => d !== pr.answerer);
+        // (A leg that is not in the fleet cannot stand down — and dereferencing it crashed the run.)
+        const others = ['ios', 'android', 'desktop'].filter((d) => d !== pr.answerer && devices[d]);
         await convergeAll(others, (j) => j.call != null && !j.call.ringing,
           BUDGET.text, `other devices stand down [${tag}]`);
       }

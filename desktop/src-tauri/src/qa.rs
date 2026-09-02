@@ -72,15 +72,18 @@ pub fn start(engine: Arc<Engine>) {
                         Ok(cmd) => {
                             let t0 = Instant::now();
                             apply(&engine, &cmd);
-                            write_dump(&engine); // every op refreshes the dump (spec)
+                            let op_ms = t0.elapsed().as_millis();
+                            let dump = write_dump(&engine); // every op refreshes the dump (spec)
                             last_dump = Instant::now();
                             // A dump that takes longer than the orchestrator's poll interval makes
                             // this leg look slow-or-dead no matter how healthy the engine is, and it
-                            // is invisible without a number.
-                            let ms = t0.elapsed().as_millis();
+                            // is invisible without a number — and without the PHASE it went into
+                            // ("dump took 16 s" says nothing about which engine read parked; the
+                            // feed behind a self-sync apply and a slow disk are opposite fixes).
+                            let ms = op_ms + dump.total_ms;
                             if ms > 2_000 {
-                                log::warn!("qa-cmd: op '{}' + dump took {ms} ms — slower than the orchestrator polls",
-                                           field(&cmd, "op"));
+                                log::warn!("qa-cmd: op '{}' took {op_ms} ms + dump {} ms ({}) — slower than the orchestrator polls",
+                                           field(&cmd, "op"), dump.total_ms, dump.phases());
                             }
                         }
                         Err(e) => log::warn!("qa-cmd: invalid JSON ({} B): {e}", data.len()),
@@ -94,8 +97,15 @@ pub fn start(engine: Arc<Engine>) {
                 // on a timer decouples the orchestrator's view of this leg from command delivery
                 // entirely, so a lost command costs one interval instead of the whole step.
                 if last_dump.elapsed() >= Duration::from_secs(5) {
-                    write_dump(&engine);
+                    let dump = write_dump(&engine);
                     last_dump = Instant::now();
+                    // Timed like an op's dump. A heartbeat that parks for 19 s parks the NEXT command
+                    // behind it too (the driver is one thread) — the e2e photo post that "took 36 s"
+                    // spent 19 of them here, unreported, before the op was even read.
+                    if dump.total_ms > 2_000 {
+                        log::warn!("qa-dump: heartbeat dump took {} ms ({}) — slower than the orchestrator polls",
+                                   dump.total_ms, dump.phases());
+                    }
                 }
             }
         })
@@ -353,19 +363,48 @@ fn real_refs(media: &[String]) -> Vec<String> {
     media.iter().filter(|r| !crate::localmedia::LocalMedia::is_synthetic(r)).cloned().collect()
 }
 
-fn item_json(engine: &Arc<Engine>, circle_id: &str, it: &FeedItemFfi) -> Value {
+/// One dump's `media_present` answers, memoised: the same ref shows up as a post's media, a
+/// comment's, a marker's companion and again in a DM, and each answer is a filesystem stat.
+struct PresentCache<'a> {
+    engine: &'a Arc<Engine>,
+    seen: std::collections::HashMap<String, bool>,
+}
+
+impl<'a> PresentCache<'a> {
+    fn new(engine: &'a Arc<Engine>) -> Self {
+        Self { engine, seen: std::collections::HashMap::new() }
+    }
+    fn has(&mut self, reference: &str) -> bool {
+        if let Some(&v) = self.seen.get(reference) {
+            return v;
+        }
+        let v = self.engine.media_present(reference);
+        self.seen.insert(reference.to_string(), v);
+        v
+    }
+}
+
+fn item_json(present: &mut PresentCache<'_>, circle_id: &str, it: &FeedItemFfi) -> Value {
     let mut reactions = serde_json::Map::new();
     for r in &it.reactions {
         reactions.insert(r.emoji.clone(), json!(r.count));
     }
     let real = real_refs(&it.media);
+    let media_present: Vec<bool> = real.iter().map(|r| present.has(r)).collect();
+    let mut companions_present = serde_json::Map::new();
+    for m in &it.media {
+        if let Some(companion) = parse_marker_companion(m) {
+            let here = present.has(&companion);
+            companions_present.insert(companion, Value::from(here));
+        }
+    }
     json!({
         "id": it.id,
         "body": it.body,
         "circle": circle_id,
         "story": it.story,
         "caption": if it.story { Value::from(it.body.clone()) } else { Value::Null },
-        "media_present": real.iter().map(|r| engine.media_present(r)).collect::<Vec<bool>>(),
+        "media_present": media_present,
         "media_refs": real,
         // Companion MARKERS and whether the blobs they name are here.
         //
@@ -376,27 +415,52 @@ fn item_json(engine: &Arc<Engine>, circle_id: &str, it: &FeedItemFfi) -> Value {
         "media_markers": it.media.iter()
             .filter(|r| crate::localmedia::LocalMedia::is_synthetic(r))
             .cloned().collect::<Vec<String>>(),
-        "companions_present": it.media.iter().filter_map(|m| {
-            let companion = parse_marker_companion(m)?;
-            Some((companion.clone(), Value::from(engine.media_present(&companion))))
-        }).collect::<serde_json::Map<String, Value>>(),
+        "companions_present": companions_present,
         "reactions": reactions,
         "comments": it.comments.iter().map(|c| json!({ "id": c.id, "body": c.body })).collect::<Vec<Value>>(),
     })
 }
 
+/// Where one dump's time went, in ms. Every phase is an engine read behind a lock except `write`, so
+/// a slow dump names the lock it waited on: `feed` (feed circles + every post) and `dms` wait on the
+/// engine state and prefs, `meta` (circles' members, profile, call facts) on prefs, `diag` (parked
+/// envelopes + the tree chain) on the engine state, `write` is serialise + the atomic file swap.
+pub struct DumpTiming {
+    pub feed_ms: u128,
+    pub dms_ms: u128,
+    pub meta_ms: u128,
+    pub diag_ms: u128,
+    pub write_ms: u128,
+    pub total_ms: u128,
+}
+
+impl DumpTiming {
+    pub fn phases(&self) -> String {
+        format!(
+            "feed={}ms dms={}ms meta={}ms diag={}ms write={}ms",
+            self.feed_ms, self.dms_ms, self.meta_ms, self.diag_ms, self.write_ms
+        )
+    }
+}
+
 /// Refresh `<data-dir>/qa-dump.json`: every circle's posts (stories included — the tray filter is
 /// a UI concern), every DM thread keyed by peer, profile + circles. Written atomically (tmp +
 /// rename) so the orchestrator can never read half a dump.
-fn write_dump(engine: &Arc<Engine>) {
+fn write_dump(engine: &Arc<Engine>) -> DumpTiming {
+    let started = Instant::now();
     let root = engine.data_root();
     let me = engine.node_id_hex().to_lowercase();
+    let mut present = PresentCache::new(engine);
+    // One circle listing serves both the posts and the `circles` section below — it was fetched
+    // twice, and each fetch is a prefs + engine read.
+    let feed_circles = engine.feed_circles();
     let mut posts = Vec::new();
-    for c in engine.feed_circles() {
+    for c in &feed_circles {
         for it in engine.feed(&c.id) {
-            posts.push(item_json(engine, &c.id, &it));
+            posts.push(item_json(&mut present, &c.id, &it));
         }
     }
+    let feed_ms = started.elapsed().as_millis();
     let mut dms = serde_json::Map::new();
     for (cid, ..) in engine.dm_threads() {
         let msgs: Vec<Value> = engine
@@ -405,58 +469,66 @@ fn write_dump(engine: &Arc<Engine>) {
             .map(|m| {
                 // Same real-refs reduction as posts (Apple/Android dump parity).
                 let real = real_refs(&m.media);
+                let media_present: Vec<bool> = real.iter().map(|r| present.has(r)).collect();
                 json!({
                     "id": m.id,
                     "body": m.body,
-                    "media_present": real.iter().map(|r| engine.media_present(r)).collect::<Vec<bool>>(),
+                    "media_present": media_present,
                 })
             })
             .collect();
         dms.insert(dm_peer(&cid, &me), Value::Array(msgs));
     }
-    let circles: Vec<Value> = engine
-        .feed_circles()
+    let dms_ms = started.elapsed().as_millis() - feed_ms;
+    let circles: Vec<Value> = feed_circles
         .iter()
         .map(|c| json!({ "id": c.id, "name": c.name, "members": engine.circle_member_ids(&c.id) }))
         .collect();
+    let profile_name = engine.get_profile().name;
+    let call_engine = json!({
+        "last_event": engine.qa_last_call_event(),
+        "session": engine.qa_call_session(),
+        "trail": engine.qa_call_trail(),
+    });
+    let call = match engine.qa_call_state() {
+        Some((ringing, in_call)) => serde_json::json!({
+            "ringing": ringing, "in_call": in_call,
+            // WHICH session, and the last frame the engine handled ("recv:35" / "recv-unopenable:…"
+            // / "none"). `in_call` alone cannot distinguish a leg that ignored a teardown from one
+            // in a DIFFERENT session, or from one the frame never reached.
+            "session": engine.qa_call_session(),
+            "last_event": engine.qa_last_call_event(),
+            "trail": engine.qa_call_trail(),
+        }),
+        None => serde_json::Value::Null,
+    };
+    let meta_ms = started.elapsed().as_millis() - feed_ms - dms_ms;
+    let delivery = serde_json::from_str::<serde_json::Value>(&engine.diag_delivery_json())
+        .unwrap_or(serde_json::Value::Null);
+    let tree_chain = serde_json::from_str::<serde_json::Value>(&engine.debug_tree_chain_json())
+        .unwrap_or(serde_json::Value::Null);
+    let diag_ms = started.elapsed().as_millis() - feed_ms - dms_ms - meta_ms;
     let dump = json!({
         "device": "desktop",
         "account_hex": me,
         "ts_ms": now_ms(),
         "posts": posts,
         "dms": dms,
-        "profile": { "name": engine.get_profile().name },
+        "profile": { "name": profile_name },
         // null until the webview has reported — deliberately NOT a healthy-looking default.
         // ALWAYS present, webview or no webview: when the webview has never pushed (or died), these
         // are the only call facts left — and "engine received recv:35, webview reported nothing" vs
         // "engine received nothing" is precisely the fork that matters.
-        "call_engine": {
-            "last_event": engine.qa_last_call_event(),
-            "session": engine.qa_call_session(),
-            "trail": engine.qa_call_trail(),
-        },
-        "call": match engine.qa_call_state() {
-            Some((ringing, in_call)) => serde_json::json!({
-                "ringing": ringing, "in_call": in_call,
-                // WHICH session, and the last frame the engine handled ("recv:35" / "recv-unopenable:…"
-                // / "none"). `in_call` alone cannot distinguish a leg that ignored a teardown from one
-                // in a DIFFERENT session, or from one the frame never reached.
-                "session": engine.qa_call_session(),
-                "last_event": engine.qa_last_call_event(),
-                "trail": engine.qa_call_trail(),
-            }),
-            None => serde_json::Value::Null,
-        },
+        "call_engine": call_engine,
+        "call": call,
         "circles": circles,
         // What the engine is HOLDING BACK: parked (received-but-unopenable) envelopes per circle,
         // plus the rosters we know. A short feed alone cannot tell "never arrived" from "arrived and
         // could not be opened", and those have opposite fixes.
-        "delivery": serde_json::from_str::<serde_json::Value>(&engine.diag_delivery_json())
-            .unwrap_or(serde_json::Value::Null),
+        "delivery": delivery,
         // Fork forensics: the stored commit chain per circle. Session-only state, so the dump is the
         // ONLY window into it — offline analysis of persisted files sees an empty chain.
-        "tree_chain": serde_json::from_str::<serde_json::Value>(&engine.debug_tree_chain_json())
-            .unwrap_or(serde_json::Value::Null),
+        "tree_chain": tree_chain,
         // Liveness: strictly increasing while the driver is healthy. A stuck value means the file
         // is frozen, not that the fleet is quiet.
         "dump_seq": DUMP_WRITES.load(Ordering::Relaxed),
@@ -468,19 +540,27 @@ fn write_dump(engine: &Arc<Engine>) {
     // running perfectly: the orchestrator polls a stale file, every assertion against this leg reads
     // "never", and nothing anywhere says why. That cost a full QA run — desktop had the content
     // twelve minutes before the step it "failed" gave up.
+    let before_write = started.elapsed().as_millis();
     match serde_json::to_vec(&dump) {
         Ok(bytes) => {
             let n = bytes.len();
             if let Err(e) = std::fs::write(&tmp, bytes) {
                 log::warn!("qa-dump: write of {n} B to {} failed: {e} — dump is now STALE", tmp.display());
-                return;
-            }
-            if let Err(e) = std::fs::rename(&tmp, root.join("qa-dump.json")) {
+            } else if let Err(e) = std::fs::rename(&tmp, root.join("qa-dump.json")) {
                 log::warn!("qa-dump: rename into place failed: {e} — dump is now STALE");
-                return;
+            } else {
+                DUMP_WRITES.fetch_add(1, Ordering::Relaxed);
             }
-            DUMP_WRITES.fetch_add(1, Ordering::Relaxed);
         }
         Err(e) => log::warn!("qa-dump: serialize failed: {e} — dump is now STALE"),
+    }
+    let total_ms = started.elapsed().as_millis();
+    DumpTiming {
+        feed_ms,
+        dms_ms,
+        meta_ms,
+        diag_ms,
+        write_ms: total_ms - before_write,
+        total_ms,
     }
 }

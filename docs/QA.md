@@ -134,6 +134,31 @@ Every op (and `{"op":"dump"}`) refreshes `qa-dump.json` next to the drop file
  "profile":{"name":"…"},"circles":[{"id":"…","name":"…","members":["…"]}]}
 ```
 
+Liveness and timing on the desktop leg: every dump carries `dump_seq` (strictly increasing per
+successful write — the orchestrator warns when it sticks, which means the driver, not delivery),
+and the driver logs any op or 5 s heartbeat dump slower than the orchestrator's poll to
+`tauri.log` **with the phase it went into**:
+
+```
+qa-cmd: op 'post' took 812 ms + dump 4210 ms (feed=3900ms dms=110ms meta=40ms diag=120ms write=40ms) — slower than the orchestrator polls
+qa-dump: heartbeat dump took 19004 ms (feed=18950ms …) — slower than the orchestrator polls
+```
+
+`feed`/`dms`/`diag` wait on the engine state (and prefs), `meta` on prefs, `write` is the file
+swap — so a slow `feed` behind a `selfsync: N roster wire(s) took … ms` line is a lock hold to
+shorten, not a slow disk. A heartbeat that parks also parks the next command behind it (one
+driver thread), so a step that "took 30 s" on desktop should be read against these lines first.
+The engine lock names its own long holds on every platform — `engine lock held 1840 ms by
+…/haven-ffi/src/lib.rs:7091` (call site of the `lock()`), threshold one second — so a slow `feed`
+phase can be matched to the exact engine call that held it.
+
+The desktop leg is a DEBUG build (the QA driver only exists there), but its Rust core and crypto
+crates are compiled optimized (`[profile.dev.package.*]` overrides in `desktop/src-tauri/Cargo.toml`):
+Android and the Apple apps link a release core, and an unoptimized core made one key-commit
+`receive()` hold the engine lock 17–49 s — which is where the desktop's "materially longer
+convergence cycle" (the 6× budget multiplier) came from. Keep those overrides when adding a
+crypto dependency to the core.
+
 The v1 keys (`post`/`story`/`dm_to`+`dm`/`call_to` without `op`) stay accepted
 on iOS for the older matrix scripts.
 

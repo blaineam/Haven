@@ -4514,9 +4514,72 @@ struct LegacyPersistState {
 /// the event log. Unlike `SocialDemo` it seals to your actual circle and ingests posts
 /// received from contacts over the network. Transport-agnostic: the same sealed
 /// envelope bytes ride iroh (internet) or MultipeerConnectivity (nearby Bluetooth/Wi-Fi).
+/// How long the engine lock may be held before the hold is logged with its call site.
+const ENGINE_HOLD_WARN: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The engine lock, with a hold-time watchdog.
+///
+/// Every reader and writer of `NetState` goes through here. A hold longer than [`ENGINE_HOLD_WARN`]
+/// is logged WITH ITS CALL SITE (`#[track_caller]`), because a long hold is invisible from the
+/// outside: on the e2e desktop leg the QA dump parked 17–49 s in `feed()` with nothing in the log
+/// naming the holder — it was one `receive()` doing a commit's post-quantum crypto under the lock in
+/// an unoptimized build. Apple's main-thread stall detector finds the same class one layer up (the
+/// 1.8.3 launch-freeze wave); this names the holder on every platform, at the lock itself. The
+/// `Result` shape matches `std::sync::Mutex::lock`, so call sites are untouched.
+struct EngineLock<T> {
+    inner: Mutex<T>,
+}
+
+struct EngineGuard<'a, T> {
+    guard: std::sync::MutexGuard<'a, T>,
+    taken: std::time::Instant,
+    site: &'static std::panic::Location<'static>,
+}
+
+impl<T> EngineLock<T> {
+    fn new(value: T) -> Self {
+        Self { inner: Mutex::new(value) }
+    }
+
+    #[track_caller]
+    fn lock(&self) -> Result<EngineGuard<'_, T>, std::sync::PoisonError<std::sync::MutexGuard<'_, T>>> {
+        let site = std::panic::Location::caller();
+        let guard = self.inner.lock()?;
+        Ok(EngineGuard { guard, taken: std::time::Instant::now(), site })
+    }
+}
+
+impl<T> std::ops::Deref for EngineGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> std::ops::DerefMut for EngineGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+impl<T> Drop for EngineGuard<'_, T> {
+    fn drop(&mut self) {
+        let held = self.taken.elapsed();
+        if held >= ENGINE_HOLD_WARN {
+            tracing::warn!(
+                target: "haven_ffi::engine_lock",
+                "engine lock held {} ms by {}:{}",
+                held.as_millis(),
+                self.site.file(),
+                self.site.line()
+            );
+        }
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct HavenSocial {
-    state: Mutex<NetState>,
+    state: EngineLock<NetState>,
     /// Outer-bytes hashes of envelopes `receive` has already processed, per circle. Envelopes
     /// seal deterministically, and peers re-blast full histories on a timer — so the same bytes
     /// arrive over and over, and proving "duplicate" used to cost a full unseal UNDER THE ENGINE
@@ -4535,7 +4598,7 @@ impl HavenSocial {
         let me = Identity::from_seed(&seed);
         let me_pub = me.public();
         Ok(Arc::new(Self {
-            state: Mutex::new(NetState {
+            state: EngineLock::new(NetState {
                 me_pub: me_pub.clone(),
                 me_secret: Some(me),
                 seedless_roster_wire: None,
@@ -4597,7 +4660,7 @@ impl HavenSocial {
             .map_err(|_| HavenError::Invalid { msg: "device seed must be 32 bytes".into() })?;
         let account_id = me_pub.node_id_bytes();
         Ok(Arc::new(Self {
-            state: Mutex::new(NetState {
+            state: EngineLock::new(NetState {
                 me_pub,
                 me_secret: None,
                 seedless_roster_wire: None,
@@ -5662,25 +5725,27 @@ impl HavenSocial {
         if wire.first() != Some(&TAG_DEVICE_ROSTER) {
             return RosterIngest::Refused.code();
         }
+        // Decode + verify with NO lock held (see `pre_verify_roster_wire`): the ML-DSA checks are
+        // the whole cost of a roster, and they used to run under the engine lock — so every reader
+        // (feeds, QA dumps, the UI) parked behind each contact roster a self-sync pass replayed.
+        let Some(pre) = pre_verify_roster_wire(&wire[1..]) else {
+            return RosterIngest::Refused.code();
+        };
         let mut st = self.state.lock().unwrap();
-        match decode_roster(&wire[1..]).and_then(|(acct, list, creds, trailer)| {
-            HavenId::from_bytes(&acct).ok().map(|a| (a, list, creds, trailer))
-        }) {
-            Some((account, list, creds, trailer)) => {
-                let outcome = verify_and_store_roster(&mut st, &account, &list, &creds);
-                note_roster_capability(&mut st, &account, &trailer); // S0: learn capability, never infer absence
-                note_seedless_own_roster_wire(&mut st, &account, &wire); // A3: keep MY primary-signed wire verbatim
-                // PARITY with the mailbox arm (`receive` → TAG_DEVICE_ROSTER, which has always done
-                // this): a roster — freshly stored OR already held — may make a parked "unknown
-                // sender" envelope openable, so replay the durable buffer here too. Without it the
-                // two ways of learning the same bytes had different consequences, and the PULL arm
-                // is the only one a contact's roster ever takes on Android. Draining is idempotent
-                // and cheap: still-locked events go straight back into the buffer.
-                let drained = drain_all_pending(&mut st);
-                if drained { RosterIngest::Stored.code() } else { outcome.code() }
-            }
-            None => RosterIngest::Refused.code(),
-        }
+        let outcome = match pre.verified {
+            Some(verified) => store_verified_roster(&mut st, &pre.account, verified),
+            None => RosterIngest::Refused,
+        };
+        note_roster_capability(&mut st, &pre.account, &pre.trailer); // S0: learn capability, never infer absence
+        note_seedless_own_roster_wire(&mut st, &pre.account, &wire); // A3: keep MY primary-signed wire verbatim
+        // PARITY with the mailbox arm (`receive` → TAG_DEVICE_ROSTER, which has always done
+        // this): a roster — freshly stored OR already held — may make a parked "unknown
+        // sender" envelope openable, so replay the durable buffer here too. Without it the
+        // two ways of learning the same bytes had different consequences, and the PULL arm
+        // is the only one a contact's roster ever takes on Android. Draining is idempotent
+        // and cheap: still-locked events go straight back into the buffer.
+        let drained = drain_all_pending(&mut st);
+        if drained { RosterIngest::Stored.code() } else { outcome.code() }
     }
 
     /// The full public **bundles** of a circle's members — for multi-device sync. Another of the
@@ -5838,8 +5903,10 @@ impl HavenSocial {
     /// to their devices and honor revocations. False on a forged / stale (rolled-back) roster.
     pub fn ingest_device_roster(&self, account_bundle: Vec<u8>, list: Vec<u8>, credentials: Vec<Vec<u8>>) -> bool {
         let Ok(account) = HavenId::from_bytes(&account_bundle) else { return false };
+        // Signatures first, lock second (see `verify_roster`).
+        let Some(verified) = verify_roster(&account, &list, &credentials) else { return false };
         let mut st = self.state.lock().unwrap();
-        verify_and_store_roster(&mut st, &account, &list, &credentials).known()
+        store_verified_roster(&mut st, &account, verified).known()
     }
 
     /// My own device roster, wire-encoded for sharing with contacts (rides the sync bundle so peers
@@ -6268,7 +6335,15 @@ impl HavenSocial {
                 return Ok(false);
             }
         }
-        let Some(result) = self.receive_locked(&circle_id, &envelope) else { return Ok(false) };
+        // A device roster's signature checks (ML-DSA over the list + every credential) run here,
+        // BEFORE the engine lock, for the same reason `ingest_roster_wire_status` does it: they are
+        // the cost of the envelope, and holding the lock across them parks every other reader.
+        let pre_verified = if envelope[0] == TAG_DEVICE_ROSTER {
+            pre_verify_roster_wire(&envelope[1..])
+        } else {
+            None
+        };
+        let Some(result) = self.receive_locked(&circle_id, &envelope, pre_verified) else { return Ok(false) };
         // Record ONLY outcomes that are durable. `result.is_ok()` was too broad: a KEY COMMIT
         // rejected at the sender-authorization gate (:3627 — we cannot yet name the committer,
         // because their roster or circle membership has not landed) returns Ok(false) WITHOUT
@@ -7088,7 +7163,15 @@ impl HavenSocial {
 
     /// The dispatch half of `receive`, under the engine lock. `None` means the circle doesn't
     /// exist (yet) — the caller must NOT record the envelope as seen in that case.
-    fn receive_locked(&self, circle_id: &str, envelope: &[u8]) -> Option<Result<bool, HavenError>> {
+    /// `pre_verified` is the decoded + signature-checked form of a `TAG_DEVICE_ROSTER` envelope,
+    /// computed by the caller with no lock held (`None` for every other tag, or a roster that did
+    /// not even decode).
+    fn receive_locked(
+        &self,
+        circle_id: &str,
+        envelope: &[u8],
+        pre_verified: Option<PreVerifiedRoster>,
+    ) -> Option<Result<bool, HavenError>> {
         let mut st = self.state.lock().unwrap();
         let idx = st.circles.iter().position(|c| c.id == circle_id)?;
         Some(match envelope[0] {
@@ -7162,15 +7245,18 @@ impl HavenSocial {
             // Unbundled proposals (§4.2 roster path) are reserved for M4; a stray one is inert.
             TAG_MLS_PROPOSAL => Ok(false),
             TAG_DEVICE_ROSTER => {
-                // Account-level (not circle-specific) — verify against the carried account bundle, store,
-                // and rotate affected epochs. Forged/stale rosters are rejected inside the verifier.
-                match decode_roster(&envelope[1..]).and_then(|(acct, list, creds, trailer)| {
-                    HavenId::from_bytes(&acct).ok().map(|a| (a, list, creds, trailer))
-                }) {
-                    Some((account, list, creds, trailer)) => {
-                        let stored = verify_and_store_roster(&mut st, &account, &list, &creds).known();
-                        note_roster_capability(&mut st, &account, &trailer); // S0: learn capability (absence-safe)
-                        note_seedless_own_roster_wire(&mut st, &account, envelope); // A3: verbatim primary wire
+                // Account-level (not circle-specific) — verified against the carried account bundle
+                // by the caller (`pre_verified`, no lock held); store and rotate affected epochs
+                // here. Forged/stale rosters are refused: a failed signature arrives as
+                // `verified: None`, a rollback is caught by the version check in the store.
+                match pre_verified {
+                    Some(pre) => {
+                        let stored = match pre.verified {
+                            Some(verified) => store_verified_roster(&mut st, &pre.account, verified).known(),
+                            None => false,
+                        };
+                        note_roster_capability(&mut st, &pre.account, &pre.trailer); // S0: learn capability (absence-safe)
+                        note_seedless_own_roster_wire(&mut st, &pre.account, envelope); // A3: verbatim primary wire
                         // A newly-learned roster may make a previously "unknown sender" event openable —
                         // drain the durable buffer so multi-device roster lag no longer loses posts.
                         let drained = drain_all_pending(&mut st);
@@ -7487,19 +7573,64 @@ impl RosterIngest {
     }
 }
 
-fn verify_and_store_roster(st: &mut NetState, account: &HavenId, list_bytes: &[u8], cred_bytes: &[Vec<u8>]) -> RosterIngest {
-    let Ok(list) = DeviceList::from_bytes(list_bytes) else { return RosterIngest::Refused };
-    if list.verify(account).is_err() {
-        return RosterIngest::Refused;
-    }
+/// A device roster whose list and every credential have been signature-checked against the account
+/// it claims — the ML-DSA work, already paid. Only [`verify_roster`] mints one.
+struct VerifiedRoster {
+    list: DeviceList,
+    credentials: Vec<DeviceCredential>,
+}
+
+/// A `TAG_DEVICE_ROSTER` wire body decoded and signature-checked with no lock held: the account it
+/// names, its verified roster (`None` = forged, a bad list or a bad credential), and the trailer.
+struct PreVerifiedRoster {
+    account: HavenId,
+    verified: Option<VerifiedRoster>,
+    trailer: Vec<u8>,
+}
+
+/// Decode a roster wire body and check its signatures. Pure — reads no engine state — so callers run
+/// it BEFORE taking the state lock. `None` only when the body does not decode; a roster that decodes
+/// but fails verification comes back with `verified: None`, because the capability trailer and the
+/// verbatim-wire bookkeeping still apply to it exactly as they always did.
+fn pre_verify_roster_wire(body: &[u8]) -> Option<PreVerifiedRoster> {
+    let (acct, list, creds, trailer) = decode_roster(body)?;
+    let account = HavenId::from_bytes(&acct).ok()?;
+    let verified = verify_roster(&account, &list, &creds);
+    Some(PreVerifiedRoster { account, verified, trailer })
+}
+
+/// Parse + verify a roster's list and credentials against `account`. Pure and lock-free on purpose:
+/// this is where a roster's cost lives (an ML-DSA verify per credential, i.e. per device of the
+/// contact), and it used to run inside the engine lock in every ingest path. A self-sync pass that
+/// replays every contact's roster then held the lock for seconds — on the e2e desktop leg (a debug
+/// build) long enough that the QA dump, which only wants to READ the feed, parked for 5–53 s and the
+/// leg read as "received after the budget". Verification needs nothing from the engine; only the
+/// version check and the store do, and those are cheap.
+fn verify_roster(account: &HavenId, list_bytes: &[u8], cred_bytes: &[Vec<u8>]) -> Option<VerifiedRoster> {
+    let list = DeviceList::from_bytes(list_bytes).ok()?;
+    list.verify(account).ok()?;
     let mut credentials = Vec::with_capacity(cred_bytes.len());
     for cb in cred_bytes {
-        let Ok(cred) = DeviceCredential::from_bytes(cb) else { return RosterIngest::Refused };
-        if cred.verify(account).is_err() {
-            return RosterIngest::Refused; // every credential must be signed by THIS account — no smuggling a rogue device.
-        }
+        let cred = DeviceCredential::from_bytes(cb).ok()?;
+        // Every credential must be signed by THIS account — no smuggling a rogue device.
+        cred.verify(account).ok()?;
         credentials.push(cred);
     }
+    Some(VerifiedRoster { list, credentials })
+}
+
+/// Verify and store in one go — for the callers that already hold the lock (own-roster paths). The
+/// hot ingest paths verify first with [`verify_roster`] and store with [`store_verified_roster`].
+fn verify_and_store_roster(st: &mut NetState, account: &HavenId, list_bytes: &[u8], cred_bytes: &[Vec<u8>]) -> RosterIngest {
+    match verify_roster(account, list_bytes, cred_bytes) {
+        Some(verified) => store_verified_roster(st, account, verified),
+        None => RosterIngest::Refused,
+    }
+}
+
+/// Store an already-verified roster: version-gate it, record it, rotate the epochs it affects.
+fn store_verified_roster(st: &mut NetState, account: &HavenId, verified: VerifiedRoster) -> RosterIngest {
+    let VerifiedRoster { list, credentials } = verified;
     let acct_id = account.node_id_bytes();
     let my_id = st.me().node_id_bytes();
 
@@ -9152,6 +9283,9 @@ mod net_tests {
 
     #[test]
     fn bundles_auto_drop_sender_expired_content_after_the_reseal_grace() {
+        // Bundle exports purge on the ENGINE clock, which a parallel rotation test skews by days:
+        // hold the shared clock guard or a "just lapsed" post can vanish mid-test (flaked 2026-09-02).
+        let _clk = clock_guard();
         let alice = HavenSocial::new([62u8; 32].to_vec()).unwrap();
         let cid = DEFAULT_CIRCLE.to_string();
         let now = wall_ms();

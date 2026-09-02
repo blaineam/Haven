@@ -267,6 +267,33 @@ fn bool_value(v: &[u8]) -> Option<bool> {
 ///
 /// `entries` is the converged state's live `(key, value)` pairs (already collected so the caller
 /// can drop the borrow on the CRDT before locking the prefs/social mutexes).
+/// Contact rosters synced from another of our devices → ingest so THIS device can also dial + seal to
+/// each friend's CURRENT devices (verified against the account bundle carried inside the wire). This is
+/// what lets a freshly-linked PC reach friends it never contacted directly — it inherits their device
+/// ids from a sibling. Idempotent + version-checked in the engine, so a stale roster can't roll back.
+///
+/// Separate from [`apply_local`] on purpose: every wire re-verifies the contact's device credentials
+/// (ML-DSA per device), and running that inside the prefs lock parked every prefs reader — the feed,
+/// DM threads, the profile, the QA dump — behind the whole self-sync apply (5–53 s dumps on the e2e
+/// desktop leg, a debug build). Callers run this first, with no lock held; `apply_local` then holds
+/// prefs only for the cheap map work. Returns how many wires were offered to the engine.
+pub fn ingest_synced_rosters(entries: &[(String, Vec<u8>)], social: &HavenSocial) -> usize {
+    let t0 = std::time::Instant::now();
+    let mut n = 0usize;
+    for (k, v) in entries {
+        if k.starts_with("roster:") {
+            let _ = social.ingest_roster_wire(v.clone());
+            n += 1;
+        }
+    }
+    let ms = t0.elapsed().as_millis();
+    if ms > 1_000 {
+        // Named, because a long hold here is exactly what the QA dump used to vanish behind.
+        log::warn!("selfsync: {n} roster wire(s) took {ms} ms to verify+ingest");
+    }
+    n
+}
+
 pub fn apply_local(
     entries: &[(String, Vec<u8>)],
     prefs: &mut Prefs,
@@ -536,15 +563,9 @@ pub fn apply_local(
         changed = true;
     }
 
-    // Contact rosters synced from another of our devices → ingest so THIS device can also dial + seal to
-    // each friend's CURRENT devices (verified against the account bundle carried inside the wire). This is
-    // what lets a freshly-linked PC reach friends it never contacted directly — it inherits their device
-    // ids from a sibling. Idempotent + version-checked in the engine, so a stale roster can't roll back.
-    for (k, v) in entries {
-        if k.starts_with("roster:") {
-            let _ = social.ingest_roster_wire(v.clone());
-        }
-    }
+    // Contact rosters synced from another of our devices are ingested by `ingest_synced_rosters`,
+    // which callers run BEFORE taking the prefs lock this function needs — the roster verification is
+    // the expensive half of a pass and must not hold prefs hostage (see there).
 
     // Circle severances synced from our other devices — resolved by LAST-WRITER-WINS on timestamps, so a
     // fresh removal beats a stale re-add and a fresh re-add beats an old removal. Gather both sides from

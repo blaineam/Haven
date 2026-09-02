@@ -106,6 +106,41 @@ windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
+# The DEBUG binary is what the e2e fleet drives, and it is the only leg of that fleet running the
+# Rust core unoptimized: Android links `libhaven_ffi.so` from `cargo ndk … --release`
+# (android/build-rust.sh) and the Apple apps link the release XCFramework. Unoptimized, one
+# `receive()` of a key/tree commit — ML-KEM decapsulations and ML-DSA verifies per member — held the
+# engine lock 17–49 s on the e2e desktop leg, which is where "desktop converges on a materially
+# longer cycle than the mobile legs" (a 6× budget multiplier in the harness) actually came from.
+# Optimize the core and its crypto in the dev profile; the desktop crate itself stays unoptimized
+# (fast incremental builds, full debug info). These only recompile when they change.
+[profile.dev.package.haven-p2p]
+opt-level = 3
+[profile.dev.package.haven_ffi]
+opt-level = 3
+[profile.dev.package.haven-net]
+opt-level = 3
+[profile.dev.package.ml-kem]
+opt-level = 3
+[profile.dev.package.ml-dsa]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.sha3]
+opt-level = 3
+[profile.dev.package.blake3]
+opt-level = 3
+[profile.dev.package.aes-gcm]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+[profile.dev.package.x25519-dalek]
+opt-level = 3
+
 [profile.release]
 opt-level = "s"
 lto = true

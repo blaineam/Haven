@@ -27,25 +27,44 @@ This document records what Haven protects, how, and the limits — including the
   remaining members, so that node **cannot decrypt content posted afterward** — this member removal is
   cryptographic, not advisory (`core/haven-ffi/src/lib.rs:1128`, `:1521`, `:2516`). Only the last 4
   epoch keys are retained (`prune_epoch_keys`, `lib.rs:1041-1063`).
-- **Device-roster revocation is _advisory_, not cryptographic.** Revoking one of your **own** linked
-  devices rotates the epoch too, but every epoch key still seals to the account key as well —
-  `recipients_with_devices` **always** adds it (`core/haven-p2p/src/device.rs:358-363`) — and a linked
-  device holds a _copy_ of the master seed (linking transfers `haven-seed:` / `haven-link:`; enrollment
-  only adds a device key to a device that already has the seed). So a revoked device that still holds the
-  seed keeps decrypting, and can even re-sign a higher-version roster re-adding itself. Revocation
-  therefore defeats a device that is **lost or stolen** (keychain intact, seed not extracted), not one
-  that is **compromised**. Making it cryptographic needs the seed-drop re-key (D16 Phase 2), which is
-  **not yet built** (`core/haven-p2p/src/device.rs:371-373`); until it lands, the only remedy against a
-  genuinely compromised device is starting a new identity.
+- **Device-roster revocation is _cryptographic_ as of 1.0.7 (seed-drop), gated per circle.** It used to
+  be advisory: every epoch key also sealed to the bare account key, and a linked device held a _copy_ of
+  the master seed (linking transferred `haven-seed:` / `haven-link:`), so a revoked device kept
+  decrypting and could re-sign a higher-version roster to re-add itself. Seed-drop (D16 Phase 2) re-roots
+  day-to-day operation on **per-device keys**: a device enrolled through the **seedless** flow holds only
+  its own device keypair plus an account-signed `DeviceCredential` and never receives the master seed,
+  which concentrates on one **primary** device (Enclave-wrapped) plus the SE-wrapped iCloud-Keychain
+  escrow. Sealing runs through `recipients_with_devices_gated` (`core/haven-p2p/src/device.rs:755`,
+  called at `core/haven-ffi/src/lib.rs:6137`): when the retirement switch is ON **and** every member is
+  affirmatively seed-drop-capable, the bare account key is **dropped** and content seals to authorized
+  device bundles only — so a revoked device is cut off even from a seed-holding member. The
+  account-leaf-retired roster flag (`DeviceList::with_account_leaf_retired`,
+  `core/haven-p2p/src/device.rs:370`) is monotone/sticky and only the account key can mint it, so a
+  seedless device cannot forge a higher-version roster to re-add itself. Revoking also re-keys the
+  account-state self-sync stream, so a revoked device can no longer read or write profile / contacts /
+  circles / settings. Every shipping client turns the switch on for a seed-holding device
+  (`apple/HavenApp/FeedStore.swift:792`, `android/…/core/HavenNet.kt:569`,
+  `desktop/src-tauri/src/engine.rs:683`), but the **gate lives in core**, not the client: a circle with
+  even one un-upgraded member stays on the legacy dual-seal path and everyone keeps reading
+  (`docs/SWITCH-FLIP-1.0.7.md`). **The honest residue:** a **primary** device still holds the seed, so
+  compromising *it* is a full account compromise — the remedy there is starting a new identity, not
+  revoking.
 - **Forward secrecy — read this carefully.** Pruning bounds it *only once the epoch has actually
   moved*. The epoch moves on removal/block/device-roster change **and, as of the 2026-07 hardening,
   on a periodic 7-day cadence** driven by the full sync bundle (`ROTATE_INTERVAL_SECS`, `lib.rs:1061`;
   `maybe_rotate`, `lib.rs:1131-1149`) — so even a quiet circle with no membership churn advances its
   epoch, and with the last four epochs retained a seed compromise exposes on the order of the last
   month of captured ciphertext rather than a circle's whole history. (The manual `rotate_circle` FFI
-  at `lib.rs:1518` remains test-only; the periodic path above is what actually runs.) Haven still
-  does **not** have per-message forward secrecy or post-compromise security; that needs MLS, which is
-  **not built** (the current layer is multi-recipient PKE — `core/haven-p2p/src/social.rs:14-16`).
+  at `lib.rs:1518` remains test-only; the periodic path above is what actually runs.) Per-message
+  forward secrecy and post-compromise security come from the **MLS-style TreeKEM group layer, which
+  shipped in 1.0.7** (`docs/TREEKEM-DESIGN.md`) — enabled for circles with a **verified owner**, i.e.
+  the ones created from 1.0.7 on. It is gated exactly like seed-drop: a circle turns over only once
+  every member's devices have updated and joined, and circles that predate 1.0.7 have no owner to
+  anchor it (one can't be added after the fact in a way other members could trust), so they keep the
+  epoch scheme described above — which still cuts off anyone you remove. Two honest qualifiers: its
+  audit to date is an **internal** AI-driven adversarial review (0 critical, 0 high), **not** a formal
+  external one — an independent cryptographer's review is planned — and it is MLS-*shaped*, TreeKEM
+  mechanisms over Haven's own post-quantum primitives, **not** RFC-9420 wire-interoperable.
 - **Authentication**: every event is signed and the signer is bound to the event author and circle
   epoch; push notifications are signed (the receiver verifies the sender); push registration is signed
   (the worker verifies the device belongs to the identity). Signatures are domain-separated; there is

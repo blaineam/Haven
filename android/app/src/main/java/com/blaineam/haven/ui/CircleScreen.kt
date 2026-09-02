@@ -53,13 +53,13 @@ import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 // NOT `filled.Image` — that extension property collides with the `Image` composable this file calls
 // on nearly every screen. `Photo` is the same glyph family and unambiguous.
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
@@ -917,7 +917,7 @@ fun ComposerAttachmentTile(
                     when {
                         LocalMedia.isVideo(ref) -> Icons.Filled.Videocam
                         LocalMedia.isAudio(ref) -> Icons.Filled.Mic
-                        LocalMedia.isFile(ref) -> Icons.Filled.InsertDriveFile
+                        LocalMedia.isFile(ref) -> Icons.AutoMirrored.Filled.InsertDriveFile
                         else -> Icons.Filled.Photo
                     },
                     null, tint = HavenTheme.textSecondary, modifier = Modifier.size(22.dp),
@@ -1536,7 +1536,7 @@ private fun FileAttachmentPage(circleId: String, ref: String) {
         contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally,
                modifier = Modifier.padding(horizontal = 20.dp)) {
-            Icon(Icons.Filled.InsertDriveFile, null, tint = HavenTheme.pink, modifier = Modifier.size(44.dp))
+            Icon(Icons.AutoMirrored.Filled.InsertDriveFile, null, tint = HavenTheme.pink, modifier = Modifier.size(44.dp))
             Spacer(Modifier.height(8.dp))
             Text(name, color = HavenTheme.textPrimary, fontSize = 15.sp,
                  maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
@@ -2092,7 +2092,7 @@ fun VideoTile(
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
-                        if (soundOn) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
+                        if (soundOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
                         stringResource(R.string.circle_toggle_sound_cd), tint = Color.White, modifier = Modifier.size(18.dp),
                     )
                 }

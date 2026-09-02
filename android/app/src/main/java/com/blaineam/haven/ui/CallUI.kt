@@ -27,11 +27,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.ScreenShare
-import androidx.compose.material.icons.filled.StopScreenShare
+import androidx.compose.material.icons.automirrored.filled.ScreenShare
+import androidx.compose.material.icons.automirrored.filled.StopScreenShare
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
-import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.PhoneInTalk
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
@@ -283,7 +283,7 @@ private fun InCall() {
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 RoundButton(if (micOn) Icons.Filled.Mic else Icons.Filled.MicOff,
                     if (micOn) CallChip else Color.White, stringResource(R.string.call_mic)) { CallManager.toggleMic() }
-                RoundButton(if (speakerOn) Icons.Filled.VolumeUp else Icons.Filled.PhoneInTalk,
+                RoundButton(if (speakerOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.Filled.PhoneInTalk,
                     if (speakerOn) Color.White else CallChip, if (speakerOn) stringResource(R.string.call_speaker_on) else stringResource(R.string.call_speaker_off)) {
                     CallManager.toggleSpeaker()
                 }
@@ -294,7 +294,7 @@ private fun InCall() {
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                RoundButton(if (sharing) Icons.Filled.StopScreenShare else Icons.Filled.ScreenShare,
+                RoundButton(if (sharing) Icons.AutoMirrored.Filled.StopScreenShare else Icons.AutoMirrored.Filled.ScreenShare,
                     if (sharing) Color.White else CallChip, stringResource(R.string.call_share_screen)) {
                     if (sharing) CallManager.stopScreenShare()
                     else {

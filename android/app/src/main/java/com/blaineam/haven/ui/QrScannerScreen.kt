@@ -5,6 +5,8 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
@@ -87,8 +89,31 @@ fun QrScannerScreen(onResult: (String) -> Unit, onCancel: () -> Unit) {
                 future.addListener({
                     val provider = future.get()
                     val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+                    // setTargetResolution's replacement, and NOT a rename — the two pick
+                    // different buffers, so this deliberately does not pin 16:9.
+                    //
+                    // The old call took its Size in the TARGET ROTATION's frame: portrait turned
+                    // 1280x720 into a 720x1280 request, and the rule was "smallest supported size
+                    // >= that", which only a tall 4:3 buffer can satisfy. Measured on the API 35
+                    // emulator (YUV_420_888 offers 640x480 / 1024x768 / 1280x720 / 1856x1392):
+                    // the analysis stream came out 1856x1392, never 720p. Pinning 16:9 here would
+                    // hand the analyzer a literal 1280x720 — a silent resolution CUT on every
+                    // device, and Haven's own invite QR carries a ~800-character payload, so the
+                    // pixels-per-module margin is the thing keeping it scannable.
+                    //
+                    // So keep ImageAnalysis's default 4:3 and let the same "closest not-smaller"
+                    // rule choose: 1856x1392 on the emulator, identical to what shipped.
                     val analysis = ImageAnalysis.Builder()
-                        .setTargetResolution(Size(1280, 720))
+                        .setResolutionSelector(
+                            ResolutionSelector.Builder()
+                                .setResolutionStrategy(
+                                    ResolutionStrategy(
+                                        Size(1280, 720),
+                                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                                    ),
+                                )
+                                .build(),
+                        )
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build()
                     analysis.setAnalyzer(executor) { proxy ->

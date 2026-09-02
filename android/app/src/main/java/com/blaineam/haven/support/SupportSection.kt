@@ -19,7 +19,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.GridView
-import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Translate
@@ -136,7 +136,7 @@ fun SupportSettingsSection() {
         SupportRow(Icons.Default.Lightbulb, stringResource(R.string.support_suggest_feature)) {
             SupportMail.composeFeedback(context, FeedbackKind.FEATURE)
         }
-        SupportRow(Icons.Default.HelpOutline, stringResource(R.string.support_ask_question)) {
+        SupportRow(Icons.AutoMirrored.Filled.HelpOutline, stringResource(R.string.support_ask_question)) {
             SupportMail.composeFeedback(context, FeedbackKind.QUESTION)
         }
         if (activeLocale != null) {

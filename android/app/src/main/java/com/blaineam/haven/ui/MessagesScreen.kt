@@ -738,7 +738,7 @@ private fun Bubble(
                 .combinedClickable(onClick = {}, onLongClick = { showReact = true })
                 .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
-            if (showsStoryCard && storyTarget != null) {
+            if (storyTarget != null) {
                 StoryReplyCard(storyTarget.circleId, storyTarget.postId)
                 if (text.isNotBlank() || m.music != null) Spacer(Modifier.size(6.dp))
             } else {

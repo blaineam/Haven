@@ -22,8 +22,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.Place
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -168,7 +168,7 @@ fun EditPostSheet(item: FeedItemFfi, circleId: String, onDismiss: () -> Unit) {
                 if (music == null && media.any { it.startsWith("v:") || it.startsWith("vid_") }) {
                     Row(Modifier.clickable { muteVideo = !muteVideo }.padding(vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically) {
-                        Icon(if (muteVideo) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp, null,
+                        Icon(if (muteVideo) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp, null,
                             tint = HavenTheme.pink, modifier = Modifier.size(20.dp))
                         Spacer(Modifier.size(6.dp))
                         Text(

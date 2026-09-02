@@ -18,7 +18,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -94,7 +94,7 @@ fun PeopleScreen(onAddFriend: () -> Unit, onClose: () -> Unit) {
                             }
                             Box(Modifier.size(40.dp).clip(CircleShape).clickable { dm = HavenNet.startDm(c) to c },
                                 contentAlignment = Alignment.Center) {
-                                Icon(Icons.Filled.Chat, stringResource(R.string.people_message), tint = HavenTheme.pink)
+                                Icon(Icons.AutoMirrored.Filled.Chat, stringResource(R.string.people_message), tint = HavenTheme.pink)
                             }
                             Text(stringResource(R.string.common_remove), color = HavenTheme.textSecondary, fontSize = 13.sp,
                                 modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { confirmRemove = c }.padding(8.dp))

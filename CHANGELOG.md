@@ -27,6 +27,42 @@ So the guess is gone. Since 1.4.5 a story reply carries a story **link** and no 
 and that card resolves the real post and says the story expired precisely when it has — guessing was
 never what protected the current path. Replies from the few weeks before 1.4.5 now render as the
 photo they are, which is what iPhone and Mac have always done with the very same message.
+### Changed — the Android build is warning-free again, and the QR scanner keeps the camera buffer it always had
+
+Fourteen Kotlin warnings had collected since the last sweep, and this repo treats them as errors.
+Ten were Material's auto-mirroring deprecations: `Chat`, `VolumeUp`/`VolumeOff`, `InsertDriveFile`,
+`ScreenShare`/`StopScreenShare` and `HelpOutline` now come from `Icons.AutoMirrored.Filled`, so they
+flip in right-to-left layouts the way the rest of the app's chrome already does — `StoryEditor`'s
+volume toggle and every back arrow were on the mirrored set already. One asymmetry is worth knowing
+rather than hiding: the call overlay's speaker button pairs `VolumeUp` with `PhoneInTalk`, and
+Material deprecated only the first, so in RTL that one button's two states mirror differently.
+
+The QR scanner's `ImageAnalysis.Builder.setTargetResolution` gave way to `ResolutionSelector`, and
+that one is not a rename. `setTargetResolution` read its `Size` in the target rotation's frame: in
+portrait a `1280x720` request became a request for `720x1280`, and the rule was "the smallest
+supported size not smaller than that" — which only a tall 4:3 buffer can satisfy. The scanner has
+therefore never analysed 720p frames. Measured on the API 35 emulator, whose camera offers YUV
+output at 640x480, 1024x768, 1280x720 and 1856x1392, the analysis stream came out **1856x1392**.
+Writing the migration the obvious way — pinning 16:9 next to the same `1280x720` — compiles clean
+and quietly hands the decoder a literal 1280x720 instead, which is a resolution cut on every device.
+Haven's own invite QR carries a roughly 800-character payload, so pixels-per-module is the margin
+keeping it scannable at arm's length.
+
+The selector therefore keeps `ImageAnalysis`'s default 4:3 and lets that same "closest not smaller"
+rule choose, reproducing the old pick. Confirmed by building both versions and reading the stream
+configuration back off the camera HAL rather than off a clean compile: preview 1024x768 and analysis
+1856x1392, identical before and after, with frames reaching the analyzer and no CameraX errors.
+
+The two "condition is always true" warnings in the DM thread were tautologies rather than drift.
+`showsStoryCard` is *defined* as `storyTarget != null`, so `&& (storyTarget == null)` and
+`showsStoryCard && storyTarget != null` each restated their own neighbour, and `git log -L` shows
+both were already tautological in the commit that introduced them — nothing had been checked and
+then lost. Removing them changes no behaviour.
+
+Clearing them is what surfaced the vanishing-photo bug above: the heuristic sitting beside those
+conditions decided a message was an expired story reply from nothing but "one visual, older than a
+day". That was a product decision rather than a warning fix, so it was split out and is written up
+in its own entry.
 
 ### Fixed — on iPhone and Mac, a connection request no longer blanks out everything older in Activity
 

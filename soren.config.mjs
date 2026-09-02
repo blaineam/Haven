@@ -43,6 +43,10 @@ export default {
       project: 'apple/Haven.xcodeproj',
       scheme: 'Haven',
       destination: 'platform=iOS Simulator,name=iPhone 17 Pro',
+      // Release toolchain, explicitly: xcode-select points at the OS 27 beta on this Mac, and its
+      // iOS 27 simulator classifies glass buttons as PopUpButton / drops identifiers the UI tests
+      // query by, so the gate went red on the runtime the store build does not even use.
+      env: { DEVELOPER_DIR: '/Applications/Xcode.app/Contents/Developer' },
       // These UI tests drive the REAL keychain-backed identity; an unsigned build has no
       // data-protection keychain entitlement, so the seed never persists and the social engine
       // never builds. Sign with the team so the identity path actually runs.
@@ -59,6 +63,7 @@ export default {
       project: 'apple/Haven.xcodeproj',
       scheme: 'HavenMac',
       destination: 'platform=macOS',
+      env: { DEVELOPER_DIR: '/Applications/Xcode.app/Contents/Developer' },
       description: 'macOS build (HavenMac scheme)',
     },
 

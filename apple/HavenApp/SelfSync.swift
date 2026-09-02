@@ -432,14 +432,17 @@ final class SelfSyncCoordinator {
             // mailbox drain instead of parking the UI.
             let wires = live.filter { $0.key.hasPrefix("roster:") }.map(\.value)
             if !wires.isEmpty {
+                // ONE gate hold PER WIRE with air between them (the mailbox drain's shape). The hold
+                // log showed this loop holding the engine for 9.5s on the owner's account — every
+                // wire drains pending epoch events and re-verifies device credentials — and any
+                // main-actor engine read in that window parked for the whole of it.
                 let rosterChanged = await Task.detached(priority: .utility) {
-                    await EngineGate.shared.run {
-                        var changed = false
-                        for wire in wires where social.ingestRosterWireStatus(wire: wire) > 0 {
-                            changed = true
-                        }
-                        return changed
+                    var changed = false
+                    for (i, wire) in wires.enumerated() {
+                        if i > 0 { try? await Task.sleep(nanoseconds: 3_000_000) }
+                        if await EngineGate.shared.run({ social.ingestRosterWireStatus(wire: wire) }) > 0 { changed = true }
                     }
+                    return changed
                 }.value
                 if rosterChanged {
                     NotificationCenter.default.post(name: SharedStore.rosterEpochChangedNotification, object: nil)

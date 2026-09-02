@@ -53,6 +53,10 @@ final class ThermalSampler: @unchecked Sendable {
         emit("[Thermal] sampler armed (every \(Int(interval))s) state=\(Self.name(ProcessInfo.processInfo.thermalState))")
     }
 
+    /// Other DEBUG counters (the publish / body census) append here too, so CPU, thermal state and
+    /// SwiftUI churn line up on one timeline.
+    func note(_ line: String) { queue.async { self.emit(line) } }
+
     // MARK: - Sampling
 
     private func sample(reason: String) {

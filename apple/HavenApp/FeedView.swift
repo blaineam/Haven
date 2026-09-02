@@ -114,15 +114,22 @@ enum BodyCensus {
     private static var n = 0
     private static var started = false
     static func tick() {
+        // DEBUG-only: this diagnostic timer ran in Release builds too (audit of DEBUG timers,
+        // owner's thermal report). The 5s line also lands in HavenThermal.log next to the CPU samples.
+        #if DEBUG
         n += 1
         if !started {
             started = true
             Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
                 MainActor.assumeIsolated {
-                    if n > 0 { HavenLog.sync("PostCard.body evaluated \(n)x in 5s (\(n / 5)/s)"); n = 0 }
+                    if n > 0 {
+                        let line = "PostCard.body evaluated \(n)x in 5s (\(n / 5)/s)"
+                        HavenLog.sync(line); ThermalSampler.shared.note("[Census] " + line); n = 0
+                    }
                 }
             }
         }
+        #endif
     }
 }
 
@@ -548,7 +555,8 @@ final class FeedStore: ObservableObject {
                 guard let self, self.willChangeCount > 0 else { return }
                 let top = self.pubBy.sorted { $0.value > $1.value }.prefix(5)
                     .map { "\($0.key)=\($0.value)" }.joined(separator: " ")
-                HavenLog.sync("FeedStore published \(self.willChangeCount)x in 5s — \(top)")
+                let line = "FeedStore published \(self.willChangeCount)x in 5s — \(top)"
+                HavenLog.sync(line); ThermalSampler.shared.note("[Census] " + line)
                 self.willChangeCount = 0; self.pubBy.removeAll()
             }
         }

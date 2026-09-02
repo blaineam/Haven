@@ -425,15 +425,20 @@ enum MediaRecovery {
         Task.detached(priority: .background) {
             defer { Task { @MainActor in inFlight = false } }
             let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
-            var owned: [(ref: String, cid: String)] = []
-            var seen = Set<String>()
-            for c in social.circles() {
-                for item in social.feed(circleId: c.id, nowMs: nowMs, viewerRetentionSecs: nil) where item.isMe {
-                    for r in item.media where seen.insert(r).inserted { owned.append((r, c.id)) }
-                    for cm in item.comments where cm.isMe {
-                        for r in cm.media where seen.insert(r).inserted { owned.append((r, c.id)) }
+            // Under EngineGate like every other engine walk: un-gated, this feed sweep held the Rust
+            // mutex outside the gate's serialization — a holder the hold log could not name.
+            let owned: [(ref: String, cid: String)] = await EngineGate.shared.run {
+                var owned: [(ref: String, cid: String)] = []
+                var seen = Set<String>()
+                for c in social.circles() {
+                    for item in social.feed(circleId: c.id, nowMs: nowMs, viewerRetentionSecs: nil) where item.isMe {
+                        for r in item.media where seen.insert(r).inserted { owned.append((r, c.id)) }
+                        for cm in item.comments where cm.isMe {
+                            for r in cm.media where seen.insert(r).inserted { owned.append((r, c.id)) }
+                        }
                     }
                 }
+                return owned
             }
             // Only media I still hold the plaintext for — the re-seal reads the original file. Anything
             // the storage sweep cleared is gone and must not block the latch.
@@ -1071,8 +1076,13 @@ enum SharedStore {
         } else {
             if reseal { HavenLog.sync("backup ref=\(ref): RE-SEALING (repair — the recipient set may have changed)") }
             if existing != nil { try? FileManager.default.removeItem(at: sealedURL) }   // stale → re-seal
+            // Gated: the seal holds the engine's state mutex for the whole seal (read → lock → seal),
+            // and un-gated it was a holder the hold log could not name — gated bodies were seen
+            // waiting 2.2s for the mutex with no gated holder to blame.
             sealedOK = await Task.detached(priority: .utility) { () -> Bool in
-                social.sealCircleMediaFile(circleId: circleId, inPath: url.path, outPath: sealedURL.path)
+                await EngineGate.shared.run {
+                    social.sealCircleMediaFile(circleId: circleId, inPath: url.path, outPath: sealedURL.path)
+                }
             }.value
         }
         guard sealedOK,
@@ -1223,7 +1233,10 @@ enum SharedStore {
     private static let rosterRepublish: TimeInterval = 1800   // 30 min
 
     static func publishDeviceRoster(social: HavenSocial, force: Bool = false) async {
-        guard let r = social.exportOwnRoster().first else { HavenLog.sync("devroster SKIP — no own roster yet"); return }
+        // SharedStore is a @MainActor enum: every engine call here used to take the Rust mutex ON
+        // MAIN (stall detector, 2026-09-01: 0.50s parked in publishDeviceRoster → exportOwnRoster
+        // behind the sync pass's seal). Hop through EngineGate for each one.
+        guard let r = await EngineGate.shared.run({ social.exportOwnRoster().first }) else { HavenLog.sync("devroster SKIP — no own roster yet"); return }
         let key = "haven/devroster/\(r.accountHex)"
         let wire = r.wire
         let wireHash = wire.hashValue
@@ -1321,7 +1334,7 @@ enum SharedStore {
     private static func adoptOwnRosterIfOutranked(social: HavenSocial) async {
         guard Date().timeIntervalSince(lastOwnRosterAdopt) > 600 else { return }
         lastOwnRosterAdopt = Date()
-        let mine = social.myNodeHex()
+        let mine = await EngineGate.shared.run { social.myNodeHex() }   // off-main (0.53s parked here at launch)
         guard mine.count == 64 else { return }
         if await fetchContactRoster(accountHex: mine, social: social) {
             HavenLog.sync("devroster: adopted + union-merged our OWN roster — version now moves ahead of the fleet's copy")
@@ -1343,13 +1356,13 @@ enum SharedStore {
     /// signature, and only our account key could have produced it — a relay can serve it, never forge it.
     private static func adoptNewerOwnRosterAndRetry(node: String, key: String, sent: Data, social: HavenSocial, error: Error) async {
         guard error.localizedDescription.lowercased().contains("forbidden") else { return }
-        guard let acct = social.exportOwnRoster().first?.accountHex else { return }
+        guard let acct = await EngineGate.shared.run({ social.exportOwnRoster().first?.accountHex }) else { return }
         HavenLog.sync("devroster refused by \(node.prefix(8)) — pulling the newer roster it holds and re-publishing")
         guard await fetchContactRoster(accountHex: acct, social: social) else {
             HavenLog.sync("devroster: could not read our own stored roster back from any relay — still unauthorized on \(node.prefix(8))")
             return
         }
-        guard let fresh = social.exportOwnRoster().first, fresh.wire != sent else {
+        guard let fresh = await EngineGate.shared.run({ social.exportOwnRoster().first }), fresh.wire != sent else {
             HavenLog.sync("devroster: adopted roster is identical to the one refused — refusal is NOT a version rollback on \(node.prefix(8))")
             return
         }
@@ -1414,8 +1427,10 @@ enum SharedStore {
         var known = false
 
         // -1 refused, 0 already current, 1 stored (changed).
-        func ingest(_ wire: Data, from node: String?) -> Bool {
-            let status = social.ingestRosterWireStatus(wire: wire)
+        func ingest(_ wire: Data, from node: String?) async -> Bool {
+            // The ingest drains pending epoch envelopes (deserialize + verify per event) — real CPU,
+            // and it ran on main (0.63s at launch). Off-main under the gate.
+            let status = await EngineGate.shared.run { social.ingestRosterWireStatus(wire: wire) }
             if status < 0 {
                 HavenLog.sync("devroster REFUSED \(acct.prefix(8)) — forged, or a rollback to an older version")
                 return false
@@ -1434,7 +1449,7 @@ enum SharedStore {
 
         // Our own hosted store first — no dial, and a relay-hosting device usually already holds it.
         if RelayHost.shared.serving, let wire = RelayHost.shared.localGet(key), !wire.isEmpty,
-           ingest(wire, from: nil) {
+           await ingest(wire, from: nil) {
             return true
         }
         for node in RelayMailboxStore.shared.allRelays() where !node.hasPrefix("s3:") {
@@ -1443,7 +1458,7 @@ enum SharedStore {
                 for base in http.urls where !httpUrlBad(base) {
                     switch await httpGet(base, http.token, key) {
                     case .success(let wire):
-                        if let wire, !wire.isEmpty, ingest(wire, from: node) { return true }
+                        if let wire, !wire.isEmpty, await ingest(wire, from: node) { return true }
                     case .failure(is RelayForbidden):
                         noteRefused(node, "devroster read for \(acct.prefix(8))")
                     case .failure:
@@ -1454,7 +1469,7 @@ enum SharedStore {
             guard let c = await RelayClients.client(node) else { continue }
             if let wire = await c.get(key: key), !wire.isEmpty {
                 RelayHealth.shared.recordSuccess(node)
-                if ingest(wire, from: node) { return true }
+                if await ingest(wire, from: node) { return true }
             }
         }
         return known
@@ -2081,11 +2096,17 @@ enum SharedStore {
         guard let blob = sealed else {
             HavenLog.relay("media restore \(ref.prefix(12)): reassembled read FAIL via \(src)"); return nil
         }
-        for cid in circleIds {
-            if let data = social.openCircleMedia(circleId: cid, sealed: blob) {
-                HavenLog.relay("media restore \(ref.prefix(12)): OK via \(src), \(data.count)B")
-                return data
+        // The open is real crypto over the whole blob and used to run on main per restore
+        // (@MainActor enum). Off-main under the gate; same first-circle-that-opens semantics.
+        let opened: Data? = await EngineGate.shared.run {
+            for cid in circleIds {
+                if let data = social.openCircleMedia(circleId: cid, sealed: blob) { return data }
             }
+            return nil
+        }
+        if let data = opened {
+            HavenLog.relay("media restore \(ref.prefix(12)): OK via \(src), \(data.count)B")
+            return data
         }
         HavenLog.relay("media restore \(ref.prefix(12)): found via \(src) (\(blob.count)B) but OPEN FAILED for all \(circleIds.count) circles")
         // Present-but-undecryptable: remember it for this session so the missing-media sweeps stop

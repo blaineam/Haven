@@ -7,6 +7,42 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 1.8.2 — 2026-09-01
+
+### Fixed — the foreground freeze finally has names (and so does the 2 AM watchdog kill)
+
+Field report: Haven locked up for a few seconds right after launch or foregrounding, then ran
+silky. A DEBUG-only main-thread stall detector (ported from Ari; it probes the main queue and
+appends a symbolicated main-thread stack to `Library/Caches/HavenStalls.log` whenever a probe
+misses by 0.4 s, pullable with `devicectl device copy`) made every freeze name itself. Five parks,
+all inside the sync burst a foreground kicks off, each caught on a real account:
+
+- **The mailbox drain is sliced.** One monolithic EngineGate pass re-acquired the barging engine
+  mutex back-to-back for the whole backlog, so any main-thread `social.*` touch parked for the entire
+  drain. Now 6 envelopes per hold with 3 ms of air between slices — a parked main thread wins the
+  lock within a slice.
+- **The upload queue is off cfprefsd.** `BackgroundUploader` persisted its queue (full sealed
+  envelopes) into UserDefaults on the main actor per enqueue/flush — a synchronous cfprefsd XPC
+  round-trip caught blocking main 0.65 s on launch's first enqueue. The queue now lives in an
+  Application Support file written by a serialized background actor (debounced 100 ms), with a
+  one-time migration off the legacy prefs blob.
+- **SelfSync roster ingest runs off-main.** `applyLocal`'s roster loop drained pending epoch events
+  on the main actor, and every drained event re-verified device credentials — cloning ML-DSA-65
+  verifying keys per contact device: 1.4–1.9 s blocked per foreground sync. The loop now hops to a
+  utility task inside EngineGate like every other engine mutation.
+- **The relay LIST-delta parse runs off-main.** Tens of thousands of newline-split keys were split
+  on the main actor (0.5 s caught). Detached utility parse, zero isolation ripple.
+- **Contact device hints decode once.** The last capture — repeated 0.40–0.50 s blocks on every
+  iroh send: `FeedStore.contactDeviceHints` re-read the invite-hint dictionary out of UserDefaults
+  and conditionally bridged the whole thing to `[String: [String]]` on the main actor per
+  `sendIroh`. It, and the per-DM "cleared before" watermark that sat on the chat-body paint path,
+  now decode once into a typed mirror the single writer keeps in step: each lookup is a native O(1)
+  dictionary read.
+
+The same parks were the 2 AM background scene-create watchdog kill (0x8BADF00D): the system created
+the scene to drain an overnight push, the main thread parked behind that same drain, and it crossed
+the 30 s watchdog. One root cause, two symptoms.
+
 ## 1.8.1 — 2026-08-29
 
 ### Fixed — a smooth feed that no longer cooks the phone

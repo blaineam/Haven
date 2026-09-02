@@ -45,6 +45,10 @@ final class MainThreadStallDetector: @unchecked Sendable {
         return dir.appendingPathComponent("HavenStalls.log")
     }()
 
+    /// Other DEBUG probes (the engine-hold timer) append to the same file, so holder and waiter
+    /// sit side by side in one timeline.
+    func note(_ line: String) { emit(line) }
+
     private func emit(_ line: String) {
         HavenLog.sync(line)
         let stamped = "\(Date().formatted(.iso8601)) \(line)\n"
@@ -217,6 +221,11 @@ final class MainThreadStallDetector: @unchecked Sendable {
         }
         #endif
     }
+}
+
+/// DEBUG sink for `EngineGate`'s hold timer — see `EngineGate.run`.
+enum EngineHoldLog {
+    static func note(_ line: String) { MainThreadStallDetector.shared.note(line) }
 }
 
 #endif

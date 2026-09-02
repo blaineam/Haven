@@ -18,7 +18,19 @@ final class InboundBridge: InboundListener {
 /// for multi-envelope work (see FeedStore messages cache / off-main receive).
 actor EngineGate {
     static let shared = EngineGate()
-    func run<T>(_ body: () throws -> T) rethrows -> T { try body() }
+    /// `caller` / `line` default to the CALL SITE, so the DEBUG hold log names the operation that
+    /// held the engine — the lock HOLDER behind a main-thread park, not just the waiter. Anything
+    /// over 300 ms lands in Caches/HavenStalls.log as `[EngineHold] …` next to the stall it caused.
+    func run<T>(caller: String = #function, line: Int = #line, _ body: () throws -> T) rethrows -> T {
+        #if DEBUG
+        let t0 = CFAbsoluteTimeGetCurrent()
+        defer {
+            let held = CFAbsoluteTimeGetCurrent() - t0
+            if held > 0.3 { EngineHoldLog.note("[EngineHold] \(caller) (line \(line)) held \(Int(held * 1000))ms") }
+        }
+        #endif
+        return try body()
+    }
 }
 
 /// Serializes engine-state exports + writes OFF the main actor. The exported state holds DECRYPTED

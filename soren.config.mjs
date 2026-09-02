@@ -104,23 +104,6 @@ export default {
       description: 'Android unit + (emulator) connected tests',
     },
 
-    // ── Desktop acceptance VMs (UTM). These LAUNCH the VM and report it up; there
-    //    is no in-guest test agent wired yet, so success = "VM launched" (honestly
-    //    labelled). When a guest smoke agent exists, add a `guest: { host, user,
-    //    cmd }` block and the leg will ssh in and run it. See docs/QA.md. Driven by
-    //    UUID (two VMs can share a name). Missing UTM/VM ⇒ the leg SKIPS, not hangs.
-    'vm-linux': {
-      type: 'utm',
-      vm: '5B499FD3-0839-46A8-8D7A-35CCBEE35D31', // "haven-linux"
-      description: 'Launch the Linux desktop VM (haven-linux) — launch-only for now',
-    },
-    'vm-windows': {
-      type: 'utm',
-      vm: '3EEB5FD1-0FEA-404C-8C36-D90488168294', // "Windows"
-      description: 'Launch the Windows desktop VM — launch-only for now',
-    },
-
-    // ── Desktop (Tauri): the Rust side tests + a JS syntax gate on the web UI.
     desktop: {
       type: 'cargo',
       cwd: 'desktop/src-tauri',
@@ -174,6 +157,25 @@ export default {
       description: 'Path proxy + WebSocket hairpin + Haven-first DERP policy',
       tags: ['fabric', 'relay'],
     },
+
+    // (Run LAST — see the note above: the VMs stay off the box while the e2e fleet needs the cores.)
+    // ── Desktop acceptance VMs (UTM). These LAUNCH the VM and report it up; there
+    //    is no in-guest test agent wired yet, so success = "VM launched" (honestly
+    //    labelled). When a guest smoke agent exists, add a `guest: { host, user,
+    //    cmd }` block and the leg will ssh in and run it. See docs/QA.md. Driven by
+    //    UUID (two VMs can share a name). Missing UTM/VM ⇒ the leg SKIPS, not hangs.
+    'vm-linux': {
+      type: 'utm',
+      vm: '5B499FD3-0839-46A8-8D7A-35CCBEE35D31', // "haven-linux"
+      description: 'Launch the Linux desktop VM (haven-linux) — launch-only for now',
+    },
+    'vm-windows': {
+      type: 'utm',
+      vm: '3EEB5FD1-0FEA-404C-8C36-D90488168294', // "Windows"
+      description: 'Launch the Windows desktop VM — launch-only for now',
+    },
+
+    // ── Desktop (Tauri): the Rust side tests + a JS syntax gate on the web UI.
   },
 
   // `soren migrate Haven` runs these (the FFI migration harness rides in both).

@@ -152,12 +152,13 @@ Android, and desktop all inherit it.
 
 ## Receiving on all devices (how it actually works today)
 
-> **This is not MLS.** MLS is **not implemented** — there is no `mls-rs` dependency and no
-> MLS code in the tree; it appears only in comments describing future work
-> (`core/haven-p2p/src/social.rs:14-16`, `device.rs:13-17`). The description below is the
-> mechanism that actually ships. The MLS design this doc originally described is a *plan*
-> (Phase 5), and D3's rationale for eventually preferring a PQ variant still stands — see
-> `GROUP-KEYING.md`.
+> **This describes the sender-key/epoch path, not the tree.** There is still no `mls-rs` dependency
+> and Haven is deliberately **not** RFC-9420 interoperable — but MLS-*style* group ratcheting did
+> land: `core/haven-p2p/src/treekem.rs` implements TreeKEM over Haven's own PQ primitives, shipped in
+> 1.0.7 (Phase 5) for circles with a **verified owner**. The mechanism described below is what a
+> circle uses until the tree layer is active for it — every circle predating 1.0.7, and any circle
+> whose members have not all updated. See `TREEKEM-DESIGN.md` for what shipped, and `GROUP-KEYING.md`
+> for D3's rationale for preferring a PQ variant, which is what was built.
 
 Each circle has an **epoch key**. When sealing, the recipient set is expanded from circle
 members to each member's **authorized devices** (`recipients_with_devices` in

@@ -305,13 +305,16 @@
               list, so adding or removing a device never changes who you are to your contacts. Your own
               devices self-sync additively, so a freshly-restored or empty device can never wipe content
               that exists elsewhere.</p>
-            <p data-i18n-html="be-precise-about-revoking.5875c4"><b>Be precise about revoking a device.</b> Today a linked device holds a <em>copy</em> of your
-              account seed, and revoking marks it revoked but doesn't invalidate the seed it already has. So
-              revocation is a <b>strong deterrent against a lost or stolen phone</b> (its keychain intact,
-              seed not extracted) — but it is <b>not yet a cryptographic guarantee against a fully
-              compromised one</b>. The re-key that makes revocation cryptographic ("seed-drop") is designed
-              and <b>planned for release 1.0.7 — not yet shipped</b>. Until then, the sure remedy against a
-              genuinely compromised device is rolling a new identity.</p>
+            <p data-i18n-html="be-precise-about-revoking.5875c4"><b>Be precise about revoking a device.</b> Since <b>1.0.7</b>, a linked device no longer holds a
+              <em>copy</em> of your account seed — it runs on its own <b>per-device keys</b>, and a device added
+              through the <b>seedless</b> flow never receives the master seed at all. That turns revoking into a
+              <b>cryptographic cut</b>: the device is excluded from your circle's next encryption epoch <em>and</em>
+              re-keyed out of the settings/contacts stream that syncs between your own devices, and — because
+              authority over the device list is the account key it doesn't hold — it can't forge a higher-version list
+              to re-add itself. It takes effect <b>per circle, once everyone's devices have updated</b>; until a
+              circle gets there, a dual-seal path keeps un-upgraded peers fully working. One honest limit remains: a
+              fully compromised <em>primary</em> device — the one that still holds the seed — is a full compromise,
+              and the answer there is rolling a new identity.</p>
             <p data-i18n-html="full-detail-multi-device.0671e3">Full detail: <a class="inline" href="https://github.com/blaineam/haven/blob/main/docs/MULTI-DEVICE.md" rel="noopener">MULTI-DEVICE.md ↗</a></p>
           </div>
         </details>
@@ -428,8 +431,8 @@
 
         <a class="card flat doclink" href="https://github.com/blaineam/haven/blob/main/docs/MULTI-DEVICE.md" rel="noopener">
           <h4 data-i18n-html="multi-device.2b86df">🔗 Multi-device <span class="arrow">↗</span></h4>
-          <p data-i18n="one-identity-across-the.d62cb0">One identity across the devices you own — linking, receiving everywhere, and the honest state
-            of device revocation (effective for a lost device; seed-drop finalizes it in 1.0.7).</p>
+          <p data-i18n="one-identity-across-the.d62cb0">One identity across the devices you own — linking, receiving everywhere, and the honest state of device
+            revocation (a cryptographic cut since seed-drop landed in 1.0.7).</p>
         </a>
 
         <a class="card flat doclink" href="https://github.com/blaineam/haven/blob/main/docs/NOTIFICATIONS.md" rel="noopener">

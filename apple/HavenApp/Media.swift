@@ -629,11 +629,11 @@ final class MediaStore: ObservableObject {
         let cutoff = Date().addingTimeInterval(-graceSeconds)
         var bytes: Int64 = 0
         var files = 0
-        let skippedFresh = 0
+        var skippedFresh = 0
         for url in items {
             let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey])
             if vals?.isDirectory == true { continue }
-            if let m = vals?.contentModificationDate, m > cutoff { continue }   // too fresh to judge
+            if let m = vals?.contentModificationDate, m > cutoff { skippedFresh += 1; continue }   // too fresh to judge
             let stem = url.deletingPathExtension().lastPathComponent
             if inUse.contains(stem) { continue }
             // Past the grace window with no referencing event anywhere: an orphan. This also retires

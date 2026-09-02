@@ -40,21 +40,21 @@
 > unconditional, so a sleeping device loses nothing. See
 > [Live device-to-device delivery](#live-device-to-device-delivery-phase-4b).
 >
-> **Still ahead:** enrollment flow + UI (Phase 2), the **personal forwarder** half of Phase 4b (an
-> always-on Mac as the user's own store-and-forward node — designed below, not built), and the MLS
-> leaf/commit hardening for per-message forward secrecy + post-compromise security (Phase 5). See
-> **Implementation phases** below.
+> **Still ahead:** the **personal forwarder** half of Phase 4b (an always-on Mac as the user's own
+> store-and-forward node — designed below, not built). Enrollment + UI (Phase 2) and the MLS
+> leaf/commit hardening for per-message forward secrecy + post-compromise security (Phase 5) both
+> **shipped in 1.0.7**. See **Implementation phases** below.
 
 ## Implementation phases (D16)
 
 | Phase | Scope | Where | State |
 |---|---|---|---|
 | **1. Device-credential trust layer** | Per-device keys; account-signed `DeviceCredential`; versioned signed `DeviceList` (add/revoke, higher-version-wins, rollback defense); verify against the pinned account key. Own-account replicas UNION-merge; where two copies disagree about a revocation the **strictly-newer list's verdict wins**, so `with_self_added`'s explicit (version-bumped) re-authorization propagates instead of a stale copy re-adding the tombstone forever — the roster/epoch-churn flip-flop that kept a device's own id revoked and rotated every circle epoch per launch. Clients must self-register AFTER importing persisted state (the restored roster's higher version clobbers a pre-import self-registration). | `haven-p2p::device` | **✅ core done & tested** |
-| **2. Enrollment & UI** | FFI export (done): `issue/verify_device_credential`, `sign/verify_device_list`, `device_list_is_authorized`, plus an `AccountStateHandle` object + `seal/open_account_state`. Ahead: QR/short-code link of a new device + out-of-band verification phrase; the authorizing device issues the credential and publishes a new `DeviceList`; "Blaine linked a new device" notice. Per-client (iOS → Android → desktop). | `haven-ffi::multidevice` + clients | 🟡 **FFI export done**; enrollment QR/verify + UI ahead |
+| **2. Enrollment & UI** | FFI export (done): `issue/verify_device_credential`, `sign/verify_device_list`, `device_list_is_authorized`, plus an `AccountStateHandle` object + `seal/open_account_state`. Shipped in 1.0.7: QR/short-code link of a new device + out-of-band verification phrase; the authorizing device issues the credential and publishes a new `DeviceList`; "Blaine linked a new device" notice. A device enrolled through the **seedless** flow holds only its device key + credential and never receives the master seed. | `haven-ffi::multidevice` + clients | ✅ **shipped 1.0.7** — seedless-enrollment onboarding on iOS, macOS, Android and desktop |
 | **3. Account-state self-sync** | A per-account state blob (roster, circles, contacts, profile, settings, blocked list, read state, **pinned conversations**) **self-sealed to the account's own devices** and synced via the mailbox; CRDT/LWW merge so devices converge. Gives "my devices show the same thing." Plus **own-device event convergence** (per-device epoch keys converge on the numerically-larger key) so authored/received posts + DMs sync across devices. | `haven-p2p::selfsync` + `haven-ffi::receive_key_commit` + relay/nearby channel | ✅ **all platforms**: iOS/macOS + desktop (relay+S3) + Android (relay) converge profile + settings + contacts + blocked + circles + message-pins, and own-device posts/DMs sync |
-| **4. Device-aware circle sealing + revocation** | A circle's epoch key seals to each member's AUTHORIZED **device** bundles (`recipients_with_devices`), never a revoked one; receive accepts a member's authorized device as committer/sender; ingest/store signed rosters (rollback-defended) + rotate epochs on add/revoke; rosters ride the sync bundle (`TAG_DEVICE_ROSTER`). | `haven-p2p::device` + `haven-ffi` | ✅ **core done & tested** — `linked_device_receives_then_revocation_cuts_it_off` proves a device receives content and revocation cuts it off. App side ahead: enrollment (device keypair + issue credential on link) + Authorized-Devices UI/revoke. |
+| **4. Device-aware circle sealing + revocation** | A circle's epoch key seals to each member's AUTHORIZED **device** bundles (`recipients_with_devices`), never a revoked one; receive accepts a member's authorized device as committer/sender; ingest/store signed rosters (rollback-defended) + rotate epochs on add/revoke; rosters ride the sync bundle (`TAG_DEVICE_ROSTER`). | `haven-p2p::device` + `haven-ffi` | ✅ **core done & tested** — `linked_device_receives_then_revocation_cuts_it_off` proves a device receives content and revocation cuts it off. App side **shipped in 1.0.7**: seedless enrollment (device keypair + credential on link) + Authorized-Devices UI / revoke. Sealing now runs through the gated variant (`recipients_with_devices_gated`), which drops the bare account key once every member is seed-drop-capable. |
 | **4b. Live delivery + personal forwarder** | Real-time device-to-device push when both are online ([`haven_net::livedelivery`](../core/haven-net/src/livedelivery.rs)): an event authored on one device is handed straight to the user's other online devices, instead of waiting out their next mailbox poll. **Strictly additive** — the mailbox put is unchanged and unconditional, so live delivery only changes *how fast* a sibling learns, never *whether* (see below). Personal forwarder: not started. | `haven-net` + clients | 🟡 **live delivery done** (core + iOS/macOS + Android); forwarder ⏭️ |
-| **5. MLS hardening** | Each device becomes an MLS leaf; Add/Remove **commits** give forward secrecy + post-compromise security on link/revoke. Gated on the separate MLS (D3) work. | `haven-p2p` (mls-rs) | ⏭️ (after MLS) |
+| **5. MLS hardening** | Each device becomes a ratchet-tree leaf; Add/Remove **commits** give forward secrecy + post-compromise security on link/revoke. Implemented as **TreeKEM over Haven's own post-quantum primitives** — deliberately *not* RFC-9420 wire-interoperable, and not `mls-rs` (every ratified MLS ciphersuite is classical). | `haven-p2p::treekem` | ✅ **shipped 1.0.7** — enabled for circles with a **verified owner** (those created from 1.0.7 on); gated per circle until every member's devices update. See `TREEKEM-DESIGN.md` |
 
 ### Self-sync mailbox channel (the recipe clients implement)
 
@@ -74,11 +74,12 @@ prefix = self/<account-node-hex>/state/                    # all the account's s
   duplicate delivery don't matter; because each device owns its own slot, devices never clobber
   each other. The relay only ever holds ciphertext.
 
-> **Honest dependency:** the *fully drawn* design (device = MLS leaf, revocation = MLS Remove
-> commit re-key) needs **MLS**, which is itself not yet built (the engine currently seals a
-> fresh content key per recipient via the hybrid KEM — see `ARCHITECTURE.md`). Phases 1–4 are
-> built on **today's** engine and deliver real live multi-device sync; Phase 5 upgrades the
-> secrecy guarantees once MLS lands. Nothing in 1–4 has to change when 5 arrives.
+> **Honest dependency (resolved in 1.0.7):** the *fully drawn* design (device = ratchet-tree leaf,
+> revocation = Remove-commit re-key) needed the MLS-style layer, which **shipped in 1.0.7** as
+> TreeKEM over Haven's own PQ primitives (`haven-p2p::treekem`). Phases 1–4 were built on the
+> pre-1.0.7 engine — a fresh content key per recipient via the hybrid KEM, see `ARCHITECTURE.md` —
+> and nothing in 1–4 had to change when Phase 5 arrived. The tree layer is enabled for circles with
+> a **verified owner** and activates per circle as members update, so both paths remain live.
 
 A user is **one account identity** with a set of **authorized devices**, each holding
 its *own* key. No private key is ever copied between devices. This gives "receive on
@@ -163,7 +164,10 @@ members to each member's **authorized devices** (`recipients_with_devices` in
 `core/haven-ffi/src/lib.rs`), and the epoch key is wrapped to every device bundle with the
 hybrid KEM. So a message is decryptable by **all** of the user's authorized devices. This is
 multi-recipient public-key encryption — it works, it's tested, and it gives cryptographic
-revocation, but it does **not** give per-message forward secrecy or post-compromise security.
+revocation, but it does **not** by itself give per-message forward secrecy or post-compromise
+security. Those come from the MLS-style TreeKEM layer that shipped in 1.0.7 (Phase 5 above),
+which is enabled for circles with a **verified owner** and turns on per circle as members update;
+circles that predate 1.0.7 keep the epoch scheme described here.
 
 ## Live device-to-device delivery (Phase 4b)
 
@@ -237,18 +241,27 @@ in-order commit processing becomes a hard requirement rather than a practical on
   the circle **epoch rotates** so the removed device is not a recipient of any future
   KeyCommit — it can't read content posted after removal (`core/haven-ffi/src/lib.rs:2516`).
   You stay *you*; only that device goes dark. Contacts honor the signed update.
-  > ⚠️ **Known limitation — revocation is not yet adversary-proof.** Today a linked device
-  > holds a **copy of the account master seed** (that's what `haven-seed:` move-to-device
-  > transfers), and the engine still runs under that copied seed rather than under a
-  > per-device key. Revoking a device marks it revoked; it does **not** invalidate the seed
-  > that device already has. Because device lists merge higher-version-wins
-  > (`core/haven-p2p/src/device.rs`), a *cooperative* device honors revocation, but an
-  > attacker in possession of the seed can sign a fresh, higher-version device list and
-  > re-add itself. The "seed-drop that finalizes revocation" is explicitly still to build
-  > (`apple/HavenApp/DeviceRoster.swift:11-12`, `:52-54`). **Treat revocation as effective
-  > against a lost device, not against a compromised one.** If a device is stolen and you
-  > believe the seed is extractable, roll your identity. Closing this is the top item in
-  > `ROADMAP.md` → Outstanding.
+  > ✅ **Revocation became adversary-proof in 1.0.7 (seed-drop).** It used to be advisory:
+  > a linked device held a **copy of the account master seed** (that's what `haven-seed:`
+  > move-to-device transferred) and the engine ran under that copy, so revoking marked the
+  > device revoked without invalidating the seed it already had — and because device lists
+  > merge higher-version-wins, an attacker holding the seed could sign a fresh, higher-version
+  > list and re-add itself. Seed-drop re-roots day-to-day operation on **per-device keys**: a
+  > device enrolled through the **seedless** flow holds only its own keypair plus an
+  > account-signed credential and never receives the seed, which concentrates on one
+  > **primary** device (Enclave-wrapped) plus the SE-wrapped iCloud-Keychain escrow. A revoked
+  > device is now excluded from the circle's next epoch *and* re-keyed out of the account-state
+  > self-sync stream, and it **cannot forge a higher-version roster** to re-add itself, because
+  > roster authority is the account key it does not hold — the account-leaf-retired flag
+  > (`DeviceList::with_account_leaf_retired`, `core/haven-p2p/src/device.rs:370`) is sticky and
+  > only the account key can mint it. Proven by the `s5` core test. **Rollout is per circle:**
+  > the bare account-key seal is retired for a circle only once every member's devices
+  > affirmatively advertise capability (never inferred from absence), so until yours finishes
+  > updating, revocation stays on the safe dual-seal path (`docs/SWITCH-FLIP-1.0.7.md`).
+  >
+  > ⚠️ **The limit that remains:** the **primary** device still holds the seed. If *that*
+  > device is genuinely compromised, it is a full account compromise and revoking another
+  > device does not help — roll your identity. See `SEED-DROP-DESIGN.md`.
 - **Lost one device, others remain:** revoke as above, link a replacement.
 - **Lost all devices:** restore the **account key from escrow** (passphrase + iCloud
   Keychain), then re-authorize fresh devices. This is the one place the account key

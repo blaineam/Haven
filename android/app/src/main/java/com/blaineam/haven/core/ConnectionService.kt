@@ -172,6 +172,9 @@ class ConnectionService : Service() {
 
         /** Called on app launch — restore the service if the user left it on. */
         fun restoreIfEnabled(ctx: Context) {
+            // haven_no_net: this service exists to keep the iroh node alive (Haven has no FCM), and
+            // under the flag there is no node to keep.
+            if (HavenOffline.enabled) return
             if (isEnabled(ctx)) start(ctx)
         }
     }

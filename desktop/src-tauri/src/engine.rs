@@ -1092,6 +1092,9 @@ impl Engine {
         if silent {
             body["silent"] = true.into();
         }
+        if crate::netgate::offline() {
+            return;   // HAVEN_NO_NET: no peer is woken from the harness
+        }
         let http = self.http.clone();
         tauri::async_runtime::spawn(async move {
             // Manual JSON body — this crate's reqwest is built without the `json` feature.
@@ -1383,6 +1386,11 @@ impl Engine {
 
     /// Start the iroh node and begin syncing. Safe to call repeatedly.
     pub async fn start(self: &Arc<Self>) {
+        // HAVEN_NO_NET: `lib.rs` already declines to call this, but saying it here is what makes the
+        // adaptive mailbox/sync loop offline too — `start_mailbox_loop` is spawned from this fn.
+        if crate::netgate::offline() {
+            return;
+        }
         {
             if self.node.lock().is_some() {
                 return;
@@ -3940,6 +3948,9 @@ impl Engine {
         let Some(body) = flag_body(&seed, &subject, &reason, now_ms() / 1000) else {
             return;
         };
+        if crate::netgate::offline() {
+            return;   // HAVEN_NO_NET: no ledger row leaves the harness
+        }
         let http = self.http.clone();
         tauri::async_runtime::spawn(async move {
             // Manual JSON body — this crate's reqwest is built without the `json` feature
@@ -5501,6 +5512,9 @@ impl Engine {
 
     /// Start serving the circle's mailbox from this device + adopt it for every circle.
     pub async fn start_hosting(self: &Arc<Self>) -> Result<String> {
+        if crate::netgate::offline() {
+            return Err(anyhow::anyhow!("relay host: offline (HAVEN_NO_NET)"));
+        }
         {
             if let Some(h) = self.relay_host.lock().as_ref() {
                 return Ok(h.node_id_hex());
@@ -6037,6 +6051,13 @@ impl Engine {
     /// HTTP interface at all, so callers go straight to the path that works. iOS
     /// `RelayMailboxStore.httpInterface` parity.
     fn relay_http_reachable(&self, hex: &str) -> Option<(Vec<String>, String)> {
+        // HAVEN_NO_NET: the whole relay HTTP lane hangs off this lookup — hello put/fetch, mailbox
+        // LIST/GET, announce, self-sync slots, media. Refusing here retires all of it through the
+        // branch every caller already handles, and (unlike failing the requests) marks no URL bad
+        // and records no health, so a harness run leaves prefs exactly as it found them.
+        if crate::netgate::offline() {
+            return None;
+        }
         let (urls, token) = self.prefs.lock().relay_http(hex)?;
         let usable: Vec<String> = urls.into_iter().filter(|u| Self::url_plausibly_reachable(u)).collect();
         if usable.is_empty() {
@@ -7315,6 +7336,9 @@ impl Engine {
     }
 
     async fn relay_client_for(self: &Arc<Self>, node_hex: &str) -> Option<Arc<RelayClient>> {
+        if crate::netgate::offline() {
+            return None;   // HAVEN_NO_NET: no dials (the node is not up either, but say so here)
+        }
         // An `s3:<bucket>` relay is a store-and-forward bucket, NOT a dialable iroh node — it's served
         // by the separate `s3_client()` path in upload_event/backfill. Never try to iroh-dial it.
         if node_hex.starts_with("s3:") {
@@ -7595,6 +7619,9 @@ impl Engine {
 
     /// Build (and cache) the BYO S3 mailbox client from prefs + the keychain secret, if configured.
     async fn s3_client(self: &Arc<Self>) -> Option<Arc<S3Mailbox>> {
+        if crate::netgate::offline() {
+            return None;   // HAVEN_NO_NET: no bucket ops
+        }
         if let Some(c) = self.s3.lock().await.as_ref() {
             return Some(c.clone());
         }
@@ -9002,6 +9029,9 @@ impl Engine {
     /// serves the same store, so skip dialing it), `Err(Unreachable)` = dead endpoint,
     /// `Err(Forbidden)` = the relay REFUSED us.
     async fn http_get(&self, base: &str, token: &str, key: &str) -> Result<Option<Vec<u8>>, RelayErr> {
+        if crate::netgate::offline() {
+            return Err(RelayErr::Unreachable);
+        }
         let auth = self.http_auth(token, "GET", key, b"").ok_or(RelayErr::Unreachable)?;
         let resp = self
             .http
@@ -9029,6 +9059,9 @@ impl Engine {
         prefix: &str,
         digest: Option<&str>,
     ) -> Result<(Option<Vec<String>>, Option<String>), RelayErr> {
+        if crate::netgate::offline() {
+            return Err(RelayErr::Unreachable);
+        }
         let auth = self.http_auth(token, "GET", prefix, b"").ok_or(RelayErr::Unreachable)?;
         let mut req = self
             .http
@@ -9109,6 +9142,12 @@ impl Engine {
     /// needs — so the blob never lands, and the damage surfaces much later as a fetch that genuinely
     /// 404s. A real absence, manufactured by a permissions problem.
     async fn http_put(&self, base: &str, token: &str, key: &str, body: Vec<u8>) -> Result<(), RelayErr> {
+        // HAVEN_NO_NET backstop. `relay_http_reachable` already refuses, so no live caller reaches
+        // here — but these three primitives are the only place our own bytes hit the relay wire, and
+        // a future route built from a base and token some other way must not slip past.
+        if crate::netgate::offline() {
+            return Err(RelayErr::Unreachable);
+        }
         // Digest over the EXACT bytes sent — `.body(body)` puts this buffer on the wire verbatim.
         let auth = self.http_auth(token, "PUT", key, &body).ok_or(RelayErr::Unreachable)?;
         let resp = self

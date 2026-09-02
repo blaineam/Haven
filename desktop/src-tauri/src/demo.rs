@@ -16,9 +16,11 @@
 //!    a desktop dev has real data on this machine, so demo mode swaps in its own seed AND its own
 //!    data dir (`<data>/Haven/demo`) — the real identity's state, prefs, media and keychain seed are
 //!    never opened, let alone written.
-//! 3. **It never goes online.** `HAVEN_DEMO=1` implies `HAVEN_NO_NET`: `lib.rs` skips `Engine::start`,
-//!    so the iroh node never binds and the synthetic cast can never leak to a real peer. Everything
-//!    below is local: authoring + `receive` are pure state transitions.
+//! 3. **It never goes online.** `HAVEN_DEMO=1` implies `HAVEN_NO_NET`, and that is enforced at every
+//!    outbound transport (see `netgate`), not just at `Engine::start`: the relay HTTP lane, S3, the
+//!    push worker, the moderation ledger and the iTunes lookups all refuse, so no UI-driven command
+//!    can leak the synthetic cast to a real peer. Everything below is local anyway: authoring +
+//!    `receive` are pure state transitions.
 
 #[cfg(not(debug_assertions))]
 compile_error!("demo.rs must never be compiled into a release build (see the module docs)");
@@ -40,11 +42,6 @@ const ME_SEED_BYTE: u8 = 0x21;
 /// Seed + show the synthetic dataset (`HAVEN_DEMO=1`).
 pub fn is_demo() -> bool {
     std::env::var("HAVEN_DEMO").as_deref() == Ok("1")
-}
-
-/// Never bring the P2P node online. Implied by demo mode: a synthetic cast must never reach the wire.
-pub fn no_net() -> bool {
-    is_demo() || std::env::var("HAVEN_NO_NET").as_deref() == Ok("1")
 }
 
 /// The demo identity + its own data dir, wiped first so every capture starts from the same state

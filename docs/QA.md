@@ -62,6 +62,7 @@ npm link`), it's just `soren run Haven`.
 | `vm-linux` | utm | **launches** the `haven-linux` UTM VM and confirms it reaches `started` (reuses an already-running VM) | UTM + the VM present |
 | `vm-windows` | utm | **launches** the `Windows` UTM VM and confirms `started` | UTM + the VM present |
 | `e2e` | cmd | **full cross-device E2E with perf gates** — see below | DEBUG builds of all four clients |
+| `qa-harness` | cmd | the e2e harness's own unit tests — the dump-channel freshness decision (`Scripts/lib/dump-freshness.mjs`), the one part of the harness that can *invent* a failure | node (no fleet) |
 
 ### The `ios` suite is hermetic (`HAVEN_NO_NET`)
 
@@ -85,6 +86,37 @@ xcrun simctl spawn <udid> log stream --predicate 'subsystem == "com.blaineam.hav
 ```
 
 `http-put`, `fan-out` and `hello claim` lines mean something is not gated.
+
+### The other two clients
+
+Same contract, same reason, one flag each — and the same rule for a new transport: gate it at its
+own entry point, not at whatever starts it.
+
+| client | flag | read by | honoured in release? |
+|---|---|---|---|
+| Apple | `HAVEN_NO_NET=1` (process env) | `apple/Shared/OfflineGate.swift` → `HavenNet.offline` | yes |
+| Android | `haven_no_net` (launch-intent extra, or the test runner) | `core/OfflineGate.kt` → `HavenOffline.enabled` | **no** |
+| desktop | `HAVEN_NO_NET=1` (process env; `HAVEN_DEMO=1` implies it) | `src-tauri/src/netgate.rs` → `netgate::offline()` | **no** |
+
+Android and desktop stay debug-only on purpose. iOS reads a process environment variable nothing
+outside the harness can set; Android reads an Intent extra on an **exported** activity, which any
+app on the device can put there, and a desktop inherits its environment from a shell or session
+manager. A shipping build that a third party (or a stray export) could leave permanently silent is a
+worse bug than the one the flag closes.
+
+`connectedDebugAndroidTest` is hermetic **by default**: `HavenTestRunner` arms the gate in
+`onCreate`, before `HavenApplication` can schedule its periodic `SyncWorker` mailbox poll. Pass
+`-e haven_no_net false` for a run that genuinely wants the wire.
+
+To confirm an Android run is silent, watch logcat across a launch:
+
+```
+adb logcat -v time | grep -E "HavenNet|HavenOffline|NearbyTransport|Presign|Moderation"
+```
+
+`node started`, `discovery published`, `uploadEvent`, `hello mailbox-put`, `hello claim` and
+`mailbox http-list` all mean something is not gated. A gated run prints one line:
+`HavenOffline: offline: this process talks to nothing`.
 
 ## Full cross-device E2E (`soren run Haven e2e`)
 
@@ -115,6 +147,11 @@ Safety: the mac leg is **always** `com.blaineam.kith.qa.stub` under
 `HOME=/tmp/haven-mac-stub-home`; the desktop leg always uses the `qa-matrix`
 data dir. The personal account, container, and daily-driver desktop data root
 are never touched, and the script refuses to run otherwise.
+
+Every read is also checked for **dump-channel freshness** — a leg whose dump file has stopped being
+rewritten is named as a dead channel instead of being scored as a delivery failure. See
+[Dump-channel freshness](#dump-channel-freshness--the-harness-will-not-believe-a-stale-dump) below;
+it is the fix for a class of false result that has twice been misread as a product regression.
 
 Subsets + reuse: `E2E_STEPS=post,dm node Scripts/qa-e2e-full.mjs`,
 `E2E_BOOTSTRAP=skip` to reuse a hot fleet, `E2E_KILL=1` to tear down after.
@@ -215,6 +252,93 @@ Android and the Apple apps link a release core, and an unoptimized core made one
 `receive()` hold the engine lock 17–49 s — which is where the desktop's "materially longer
 convergence cycle" (the 6× budget multiplier) came from. Keep those overrides when adding a
 crypto dependency to the core.
+
+### Dump-channel freshness — the harness will not believe a stale dump
+
+Every assertion in the suite is a statement about a JSON file a leg wrote. **If that file stops
+being rewritten, every later assertion about the leg measures the harness and reports it as the
+product.** That has cost two investigations:
+
+* **August** — a reinstall orphaned MediaStore's row for
+  `/sdcard/Download/qa-dump-com.blaineam.haven.json`, so every `renameTo` in the Android driver
+  failed (`MediaProvider: Database update failed while renaming`) while the app itself stayed
+  perfectly healthy. The harness read the same frozen file for the whole run: healthy Android legs
+  scored as **7× perf regressions**, then as **"never"**, and a shipped codec bump was nearly
+  convicted of a regression that did not exist.
+* **2026-09-02** — the same signature again, while the real bug was somewhere else entirely.
+
+So `Scripts/qa-e2e-full.mjs` now checks, on **every** read, that the dump it got back was
+*regenerated after the command that asked for it*. The decision itself lives in
+`Scripts/lib/dump-freshness.mjs` (pure, unit-tested — soren suite `qa-harness`).
+
+**The rule.** A leg is condemned only when all three hold at once:
+
+1. the dump's `ts_ms`, corrected for measured clock skew, predates the command by more than the
+   **tolerance** (60 s, `E2E_DUMP_TOLERANCE`);
+2. it has stayed that way continuously for the **grace window** (75 s, `E2E_DUMP_GRACE`) across at
+   least five reads; **and**
+3. `ts_ms` has not advanced by even a millisecond in that time — the file is *frozen*.
+
+Condition 3 is what makes this safe to leave on. A leg that is merely **slow** rewrites its dump
+constantly, so its timestamp climbs even while it lags; it is reported as slow (`dump is 90.0s
+behind the command but STILL BEING REWRITTEN`) and never condemned. Only a channel that has
+actually stopped delivering freezes. It also makes the check immune to the things that would
+otherwise fake a lag — a mismeasured skew, an emulator resyncing NTP mid-run, a leg that went
+unread for two minutes while another converged. All of those shift the lag by a constant; none can
+make a live file's timestamp stand still.
+
+**Clock skew is measured, not assumed.** The host legs (iOS Simulator, mac stub, Tauri desktop)
+share this machine's clock. The Android emulator keeps its own and drifts — 782 ms behind when this
+was written, and an AVD resumed from a snapshot can be minutes out — so the harness samples
+`adb shell date +%s%3N` five times, takes the tightest round trip (NTP's estimator) and subtracts
+the offset. It re-measures before condemning anything, in case the clock jumped rather than the
+channel dying.
+
+**Freshness is about REGENERATION, never content.** A dump whose posts are byte-identical to the
+last one because nothing happened is perfectly fresh. Nothing in the check looks at the payload.
+
+**Cadence differs per leg and the check does not care.** Apple and desktop also rewrite on a 5 s
+heartbeat, so their `ts_ms` moves with no command outstanding; Android rewrites *only* in response
+to a command, so between two commands its timestamp legitimately stands still. Nothing here is
+measured against wall-clock age — it is measured against the command the harness itself issued.
+The one place in the suite that stops a leg dumping on purpose (`invite_offline` terminates the iOS
+app) clears that leg's tracker on relaunch.
+
+**When it fires** you get this, not a converge timeout:
+
+```
+STALE DUMP CHANNEL — android
+  the android leg is returning a dump from 4m12s ago; its dump channel is not delivering.
+  Its ts_ms has not moved for 1m20s across 21 reads, each of which
+  issued a fresh {"op":"dump"} — so this is the HARNESS's view of the leg, not the product's
+  behaviour. Left alone it reads as "never converged" on content the device may already hold.
+  dump file:  /sdcard/Download/qa-dump-com.blaineam.haven.json
+              41231 B, owner u0_a191, mtime 4m14s ago
+  logcat:     3 x "MediaProvider: Database update failed while renaming" in the last 4000 lines — THIS IS THE KNOWN CAUSE.
+  RECOVERY (one shot): wiping android's qa drop files …
+```
+
+**The one-shot recovery.** Because the cure is known and cheap, the harness tries it before
+complaining: it wipes that leg's qa drop files — exactly what `qa-e2e-bootstrap.sh` does around
+every install, so MediaStore mints fresh rows owned by the current install — and asks for up to
+eight re-dumps. If the channel comes back it logs `RECOVERED after N re-dump attempt(s)` and the run
+continues (treat that leg's earlier latencies with suspicion). One attempt per leg per run: a
+channel that goes stale *again* is not papered over.
+
+**What to do when it aborts.**
+
+1. Re-run the bootstrap — it wipes the qa drop files on every install.
+2. On Android, check the app is **foregrounded**: `QaDriver` polls the drop file only while it is
+   (`onResume`/`onPause`), so a backgrounded activity is a dead channel too.
+3. If the `MediaProvider` lines are in the output, the reinstall orphaned the provider row —
+   `adb shell rm -f /sdcard/Download/qa-dump-com.blaineam.haven.json*` is the cure, and the wipe
+   above has already tried it. A wipe that *cannot* remove the file prints `WIPE PROBLEM:` and is
+   itself the diagnosis.
+4. On the host legs, `tauri.log` / the Apple diagnostic channel already name a failed dump write
+   (`dump is now STALE`).
+
+`E2E_STALE_ABORT=0` downgrades the abort to a log line and runs on — every later result for that
+leg is then suspect, which is the state this check exists to end.
 
 The v1 keys (`post`/`story`/`dm_to`+`dm`/`call_to` without `op`) stay accepted
 on iOS for the older matrix scripts.

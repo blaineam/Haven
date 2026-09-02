@@ -97,11 +97,13 @@ object Presign {
     // --- plain HTTPS against pre-signed URLs (no creds, no SigV4) ---
 
     private fun httpGet(url: String): ByteArray? = runCatching {
+        if (HavenOffline.enabled) return null   // haven_no_net: no pre-signed bucket reads
         val c = (URL(url).openConnection() as HttpURLConnection).apply { connectTimeout = 8000; readTimeout = 12000 }
         if (c.responseCode in 200..299) c.inputStream.use { it.readBytes() } else null
     }.getOrElse { Log.d(TAG, "GET failed: ${it.message}"); null }
 
     private fun httpPut(url: String, body: ByteArray): Boolean = runCatching {
+        if (HavenOffline.enabled) return false   // haven_no_net: no pre-signed bucket writes
         val c = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "PUT"; doOutput = true; connectTimeout = 8000; readTimeout = 20000
             setRequestProperty("Content-Type", "application/octet-stream")

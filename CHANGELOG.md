@@ -115,6 +115,37 @@ only a completed refresh moves that mark — to an event's own time, never to th
 that arrives late still lands. The first launch on this build asks for everything once, which fills
 back in whatever the old behaviour had already dropped.
 
+### Fixed — the offline harness is genuinely offline on Android and desktop too
+
+The same gap as the Apple one below, on the other two clients, plus one that was worse.
+
+On **Android** the flag was read *inside* the `haven_demo` branch, so asking for an offline run
+without also asking for the synthetic dataset did nothing at all — and all it ever gated was the
+iroh node. Both Android screenshot scripts pass only `haven_demo`, never `haven_no_net`, so every
+capture ran the synthetic cast **online**: the node bound and published this device to the public
+discovery service. `haven_no_net` now stands on its own, `haven_demo` implies it (a fictional cast
+must never reach a real peer — the rule desktop already had), and it is enforced at the relay HTTP
+lane, iroh dials, nearby discovery, relay hosting, S3/pre-signed media, the call hairpin, the
+moderation ledger, music search and artwork, and the schedulers behind them.
+
+Android also ran a mailbox poll underneath its own test suite. `HavenApplication.onCreate` schedules
+a periodic `SyncWorker`, and that Application is created in the instrumented-test process too — on a
+device that carries a real identity and real relay records. `connectedDebugAndroidTest` now runs
+under a `HavenTestRunner` that arms the gate before the Application exists, so the whole process is
+hermetic by construction rather than by each test remembering.
+
+On **desktop** `HAVEN_NO_NET` skipped `Engine::start` and nothing else, which left every Tauri
+command the UI can invoke free to use the relay HTTP lane, S3, the push worker, the moderation
+ledger and the iTunes lookups — none of which need a node. Each refuses at its own entry point now.
+
+An offline run also stops asking for permissions to capabilities it has just disabled: the
+nearby-devices and notification prompts no longer fire, so they stop photobombing the Play Store
+captures the way they did on a fresh install.
+
+Measured on the emulator, same binary, only the flag differing: 60 seconds without it produced
+`node started`, `discovery published devices=1` and two `uploadEvent` passes; 120 seconds with it
+produced one line, `offline: this process talks to nothing`.
+
 ### Fixed — the offline test harness is now genuinely offline
 
 `HAVEN_NO_NET=1` is the flag the UI tests and the screenshot capture run under, and it only ever

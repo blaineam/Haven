@@ -71,7 +71,10 @@ fun RootScreen() {
         LaunchedEffect(Unit) {
             HavenNet.init(context)
             DemoSeeder.seed(context)
-            if (!DemoEnv.noNet) HavenNet.start()
+            // Demo implies offline (a synthetic cast must never reach a real peer), so `start()` is
+            // a no-op — but the hero shots should still show a healthy circle, not "Connecting".
+            HavenNet.start()
+            HavenNet.presentDemoConnected()
         }
         MainScaffold()
         return
@@ -166,10 +169,11 @@ private fun MainScaffold() {
     // RootScreen LaunchedEffect already did init/seed, and `haven_no_net` keeps the node offline.
     LaunchedEffect(Unit) {
         if (DemoEnv.isDemo) {
-            if (!DemoEnv.noNet) {
-                HavenNet.start()
-                com.blaineam.haven.core.CallManager.init(context, HavenNet.nodeIdHex)
-            }
+            // No-ops under the flag (which demo implies); left in place so a future demo run that
+            // deliberately wants the wire — `--ez haven_demo true --ez haven_no_net false` — still works.
+            HavenNet.start()
+            com.blaineam.haven.core.CallManager.init(context, HavenNet.nodeIdHex)
+            HavenNet.presentDemoConnected()
         } else {
             HavenNet.init(context)
             HavenNet.start()
@@ -186,6 +190,9 @@ private fun MainScaffold() {
     val notifPermission = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(Unit) {
+        // haven_no_net: the system prompt would photobomb the captures, and notifications here are
+        // about content arriving over a wire this run does not have. iOS parity.
+        if (com.blaineam.haven.core.HavenOffline.enabled) return@LaunchedEffect
         if (android.os.Build.VERSION.SDK_INT >= 33) notifPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
     }
     val lifecycleOwner = LocalLifecycleOwner.current

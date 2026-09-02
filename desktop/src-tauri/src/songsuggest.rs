@@ -529,6 +529,9 @@ fn ranked_by_era(mut hits: Vec<Track>) -> Vec<Track> {
 /// Exact where `search` is approximate: a TrackRef carries the store URL it came from, so the id is
 /// already known and a text search for its title is a worse question with a worse answer.
 pub async fn lookup(id: &str) -> Option<Track> {
+    if crate::netgate::offline() {
+        return None;   // HAVEN_NO_NET: no third-party lookup either
+    }
     let url = format!("https://itunes.apple.com/lookup?id={id}&entity=song");
     let body = http().get(&url).send().await.ok()?.text().await.ok()?;
     parse_results(&body).into_iter().next()
@@ -539,6 +542,9 @@ pub async fn search(query: &str, limit: usize) -> Option<Vec<Track>> {
     let q = query.trim();
     if q.is_empty() {
         return Some(Vec::new());
+    }
+    if crate::netgate::offline() {
+        return Some(Vec::new());   // HAVEN_NO_NET: an empty result, not a hang or an error toast
     }
     let url = format!(
         "https://itunes.apple.com/search?term={}&media=music&entity=song&limit={limit}",

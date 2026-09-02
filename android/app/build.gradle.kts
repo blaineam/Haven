@@ -18,7 +18,9 @@ android {
         //   ./gradlew bundleRelease -PhavenVersionCode=<n> -PhavenVersionName=<x.y.z>
         versionCode = (project.findProperty("havenVersionCode") as String?)?.toInt() ?: 1
         versionName = (project.findProperty("havenVersionName") as String?) ?: "0.1.0"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Our own runner, so the whole instrumented-test process is hermetic before
+        // `HavenApplication.onCreate` can schedule a mailbox poll. See HavenTestRunner.
+        testInstrumentationRunner = "com.blaineam.haven.HavenTestRunner"
 
         // We ship prebuilt .so files in jniLibs; keep the APK to the ABIs we build.
         ndk {

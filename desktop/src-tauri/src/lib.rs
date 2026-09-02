@@ -17,6 +17,7 @@ mod igimport;
 mod instagram;
 mod localmedia;
 mod mediaresume;
+mod netgate;
 // qa-cmd v2 driver (docs/QA.md) — same rule as demo: `cfg`, not a runtime check, so no release
 // binary carries a file-drop remote control. See qa.rs for the contract.
 #[cfg(debug_assertions)]
@@ -313,18 +314,12 @@ fn restore_window(app: &tauri::AppHandle) {
     });
 }
 
-/// True when this run must never bring the P2P node online (the demo/screenshot capture, which has a
-/// synthetic cast that must never reach a real peer). Always false in release: the module that reads
-/// the env var doesn't exist there.
+/// True when this run must talk to NOTHING — the demo/screenshot capture, whose synthetic cast must
+/// never reach a real peer. Always false in release; see `netgate` for why, and for the list of
+/// transports that enforce it. The skip below is now a courtesy rather than the guarantee: every
+/// outbound lane refuses on its own, so a UI-driven command cannot go around it.
 fn no_net() -> bool {
-    #[cfg(debug_assertions)]
-    {
-        demo::no_net()
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        false
-    }
+    netgate::offline()
 }
 
 /// The identity to run as: normally the roster's active one, but `HAVEN_DEMO=1` (debug only) swaps in

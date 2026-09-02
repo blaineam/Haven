@@ -54,6 +54,9 @@ object NearbyTransport {
     }
 
     fun start(context: Context) {
+        // haven_no_net: nearby is the loudest lane in a test lab — it advertises and discovers over
+        // Wi-Fi/Bluetooth, and any other Haven install in range can ask to connect.
+        if (HavenOffline.enabled) return
         if (active) return
         val appCtx = context.applicationContext
         ctx = appCtx

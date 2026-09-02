@@ -31,25 +31,41 @@ private const val TAG = "DemoSeed"
  * Launch flags (read from the Activity intent extras):
  *   haven_demo (bool)            seed the synthetic dataset + jump into the app
  *   haven_skip_onboarding (bool) implied true whenever haven_demo is on (no onboarding flow)
- *   haven_no_net (bool)          never bring the live P2P node online (offline, fast, deterministic)
+ *   haven_no_net (bool)          talk to NOTHING — no iroh node, no relay HTTP, no Multipeer-style
+ *                                nearby, no push, no S3 (offline, fast, deterministic). Stands on
+ *                                its own: it does NOT need haven_demo. See [HavenOffline].
  *   haven_tab (string)           which tab is selected at launch: circle | messages | you
  */
 object DemoEnv {
     @Volatile var isDemo = false; private set
     @Volatile var skipOnboarding = false; private set
-    @Volatile var noNet = false; private set
     @Volatile var tab: String? = null; private set
 
-    /** Read launch flags from the Activity intent. No-op (everything off) in a release build. */
+    /** Read launch flags from the Activity intent. No-op (everything off) in a release build.
+     *
+     *  There is deliberately no `noNet` field here any more: [HavenOffline] is the one place that
+     *  answers "are we offline", and a second name for the same state is what let the old code read
+     *  the flag in one branch and gate on it in another. */
     fun configure(intent: Intent?) {
         if (!BuildConfig.DEBUG || intent == null) return
+        // Tri-state on purpose: present-and-true, present-and-false, absent. Read BEFORE the demo
+        // check — this used to sit below the `if (!isDemo) return`, so asking for an offline run
+        // without also asking for the synthetic dataset silently did nothing, and the app went
+        // online with the device's real identity.
+        val asked: Boolean? =
+            if (intent.hasExtra("haven_no_net")) intent.getBooleanExtra("haven_no_net", false) else null
+        if (asked == true) HavenOffline.set(true)
         isDemo = intent.getBooleanExtra("haven_demo", false)
         if (!isDemo) return
+        // Demo IMPLIES offline: a synthetic cast must never reach a real peer, and neither capture
+        // script passes `haven_no_net` — so every Play Store screenshot used to be taken with the
+        // node up and this device published to the public directory. `--ez haven_no_net false` is
+        // still honoured, for a demo run that deliberately wants the wire.
+        if (asked != false) HavenOffline.set(true)
         // Demo always skips onboarding so screenshots land straight in the populated app.
         skipOnboarding = intent.getBooleanExtra("haven_skip_onboarding", true)
-        noNet = intent.getBooleanExtra("haven_no_net", false)
         tab = intent.getStringExtra("haven_tab")
-        Log.i(TAG, "demo on (tab=$tab noNet=$noNet)")
+        Log.i(TAG, "demo on (tab=$tab offline=${HavenOffline.enabled})")
     }
 }
 

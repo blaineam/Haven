@@ -118,6 +118,22 @@ object HavenNet : InboundListener {
     var started = mutableStateOf(false); private set
     var feedVersion = mutableStateOf(0); private set   // bump to recompose the feed
     var relayActive = mutableStateOf(false); private set
+
+    /**
+     * Present the offline demo as a healthy, connected circle for the hero shots — the three flags
+     * the connection chip reads, set without a node. iOS parity (`FeedStore.seedDemoIfNeeded`).
+     *
+     * Needed because `haven_demo` now implies `haven_no_net`: the synthetic cast must never reach a
+     * real peer, so [start] returns early and `started` would otherwise leave every Play Store
+     * screenshot showing an amber "Connecting" chip. DEBUG-only by construction — nothing outside
+     * the demo seeder calls it, and [HavenOffline] cannot be armed in a release build at all.
+     */
+    fun presentDemoConnected() {
+        if (!HavenOffline.enabled) return
+        started.value = true
+        internetActive.value = true
+        relayActive.value = true
+    }
     @Volatile var isForeground = false   // set by the UI lifecycle; suppresses notifications when open   // true once a mailbox put/get succeeds
 
     // Circle relay/mailbox: circleId -> ORDERED list of relay node hexes. Posts are mirrored to
@@ -660,6 +676,10 @@ object HavenNet : InboundListener {
 
     /** Start the iroh node and begin syncing. Safe to call repeatedly. */
     fun start() {
+        // haven_no_net: this was the ONLY thing the flag ever gated, and only in demo mode. It is
+        // now the least of it — every lane below refuses on its own — but the node still must not
+        // bind, and the sync/poll heartbeats this arms still must not be scheduled.
+        if (HavenOffline.enabled) return
         if (node != null) return
         bumpActivity()   // seed activity NOW so launch starts at tight cadence (idle=huge would else max-back-off)
         // DIAGNOSTIC: capture iroh/noq connection-level logs to filesDir/iroh-trace.log BEFORE the node starts.
@@ -792,6 +812,7 @@ object HavenNet : InboundListener {
      *  the due poll so the heartbeat doesn't immediately repeat it. */
     @Volatile private var pollNowJob: Job? = null
     fun pollMailboxNow() {
+        if (HavenOffline.enabled) return   // haven_no_net — see `start`
         if (!ready) return
         if (pollNowJob?.isActive == true) return
         pollNowJob = scope.launch {
@@ -2832,6 +2853,9 @@ object HavenNet : InboundListener {
     private var lastOwnDeviceCatchupMs: Long = 0
     private var ownDeviceCatchupInFlight = false
     fun syncWithContacts() {
+        // haven_no_net: the fan-out is a hybrid-PQ seal per member per circle. Refuse before doing
+        // that work for a lane that would drop it.
+        if (HavenOffline.enabled) return
         if (!ready) return
         val nowMs = System.currentTimeMillis()
         val resendHistory = nowMs - lastHistoryResendMs > 180_000   // ~3 min, not every tick
@@ -4046,6 +4070,7 @@ object HavenNet : InboundListener {
     }
     /** On launch: auto-start Nearby if wanted (default) and the perms are already granted. */
     fun restoreNearbyIfWanted() {
+        if (HavenOffline.enabled) return   // haven_no_net: no nearby advertise/discover
         if (nearbyWanted() && NearbyTransport.hasPermissions(appContext)) runCatching { NearbyTransport.start(appContext) }
     }
 
@@ -4900,6 +4925,10 @@ object HavenNet : InboundListener {
         set(v) { prefs.edit().putLong("relay.mediaMaxBytes", v.coerceAtLeast(0)).apply(); bumpRelays() }
 
     fun startHosting() {
+        // haven_no_net: hosting is inbound network — it attaches a relay server and opens an HTTP
+        // interface on a port. It is also a self-rearming wait: the retry below fires every second
+        // until the node exists, and under the flag it never will.
+        if (HavenOffline.enabled) return
         if (relayHost != null) return
         val n = node ?: run {
             // Node not up yet — retry shortly; the relay can't exist without the node to attach to.
@@ -5117,6 +5146,7 @@ object HavenNet : InboundListener {
     }
 
     private suspend fun relayClientFor(nodeHex: String): RelayClient? = relayMutex.withLock {
+        if (HavenOffline.enabled) return null   // haven_no_net: no dials
         relayClients[nodeHex]?.let { return it }
         // NEVER dial our OWN account node id. Relays now share the account node id, and same-account
         // sibling devices share it too — so dialing it is a self-dial, which sends iroh's path discovery
@@ -5339,6 +5369,9 @@ object HavenNet : InboundListener {
 
     /** Poll every circle's mailbox; ingest envelopes we haven't seen. */
     suspend fun pollMailbox() {
+        // haven_no_net: reached from `SyncWorker`, which `HavenApplication.onCreate` schedules —
+        // and that Application is created in the instrumented-test process too.
+        if (HavenOffline.enabled) return
         if (!ready) return
         // THE EPOCH MOVED -> re-seal my history under it, so anyone who joined or advanced past the
         // old epoch can still read what I already posted. Asked of the engine directly rather than
@@ -5900,6 +5933,9 @@ object HavenNet : InboundListener {
      *  SyncWorker so media that was mid-upload when the app was killed still reaches a relay. Idempotent:
      *  offerMediaJob de-dups, and uploadMedia skips anything the ledger already confirms. */
     fun drainPersistedBackups() {
+        // haven_no_net: the queue is persisted, so refusing only defers the work to a run that can
+        // actually deliver it — nothing is dropped.
+        if (HavenOffline.enabled) return
         ensurePendingBackups()
         val jobs = synchronized(pendingBackupsLock) { pendingBackups.toList() }
         for (k in jobs) {
@@ -6519,7 +6555,11 @@ object HavenNet : InboundListener {
      * `RelayMailboxStore.httpInterface` parity.
      */
     private fun httpUrlsFor(e: RelayEntry): List<String> =
-        if (e.httpToken.isEmpty()) emptyList()
+        // haven_no_net: the whole relay HTTP lane hangs off this lookup — hello put/fetch, mailbox
+        // LIST/GET, announce, self-sync slots, media. Refusing here retires all of it through the
+        // branch every caller already handles, and (unlike failing the requests) marks no URL bad
+        // and records no health, so a harness run leaves the persisted relay state untouched.
+        if (HavenOffline.enabled || e.httpToken.isEmpty()) emptyList()
         else e.httpUrls.filter { urlPlausiblyReachable(it) && (httpUrlBad[it] ?: 0L) < System.currentTimeMillis() }
 
     /** Is this URL worth trying from where we are? Public hosts always; a private address only when
@@ -6558,6 +6598,7 @@ object HavenNet : InboundListener {
     class RelayForbidden : java.io.IOException("relay refused (401/403)")
 
     private fun relayHttpGet(base: String, token: String, key: String): Result<ByteArray?> = runCatching {
+        if (HavenOffline.enabled) throw java.io.IOException("offline (haven_no_net)")
         val auth = httpAuth(token, "GET", key, ByteArray(0)) ?: throw java.io.IOException("cannot sign relay GET")
         val c = (java.net.URL(httpKeyUrl(base, key)).openConnection() as java.net.HttpURLConnection).apply {
             connectTimeout = 4000; readTimeout = 60000
@@ -6599,6 +6640,7 @@ object HavenNet : InboundListener {
      */
     private fun relayHttpListDelta(base: String, token: String, prefix: String,
                                    digest: String?): Result<Pair<List<String>?, String?>> = runCatching {
+        if (HavenOffline.enabled) throw java.io.IOException("offline (haven_no_net)")
         val auth = httpAuth(token, "GET", prefix, ByteArray(0))
             ?: throw java.io.IOException("cannot sign relay LIST")
         val root = base.trimEnd('/')
@@ -6720,6 +6762,10 @@ object HavenNet : InboundListener {
      * manufactured by a permissions problem. iOS SharedStore.httpPut parity.
      */
     private fun relayHttpPut(base: String, token: String, key: String, body: ByteArray): Result<Unit> = runCatching {
+        // haven_no_net backstop. `httpUrlsFor` already refuses, so no live caller reaches here — but
+        // these three primitives are the only place our own bytes hit the relay wire, and a future
+        // route built from a base and token some other way must not slip past.
+        if (HavenOffline.enabled) throw java.io.IOException("offline (haven_no_net)")
         // Digest over the EXACT bytes written below — `body` is streamed verbatim, unmodified.
         val auth = httpAuth(token, "PUT", key, body) ?: throw java.io.IOException("no device key to sign PUT")
         val c = (java.net.URL(httpKeyUrl(base, key)).openConnection() as java.net.HttpURLConnection).apply {

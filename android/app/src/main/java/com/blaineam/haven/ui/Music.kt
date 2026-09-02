@@ -78,6 +78,9 @@ fun rememberArtwork(raw: String?): ImageBitmap? {
     var bmp by remember(url) { mutableStateOf(artCache[url]) }
     LaunchedEffect(url) {
         if (artCache.containsKey(url)) { bmp = artCache[url]; return@LaunchedEffect }
+        // haven_no_net: this fires from composition, so every song chip that scrolls past would
+        // otherwise fetch remote artwork. No art is the honest render for an offline run.
+        if (com.blaineam.haven.core.HavenOffline.enabled) return@LaunchedEffect
         val b = withContext(Dispatchers.IO) {
             runCatching { URL(url).openStream().use { BitmapFactory.decodeStream(it) }?.asImageBitmap() }.getOrNull()
         }
@@ -168,6 +171,7 @@ object MusicPlayer : com.blaineam.haven.core.AudioFocus.Holder {
      * restarting on every advance.
      */
     fun play(context: android.content.Context, url: String) {
+        if (com.blaineam.haven.core.HavenOffline.enabled) return   // haven_no_net: no 30s stream
         if (playingUrl == url) return
         stop()
         // Call audio priority: never start a song preview while a call is ringing/connecting/live.

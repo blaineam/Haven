@@ -16,6 +16,10 @@ import java.util.concurrent.TimeUnit
  */
 class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
+        // haven_no_net: `HavenApplication.onCreate` schedules this, and that Application is created
+        // in the instrumented-test process too — so on a device carrying a real identity this was a
+        // periodic mailbox poll running underneath `connectedDebugAndroidTest`.
+        if (HavenOffline.enabled) return Result.success()
         runCatching {
             HavenNet.init(applicationContext)
             HavenNet.pollMailbox()
@@ -30,6 +34,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
     companion object {
         fun schedule(context: Context) {
             Notifications.ensureChannel(context)
+            if (HavenOffline.enabled) return   // haven_no_net: nothing periodic to enqueue
             val req = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                 .build()

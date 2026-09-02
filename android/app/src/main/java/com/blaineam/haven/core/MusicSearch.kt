@@ -81,6 +81,7 @@ object MusicSearch {
     }
 
     private fun httpGet(url: String): String? = runCatching {
+        if (HavenOffline.enabled) return null   // haven_no_net: no third-party lookup either
         val c = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 8000; readTimeout = 8000
             setRequestProperty("User-Agent", "Haven")

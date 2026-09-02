@@ -120,6 +120,7 @@ object CallHairpin {
     /** Open (or keep) a hairpin to [remote] for this call session. Idempotent per remote. */
     @Synchronized
     fun open(context: Context, sessionId: String, me: String, remote: String) {
+        if (HavenOffline.enabled) return   // haven_no_net: no WSS to the path proxy
         if (sessionId.isEmpty() || me.isEmpty() || remote.isEmpty() || me == remote) return
         if (sockets.containsKey(remote)) return
         val base = fabricBase(context) ?: run {

@@ -37,6 +37,7 @@ object ModerationLedger {
      *  so an unsigned POST must not be able to plant one. The signature binds subject + action +
      *  category, so a captured flag can't be re-aimed at someone else. */
     fun report(account: Account, subject: String, reason: String) {
+        if (HavenOffline.enabled) return   // haven_no_net: no ledger row leaves the harness
         if (subject.isEmpty()) return
         val category = reason.take(64)
         val ts = System.currentTimeMillis() / 1000

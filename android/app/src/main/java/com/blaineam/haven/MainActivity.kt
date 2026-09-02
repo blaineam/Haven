@@ -206,6 +206,11 @@ class MainActivity : FragmentActivity() {
      *  so the default-on mesh actually starts. If denied, the Settings toggle stays the manual path.
      *  Reads the pref DIRECTLY (not via HavenNet) — this runs in onCreate, before HavenNet.init(). */
     private fun maybeRequestNearby() {
+        // haven_no_net: never ask for a capability the run has disabled. `DemoEnv.configure` has
+        // already armed the gate by the time onCreate reaches here. This is also what keeps the
+        // system dialog out of the Play Store captures — iOS guards its notification prompt for the
+        // same reason. The "asked" pref is deliberately NOT stamped, so a real launch still asks.
+        if (com.blaineam.haven.core.HavenOffline.enabled) return
         val prefs = getSharedPreferences("haven.nearby", MODE_PRIVATE)
         if (!prefs.getBoolean("on", true)) return   // nearby is default-on
         val perms = if (android.os.Build.VERSION.SDK_INT >= 33)

@@ -78,7 +78,12 @@ final class HavenUITests: XCTestCase {
         app.launchEnvironment["HAVEN_SCENE"] = "call"
         app.launch()
 
-        let minimize = app.buttons["callMinimize"].firstMatch
+        // Query by IDENTIFIER, not by element type: on the iOS 27 simulator XCUITest classifies this
+        // glass-styled Button as a PopUpButton under its "modern" automation attributes
+        // ("Automation type mismatch: computed Button … vs PopUpButton"), so `app.buttons[…]`
+        // found nothing while the control was on screen. The contract under test is the frame,
+        // not the accessibility role.
+        let minimize = app.descendants(matching: .any).matching(identifier: "callMinimize").firstMatch
         XCTAssertTrue(minimize.waitForExistence(timeout: 25), "the call scene should offer a way back")
 
         let frame = minimize.frame

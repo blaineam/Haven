@@ -31,6 +31,9 @@ final class ShazamRetryQueue: ObservableObject {
     }
 
     private static let key = "haven.shazam.retryQueue"
+    /// Posted on main whenever an entry leaves the queue for good — `postId` + `matched` — so the
+    /// manual rescan can keep its "n of m checked · k named" line honest.
+    nonisolated static let itemFinished = Notification.Name("haven.shazam.itemFinished")
     /// Give up after this many refusals. Six attempts spans roughly an hour of backoff, which is
     /// long enough to outlast a throttling window without retrying forever.
     private static let maxAttempts = 6
@@ -96,8 +99,13 @@ final class ShazamRetryQueue: ObservableObject {
                 continue                      // re-evaluate: something sooner may have been queued
             }
 
+            // Ledger gate: a deterministic answer recorded meanwhile, or a long back-off still running
+            // (see ShazamScanLedger), means this entry must cost nothing more.
+            guard await ShazamScanLedger.shared.shouldScan(item.postId) else {
+                remove(item.postId); finished(item.postId, matched: false); continue
+            }
             guard let clip = await Self.clipURL(for: item.videoRef) else {
-                remove(item.postId); continue // the media is gone; nothing to identify
+                remove(item.postId); finished(item.postId, matched: false); continue // the media is gone
             }
             defer { try? FileManager.default.removeItem(at: clip) }
 
@@ -109,7 +117,8 @@ final class ShazamRetryQueue: ObservableObject {
                 // deleted; now it counts as a refusal and the entry stays for another pass.
                 if await FeedStore.shared.attachSongCredit(postId: item.postId, circleId: item.circleId, track: track) {
                     HavenLog.sync("shazam-retry: MATCHED \(track.title) for \(item.postId.prefix(8))")
-                    remove(item.postId)
+                    await ShazamScanLedger.shared.record(item.postId, outcome: .matched)
+                    remove(item.postId); finished(item.postId, matched: true)
                     continue
                 }
                 HavenLog.sync("shazam-retry: matched \(track.title) but could not attach to \(item.postId.prefix(8)) — keeping")
@@ -119,7 +128,11 @@ final class ShazamRetryQueue: ObservableObject {
             // A definitive answer is not worth retrying — only a refusal is (see identifyDetailed).
             guard refused, item.attempts + 1 < Self.maxAttempts else {
                 HavenLog.sync("shazam-retry: giving up on \(item.postId.prefix(8)) — \(outcome.reason)")
-                remove(item.postId); continue
+                // Remember the answer: a deterministic miss is never asked again; a refusal that
+                // exhausted the queue's own back-off gets the ledger's longer one.
+                await ShazamScanLedger.shared.record(item.postId,
+                    outcome: refused ? .transient : ShazamDetector.ledgerOutcome(reason: outcome.reason, retryable: false))
+                remove(item.postId); finished(item.postId, matched: false); continue
             }
 
             // Exponential: 2m, 4m, 8m, 16m, 32m.
@@ -138,6 +151,10 @@ final class ShazamRetryQueue: ObservableObject {
     private func remove(_ postId: String) {
         items.removeAll { $0.postId == postId }
         save()
+    }
+    private func finished(_ postId: String, matched: Bool) {
+        NotificationCenter.default.post(name: Self.itemFinished, object: nil,
+                                        userInfo: ["postId": postId, "matched": matched])
     }
 
     private func save() {

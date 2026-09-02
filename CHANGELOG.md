@@ -113,6 +113,15 @@ keeping its own sound) existed only for imported Instagram reels — and rarely 
   attach fails.
 - **Import sheet:** "Name the song playing in reels (Shazam)" is its own switch, on by default and
   needing no Apple Music authorization, separate from the opt-in "Suggest a song for silent posts".
+- **Older videos inherit their chip when you play them.** The first time one of your own untagged
+  videos (an imported reel included) starts playing, it is scanned — after playback has started,
+  off the main actor, through the same one-at-a-time queue — and the chip lands on that row in
+  place. A per-post scan ledger (a small file in Application Support) remembers the answer, so a
+  clip is fingerprinted at most once for a definitive one and re-asked only after a back-off for a
+  transient refusal, a bounded number of times. Other people's videos are never scanned.
+- **Settings → Song credits → Rescan imported videos** walks every video of yours that still has
+  no chip — the import backlog — through that queue, with a "12 of 81 checked · 9 named" line.
+  Manual on purpose: a bulk pass never runs unasked.
 
 ### Fixed — network path churn no longer spins up a rebind storm
 

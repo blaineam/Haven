@@ -69,6 +69,14 @@ get the same treatment (`docs/instagram-import.md`).
   attempt (`matchAttemptFailed` / `internalError` / no answer) is retried from a persisted queue
   with exponential back-off — never a loop. "Not in catalog" is an answer and is not retried.
 - **Maker holds nothing:** no Haven server is involved; the request goes device → Apple.
+- **Older videos, on playback:** an own, untagged video (imported reels included) is scanned the
+  first time it plays — after playback starts, off the main actor, through the same queue. A
+  per-post ledger (`Application Support/haven-shazam-ledger.json`, written by a serialized actor)
+  records `matched / notInCatalog / noAudio / tooShort / badSignature / transient / exhausted`, so a
+  clip is fingerprinted at most once for a definitive answer and re-asked only after a back-off
+  (30 min × 2ⁿ, four tries) for a transient one. *Settings → Song credits → Rescan imported videos*
+  runs the backlog manually, one at a time, honouring the ledger. Only the author can attach a
+  credit, so other people's posts are never scanned.
 
 ## 3. Audio crossfade (music ↔ video)
 

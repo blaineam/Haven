@@ -127,6 +127,17 @@ enum ShazamDetector {
             durationMs: 0), "matched", false)
     }
 
+    /// The scan-ledger outcome for a miss, derived from the reason strings THIS file produces, so
+    /// the strings and their meaning live in one place.
+    static func ledgerOutcome(reason: String, retryable: Bool) -> ShazamScanOutcome {
+        if retryable { return .transient }
+        if reason.hasPrefix("not in catalog") || reason.hasPrefix("match had no title") { return .notInCatalog }
+        if reason.hasPrefix("no audio track") || reason.hasPrefix("could not read audio") { return .noAudio }
+        if reason.hasPrefix("audio only") { return .tooShort }
+        if reason.hasPrefix("signature duration invalid") { return .badSignature }
+        return .failed
+    }
+
     /// Why `signature(for:)` gave up — checked only on failure, so it costs nothing in the normal
     /// case. These are the guards that return instantly, which is exactly the 0.0s symptom.
     private static func signatureFailureReason(_ url: URL) async -> String {

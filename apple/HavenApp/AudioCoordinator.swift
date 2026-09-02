@@ -133,6 +133,9 @@ final class AudioCoordinator: ObservableObject {
         // Fall back to the registered player when the caller has none — see videoByPost.
         videoPlayer = video ?? videoByPost[postId]
         activeTrack = track
+        // A video is starting: give the song-credit scan its chance (own, untagged, unanswered
+        // posts only — see FeedStore.noteVideoPlaybackStarted; the work itself runs off-main later).
+        if videoPlayer != nil { FeedStore.shared.noteVideoPlaybackStarted(postId: postId) }
         // Play the video's own audio only when there's no song, the author left it unmuted, the app
         // isn't globally silenced, AND the viewer's GLOBAL video-sound toggle is on. The global flag is
         // what makes "tap one video to unmute" carry to every other video + survive loops.

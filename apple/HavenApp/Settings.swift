@@ -238,6 +238,7 @@ struct SettingsView: View {
     let accountStore: AccountStore
     var onReset: () -> Void
     @ObservedObject private var settings = SettingsStore.shared
+    @ObservedObject private var rescan = ShazamRescan.shared
     @ObservedObject private var pinnedStore = PinnedMediaStore.shared
     @State private var storageText = "…"
     @State private var cleaningMedia = false
@@ -362,9 +363,22 @@ struct SettingsView: View {
                 Section {
                     Toggle("Name the song in my videos", isOn: $settings.identifySongsInVideos)
                         .tint(HavenTheme.pink)
+                    Button {
+                        ShazamRescan.shared.start()
+                    } label: {
+                        HStack {
+                            Label("Rescan imported videos", systemImage: "shazam.logo")
+                            Spacer()
+                            if rescan.running { ProgressView().controlSize(.small) }
+                        }
+                    }
+                    .disabled(rescan.running || !settings.identifySongsInVideos)
+                    if let p = rescan.progress {
+                        Text(p).font(.footnote).foregroundStyle(.secondary)
+                    }
                 } header: { Text("Song credits") }
                 footer: {
-                    Text("When you post a video with music in it, Haven asks Apple's Shazam service what's playing and shows it as a credit — the video keeps its own sound. Only a short audio fingerprint is sent, never the video or the post.")
+                    Text("When you post a video with music in it, Haven asks Apple's Shazam service what's playing and shows it as a credit — the video keeps its own sound. Only a short audio fingerprint is sent, never the video or the post. It also names songs in your older videos when you play them, and Rescan checks every video of yours that has no song chip yet — imported reels included — one at a time, only when you ask.")
                 }
                 Section {
                     HStack {

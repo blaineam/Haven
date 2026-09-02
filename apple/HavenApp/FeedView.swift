@@ -3832,10 +3832,69 @@ final class FeedStore: ObservableObject {
         guard let ref = MediaVariants.displayRefs(media).first(where: { MediaKind(ref: $0) == .video }),
               let url = MediaStore.shared.storagePath(for: ref) else { return }
         Task { @MainActor in
-            guard await SongSuggester.hasAudio(url) else { return }
+            guard await SongSuggester.hasAudio(url) else {
+                await ShazamScanLedger.shared.record(postId, outcome: .noAudio)   // silent: never ask again
+                return
+            }
             ShazamRetryQueue.shared.enqueue(postId: postId, circleId: circleId, videoRef: ref, firstDelay: 0)
             ShazamRetryQueue.shared.start()
         }
+    }
+
+    /// A video post just started playing (every feed / story / zoom start funnels through
+    /// `AudioCoordinator.start`). If it is MINE, has no chip and the ledger says it has not been
+    /// answered, ask Shazam — the owner's request: an older, untagged video inherits its chip the
+    /// first time it is played. Cheap on the main actor (an id lookup in the active feed / DM cache
+    /// and a few flag checks); the ledger read, the audio-track probe and the identification run
+    /// off-main behind the queue's throttle, so playback and scrolling are never delayed. Imported
+    /// reels are authored by this account, so they qualify; other people's posts never do (only the
+    /// author can attach a credit, and a local-only pseudo chip would be a lie).
+    func noteVideoPlaybackStarted(postId: String) {
+        guard SettingsStore.shared.identifySongsInVideos, let (item, circleId) = locateCachedPost(postId) else { return }
+        guard item.isMe, !item.unsent, item.music == nil, !item.muteVideo else { return }
+        guard let ref = MediaVariants.displayRefs(item.media).first(where: { MediaKind(ref: $0) == .video }),
+              MediaStore.shared.hasLocalFile(ref),   // scan what is already here — never fetch media just to scan
+              let url = MediaStore.shared.storagePath(for: ref) else { return }
+        Task { @MainActor in
+            guard await ShazamScanLedger.shared.shouldScan(postId) else { return }
+            guard await SongSuggester.hasAudio(url) else {
+                await ShazamScanLedger.shared.record(postId, outcome: .noAudio)
+                return
+            }
+            ShazamRetryQueue.shared.enqueue(postId: postId, circleId: circleId, videoRef: ref, firstDelay: 0)
+            ShazamRetryQueue.shared.start()
+        }
+    }
+    /// The post and its circle from what is already decoded on the main actor — the active feed
+    /// (stories included) or a cached DM thread. Nothing here touches the engine.
+    private func locateCachedPost(_ postId: String) -> (FeedItemFfi, String)? {
+        if let it = items.first(where: { $0.id == postId }) { return (it, activeCircleId) }
+        for (cid, hit) in messagesCache {
+            if let it = hit.items.first(where: { $0.id == postId }) { return (it, cid) }
+        }
+        return nil
+    }
+    /// Every video post of MINE with no song chip whose bytes are on this device — the manual
+    /// rescan's worklist. The feed walk runs off-main under EngineGate; the local-file check on main.
+    func ownUntaggedVideoPosts() async -> [(postId: String, circleId: String, ref: String)] {
+        guard let social else { return [] }
+        let cids = circles.map(\.id)
+        let nowMs = now()
+        let found: [(postId: String, circleId: String, ref: String)] = await Task.detached(priority: .utility) {
+            await EngineGate.shared.run {
+                var out: [(postId: String, circleId: String, ref: String)] = []
+                for cid in cids {
+                    for item in social.feed(circleId: cid, nowMs: nowMs, viewerRetentionSecs: nil)
+                    where item.isMe && !item.unsent && item.music == nil && !item.muteVideo {
+                        if let ref = MediaVariants.displayRefs(item.media).first(where: { MediaKind(ref: $0) == .video }) {
+                            out.append((item.id, cid, ref))
+                        }
+                    }
+                }
+                return out
+            }
+        }.value
+        return found.filter { MediaStore.shared.hasLocalFile($0.ref) }
     }
 
     /// Attach an identified song CREDIT to a post that already published.
@@ -3866,7 +3925,12 @@ final class FeedStore: ObservableObject {
                                          media: item.media, music: track,
                                          muteVideo: item.muteVideo, createdAt: now()) else { return false }
         broadcastEvent(circleId, env, silent: true)
-        scheduleRefresh()
+        // The chip appears IN PLACE: patch the decoded item rather than rebuilding the feed — a full
+        // refresh() replaces the whole array and re-diffs the list under the reader, and the row
+        // being played is exactly where the owner is looking.
+        if let i = items.firstIndex(where: { $0.id == postId }) { items[i].music = track }
+        else { scheduleRefresh() }
+        messagesCache.removeValue(forKey: circleId)   // a DM thread re-reads on its next paint
         return true
     }
 

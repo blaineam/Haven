@@ -774,6 +774,7 @@ struct StoryViewer: View {
             }
             player = p
             p.play()
+            FeedStore.shared.noteVideoPlaybackStarted(postId: s.id)   // song-credit scan for own untagged stories
             // Swap to the audio-free composition once it resolves. Muting alone is not enough (an
             // owned audio track still joins the session and ping-pongs with the music player), but it
             // holds the line until the composition is ready — and if it never resolves, muted IS the

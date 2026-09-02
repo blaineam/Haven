@@ -257,10 +257,21 @@ pub fn active_derp_urls() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every test here reads or writes the process-wide `POLICY`. Cargo runs tests on parallel
+    /// threads, so without this they interleave: `apply_derp_urls_prefers_haven_but_keeps_n0`
+    /// asserted `prefer_custom_relays` right after a sibling's `apply_derp_urls(vec![])` reset it
+    /// (soren core lane, 2026-09-01 — passes in isolation, fails under load). One lock, taken by
+    /// every test, restores the sequential assumption; a poisoned lock is still a valid lock.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
     use crate::discovery::{RelayBook, RelayEntry};
 
     #[test]
     fn default_policy_is_n0_default_mode() {
+        let _serial = serial();
         let p = EndpointPolicy::default();
         assert!(p.use_n0_relays);
         assert!(!p.prefer_custom_relays);
@@ -269,12 +280,14 @@ mod tests {
 
     #[test]
     fn haven_only_empty_falls_back_to_default() {
+        let _serial = serial();
         let p = EndpointPolicy::haven_only(std::iter::empty::<String>());
         assert!(matches!(p.relay_mode(), RelayMode::Default));
     }
 
     #[test]
     fn custom_url_with_flag_builds_custom_mode() {
+        let _serial = serial();
         let p = EndpointPolicy {
             use_n0_relays: false,
             custom_derp_urls: vec!["https://relay.example.com.".into()],
@@ -288,6 +301,7 @@ mod tests {
 
     #[test]
     fn apply_derp_urls_prefers_haven_but_keeps_n0() {
+        let _serial = serial();
         // A circle relay is an ADDITION, never a substitute. Dropping n0 the moment a circle
         // announced its own DERP made that (free-tunnel, rotating) hostname a single point of
         // failure for the whole transport — two devices on the same wi-fi could not even exchange
@@ -307,6 +321,7 @@ mod tests {
 
     #[test]
     fn merge_derp_urls_unions_without_dropping() {
+        let _serial = serial();
         apply_derp_urls(vec!["https://a.example.com".into()]);
         merge_derp_urls(vec!["https://b.example.com".into(), "https://a.example.com/".into()]);
         let urls = active_derp_urls();
@@ -316,6 +331,7 @@ mod tests {
 
     #[test]
     fn apply_derp_urls_trims_and_dedups() {
+        let _serial = serial();
         apply_derp_urls(vec![
             " https://x.example.com/ ".into(),
             "https://x.example.com".into(),
@@ -327,6 +343,7 @@ mod tests {
 
     #[test]
     fn custom_urls_ignored_when_flag_off() {
+        let _serial = serial();
         let p = EndpointPolicy {
             use_n0_relays: true,
             custom_derp_urls: vec!["https://relay.example.com.".into()],
@@ -337,6 +354,7 @@ mod tests {
 
     #[test]
     fn derp_urls_from_book_skips_empty_and_tombstones() {
+        let _serial = serial();
         let mut b = RelayBook::default();
         b.upsert("aa", "h:8674", "home", "https://live.example.com");
         b.upsert("bb", "h:8674", "dead", "");
@@ -348,6 +366,7 @@ mod tests {
 
     #[test]
     fn upsert_preserves_derp_url() {
+        let _serial = serial();
         let mut b = RelayBook::default();
         b.upsert("aa", "127.0.0.1:8674", "mac", "https://abc.trycloudflare.com");
         assert_eq!(b.entries["aa"].derp_url, "https://abc.trycloudflare.com");
@@ -359,6 +378,7 @@ mod tests {
 
     #[test]
     fn relay_entry_default_derp_is_empty() {
+        let _serial = serial();
         let e = RelayEntry {
             node_hex: "x".into(),
             http: "h".into(),

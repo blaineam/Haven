@@ -9511,8 +9511,11 @@ mod net_tests {
     fn s4_ffi_seedless_roster_only_moves_forward() {
         let (primary, seedless, primary_wire, _key) = grant_seedless([98u8; 32]);
         // Re-ingesting the very same wire changes nothing (adopt_if_newer sees no higher version).
-        assert!(!seedless.ingest_roster_wire(primary_wire.clone()),
-                "re-ingesting the same roster does not move forward");
+        // Assert on the STATUS: `ingest_roster_wire` is "not refused" (`>= 0`), so it is true here
+        // by design — `0` (already current) must not read as failure (see
+        // `ingest_roster_wire_status`). "Did not move forward" is exactly status 0.
+        assert_eq!(seedless.ingest_roster_wire_status(primary_wire.clone()), 0,
+                   "re-ingesting the same roster does not move forward");
         assert_eq!(seedless.my_device_roster_wire(), primary_wire, "and the held wire is unchanged");
 
         // A genuinely NEWER primary-signed roster (the primary registers a second device, bumping the

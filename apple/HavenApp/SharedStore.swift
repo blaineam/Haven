@@ -2330,9 +2330,18 @@ enum SharedStore {
         if let snapshot { try? snapshot.write(to: seenURL, atomically: true, encoding: .utf8) }
     }
 
-    private static func mailboxKey(_ circleId: String, _ env: Data) -> String {
-        let h = SHA256.hash(data: env).map { String(format: "%02x", $0) }.joined()
-        return "haven/mailbox/\(circleId)/\(h)"
+    /// Nonisolated + a table hex encode: this used to be `String(format: "%02x")` × 32 on the main
+    /// actor per envelope, and the launch flush runs it for every queued item (stall detector,
+    /// 2026-09-01: 0.54s in `mailboxKey` under `uploadEvent`).
+    nonisolated private static func mailboxKey(_ circleId: String, _ env: Data) -> String {
+        "haven/mailbox/\(circleId)/\(hexString(SHA256.hash(data: env)))"
+    }
+    nonisolated private static func hexString<S: Sequence>(_ bytes: S) -> String where S.Element == UInt8 {
+        let digits = Array("0123456789abcdef".utf8)
+        var out = [UInt8]()
+        out.reserveCapacity(64)
+        for b in bytes { out.append(digits[Int(b >> 4)]); out.append(digits[Int(b & 0x0f)]) }
+        return String(decoding: out, as: UTF8.self)
     }
 
     /// The deterministic mailbox key an envelope will be uploaded under — PUBLIC so the author can
@@ -2492,9 +2501,16 @@ enum SharedStore {
     /// failed upload is retried rather than silently dropped.
     @discardableResult
     static func uploadEvent(circleId: String, env: Data) async -> Bool {
-        let key = mailboxKey(circleId, env)
         // Relay (common path) → owner's own bucket → member's pre-signed pool → legacy creds.
         let nodes = relayNodes(circleId)
+        // The key hash and the per-relay seen filter — which loads and splits the whole seen file on
+        // first use — are CPU + lock work; SharedStore is a @MainActor enum, so they ran on main for
+        // every item of the launch flush (stall detector, 2026-09-01: 0.61s in `withSeen` and 0.54s
+        // in `mailboxKey` under `uploadEvent`). One detached hop per envelope, both computed there.
+        let (key, unlanded): (String, [String]) = await Task.detached(priority: .utility) {
+            let k = mailboxKey(circleId, env)
+            return (k, nodes.filter { !seenContains("put:\($0)|\(k)") })
+        }.value
         if nodes.isEmpty {
             if seenContains(key) { return true }
             HavenLog.net("uploadEvent: no relays for circle=\(circleId.prefix(20)) — mailbox skip")
@@ -2508,7 +2524,6 @@ enum SharedStore {
             // sat in pending_epoch forever (512 buffered vs 177 applied on a live store — the
             // "pushes arrive, nothing opens" blackout's sender half). Same fix the hello lane
             // needed. Heads ride every post, so a missed relay converges on the next one.
-            let unlanded = nodes.filter { !seenContains("put:\($0)|\(key)") }
             if unlanded.isEmpty { return true }
             var landed = false
             for node in unlanded {

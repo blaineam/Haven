@@ -630,13 +630,14 @@ struct RootView: View {
         }
         .onAppear {
             accountStore.reloadIfTemporary()
-            FeedStore.shared.configureForCurrentIdentity()   // seeded or seedless (S4)
-            #if os(iOS)
-            // The engine exists as of this line, so anything the share sheet queued can go out now.
-            // A cold launch straight from a share hits `onOpenURL` BEFORE this, when there was no
-            // engine to send with.
-            Task { await ShareRouter.shared.ingest() }
-            #endif
+            // The engine boots off the main actor; the share-sheet drain runs once it exists
+            // (immediately when it already does). A cold launch straight from a share hits
+            // `onOpenURL` BEFORE this, when there was no engine to send with.
+            FeedStore.shared.configureForCurrentIdentity {   // seeded or seedless (S4)
+                #if os(iOS)
+                Task { await ShareRouter.shared.ingest() }
+                #endif
+            }
             // Screenshot harness: bring up the group-call overlay over the seeded feed.
             if DemoEnv.scene == .call { DemoSeeder.startDemoCall() }
             if ProcessInfo.processInfo.environment["HAVEN_OPEN_CONNECT"] == "1" {

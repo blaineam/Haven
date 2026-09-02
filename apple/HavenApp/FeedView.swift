@@ -260,7 +260,7 @@ final class FeedStore: ObservableObject {
     static let shared = FeedStore()
 
     private var social: HavenSocial? {
-        didSet { cachedAccountHex = ""; cachedDeviceHex = "" }   // the identity cache follows the engine instance
+        didSet { cachedAccountHex = ""; cachedDeviceHex = ""; circleMembersCache.removeAll() }   // caches follow the engine instance
     }
     // MARK: Identity cache (stall detector, 2026-09-01)
     //
@@ -279,6 +279,26 @@ final class FeedStore: ObservableObject {
     private func refreshIdentityCache() {
         cachedAccountHex = social?.myNodeHex() ?? ""
         cachedDeviceHex = social?.myDeviceNodeHex() ?? ""
+    }
+    // MARK: Circle members cache (stall detector, 2026-09-01)
+    //
+    // `social.contactNodeIds(circleId:)` takes the engine mutex. The DM helpers below are called from
+    // chat-list rows, deep links and the Watch snapshot — which rebuilds on every store publish — so
+    // at launch `WatchSessionManager.buildSnapshot → dmPartnerName → contactNodeIds` parked main for
+    // 2.59s behind the first drain. Members are read here once, lock-free: filled on the main actor
+    // right after boot (before any background engine work exists), then kept fresh by the off-main
+    // readers (the sync pass, the DM purge). An absent entry falls back to the engine.
+    private var circleMembersCache: [String: [String]] = [:]
+    func cachedMembers(_ circleId: String) -> [String] {
+        if let m = circleMembersCache[circleId] { return m }
+        guard let social else { return [] }
+        let m = social.contactNodeIds(circleId: circleId)
+        circleMembersCache[circleId] = m
+        return m
+    }
+    private func warmCircleMembersCache() {
+        guard let social else { return }
+        for c in circles { circleMembersCache[c.id] = social.contactNodeIds(circleId: c.id) }
     }
     /// Floor between two epoch-change re-seals: each is a hybrid PQ signature per event, so a fleet
     /// registering several devices at once must coalesce into one pass.
@@ -578,16 +598,16 @@ final class FeedStore: ObservableObject {
     }
 
     /// Legacy entry point — unchanged callers keep working. Seedless devices boot via `configure(mode:)`.
-    func configure(seed: Data) { configure(mode: .seeded(seed)) }
+    func configure(seed: Data, then: (() -> Void)? = nil) { configure(mode: .seeded(seed), then: then) }
 
     /// Boot the engine in whichever mode this device is persisted as: seedless (S4 — account public
     /// bundle + device seed) or seeded (account master seed). The single boot entry the app/scene
     /// call sites use so a seedless device never accidentally boots seeded off a throwaway seed.
-    func configureForCurrentIdentity() {
+    func configureForCurrentIdentity(then: (() -> Void)? = nil) {
         if SeedlessState.isEnabled, let bundle = AccountPublicStore.load() {
-            configure(mode: .seedless(accountBundle: bundle, deviceSeed: DeviceKeyStore.deviceAccount().secretSeed()))
+            configure(mode: .seedless(accountBundle: bundle, deviceSeed: DeviceKeyStore.deviceAccount().secretSeed()), then: then)
         } else if let seed = AccountStore.storedSeed() {
-            configure(seed: seed)
+            configure(seed: seed, then: then)
         } else {
             // No keychain seed (locked, missing entitlement on unsigned sim builds, or first-run race).
             // Without a configure(), `online` stays false forever and the feed is a dead Offline shell.
@@ -606,16 +626,57 @@ final class FeedStore: ObservableObject {
                 seed = Data(bytes)
                 UserDefaults.standard.set(seed.base64EncodedString(), forKey: udKey)
             }
-            configure(seed: seed)
+            configure(seed: seed, then: then)
         }
     }
 
 
-    func configure(mode: BootMode) {
-        guard social == nil else { return }
+    /// Booting the engine — constructing it, adopting the device identity, IMPORTING the persisted
+    /// state and self-registering — is real work: import_state re-parses every member of every
+    /// circle, and each `HavenId::from_bytes` expands an ML-DSA public key through SHAKE. The stall
+    /// detector caught exactly that on the main thread at +1s of launch, under the first render
+    /// (0.83s: `configure → importState → merge_circle → HavenId::from_bytes → ml_dsa::rej_ntt_poly`).
+    /// The boot now runs in one EngineGate pass off-main; `finishConfigure` continues on the main
+    /// actor with the engine published, in the same order as before. Until then `social` is nil —
+    /// every entry point already guards on it (`engineReady` says so) — and a caller that needs the
+    /// engine next passes `then:`, which runs after the boot (immediately when it already exists).
+    private var configureInFlight = false
+    private var configureCompletions: [() -> Void] = []
+    func configure(mode: BootMode, then: (() -> Void)? = nil) {
+        guard social == nil, !configureInFlight else {
+            if social != nil { then?() } else if let then { configureCompletions.append(then) }
+            return
+        }
+        configureInFlight = true
+        if let then { configureCompletions.append(then) }
         // Background launch never gets scenePhase — pin the flag from the system before any
         // Multipeer / timer / daily-backfill work below can treat a pocket wake as "on screen".
         syncForegroundFromSystem()
+        // Inputs the boot needs, read on the main actor (keychain-backed stores, prefs, the state path).
+        let deviceSeed = DeviceKeyStore.deviceAccount().secretSeed()
+        let deviceBundle = DeviceKeyStore.deviceBundle()
+        let deviceName = DeviceKeyStore.deviceName
+        let rosterWire = SeedlessRosterStore.load()
+        let stateURL = self.stateURL
+        let isDemo = DemoEnv.isDemo
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let booted = await EngineGate.shared.run {
+                Self.bootEngine(mode: mode, deviceSeed: deviceSeed, deviceBundle: deviceBundle, deviceName: deviceName,
+                                rosterWire: rosterWire, stateURL: stateURL, isDemo: isDemo)
+            }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.configureInFlight = false
+                self.finishConfigure(booted, mode: mode)
+            }
+        }
+    }
+
+    /// Construct + identity + import + register, off the main actor. The ORDER is unchanged from the
+    /// synchronous version and matters — see the comments inline.
+    nonisolated private static func bootEngine(mode: BootMode, deviceSeed: Data, deviceBundle: Data, deviceName: String,
+                                               rosterWire: Data?, stateURL: URL, isDemo: Bool) -> HavenSocial? {
+        let social: HavenSocial?
         let seedless: Bool
         switch mode {
         case .seeded(let seed):
@@ -627,30 +688,26 @@ final class FeedStore: ObservableObject {
             //    and its in-app relay (shared endpoint) serves on that id. One endpoint, no leak.
             //  • A NON-HOST device takes a per-DEVICE transport id so it never competes with the host for the
             //    account id; friends learn it via the host's roster. (Sealing stays account-based either way.)
-            if let social {
-                // Per-INSTANCE identity: every client instance takes its OWN unique transport/relay id
-                // (DeviceKeyStore — unique per install), so any number of clients can run under ONE account id
-                // without colliding on iroh discovery. The account id is the IDENTITY only (signing + the
-                // contact card friends pin), never a transport address. Each client hosts its relay on its own
-                // id; friends reach each via the circle's relay list (the set of these ids).
-                _ = social.useDeviceIdentity(deviceSeed: DeviceKeyStore.deviceAccount().secretSeed())
-                refreshIdentityCache()   // identity is final from here on — every later read is lock-free
-                HavenLog.net("configure account=\(myNodeHex.prefix(10)) instance=\(myDeviceNodeHex.prefix(10))")
-            }
-        case .seedless(let bundle, let deviceSeed):
+            // Per-INSTANCE identity: every client instance takes its OWN unique transport/relay id
+            // (DeviceKeyStore — unique per install), so any number of clients can run under ONE account id
+            // without colliding on iroh discovery. The account id is the IDENTITY only (signing + the
+            // contact card friends pin), never a transport address. Each client hosts its relay on its own
+            // id; friends reach each via the circle's relay list (the set of these ids).
+            _ = social?.useDeviceIdentity(deviceSeed: deviceSeed)
+        case .seedless(let bundle, let dSeed):
             seedless = true
             // The engine runs under the DEVICE key with the account PUBLIC bundle as its trust anchor.
             // `newSeedless` adopts the device identity internally, so no separate useDeviceIdentity call.
-            social = try? HavenSocial.newSeedless(accountPublicBundle: bundle, deviceSeed: deviceSeed)
-            if let social {
-                // Reinstall the primary-signed roster wire we persisted at enrollment (VERBATIM, incl. the
-                // SeedDropCapability trailer) so this device is authorized + rebroadcasts the exact bytes.
-                if let wire = SeedlessRosterStore.load(), !wire.isEmpty { _ = social.ingestRosterWire(wire: wire) }
-                refreshIdentityCache()   // identity is final from here on — every later read is lock-free
-                HavenLog.net("configure SEEDLESS account=\(myNodeHex.prefix(10)) instance=\(myDeviceNodeHex.prefix(10))")
-            }
+            social = try? HavenSocial.newSeedless(accountPublicBundle: bundle, deviceSeed: dSeed)
+            // Reinstall the primary-signed roster wire we persisted at enrollment (VERBATIM, incl. the
+            // SeedDropCapability trailer) so this device is authorized + rebroadcasts the exact bytes.
+            if let social, let rosterWire, !rosterWire.isEmpty { _ = social.ingestRosterWire(wire: rosterWire) }
         }
-        loadPersisted()
+        guard let social else { return nil }
+        // Demo mode reseeds a fresh deterministic dataset on every launch, so it must NOT load
+        // (or, later, persist) engine state — otherwise the synthetic posts/DMs/contacts compound
+        // across the many per-scene launches the screenshot harness makes.
+        if !isDemo, let data = try? Data(contentsOf: stateURL) { social.importState(data: data) }
         // Self-register THIS device AFTER importing persisted state. Registering first wrote a fresh
         // v1 roster that import_state's higher-version-wins restore then CLOBBERED with the persisted
         // roster — so if that roster carried a (stale) revocation of our own device id, the device
@@ -661,25 +718,45 @@ final class FeedStore: ObservableObject {
         // SEEDLESS: skip it entirely — a seedless device has no account key to sign a roster with
         // (register_device returns empty; the primary is the sole roster authority, plan §2.2 A1). Its
         // authorization comes from the primary-signed roster wire ingested above.
-        if let social, !seedless {
-            _ = social.registerDevice(deviceBundle: DeviceKeyStore.deviceBundle(),
-                                      name: DeviceKeyStore.deviceName,
+        if !seedless {
+            _ = social.registerDevice(deviceBundle: deviceBundle, name: deviceName,
                                       createdAt: UInt64(Date().timeIntervalSince1970))
+        }
+        return social
+    }
+
+    /// The main-actor half of `configure`: publish the engine, then everything that used to follow
+    /// the boot, in the same order.
+    private func finishConfigure(_ booted: HavenSocial?, mode: BootMode) {
+        defer {
+            let done = configureCompletions
+            configureCompletions.removeAll()
+            for f in done { f() }
+        }
+        let seedless: Bool
+        if case .seedless = mode { seedless = true } else { seedless = false }
+        social = booted   // the didSet drops the identity cache; identity is final now
+        refreshIdentityCache()
+        if social != nil {
+            HavenLog.net("configure\(seedless ? " SEEDLESS" : "") account=\(myNodeHex.prefix(10)) instance=\(myDeviceNodeHex.prefix(10))")
         }
         social?.setKeepOwnPosts(on: SettingsStore.shared.keepMyPosts)   // apply the archive preference
         ensureDefaultCircle()   // a brand-new identity must have its own "default" circle to post into
         bumpActivity()   // seed activity NOW so launch starts at tight cadence (not instant max backoff)
         loadLastHeard()   // so "last seen" survives an app restart
         refreshCircles()     // also purges any contaminated DM membership (see refreshCircles)
+        warmCircleMembersCache()   // on main, BEFORE any background engine work exists (see cachedMembers)
         reconcileRemovals()  // heal old-build damage: purge engine members that are still client-tombstoned
         applyCryptoSwitches(seedless: seedless)   // Switch-Flip 1.0.7: re-apply the non-persisted crypto switches
+        // One-time badge compute at startup (kept OFF the per-refresh hot path) — BEFORE refresh(),
+        // so its per-DM feed() reads never contend with the rebuild refresh() starts off-main.
+        recomputeUnreadDMs()
         refresh()
         // Media-backup drain holds a UIApplication assertion. On a pocket cold launch (push /
         // BGAppRefresh) the wake path already runs one budgeted pass via slimBackgroundSync —
         // starting another here stacks assertions and keeps the process warm for the whole drain.
         // Foreground open: finish mid-flight uploads so the user sees them land.
         if appIsForeground, let social { MediaBackupQueue.shared.drainPersisted(social: social) }
-        recomputeUnreadDMs()   // one-time badge compute at startup (kept OFF the per-refresh hot path)
         seedDemoIfNeeded()   // HAVEN_DEMO=1 only — PII-free synthetic dataset for screenshots
         restoreReassemblies()   // pick half-finished media transfers back up instead of restarting them
         // Reclaim leaked produce/reassembly scratch every launch (an interrupted big-video export or a
@@ -942,7 +1019,7 @@ final class FeedStore: ObservableObject {
     // MARK: - Circles
 
     func refreshCircles() {
-        purgeDMIntrudersRaw()           // clean DM membership every time we read circles
+        scheduleDMIntruderPurge()       // clean DM membership every time we read circles (off-main)
         // A circle I've upgraded (or followed an upgrade off of) is SUPERSEDED — the owned successor
         // carries its name + members + history. The earlier fix only hid it via the per-device
         // `supersededCircleIds()`, which is NOT synced: my Mac (which didn't run the upgrade) kept showing
@@ -982,18 +1059,39 @@ final class FeedStore: ObservableObject {
 
     /// Evict anyone who isn't one of a DM's two parties (full-id match). Operates directly
     /// on the engine so it can run inside refreshCircles without recursing.
-    @discardableResult
-    private func purgeDMIntrudersRaw() -> Bool {
-        guard let social else { return false }
-        var fixed = false
-        for circle in social.circles() where circle.id.hasPrefix("dm:") {
-            for nodeHex in social.contactNodeIds(circleId: circle.id) where !dmCircleAllows(circle.id, nodeHex) {
-                social.removeFromCircle(circleId: circle.id, nodeHex: nodeHex)
-                fixed = true
+    /// Off the main actor (stall detector, 2026-09-01): the per-DM member reads and the removals run
+    /// in one EngineGate hold, and the pass refreshes the members cache for every circle it visits.
+    /// `dmCircleAllows` is a pure parse of the circle id, so the whole check is engine-only work.
+    private var dmPurgeInFlight = false
+    private func scheduleDMIntruderPurge() {
+        guard let social, !dmPurgeInFlight else { return }
+        dmPurgeInFlight = true
+        Task.detached(priority: .utility) { [weak self] in
+            let (fixed, members): (Bool, [String: [String]]) = await EngineGate.shared.run {
+                var fixed = false
+                var members: [String: [String]] = [:]
+                for circle in social.circles() {
+                    var m = social.contactNodeIds(circleId: circle.id)
+                    if circle.id.hasPrefix("dm:") {
+                        var purged = false
+                        for nodeHex in m where !Self.dmCircleAllows(circle.id, nodeHex) {
+                            social.removeFromCircle(circleId: circle.id, nodeHex: nodeHex)
+                            purged = true
+                        }
+                        if purged { fixed = true; m = social.contactNodeIds(circleId: circle.id) }
+                    }
+                    members[circle.id] = m
+                }
+                return (fixed, members)
+            }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.dmPurgeInFlight = false
+                guard self.social === social else { return }
+                for (cid, m) in members { self.circleMembersCache[cid] = m }
+                if fixed { self.persist() }
             }
         }
-        if fixed { persist() }
-        return fixed
     }
 
     var activeCircleName: String {
@@ -1412,7 +1510,8 @@ final class FeedStore: ObservableObject {
     /// True only if `nodeHex` is one of the full ids encoded in a `dm:` circle id — the guard that stops
     /// a third party from handshaking their way into a private DM. Works for 1:1 (two parties) AND group
     /// DMs (a `dm:` id encoding 3+ sorted members). Old short-prefix ids fail this and get purged.
-    func dmCircleAllows(_ circleId: String, _ nodeHex: String) -> Bool {
+    func dmCircleAllows(_ circleId: String, _ nodeHex: String) -> Bool { Self.dmCircleAllows(circleId, nodeHex) }
+    nonisolated static func dmCircleAllows(_ circleId: String, _ nodeHex: String) -> Bool {
         let parts = circleId.dropFirst(3).split(separator: "-").map(String.init)
         guard parts.count >= 2 else { return false }
         return parts.contains(nodeHex)
@@ -1460,13 +1559,13 @@ final class FeedStore: ObservableObject {
 
     /// All the OTHER members of a DM/group-DM (everyone but me) — used to ring everyone on a group call.
     func dmMemberHexes(_ circleId: String) -> [String] {
-        (social?.contactNodeIds(circleId: circleId) ?? []).filter { $0 != myNodeHex }
+        cachedMembers(circleId).filter { $0 != myNodeHex }
     }
 
     /// The display title of a DM: the other person's name for a 1:1, or a joined list for a group DM
     /// ("Alice, Bob & Carol").
     func dmPartnerName(_ circleId: String) -> String {
-        let others = (social?.contactNodeIds(circleId: circleId) ?? []).filter { $0 != myNodeHex }
+        let others = cachedMembers(circleId).filter { $0 != myNodeHex }
         let names = others.map { ContactsStore.shared.name(forNodePrefix: $0) ?? "Someone" }.sorted()
         switch names.count {
         case 0: return "Direct message"
@@ -1478,7 +1577,7 @@ final class FeedStore: ObservableObject {
 
     /// The other person's node id in a DM (for placing a call).
     func dmPartnerHex(_ circleId: String) -> String? {
-        (social?.contactNodeIds(circleId: circleId) ?? []).first { $0 != myNodeHex }
+        cachedMembers(circleId).first { $0 != myNodeHex }
     }
 
     // MARK: - Connection approval + block
@@ -2083,14 +2182,6 @@ final class FeedStore: ObservableObject {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("haven-feed.json")
     }
-    private func loadPersisted() {
-        // Demo mode reseeds a fresh deterministic dataset on every launch, so it must NOT load
-        // (or, below, persist) engine state — otherwise the synthetic posts/DMs/contacts compound
-        // across the many per-scene launches the screenshot harness makes.
-        guard !DemoEnv.isDemo else { return }
-        guard let social, let data = try? Data(contentsOf: stateURL) else { return }
-        social.importState(data: data)
-    }
     /// Trailing-edge debounce for `persist()`. Stall detector, 2026-09-01: at launch `configure`'s
     /// first persist() started a background `exportState` (100s of ms holding the engine mutex) at
     /// the exact moment the rest of configure / bringOnline still read the engine on the main actor
@@ -2422,11 +2513,11 @@ final class FeedStore: ObservableObject {
         return cachedDeviceHex
     }
     var contactCount: Int { ContactsStore.shared.contacts.count }
-    var handshakedCount: Int { social?.contactNodeIds(circleId: activeCircleId).count ?? 0 }
+    var handshakedCount: Int { cachedMembers(activeCircleId).count }
     /// True once we hold this contact's verified public bundle (handshake complete) —
     /// the point at which we can seal to / open from them.
     func isHandshaked(_ idHex: String) -> Bool {
-        social?.contactNodeIds(circleId: activeCircleId).contains(idHex) ?? false
+        cachedMembers(activeCircleId).contains(idHex)
     }
     /// True only if we've actually heard from them recently — a real live link, not
     /// just holding (possibly stale) keys.
@@ -4114,6 +4205,7 @@ final class FeedStore: ObservableObject {
                 for cid in circleIds {
                     self.seedDialTargets(cid, members: reads.members[cid] ?? [], deviceIds: reads.deviceIds)
                 }
+                for (cid, m) in reads.members { self.circleMembersCache[cid] = m }   // keeps the DM helpers lock-free
                 self.syncWithContactsApply(reads)
             }
         }
@@ -6112,10 +6204,12 @@ final class FeedStore: ObservableObject {
         flushPersistIfPending()   // the outgoing engine's last debounced export lands before it goes
         node = nil; nearby = nil; social = nil; items.removeAll(); circles.removeAll()
         RelayClients.clearAll()
-        configure(mode: .seedless(accountBundle: grant.accountBundle, deviceSeed: deviceSeed))
-        // 4. Ask the primary to push full state now (profile/circles/posts) → it answers with the
-        //    type-23 slot that seeds our base, plus the circle events.
-        sendToMyDevices(26, Data(DeviceKeyStore.deviceNodeHex().utf8))
+        // 4. Once the engine is up, ask the primary to push full state now (profile/circles/posts)
+        //    → it answers with the type-23 slot that seeds our base, plus the circle events. The
+        //    boot is asynchronous, so the ask rides its completion.
+        configure(mode: .seedless(accountBundle: grant.accountBundle, deviceSeed: deviceSeed)) { [weak self] in
+            self?.sendToMyDevices(26, Data(DeviceKeyStore.deviceNodeHex().utf8))
+        }
         NotificationManager.shared.notify(title: "Device linked",
                                           body: "This device is now linked — syncing your circles…",
                                           dedupeKey: "seedless-grant", persist: false)
@@ -6402,40 +6496,57 @@ final class FeedStore: ObservableObject {
         // Host Macs with large libraries: enqueue a bounded newest-first slice per pass so the
         // 2‑min tick can't dump thousands of seal jobs onto MediaBackupQueue at once.
         let perCircleCap = RelayHost.shared.serving ? 40 : 200
-        for cid in circleIds where SharedStore.hasMailbox(cid) {
-            let feed = social.feed(circleId: cid, nowMs: now(),
-                                   viewerRetentionSecs: CircleSettingsStore.shared.retentionSecs(cid))
-            var refs: [String] = []
-            var seen = Set<String>()
-            // Newest posts first (feed is reverse-chronological).
-            for item in feed {
-                for r in item.media where seen.insert(r).inserted { refs.append(r) }
-                for c in item.comments {
-                    for r in c.media where seen.insert(r).inserted { refs.append(r) }
+        let cids = circleIds.filter { SharedStore.hasMailbox($0) }
+        guard !cids.isEmpty else { return }
+        var retention: [String: UInt64?] = [:]
+        for cid in cids { retention[cid] = CircleSettingsStore.shared.retentionSecs(cid) }
+        let nowMs = now()
+        // The feed walk — a full decrypt per circle under the engine mutex — runs OFF the main actor
+        // (stall detector, 2026-09-01: 1.66s parked in `syncWithContactsApply → backfillMailboxMedia
+        // → social.feed`); only the enqueue decisions hop back.
+        Task.detached(priority: .utility) { [weak self] in
+            let refsByCircle: [(cid: String, refs: [String])] = await EngineGate.shared.run {
+                cids.map { cid in
+                    let feed = social.feed(circleId: cid, nowMs: nowMs, viewerRetentionSecs: retention[cid] ?? nil)
+                    var refs: [String] = []
+                    var seen = Set<String>()
+                    // Newest posts first (feed is reverse-chronological).
+                    for item in feed {
+                        for r in item.media where seen.insert(r).inserted { refs.append(r) }
+                        for c in item.comments {
+                            for r in c.media where seen.insert(r).inserted { refs.append(r) }
+                        }
+                    }
+                    return (cid, refs)
                 }
             }
-            var enqueued = 0
-            let ownRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
-            for ref in refs {
-                guard enqueued < perCircleCap else { break }
-                guard MediaStore.shared.has(ref), !MediaBackupBackoff.shouldSkip(ref) else { continue }
-                // Skip only when EVERY relay this circle publishes to already holds it. The old
-                // test was "any relay a DIFFERENT DEVICE can read" — one remote copy stopped the
-                // mirroring forever, so a blob that landed on the NAS never reached this Mac's
-                // relay (and vice versa), and any relay adopted, recovered, or GC-swept afterwards
-                // stayed empty for good. Redundancy across relays is the entire point of having
-                // several: a peer polls the relays IT knows, not the one that happened to win the
-                // race here. Exactly the per-(relay,key) shape the EVENT upload path needed.
-                let wanted = RelayMailboxStore.shared.relays(forCircle: cid)
-                if wanted.isEmpty {
-                    // No explicit relay set for this circle — fall back to the old remote test.
-                    if MediaBackupLedger.hasAnyRemote(ref, ownRelayHex: ownRelay) { continue }
-                } else {
-                    let held = Set(MediaBackupLedger.destinations(for: ref))
-                    if wanted.allSatisfy({ held.contains($0) }) { continue }
+            await MainActor.run { [weak self] in
+                guard let self, self.social === social else { return }
+                for (cid, refs) in refsByCircle {
+                    var enqueued = 0
+                    let ownRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
+                    for ref in refs {
+                        guard enqueued < perCircleCap else { break }
+                        guard MediaStore.shared.has(ref), !MediaBackupBackoff.shouldSkip(ref) else { continue }
+                        // Skip only when EVERY relay this circle publishes to already holds it. The old
+                        // test was "any relay a DIFFERENT DEVICE can read" — one remote copy stopped the
+                        // mirroring forever, so a blob that landed on the NAS never reached this Mac's
+                        // relay (and vice versa), and any relay adopted, recovered, or GC-swept afterwards
+                        // stayed empty for good. Redundancy across relays is the entire point of having
+                        // several: a peer polls the relays IT knows, not the one that happened to win the
+                        // race here. Exactly the per-(relay,key) shape the EVENT upload path needed.
+                        let wanted = RelayMailboxStore.shared.relays(forCircle: cid)
+                        if wanted.isEmpty {
+                            // No explicit relay set for this circle — fall back to the old remote test.
+                            if MediaBackupLedger.hasAnyRemote(ref, ownRelayHex: ownRelay) { continue }
+                        } else {
+                            let held = Set(MediaBackupLedger.destinations(for: ref))
+                            if wanted.allSatisfy({ held.contains($0) }) { continue }
+                        }
+                        MediaBackupQueue.shared.enqueue(ref, circleId: cid, social: social)
+                        enqueued += 1
+                    }
                 }
-                MediaBackupQueue.shared.enqueue(ref, circleId: cid, social: social)
-                enqueued += 1
             }
         }
     }
@@ -6635,7 +6746,7 @@ final class FeedStore: ObservableObject {
 
     // MARK: - Pre-signed S3 pool (advanced mailbox without sharing credentials)
 
-    func memberHexes(circleId: String) -> [String] { social?.contactNodeIds(circleId: circleId) ?? [] }
+    func memberHexes(circleId: String) -> [String] { cachedMembers(circleId) }
 
     /// (circleId, all member hexes incl. me) for every circle — the relay's membership allow-list
     /// (audit transport-F4). `social` is private, so RelayHost gets the data through this accessor.

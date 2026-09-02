@@ -290,6 +290,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.NotificationService
+        # No App Intents in this target: skip appintentsmetadataprocessor, whose "Metadata
+        # extraction skipped" line is a `warning:` in every clean build log.
+        LM_SKIP_METADATA_EXTRACTION: YES
         PRODUCT_MODULE_NAME: HavenNotificationService
         GENERATE_INFOPLIST_FILE: NO
         MARKETING_VERSION: "1.8.3"
@@ -322,6 +325,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.Broadcast
+        # No App Intents in this target: skip appintentsmetadataprocessor, whose "Metadata
+        # extraction skipped" line is a `warning:` in every clean build log.
+        LM_SKIP_METADATA_EXTRACTION: YES
         PRODUCT_MODULE_NAME: HavenBroadcast
         GENERATE_INFOPLIST_FILE: NO
         MARKETING_VERSION: "1.8.3"
@@ -372,6 +378,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.ShareExtension
+        # No App Intents in this target: skip appintentsmetadataprocessor, whose "Metadata
+        # extraction skipped" line is a `warning:` in every clean build log.
+        LM_SKIP_METADATA_EXTRACTION: YES
         PRODUCT_MODULE_NAME: HavenShareExtension
         GENERATE_INFOPLIST_FILE: NO
         MARKETING_VERSION: "1.8.3"
@@ -457,6 +466,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.watchkitapp
+        # No App Intents in this target: skip appintentsmetadataprocessor, whose "Metadata
+        # extraction skipped" line is a `warning:` in every clean build log.
+        LM_SKIP_METADATA_EXTRACTION: YES
         # Distinct product (bundle) name so the embedded watch app never collides with the
         # iOS app's Haven.app; the user-facing name is still "Haven" via CFBundleDisplayName.
         PRODUCT_NAME: HavenWatch

@@ -6,7 +6,7 @@ import Security
 // Every crypto switch (`set_mls_keying`, `set_seed_drop_retire`, `set_circle_creator`,
 // `set_circle_live_lane`) is NON-PERSISTED session state and GATED in core — flipping one ON changes
 // nothing on the wire until a whole circle (or the whole own-device fleet, for self-sync) is capable.
-// The app re-applies them on every launch (`FeedStore.applyCryptoSwitches`). These three little stores
+// The app re-applies them on every launch (`FeedStore.postBootPass`). These three little stores
 // hold the small amount of DURABLE bookkeeping the re-apply needs:
 //   • CircleCreatorStore  — which circles I authored, so §2 re-pins my authority root each launch.
 //   • SwitchFlipMigration — the one-time §1 account-leaf-retirement flag (don't rebroadcast every launch).

@@ -34,7 +34,15 @@ problem we own (not the user's email provider's).
 
 ## D3 — Group encryption via MLS (`mls-rs`), not pairwise Signal
 
-**Decision:** Use **MLS (RFC 9420)** for all E2E encryption, via AWS's **`mls-rs`**.
+> **Superseded in 1.0.7 — kept for the record.** The group layer that shipped is MLS-*shaped*, not
+> RFC 9420: TreeKEM mechanisms (propose/commit/welcome, O(log n) path updates, a one-way epoch
+> schedule) implemented over Haven's **own** hybrid post-quantum primitives in
+> `core/haven-p2p/src/treekem.rs`. There is **no `mls-rs` dependency** in the workspace. The reason is
+> D4 below: every ratified MLS ciphersuite is classical, so wire-interoperating with RFC 9420 would
+> have regressed the post-quantum posture that is the point of the product. The "1:1 chats are just
+> 2-member groups" framing survives. See `docs/TREEKEM-DESIGN.md`.
+
+**Decision (as taken):** Use **MLS (RFC 9420)** for all E2E encryption, via AWS's **`mls-rs`**.
 1:1 chats are just 2-member groups.
 
 **Why:** The product is *groups* (family, friends), and MLS is built for efficient

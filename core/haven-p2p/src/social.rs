@@ -20,8 +20,8 @@
 //! for circles with a verified owner and activates per circle as members update, so
 //! both paths stay live. This module's envelope format is unchanged either way — the
 //! tree only changes how the epoch key is *agreed*. See `docs/TREEKEM-DESIGN.md` for
-//! what shipped; `docs/DECISIONS.md` D3 records the ORIGINAL decision this layer
-//! supersedes (RFC 9420 via `mls-rs`) and still reads as if that were the plan.
+//! what shipped; `docs/DECISIONS.md` D3 is the ORIGINAL decision this layer supersedes
+//! (RFC 9420 via `mls-rs`), and is marked as superseded there.
 
 use std::collections::BTreeMap;
 

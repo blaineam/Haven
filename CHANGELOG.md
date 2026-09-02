@@ -9,6 +9,25 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 1.8.4 — in development
 
+### Fixed — on Android, a photo in a DM no longer vanishes the day after it is sent
+
+A story reply used to be a resealed copy of the story's own media, so the Messages bubble tried to
+spot those after the fact and swap them for "story no longer available" — story media is not meant
+to outlive the story. The test it used was "exactly one photo or video, and older than 24 hours."
+Nothing in that asks whether the message was a story reply at all. Any ordinary DM carrying a single
+photo or clip matched it the day after it was sent, and from then on the picture was gone — no
+thumbnail, no tap target, a placeholder for good, for both people in the conversation.
+
+There is no shape to test instead. A story is an ordinary post with the story flag and a 24-hour
+retention, so it carries whatever the author picked; the tall 9:16 frame belongs to the story
+viewer, not to the media. Checking for it would still miss a landscape story reply and would swallow
+every ordinary portrait video, which is 9:16 exactly.
+
+So the guess is gone. Since 1.4.5 a story reply carries a story **link** and no media copy at all,
+and that card resolves the real post and says the story expired precisely when it has — guessing was
+never what protected the current path. Replies from the few weeks before 1.4.5 now render as the
+photo they are, which is what iPhone and Mac have always done with the very same message.
+
 ### Fixed — on iPhone and Mac, a connection request no longer blanks out everything older in Activity
 
 The bell's list is a merge of two sources: rows the engine reduces out of your circles, and

@@ -704,17 +704,22 @@ private fun Bubble(
             dmPeerHex = peerHex, unsent = m.unsent, liveStories = live, keptMine = kept,
         )
     }
-    val visualRefs = com.blaineam.haven.core.MediaVariants.displayRefs(m.media).filter {
-        !com.blaineam.haven.core.LocalMedia.isAudio(it) && !com.blaineam.haven.core.LocalMedia.isFile(it)
-    }
-    // After 24h, a lone story-shaped visual with no openable story is treated as an expired
-    // story reply — never keep showing the resealed media forever.
-    val storyLifetimeMs = 24L * 60 * 60 * 1000
-    val replyAge = com.blaineam.haven.core.nowMs().toLong() - m.createdAt.toLong()
-    val looksLikeLegacyStoryReply = visualRefs.size == 1 && replyAge > storyLifetimeMs
+    // A story reply is identified by its POINTER — never by its shape or its age. This used to
+    // guess: one visual + older than 24h ⇒ "story no longer available". Nothing in that test asked
+    // whether the message WAS a story reply, so every ordinary DM carrying a single photo hid
+    // itself permanently the day after it was sent, and the photo never came back.
+    //
+    // There is no shape to test instead. A story is a post with the story flag and a 24h retention
+    // — it carries whatever aspect the author picked, and the 9:16 lives in the story VIEWER's
+    // frame, not in the media. An aspect check would miss a landscape story reply and would swallow
+    // every ordinary portrait video, which is 9:16 exactly.
+    //
+    // Nothing is lost by not guessing. A 1.4.5+ reply carries a story link and no media at all
+    // (HavenNet.replyToStory), so StoryReplyCard resolves the real post and shows expiry precisely.
+    // The only messages the guess ever aimed at are Android media-only replies from the weeks
+    // before 1.4.5; those now render as the photo they are — which is what iOS has always done with
+    // the same message, and the resealed bytes were on disk either way.
     val showsStoryCard = storyTarget != null
-    val showsUnavailable = !showsStoryCard && looksLikeLegacyStoryReply
-        && (storyTarget == null) // no recoverable live/kept story
 
     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (mine) Alignment.End else Alignment.Start) {
         // In a group DM, label each INCOMING message with who sent it (parity with iOS).
@@ -736,24 +741,6 @@ private fun Bubble(
             if (showsStoryCard && storyTarget != null) {
                 StoryReplyCard(storyTarget.circleId, storyTarget.postId)
                 if (text.isNotBlank() || m.music != null) Spacer(Modifier.size(6.dp))
-            } else if (showsUnavailable) {
-                // Expired story reply — never keep the resealed media thumbnail.
-                Column(
-                    Modifier.width(128.dp).aspectRatio(9f / 16f).clip(RoundedCornerShape(14.dp))
-                        .background(HavenTheme.card).padding(10.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    Text("⏱", fontSize = 20.sp)
-                    Spacer(Modifier.size(6.dp))
-                    Text(
-                        stringResource(R.string.story_no_longer_available),
-                        color = HavenTheme.textSecondary, fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                    )
-                }
-                if (text.isNotBlank() || m.music != null) Spacer(Modifier.size(6.dp))
             } else {
                 // Generic multi-media / landscape path.
                 com.blaineam.haven.core.MediaVariants.displayRefs(m.media).forEach { ref ->
@@ -771,8 +758,8 @@ private fun Bubble(
                     if (text.isNotBlank() || m.music != null) Spacer(Modifier.size(6.dp))
                 }
             }
-            // Audio still rides alongside a story/unavailable card.
-            if (showsStoryCard || showsUnavailable) {
+            // Audio still rides alongside a story card.
+            if (showsStoryCard) {
                 com.blaineam.haven.core.MediaVariants.displayRefs(m.media).forEach { ref ->
                     if (com.blaineam.haven.core.LocalMedia.isAudio(ref)) {
                         AudioPlayerPill(circleId, ref, contentColor = bubbleContent)

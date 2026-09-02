@@ -19,7 +19,8 @@ import UIKit
 /// ⚠️ Two things to keep straight before relying on that. Activation is **per circle and gated in
 /// core**, not decided here: until every member's devices affirmatively advertise capability, sealing
 /// stays on the legacy dual-seal path and revocation is only as strong as it was before
-/// (`docs/SWITCH-FLIP-1.0.7.md`; the switch itself is set in `FeedStore.applyCryptoSwitches`). And the
+/// (`docs/SWITCH-FLIP-1.0.7.md`; the switch itself is re-applied every launch in `FeedStore.postBootPass`,
+/// primary devices only — a seedless device holds no bare account key to retire). And the
 /// **primary** device still holds the master seed, so compromising *it* is a full account compromise
 /// that revoking another device cannot undo — the remedy there is rolling a new identity.
 enum DeviceKeyStore {

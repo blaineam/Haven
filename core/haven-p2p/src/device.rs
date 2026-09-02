@@ -689,8 +689,9 @@ pub fn open_self_sync_key_epoch(
 /// absence-inferred): true only when every member account both appears in `capable` (we have
 /// affirmatively verified its signed marker) AND has a known device roster. A single member we have not
 /// seen capability from keeps the whole circle NOT-fully-capable, so the legacy account-key seal is
-/// retained. This is the computation a later release consults before retiring the account-key seal for a
-/// circle; it is wired but OFF this release (see [`recipients_with_devices_gated`]).
+/// retained. This is the computation [`recipients_with_devices_gated`] consults before retiring the
+/// account-key seal for a circle — LIVE since 1.0.7, so a circle flips to device-only sealing exactly
+/// when this turns true, and falls back the moment a member we cannot vouch for is present.
 pub fn circle_fully_seed_drop_capable(
     members: &[HavenId],
     devices_by_account: &std::collections::HashMap<[u8; 32], ContactDevices>,
@@ -736,8 +737,10 @@ pub fn circle_fully_compact_wire_capable(
 /// account key). A member therefore counts only when we have affirmatively verified its signed
 /// marker in BOTH capable sets AND hold its device roster; a single member missing from either set
 /// (or roster-less) keeps the whole circle NOT-fully-capable — absence is never information, so a
-/// missing marker means "legacy," never "downgraded." Wired but consumed by nothing in production
-/// this release (M0 ships the gate OFF).
+/// missing marker means "legacy," never "downgraded." Consumed in production since 1.0.7: the author
+/// path reaches this through `circle_is_mls_capable`, and with the `mls_keying` switch ON (every
+/// client sets it at launch) a circle keys under the tree only when this is true, keeping legacy
+/// epoch keying otherwise.
 pub fn circle_fully_mls_capable(
     members: &[HavenId],
     devices_by_account: &std::collections::HashMap<[u8; 32], ContactDevices>,
@@ -748,13 +751,16 @@ pub fn circle_fully_mls_capable(
         && members.iter().all(|m| mls_capable.contains(&m.node_id_bytes()))
 }
 
-/// [`recipients_with_devices`] with the seed-drop dual-seal **gate** wired. When `drop_account_key` is
-/// set AND the circle is fully seed-drop-capable, the bare per-member account key is omitted so content
-/// seals ONLY to authorized device bundles (a revoked device is then cut off cryptographically). With
-/// `drop_account_key = false` — the DEFAULT and the only value the production path passes this release —
-/// it is **byte-identical** to [`recipients_with_devices`]: nothing is dropped, dual-seal (account key +
-/// device bundles) stays in place, and existing behavior is unchanged for everyone. This is the scaffold
-/// a later release flips on per fully-upgraded circle; shipping it OFF keeps this release strictly additive.
+/// [`recipients_with_devices`] with the seed-drop dual-seal **gate** wired — the LIVE production sealing
+/// path since 1.0.7. When `drop_account_key` is set AND the circle is fully seed-drop-capable, the bare
+/// per-member account key is omitted so content seals ONLY to authorized device bundles (a revoked device
+/// is then cut off cryptographically, even from a seed-holding member). Production passes
+/// `drop_account_key = true`: every client re-applies the retirement switch at launch on a primary device
+/// (`set_seed_drop_retire`; a seedless device holds no bare account key to retire). With
+/// `drop_account_key = false`, or on a circle that is not fully capable, this is **byte-identical** to
+/// [`recipients_with_devices`]: nothing is dropped, dual-seal (account key + device bundles) stays in
+/// place, and a mixed-version circle keeps reading. The gate — not the caller — decides when the new path
+/// activates, which is what makes shipping the switch ON safe (`docs/SWITCH-FLIP-1.0.7.md`).
 pub fn recipients_with_devices_gated(
     members: &[HavenId],
     devices_by_account: &std::collections::HashMap<[u8; 32], ContactDevices>,
@@ -763,7 +769,7 @@ pub fn recipients_with_devices_gated(
 ) -> Vec<HavenId> {
     let drop = drop_account_key && circle_fully_seed_drop_capable(members, devices_by_account, capable);
     if !drop {
-        // DEFAULT this release: unchanged dual-seal (account key + authorized device bundles).
+        // Gate closed (switch off, or a member not affirmatively capable): unchanged dual-seal.
         return recipients_with_devices(members, devices_by_account);
     }
     // Fully capable + gate ON: seal ONLY to authorized device bundles, no bare account key.

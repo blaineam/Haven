@@ -46,6 +46,26 @@ final class ActivityStore: ObservableObject {
     /// The read watermark (unix ms). Monotonic — see `applySyncedSeenAt`.
     private(set) var seenAtMs: UInt64
 
+    private let pulledThroughKey = "haven.activity.pulledThroughMs"
+    /// The newest EVENT TIME the engine's `activity()` has actually handed us — the ONLY thing
+    /// allowed to narrow the next pull's window.
+    ///
+    /// This used to be `entries.first?.at`: the newest row in the list, whatever its source. But
+    /// the list is a MERGE, and its other source stamps `Date()`. One `note(…)` row — "someone
+    /// wants to connect", "you were added to a circle", "a device was linked" — therefore set the
+    /// engine's watermark to *now*, and every pull after it asked the engine for the last hour
+    /// only. Anything older that the list had not already ingested was skipped, and skipped again
+    /// on the next pull, because that app-layer row stayed the newest one: a permanent hole, not a
+    /// slow refresh. `noteFeedItem` did the same with a real event time — `runCircleSideEffects`
+    /// mirrors the newest inbound item and *then* pulls, so a phone catching up after a day
+    /// offline noted one fresh message and clamped the pull that was supposed to fetch the
+    /// backlog behind it.
+    ///
+    /// Persisted, so a relaunch keeps the incremental window. Absent (or 0) means "ask for
+    /// everything" — which is what a fresh install does anyway, and what repairs a list this bug
+    /// already punched a hole in.
+    private var pulledThroughMs: UInt64
+
     private var fileURL: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -54,6 +74,7 @@ final class ActivityStore: ObservableObject {
 
     private init() {
         seenAtMs = UInt64(max(0, UserDefaults.standard.double(forKey: seenAtKey)))
+        pulledThroughMs = UInt64(max(0, UserDefaults.standard.double(forKey: pulledThroughKey)))
         if let data = try? Data(contentsOf: fileURL),
            let rows = try? JSONDecoder().decode([Entry].self, from: data) {
             entries = rows
@@ -69,10 +90,10 @@ final class ActivityStore: ObservableObject {
     func pull(engine: Engine) {
         guard !pullInFlight else { return }
         pullInFlight = true
-        // Overlap the newest known row by an hour so an event that raced the previous pull isn't
-        // skipped; `ingest` dedupes by event id, so overlap costs nothing.
-        let newest = entries.first?.at ?? 0
-        let since = newest > 3_600_000 ? newest - 3_600_000 : 0
+        // Overlap what the engine has already given us by an hour so an event that raced the
+        // previous pull isn't skipped; `ingest` dedupes by event id, so overlap costs nothing.
+        // The watermark is `pulledThroughMs` and NOT the newest row in the list — see its comment.
+        let since = pulledThroughMs > 3_600_000 ? pulledThroughMs - 3_600_000 : 0
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         Task { @MainActor [weak self] in
             let rows = await engine.run { $0.activity(sinceMs: since, nowMs: nowMs) }
@@ -82,7 +103,14 @@ final class ActivityStore: ObservableObject {
         }
     }
 
+    /// Merge one completed engine pull. This is the only place the pull watermark moves, and it
+    /// moves to an EVENT time the engine reported — never to the wall clock, so a backfill that
+    /// delivers older events later still lands.
     private func ingest(_ rows: [ActivityItemFfi]) {
+        if let newest = rows.map(\.createdAt).max(), newest > pulledThroughMs {
+            pulledThroughMs = newest
+            scheduleSave()   // the watermark rides the SAME write as the rows it accounts for
+        }
         var added = false
         for r in rows where !ids.contains(r.id) {
             ids.insert(r.id)
@@ -166,6 +194,12 @@ final class ActivityStore: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self else { return }
             self.savePending = false
+            // Watermark and rows are written together on purpose. Persisting `pulledThroughMs` the
+            // moment a pull returned would narrow the next launch's window on the strength of rows
+            // that a kill in the next two seconds never wrote — a hole that no later pull would
+            // ever ask for again. Written here they advance together, and a kill in between simply
+            // re-pulls the same window.
+            UserDefaults.standard.set(Double(self.pulledThroughMs), forKey: self.pulledThroughKey)
             guard let data = try? JSONEncoder().encode(self.entries) else { return }
             let url = self.fileURL
             DispatchQueue.global(qos: .utility).async {

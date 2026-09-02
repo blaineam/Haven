@@ -9,6 +9,28 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 1.8.4 — in development
 
+### Fixed — on iPhone and Mac, a connection request no longer blanks out everything older in Activity
+
+The bell's list is a merge of two sources: rows the engine reduces out of your circles, and
+app-layer moments that never enter an event log — "someone wants to connect", "you were added to a
+circle", "a device was linked". The engine half is fetched incrementally, and the window it asked
+for was measured from the newest row in the list *regardless of which half that row came from*.
+App-layer rows are stamped with the clock, so one of them moved the engine's window to "the last
+hour" — and left it there, because that same row was still the newest one on the next pull, and the
+one after that. Every reaction, comment, message and post older than an hour that the list had not
+already collected was skipped, permanently. One connection request could empty the bell of
+everything that came before it.
+
+The same clamp fired with no connection request in sight. The ingest pass mirrors the newest inbound
+item into the list and *then* refreshes from the engine, so a phone catching up after a stretch
+offline noted one fresh message and cut the very refresh that was meant to fetch the rest of the
+backlog down to an hour.
+
+Activity now tracks what the engine has actually handed it, separately from what the list holds, and
+only a completed refresh moves that mark — to an event's own time, never to the clock, so history
+that arrives late still lands. The first launch on this build asks for everything once, which fills
+back in whatever the old behaviour had already dropped.
+
 ### Fixed — on Android, the call that just ended no longer hangs up the next one
 
 An Android phone could stop ringing for an incoming call about a second after it started, and then

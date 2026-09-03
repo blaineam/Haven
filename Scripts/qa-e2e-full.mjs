@@ -185,8 +185,26 @@ function makeAndroid() {
   return {
     label: 'android',
     qaWrite: (cmd) => {
-      const tmp = join(OUT, 'and-cmd.json'); writeFileSync(tmp, JSON.stringify(cmd));
+      const tmp = join(OUT, 'and-cmd.json'); const body = JSON.stringify(cmd); writeFileSync(tmp, body);
       guarded(['push', tmp, `${dev}/qa-cmd.json`]);
+      // `adb push` reports success even when MediaProvider's row for this path is orphaned and the
+      // bytes never become readable at it — the command then simply never reaches the app, while
+      // dumps keep working because the app writes those itself. That is how a release gate lost the
+      // whole android call matrix on 2026-09-03: `call_accept` was pushed, the phone rang for its
+      // full 60 s, and the driver logged only the `dump` ops around it. Read it back; on a mismatch,
+      // clear the stale MediaStore rows (the documented cure) and push again.
+      const readBack = () => shOk('adb', ['shell', 'cat', `${dev}/qa-cmd.json`])?.trim();
+      if (readBack() === body) return;
+      log(`WARN: android command channel did not take '${cmd.op}' — clearing stale MediaStore rows and retrying`);
+      shOk('adb', ['shell', 'content', 'delete', '--uri', 'content://media/external/file',
+        '--where', `"_data LIKE '%/Download/qa-%'"`]);
+      shOk('adb', ['shell', 'rm', '-f', `${dev}/qa-cmd.json`]);
+      guarded(['push', tmp, `${dev}/qa-cmd.json`]);
+      if (readBack() !== body) {
+        log(`WARN: android command channel is STILL not delivering — every android check after this is about the HARNESS, not the app`);
+      } else {
+        log(`android command channel recovered — '${cmd.op}' delivered on the retry`);
+      }
     },
     poke: () => guarded(['shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', 'haven://qa']),
     dump: () => {

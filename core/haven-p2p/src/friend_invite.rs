@@ -374,13 +374,14 @@ impl<'a> Reader<'a> {
         Self { b, i: 0 }
     }
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        // `checked_add`, NOT `self.i + n`: `n` comes from an untrusted u32 length prefix, and
-        // `usize` is 32-BIT on wasm32 — a real target here (the web client; see the wasm32
-        // dependency block in Cargo.toml). There `self.i + n` WRAPS to a small value, this bounds
-        // check passes, and the slice below panics with start > end. Release builds wrap silently,
-        // so that is a remotely triggerable panic on the web client, not a debug-only assertion.
-        // 64-bit hosts cannot reach it, which is precisely why it survived review — the same shape
-        // as the DeviceList reservation that only Linux could see.
+        // `checked_add`, NOT `self.i + n`. DEFENSIVE, not a live bug: `n` comes from an untrusted
+        // u32 length prefix, so on a 32-bit `usize` the sum would WRAP, this bounds check would
+        // pass, and the slice below would panic with start > end. Every target Haven ships today
+        // is 64-bit (iOS/macOS/Android/Windows/Linux native), where `i + n` cannot overflow — so
+        // this is unreachable, and is kept because the cost is one `checked_add` and the failure
+        // mode would be a silent wrap in release. Do NOT read the wasm32 block in Cargo.toml as a
+        // live target: the web client was abandoned 2026-06-22 and `core/haven-wasm` deleted
+        // (docs/WEB-PARITY.md); that block is leftover scaffolding.
         let end = self
             .i
             .checked_add(n)

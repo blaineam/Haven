@@ -1,3 +1,4 @@
-1.8.3 — No more freeze on open, and your videos name their songs.
-• The few-second lockup right after opening Haven, or coming back to it, is gone — and with it the overnight crash it was causing in the background.
-• Your phone stays cooler: the feed no longer redraws every post while a photo or video is still downloading.
+1.8.4 — Calls behave, photos stay put, and everything keeps moving.
+- On Android, the call that just ended no longer hangs up the next one. A goodbye from the previous call could arrive a second into the new one and stop the phone ringing, while the caller heard nothing but a dial tone.
+- On Android, a photo you sent in a conversation no longer disappears the next day.
+- On iPhone and Mac, a connection request no longer empties everything older out of Activity.

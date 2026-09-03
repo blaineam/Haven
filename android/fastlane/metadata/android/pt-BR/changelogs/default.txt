@@ -1,3 +1,4 @@
-1.8.3 — Sem travar ao abrir, e seus vídeos sabem qual é a música.
-• O travamento de alguns segundos logo depois de abrir o Haven, ou de voltar ao app, acabou — e com ele a falha noturna em segundo plano que ele causava.
-• O telefone fica mais frio: o feed não redesenha mais todas as publicações enquanto uma foto ou um vídeo ainda está baixando.
+1.8.4 — As chamadas se comportam, as fotos ficam e tudo segue fluido.
+- No Android, a chamada que acabou de terminar não desliga mais a seguinte. Um adeus da chamada anterior podia chegar um segundo depois do início e parar o toque, enquanto quem ligava só ouvia o sinal.
+- No Android, uma foto enviada em uma conversa não some mais no dia seguinte.
+- No iPhone e no Mac, um pedido de conexão não esvazia mais tudo o que é mais antigo em Atividade.

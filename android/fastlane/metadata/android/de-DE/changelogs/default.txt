@@ -1,3 +1,4 @@
-1.8.3 — Kein Einfrieren mehr beim Öffnen, und deine Videos kennen ihre Songs.
-• Das kurze Einfrieren direkt nach dem Öffnen von Haven oder beim Zurückkehren in die App ist behoben — und damit auch der nächtliche Absturz im Hintergrund, den es verursacht hat.
-• Dein Telefon bleibt kühler: Der Feed zeichnet nicht mehr jeden Beitrag neu, solange ein Foto oder Video noch lädt.
+1.8.4 — Anrufe verhalten sich, Fotos bleiben, alles läuft weiter.
+- Unter Android beendet der gerade beendete Anruf nicht mehr den nächsten. Ein verspätetes Auflegen des vorherigen Anrufs konnte eine Sekunde nach Beginn das Klingeln stoppen, während die anrufende Person nur das Freizeichen hörte.
+- Unter Android verschwindet ein in einer Unterhaltung gesendetes Foto nicht mehr am nächsten Tag.
+- Auf iPhone und Mac leert eine Kontaktanfrage nicht mehr alles Ältere aus der Aktivität.

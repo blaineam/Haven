@@ -32,12 +32,12 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Free. A private, end‑to‑end encrypted home for your closest people — no ads, no tracking, no subscription. Peer‑to‑peer, post‑quantum, yours.
 
 ## whats_new
-1.8.3 — No more freeze on open, and your videos name their songs.
-
-• The few-second lockup right after opening Haven, or coming back to it, is gone — and with it the overnight crash it was causing in the background.
-• Your phone stays cooler: the feed no longer redraws every post while a photo or video is still downloading.
-• Song credits on videos: post a video with music in it and Haven names the song as a small credit — the video keeps its own sound. Older videos get theirs the first time you play them, and Settings → Song credits can rescan the ones you imported. Only a short audio fingerprint goes to Apple's Shazam service, never the video; switch it off in Settings if you prefer.
-• On the Mac, Haven is now built for Apple silicon only, and the download is smaller.
+1.8.4 — Calls behave, photos stay put, and everything keeps moving.
+- On Android, the call that just ended no longer hangs up the next one. A goodbye from the previous call could arrive a second into the new one and stop the phone ringing, while the caller heard nothing but a dial tone.
+- On Android, a photo you sent in a conversation no longer disappears the next day.
+- On iPhone and Mac, a connection request no longer empties everything older out of Activity.
+- On the desktop app, one unlucky moment reaching a relay no longer takes it off the air for two minutes.
+- The app never talks to its engine on the main thread now, so scrolling and typing stay smooth while it syncs in the background.
 
 ## whats_new_previous
 1.8.1 — Smoother feed, cooler phone.

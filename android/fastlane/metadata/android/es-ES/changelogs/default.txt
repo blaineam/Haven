@@ -1,3 +1,4 @@
-1.8.3 — Se acabaron los bloqueos al abrir, y tus vídeos saben qué canción suena.
-• El bloqueo de unos segundos justo después de abrir Haven, o de volver a la app, ha desaparecido — y con él el cierre inesperado nocturno en segundo plano que provocaba.
-• El teléfono se mantiene más fresco: el feed ya no redibuja todas las publicaciones mientras una foto o un vídeo siguen descargándose.
+1.8.4 — Las llamadas se portan, las fotos se quedan y todo sigue fluido.
+- En Android, la llamada que acaba de terminar ya no cuelga la siguiente. Un adiós de la llamada anterior podía llegar un segundo después de empezar la nueva y cortar el timbre, mientras quien llamaba solo oía el tono.
+- En Android, una foto enviada en una conversación ya no desaparece al día siguiente.
+- En iPhone y Mac, una solicitud de conexión ya no vacía todo lo anterior de Actividad.

@@ -34,12 +34,12 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Gratuit. Un espace privé, chiffré de bout en bout, pour vos proches — sans pub, sans suivi, sans abonnement. Pair‑à‑pair, post‑quantique, à vous.
 
 ## whats_new
-1.8.3 — Fini le blocage à l'ouverture, et vos vidéos nomment leurs chansons.
-
-• Le blocage de quelques secondes juste après l'ouverture de Haven, ou au retour dans l'app, a disparu — et avec lui le plantage nocturne en arrière-plan qu'il provoquait.
-• Votre téléphone reste plus frais : le fil ne redessine plus chaque publication pendant qu'une photo ou une vidéo se télécharge encore.
-• Crédits musicaux sur les vidéos : publiez une vidéo avec de la musique et Haven nomme la chanson dans un petit crédit — la vidéo garde son propre son. Vos anciennes vidéos reçoivent le leur à la première lecture, et Réglages → Crédits musicaux permet de réanalyser celles que vous avez importées. Seule une courte empreinte audio est envoyée au service Shazam d'Apple, jamais la vidéo ; désactivable dans les Réglages.
-• Sur Mac, Haven est désormais conçu uniquement pour les puces Apple Silicon, et le téléchargement est plus léger.
+1.8.4 — Les appels se tiennent, les photos restent, tout continue de glisser.
+- Sur Android, l'appel qui vient de se terminer ne raccroche plus le suivant. Un au revoir de l'appel précédent pouvait arriver une seconde après le début du nouveau et couper la sonnerie, pendant que l'appelant n'entendait que la tonalité.
+- Sur Android, une photo envoyée dans une conversation ne disparaît plus le lendemain.
+- Sur iPhone et Mac, une demande de connexion ne vide plus tout ce qui précède dans Activité.
+- Sur l'app de bureau, un seul raté en joignant un relais ne la coupe plus du monde pendant deux minutes.
+- L'app ne parle plus jamais à son moteur sur le fil principal : le défilement et la saisie restent fluides pendant la synchronisation.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

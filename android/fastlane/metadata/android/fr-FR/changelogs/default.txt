@@ -1,3 +1,3 @@
-1.8.3 — Plus de blocage à l'ouverture, et vos vidéos connaissent leurs chansons.
-• Le blocage de quelques secondes juste après l'ouverture de Haven, ou au retour dans l'app, a disparu — et avec lui le plantage nocturne en arrière-plan qu'il provoquait.
-• Votre téléphone reste plus frais : le fil ne redessine plus chaque publication pendant qu'une photo ou une vidéo se télécharge encore.
+1.8.4 — Les appels se tiennent, les photos restent, tout continue de glisser.
+- Sur Android, l'appel qui vient de se terminer ne raccroche plus le suivant. Un au revoir de l'appel précédent pouvait arriver une seconde après le début du nouveau et couper la sonnerie, pendant que l'appelant n'entendait que la tonalité.
+- Sur Android, une photo envoyée dans une conversation ne disparaît plus le lendemain.

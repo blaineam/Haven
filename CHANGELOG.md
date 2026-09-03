@@ -9,18 +9,20 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 1.8.4 — in development
 
-### Fixed — the Android QA channel proves a command arrived instead of assuming it
+### Fixed — the Android QA channel is proven before the run, not assumed by it
 
 `adb push` reports success even when MediaProvider's row for the destination is orphaned and the
-bytes never become readable there. The command then never reaches the app while dumps keep working,
-because the app writes those itself — so the leg looks alive and simply ignores what it is told. A
+bytes never become readable there. The command never reaches the app while dumps keep working,
+because the app writes those itself — so the leg looks alive and quietly ignores what it is told. A
 release gate lost the entire android call matrix to this: `call_accept` was pushed, the phone rang
 for its full sixty seconds, and the driver's log shows only the `dump` ops on either side of it.
 
-Each command is now read back after it is written. On a mismatch the harness clears the stale
-MediaStore rows — the documented cure — pushes again, and says plainly whether the channel
-recovered or whether every android check after that point is about the harness rather than the app.
-
+The fleet now proves the channel with a round trip before the matrix starts, clears the stale
+MediaStore rows if the probe does not come back, and says plainly when the channel is dead so the
+run's android results are read as the harness's view rather than the product's behaviour. It is
+checked once, up front, on purpose: the driver deletes each command as it applies it, so a
+read-back after every write cannot tell "already consumed" from "never landed" — and re-pushing on
+that guess would apply a second `call_accept`.
 
 ### Fixed — a second QA run no longer guts the one already running
 

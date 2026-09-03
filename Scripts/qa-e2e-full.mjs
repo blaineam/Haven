@@ -172,10 +172,12 @@ function makeIos(udid) {
   };
 }
 
+const ANDROID_DEV_DIR = '/sdcard/Download';
+
 function makeAndroid() {
   // Every adb interaction is best-effort: an emulator hiccup (sdcard I/O errors,
   // adb restarts) must degrade this leg to RED checks, never crash the whole run.
-  const dev = '/sdcard/Download';
+  const dev = ANDROID_DEV_DIR;
   let iofails = 0;
   const guarded = (args) => {
     const r = shOk('adb', args);
@@ -185,26 +187,14 @@ function makeAndroid() {
   return {
     label: 'android',
     qaWrite: (cmd) => {
-      const tmp = join(OUT, 'and-cmd.json'); const body = JSON.stringify(cmd); writeFileSync(tmp, body);
+      const tmp = join(OUT, 'and-cmd.json'); writeFileSync(tmp, JSON.stringify(cmd));
       guarded(['push', tmp, `${dev}/qa-cmd.json`]);
-      // `adb push` reports success even when MediaProvider's row for this path is orphaned and the
-      // bytes never become readable at it — the command then simply never reaches the app, while
-      // dumps keep working because the app writes those itself. That is how a release gate lost the
-      // whole android call matrix on 2026-09-03: `call_accept` was pushed, the phone rang for its
-      // full 60 s, and the driver logged only the `dump` ops around it. Read it back; on a mismatch,
-      // clear the stale MediaStore rows (the documented cure) and push again.
-      const readBack = () => shOk('adb', ['shell', 'cat', `${dev}/qa-cmd.json`])?.trim();
-      if (readBack() === body) return;
-      log(`WARN: android command channel did not take '${cmd.op}' — clearing stale MediaStore rows and retrying`);
-      shOk('adb', ['shell', 'content', 'delete', '--uri', 'content://media/external/file',
-        '--where', `"_data LIKE '%/Download/qa-%'"`]);
-      shOk('adb', ['shell', 'rm', '-f', `${dev}/qa-cmd.json`]);
-      guarded(['push', tmp, `${dev}/qa-cmd.json`]);
-      if (readBack() !== body) {
-        log(`WARN: android command channel is STILL not delivering — every android check after this is about the HARNESS, not the app`);
-      } else {
-        log(`android command channel recovered — '${cmd.op}' delivered on the retry`);
-      }
+      // Deliberately NOT verified by reading the file back: the driver DELETES the drop as soon as
+      // it applies it (QaDriver.kt:153), so an empty read means "already consumed" just as often as
+      // "never landed", and re-pushing on that guess would apply the same op twice — a second
+      // call_accept or post is worse than the fault it was chasing. The channel is proven once, up
+      // front, by `assertAndroidCommandChannel()`, and any later rot is caught by the dump
+      // freshness check rather than guessed at per write.
     },
     poke: () => guarded(['shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', 'haven://qa']),
     dump: () => {
@@ -368,6 +358,41 @@ function localDumpDiag(p) {
 }
 
 // ── driver ops ──────────────────────────────────────────────────────────────
+
+// ── the android command channel, proven once before the matrix runs ─────────
+// `adb push` reports success even when MediaProvider's row for the destination is orphaned and the
+// bytes never become readable at that path. The app then never sees a command while its dumps keep
+// working (it writes those itself), so the leg looks alive and simply ignores what it is told: the
+// 2026-09-03 release gate lost the whole android call matrix that way — `call_accept` pushed, the
+// phone ringing its full 60 s, and the driver logging only the `dump` ops on either side.
+//
+// Proven by round trip, not by the app's behaviour, and only while nothing else is in flight — the
+// driver deletes each drop as it applies it, so this must run BEFORE the matrix starts.
+function assertAndroidCommandChannel() {
+  const probe = join(OUT, 'and-channel-probe.json');
+  const body = JSON.stringify({ op: 'channel-probe', nonce: RUN_NONCE });
+  writeFileSync(probe, body);
+  const path = `${ANDROID_DEV_DIR}/qa-channel-probe.json`;
+  const roundTrip = () => {
+    shOk('adb', ['push', probe, path]);
+    return shOk('adb', ['shell', 'cat', path])?.trim();
+  };
+  let got = roundTrip();
+  if (got !== body) {
+    log('WARN: android command channel did not take a probe — clearing stale MediaStore rows');
+    shOk('adb', ['shell', 'content', 'delete', '--uri', 'content://media/external/file',
+      '--where', `"_data LIKE '%/Download/qa-%'"`]);
+    shOk('adb', ['shell', 'rm', '-f', `${ANDROID_DEV_DIR}/qa-*`]);
+    got = roundTrip();
+  }
+  shOk('adb', ['shell', 'rm', '-f', path]);
+  if (got === body) { log('android command channel: verified (a pushed file reads back)'); return true; }
+  log('WARN: ANDROID COMMAND CHANNEL IS DEAD — pushes report success and the file never appears.');
+  log('      Every android check in this run would be about the harness, not the app.');
+  log('      Cure: adb shell content delete --uri content://media/external/file '
+    + `--where "_data LIKE '%/Download/qa-%'"  (then re-run)`);
+  return false;
+}
 
 async function op(dev, cmd, settleMs = 4000) {
   dev.qaWrite(cmd); dev.poke(); await sleep(settleMs);
@@ -627,7 +652,12 @@ async function main() {
   devices.ios = makeIos(udid);
   devices.stub = makeStub();
   devices.desktop = makeDesktop();
-  if (shOk('adb', ['get-state'])?.trim() === 'device') devices.android = makeAndroid();
+  if (shOk('adb', ['get-state'])?.trim() === 'device') {
+    devices.android = makeAndroid();
+    // Prove the command channel before anything depends on it — a leg that cannot be TOLD anything
+    // reports its state cheerfully and ignores every instruction.
+    assertAndroidCommandChannel();
+  }
   else log('WARN: no android device — android leg SKIPPED (still reported)');
 
   const fleet = ['ios', 'desktop', ...(devices.android ? ['android'] : [])]; // account A

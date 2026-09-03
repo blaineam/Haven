@@ -71,6 +71,13 @@ build/
 soren-junit.xml
 soren-results.json
 
+# Generated App Store creative — the localized screenshot/header renders, ~325 MB of PNGs. It is
+# regenerable from the screenshot tooling, but slowly, so it is kept as a LOCAL CACHE rather than
+# rebuilt on demand. Untracked-but-unignored it did two bad things: it sat in every `git status` as
+# permanent noise, and it was one `git clean -fd` away from being deleted, which costs a full
+# regeneration run to get back. Ignoring it keeps the files and drops the noise.
+appstore-creative/
+
 # iCloud CONFLICT COPIES. This repo lives under ~/Documents, which iCloud syncs, and it resolves a
 # conflict by duplicating the entry with " 2" appended — "target 2/", "foo 2.dex", and so on. Those
 # names match no existing ignore rule, so `git add -A` swept a 15GB copy of the Rust build directory

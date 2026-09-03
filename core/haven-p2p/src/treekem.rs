@@ -79,62 +79,17 @@ const PERSIST_TREE_V1: u8 = 1;
 
 // ── Encoding helpers (device.rs house style) ─────────────────────────────────────────────
 
-/// Append `b` length-prefixed (u32 LE).
-fn lp(out: &mut Vec<u8>, b: &[u8]) {
-    out.extend_from_slice(&(b.len() as u32).to_le_bytes());
-    out.extend_from_slice(b);
-}
+// The wire cursor now lives in `crate::wire` — this module carried one of five
+// byte-identical private copies, which is why the cursor-overflow guard had to be
+// written five times. Only the error strings were ever module-specific, so those stay
+// here as a tag and the cursor itself does not.
+use crate::wire::{lp, Reader, WireTag};
 
-/// Minimal length-prefixed byte reader (the `device.rs:580` shape).
-struct Reader<'a> {
-    b: &'a [u8],
-    i: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(b: &'a [u8]) -> Self {
-        Self { b, i: 0 }
-    }
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        // `checked_add`, NOT `self.i + n`. DEFENSIVE, not a live bug: `n` comes from an untrusted
-        // u32 length prefix, so on a 32-bit `usize` the sum would WRAP, this bounds check would
-        // pass, and the slice below would panic with start > end. Every target Haven ships today
-        // is 64-bit (iOS/macOS/Android/Windows/Linux native), where `i + n` cannot overflow — so
-        // this is unreachable, and is kept because the cost is one `checked_add` and the failure
-        // mode would be a silent wrap in release. Do NOT read the wasm32 block in Cargo.toml as a
-        // live target: the web client was abandoned 2026-06-22 and `core/haven-wasm` deleted
-        // (docs/WEB-PARITY.md); that block is leftover scaffolding.
-        let end = self
-            .i
-            .checked_add(n)
-            .ok_or(CoreError::Encoding("treekem wire: length overflow"))?;
-        if end > self.b.len() {
-            return Err(CoreError::Encoding("treekem wire: unexpected end of input"));
-        }
-        let s = &self.b[self.i..end];
-        self.i = end;
-        Ok(s)
-    }
-    fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
-        Ok(self.take(N)?.try_into().unwrap())
-    }
-    fn u8(&mut self) -> Result<u8> {
-        Ok(self.take(1)?[0])
-    }
-    fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
-    }
-    fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
-    }
-    fn bytes_lp(&mut self) -> Result<&'a [u8]> {
-        let n = self.u32()? as usize;
-        self.take(n)
-    }
-    fn done(&self) -> bool {
-        self.i == self.b.len()
-    }
-}
+const WIRE: WireTag = WireTag::new(
+    "treekem wire: unexpected end of input",
+    "treekem wire: length overflow",
+    "treekem wire: invalid utf-8",
+);
 
 /// Enforce exact consumption for a top-level parse: trailing bytes are a hard error, so a
 /// blob can't smuggle data past the parser (and round-trips stay byte-stable by construction).
@@ -191,7 +146,7 @@ impl LeafNode {
     }
 
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(b);
+        let mut r = Reader::new(b, WIRE);
         let v = Self::read(&mut r)?;
         expect_consumed(&r, v)
     }
@@ -248,7 +203,7 @@ impl ParentNode {
     }
 
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(b);
+        let mut r = Reader::new(b, WIRE);
         let v = Self::read(&mut r)?;
         expect_consumed(&r, v)
     }
@@ -295,7 +250,7 @@ impl RatchetTree {
     }
 
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(b);
+        let mut r = Reader::new(b, WIRE);
         let n = r.u32()?;
         let mut slots = Vec::new();
         for _ in 0..n {
@@ -358,7 +313,7 @@ impl Proposal {
     }
 
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(b);
+        let mut r = Reader::new(b, WIRE);
         let ptype = r.u8()?;
         let group_id = r.bytes_lp()?.to_vec();
         let epoch = r.u64()?;
@@ -461,7 +416,7 @@ impl UpdatePath {
     }
 
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(b);
+        let mut r = Reader::new(b, WIRE);
         let leaf_node = LeafNode::from_bytes(r.bytes_lp()?)?;
         let n = r.u32()?;
         let mut nodes = Vec::new();
@@ -522,7 +477,7 @@ impl Commit {
     }
 
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(b);
+        let mut r = Reader::new(b, WIRE);
         let group_id = r.bytes_lp()?.to_vec();
         let epoch = r.u64()?;
         let parent_commit_hash = r.array()?;
@@ -593,7 +548,7 @@ impl GroupInfo {
     }
 
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(b);
+        let mut r = Reader::new(b, WIRE);
         let group_id = r.bytes_lp()?.to_vec();
         let epoch = r.u64()?;
         let tree_blob_ref = r.bytes_lp()?.to_vec();
@@ -662,7 +617,7 @@ impl Welcome {
     }
 
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(b);
+        let mut r = Reader::new(b, WIRE);
         let group_info = GroupInfo::from_bytes(r.bytes_lp()?)?;
         let n = r.u32()?;
         let mut joiners = Vec::new();
@@ -764,7 +719,7 @@ impl PersistTree {
     }
 
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(b);
+        let mut r = Reader::new(b, WIRE);
         if r.u8()? != PERSIST_TREE_V1 {
             return Err(CoreError::Encoding("treekem wire: unknown PersistTree version"));
         }

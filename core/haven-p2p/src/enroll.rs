@@ -127,7 +127,7 @@ impl EnrollTicket {
     /// Inverse of [`Self::to_bytes`]. Strict: trailing bytes are a parse error, so a truncated
     /// or padded ticket never half-parses into something usable.
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(b);
+        let mut r = Reader::new(b, WIRE);
         if r.u8()? != TICKET_VERSION {
             return Err(CoreError::Encoding("enroll ticket: unsupported version"));
         }
@@ -211,7 +211,7 @@ pub fn verify_enroll_request(
     now: u64,
     max_age_secs: u64,
 ) -> Result<(HavenId, String, u64)> {
-    let mut r = Reader::new(wire);
+    let mut r = Reader::new(wire, WIRE);
     if r.u8()? != REQUEST_VERSION {
         return Err(CoreError::Encoding("enroll request: unsupported version"));
     }
@@ -331,7 +331,7 @@ pub fn open_enroll_grant(
     if h.finalize() != mac {
         return Err(CoreError::Crypto("enroll grant: MAC verification failed"));
     }
-    let mut r = Reader::new(body);
+    let mut r = Reader::new(body, WIRE);
     if r.u8()? != GRANT_VERSION {
         return Err(CoreError::Encoding("enroll grant: unsupported version"));
     }
@@ -394,7 +394,7 @@ pub fn open_enroll_grant(
 /// verify (the `verify_and_store_roster` discipline: no smuggling a rogue device's credential
 /// alongside a valid list).
 fn parse_and_verify_roster(wire: &[u8], account: &HavenId) -> Result<ContactDevices> {
-    let mut r = Reader::new(wire);
+    let mut r = Reader::new(wire, WIRE);
     if r.u8()? != TAG_DEVICE_ROSTER {
         return Err(CoreError::Encoding("enroll grant: roster wire missing tag"));
     }
@@ -420,66 +420,17 @@ fn parse_and_verify_roster(wire: &[u8], account: &HavenId) -> Result<ContactDevi
 
 // ── Wire helpers (the device.rs Reader/lp style; Reader there is private, so mirrored) ──────
 
-/// Append a u32-LE length-prefixed slice.
-fn lp(out: &mut Vec<u8>, b: &[u8]) {
-    out.extend_from_slice(&(b.len() as u32).to_le_bytes());
-    out.extend_from_slice(b);
-}
+// The wire cursor now lives in `crate::wire` — this module carried one of five
+// byte-identical private copies, which is why the cursor-overflow guard had to be
+// written five times. Only the error strings were ever module-specific, so those stay
+// here as a tag and the cursor itself does not.
+use crate::wire::{lp, Reader, WireTag};
 
-/// Minimal length-prefixed byte reader for the wire formats above.
-struct Reader<'a> {
-    b: &'a [u8],
-    i: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(b: &'a [u8]) -> Self {
-        Self { b, i: 0 }
-    }
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        // `checked_add`, NOT `self.i + n`. DEFENSIVE, not a live bug: `n` comes from an untrusted
-        // u32 length prefix, so on a 32-bit `usize` the sum would WRAP, this bounds check would
-        // pass, and the slice below would panic with start > end. Every target Haven ships today
-        // is 64-bit (iOS/macOS/Android/Windows/Linux native), where `i + n` cannot overflow — so
-        // this is unreachable, and is kept because the cost is one `checked_add` and the failure
-        // mode would be a silent wrap in release. Do NOT read the wasm32 block in Cargo.toml as a
-        // live target: the web client was abandoned 2026-06-22 and `core/haven-wasm` deleted
-        // (docs/WEB-PARITY.md); that block is leftover scaffolding.
-        let end = self
-            .i
-            .checked_add(n)
-            .ok_or(CoreError::Encoding("enroll wire: length overflow"))?;
-        if end > self.b.len() {
-            return Err(CoreError::Encoding("enroll wire: unexpected end of input"));
-        }
-        let s = &self.b[self.i..end];
-        self.i = end;
-        Ok(s)
-    }
-    fn u8(&mut self) -> Result<u8> {
-        Ok(self.take(1)?[0])
-    }
-    fn array32(&mut self) -> Result<[u8; 32]> {
-        Ok(self.take(32)?.try_into().unwrap())
-    }
-    fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
-    }
-    fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
-    }
-    fn bytes_lp(&mut self) -> Result<&'a [u8]> {
-        let n = self.u32()? as usize;
-        self.take(n)
-    }
-    fn str_lp(&mut self) -> Result<String> {
-        let b = self.bytes_lp()?;
-        String::from_utf8(b.to_vec()).map_err(|_| CoreError::Encoding("enroll wire: invalid utf-8"))
-    }
-    fn rest(&self) -> &'a [u8] {
-        &self.b[self.i..]
-    }
-}
+const WIRE: WireTag = WireTag::new(
+    "enroll wire: unexpected end of input",
+    "enroll wire: length overflow",
+    "enroll wire: invalid utf-8",
+);
 
 #[cfg(test)]
 mod tests {

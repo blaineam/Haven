@@ -40,6 +40,9 @@ pub mod selfsync;
 pub mod social;
 pub mod transport;
 pub mod treekem;
+/// The shared binary wire cursor. Internal plumbing, not part of the public surface —
+/// five modules each held a private copy of it before consolidation.
+pub(crate) mod wire;
 
 /// One error type for the whole core so the FFI surface stays small.
 #[derive(Debug, thiserror::Error)]

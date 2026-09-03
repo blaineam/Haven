@@ -134,7 +134,7 @@ impl DeviceCredential {
 
     /// Inverse of [`Self::to_bytes`].
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(b);
+        let mut r = Reader::new(b, WIRE);
         let account_id = r.array32()?;
         let created_at = r.u64()?;
         let name = r.str_lp()?;
@@ -416,7 +416,7 @@ impl DeviceList {
         } else {
             (b, false)
         };
-        let mut r = Reader::new(body);
+        let mut r = Reader::new(body, WIRE);
         let account_id = r.array32()?;
         let version = r.u64()?;
         let updated_at = r.u64()?;
@@ -959,7 +959,7 @@ impl AdminGrant {
 
     /// Inverse of [`Self::to_bytes`].
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(b);
+        let mut r = Reader::new(b, WIRE);
         let circle_id = r.bytes_lp()?.to_vec();
         let creator = r.array32()?;
         let admin_account = r.array32()?;
@@ -1075,7 +1075,7 @@ impl CircleUpgrade {
 
     /// Inverse of [`Self::to_bytes`].
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(b);
+        let mut r = Reader::new(b, WIRE);
         let legacy_circle_id = r.bytes_lp()?.to_vec();
         let new_circle_id = r.bytes_lp()?.to_vec();
         let creator = r.array32()?;
@@ -1117,89 +1117,21 @@ pub fn admin_closure(
     admins
 }
 
-/// Minimal length-prefixed byte reader for the wire formats above.
-struct Reader<'a> {
-    b: &'a [u8],
-    i: usize,
-}
+// The wire cursor now lives in `crate::wire` — this module carried one of five
+// byte-identical private copies, which is why the cursor-overflow guard had to be
+// written five times. Only the error strings were ever module-specific, so those stay
+// here as a tag and the cursor itself does not.
+use crate::wire::{Reader, WireTag};
 
-impl<'a> Reader<'a> {
-    fn new(b: &'a [u8]) -> Self {
-        Self { b, i: 0 }
-    }
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        // `checked_add`, NOT `self.i + n`. DEFENSIVE, not a live bug: `n` comes from an untrusted
-        // u32 length prefix, so on a 32-bit `usize` the sum would WRAP, this bounds check would
-        // pass, and the slice below would panic with start > end. Every target Haven ships today
-        // is 64-bit (iOS/macOS/Android/Windows/Linux native), where `i + n` cannot overflow — so
-        // this is unreachable, and is kept because the cost is one `checked_add` and the failure
-        // mode would be a silent wrap in release. Do NOT read the wasm32 block in Cargo.toml as a
-        // live target: the web client was abandoned 2026-06-22 and `core/haven-wasm` deleted
-        // (docs/WEB-PARITY.md); that block is leftover scaffolding.
-        let end = self
-            .i
-            .checked_add(n)
-            .ok_or(CoreError::Encoding("device wire: length overflow"))?;
-        if end > self.b.len() {
-            return Err(CoreError::Encoding("device wire: unexpected end of input"));
-        }
-        let s = &self.b[self.i..end];
-        self.i = end;
-        Ok(s)
-    }
-    fn array32(&mut self) -> Result<[u8; 32]> {
-        Ok(self.take(32)?.try_into().unwrap())
-    }
-    fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
-    }
-    fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
-    }
-    fn bytes_lp(&mut self) -> Result<&'a [u8]> {
-        let n = self.u32()? as usize;
-        self.take(n)
-    }
-    fn str_lp(&mut self) -> Result<String> {
-        let b = self.bytes_lp()?;
-        String::from_utf8(b.to_vec()).map_err(|_| CoreError::Encoding("device wire: invalid utf-8 name"))
-    }
-    fn rest(&self) -> &'a [u8] {
-        &self.b[self.i..]
-    }
-}
+const WIRE: WireTag = WireTag::new(
+    "device wire: unexpected end of input",
+    "device wire: length overflow",
+    "device wire: invalid utf-8 name",
+);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `Reader::take` must reject a length that would overflow the cursor, not wrap into a
-    /// backwards slice.
-    ///
-    /// This guards a 32-bit-`usize` wrap that NO shipping Haven target can currently reach — every
-    /// platform is 64-bit, and the wasm32 block in Cargo.toml is dead scaffolding from the
-    /// abandoned web client (docs/WEB-PARITY.md). Kept because the guard costs one `checked_add`
-    /// and the failure mode would be a silent wrap in release rather than an error. `usize::MAX`
-    /// overflows at any word size, so the test exercises the guard on a 64-bit host.
-    ///
-    /// Four other modules carry a byte-identical `Reader` (treekem, friend_invite, enroll,
-    /// selfsync) and were fixed alongside this one.
-    #[test]
-    fn reader_take_rejects_a_length_that_would_overflow_the_cursor() {
-        let buf = [0u8; 64];
-        let mut r = Reader::new(&buf);
-        r.take(8).expect("first read is in bounds");
-
-        assert!(
-            r.take(usize::MAX).is_err(),
-            "an overflowing length must error, not wrap the cursor into a backwards slice"
-        );
-        // A merely-too-large length still fails the ordinary bounds check.
-        assert!(r.take(1000).is_err());
-        // Neither failure may advance the cursor — a partial consume would desynchronise the parse
-        // and shift every field after the rejected one.
-        assert_eq!(r.rest().len(), 56, "a failed take must not consume");
-    }
 
     /// A hostile element count must be REJECTED, not reserved for.
     ///
@@ -1252,7 +1184,6 @@ mod tests {
         assert_eq!(parsed, l);
     }
 
-    use super::*;
     use crate::identity::Identity;
 
     fn id(seed: u8) -> Identity {

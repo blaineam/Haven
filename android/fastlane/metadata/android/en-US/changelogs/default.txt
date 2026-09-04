@@ -1,4 +1,2 @@
-1.8.4 — Calls behave, photos stay put, and everything keeps moving.
-- On Android, the call that just ended no longer hangs up the next one. A goodbye from the previous call could arrive a second into the new one and stop the phone ringing, while the caller heard nothing but a dial tone.
-- On Android, a photo you sent in a conversation no longer disappears the next day.
-- On iPhone and Mac, a connection request no longer empties everything older out of Activity.
+1.8.5 — Add friend opens instantly.
+- Tapping add friend no longer freezes the app. The invite sheet was building its link and QR code while the screen was drawing, which could lock everything up long enough for the system to close Haven. Both are prepared in the background now, so the sheet opens straight away.

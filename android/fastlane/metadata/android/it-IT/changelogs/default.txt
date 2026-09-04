@@ -1,4 +1,2 @@
-1.8.4 — Le chiamate si comportano, le foto restano, tutto continua a scorrere.
-- Su Android, la chiamata appena conclusa non riaggancia più quella successiva. Un addio della chiamata precedente poteva arrivare un secondo dopo l'inizio e fermare la suoneria, mentre chi chiamava sentiva solo il tono.
-- Su Android, una foto inviata in una conversazione non sparisce più il giorno dopo.
-- Su iPhone e Mac, una richiesta di contatto non svuota più tutto ciò che è più vecchio da Attività.
+1.8.5 — «Aggiungi amico» si apre subito.
+- Toccare «aggiungi» non blocca più l'app. Il pannello di invito creava link e QR mentre la schermata veniva disegnata, abbastanza a lungo perché il sistema chiudesse Haven. Ora entrambi si preparano in background e il pannello si apre subito.

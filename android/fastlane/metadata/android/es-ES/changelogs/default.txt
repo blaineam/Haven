@@ -1,4 +1,2 @@
-1.8.4 — Las llamadas se portan, las fotos se quedan y todo sigue fluido.
-- En Android, la llamada que acaba de terminar ya no cuelga la siguiente. Un adiós de la llamada anterior podía llegar un segundo después de empezar la nueva y cortar el timbre, mientras quien llamaba solo oía el tono.
-- En Android, una foto enviada en una conversación ya no desaparece al día siguiente.
-- En iPhone y Mac, una solicitud de conexión ya no vacía todo lo anterior de Actividad.
+1.8.5 — Añadir a alguien se abre al instante.
+- Tocar «añadir» ya no bloquea la app. La hoja de invitación creaba el enlace y el código QR mientras se dibujaba la pantalla, y podía quedarse colgada lo suficiente para que el sistema cerrara Haven. Ahora ambos se preparan en segundo plano y la hoja se abre de inmediato.

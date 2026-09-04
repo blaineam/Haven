@@ -32,12 +32,8 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Free. A private, end‑to‑end encrypted home for your closest people — no ads, no tracking, no subscription. Peer‑to‑peer, post‑quantum, yours.
 
 ## whats_new
-1.8.4 — Calls behave, photos stay put, and everything keeps moving.
-- A call that just ended no longer hangs up the next one. A goodbye from the previous call could arrive a second into the new one and stop the phone ringing, while the caller heard nothing but a dial tone.
-- A photo you sent in a conversation no longer disappears the next day.
-- A connection request no longer empties everything older out of Activity.
-- One unlucky moment reaching a relay no longer takes the app off the air for two minutes.
-- The app never talks to its engine on the main thread now, so scrolling and typing stay smooth while it syncs in the background.
+1.8.5 — Add friend opens instantly.
+- Tapping add friend no longer freezes the app. The invite sheet was building its link and QR code while the screen was drawing, which could lock everything up long enough for the system to close Haven. Both are prepared in the background now, so the sheet opens straight away.
 
 ## whats_new_previous
 1.8.1 — Smoother feed, cooler phone.

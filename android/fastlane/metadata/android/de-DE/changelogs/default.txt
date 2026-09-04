@@ -1,4 +1,2 @@
-1.8.4 — Anrufe verhalten sich, Fotos bleiben, alles läuft weiter.
-- Unter Android beendet der gerade beendete Anruf nicht mehr den nächsten. Ein verspätetes Auflegen des vorherigen Anrufs konnte eine Sekunde nach Beginn das Klingeln stoppen, während die anrufende Person nur das Freizeichen hörte.
-- Unter Android verschwindet ein in einer Unterhaltung gesendetes Foto nicht mehr am nächsten Tag.
-- Auf iPhone und Mac leert eine Kontaktanfrage nicht mehr alles Ältere aus der Aktivität.
+1.8.5 — „Freund hinzufügen" öffnet sofort.
+- Auf „Freund hinzufügen" zu tippen friert die App nicht mehr ein. Das Einladungsfenster hat Link und QR-Code noch während des Zeichnens erzeugt — lange genug, dass das System Haven beenden konnte. Beides wird jetzt im Hintergrund vorbereitet, das Fenster öffnet sofort.

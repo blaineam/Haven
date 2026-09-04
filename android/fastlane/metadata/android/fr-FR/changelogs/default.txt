@@ -1,3 +1,2 @@
-1.8.4 — Les appels se tiennent, les photos restent, tout continue de glisser.
-- Sur Android, l'appel qui vient de se terminer ne raccroche plus le suivant. Un au revoir de l'appel précédent pouvait arriver une seconde après le début du nouveau et couper la sonnerie, pendant que l'appelant n'entendait que la tonalité.
-- Sur Android, une photo envoyée dans une conversation ne disparaît plus le lendemain.
+1.8.5 — « Ajouter un ami » s'ouvre instantanément.
+- Toucher « ajouter » ne fige plus l'app. La feuille d'invitation fabriquait son lien et son QR code pendant l'affichage, assez longtemps pour que le système ferme Haven. Les deux sont préparés en arrière-plan : la feuille s'ouvre aussitôt.

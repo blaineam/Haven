@@ -1,4 +1,2 @@
-1.8.4 — As chamadas se comportam, as fotos ficam e tudo segue fluido.
-- No Android, a chamada que acabou de terminar não desliga mais a seguinte. Um adeus da chamada anterior podia chegar um segundo depois do início e parar o toque, enquanto quem ligava só ouvia o sinal.
-- No Android, uma foto enviada em uma conversa não some mais no dia seguinte.
-- No iPhone e no Mac, um pedido de conexão não esvazia mais tudo o que é mais antigo em Atividade.
+1.8.5 — "Adicionar amigo" abre na hora.
+- Tocar em "adicionar" não trava mais o app. A tela de convite montava o link e o QR enquanto era desenhada, o bastante para o sistema encerrar o Haven. Agora os dois são preparados em segundo plano e a tela abre imediatamente.

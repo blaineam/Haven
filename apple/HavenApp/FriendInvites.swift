@@ -128,6 +128,50 @@ final class FriendInviteStore: ObservableObject {
         Self.ticket("haven-friend:" + v)
     }
 
+    /// The `?t=` value, minted OFF the main thread when there is no live ticket.
+    ///
+    /// `friendInviteIssue` is post-quantum key work and `save()` writes a file; doing either while
+    /// a SwiftUI body evaluates froze the invite sheet for seconds on a device with relays, and the
+    /// watchdog then killed the app — the "tapping add friend crashes it" report on 1.8.4. The
+    /// crypto runs detached; only the tiny bookkeeping comes back to the main actor.
+    func currentTicketLinkValueAsync() async -> String? {
+        prune()
+        if let live = issued.last(where: { $0.consumedAt == nil && isLive($0.issuedAt) }),
+           let v = Self.linkValue(live.ticket) { return v }
+        guard let material = mintMaterial() else { return nil }
+        let issuedAt = Self.now()
+        let text = await Task.detached(priority: .userInitiated) {
+            guard let t = try? friendInviteIssue(accountBundle: material.bundle, issuedAt: issuedAt,
+                                                 relays: material.relays, deviceHints: material.hints),
+                  let text = try? friendTicketEncode(ticket: t) else { return String?.none }
+            return text
+        }.value
+        guard let text else { return nil }
+        issued.append(Issued(ticket: text, issuedAt: issuedAt, consumedAt: nil, acceptorHex: nil))
+        save()
+        HavenLog.net("friend-invite: minted ticket off-main (relays=\(material.relays.count))")
+        return Self.linkValue(text)
+    }
+
+    /// Roll to a fresh ticket without blocking the main thread. Same contract as `rollInviteLink`.
+    @discardableResult
+    func rollInviteLinkAsync() async -> String? {
+        for i in issued.indices where issued[i].consumedAt == nil { issued[i].consumedAt = Self.now() }
+        save()
+        return await currentTicketLinkValueAsync()
+    }
+
+    /// Everything `mint()` needs from the main actor, gathered before the crypto runs.
+    private func mintMaterial() -> (bundle: Data, relays: [String], hints: [Data])? {
+        let relays = RelayMailboxStore.shared.allRelays()
+        guard !relays.isEmpty else {
+            HavenLog.net("friend-invite: mint skipped — no relays (live-only link)")
+            return nil
+        }
+        guard let bundle = FeedStore.shared.myPublicBundle() else { return nil }
+        return (bundle, relays, FeedStore.shared.inviteDeviceIds().compactMap(Self.hexData))
+    }
+
     private func mint() -> String? {
         let relays = RelayMailboxStore.shared.allRelays()
         guard !relays.isEmpty else {

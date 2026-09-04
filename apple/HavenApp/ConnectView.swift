@@ -50,6 +50,13 @@ struct ConnectView: View {
     @State private var problem: String?
     @State private var addedName: String?
     @State private var showScanner = false
+    /// The invite link and its QR, resolved OFF the main thread. They used to be computed inside
+    /// `body`, which meant every evaluation could mint a post-quantum ticket and render a QR image
+    /// on the main thread — seconds of freeze on a device with relays, then the watchdog. Empty
+    /// means "still resolving"; the sheet shows a placeholder rather than blocking for it.
+    @State private var resolvedLink = ""
+    @State private var resolvedQR: PlatformImage?
+    @State private var linkFailed = false
 
     var body: some View {
         #if os(macOS)
@@ -67,6 +74,7 @@ struct ConnectView: View {
         }
         .sheet(isPresented: $showScanner) { scannerSheet }
         .onAppear { seedIncomingLink() }
+        .task { await refreshInviteLink() }
         .havenPausesPostAudio()
         #else
         NavigationStack {
@@ -85,6 +93,7 @@ struct ConnectView: View {
             .toolbar { if addedName == nil { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { dismiss() }.havenToolbarPill() } } }
             .sheet(isPresented: $showScanner) { scannerSheet }
             .onAppear { seedIncomingLink() }
+            .task { await refreshInviteLink() }
         }
         .havenPausesPostAudio()
         #endif
@@ -104,6 +113,20 @@ struct ConnectView: View {
     }
 
     /// Opened with an invite link → jump straight to "Add a friend" and resolve it.
+    /// Build the link and its QR without touching the main thread for the expensive parts.
+    /// The ticket mint is already off-main inside the store; the QR render is CoreImage work, so it
+    /// goes to a detached task too. Runs once per sheet, and again only when the user rolls.
+    private func refreshInviteLink(roll: Bool = false) async {
+        let base = InviteHints.embed(in: account.havenLink(domain: HavenSite.inviteDomain),
+                                     deviceIds: FeedStore.shared.inviteDeviceIds())
+        let ticket = roll ? await invites.rollInviteLinkAsync() : await invites.currentTicketLinkValueAsync()
+        let link = ticket.map { InviteHints.appendQuery(in: base, name: "t", value: $0) } ?? base
+        let image = await Task.detached(priority: .userInitiated) { QRCode.image(from: link) }.value
+        resolvedLink = link
+        resolvedQR = image
+        linkFailed = image == nil
+    }
+
     private func seedIncomingLink() {
         guard let link = incomingLink, !link.isEmpty else { return }
         mode = 1
@@ -139,19 +162,10 @@ struct ConnectView: View {
 
     // MARK: - Invite
 
-    /// The shareable link, carrying my device node id(s) as `?d=` dial hints — the scanner's only
-    /// reachable ids for me until my signed roster arrives (device-seed transport bootstrap).
-    private var inviteLink: String {
-        var link = InviteHints.embed(in: account.havenLink(domain: HavenSite.inviteDomain),
-                                     deviceIds: FeedStore.shared.inviteDeviceIds())
-        // Offline-invite ticket: lets the scanner accept while we're offline (and vice versa) —
-        // the acceptance parks on our relays instead of needing a live handshake. Absent when we
-        // have no relays; the link then works exactly as before (live-only).
-        if let t = FriendInviteStore.shared.currentTicketLinkValue() {
-            link = InviteHints.appendQuery(in: link, name: "t", value: t)
-        }
-        return link
-    }
+    // The link used to be a computed property read from `body` (twice: once for the QR, once for
+    // the share sheet). Each read could mint a post-quantum ticket and render a QR on the main
+    // thread. It is now resolved once, off-main, into `resolvedLink` / `resolvedQR` — see
+    // `refreshInviteLink`.
 
     private var invite: some View {
         VStack(spacing: 16) {
@@ -161,20 +175,35 @@ struct ConnectView: View {
                 .font(.subheadline).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            if let qr = QRCode.image(from: inviteLink) {
+            if let qr = resolvedQR {
                 Image(platformImage: qr)
                     .interpolation(.none).resizable().scaledToFit()
                     .frame(width: 210, height: 210)
                     .padding(12)
                     .background(.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .shadow(color: HavenTheme.violet.opacity(0.25), radius: 16, y: 8)
+            } else {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(.white.opacity(0.06))
+                    .frame(width: 234, height: 234)
+                    .overlay(ProgressView())
+                    .accessibilityIdentifier("inviteQRPlaceholder")
             }
 
-            if let url = URL(string: inviteLink) {
+            if let url = URL(string: resolvedLink), !resolvedLink.isEmpty {
                 ShareLink(item: url) {
                     Label("Share invite link", systemImage: "square.and.arrow.up")
                 }
                 .buttonStyle(BrandButtonStyle())
+                .accessibilityIdentifier("shareInviteLink")
+            }
+
+            if !resolvedLink.isEmpty {
+                Text(resolvedLink)
+                    .font(.caption2.monospaced()).foregroundStyle(.secondary)
+                    .lineLimit(2).truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("inviteLinkText")
             }
 
             // Offline-invite controls (only meaningful when this device hosts/uses a relay — that's
@@ -200,7 +229,8 @@ struct ConnectView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Button {
-                        _ = invites.rollInviteLink()   // @Published mutation → QR + link above refresh
+                        // Off-main: rolling mints a fresh ticket (post-quantum) — see refreshInviteLink.
+                        Task { await refreshInviteLink(roll: true) }
                     } label: {
                         Label("Regenerate invite link", systemImage: "arrow.triangle.2.circlepath")
                             .font(.subheadline).frame(maxWidth: .infinity)

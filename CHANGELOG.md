@@ -7,6 +7,25 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 1.8.5 — in development
+
+### Fixed — tapping "add friend" no longer freezes the app
+
+Opening the invite sheet built its link inside the view body: every evaluation could mint a
+post-quantum invite ticket and render the QR image on the main thread, and the body reads that
+link twice. On an account with relays — which is every real one — that is seconds of frozen UI and
+then the system's watchdog ending the app, which is what "the add friend button crashes it" looked
+like from the outside.
+
+The link and its QR now resolve once, off the main thread, and the sheet shows a placeholder until
+they are ready. Rolling to a fresh link does the same. Nothing about the link itself changed.
+
+And the test that should have caught it exists now: it walks the real path — Circle, manage circle,
+add friend — and fails both if the sheet takes more than eight seconds to appear and if the app is
+not still running afterwards. The freeze reproduced as a UI query timing out, which is what a
+blocked main thread looks like to a UI test.
+
+
 ## 1.8.4 — in development
 
 ### Fixed — the Android QA channel is proven before the run, not assumed by it

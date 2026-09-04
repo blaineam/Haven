@@ -172,6 +172,8 @@ struct CircleView: View {
             ToolbarItem(placement: .havenTrailing) {
                 Button { showInvite = true } label: { Image(systemName: "person.badge.plus") }
                     .buttonStyle(HavenGlassIcon())
+                    .accessibilityLabel("Invite someone")
+                    .accessibilityIdentifier("circleAddFriend")
             }
             ToolbarItem(placement: .havenTrailing) {
                 NavigationLink { CircleSettingsView(circleId: store.activeCircleId) } label: {
@@ -272,6 +274,7 @@ struct CircleView: View {
             Button { showInvite = true } label: { Image(systemName: "person.badge.plus") }
                 .buttonStyle(GlassIconButtonStyle())
                 .accessibilityLabel("Invite someone")
+                .accessibilityIdentifier("circleAddFriend")
 
             Button { showSettings = true } label: { Image(systemName: "gearshape.fill") }
                 .buttonStyle(GlassIconButtonStyle())

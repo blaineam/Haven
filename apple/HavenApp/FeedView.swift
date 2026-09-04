@@ -482,6 +482,7 @@ struct FeedView: View {
                 // Manage this circle (members, invite, settings) — lives on the circle, not You.
                 ToolbarItem(placement: .havenTrailing) {
                     Button { showCircle = true } label: { Image(systemName: "person.2.fill") }
+                        .accessibilityIdentifier("circleMembers")
                         .buttonStyle(HavenGlassIcon())
                         .accessibilityLabel("Manage circle")
                 }

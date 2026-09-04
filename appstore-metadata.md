@@ -33,10 +33,10 @@ Free. A private, end‑to‑end encrypted home for your closest people — no ad
 
 ## whats_new
 1.8.4 — Calls behave, photos stay put, and everything keeps moving.
-- On Android, the call that just ended no longer hangs up the next one. A goodbye from the previous call could arrive a second into the new one and stop the phone ringing, while the caller heard nothing but a dial tone.
-- On Android, a photo you sent in a conversation no longer disappears the next day.
-- On iPhone and Mac, a connection request no longer empties everything older out of Activity.
-- On the desktop app, one unlucky moment reaching a relay no longer takes it off the air for two minutes.
+- A call that just ended no longer hangs up the next one. A goodbye from the previous call could arrive a second into the new one and stop the phone ringing, while the caller heard nothing but a dial tone.
+- A photo you sent in a conversation no longer disappears the next day.
+- A connection request no longer empties everything older out of Activity.
+- One unlucky moment reaching a relay no longer takes the app off the air for two minutes.
 - The app never talks to its engine on the main thread now, so scrolling and typing stay smooth while it syncs in the background.
 
 ## whats_new_previous

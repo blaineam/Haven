@@ -1348,7 +1348,7 @@
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Clip di %2$lld s da %1$@"
+            "value" : "Clip di %1$lld s da %2$@"
           }
         },
         "ja" : {

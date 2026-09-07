@@ -9,6 +9,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 1.8.5 — in development
 
+### Fixed — the Italian story-clip label read the length as text
+
+`%llds clip from %@` takes a number of seconds and a timestamp. The Italian
+translation numbered its two placeholders the wrong way round — `Clip di
+%2$lld s da %1$@` — so it handed the seconds to the slot expecting text and
+the timestamp to the slot expecting a number. Numbered placeholders are read
+by their number, not their order on the line, so this was not a display
+glitch: the label dereferenced an integer as an object. Every other language
+had them the right way round.
+
 ### Fixed — tapping "add friend" no longer freezes the app
 
 Opening the invite sheet built its link inside the view body: every evaluation could mint a

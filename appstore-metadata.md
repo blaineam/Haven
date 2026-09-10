@@ -32,8 +32,8 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Free. A private, end‑to‑end encrypted home for your closest people — no ads, no tracking, no subscription. Peer‑to‑peer, post‑quantum, yours.
 
 ## whats_new
-1.8.5 — Add friend opens instantly.
-- Tapping add friend no longer freezes the app. The invite sheet was building its link and QR code while the screen was drawing, which could lock everything up long enough for the system to close Haven. Both are prepared in the background now, so the sheet opens straight away.
+1.8.6 — Sending photos to a friend no longer freezes the app.
+- Haven could lock up shortly after opening while a friend was loading photos and videos from you — usually one you had just added, since they need everything at once. Haven re-checked its own backup for every item they asked for, and those checks stalled everything else. It now checks far less often, so the app stays responsive.
 
 ## whats_new_previous
 1.8.1 — Smoother feed, cooler phone.

@@ -34,8 +34,8 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Gratis. Una casa privata e crittografata end‑to‑end per i tuoi cari — niente pubblicità, niente tracciamento, nessun abbonamento. Peer‑to‑peer, post‑quantistica, tua.
 
 ## whats_new
-1.8.5 — «Aggiungi amico» si apre subito.
-- Toccare «aggiungi» non blocca più l'app. Il pannello di invito creava link e QR mentre la schermata veniva disegnata, abbastanza a lungo perché il sistema chiudesse Haven. Ora entrambi si preparano in background e il pannello si apre subito.
+1.8.6 — Inviare foto a un amico non blocca più l'app.
+- Haven poteva bloccarsi poco dopo l'apertura mentre un amico scaricava le tue foto e i tuoi video — di solito un amico appena aggiunto, perché ha bisogno di tutto in una volta. Haven ricontrollava il proprio backup per ogni elemento richiesto, bloccando tutto il resto. Ora controlla molto meno spesso.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

@@ -34,8 +34,8 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Gratuit. Un espace privé, chiffré de bout en bout, pour vos proches — sans pub, sans suivi, sans abonnement. Pair‑à‑pair, post‑quantique, à vous.
 
 ## whats_new
-1.8.5 — « Ajouter un ami » s'ouvre instantanément.
-- Toucher « ajouter » ne fige plus l'app. La feuille d'invitation fabriquait son lien et son QR code pendant l'affichage, assez longtemps pour que le système ferme Haven. Les deux sont préparés en arrière-plan : la feuille s'ouvre aussitôt.
+1.8.6 — Envoyer des photos à un ami ne bloque plus l'app.
+- Haven pouvait se figer peu après son ouverture pendant qu'un ami récupérait vos photos et vidéos — souvent un ami que vous veniez d'ajouter, car il a besoin de tout d'un coup. Haven revérifiait sa sauvegarde pour chaque élément demandé, ce qui bloquait tout le reste. Il vérifie désormais bien plus rarement.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

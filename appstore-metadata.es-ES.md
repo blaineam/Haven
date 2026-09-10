@@ -34,8 +34,8 @@ privado,cifrado,familia,amigos,mensajería,seguro,sin conexión,llamadas,sin anu
 Gratis. Un hogar privado y cifrado de extremo a extremo para los tuyos: sin anuncios, sin rastreo, sin suscripción. Peer-to-peer, poscuántico, tuyo.
 
 ## whats_new
-1.8.5 — Añadir a alguien se abre al instante.
-- Tocar «añadir» ya no bloquea la app. La hoja de invitación creaba el enlace y el código QR mientras se dibujaba la pantalla, y podía quedarse colgada lo suficiente para que el sistema cerrara Haven. Ahora ambos se preparan en segundo plano y la hoja se abre de inmediato.
+1.8.6 — Enviar fotos a un amigo ya no bloquea la app.
+- Haven podía bloquearse poco después de abrirse mientras un amigo descargaba tus fotos y vídeos — normalmente alguien recién añadido, porque necesita todo de una vez. Haven comprobaba de nuevo su copia de seguridad por cada elemento pedido, y eso bloqueaba el resto. Ahora comprueba mucho menos.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

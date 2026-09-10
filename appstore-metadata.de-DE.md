@@ -34,8 +34,8 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Kostenlos. Ein privates, Ende-zu-Ende verschlüsseltes Zuhause für deine Liebsten – keine Werbung, kein Tracking, kein Abo. Peer-to-Peer, Post-Quanten-sicher, deins.
 
 ## whats_new
-1.8.5 — „Freund hinzufügen" öffnet sofort.
-- Auf „Freund hinzufügen" zu tippen friert die App nicht mehr ein. Das Einladungsfenster hat Link und QR-Code noch während des Zeichnens erzeugt — lange genug, dass das System Haven beenden konnte. Beides wird jetzt im Hintergrund vorbereitet, das Fenster öffnet sofort.
+1.8.6 — Fotos an Freunde zu senden friert die App nicht mehr ein.
+- Haven konnte kurz nach dem Öffnen einfrieren, während ein Freund Fotos und Videos von dir lud — meist ein neu hinzugefügter Freund, weil er alles auf einmal braucht. Haven prüfte für jedes angefragte Element seine Sicherung erneut, und diese Prüfungen blockierten alles andere. Jetzt wird viel seltener geprüft.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

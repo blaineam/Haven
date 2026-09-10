@@ -7,6 +7,29 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 1.8.6 — 2026-09-10
+
+### Fixed — a friend loading your media no longer freezes the app
+
+A peer that cannot fetch a blob from a relay asks its origin device directly, and the origin
+treats that direct ask as the one signal it has that a stored copy went bad — so it re-probes its
+own backup. Working out WHICH circle holds the ref walked every circle's feed, and the throttle on
+that walk was per-ref. A friend added on a never-expiring link holds none of your media and asks
+for all of it at once, so every ask is a distinct ref and the throttle never fires once.
+
+Each walk then took the one global engine lock and held it for the whole reduce. Measured at 4,000
+events in a single circle: 8.327 ms held of an 8.329 ms call — 99.98% of it. `Engine` is documented
+"one call at a time" and `FeedStore` alone calls it from 87 sites, so N refs across M circles of
+that starves every engine call the interface needs. From the outside it looked like the app locking
+up shortly after launch, while a friend — most likely a newly added one — loaded photos and videos.
+
+`activity()` already had the answer and said why: "the reduce runs with the lock released, so a
+large history can't stall every other caller (the mac beachball lesson)". `feed()` never got the
+same treatment. Both copies now clone out under the lock and reduce with it released, guarded by a
+test that measures the ratio rather than a wall-clock threshold. On the client, the circle lookup
+remembers its answer instead of re-walking, re-probes are now rate-limited as a whole rather than
+only per-ref, and the media request path stats its file once instead of twice.
+
 ## 1.8.5 — in development
 
 ### Fixed — the Italian story-clip label read the length as text

@@ -1157,10 +1157,14 @@ impl SocialDemo {
     }
 
     /// The current feed (newest first), with comments and reactions resolved.
+    /// Clone out under the lock, reduce with it released — see `HavenSocial::feed`, which had the
+    /// same defect and the measurement that motivated fixing both.
     pub fn feed(&self, now_ms: u64, viewer_retention_secs: Option<u64>) -> Vec<FeedItemFfi> {
-        let st = self.state.lock().unwrap();
-        let me = hex(&st.me.public().node_id_bytes());
-        build_feed(st.events.clone(), now_ms, viewer_retention_secs, None)
+        let (me, events) = {
+            let st = self.state.lock().unwrap();
+            (hex(&st.me.public().node_id_bytes()), st.events.clone())
+        };
+        build_feed(events, now_ms, viewer_retention_secs, None)
             .into_iter()
             .map(|it| FeedItemFfi {
                 id: it.id,
@@ -4562,9 +4566,27 @@ impl<T> std::ops::DerefMut for EngineGuard<'_, T> {
     }
 }
 
+/// Nanoseconds the most recently released engine guard was held for, PER THREAD.
+///
+/// Test-only. Lets a test assert the SHAPE of a call — that a reduce runs with
+/// the lock released — instead of asserting a wall-clock threshold that would
+/// mean different things on different machines.
+///
+/// Thread-local, not a global: `cargo test` runs the suite in one process with
+/// many threads, so a global is written by every other test's guard too. As a
+/// global this reported 26.3 ms held for an 8.6 ms call — someone else's hold,
+/// read as ours. A guard is always dropped on the thread that took it, so
+/// per-thread is both correct and immune to the neighbours.
+#[cfg(test)]
+thread_local! {
+    static LAST_ENGINE_HOLD_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 impl<T> Drop for EngineGuard<'_, T> {
     fn drop(&mut self) {
         let held = self.taken.elapsed();
+        #[cfg(test)]
+        LAST_ENGINE_HOLD_NANOS.with(|c| c.set(held.as_nanos() as u64));
         if held >= ENGINE_HOLD_WARN {
             tracing::warn!(
                 target: "haven_ffi::engine_lock",
@@ -6423,16 +6445,27 @@ impl HavenSocial {
             .unwrap_or(0)
     }
 
+    /// ONE pass under the state lock clones this circle's events out; the reduce runs with the
+    /// lock RELEASED — the same shape `activity` below already uses, and for the same reason.
+    ///
+    /// This used to hold the guard to the end of the function, so `map_feed` ran under the one
+    /// global lock every other caller needs. Measured at 4,000 events in a single circle: 8.327 ms
+    /// held of an 8.329 ms call — 99.98% of it. That is an app-wide stall, not a slow read, and
+    /// `handleMediaRequest` on the apple side turns a peer's backlog of media asks into one of
+    /// these per requested ref (see `feed_does_not_hold_the_engine_lock_across_the_reduce`).
     pub fn feed(&self, circle_id: String, now_ms: u64, viewer_retention_secs: Option<u64>) -> Vec<FeedItemFfi> {
-        let st = self.state.lock().unwrap();
-        let me = hex(&st.me().node_id_bytes());
-        let keep_own = st.keep_own_posts;
-        let events = st
-            .circles
-            .iter()
-            .find(|c| c.id == circle_id)
-            .map(|c| c.events.clone())
-            .unwrap_or_default();
+        let (me, keep_own, events) = {
+            let st = self.state.lock().unwrap();
+            let me = hex(&st.me().node_id_bytes());
+            let keep_own = st.keep_own_posts;
+            let events = st
+                .circles
+                .iter()
+                .find(|c| c.id == circle_id)
+                .map(|c| c.events.clone())
+                .unwrap_or_default();
+            (me, keep_own, events)
+        };
         map_feed(events, &me, now_ms, viewer_retention_secs, keep_own)
     }
 
@@ -7917,6 +7950,63 @@ mod net_tests {
         for env in from.sync_envelopes(cid.to_string()) {
             let _ = to.receive(cid.to_string(), env);
         }
+    }
+
+    /// `feed` must not hold the engine lock while it reduces.
+    ///
+    /// `activity` already does this correctly, and says why: "the reduce runs with the lock
+    /// released, so a large history can't stall every other caller (the mac beachball lesson)."
+    /// `feed` was never given the same treatment — it took the lock, cloned the circle's events,
+    /// and then ran `map_feed` with the guard still alive to the end of the function.
+    ///
+    /// That is not merely slow, it is an app-wide freeze, because of who calls it. A peer that
+    /// cannot fetch a blob from a relay asks its origin device directly; the origin treats that as
+    /// evidence its own backup went bad and re-probes — resolving which circle holds the ref by
+    /// walking EVERY circle's feed. The throttle on that is per-ref, so a brand-new peer draining a
+    /// backlog of distinct refs defeats it completely, and every one of those walks takes the one
+    /// global engine lock that the entire UI also needs.
+    ///
+    /// Asserted as a RATIO, not a duration: the reduce must dominate the part done under the lock.
+    /// A wall-clock threshold would mean something different on every machine and in CI.
+    #[test]
+    fn feed_does_not_hold_the_engine_lock_across_the_reduce() {
+        let alice = HavenSocial::new([77u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        for i in 0..2_000u64 {
+            alice
+                .post(cid.clone(), format!("post {i}"), vec![], None, None, false, false, 1_000 + i)
+                .unwrap();
+        }
+
+        // Warm any lazy work so the measured call is just lock + clone + reduce.
+        let _ = alice.feed(cid.clone(), 10_000_000, None);
+
+        // Best of three. The machine is shared with the rest of the suite, and a single sample can
+        // be descheduled anywhere — including inside the locked section. The PROPERTY is not
+        // statistical (the guard either spans the reduce or it does not), so one clean observation
+        // is enough to prove it; repeating only defends against a stolen timeslice.
+        let mut best: Option<(std::time::Duration, std::time::Duration)> = None;
+        for _ in 0..3 {
+            LAST_ENGINE_HOLD_NANOS.with(|c| c.set(0));
+            let started = std::time::Instant::now();
+            let items = alice.feed(cid.clone(), 10_000_000, None);
+            let total = started.elapsed();
+            let held = std::time::Duration::from_nanos(LAST_ENGINE_HOLD_NANOS.with(|c| c.get()));
+            assert!(!items.is_empty(), "test needs a feed to reduce");
+            if best.map_or(true, |(b_held, b_total)| held.as_nanos() * b_total.as_nanos()
+                < b_held.as_nanos() * total.as_nanos())
+            {
+                best = Some((held, total));
+            }
+        }
+        let (held, total) = best.expect("at least one sample");
+
+        assert!(
+            held * 2 < total,
+            "feed held the engine lock {held:?} of its {total:?} — the reduce must run with the \
+             lock released (see activity(), and the direct-ask path in FeedStore that calls this \
+             once per requested media ref)"
+        );
     }
 
     // ── Compact wire, write-side (docs/SATELLITE-DESIGN.md §6, S0) ───────────────────────────────

@@ -8244,7 +8244,11 @@ final class FeedStore: ObservableObject {
         let requesterHex = String(data: payload.prefix(64), encoding: .utf8) ?? ""
         let ref = String(data: payload.dropFirst(64), encoding: .utf8) ?? ""
         guard requesterHex.count == 64, !ref.isEmpty else { return }
-        let haveLocal = MediaStore.shared.storagePath(for: ref).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        // Resolved ONCE. This runs on the main actor, and the path was stat()ed twice per request —
+        // here for the log line and again at the serve branch below. Harmless for one ask, not for
+        // a peer draining a backlog of them.
+        let localURL = MediaStore.shared.storagePath(for: ref)
+        let haveLocal = localURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
         HavenLog.net("media REQ ref=\(ref.prefix(12)) have=\(haveLocal) from=\(requesterHex.prefix(8))")
         // ULTRA-CONSTRAINED LINK: serve only what may cross it.
         //
@@ -8258,7 +8262,7 @@ final class FeedStore: ObservableObject {
             HavenLog.net("media REQ ref=\(ref.prefix(12)) — refused, link is ultra-constrained")
             return
         }
-        if let url = MediaStore.shared.storagePath(for: ref), FileManager.default.fileExists(atPath: url.path) {
+        if haveLocal, let url = localURL {
             // They had to come to US for bytes we already backed up — so a relay didn't serve them.
             // That is a signal about our own backup, not just a request to answer. See below.
             reverifyBackupAfterDirectAsk(ref)
@@ -8287,6 +8291,16 @@ final class FeedStore: ObservableObject {
     /// Once an hour per ref. A peer that still can't fetch re-asks on a timer, and a re-verify must
     /// never be allowed to become a re-upload storm.
     private static let backupReverifyIntervalMs: UInt64 = 3_600_000
+    /// When the last re-probe was admitted, for ANY ref.
+    private var lastBackupReverifyAtMs: UInt64 = 0
+    /// Floor on the gap between two re-probes, whatever refs they are for.
+    ///
+    /// The per-ref hour cannot bound a burst of DISTINCT refs, and a burst is the normal case: a
+    /// newly added friend holds none of our media and asks for all of it at once. Each probe walks
+    /// every circle's feed through the single engine actor, so without this the fan-out is the
+    /// size of their backlog. Two seconds keeps the signal — a genuinely bad relay copy is still
+    /// found, just not all of them in the same breath — while keeping the app responsive.
+    private static let backupReverifyMinGapMs: UInt64 = 2_000
 
     /// A peer asked us DIRECTLY for a blob we hold — meaning they could not fetch it from any relay
     /// we share. That is the only signal in the system that a STORED copy has gone bad, and until now
@@ -8304,6 +8318,20 @@ final class FeedStore: ObservableObject {
         guard let engine, !MediaStore.isSynthetic(ref) else { return }
         let nowMs = now()
         if let at = backupReverifiedAt[ref], nowMs &- at < Self.backupReverifyIntervalMs { return }
+        // A SECOND brake, on the rate rather than on each ref.
+        //
+        // The per-ref hour above stops one blob being re-probed in a loop; it does nothing about
+        // MANY refs, because each one is its own key. A peer that just joined holds none of our
+        // media and asks for all of it, so every ask is a distinct ref and the per-ref throttle
+        // never fires once — which is exactly how a friend added on a never-expiring link froze
+        // the app shortly after launch. Each admitted probe walks every circle's feed through the
+        // one engine actor ("One call at a time"), so the fan-out, not the individual probe, is
+        // what has to be bounded.
+        if nowMs &- lastBackupReverifyAtMs < Self.backupReverifyMinGapMs {
+            HavenLog.sync("media REQ \(ref.prefix(10)): re-probe skipped, another ran <\(Self.backupReverifyMinGapMs)ms ago")
+            return
+        }
+        lastBackupReverifyAtMs = nowMs
         backupReverifiedAt[ref] = nowMs
         if backupReverifiedAt.count > 2000 { backupReverifiedAt.removeAll() }
         Task { @MainActor in
@@ -8315,13 +8343,21 @@ final class FeedStore: ObservableObject {
     }
 
     /// The circle whose feed references `ref` — the one whose relays are supposed to hold its bytes.
-    /// Only ever reached behind the hourly throttle above, so the feed walk is not a hot path.
+    ///
+    /// The walk is expensive in a way its cost does not advertise: one `s.feed` per circle, each of
+    /// which reduces that circle's whole history on the engine actor. It read `mediaReqCircle` but
+    /// never WROTE it — and that cache is only ever filled on the paths where WE ask for media, so
+    /// on the serving side it missed every single time and re-walked from scratch. Remember the
+    /// answer, so a peer re-asking for the same ref (or resuming it) costs one lookup.
     private func circleId(holding ref: String) async -> String? {
         if let cid = mediaReqCircle[ref] { return cid }
         guard let engine else { return nil }
         let cids = circles.map(\.id)
         let nowMs = now()
-        return await engine.run { s in
+        // Result type spelled out: the closure used to be the function's own `return`, so it
+        // inherited `String?` from the signature. Binding it to a local drops that context and
+        // Swift infers `String` from the `return cid` above, which the `return nil` then fails.
+        let found: String? = await engine.run { s -> String? in
             for cid in cids {
                 for item in s.feed(circleId: cid, nowMs: nowMs, viewerRetentionSecs: nil) {
                     if item.media.contains(ref) { return cid }
@@ -8330,6 +8366,8 @@ final class FeedStore: ObservableObject {
             }
             return nil
         }
+        if let found { mediaReqCircle[ref] = found }
+        return found
     }
 
     /// Frame 33 — a RESUME request: `[requesterHex 64][u16 refLen][ref][u32 total][bitmap]`.

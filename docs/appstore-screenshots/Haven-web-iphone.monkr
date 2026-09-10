@@ -22,14 +22,14 @@
   "sceneObjects": [
     {
       "id": "obj-1",
-      "deviceId": "iphone-17-pro-max",
+      "deviceId": "iphone-18-pro-max",
       "deviceColorId": "deep-blue",
       "screenshotUrl": null,
       "screenshotFile": null,
       "extraScreenshots": [],
       "x": 50,
       "y": 50,
-      "scale": 2.45,
+      "scale": 2.1827,
       "rotation": 0,
       "tiltX": 0,
       "tiltY": 0,

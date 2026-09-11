@@ -452,16 +452,39 @@ async function main() {
 			run = await startRun(workflow.id, ref);
 			log(`started Xcode Cloud run #${run.attributes?.number ?? '?'} on workflow "${workflow.attributes.name}" via ${via}`);
 		} catch (e) {
-			// XCC refuses manual runs on a TAG unless the workflow's start condition lists tags
-			// ("the tag is not associated with the workflow", 409). Ours builds on branch pushes —
-			// fall back to starting the BRANCH when its tip carries the same tree/version.
-			if (!/not associated with the workflow/i.test(String(e?.message || e))) throw e;
-			log(`tag start refused by the workflow's start condition — starting branch main instead`);
+			// XCC refuses manual runs on a TAG unless the workflow's start condition lists tags.
+			// Ours builds on branch pushes — fall back to starting the BRANCH when its tip carries
+			// the same tree/version.
+			//
+			// TWO shapes of refusal, both seen in production:
+			//   * 409 "the tag is not associated with the workflow" — the documented one (1.8.6).
+			//   * 500 UNEXPECTED_ERROR — what the SAME refused tag start returned on 2026-09-11,
+			//     with no detail beyond "an unexpected error occurred on the server side". Matching
+			//     only the 409 text made that fatal, and the fallback that exists for exactly this
+			//     case never ran: the 1.8.7 lane died twice in a row with the branch start, which
+			//     would have worked, one line away.
+			// A 500 here is indistinguishable from Apple being down, so the fallback is ATTEMPTED
+			// rather than assumed: if the branch start also fails, that error is the one that
+			// surfaces, and the message below says to start the build by hand.
+			const refused = /not associated with the workflow/i.test(String(e?.message || e)) || e?.status === 500;
+			if (!refused) throw e;
+			log(`tag start refused (${e?.status ?? '?'}) — starting branch main instead`);
 			const repo = await api('GET', `/v1/ciWorkflows/${workflow.id}/repository?fields[scmRepositories]=repositoryName`);
 			const refs = await paged(`/v1/scmRepositories/${repo.data.id}/gitReferences?limit=200&fields[scmGitReferences]=name,kind,isDeleted`, 5);
 			const m = refs.find((x) => x.attributes?.kind === 'BRANCH' && !x.attributes?.isDeleted && x.attributes?.name === 'main');
 			if (!m) die('no main branch reference in Xcode Cloud — start the build by hand and re-run');
-			run = await startRun(workflow.id, m);
+			try {
+				run = await startRun(workflow.id, m);
+			} catch (e2) {
+				// Neither ref could be started. On 2026-09-11 this was Apple's side: POST
+				// /v1/ciBuildRuns returned 500 UNEXPECTED_ERROR for the tag AND for branch main,
+				// for over an hour, while every GET on the same product answered fine. There is
+				// nothing to retry around, so say what actually happened and what unblocks it.
+				die(`Xcode Cloud refused to start a run for both ${args.tag} and branch main `
+					+ `(${e2?.status ?? '?'}: ${String(e2?.message || e2).slice(0, 120)}). `
+					+ `A PUSH still triggers the workflow — push a commit to main (without [ci skip]) `
+					+ `or start the build in Xcode Cloud by hand, then re-run this lane.`);
+			}
 			log(`started Xcode Cloud run #${run.attributes?.number ?? '?'} via branch main`);
 			args.commit = '';   // the branch tip may differ from the tagged sha — trust the run, not the pin
 		}

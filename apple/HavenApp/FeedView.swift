@@ -1739,7 +1739,10 @@ struct PostMasonryTile: View {
                 .sensitiveContentGuard(ref: ref, circleId: FeedStore.shared.activeCircleId, scan: !item.isMe)
                 .onTapGesture {
                     let media = media
-                    if let idx = media.firstIndex(of: ref) { zoomTarget = ZoomTarget(refs: media, index: idx) }
+                    if let idx = media.firstIndex(of: ref) {
+                        zoomTarget = ZoomTarget(refs: media, index: idx, postId: item.id,
+                                                music: item.music, authorMutedVideo: item.muteVideo)
+                    }
                 }
         } else {
             // Not downloaded yet — a compact loading tile keeps the gallery layout intact.
@@ -2141,7 +2144,12 @@ struct PostCard: View {
         .havenCard()
         .sheet(isPresented: $showEdit) { EditPostSheet(item: item) }
         .sheet(isPresented: $showReport) { ReportSheet(item: item, authorName: authorName) }
-        .havenFullScreenCover(item: $zoomTarget, wide: true) { t in MediaZoomViewer(refs: t.refs, index: t.index) }
+        // pausesPostAudio: false — the viewer KEEPS this post's song playing (it is the same post,
+        // bigger), and takes the audio over itself via enterMediaViewer. Every other cover still
+        // silences the feed behind it.
+        .havenFullScreenCover(item: $zoomTarget, wide: true, pausesPostAudio: false) { t in
+            MediaZoomViewer(target: t)
+        }
         // Share-as-story runs through the SAME composer as a camera story (filters, caption styling,
         // music, reframing) — the only difference is that the published body carries the source post's
         // ref, so the story deep-links back to it.

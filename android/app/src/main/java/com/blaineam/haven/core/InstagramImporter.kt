@@ -548,18 +548,9 @@ object InstagramImporter {
         return StagedItem(refs, anyAudio)
     }
 
-    /** Does this clip carry an audio track? Device-only (MediaMetadataRetriever); false if asked
-     *  anywhere it isn't available, which is the safe answer — it only means a song is offered. */
-    private fun hasAudioTrack(file: File): Boolean = runCatching {
-        val mmr = android.media.MediaMetadataRetriever()
-        try {
-            mmr.setDataSource(file.absolutePath)
-            mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
-                .equals("yes", ignoreCase = true)
-        } finally {
-            runCatching { mmr.release() }
-        }
-    }.getOrDefault(false)
+    /** Does this clip carry an audio track? One implementation, in LocalMedia — the full-screen
+     *  viewer asks the same question to decide whether to duck a post's song under a talking clip. */
+    private fun hasAudioTrack(file: File): Boolean = LocalMedia.hasAudioTrack(file)
 
     // ---- Pure name helpers (shared with the tests) ----------------------------------------------
 

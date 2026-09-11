@@ -206,7 +206,10 @@ struct PostMediaView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 16))
                 // Tap-to-zoom only for images. For a video, the player owns the single tap
                 // (mute) / hold (pause) / drag (scrub); a zoom tap here would swallow them.
-                .modifier(ConditionalTap(enabled: !video) { zoomTarget = ZoomTarget(refs: media, index: 0) })
+                .modifier(ConditionalTap(enabled: !video) {
+                    zoomTarget = ZoomTarget(refs: media, index: 0, postId: item.id,
+                                            music: item.music, authorMutedVideo: item.muteVideo)
+                })
             } else if (2...10).contains(media.count) {
                 // Mixed aspects no longer force the grid — each page fits inside a shared shape and
                 // its own blurred backdrop masks the difference, which beats a 2-photo masonry.
@@ -291,7 +294,10 @@ struct PostMediaView: View {
                         if isVideo(ref) { muteButton(ref) }
                     }
                     .containerRelativeFrame(.horizontal)   // each page == the carousel's width
-                    .modifier(ConditionalTap(enabled: !isVideo(ref)) { zoomTarget = ZoomTarget(refs: media, index: i) })
+                    .modifier(ConditionalTap(enabled: !isVideo(ref)) {
+                        zoomTarget = ZoomTarget(refs: media, index: i, postId: item.id,
+                                                music: item.music, authorMutedVideo: item.muteVideo)
+                    })
                     .id(i)
                 }
             }

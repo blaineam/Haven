@@ -409,6 +409,10 @@ targets:
       - path: HavenApp/PushBanner.swift
       - path: HavenApp/PostDedupe.swift
       - path: HavenApp/PerceptualHash.swift
+      # Who gets the speakers in the full-screen media viewer. Pure data — no MediaPlayer, no
+      # MusicKit, no FFI — precisely so the rule can be covered without a subscription or a
+      # device (MPMusicPlayerController does not exist in the simulator at all).
+      - path: HavenApp/ViewerAudioPolicy.swift
       # The 512px AVIF preview tier. ImageIO/CoreGraphics only — no FeedStore, no FFI, so the
       # target stays host-LESS and its byte budget is covered by CI.
       - path: HavenApp/PreviewCodec.swift

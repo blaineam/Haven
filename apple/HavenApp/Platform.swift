@@ -311,14 +311,18 @@ extension View {
         #endif
     }
 
+    /// `pausesPostAudio: false` for a surface that OWNS the post's audio rather than covering it —
+    /// the full-screen media viewer, which keeps the song paired with the photos you're paging
+    /// through. Everything else leaves it on and goes quiet.
     @ViewBuilder
     func havenFullScreenCover<Item: Identifiable, Content: View>(item: Binding<Item?>,
                                                                  wide: Bool = false,
+                                                                 pausesPostAudio: Bool = true,
                                                                  onDismiss: (() -> Void)? = nil,
                                                                  @ViewBuilder content: @escaping (Item) -> Content) -> some View {
         #if os(iOS)
         self.fullScreenCover(item: item, onDismiss: onDismiss) { it in
-            content(it).havenPausesPostAudio()
+            if pausesPostAudio { content(it).havenPausesPostAudio() } else { content(it) }
         }
         #else
         // Pickers/forms get a phone-ish frame; the MEDIA VIEWER (wide:true) gets a roomy landscape frame so

@@ -676,7 +676,7 @@ struct DMThreadView: View {
         .onChange(of: store.postTick) { store.markThreadRead(circleId) }
         .onDisappear { store.markThreadRead(circleId) }
         .onDisappear { MusicPlayback.shared.stop() }   // leaving the thread silences any DM song
-        .havenFullScreenCover(item: $zoom, wide: true) { t in MediaZoomViewer(refs: t.refs, index: t.index) }
+        .havenFullScreenCover(item: $zoom, wide: true) { t in MediaZoomViewer(target: t) }
         .sheet(item: $reactTarget) { t in
             ReactionPicker { e in store.reactMessage(in: circleId, t.id, e) }
         }

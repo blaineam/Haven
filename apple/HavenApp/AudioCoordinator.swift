@@ -284,6 +284,76 @@ final class AudioCoordinator: ObservableObject {
         MusicPlayback.shared.stop()
     }
 
+    /// THE FULL-SCREEN MEDIA VIEWER opened over a post: keep its song playing.
+    ///
+    /// Every other surface that covers the feed silences it (`stopPostAudioForOverlay`), and the
+    /// viewer used to be treated the same way — so opening a photo full screen killed the music
+    /// paired with it, which is the one place you most want to sit and listen. A viewer is not a
+    /// picker: it shows the SAME post, bigger, and it owns that post's audio while it's up.
+    ///
+    /// The post stays the active audio source (`activePostId` is kept, not cleared) so closing the
+    /// viewer needs no re-activation. What is quieted is only what would compete: every inline feed
+    /// player behind the cover, muted — never paused, same as the overlay path, so nothing has to be
+    /// restarted on the way back.
+    ///
+    /// A post with no playable song has nothing to keep, so it falls through to the old behaviour.
+    func enterMediaViewer(postId: String, track: TrackRefFfi?) {
+        guard let track, !track.isCreditOnly, !SettingsStore.shared.dataSaverActive else {
+            stopPostAudioForOverlay()
+            return
+        }
+        pendingMusicStart?.cancel(); pendingMusicStart = nil   // the viewer starts the song itself, now
+        fadeTimer?.invalidate(); fadeTimer = nil
+        for (_, player) in videoByPost { player.volume = 0 }
+        videoPlayer?.volume = 0
+        videoUnmuted = false
+        activePostId = postId
+        activeTrack = track
+        setViewerMusicAudible(true, track: track)
+    }
+
+    /// The viewer's one audio decision, applied: should the post's song be audible right now?
+    /// False while a video page carries its own sound, or while the viewer's music chip is muted.
+    ///
+    /// `play` vs `resume` matters: a song that was never queued (the feed deferred it, or the app was
+    /// silent when the post became active) has nothing to resume, and `resume()` would no-op forever.
+    func setViewerMusicAudible(_ audible: Bool, track: TrackRefFfi) {
+        guard audible, !backgrounded, !SettingsStore.shared.silent, !callActive else {
+            MusicPlayback.shared.duck()
+            return
+        }
+        if MusicPlayback.shared.current?.catalogId == track.catalogId {
+            MusicPlayback.shared.resume()
+        } else {
+            MusicPlayback.shared.play(track)
+        }
+    }
+
+    /// The viewer closed. The post is still the active source and still centred, so the feed's own
+    /// rule takes over again: the song plays, the inline clip stays muted under it.
+    ///
+    /// `musicStaysMuted` carries the viewer's mute chip back with the user. Muting the song and having
+    /// it start again the instant you swipe the photo away reads as a broken control, so the choice
+    /// outlives the viewer — until you scroll on and another post takes the stage.
+    func exitMediaViewer(musicStaysMuted: Bool) {
+        fadeTimer?.invalidate(); fadeTimer = nil
+        videoUnmuted = false
+        videoPlayer?.volume = 0
+        // Opening the viewer can make a post the audio source without it being the CENTRED one (tap a
+        // photo on a card half off screen and its song starts). Coming back to the feed, that post is
+        // not what you're looking at, so its song does not get to keep the stage: stop outright and
+        // let the feed re-activate whatever is actually centred.
+        if let active = activePostId, active != centeredPostId {
+            stop()
+            return
+        }
+        guard let track = activeTrack, !track.isCreditOnly, !musicStaysMuted else {
+            if musicStaysMuted { MusicPlayback.shared.duck() }
+            return
+        }
+        setViewerMusicAudible(true, track: track)
+    }
+
     /// A camera / viewfinder / sheet took over: STOP post audio outright instead of pausing it.
     /// A merely *paused* system music player is resumed BY iOS when a capture session tears its audio
     /// session down at the end of a recording — which is why the post's song came roaring back the

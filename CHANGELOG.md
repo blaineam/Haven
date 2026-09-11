@@ -7,6 +7,33 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 1.8.7 — in development
+
+### Added — the song keeps playing when you open a photo full screen
+
+Tapping a photo on a post with music used to kill the music. Everything that covers the feed
+silences it — a picker, a composer, a viewfinder — and the full-screen viewer went through the same
+door, so the one place you would most want to sit and listen to the song paired with a photo was the
+one place it stopped. The viewer is not a sheet over the post; it is the same post, bigger. It now
+owns that post's audio for as long as it is up.
+
+Page between photos and the song plays straight through. Land on a video that carries sound of its
+own and the clip takes the stage — the song ducks under it and comes back on the next photo, without
+a tap. A clip that CANNOT be heard takes nothing: "is a video" and "makes sound" are different
+questions, so the file is probed rather than guessed from its name, and a screen recording, a
+time-lapse or a clip muted before posting leaves the song exactly where it was. The song has its own
+mute in the bottom leading corner, naming what is playing; the clip keeps its speaker in the bottom
+trailing corner, where the feed's has always been. An explicit tap on the speaker outranks the
+automatic duck for the rest of the viewer.
+
+The rule is a table rather than branches in a view body — `ViewerAudioPolicy` in Swift and
+`core/ViewerAudioPolicy.kt` in Kotlin, field for field — because it is exactly the kind of rule that
+drifts once it lives in two view bodies. Both are covered by test files asserting the same cases,
+including an exhaustive sweep of all 1,152 input combinations for the invariant that matters: a
+post's song and its own clip are never both audible. Android's viewer applies the same table to its
+30-second preview. Desktop still does not play post music at all — no library to drive and no licence
+to stream — so it has nothing to keep playing, which is unchanged.
+
 ## 1.8.6 — 2026-09-10
 
 ### Fixed — a friend loading your media no longer freezes the app

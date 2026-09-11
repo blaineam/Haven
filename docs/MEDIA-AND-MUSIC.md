@@ -92,6 +92,44 @@ or scroll-away.
   keys. The only guarantee we keep is **honoring the user's control** (muted by
   default; unmute is explicit; nothing autoplays audibly without a clear affordance).
 
+### The full-screen viewer keeps the song
+
+Opening a photo full screen **does not** stop the post's music. Every other surface that
+covers the feed silences it — a picker, a composer, a viewfinder, all via
+`AudioCoordinator.stopPostAudioForOverlay` — and the viewer was treated the same way, which
+killed the soundtrack in the one place you most want to sit and listen to it. The viewer is
+the same post, bigger; it **owns** that post's audio while it is up
+(`AudioCoordinator.enterMediaViewer`, and `pausesPostAudio: false` on its cover).
+
+Who gets the speakers is a rule table, not branches in a view body:
+`ViewerAudioPolicy` (Swift) and `core/ViewerAudioPolicy.kt` (Kotlin) are field-for-field
+twins, each covered by a test file asserting the same cases — including an exhaustive sweep
+of all 1,152 input combinations for the one invariant that matters, that a post's song and
+its own clip are **never both audible**.
+
+| On screen | What you hear |
+| --- | --- |
+| A photo page | the song |
+| A video page whose clip carries an audible track | the clip; the song ducks and returns when you page off it |
+| A video page whose clip is silent, or one the author muted | the song, undisturbed |
+| Either, with the song chip muted (bottom leading) | the clip, if any |
+| Either, with the speaker chip muted (bottom trailing) | the song |
+| Either, app-wide mute on, or a live call | nothing |
+
+"Is a video" and "makes sound" are different questions, so the clip is **probed** off-main
+(`SongSuggester.hasAudio` / `LocalMedia.hasAudioTrack`) rather than guessed from the ref: a
+screen recording, a time-lapse or a clip muted before posting must not silence a song on its
+way past. An explicit tap on the speaker chip outranks the automatic duck for the rest of the
+viewer's life, and the song chip's mute is **viewer-local** — deliberately not the app-wide
+`silent`, which would also kill video audio and persist long after the viewer closed. It does
+carry back to the feed on close, because a song that restarts the instant you swipe a photo
+away reads as a broken control.
+
+**Android parity:** `MediaViewer` applies the same table, pausing/resuming the 30-second
+preview through `MusicPlayer.setUserPaused`. **Desktop does not play post music at all** (see
+`storySongChip` — no library to drive and no licence to stream), so there is nothing there to
+keep playing; that divergence is unchanged by this.
+
 ## Data-model change (security-reviewed)
 
 `haven-p2p::social::EventKind::Post` gains optional `media: [MediaRef]` (already present
@@ -107,6 +145,8 @@ encryption boundary; it's just more sealed bytes.
 - ✅ Composer attach: Photos/Videos picker (`PHPicker`), in-app **camera**
   (`AVCaptureSession`, tap=photo / hold=video / flip), **song picker**.
 - ✅ `AudioCoordinator` + video-volume crossfade; muted-video-while-music model.
+- ✅ **The full-screen viewer keeps the song** (Apple + Android), with a song mute chip and an
+  automatic duck under a clip that carries its own audio — one rule table, tested on both.
 - ✅ Privacy usage strings (camera/mic/photos/Apple Music).
 - ✅ **Real Apple Music**: the **MusicKit capability + `com.apple.developer.musickit`
   entitlement** are **granted on the App ID**; live catalog + library picker, attach, and

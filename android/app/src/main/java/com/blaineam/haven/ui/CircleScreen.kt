@@ -19,6 +19,10 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.runtime.mutableStateMapOf
+import uniffi.haven_ffi.TrackRefFfi
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -1585,13 +1589,41 @@ private fun PillAction(label: String, filled: Boolean = true, enabled: Boolean =
     )
 }
 
-/** Full-screen media viewer: swipe between items, tap/back to close. */
+/**
+ * Full-screen media viewer: swipe between items, tap/back to close.
+ *
+ * AUDIO (Apple parity — see MediaZoomViewer). The post's song keeps playing while you page through
+ * its photos: the viewer is the same post, bigger, not a sheet covering it. A video page whose clip
+ * carries its own audible track takes the stage — the song pauses and comes back the moment you page
+ * off it — and the song chip in the bottom-start corner is the song's own mute, separate from the
+ * clip's speaker in the bottom-end corner.
+ *
+ * [music] is null for media with no post behind it (a DM attachment, a comment's photo), which is
+ * the pre-existing behaviour: nothing to keep playing, nothing to duck.
+ */
 @Composable
-fun MediaViewer(circleId: String, refs: List<String>, startIndex: Int, onClose: () -> Unit) {
+fun MediaViewer(
+    circleId: String,
+    refs: List<String>,
+    startIndex: Int,
+    music: TrackRefFfi? = null,
+    authorMutedVideo: Boolean = false,
+    onClose: () -> Unit,
+) {
     val pager = androidx.compose.foundation.pager.rememberPagerState(initialPage = startIndex) { refs.size }
     val context = LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var saved by remember { mutableStateOf(false) }
+    val profile = remember { ProfileStore.get(context) }
+    // The song's mute, and ONLY the song's — deliberately not the global video-sound toggle, which
+    // would also change every clip in the feed and persist long after this viewer closed.
+    var musicMuted by remember { mutableStateOf(false) }
+    // An explicit tap on the clip's speaker, which overrides the automatic choice below. Null until
+    // tapped, so paging decides for itself until the user says otherwise.
+    var videoSoundChoice by remember { mutableStateOf<Boolean?>(null) }
+    // Does this clip actually carry an audible track? Probed off-main per ref and cached — only a
+    // clip that CAN be heard should take the stage from a song.
+    val clipHasAudio = remember { mutableStateMapOf<String, Boolean>() }
     // Pinch-to-zoom + pan on the current photo (parity with iOS PostMedia). Resets on page change; while
     // zoomed, drag pans the image instead of swiping to the next item.
     var scale by remember { mutableFloatStateOf(1f) }
@@ -1601,6 +1633,37 @@ fun MediaViewer(circleId: String, refs: List<String>, startIndex: Int, onClose: 
     // VideoView's own MediaController + the sound toggle own all taps, and dismissal goes through the
     // explicit Close button — otherwise a stray tap on the video would close the viewer.
     val onVideoPage = refs.getOrNull(pager.currentPage)?.let { LocalMedia.isVideo(it) } == true
+    val curRefForAudio = refs.getOrNull(pager.currentPage)
+    // Ask the file whether the clip on screen can be heard, once per ref. On IO: it opens the file
+    // and reads its metadata, which is exactly the kind of work that stutters a page swipe.
+    LaunchedEffect(curRefForAudio, circleId) {
+        val ref = curRefForAudio ?: return@LaunchedEffect
+        if (!LocalMedia.isVideo(ref) || clipHasAudio.containsKey(ref)) return@LaunchedEffect
+        val has = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            LocalMedia.videoFile(circleId, ref)?.let { LocalMedia.hasAudioTrack(it) } ?: false
+        }
+        clipHasAudio[ref] = has
+    }
+    // The rule table both clients share — see core/ViewerAudioPolicy (and its Swift twin), where the
+    // behaviour is written down and covered by tests.
+    val policy = com.blaineam.haven.core.ViewerAudioPolicy(
+        hasSong = music != null,
+        musicMuted = musicMuted,
+        onVideoPage = onVideoPage,
+        clipCarriesAudio = clipHasAudio[curRefForAudio] == true,
+        authorMutedVideo = authorMutedVideo,
+        explicitVideoChoice = videoSoundChoice,
+        globalVideoSoundOn = profile.videoSoundOn,
+        callActive = com.blaineam.haven.core.CallManager.callInProgress,
+    )
+    val videoAudible = policy.videoAudible
+    // Pause the song under a clip that is taking the stage, and hand it back on the way off. The
+    // song itself is driven by the card's MusicChip, which keeps playing under this overlay — that
+    // is what makes "keep listening while I look at the photos" work at all.
+    LaunchedEffect(music, policy.musicAudible) {
+        if (music == null) return@LaunchedEffect
+        MusicPlayer.setUserPaused(!policy.musicAudible)
+    }
     Box(
         Modifier.fillMaxSize().background(Color.Black)
             .then(if (onVideoPage) Modifier else Modifier.clickable { onClose() }),
@@ -1616,7 +1679,15 @@ fun MediaViewer(circleId: String, refs: List<String>, startIndex: Int, onClose: 
                 // Full-screen player: VideoTile autoplays (start() in onPreparedListener), loops, has an
                 // onErrorListener logging to tag "VideoTile", and a sound toggle. This is why grid videos
                 // opened via the pager now actually play instead of showing the play-glyph still.
-                VideoTile(circleId, ref, Modifier.fillMaxSize())
+                VideoTile(
+                    circleId, ref, Modifier.fillMaxSize(),
+                    soundOverride = videoAudible && page == pager.currentPage,
+                    onToggleSound = {
+                        val want = !videoAudible
+                        videoSoundChoice = want
+                        profile.videoSoundOn = want
+                    },
+                )
             } else {
                 MediaImage(
                     circleId, ref,
@@ -1663,6 +1734,32 @@ fun MediaViewer(circleId: String, refs: List<String>, startIndex: Int, onClose: 
                     }
                 }, contentAlignment = Alignment.Center) {
                 Icon(Icons.Filled.Download, stringResource(R.string.circle_save_to_photos_cd), tint = Color.White)
+            }
+        }
+        // The song paired with this post, named and mutable without leaving the viewer. Bottom START
+        // so it never collides with the clip's speaker chip on a video page — two separate sources,
+        // two separate controls, never the same corner.
+        if (music != null) {
+            val songAudible = policy.musicAudible
+            Row(
+                Modifier.align(Alignment.BottomStart).navigationBarsPadding().padding(16.dp)
+                    .widthIn(max = 260.dp).clip(RoundedCornerShape(20.dp))
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .clickable { musicMuted = !musicMuted }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(Icons.Filled.MusicNote, null, tint = HavenTheme.pink, modifier = Modifier.size(16.dp))
+                Text(
+                    if (music.artist.isBlank()) music.title else "${music.title} · ${music.artist}",
+                    color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+                )
+                Icon(
+                    if (songAudible) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
+                    stringResource(R.string.circle_toggle_sound_cd), tint = Color.White, modifier = Modifier.size(16.dp),
+                )
             }
         }
         // The viewer's surface is Color.Black in both modes — all its chrome stays white.
@@ -1934,6 +2031,14 @@ fun VideoTile(
     // back. MediaPlayer has no such ownership — it only takes the route if someone requests focus on
     // its behalf, and a force-muted tile below never does (see the `audible` effect).
     forceMuted: Boolean = false,
+    // The caller has already decided whether this clip may be heard, and its answer REPLACES the
+    // global toggle. Set by the full-screen viewer, which weighs the post's song against the clip's
+    // own audio: a clip that carries sound takes the stage automatically there, which the global
+    // flag (off by default) cannot express. Null = decide from the global toggle, as the feed does.
+    soundOverride: Boolean? = null,
+    // Who owns the sound button's tap. Null = this tile flips the global toggle itself. The viewer
+    // passes its own handler so the tap lands on the choice it is actually reading.
+    onToggleSound: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val profile = remember { ProfileStore.get(context) }
@@ -1941,7 +2046,7 @@ fun VideoTile(
     // must not start making noise because they scrolled past a clip. Two signals, because Android
     // splits what iOS's one switch covers — the ringer being silenced, and the media stream itself
     // being at zero. Either means "not now".
-    val soundOn = profile.videoSoundOn && !forceMuted
+    val soundOn = soundOverride ?: (profile.videoSoundOn && !forceMuted)
     var file by remember(ref) { mutableStateOf(resolved) }
     val player = remember(ref) { mutableStateOf<android.media.MediaPlayer?>(null) }
     android.util.Log.i("VideoTile", "COMPOSE ref=$ref circle=${circleId.take(14)} isVideo=${LocalMedia.isVideo(ref)}")
@@ -2052,7 +2157,7 @@ fun VideoTile(
                                         // Mirrors the `audible` effect above — a force-muted tile
                                         // (a story under a song) must not make noise for the frame
                                         // between prepare and that effect running.
-                                        val vol = if (profile.videoSoundOn && !forceMuted &&
+                                        val vol = if ((soundOverride ?: (profile.videoSoundOn && !forceMuted)) &&
                                             !com.blaineam.haven.core.CallManager.callInProgress) 1f else 0f
                                         it.setVolume(vol, vol)
                                         it.start()   // autoplay (iOS parity)
@@ -2088,7 +2193,7 @@ fun VideoTile(
                 Box(
                     Modifier.align(Alignment.BottomEnd).padding(8.dp).size(34.dp).clip(CircleShape)
                         .background(Color.Black.copy(alpha = 0.45f))
-                        .clickable { profile.videoSoundOn = !profile.videoSoundOn },
+                        .clickable { onToggleSound?.invoke() ?: run { profile.videoSoundOn = !profile.videoSoundOn } },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
@@ -2160,6 +2265,10 @@ fun PostCard(
                     item.media.filter { !com.blaineam.haven.core.LocationShare.isLocation(it) }
                 ),
                 start,
+                // The viewer keeps THIS post's song playing — MusicChip below stays composed under
+                // the overlay, so there is a song to keep rather than one to restart.
+                music = item.music,
+                authorMutedVideo = item.muteVideo,
             ) { viewerStart = null }
         }
     }

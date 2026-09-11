@@ -279,6 +279,25 @@ object LocalMedia {
         return if (out.exists()) out else null
     }
 
+    /** Does this clip carry an audio track? Device-only (MediaMetadataRetriever); false if asked
+     *  anywhere it isn't available, which is the safe answer everywhere it is used — a clip we
+     *  cannot judge never takes the audio stage from a post's song.
+     *
+     *  "Is a video" and "makes sound" are different questions: a screen recording, a time-lapse or a
+     *  clip muted before posting is a silent video. Lives here rather than beside its first caller
+     *  (the Instagram import, which asks it to decide whether to suggest a song) because the
+     *  full-screen viewer needs the same answer to decide whether to duck the music. */
+    fun hasAudioTrack(file: File): Boolean = runCatching {
+        val mmr = android.media.MediaMetadataRetriever()
+        try {
+            mmr.setDataSource(file.absolutePath)
+            mmr.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
+                .equals("yes", ignoreCase = true)
+        } finally {
+            runCatching { mmr.release() }
+        }
+    }.getOrDefault(false)
+
     fun isVideo(ref: String): Boolean = ref.startsWith("vid_") || ref.startsWith("v:")
     fun isFile(ref: String): Boolean = ref.startsWith("file_")
     fun isAudio(ref: String): Boolean = ref.startsWith("aud_")

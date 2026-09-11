@@ -1,2 +1,2 @@
-1.8.6 — Enviar fotos a un amigo ya no bloquea la app.
-- Haven podía bloquearse poco después de abrirse mientras un amigo descargaba tus fotos y vídeos — normalmente alguien recién añadido, porque necesita todo de una vez. Haven comprobaba de nuevo su copia de seguridad por cada elemento pedido, y eso bloqueaba el resto. Ahora comprueba mucho menos.
+1.8.7 — La canción sigue sonando al abrir una foto a pantalla completa.
+- Toca una foto de una publicación con música y la canción ya no se corta: sigue sonando, con su propio botón de silencio en la esquina. Se aparta sola cuando llega un vídeo con sonido propio y vuelve en la siguiente foto.

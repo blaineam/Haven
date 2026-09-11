@@ -1,2 +1,2 @@
-1.8.6 — Envoyer des photos à un ami ne bloque plus l'app.
-- Haven pouvait se figer peu après son ouverture pendant qu'un ami récupérait vos photos et vidéos — souvent un ami que vous veniez d'ajouter, car il a besoin de tout d'un coup. Haven revérifiait sa sauvegarde pour chaque élément demandé, ce qui bloquait tout le reste. Il vérifie désormais bien plus rarement.
+1.8.7 — La musique continue quand vous ouvrez une photo en plein écran.
+- Touchez une photo d'une publication avec musique : le morceau continue désormais au lieu de s'arrêter, avec son propre bouton de sourdine dans le coin. Il s'efface de lui-même devant une vidéo qui a déjà du son, puis revient à la photo suivante.

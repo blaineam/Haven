@@ -32,8 +32,8 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Free. A private, end‑to‑end encrypted home for your closest people — no ads, no tracking, no subscription. Peer‑to‑peer, post‑quantum, yours.
 
 ## whats_new
-1.8.6 — Sending photos to a friend no longer freezes the app.
-- Haven could lock up shortly after opening while a friend was loading photos and videos from you — usually one you had just added, since they need everything at once. Haven re-checked its own backup for every item they asked for, and those checks stalled everything else. It now checks far less often, so the app stays responsive.
+1.8.7 — The song keeps playing when you open a photo full screen.
+- Tap a photo on a post with music and the song now plays on instead of stopping, with its own mute button in the corner. It steps aside by itself for a video that has sound of its own, then comes back on the next photo.
 
 ## whats_new_previous
 1.8.1 — Smoother feed, cooler phone.

@@ -1,2 +1,2 @@
-1.8.6 — Enviar fotos para um amigo não trava mais o app.
-- O Haven podia travar logo depois de abrir enquanto um amigo baixava suas fotos e vídeos — normalmente alguém que você acabara de adicionar, porque precisa de tudo de uma vez. O Haven verificava de novo o próprio backup a cada item pedido, travando o resto. Agora ele verifica bem menos.
+1.8.7 — A música continua tocando quando você abre uma foto em tela cheia.
+- Toque em uma foto de um post com música e a música agora continua tocando em vez de parar, com um botão de mudo próprio no canto. Ela sai de cena sozinha quando um vídeo tem som próprio e volta na foto seguinte.

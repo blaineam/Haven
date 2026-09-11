@@ -1,2 +1,2 @@
-1.8.6 — Inviare foto a un amico non blocca più l'app.
-- Haven poteva bloccarsi poco dopo l'apertura mentre un amico scaricava le tue foto e i tuoi video — di solito un amico appena aggiunto, perché ha bisogno di tutto in una volta. Haven ricontrollava il proprio backup per ogni elemento richiesto, bloccando tutto il resto. Ora controlla molto meno spesso.
+1.8.7 — La musica continua mentre guardi una foto a schermo intero.
+- Tocca una foto in un post con musica: ora il brano prosegue invece di interrompersi, con un pulsante di silenziamento tutto suo nell'angolo. Si fa da parte da solo quando un video ha un audio proprio, poi torna con la foto successiva.

@@ -7,7 +7,7 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 1.8.7 — in development
+## 1.8.7 — 2026-09-11
 
 ### Added — the song keeps playing when you open a photo full screen
 

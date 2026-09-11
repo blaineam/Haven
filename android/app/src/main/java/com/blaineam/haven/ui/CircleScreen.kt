@@ -1660,7 +1660,11 @@ fun MediaViewer(
     // Pause the song under a clip that is taking the stage, and hand it back on the way off. The
     // song itself is driven by the card's MusicChip, which keeps playing under this overlay — that
     // is what makes "keep listening while I look at the photos" work at all.
-    LaunchedEffect(music, policy.musicAudible) {
+    // `playingUrl` is a key, not just a read: MusicChip resolves the 30-second preview URL
+    // asynchronously and its own effect then calls MusicPlayer.play, which RESETS pausedByUser. Open
+    // the viewer before that lands, page onto a talking clip, and the song would start over the top
+    // of it. Re-applying when playback actually begins closes that window.
+    LaunchedEffect(music, policy.musicAudible, MusicPlayer.playingUrl) {
         if (music == null) return@LaunchedEffect
         MusicPlayer.setUserPaused(!policy.musicAudible)
     }

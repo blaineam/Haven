@@ -117,6 +117,16 @@ final class AudioCoordinator: ObservableObject {
         activePostId == postId && videoUnmuted && !backgrounded
             && !SettingsStore.shared.silent && !callActive
     }
+    /// TRUE while the full-screen media viewer owns this post's audio. Every feed-driven raise below
+    /// is inert while it is set, because the feed is not what the user is looking at.
+    ///
+    /// The bug that earned it: the inline player behind the cover keeps LOOPING (nothing about a
+    /// cover moves the centred post, which is what `videoMayLoop` asks), and `videoFinished` resumes
+    /// the song on every loop of a muted clip. So a viewer sitting on a video page — song correctly
+    /// ducked under the clip — got the song back over the top of it a few seconds later, from a clip
+    /// the user could not even see.
+    private(set) var mediaViewerActive = false
+
     /// A call is ringing/connecting/in progress — call audio owns the stage: no post music, no video
     /// audio (videos keep playing, muted). Computed live so scroll-driven start() can't race a flag.
     private var callActive: Bool { CallManager.shared.callInProgress }
@@ -224,6 +234,7 @@ final class AudioCoordinator: ObservableObject {
     }
 
     func stop() {
+        mediaViewerActive = false
         pendingMusicStart?.cancel(); pendingMusicStart = nil   // drop a deferred scroll start that never settled
         fadeTimer?.invalidate(); fadeTimer = nil
         videoPlayer?.volume = 0
@@ -309,6 +320,7 @@ final class AudioCoordinator: ObservableObject {
         videoUnmuted = false
         activePostId = postId
         activeTrack = track
+        mediaViewerActive = true
         setViewerMusicAudible(true, track: track)
     }
 
@@ -336,6 +348,7 @@ final class AudioCoordinator: ObservableObject {
     /// it start again the instant you swipe the photo away reads as a broken control, so the choice
     /// outlives the viewer — until you scroll on and another post takes the stage.
     func exitMediaViewer(musicStaysMuted: Bool) {
+        mediaViewerActive = false
         fadeTimer?.invalidate(); fadeTimer = nil
         videoUnmuted = false
         videoPlayer?.volume = 0
@@ -390,6 +403,7 @@ final class AudioCoordinator: ObservableObject {
     /// listening to a video's audio. Called when a post stays active (e.g. after a video
     /// paused it) so the music resumes as long as you haven't scrolled past the post.
     func ensureMusicPlaying() {
+        guard !mediaViewerActive else { return }   // the viewer decides while it is up
         guard !videoUnmuted, !SettingsStore.shared.silent, !backgrounded else { return }
         MusicPlayback.shared.resume()
     }
@@ -398,6 +412,9 @@ final class AudioCoordinator: ObservableObject {
     /// force re-mute every loop, which is exactly the bug). Only bring the song back if the video is
     /// muted; if the viewer is listening to the video, leave it up and don't resume the song.
     func videoFinished() {
+        // A clip looping BEHIND the media viewer's cover must not raise the song the viewer has
+        // deliberately ducked under the clip on screen — see mediaViewerActive.
+        if mediaViewerActive { return }
         if videoUnmuted {
             videoPlayer?.volume = 1   // stay unmuted on the looped playback
         } else if !backgrounded, !SettingsStore.shared.silent {

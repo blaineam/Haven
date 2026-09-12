@@ -1,2 +1,3 @@
-1.8.7 — A música continua tocando quando você abre uma foto em tela cheia.
-- Toque em uma foto de um post com música e a música agora continua tocando em vez de parar, com um botão de mudo próprio no canto. Ela sai de cena sozinha quando um vídeo tem som próprio e volta na foto seguinte.
+1.8.8 — Fotos em tela cheia: a música continua e o zoom acompanha seu dedo.
+- Toque em uma foto de um post com música e a música continua tocando, com botão de mudo próprio no canto. Ela sai de cena se um vídeo tem som próprio.
+- Uma foto ampliada agora acompanha seu dedo em vez de pular quando você solta. Dois toques ampliam no ponto tocado, e o nome da música não cobre mais os pontinhos de baixo.

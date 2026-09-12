@@ -7,7 +7,11 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 1.8.7 — 2026-09-11
+## 1.8.8 — 2026-09-12
+
+On the App Store this release also carries 1.8.7's work below: 1.8.7 was tagged and shipped to
+Play, Linux and the Microsoft Store, but Xcode Cloud never produced a build for it (the submission
+died on a 500 from App Store Connect), so Apple skips the number rather than waiting on it.
 
 ### Fixed — in the full-screen viewer, the song chip is off the page dots and a zoomed photo follows your finger
 
@@ -36,6 +40,8 @@ rubber-banding, and panning is clamped to the picture — you can no longer flin
 off the screen and be left looking at black. Double tap zooms to the point you tapped rather
 than to the middle. At rest nothing changes: swiping still pages, and a swipe down still
 dismisses.
+
+## 1.8.7 — 2026-09-11
 
 ### Added — the song keeps playing when you open a photo full screen
 

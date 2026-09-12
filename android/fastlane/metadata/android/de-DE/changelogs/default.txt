@@ -1,2 +1,3 @@
-1.8.7 — Der Song läuft weiter, wenn du ein Foto im Vollbild öffnest.
-- Tippe bei einem Post mit Musik auf ein Foto, und der Song spielt jetzt einfach weiter, statt zu stoppen — mit eigenem Stummschalter in der Ecke. Für ein Video mit eigenem Ton tritt er von selbst zurück und kommt beim nächsten Foto wieder.
+1.8.8 — Fotos im Vollbild: Der Song läuft weiter, und der Zoom folgt deinem Finger.
+- Tippe bei einem Post mit Musik auf ein Foto, und der Song läuft weiter — mit eigenem Stummschalter in der Ecke. Für ein Video mit eigenem Ton tritt er zurück.
+- Ein herangezoomtes Foto folgt jetzt deinem Finger, statt beim Loslassen zu springen. Doppeltippen zoomt auf die getippte Stelle, und der Songtitel liegt nicht mehr über den Punkten unten.

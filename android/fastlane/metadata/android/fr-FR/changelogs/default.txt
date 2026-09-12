@@ -1,2 +1,3 @@
-1.8.7 — La musique continue quand vous ouvrez une photo en plein écran.
-- Touchez une photo d'une publication avec musique : le morceau continue désormais au lieu de s'arrêter, avec son propre bouton de sourdine dans le coin. Il s'efface de lui-même devant une vidéo qui a déjà du son, puis revient à la photo suivante.
+1.8.8 — Photos en plein écran : la musique continue et le zoom suit votre doigt.
+- Touchez une photo d'une publication avec musique : le morceau continue, avec son bouton de sourdine dans le coin. Il s'efface devant une vidéo qui a déjà du son.
+- Une photo zoomée suit désormais votre doigt au lieu de sauter quand vous relâchez. Un double toucher zoome à l'endroit touché, et le titre ne recouvre plus les points du bas.

@@ -9,6 +9,34 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 1.8.7 — 2026-09-11
 
+### Fixed — in the full-screen viewer, the song chip is off the page dots and a zoomed photo follows your finger
+
+Two things the new song chip landed on, both on iPhone.
+
+The chip and the **page dots** were drawn in the same corner of the screen by two different
+things that had never had to agree: the dots come free with the pager and sit in the bottom
+centre, the chip is drawn over the top of it in the bottom leading corner, and a song with a
+long enough title reached the middle and printed itself across them. The viewer now draws its
+own dots — the same ones the feed carousel has always used — in the same stack as the chips,
+one row above the other. The collision is not tuned out, it is impossible: they are no longer
+in a position to overlap at any title length, on any screen width.
+
+**Panning a zoomed photo** did not follow your finger. It sat still while you dragged and then
+jumped to wherever the finger had got to by the time you lifted it, which is a worse feeling
+than not being able to pan at all. The cause is that the page lives inside the pager, and the
+pager is a scroll view: a SwiftUI drag gesture has to win the touch from that scroll view's own
+pan recogniser, and it loses — its updates arrive late and coalesced, and only the final
+translation ever really landed. Gesture masking cannot fix that, because the competition is
+with a UIKit recogniser that never fails.
+
+So zoom and pan are now a real scroll view, which is how every photo browser on the platform is
+built and something the system already knows how to resolve against the pager around it. A
+zoomed photo tracks your finger at the display's full refresh rate, with momentum and
+rubber-banding, and panning is clamped to the picture — you can no longer fling a photo clean
+off the screen and be left looking at black. Double tap zooms to the point you tapped rather
+than to the middle. At rest nothing changes: swiping still pages, and a swipe down still
+dismisses.
+
 ### Added — the song keeps playing when you open a photo full screen
 
 Tapping a photo on a post with music used to kill the music. Everything that covers the feed

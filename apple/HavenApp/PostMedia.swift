@@ -1,5 +1,10 @@
 import SwiftUI
 import AVKit
+#if canImport(UIKit)
+import UIKit
+#else
+import AppKit
+#endif
 
 struct ZoomTarget: Identifiable {
     let id = UUID()
@@ -17,10 +22,12 @@ struct ZoomTarget: Identifiable {
 /// Full-screen media viewer: swipe between a post's photos/videos, pinch + double-tap to
 /// zoom, pan a zoomed photo, swipe down to dismiss.
 ///
-/// Gesture model: at scale 1 the per-page pan gesture is masked off (`.subviews`), so the
-/// TabView pages horizontally and the dismiss drag handles vertical swipes. When a page is
-/// zoomed it reports `zoomed = true`, which (a) activates that page's pan and (b) disables
-/// the dismiss drag, so panning a zoomed image never paginates or dismisses.
+/// Gesture model: at scale 1 a page takes no drag of its own, so the TabView pages horizontally
+/// and the dismiss drag handles vertical swipes. When a page is zoomed it reports `zoomed = true`,
+/// which (a) hands that page the drag, for panning, and (b) disables the dismiss drag, so panning
+/// a zoomed image never paginates or dismisses. On iOS the zoom and the pan are a real
+/// `UIScrollView` (see `ZoomableImage`) rather than SwiftUI gestures, because a SwiftUI drag
+/// cannot win a touch from the paging scroll view it is sitting inside.
 ///
 /// AUDIO. The viewer OWNS the post's audio while it is up, rather than silencing the feed behind it
 /// (which is what every other cover does, and what this one used to do — opening a photo full screen
@@ -103,7 +110,11 @@ struct MediaZoomViewer: View {
                                  soundAllowed: policy.videoAudible && i == index).tag(i)
                 }
             }
-            .havenPagedTabViewStyle(showsIndex: target.refs.count > 1)
+            // showsIndex: FALSE, deliberately. The system's page dots sit in the bottom CENTRE,
+            // underneath whatever chrome the viewer draws there — which is how the song chip ended
+            // up printed across them. The viewer draws its own dots below, in the same stack as the
+            // chips, where a collision is impossible by construction: one row, then the next.
+            .havenPagedTabViewStyle(showsIndex: false)
             .offset(y: dismissOffset)
             .simultaneousGesture(
                 DragGesture(minimumDistance: 15)
@@ -112,7 +123,10 @@ struct MediaZoomViewer: View {
                         dismissOffset = v.translation.height
                     }
                     .onEnded { v in
-                        guard !zoomed else { return }
+                        // Zoomed → this drag was never a dismiss, but it may have nudged the
+                        // viewer before the pinch reported: put it back rather than leaving the
+                        // page sitting a few points down the screen.
+                        guard !zoomed else { withAnimation(.spring()) { dismissOffset = 0 }; return }
                         if abs(v.translation.height) > 140 && abs(v.translation.height) > abs(v.translation.width) { dismiss() }
                         else { withAnimation(.spring()) { dismissOffset = 0 } }
                     }
@@ -159,6 +173,11 @@ struct MediaZoomViewer: View {
                         .buttonStyle(GlassIconButtonStyle(tint: .white))
                         .padding()
                     }
+                }
+                // The page dots, BELOW the chips rather than behind them — the same dots the feed
+                // carousel draws, so the two read as one control at two sizes.
+                if target.refs.count > 1 {
+                    PostCarouselDots(count: target.refs.count, currentPage: index)
                 }
             }
         }
@@ -277,10 +296,12 @@ private struct ZoomablePage: View {
     /// the clip's own audio — a page cannot answer that on its own, and reading the global toggle
     /// here (as it used to) is how a music post ended up playing both at once.
     var soundAllowed: Bool = false
+    #if !os(iOS)
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
     @State private var offset: CGSize = .zero
     @State private var lastOffset: CGSize = .zero
+    #endif
 
     var body: some View {
         Group {
@@ -291,28 +312,44 @@ private struct ZoomablePage: View {
                 } else if let img = m.image {
                     // Photo — or a video whose file hasn't downloaded yet: show its still
                     // (with a play badge) instead of a blank page.
-                    Image(platformImage: img).resizable().scaledToFit()
-                        .scaleEffect(scale).offset(offset)
-                        .overlay {
-                            if m.kind == .video {
-                                Image(systemName: "play.circle.fill").font(.system(size: 56))
-                                    .foregroundStyle(.white.opacity(0.9)).shadow(radius: 6)
-                            }
-                        }
-                        .gesture(zoomGesture)
-                        // Pan only when zoomed; masked to .subviews otherwise so the TabView
-                        // can page and the dismiss drag can fire.
-                        .gesture(panGesture, including: scale > 1 ? .all : .subviews)
-                        .onTapGesture(count: 2) {
-                            withAnimation(.spring()) {
-                                if scale > 1 { resetZoom() }
-                                else { scale = 2.5; lastScale = 2.5; zoomed = true }
-                            }
-                        }
+                    photo(img, stillOfVideo: m.kind == .video)
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The badge over a video whose bytes have not landed yet. Deliberately untappable: the page
+    /// under it owns every touch, and a badge that eats the double tap is a photo that won't zoom.
+    private var playBadge: some View {
+        Image(systemName: "play.circle.fill").font(.system(size: 56))
+            .foregroundStyle(.white.opacity(0.9)).shadow(radius: 6)
+            .allowsHitTesting(false)
+    }
+
+    #if os(iOS)
+    /// iOS drives zoom and pan from a real `UIScrollView` — see `ZoomableImage` for why.
+    private func photo(_ img: PlatformImage, stillOfVideo: Bool) -> some View {
+        ZoomableImage(image: img, zoomed: $zoomed)
+            .overlay { if stillOfVideo { playBadge } }
+    }
+    #else
+    /// macOS keeps the SwiftUI gestures: there is no paging `TabView` under them to fight with
+    /// (`havenPagedTabViewStyle` is a no-op off iOS), and no UIKit to reach for.
+    private func photo(_ img: PlatformImage, stillOfVideo: Bool) -> some View {
+        Image(platformImage: img).resizable().scaledToFit()
+            .scaleEffect(scale).offset(offset)
+            .overlay { if stillOfVideo { playBadge } }
+            .gesture(zoomGesture)
+            // Pan only when zoomed; masked to .subviews otherwise so the pager can page and the
+            // dismiss drag can fire.
+            .gesture(panGesture, including: scale > 1 ? .all : .subviews)
+            .onTapGesture(count: 2) {
+                withAnimation(.spring()) {
+                    if scale > 1 { resetZoom() }
+                    else { scale = 2.5; lastScale = 2.5; zoomed = true }
+                }
+            }
     }
 
     private func resetZoom() {
@@ -332,7 +369,162 @@ private struct ZoomablePage: View {
             .onChanged { v in if scale > 1 { offset = CGSize(width: lastOffset.width + v.translation.width, height: lastOffset.height + v.translation.height) } }
             .onEnded { _ in lastOffset = offset }
     }
+    #endif
 }
+
+#if os(iOS)
+/// A zoomable photo page, backed by a real `UIScrollView`.
+///
+/// WHY UIKit, when the rest of this viewer is SwiftUI. The page lives inside a paged `TabView`,
+/// which is a `UIPageViewController` and therefore a scroll view. A SwiftUI `DragGesture` on a
+/// page inside it has to win the touch from that scroll view's own pan recogniser, and it does
+/// not: the drag's `onChanged` updates arrive late and coalesced, so a zoomed photo did not
+/// follow the finger — it sat still and then JUMPED to wherever the finger had got to by the
+/// time you lifted it. No amount of gesture masking fixes that, because the competition is
+/// between a SwiftUI gesture and a UIKit recogniser that never fails.
+///
+/// A nested scroll view is what UIKit already knows how to resolve — it is how every photo
+/// browser on the platform is built. The inner view owns the pan the moment there is something
+/// to pan, panning is clamped to the picture (the old code let you fling a photo clean off
+/// screen), and it comes with momentum, rubber-banding and 120 Hz tracking for free.
+///
+/// At scale 1 the pan recogniser is DISABLED, so the page behaves exactly as it did before this
+/// view existed: the pager gets horizontal swipes, the viewer's dismiss drag gets vertical ones.
+/// Pinch and double-tap are separate recognisers and stay live throughout.
+private struct ZoomableImage: UIViewRepresentable {
+    let image: PlatformImage
+    @Binding var zoomed: Bool
+
+    func makeUIView(context: Context) -> ZoomScrollView {
+        let sv = ZoomScrollView()
+        sv.delegate = context.coordinator
+        sv.minimumZoomScale = 1
+        sv.maximumZoomScale = 5
+        sv.showsHorizontalScrollIndicator = false
+        sv.showsVerticalScrollIndicator = false
+        sv.contentInsetAdjustmentBehavior = .never   // the viewer draws edge to edge
+        sv.backgroundColor = .clear
+        sv.bouncesZoom = true
+        sv.decelerationRate = .fast
+        sv.panGestureRecognizer.isEnabled = false    // nothing to pan until it is zoomed
+        sv.imageView.image = image
+        let doubleTap = UITapGestureRecognizer(target: context.coordinator,
+                                               action: #selector(Coordinator.handleDoubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        sv.addGestureRecognizer(doubleTap)
+        return sv
+    }
+
+    func updateUIView(_ sv: ZoomScrollView, context: Context) {
+        let binding = $zoomed
+        context.coordinator.zoomedChanged = { binding.wrappedValue = $0 }
+        // One ref, one picture: the image is set at make time and only ever filled in here if the
+        // decode had not landed yet. NEVER re-set on identity alone — `MediaStore.item` hands back
+        // a fresh `UIImage` after a cache eviction, and re-fitting mid-pinch would eat the zoom.
+        if sv.imageView.image == nil { sv.imageView.image = image; sv.fitImage() }
+        // The viewer clears `zoomed` when the page changes; follow it back down so a page you
+        // return to is un-zoomed, which is what the pager has always claimed.
+        if !zoomed, sv.zoomScale > 1.01 { sv.setZoomScale(1, animated: false) }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator: NSObject, UIScrollViewDelegate {
+        var zoomedChanged: (Bool) -> Void = { _ in }
+        private var reportedZoomed = false
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            (scrollView as? ZoomScrollView)?.imageView
+        }
+
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            (scrollView as? ZoomScrollView)?.centerContent()
+            report(scrollView)
+        }
+
+        func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+            report(scrollView)
+        }
+
+        /// Double tap zooms to the point you tapped, or all the way back out.
+        @objc func handleDoubleTap(_ g: UITapGestureRecognizer) {
+            guard let sv = g.view as? ZoomScrollView else { return }
+            if sv.zoomScale > sv.minimumZoomScale {
+                sv.setZoomScale(sv.minimumZoomScale, animated: true)
+            } else {
+                let scale = min(2.5, sv.maximumZoomScale)
+                let size = CGSize(width: sv.bounds.width / scale, height: sv.bounds.height / scale)
+                let point = g.location(in: sv.imageView)
+                sv.zoom(to: CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2,
+                                   width: size.width, height: size.height), animated: true)
+            }
+        }
+
+        /// Hand "this page is zoomed" up to the viewer, which uses it to hold off the dismiss drag,
+        /// and switch the pan recogniser with it — at scale 1 the page must not take touches the
+        /// pager and the dismiss drag are entitled to.
+        private func report(_ sv: UIScrollView) {
+            let nowZoomed = sv.zoomScale > 1.01
+            guard nowZoomed != reportedZoomed else { return }
+            reportedZoomed = nowZoomed
+            // Only on the flip: disabling a recogniser CANCELS it, so writing this every zoom
+            // notification would cut a pan short the moment the picture bounced back a hair.
+            sv.panGestureRecognizer.isEnabled = nowZoomed
+            // Off this turn of the run loop: this arrives from a live gesture inside a layout pass,
+            // which is exactly what "Modifying state during view update" means.
+            let notify = zoomedChanged
+            DispatchQueue.main.async { notify(nowZoomed) }
+        }
+    }
+}
+
+/// The scroll view behind a zoomable photo: an image view sized to the picture's aspect-fit rect
+/// (so panning is bounded by the PHOTO, not by the letterbox around it), kept centred whenever it
+/// is smaller than the page.
+private final class ZoomScrollView: UIScrollView {
+    let imageView = UIImageView()
+    private var fittedFor: CGSize = .zero
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        imageView.contentMode = .scaleAspectFit
+        imageView.isUserInteractionEnabled = true
+        addSubview(imageView)
+    }
+    required init?(coder: NSCoder) { fatalError("ZoomScrollView is code-only") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // Re-fit on a real size change only (rotation, a window resize) — never every scroll, or
+        // a pan would be fighting the layout it is panning.
+        if bounds.size != fittedFor, zoomScale == minimumZoomScale { fitImage() }
+        centerContent()
+    }
+
+    /// Size the image view to the picture's aspect-fit rect inside the page.
+    func fitImage() {
+        guard let size = imageView.image?.size, size.width > 0, size.height > 0,
+              bounds.width > 0, bounds.height > 0 else { return }
+        fittedFor = bounds.size
+        let fit = min(bounds.width / size.width, bounds.height / size.height)
+        let fitted = CGSize(width: size.width * fit, height: size.height * fit)
+        zoomScale = minimumZoomScale
+        imageView.frame = CGRect(origin: .zero, size: fitted)
+        contentSize = fitted
+        centerContent()
+    }
+
+    /// Centre the picture while it is smaller than the page — a scroll view pins its content to
+    /// the top leading corner otherwise, which reads as the photo sliding into a corner as you
+    /// zoom out of it.
+    func centerContent() {
+        let x = max(0, (bounds.width - contentSize.width) / 2)
+        let y = max(0, (bounds.height - contentSize.height) / 2)
+        let inset = UIEdgeInsets(top: y, left: x, bottom: y, right: x)
+        if contentInset != inset { contentInset = inset }
+    }
+}
+#endif
 
 /// Full-screen carousel video: native controls (scrub/play), autoplays + loops on appear,
 /// pauses + tears down when you swipe to another page.

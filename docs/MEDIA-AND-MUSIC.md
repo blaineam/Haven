@@ -125,6 +125,15 @@ viewer's life, and the song chip's mute is **viewer-local** — deliberately not
 carry back to the feed on close, because a song that restarts the instant you swipe a photo
 away reads as a broken control.
 
+**Where the chips sit.** Bottom leading for the song, bottom trailing for the clip — and the
+viewer draws its **own page dots** under both, rather than taking the pager's free ones. The
+system's sit in the bottom centre, underneath whatever chrome is drawn there, which is how a
+long song title ended up printed across them (1.8.7). Chips in one row and dots in the next is
+a layout that cannot collide at any title length. On iOS the zoom and pan under all of this is
+a `UIScrollView` (`ZoomableImage` in `PostMedia.swift`), not SwiftUI gestures: a SwiftUI drag
+inside the paging scroll view loses the touch to the pager's own pan recogniser, which is what
+made a zoomed photo jump to the end of the drag instead of following the finger.
+
 **Android parity:** `MediaViewer` applies the same table, pausing/resuming the 30-second
 preview through `MusicPlayer.setUserPaused`. **Desktop does not play post music at all** (see
 `storySongChip` — no library to drive and no licence to stream), so there is nothing there to

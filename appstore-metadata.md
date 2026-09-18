@@ -32,9 +32,9 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Free. A private, end‑to‑end encrypted home for your closest people — no ads, no tracking, no subscription. Peer‑to‑peer, post‑quantum, yours.
 
 ## whats_new
-1.8.8 — Full-screen photos: the song plays on, and zoom follows your finger.
-- Tap a photo on a post with music and the song keeps playing, with its own mute in the corner. It steps aside for a video with sound of its own.
-- A zoomed photo now follows your finger instead of jumping when you let go, and double tap zooms where you tapped. The song's name no longer covers the dots at the bottom.
+1.8.9 — A clearer name on the App Store.
+- Haven is now listed as "Haven Private Circles", so the name says what it is where people search. The app on your device is still just Haven.
+- No changes to the app itself in this one.
 
 ## whats_new_previous
 1.8.1 — Smoother feed, cooler phone.

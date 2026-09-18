@@ -5,7 +5,7 @@
      source-hashes: name=968d7ccbd451 subtitle=acdce398dc46 description=25449350496f keywords=9741671c9490 promotional_text=d1331bf85171 whats_new=ccf048a02815 -->
 
 ## name
-Haven 〇
+Haven Private Circles
 
 ## subtitle
 Cerchie private e cifrate

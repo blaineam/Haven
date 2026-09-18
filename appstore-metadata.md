@@ -3,7 +3,7 @@
 <!-- Edit, then sync: rocket meta Haven   (preview first: rocket meta Haven --dry-run) -->
 
 ## name
-Haven 〇
+Haven Private Circles
 
 ## subtitle
 Private, encrypted circles

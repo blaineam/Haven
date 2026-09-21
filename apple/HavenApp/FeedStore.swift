@@ -3439,6 +3439,26 @@ final class FeedStore: ObservableObject {
 
         switch op {
         #if DEBUG
+        case "adopt_code":
+            // QA: become another device's account through the real transfer-code path (the
+            // history-handoff E2E links two simulators into one account this way).
+            let ok = AccountStore.qaShared?.restore(fromTransferCode: str("code")) ?? false
+            HavenLog.net("matrix-qa v2 adopt_code: \(ok ? "adopted" : "FAILED")")
+            return
+        case "posts_bulk":
+            // QA: a history big enough to span many handoff pages.
+            let n = Int(str("count")) ?? 50
+            for i in 0..<n { await postNow("\(body.isEmpty ? "bulk" : body) \(i)", media: []) }
+            HavenLog.net("matrix-qa v2 posts_bulk: \(n)")
+            qaWriteDump()
+            return
+        case "history_request":
+            HistoryHandoff.shared.requestHistory(reason: "qa")
+            return
+        case "history_status":
+            let st = HistoryHandoff.shared.status
+            HavenLog.net("matrix-qa v2 history_status: \(st.phase) \(st.done)/\(st.total)")
+            return
         case "recover_set_aside":
             // QA: the Settings "Recover earlier posts & messages" action, headless.
             let n = await recoverSetAsideState(ownOtherIdentities: [])
@@ -5795,10 +5815,10 @@ final class FeedStore: ObservableObject {
     func pollMailboxNow() {
         guard engine != nil else { return }
         guard !HavenNet.offline else { return }   // HAVEN_NO_NET — see `armMailboxTimer`
-        // History handoff: a bounded step each poll while either role has work; a cheap LIST of a
-        // tiny account-lane prefix every few minutes otherwise, so a request is noticed promptly.
+        // History handoff: a bounded step each poll while either role has work; otherwise a cheap
+        // LIST of a tiny account-lane prefix once a minute, so an open device answers a new one fast.
         let tickNow = now()
-        if HistoryHandoff.shared.hasOutstandingWork || tickNow - lastHandoffCheckMs > 180_000 {
+        if HistoryHandoff.shared.hasOutstandingWork || tickNow - lastHandoffCheckMs > 60_000 {
             lastHandoffCheckMs = tickNow
             Task { @MainActor in await HistoryHandoff.shared.tick(budget: 20) }
         }
@@ -6516,6 +6536,34 @@ final class FeedStore: ObservableObject {
         guard let engine else { return nil }
         let page = await engine.run { $0.exportHistoryPage(circleId: circleId, beforeMs: before, limit: limit) }
         return self.engine === engine ? page : nil
+    }
+
+    /// My account-signed device roster wire (the one the relay verifies), for a handoff request.
+    func ownRosterWire() async -> Data? {
+        guard let engine else { return nil }
+        return await engine.run { $0.exportOwnRoster().first?.wire }
+    }
+
+    /// Publish my roster to every relay NOW — a device that just joined the account is refused on
+    /// the account lane until a relay has verified a roster naming it (the timer is minutes away).
+    func publishOwnRosterNow() async {
+        guard let engine else { return }
+        await SharedStore.publishDeviceRoster(engine: engine, force: true)
+    }
+
+    /// Ingest another of my devices' roster (union-merge + epoch rotation on a seed holder), so what
+    /// I export next is sealed to that device too. -1 refused, 0 already current, 1 changed.
+    func ingestOwnDeviceRoster(_ wire: Data) async -> Int8 {
+        guard let engine else { return -1 }
+        let status = await engine.run { $0.ingestRosterWireStatus(wire: wire) }
+        if status > 0 { scheduleDeviceIdsFill(); dialTargetsCache.removeAll() }
+        return status
+    }
+
+    /// The handoff's progress denominator: total events across these circles.
+    func historyEventCount(circleIds: [String]) async -> Int {
+        guard let engine else { return 0 }
+        return await engine.run { s in circleIds.reduce(0) { $0 + Int(s.historyEventCount(circleId: $1)) } }
     }
 
     /// Ingest one handoff page. nil = its circle isn't on this device yet (the page must be kept and

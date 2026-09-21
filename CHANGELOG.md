@@ -62,6 +62,22 @@ under keys the new device never held. For a big, old account that meant days of 
   select by time, not position, and never split a timestamp tie across pages — the events vector is
   in arrival order, so the old positional "newest N" could skip events permanently.
 
+- **It now actually transfers, and shows progress** (rc.2). Proven end to end on two simulators
+  through a local relay (1,200 posts, 10 pages, about a minute from link to done). rc.1 had two
+  bugs that the real run exposed:
+  - The new device's pages were **unopenable**: in a circle whose members are all current, the key
+    commit is sealed to known DEVICE ids only, and the old device had never seen the new one. The
+    request now carries the new device's account-signed roster; the source union-merges it (seed
+    holders) before exporting, so every page's key commit includes the new device.
+  - The new device was **refused on its own account lane** for up to five minutes after linking —
+    the relay only admits devices named in a verified roster, and the roster publish waited for
+    its timer. The request now publishes the roster first (and waits for the relinked engine).
+  - Progress: a banner over the feed on both devices ("Bringing over your history — 340 of 1,200
+    posts and messages", "Sending history to your new device") and the same bar in Settings ▸
+    Devices. Manifests carry the total (`history_event_count`) so the bar is real.
+  - An open device checks for requests every minute (was three). A failed roster HTTP put now logs
+    why instead of silently backing the URL off.
+
 Not yet: Android and desktop neither request nor serve the handoff (they ignore frame 36), and
 old *media* is still fetched lazily per post, from the relay or a sibling.
 

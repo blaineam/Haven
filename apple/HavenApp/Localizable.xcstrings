@@ -4,6 +4,110 @@
     "" : {
 
     },
+    "%lld of %lld posts and messages" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$lld von %2$lld Beiträgen und Nachrichten"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$lld de %2$lld publicaciones y mensajes"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$lld sur %2$lld posts et messages"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$lld di %2$lld post e messaggi"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$lld 件中 %1$lld 件の投稿とメッセージ"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "게시물과 메시지 %2$lld개 중 %1$lld개"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$lld de %2$lld posts e mensagens"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$lld 条帖子和消息中的 %1$lld 条"
+          }
+        }
+      }
+    },
+    "%lld posts and messages so far" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bisher %lld Beiträge und Nachrichten"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld publicaciones y mensajes hasta ahora"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld posts et messages pour l’instant"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld post e messaggi finora"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "これまでに %lld 件の投稿とメッセージ"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "지금까지 게시물과 메시지 %lld개"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld posts e mensagens até agora"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "目前已有 %lld 条帖子和消息"
+          }
+        }
+      }
+    },
     "An identity switch or device restore set a feed aside on this device. Recovering merges its posts, messages and circles into the identity you're using now. Photos already on this device reappear with them." : {
       "localizations" : {
         "de" : {
@@ -108,6 +212,58 @@
         }
       }
     },
+    "Bringing over your history" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dein Verlauf wird übertragen"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Trayendo tu historial"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Transfert de votre historique"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Trasferimento della cronologia"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "履歴を移行中"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기록을 가져오는 중"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Trazendo seu histórico"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在迁移你的历史记录"
+          }
+        }
+      }
+    },
     "Earlier feed found" : {
       "localizations" : {
         "de" : {
@@ -160,6 +316,58 @@
         }
       }
     },
+    "Everything from your other device has arrived." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Alles von deinem anderen Gerät ist angekommen."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ya llegó todo lo de tu otro dispositivo."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tout ce qui venait de votre autre appareil est arrivé."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "È arrivato tutto dall’altro dispositivo."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ほかのデバイスからすべて届きました。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "다른 기기의 모든 항목이 도착했습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tudo do seu outro dispositivo chegou."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "来自你其他设备的内容已全部到达。"
+          }
+        }
+      }
+    },
     "Get full history from my other devices" : {
       "localizations" : {
         "de" : {
@@ -208,6 +416,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "从我的其他设备获取完整历史记录"
+          }
+        }
+      }
+    },
+    "History" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Verlauf"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Historial"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Historique"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cronologia"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "履歴"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기록"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Histórico"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "历史记录"
           }
         }
       }
@@ -316,54 +576,54 @@
         }
       }
     },
-    "Receiving history from your other devices…" : {
+    "Open Haven on your other device, or leave it on a charger — it starts on its next wake." : {
       "localizations" : {
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Verlauf wird von deinen anderen Geräten empfangen …"
+            "value" : "Öffne Haven auf deinem anderen Gerät oder lass es am Ladegerät – es beginnt beim nächsten Aufwachen."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Recibiendo el historial de tus otros dispositivos…"
+            "value" : "Abre Haven en tu otro dispositivo o déjalo cargando: empezará la próxima vez que se active."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Réception de l’historique de vos autres appareils…"
+            "value" : "Ouvrez Haven sur votre autre appareil ou laissez-le en charge — il commencera à son prochain réveil."
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ricezione della cronologia dagli altri tuoi dispositivi…"
+            "value" : "Apri Haven sull’altro dispositivo o lascialo in carica: inizierà al prossimo risveglio."
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ほかのデバイスから履歴を受信中…"
+            "value" : "ほかのデバイスで Haven を開くか、充電したままにしてください。次に起動したときに開始されます。"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "다른 기기에서 기록을 받는 중…"
+            "value" : "다른 기기에서 Haven을 열거나 충전기에 연결해 두세요. 다음에 깨어날 때 시작됩니다."
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Recebendo o histórico dos seus outros dispositivos…"
+            "value" : "Abra o Haven no seu outro dispositivo ou deixe-o carregando — ele começa na próxima vez que for ativado."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在从你的其他设备接收历史记录…"
+            "value" : "在你的其他设备上打开 Haven，或让它保持充电——它会在下次唤醒时开始。"
           }
         }
       }
@@ -472,6 +732,58 @@
         }
       }
     },
+    "Sending history to your new device" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Verlauf wird an dein neues Gerät gesendet"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enviando el historial a tu nuevo dispositivo"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Envoi de l’historique vers votre nouvel appareil"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Invio della cronologia al nuovo dispositivo"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新しいデバイスに履歴を送信中"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "새 기기로 기록을 보내는 중"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enviando o histórico para o seu novo dispositivo"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在将历史记录发送到你的新设备"
+          }
+        }
+      }
+    },
     "There was nothing to recover in the earlier feed." : {
       "localizations" : {
         "de" : {
@@ -524,6 +836,58 @@
         }
       }
     },
+    "Waiting for your other device" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Warte auf dein anderes Gerät"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Esperando a tu otro dispositivo"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "En attente de votre autre appareil"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "In attesa dell’altro dispositivo"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ほかのデバイスを待っています"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "다른 기기를 기다리는 중"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aguardando seu outro dispositivo"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在等待你的其他设备"
+          }
+        }
+      }
+    },
     "With device backups on, restoring an iCloud or encrypted Finder backup to a new iPhone brings this identity with it, so you stay you. Turn on Advanced Data Protection to make the iCloud copy end-to-end encrypted. Past identities can separately be kept in iCloud Keychain so you can switch back to them on any of your devices." : {
       "localizations" : {
         "de" : {
@@ -572,6 +936,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "开启设备备份后，将 iCloud 备份或加密的访达备份恢复到新 iPhone 时，此身份也会随之迁移，你依然是你。开启“高级数据保护”可让 iCloud 副本端到端加密。以往身份可另外保存在 iCloud 钥匙串中，方便你在任意设备上切换回去。"
+          }
+        }
+      }
+    },
+    "Your history is here" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dein Verlauf ist da"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tu historial ya está aquí"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Votre historique est là"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La tua cronologia è arrivata"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "履歴の移行が完了しました"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기록이 모두 도착했습니다"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Seu histórico chegou"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你的历史记录已到达"
           }
         }
       }

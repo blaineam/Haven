@@ -6262,6 +6262,14 @@ impl HavenSocial {
         HistoryPageFfi { envelopes, oldest_ms, events }
     }
 
+    /// How many events `export_history_page` pages through for this circle — the history handoff's
+    /// progress denominator. An upper bound (the export also drops sender-expired content, which is
+    /// rare), so progress is clamped by the caller. No sealing.
+    pub fn history_event_count(&self, circle_id: String) -> u64 {
+        let st = self.state.lock().unwrap();
+        st.circles.iter().find(|c| c.id == circle_id).map(|c| c.events.len() as u64).unwrap_or(0)
+    }
+
     /// The oldest event I authored in a circle, in ms — 0 when I have authored none.
     ///
     /// A receiver cannot otherwise tell "you have reached the beginning of their history" from "the

@@ -349,6 +349,7 @@ struct FeedView: View {
                     LazyVStack(spacing: 16) {
                         banner
                         if !connections.pending.isEmpty { pendingBanner }
+                        HistoryHandoffBanner()
                         CircleUpgradeBanner(circleId: store.activeCircleId)
                         RelayNudgeBanner(circleId: store.activeCircleId)
                         storiesTray

@@ -27,7 +27,16 @@ enum HistoryHandoffWire {
     /// second source may take the request over, and the target may switch to it.
     static let staleSourceMs: UInt64 = 45 * 60 * 1000
 
-    struct Request: Codable { var v = 1; var device: String; var at: UInt64; var done: Bool? }
+    struct Request: Codable {
+        var v = 1
+        var device: String
+        var at: UInt64
+        var done: Bool?
+        /// The requesting device's account-signed roster wire (base64). The source ingests it before
+        /// exporting: a circle whose members are all current seals its key to known DEVICE ids only,
+        /// so a source that has never seen the new device would export pages it can't open.
+        var roster: String?
+    }
     struct Manifest: Codable {
         var v = 1
         var run: String
@@ -38,11 +47,19 @@ enum HistoryHandoffWire {
         var complete: Bool
         /// Last progress, ms. Optional so a manifest without it still decodes (treated as stale).
         var updatedAt: UInt64?
+        /// Events the source will send in total (an upper bound) and has sent so far — the target's
+        /// progress bar. Optional: older manifests just show an indeterminate bar.
+        var totalEvents: Int?
+        var servedEvents: Int?
 
         func isLive(now: UInt64) -> Bool { complete || now &- (updatedAt ?? 0) < HistoryHandoffWire.staleSourceMs }
     }
 
     static func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
+
+    /// Tag byte of a sealed event envelope (core `TAG_EPOCH_EVENT`) — what progress counts.
+    static let eventTag: UInt8 = 0x02
+    static func eventCount(_ envelopes: [Data]) -> Int { envelopes.reduce(0) { $0 + ($1.first == eventTag ? 1 : 0) } }
 
     // MARK: page wire format
     //

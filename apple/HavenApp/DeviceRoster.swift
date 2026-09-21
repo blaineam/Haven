@@ -351,20 +351,24 @@ struct AuthorizedDevicesView: View {
         }
     }
 
-    @State private var historyRequested = HistoryHandoff.shared.isWaiting
+    @ObservedObject private var handoff = HistoryHandoff.shared
 
-    /// Pull the whole backlog from my other devices through the relay (HistoryHandoff).
+    /// Pull the whole backlog from my other devices through the relay (HistoryHandoff), with its progress.
     @ViewBuilder private var historySection: some View {
         Section {
-            Button {
-                HistoryHandoff.shared.requestHistory(reason: "asked from Settings")
-                historyRequested = true
-            } label: {
-                Label(historyRequested ? "Receiving history from your other devices…" : "Get full history from my other devices",
-                      systemImage: "clock.arrow.2.circlepath")
+            if handoff.status.phase != .idle {
+                HistoryHandoffProgress(status: handoff.status, onDismiss: { handoff.dismissReceived() })
+                    .padding(.vertical, 4)
             }
-            .disabled(historyRequested)
-        } footer: {
+            if handoff.status.phase != .waitingForSource && handoff.status.phase != .receiving {
+                Button {
+                    HistoryHandoff.shared.requestHistory(reason: "asked from Settings")
+                } label: {
+                    Label("Get full history from my other devices", systemImage: "clock.arrow.2.circlepath")
+                }
+            }
+        } header: { Text("History") }
+        footer: {
             Text("Your other devices upload your posts, messages and circles to your relay the next time they wake — they don't need to stay open — and this device downloads them in the background.")
                 .fixedSize(horizontal: false, vertical: true)
         }

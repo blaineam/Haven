@@ -1259,7 +1259,11 @@ enum SharedStore {
                 continue
             }
             // Plain-HTTP interface first (the cross-NAT path), else the iroh dial.
-            if let http = RelayMailboxStore.shared.httpInterface(node) {
+            let httpIf = RelayMailboxStore.shared.httpInterface(node)
+            if httpIf == nil || httpIf!.urls.allSatisfy(httpUrlBad) {
+                HavenLog.sync("devroster relay=\(node.prefix(8)) no usable HTTP (\(httpIf == nil ? "no interface" : "all URLs backed off")) — dialing")
+            }
+            if let http = httpIf {
                 var done = false
                 for base in http.urls where !httpUrlBad(base) {
                     switch await httpPut(base, http.token, key, wire) {
@@ -1280,7 +1284,10 @@ enum SharedStore {
                         // write that authorizes all the others, and sealing it for two minutes is how a
                         // device stays unauthorized (and unable to upload) far longer than it needs to.
                         HavenLog.sync("devroster http-put REFUSED relay=\(node.prefix(8)) — signature rejected, trying dial")
-                    case .failure:
+                    case .failure(let error):
+                        // Say why: this is the write that authorizes every other one, and a silent
+                        // back-off here left a device locked out with nothing in the log to show for it.
+                        HavenLog.sync("devroster http-put FAIL relay=\(node.prefix(8)) \(base): \(error)")
                         markHttpUrlBad(base)
                     }
                     if done { break }

@@ -28,8 +28,29 @@ import Foundation
 /// open it whenever it arrives. Frame 36 is only a "look now" hint — the relay copy is the request.
 /// Pages are sealed exactly like the own-device catch-up, so nothing new is exposed to the relay.
 @MainActor
-final class HistoryHandoff {
+final class HistoryHandoff: ObservableObject {
     static let shared = HistoryHandoff()
+
+    /// What the UI shows: a progress bar in Settings ▸ Devices and a banner over the feed.
+    struct Status: Equatable {
+        enum Phase: Equatable {
+            case idle
+            /// Asked; no other device has answered yet (it will on its next wake).
+            case waitingForSource
+            case receiving
+            /// Everything arrived — shown until dismissed or the next launch.
+            case received
+            /// This device is uploading history for another of my devices.
+            case sending
+        }
+        var phase: Phase = .idle
+        /// Events received (target) or sent (source) so far.
+        var done = 0
+        /// Total events expected; 0 = not known yet.
+        var total = 0
+        var fraction: Double? { total > 0 ? min(1, Double(done) / Double(total)) : nil }
+    }
+    @Published private(set) var status = Status()
 
     /// "Look at the account lane now" — a nudge to my own devices, no payload semantics.
     static let nudgeFrame: UInt8 = 36
@@ -37,7 +58,28 @@ final class HistoryHandoff {
     /// stays well under a second on a phone and doesn't park the UI behind the engine mutex.
     static let pageEvents: UInt32 = 120
 
-    private init() {}
+    private init() { refreshStatus() }
+
+    /// Rebuild `status` from the persisted state (both roles).
+    private func refreshStatus() {
+        var st = Status()
+        if let w = want, w.account == AccountStore.currentNodeHex() {
+            st.phase = w.run == nil ? .waitingForSource : .receiving
+            st.done = w.receivedEvents
+            st.total = w.totalEvents
+        } else if let s = serves.values.first(where: { !$0.complete }) {
+            st.phase = .sending
+            st.done = s.servedEvents
+            st.total = s.totalEvents
+        } else if receivedBanner {
+            st.phase = .received
+        }
+        if st != status { status = st }
+    }
+
+    /// The "all your history is here" banner, until dismissed.
+    private var receivedBanner = false
+    func dismissReceived() { receivedBanner = false; refreshStatus() }
 
     // MARK: - Target (the new device)
 
@@ -50,6 +92,9 @@ final class HistoryHandoff {
         var source: String?
         var nextPage = 0
         var received = 0
+        /// Event envelopes taken in (progress numerator) and the source's announced total.
+        var receivedEvents = 0
+        var totalEvents = 0
         var lastNudgeAt: UInt64 = 0
         /// Consecutive attempts at a page whose circle isn't on this device yet.
         var heldAttempts = 0
@@ -66,6 +111,7 @@ final class HistoryHandoff {
             } else {
                 UserDefaults.standard.removeObject(forKey: Self.wantKey)
             }
+            refreshStatus()
         }
     }
 
@@ -91,8 +137,15 @@ final class HistoryHandoff {
         guard var w = want else { return }
         let now = HistoryHandoffWire.nowMs()
         guard force || now - w.lastNudgeAt > 10 * 60 * 1000 else { return }
+        // A link reconfigures the engine right before asking: wait for the new one (the roster below
+        // needs it), rather than failing the first ask and waiting a whole tick for the retry.
+        for _ in 0..<60 where !FeedStore.shared.engineReady { try? await Task.sleep(nanoseconds: 250_000_000) }
         let me = DeviceKeyStore.deviceNodeHex()
-        let req = HistoryHandoffWire.Request(device: me, at: w.at)
+        // The relay must know this device before it accepts the account-lane write, and the source
+        // must know it before its pages are sealed to it: publish the roster, and carry it along.
+        await FeedStore.shared.publishOwnRosterNow()
+        let roster = await FeedStore.shared.ownRosterWire()
+        let req = HistoryHandoffWire.Request(device: me, at: w.at, roster: roster?.base64EncodedString())
         guard let body = try? JSONEncoder().encode(req),
               await SelfSyncCoordinator.shared.accountLanePut(HistoryHandoffWire.requestKey(w.account, me), body) else {
             HavenLog.sync("history handoff: request not published yet (no reachable relay)")
@@ -117,8 +170,10 @@ final class HistoryHandoff {
             return false
         }
         if w.run != m.run || w.source != m.source {
-            w.run = m.run; w.source = m.source; w.nextPage = 0; w.heldAttempts = 0
+            w.run = m.run; w.source = m.source; w.nextPage = 0; w.heldAttempts = 0; w.receivedEvents = 0
         }
+        w.totalEvents = max(m.totalEvents ?? 0, w.receivedEvents)
+        want = w
         var progressed = false
         while w.nextPage < m.pages, Date() < deadline {
             guard let blob = await SelfSyncCoordinator.shared.accountLaneGet(HistoryHandoffWire.pageKey(w.account, me, m.source, m.run, w.nextPage)) else {
@@ -141,6 +196,7 @@ final class HistoryHandoff {
                 break
             }
             w.received += applied
+            w.receivedEvents += HistoryHandoffWire.eventCount(page.envelopes)
             w.nextPage += 1
             w.heldAttempts = 0
             want = w
@@ -148,6 +204,7 @@ final class HistoryHandoff {
         }
         if m.complete && w.nextPage >= m.pages {
             HavenLog.sync("history handoff: complete — \(w.received) envelopes over \(m.pages) pages")
+            receivedBanner = true
             want = nil
             // Tell the source it can stop considering this ask.
             let done = HistoryHandoffWire.Request(device: me, at: w.at, done: true)
@@ -191,6 +248,8 @@ final class HistoryHandoff {
         var finished: [String] = []
         var pages = 0
         var complete = false
+        var totalEvents = 0
+        var servedEvents = 0
     }
     private static let serveKey = "haven.historyHandoff.serve.v1"
     private var serves: [String: Serve] {
@@ -200,6 +259,7 @@ final class HistoryHandoff {
         }
         set {
             if let d = try? JSONEncoder().encode(newValue) { UserDefaults.standard.set(d, forKey: Self.serveKey) }
+            refreshStatus()
         }
     }
 
@@ -229,9 +289,16 @@ final class HistoryHandoff {
             if s == nil || s!.requestAt != req.at {
                 // Another of my devices already answering this ask? Let it finish (unless it went quiet).
                 if await anotherSourceIsServing(account: acct, target: device, request: req.at, me: me) { continue }
+                // Learn the new device first, so the key commit on every page is sealed to it. Only a
+                // seed holder can union-merge (and re-sign) its own roster.
+                if AccountStore.storedSeed() != nil, let b64 = req.roster, let wire = Data(base64Encoded: b64) {
+                    let st = await FeedStore.shared.ingestOwnDeviceRoster(wire)
+                    HavenLog.sync("history handoff: \(device.prefix(8))'s roster ingested (\(st))")
+                }
                 // A new ask (or a re-ask after a finished run): start a fresh run, newest circles first.
-                s = Serve(device: device, requestAt: req.at, run: String(HistoryHandoffWire.nowMs()),
-                          order: FeedStore.shared.circles.map(\.id))
+                let order = FeedStore.shared.circles.map(\.id)
+                s = Serve(device: device, requestAt: req.at, run: String(HistoryHandoffWire.nowMs()), order: order,
+                          totalEvents: await FeedStore.shared.historyEventCount(circleIds: order))
                 HavenLog.sync("history handoff: serving \(device.prefix(8)) — \(s!.order.count) circles")
             }
             guard var run = s, !run.complete else { continue }
@@ -279,6 +346,7 @@ final class HistoryHandoff {
                     return did   // no relay took it — resume from this cursor on the next wake
                 }
                 run.pages += 1
+                run.servedEvents += Int(page.events)
                 run.cursors[cid] = page.oldestMs
                 serves[run.device] = run
                 await putManifest(run, account: account, source: source)
@@ -292,7 +360,8 @@ final class HistoryHandoff {
 
     private func putManifest(_ run: Serve, account: String, source: String) async {
         let m = HistoryHandoffWire.Manifest(run: run.run, source: source, forRequest: run.requestAt, pages: run.pages,
-                                            complete: run.complete, updatedAt: HistoryHandoffWire.nowMs())
+                                            complete: run.complete, updatedAt: HistoryHandoffWire.nowMs(),
+                                            totalEvents: run.totalEvents, servedEvents: run.servedEvents)
         if let body = try? JSONEncoder().encode(m) {
             _ = await SelfSyncCoordinator.shared.accountLanePut(HistoryHandoffWire.manifestKey(account, run.device, source), body)
         }
@@ -316,6 +385,8 @@ final class HistoryHandoff {
     /// Forget everything (identity switch / factory reset): a run belongs to one account.
     func reset() {
         want = nil
+        receivedBanner = false
         UserDefaults.standard.removeObject(forKey: Self.serveKey)
+        refreshStatus()
     }
 }

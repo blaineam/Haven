@@ -96,7 +96,14 @@ enum HistoryHandoffWire {
     struct MediaItem: Codable, Equatable { var ref: String; var size: Int64 }
     /// Written by the source once page n's media is on the relay. A ref it no longer holds is simply
     /// absent — the target stops waiting for it.
-    struct MediaReady: Codable { var v = 1; var items: [Ready]; struct Ready: Codable { var ref: String; var chunks: Int } }
+    struct MediaReady: Codable {
+        var v = 1
+        var items: [Ready]
+        /// Rewritten after EACH upload so the target starts downloading while the rest goes up;
+        /// `complete` once the page is done (only then may a missing ref be given up on).
+        var complete: Bool?
+        struct Ready: Codable { var ref: String; var chunks: Int }
+    }
 
     /// The content refs behind a page's signed media lists: every variant marker (poster, thumb,
     /// preview, original) expands to the blobs it pairs, plain entries pass through. Deduped, in order.

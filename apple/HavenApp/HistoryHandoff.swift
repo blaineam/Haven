@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Hands a new device of MY OWN account the account's whole history — through the relay, so the old
 /// and new device never have to be awake at the same time.
@@ -72,7 +75,91 @@ final class HistoryHandoff: ObservableObject {
     /// stays well under a second on a phone and doesn't park the UI behind the engine mutex.
     static let pageEvents: UInt32 = 120
 
-    private init() { refreshStatus() }
+    private init() {
+        refreshStatus()
+        #if os(iOS)
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in HistoryHandoff.shared.enteredBackground() }
+        }
+        nc.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in HistoryHandoff.shared.becameActive() }
+        }
+        #endif
+    }
+
+    // MARK: - Keeping a transfer moving
+
+    /// True while a transfer is running in either direction. `CallManager.syncIdleTimer` holds the
+    /// screen awake while this is set — derived, never latched, exactly like a call — because a
+    /// phone that auto-locks suspends Haven and the transfer with it.
+    @Published private(set) var transferActive = false
+    /// Last time this device did SOURCE work: a page, a relayed blob, or a direct media serve.
+    private var lastSendingAt: UInt64 = 0
+    /// Unrelayed needs were seen on the last source pass (more media to upload).
+    private var needsPending = false
+
+    /// Called when this device served history work — including a direct media ask from my other
+    /// device DURING a handoff (FeedStore's media-request handler).
+    func noteSending() {
+        guard !serves.isEmpty else { return }   // a normal own-device media ask isn't a handoff
+        lastSendingAt = HistoryHandoffWire.nowMs()
+        refreshActive()
+        startDriver()
+    }
+
+    private func refreshActive() {
+        let active = hasOutstandingWork
+        if active != transferActive {
+            transferActive = active
+            #if os(iOS)
+            CallManager.shared.syncIdleTimer()
+            #endif
+        }
+        refreshStatus()
+    }
+
+    /// The loop that actually moves the transfer. It used to ride the mailbox poll, which stretches
+    /// to minutes when the app is idle — so each side did ~20s of work every few minutes and a big
+    /// library looked stuck. This runs back-to-back while there is work, in the foreground, and for
+    /// the background grace iOS allows after the app is switched away.
+    private var driver: Task<Void, Never>?
+    func startDriver() {
+        guard driver == nil, hasOutstandingWork else { return }
+        driver = Task { @MainActor in
+            while !Task.isCancelled, HistoryHandoff.shared.hasOutstandingWork {
+                #if os(iOS)
+                if UIApplication.shared.applicationState == .background, bgTask == .invalid { break }
+                #endif
+                let moved = await tick(budget: 25)
+                refreshActive()
+                try? await Task.sleep(nanoseconds: moved ? 1_000_000_000 : 6_000_000_000)
+            }
+            driver = nil
+            refreshActive()
+        }
+    }
+
+    #if os(iOS)
+    private var bgTask: UIBackgroundTaskIdentifier = .invalid
+    private func enteredBackground() {
+        guard transferActive, bgTask == .invalid else { return }
+        // Finish the item in hand (and a bit more) instead of freezing mid-blob.
+        bgTask = UIApplication.shared.beginBackgroundTask(withName: "haven.history-handoff") { [weak self] in
+            Task { @MainActor in self?.endBackgroundTask() }
+        }
+        startDriver()
+    }
+    private func endBackgroundTask() {
+        guard bgTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(bgTask)
+        bgTask = .invalid
+    }
+    private func becameActive() {
+        endBackgroundTask()
+        startDriver()
+    }
+    #endif
 
     /// Rebuild `status` from the persisted state (both roles).
     private func refreshStatus() {
@@ -87,6 +174,8 @@ final class HistoryHandoff: ObservableObject {
             st.phase = .sending
             st.done = s.servedEvents
             st.total = s.totalEvents
+        } else if needsPending || HistoryHandoffWire.nowMs() &- lastSendingAt < 120_000 {
+            st.phase = .sending   // posts are across; media is still going
         } else if receivedBanner {
             st.phase = .received
         }
@@ -164,7 +253,7 @@ final class HistoryHandoff: ObservableObject {
         guard !acct.isEmpty else { return }
         want = Want(account: acct, at: HistoryHandoffWire.nowMs())
         HavenLog.sync("history handoff: requested (\(reason))")
-        Task { await announce(force: true) }
+        Task { await announce(force: true); startDriver() }
     }
 
     /// Publish (or re-publish) the request and nudge my devices. Throttled: a device that is asleep
@@ -263,50 +352,44 @@ final class HistoryHandoff: ObservableObject {
     }
     private var pulling = false
 
-    /// Work the media queue: count what has landed (direct transfers arrive on their own), ask the
-    /// source directly while it is live, and fall back to the relay per page when direct stalls.
+    /// Direct asks in flight (ref → when asked). In memory: a relaunch simply re-asks. The window is
+    /// what keeps the SOURCE alive — asking for 2,000 blobs at once made it try to stream them all
+    /// concurrently, and it served a handful before choking.
+    private static let directWindow = 12
+    private var directAsked: [String: UInt64] = [:]
+    private var directWindowSince: UInt64 = 0
+    private var lastDirectLandAt: UInt64 = 0
+    /// Direct stalled twice this session: stop trying it and go relay-only (rolling pages).
+    private var directStalls = 0
+    /// Relay pages requested at once while direct isn't an option.
+    private static let relayWindow = 3
+
+    /// Work the media queue: count what has landed (direct transfers arrive on their own), keep a
+    /// small window of direct asks going while the source is awake, and move pages to the relay when
+    /// direct stalls or the source sleeps — a few at a time, never the whole library at once.
     private func pullMedia(_ w: inout Want, account: String, me: String,
                            manifest m: HistoryHandoffWire.Manifest, until deadline: Date) async -> Bool {
         let now = HistoryHandoffWire.nowMs()
-        // Live = the source touched its manifest in the last two minutes, i.e. it is awake right now
-        // and can stream. Otherwise asking directly only burns the wait before the relay fallback.
+        // Live = the source touched its manifest in the last two minutes (it refreshes it while it
+        // serves), i.e. it is awake right now and can stream.
         let sourceLive = now &- (m.updatedAt ?? 0) < 120_000
         var progressed = false
+
+        // 1. Count what landed, everywhere.
         var i = 0
-        while i < w.mediaQueue.count, Date() < deadline {
+        while i < w.mediaQueue.count {
             var t = w.mediaQueue[i]
             let before = t.pending.count
-            t.pending.removeAll { MediaStore.shared.hasLocalFile($0.ref) }
+            t.pending.removeAll { item in
+                guard MediaStore.shared.hasLocalFile(item.ref) else { return false }
+                directAsked[item.ref] = nil
+                return true
+            }
             if t.pending.count < before {
                 w.mediaDone += before - t.pending.count
                 t.lastProgressAt = now
+                lastDirectLandAt = now
                 progressed = true
-            }
-            if t.pending.isEmpty {
-                if t.needPut { await blankRelayMedia(account: account, me: me, manifest: m, page: t.page) }
-                w.mediaQueue.remove(at: i); continue
-            }
-            if t.needPut {
-                progressed = await pullRelayMedia(&t, &w, account: account, me: me, manifest: m, until: deadline) || progressed
-            } else if sourceLive && (t.firstAskAt == 0 || now &- t.lastProgressAt < 90_000) {
-                // DIRECT: (re-)ask every 45s while things keep landing.
-                if t.firstAskAt == 0 { t.firstAskAt = now; t.lastProgressAt = now }
-                if now &- t.lastAskAt > 45_000 {
-                    FeedStore.shared.askMyDevicesForMedia(t.pending.map(\.ref))
-                    t.lastAskAt = now
-                }
-            } else {
-                // Direct stalled (or the source is asleep): ask for this page's media on the relay.
-                let key = HistoryHandoffWire.needKey(account, me, m.source, m.run, t.page)
-                if await SelfSyncCoordinator.shared.accountLanePut(key, Data("1".utf8)) {
-                    t.needPut = true
-                    HavenLog.sync("history handoff: page \(t.page) media → relay (\(t.pending.count) items, source \(sourceLive ? "stalled" : "asleep"))")
-                    if now &- w.lastNeedNudgeAt > 60_000 {
-                        w.lastNeedNudgeAt = now
-                        FeedStore.shared.nudgeMyDevicesForHistory()
-                        PushManager.shared.wakeMyDevices()
-                    }
-                }
             }
             if t.pending.isEmpty {
                 if t.needPut { await blankRelayMedia(account: account, me: me, manifest: m, page: t.page) }
@@ -315,7 +398,77 @@ final class HistoryHandoff: ObservableObject {
             w.mediaQueue[i] = t
             i += 1
         }
+        if directAsked.isEmpty { directWindowSince = 0 }
+
+        // 2. Relay pages already requested: download whatever the source has put up so far.
+        for j in w.mediaQueue.indices where w.mediaQueue[j].needPut && Date() < deadline {
+            var t = w.mediaQueue[j]
+            if await pullRelayMedia(&t, &w, account: account, me: me, manifest: m, until: deadline) { progressed = true }
+            w.mediaQueue[j] = t
+        }
+        for j in w.mediaQueue.indices.reversed() where w.mediaQueue[j].pending.isEmpty {
+            let t = w.mediaQueue.remove(at: j)
+            await blankRelayMedia(account: account, me: me, manifest: m, page: t.page)
+        }
+
+        // 3. Direct window, or relay pages when direct isn't possible.
+        let directUsable = sourceLive && directStalls < 2
+        if directUsable {
+            let stallClock = max(lastDirectLandAt, directWindowSince)
+            if !directAsked.isEmpty, stallClock > 0, now &- stallClock > 90_000 {
+                // Nothing landed for 90s with asks outstanding: those pages go to the relay.
+                directStalls += 1
+                let stuck = Set(directAsked.keys)
+                directAsked.removeAll(); directWindowSince = 0
+                for j in w.mediaQueue.indices where !w.mediaQueue[j].needPut
+                    && w.mediaQueue[j].pending.contains(where: { stuck.contains($0.ref) }) {
+                    var t = w.mediaQueue[j]
+                    await putNeed(&t, &w, account: account, me: me, manifest: m, why: "direct stalled")
+                    w.mediaQueue[j] = t
+                }
+            } else {
+                // Re-ask anything outstanding for 45s (dropped on the way), then top the window up.
+                var ask: [String] = directAsked.filter { now &- $0.value > 45_000 }.map(\.key)
+                for t in w.mediaQueue where !t.needPut {
+                    for item in t.pending where directAsked[item.ref] == nil {
+                        guard directAsked.count + ask.count < Self.directWindow else { break }
+                        ask.append(item.ref)
+                    }
+                    if directAsked.count + ask.count >= Self.directWindow { break }
+                }
+                if !ask.isEmpty {
+                    if directAsked.isEmpty { directWindowSince = now }
+                    for r in ask { directAsked[r] = now }
+                    FeedStore.shared.askMyDevicesForMedia(ask)
+                }
+            }
+        } else {
+            // Source asleep (or unreachable directly): keep a few pages on the relay at a time.
+            directAsked.removeAll(); directWindowSince = 0
+            var onRelay = w.mediaQueue.filter(\.needPut).count
+            for j in w.mediaQueue.indices where !w.mediaQueue[j].needPut && onRelay < Self.relayWindow {
+                var t = w.mediaQueue[j]
+                await putNeed(&t, &w, account: account, me: me, manifest: m,
+                              why: sourceLive ? "direct unreachable" : "source asleep")
+                w.mediaQueue[j] = t
+                if t.needPut { onRelay += 1 }
+            }
+        }
         return progressed
+    }
+
+    private func putNeed(_ t: inout MediaTask, _ w: inout Want, account: String, me: String,
+                         manifest m: HistoryHandoffWire.Manifest, why: String) async {
+        let key = HistoryHandoffWire.needKey(account, me, m.source, m.run, t.page)
+        guard await SelfSyncCoordinator.shared.accountLanePut(key, Data("1".utf8)) else { return }
+        t.needPut = true
+        HavenLog.sync("history handoff: page \(t.page) media → relay (\(t.pending.count) items, \(why))")
+        let now = HistoryHandoffWire.nowMs()
+        if now &- w.lastNeedNudgeAt > 60_000 {
+            w.lastNeedNudgeAt = now
+            FeedStore.shared.nudgeMyDevicesForHistory()
+            PushManager.shared.wakeMyDevices()
+        }
     }
 
     /// RELAY lane for one page: once the source has marked it ready, download each blob's chunks to
@@ -331,9 +484,11 @@ final class HistoryHandoff: ObservableObject {
         var progressed = false
         for item in t.pending where Date() < deadline {
             guard let chunks = chunksByRef[item.ref] else {
-                // The source no longer holds it — nothing to wait for.
-                t.pending.removeAll { $0.ref == item.ref }
-                w.mediaTotal = max(w.mediaDone, w.mediaTotal - 1)
+                // Not up yet — unless the source finished this page without it (it no longer holds it).
+                if ready.complete == true {
+                    t.pending.removeAll { $0.ref == item.ref }
+                    w.mediaTotal = max(w.mediaDone, w.mediaTotal - 1)
+                }
                 continue
             }
             switch await downloadRelayMedia(account: account, me: me, manifest: m, ref: item.ref, chunks: chunks, circle: t.circle) {
@@ -471,7 +626,10 @@ final class HistoryHandoff: ObservableObject {
     }
 
     /// Unfinished work on either side — worth a background wake.
-    var hasOutstandingWork: Bool { isWaiting || serves.values.contains { !$0.complete } }
+    var hasOutstandingWork: Bool {
+        isWaiting || serves.values.contains { !$0.complete } || needsPending
+            || HistoryHandoffWire.nowMs() &- lastSendingAt < 120_000
+    }
 
     /// Serve every open request from my other devices, until `deadline`. True if anything was
     /// uploaded. Cheap when there's nothing to do: one LIST of a tiny prefix.
@@ -518,6 +676,13 @@ final class HistoryHandoff: ObservableObject {
             }
             guard var run = s else { continue }
             if !run.complete, await serveRun(&run, account: acct, source: me, until: deadline) { did = true }
+            // Still streaming media directly after the posts are done: keep the manifest fresh, or
+            // the target reads this device as asleep after two minutes and detours via the relay.
+            let nowMs = HistoryHandoffWire.nowMs()
+            if nowMs &- lastSendingAt < 60_000, nowMs &- (lastManifestTouch[device] ?? 0) > 30_000 {
+                lastManifestTouch[device] = nowMs
+                await putManifest(run, account: acct, source: me)
+            }
             serves[device] = run
             // Pages whose media the target couldn't get directly — whether or not paging is finished.
             if Date() < deadline, await serveNeeds(run, account: acct, source: me, until: deadline) { did = true }
@@ -526,6 +691,7 @@ final class HistoryHandoff: ObservableObject {
         return did
     }
     private var serving = false
+    private var lastManifestTouch: [String: UInt64] = [:]
 
     private func anotherSourceIsServing(account: String, target: String, request: UInt64, me: String) async -> Bool {
         let now = HistoryHandoffWire.nowMs()
@@ -576,6 +742,7 @@ final class HistoryHandoff: ObservableObject {
                 }
                 run.pages += 1
                 run.servedEvents += Int(page.events)
+                lastSendingAt = HistoryHandoffWire.nowMs()
                 run.cursors[cid] = page.oldestMs
                 serves[run.device] = run
                 await putManifest(run, account: account, source: source)
@@ -602,6 +769,8 @@ final class HistoryHandoff: ObservableObject {
         let keys = await SelfSyncCoordinator.shared.accountLaneList(HistoryHandoffWire.needPrefix(account, run.device, source, run.run))
         guard !keys.isEmpty else { return false }
         var rm = Self.loadRunMedia(device: run.device, run: run.run)
+        needsPending = keys.contains { k in Int(k.split(separator: "/").last ?? "").map { !rm.relayed.contains($0) } ?? false }
+        defer { needsPending = keys.contains { k in Int(k.split(separator: "/").last ?? "").map { !rm.relayed.contains($0) } ?? false } }
         var did = false
         for key in keys.sorted() {
             guard let n = Int(key.split(separator: "/").last ?? ""), !rm.relayed.contains(n) else { continue }
@@ -625,8 +794,14 @@ final class HistoryHandoff: ObservableObject {
                 ready.append(.init(ref: ref, chunks: chunks))
                 Self.saveRunMedia(rm, device: run.device, run: run.run)
                 did = true
+                noteSending()
+                // Progressive: the target starts downloading while the rest of the page goes up.
+                if let partial = try? JSONEncoder().encode(HistoryHandoffWire.MediaReady(items: ready, complete: false)) {
+                    _ = await SelfSyncCoordinator.shared.accountLanePut(
+                        HistoryHandoffWire.mediaReadyKey(account, run.device, source, run.run, n), partial)
+                }
             }
-            let body = (try? JSONEncoder().encode(HistoryHandoffWire.MediaReady(items: ready))) ?? Data()
+            let body = (try? JSONEncoder().encode(HistoryHandoffWire.MediaReady(items: ready, complete: true))) ?? Data()
             guard await SelfSyncCoordinator.shared.accountLanePut(
                     HistoryHandoffWire.mediaReadyKey(account, run.device, source, run.run, n), body) else { break }
             rm.relayed.append(n)

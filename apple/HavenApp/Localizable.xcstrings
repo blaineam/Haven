@@ -576,6 +576,58 @@
         }
       }
     },
+    "Keep Haven open on this phone until your new device has everything — the screen stays on while it sends." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lass Haven auf diesem Telefon geöffnet, bis dein neues Gerät alles hat – der Bildschirm bleibt beim Senden an."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mantén Haven abierto en este teléfono hasta que tu nuevo dispositivo lo tenga todo: la pantalla se queda encendida mientras envía."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gardez Haven ouvert sur ce téléphone jusqu’à ce que votre nouvel appareil ait tout reçu — l’écran reste allumé pendant l’envoi."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tieni Haven aperto su questo telefono finché il nuovo dispositivo non ha ricevuto tutto: lo schermo resta acceso durante l’invio."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新しいデバイスにすべて届くまで、この iPhone で Haven を開いたままにしてください。送信中は画面が点灯したままになります。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "새 기기가 모두 받을 때까지 이 휴대폰에서 Haven을 열어 두세요. 보내는 동안 화면이 켜진 상태로 유지됩니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mantenha o Haven aberto neste telefone até o novo dispositivo receber tudo — a tela fica ligada enquanto envia."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在此手机上保持 Haven 打开，直到新设备收到全部内容——发送期间屏幕会保持常亮。"
+          }
+        }
+      }
+    },
     "Keep past identities in iCloud Keychain" : {
       "localizations" : {
         "de" : {

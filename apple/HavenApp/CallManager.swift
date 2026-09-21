@@ -340,10 +340,12 @@ final class CallManager: NSObject, ObservableObject {
     /// change, instead of a permanent one.
     func syncIdleTimer() {
         #if !os(macOS)
-        let shouldHold = active
+        // A history transfer to/from my other device holds it too: an auto-locked phone suspends
+        // Haven, and the transfer stops with it (the "doesn't keep my old iPhone awake" report).
+        let shouldHold = active || HistoryHandoff.shared.transferActive
         if UIApplication.shared.isIdleTimerDisabled != shouldHold {
             UIApplication.shared.isIdleTimerDisabled = shouldHold
-            HavenLog.call("idle timer \(shouldHold ? "DISABLED (call up)" : "restored (no call)")")
+            HavenLog.call("idle timer \(shouldHold ? "DISABLED (\(active ? "call up" : "history transfer"))" : "restored")")
         }
         #endif
     }

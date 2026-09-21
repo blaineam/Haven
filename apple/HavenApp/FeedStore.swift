@@ -5835,9 +5835,13 @@ final class FeedStore: ObservableObject {
         // History handoff: a bounded step each poll while either role has work; otherwise a cheap
         // LIST of a tiny account-lane prefix once a minute, so an open device answers a new one fast.
         let tickNow = now()
-        if HistoryHandoff.shared.hasOutstandingWork || tickNow - lastHandoffCheckMs > 60_000 {
+        if HistoryHandoff.shared.hasOutstandingWork {
+            HistoryHandoff.shared.startDriver()   // no-op while its loop is already running
+        } else if tickNow - lastHandoffCheckMs > 60_000 {
             lastHandoffCheckMs = tickNow
-            Task { @MainActor in await HistoryHandoff.shared.tick(budget: 20) }
+            Task { @MainActor in
+                if await HistoryHandoff.shared.tick(budget: 20) { HistoryHandoff.shared.startDriver() }
+            }
         }
         // Offline friend invites ride the same cadence: cheap no-op when nothing is pending.
         Task { await FriendInviteStore.shared.tick() }
@@ -6541,7 +6545,10 @@ final class FeedStore: ObservableObject {
         case 35: CallManager.shared.handleEndedElsewhere(payload)   // my account ENDED this call elsewhere
         case 34: handleHistoryRequest(payload)                       // "send me the page of your history before X"
         case HistoryHandoff.nudgeFrame:                              // 36: a device of mine asked for the whole history
-            Task { @MainActor in await HistoryHandoff.shared.tick(budget: 25) }
+            Task { @MainActor in
+                await HistoryHandoff.shared.tick(budget: 25)
+                HistoryHandoff.shared.startDriver()
+            }
         default: break
         }
     }
@@ -8600,6 +8607,7 @@ final class FeedStore: ObservableObject {
             HavenLog.net("media REQ ref=\(ref.prefix(12)) — refused, link is ultra-constrained")
             return
         }
+        if haveLocal, requesterHex == myNodeHex { HistoryHandoff.shared.noteSending() }   // my other device, mid-handoff
         if haveLocal, let url = localURL {
             // They had to come to US for bytes we already backed up — so a relay didn't serve them.
             // That is a signal about our own backup, not just a request to answer. See below.

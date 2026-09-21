@@ -98,9 +98,12 @@ Account identity key  (long-term; represents you to contacts; escrowed for recov
 
 - **Account identity key** — the long-term key contacts pin (from the first QR/link
   verification). It signs device credentials and signed device-list updates. It is
-  *not* needed for day-to-day messaging (devices use their own keys), so it can stay
-  escrowed (passphrase-encrypted in the user's own iCloud Keychain, per D2) and only
-  be unlocked when linking or revoking a device. Signed with the hybrid signature
+  *not* needed for day-to-day messaging (devices use their own keys). At rest on the
+  primary it is Secure-Enclave-wrapped; a second, migratable-but-never-synced copy (the
+  **device-backup escrow**, on by default) rides iCloud / encrypted Finder backups so a
+  restore onto a new phone keeps the identity. There is no passphrase layer — protection
+  is the keychain class plus the backup's own encryption (end-to-end with Advanced Data
+  Protection). Signed with the hybrid signature
   (Ed25519 + ML-DSA).
 - **Device key** — generated on-device, never leaves it (Secure Enclave on Apple).
 - **Device credential** — `{account_id, device_pubkey, device_name, created_at}`
@@ -264,9 +267,10 @@ in-order commit processing becomes a hard requirement rather than a practical on
   > device is genuinely compromised, it is a full account compromise and revoking another
   > device does not help — roll your identity. See `SEED-DROP-DESIGN.md`.
 - **Lost one device, others remain:** revoke as above, link a replacement.
-- **Lost all devices:** restore the **account key from escrow** (passphrase + iCloud
-  Keychain), then re-authorize fresh devices. This is the one place the account key
-  must be recoverable — hence escrow (D2).
+- **Lost all devices:** restore the latest **device backup** (iCloud or encrypted Finder)
+  onto a new phone — the device-backup escrow brings the account key back — then
+  re-authorize fresh devices. Past identities can also be restored from the opt-in
+  iCloud-Keychain identity-history archive.
 
 ## Device-list authentication (anti-rogue-device)
 

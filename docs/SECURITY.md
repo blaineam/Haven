@@ -33,8 +33,9 @@ This document records what Haven protects, how, and the limits — including the
   decrypting and could re-sign a higher-version roster to re-add itself. Seed-drop (D16 Phase 2) re-roots
   day-to-day operation on **per-device keys**: a device enrolled through the **seedless** flow holds only
   its own device keypair plus an account-signed `DeviceCredential` and never receives the master seed,
-  which concentrates on one **primary** device (Enclave-wrapped) plus the SE-wrapped iCloud-Keychain
-  escrow. Sealing runs through `recipients_with_devices_gated` (`core/haven-p2p/src/device.rs:755`,
+  which concentrates on one **primary** device (Enclave-wrapped) plus a device-backup escrow copy
+  (`AccountStore` — migratable, never iCloud-Keychain-synced, plaintext inside the keychain item so it
+  can travel with an iCloud / encrypted Finder backup; opt-out in Settings). Sealing runs through `recipients_with_devices_gated` (`core/haven-p2p/src/device.rs:755`,
   called at `core/haven-ffi/src/lib.rs:6137`): when the retirement switch is ON **and** every member is
   affirmatively seed-drop-capable, the bare account key is **dropped** and content seals to authorized
   device bundles only — so a revoked device is cut off even from a seed-holding member. The

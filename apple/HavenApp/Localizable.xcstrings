@@ -4,6 +4,474 @@
     "" : {
 
     },
+    "An identity switch or device restore set a feed aside on this device. Recovering merges its posts, messages and circles into the identity you're using now. Photos already on this device reappear with them." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ein Identitätswechsel oder eine Gerätewiederherstellung hat auf diesem Gerät einen Feed beiseitegelegt. Beim Wiederherstellen werden seine Beiträge, Nachrichten und Kreise in die Identität übernommen, die du gerade nutzt. Fotos, die schon auf diesem Gerät sind, erscheinen wieder mit ihnen."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Un cambio de identidad o una restauración del dispositivo dejó un feed apartado en este dispositivo. Al recuperarlo, sus publicaciones, mensajes y círculos se combinan con la identidad que usas ahora. Las fotos que ya están en este dispositivo vuelven a aparecer con ellos."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Un changement d’identité ou une restauration de l’appareil a mis un fil de côté sur cet appareil. La récupération fusionne ses posts, messages et cercles dans l’identité que vous utilisez maintenant. Les photos déjà présentes sur cet appareil réapparaissent avec eux."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Un cambio di identità o un ripristino del dispositivo ha messo da parte un feed su questo dispositivo. Recuperandolo, i suoi post, messaggi e cerchie vengono uniti all’identità che stai usando ora. Le foto già presenti su questo dispositivo ricompaiono con loro."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ID の切り替えまたはデバイスの復元により、このデバイスにフィードが保留されています。復元すると、その投稿・メッセージ・サークルが現在使用中の ID に統合されます。このデバイスにある写真も一緒に再表示されます。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ID 전환이나 기기 복원으로 이 기기에 피드가 따로 보관되어 있습니다. 복구하면 해당 게시물, 메시지, 서클이 지금 사용 중인 ID에 병합됩니다. 이 기기에 이미 있는 사진도 함께 다시 표시됩니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Uma troca de identidade ou restauração do dispositivo deixou um feed separado neste dispositivo. Ao recuperar, os posts, mensagens e círculos dele são mesclados à identidade que você usa agora. As fotos que já estão neste dispositivo reaparecem com eles."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "身份切换或设备恢复在此设备上搁置了一份动态。恢复后，其中的帖子、消息和圈子会合并到你当前使用的身份中。此设备上已有的照片也会随之重新显示。"
+          }
+        }
+      }
+    },
+    "Backup" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Backup"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copia de seguridad"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sauvegarde"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Backup"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バックアップ"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "백업"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Backup"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "备份"
+          }
+        }
+      }
+    },
+    "Earlier feed found" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Früherer Feed gefunden"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Se encontró un feed anterior"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ancien fil trouvé"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Trovato un feed precedente"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "以前のフィードが見つかりました"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이전 피드를 찾았습니다"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Feed anterior encontrado"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "找到之前的动态"
+          }
+        }
+      }
+    },
+    "Include in device backups" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "In Gerätebackups einschließen"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Incluir en las copias de seguridad del dispositivo"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Inclure dans les sauvegardes de l’appareil"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Includi nei backup del dispositivo"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "デバイスのバックアップに含める"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기기 백업에 포함"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Incluir nos backups do dispositivo"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "包含在设备备份中"
+          }
+        }
+      }
+    },
+    "Keep past identities in iCloud Keychain" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Frühere Identitäten im iCloud-Schlüsselbund behalten"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Guardar identidades anteriores en el Llavero de iCloud"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Conserver les identités passées dans le trousseau iCloud"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Conserva le identità precedenti nel Portachiavi iCloud"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "過去の ID を iCloud キーチェーンに保持"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이전 ID를 iCloud 키체인에 보관"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Manter identidades anteriores no Porta-Chaves do iCloud"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 iCloud 钥匙串中保留以往身份"
+          }
+        }
+      }
+    },
+    "Recover earlier posts & messages" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Frühere Beiträge und Nachrichten wiederherstellen"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recuperar publicaciones y mensajes anteriores"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Récupérer les anciens posts et messages"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recupera post e messaggi precedenti"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "以前の投稿とメッセージを復元"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이전 게시물과 메시지 복구"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recuperar posts e mensagens anteriores"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢复之前的帖子和消息"
+          }
+        }
+      }
+    },
+    "Recovered %lld posts and messages into this identity." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld Beiträge und Nachrichten in diese Identität wiederhergestellt."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Se recuperaron %lld publicaciones y mensajes en esta identidad."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld posts et messages récupérés dans cette identité."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recuperati %lld post e messaggi in questa identità."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 件の投稿とメッセージをこの ID に復元しました。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 ID로 게시물과 메시지 %lld개를 복구했습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld posts e mensagens recuperados nesta identidade."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已将 %lld 条帖子和消息恢复到此身份。"
+          }
+        }
+      }
+    },
+    "There was nothing to recover in the earlier feed." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Im früheren Feed gab es nichts wiederherzustellen."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No había nada que recuperar en el feed anterior."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Il n’y avait rien à récupérer dans l’ancien fil."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Non c’era nulla da recuperare nel feed precedente."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "以前のフィードに復元できるものはありませんでした。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이전 피드에 복구할 항목이 없었습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Não havia nada para recuperar no feed anterior."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "之前的动态中没有可恢复的内容。"
+          }
+        }
+      }
+    },
+    "With device backups on, restoring an iCloud or encrypted Finder backup to a new iPhone brings this identity with it, so you stay you. Turn on Advanced Data Protection to make the iCloud copy end-to-end encrypted. Past identities can separately be kept in iCloud Keychain so you can switch back to them on any of your devices." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mit aktivierten Gerätebackups wird diese Identität beim Wiederherstellen eines iCloud- oder verschlüsselten Finder-Backups auf ein neues iPhone mitgenommen – du bleibst du. Aktiviere den erweiterten Datenschutz, damit die iCloud-Kopie Ende-zu-Ende-verschlüsselt ist. Frühere Identitäten können zusätzlich im iCloud-Schlüsselbund aufbewahrt werden, damit du auf jedem deiner Geräte zu ihnen zurückwechseln kannst."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Con las copias del dispositivo activadas, restaurar una copia de iCloud o una copia cifrada del Finder en un iPhone nuevo trae esta identidad consigo, así sigues siendo tú. Activa la Protección de datos avanzada para que la copia de iCloud tenga cifrado de extremo a extremo. Las identidades anteriores pueden guardarse aparte en el Llavero de iCloud para volver a ellas en cualquiera de tus dispositivos."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avec les sauvegardes de l’appareil activées, restaurer une sauvegarde iCloud ou une sauvegarde Finder chiffrée sur un nouvel iPhone emporte cette identité : vous restez vous. Activez la Protection avancée des données pour que la copie iCloud soit chiffrée de bout en bout. Les identités passées peuvent aussi être conservées dans le trousseau iCloud pour y revenir sur n’importe lequel de vos appareils."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Con i backup del dispositivo attivi, ripristinare un backup iCloud o un backup Finder crittografato su un nuovo iPhone porta con sé questa identità, così resti tu. Attiva la Protezione avanzata dei dati per rendere la copia su iCloud crittografata end-to-end. Le identità precedenti possono essere conservate a parte nel Portachiavi iCloud per tornarci su qualsiasi tuo dispositivo."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "デバイスのバックアップをオンにすると、iCloud または暗号化された Finder バックアップを新しい iPhone に復元したときにこの ID も引き継がれ、あなたのままでいられます。iCloud 上のコピーをエンドツーエンドで暗号化するには「高度なデータ保護」をオンにしてください。過去の ID は別途 iCloud キーチェーンに保持でき、どのデバイスからでも切り替えて戻せます。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기기 백업을 켜 두면 iCloud 또는 암호화된 Finder 백업을 새 iPhone에 복원할 때 이 ID도 함께 옮겨져 그대로 당신으로 남습니다. iCloud 사본을 종단 간 암호화하려면 고급 데이터 보호를 켜세요. 이전 ID는 따로 iCloud 키체인에 보관해 두고 어느 기기에서든 다시 전환할 수 있습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Com os backups do dispositivo ativados, restaurar um backup do iCloud ou um backup criptografado do Finder em um iPhone novo traz esta identidade junto, e você continua sendo você. Ative a Proteção Avançada de Dados para que a cópia no iCloud tenha criptografia de ponta a ponta. Identidades anteriores podem ser mantidas à parte no Porta-Chaves do iCloud para você voltar a elas em qualquer dispositivo seu."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "开启设备备份后，将 iCloud 备份或加密的访达备份恢复到新 iPhone 时，此身份也会随之迁移，你依然是你。开启“高级数据保护”可让 iCloud 副本端到端加密。以往身份可另外保存在 iCloud 钥匙串中，方便你在任意设备上切换回去。"
+          }
+        }
+      }
+    },
     "·" : {
 
     },
@@ -5540,58 +6008,6 @@
         }
       }
     },
-    "Back up to iCloud" : {
-      "localizations" : {
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "In iCloud sichern"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hacer copia de seguridad en iCloud"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Sauvegarder sur iCloud"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Esegui il backup su iCloud"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "iCloudにバックアップ"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "iCloud에 백업"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Fazer backup no iCloud"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "备份到 iCloud"
-          }
-        }
-      }
-    },
     "Back up your identity to iCloud, move it with a QR code, or restore one here." : {
       "localizations" : {
         "de" : {
@@ -5744,58 +6160,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已备份到他人可读取的 Relay"
-          }
-        }
-      }
-    },
-    "Backs up an encrypted recovery copy to your iCloud Keychain — active keys never leave this device." : {
-      "localizations" : {
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Sichert eine verschlüsselte Wiederherstellungskopie in deinem iCloud-Schlüsselbund — aktive Schlüssel verlassen dieses Gerät nie."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Guarda una copia de recuperación cifrada en tu Llavero de iCloud: las claves activas nunca salen de este dispositivo."
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Sauvegarde une copie de récupération chiffrée dans votre trousseau iCloud — les clés actives ne quittent jamais cet appareil."
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Salva una copia di recupero cifrata nel tuo portachiavi iCloud: le chiavi attive non lasciano mai questo dispositivo."
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "暗号化した復元用のコピーをiCloudキーチェーンにバックアップします。使用中の鍵がこの端末から出ることはありません。"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "암호화된 복구본을 iCloud 키체인에 백업해요 — 사용 중인 키는 이 기기를 벗어나지 않아요."
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Salva uma cópia de recuperação criptografada nas suas Chaves do iCloud — as chaves ativas nunca saem deste dispositivo."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "将加密的恢复副本备份到你的 iCloud 钥匙串 — 正在使用的密钥永远不会离开这台设备。"
           }
         }
       }
@@ -13426,58 +13790,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "我同意 —— 进入 Haven"
-          }
-        }
-      }
-    },
-    "iCloud backup" : {
-      "localizations" : {
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "iCloud-Backup"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Copia de seguridad en iCloud"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Sauvegarde iCloud"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Backup su iCloud"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "iCloud バックアップ"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "iCloud 백업"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Backup do iCloud"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "iCloud 备份"
           }
         }
       }

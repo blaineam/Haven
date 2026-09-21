@@ -7,6 +7,45 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 1.8.10 — in development
+
+### Fixed — moving to a new iPhone keeps your identity, and your feed survives identity switches
+
+Restoring an iCloud (or encrypted Finder) backup onto a new iPhone came up signed in, but as a
+**brand-new identity**. The account key lives Secure-Enclave-wrapped and device-only, so it never
+made the trip — while the "onboarded" flag, the old feed file and even the old phone's device key
+(a plaintext UserDefaults mirror) did. The app read the missing key as a fresh install, minted a
+stranger, skipped onboarding, merged the old account's feed into it, and ran on the old phone's
+device id.
+
+- **Device-backup escrow.** A second copy of the account key is kept in a keychain item that is
+  migratable but never iCloud-Keychain-synced (`kSecAttrAccessibleAfterFirstUnlock`,
+  non-synchronizable), so it moves only when a whole backup is restored. A restored phone now
+  adopts it and re-wraps it into its own Secure Enclave: same account, same feed, its own new
+  device key. On by default (Settings ▸ Identity & backup ▸ "Include in device backups"); the
+  trade is that a forensic keychain extraction of an unlocked phone yields the seed, and the iCloud
+  copy is end-to-end only with Advanced Data Protection. Existing installs plant it once after
+  unlock, off the launch path. It also rescues an encrypted backup restored to the *same* phone,
+  which brings the wrapped seed back without the Enclave key that opens it.
+- **Restore detection.** A random install sentinel in both a device-only keychain item and
+  UserDefaults tells "restored onto a new device" apart from a reinstall. A restore drops the old
+  phone's device key mirror, linked-device credential and seedless enrollment. Without an escrowed
+  key (an older backup, or opted out) the phone no longer pretends: it shelves the restored feed
+  under its owner, drops the stale roster, and opens on Welcome with Link / Move offered.
+- **Each identity keeps its own feed.** Switching identities moved the feed into one
+  `haven-feed.prev.json` slot that the next switch overwrote and nothing ever read — so switching
+  back came up empty, despite the dialog promising otherwise. Feeds are now shelved per identity
+  and come back on switch. A feed an older build set aside can be merged back from Settings
+  ("Recover earlier posts & messages"); the stray identity's own keys, roster, profile card and
+  circle membership are stripped first so they can't displace the real account's.
+- The iCloud toggle said the active key was backed up; it only ever covered past identities (and
+  `saveSeed`'s `synced` flag was ignored). It is now labelled for what it does, and the docs no
+  longer describe a passphrase that never existed.
+
+Still open: history sync to a new *linked* device is small-batch and foreground-only (own-device
+catch-up re-sends the newest 6 envelopes per circle, with no cursor), and relay copies stay
+unreadable until the old device re-seals them.
+
 ## 1.8.8 — 2026-09-12
 
 On the App Store this release also carries 1.8.7's work below: 1.8.7 was tagged and shipped to

@@ -48,10 +48,16 @@ enum DeviceKeyStore {
             return acct
         case .notFound:
             // Genuinely no seed → first run on this device. The ONLY case allowed to write.
+            // A backup restored onto a NEW phone carries the old phone's UserDefaults mirror below;
+            // reusing it would put two phones on one device id. Drop it so this device mints its own.
+            if RestoreDetector.wasRestoredToNewDevice {
+                UserDefaults.standard.removeObject(forKey: udSeedKey)
+            }
             // Prefer a stable UserDefaults seed when keychain cannot persist (unsigned sim / matrix QA)
             // so HTTP mailbox auth does not remint a new device id every launch.
             if let stable = loadOrMintUserDefaultsSeed(), let acct = try? Account.fromSeed(seed: stable) {
-                // Best-effort: also write keychain so a later signed install upgrades.
+                // Best-effort: also write keychain so a later signed install upgrades. (The mirror
+                // stays: a locked background launch dials under it with a stable device id.)
                 saveSeed(stable)
                 cached = acct; usingTemporaryIdentity = false
                 return acct

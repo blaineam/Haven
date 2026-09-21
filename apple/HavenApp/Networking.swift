@@ -18,10 +18,14 @@ final class InboundBridge: InboundListener {
 /// in order — an older export can never land after (and clobber) a newer one.
 actor StatePersister {
     static let shared = StatePersister()
-    func persist(engine: Engine, to url: URL) async {
+    /// `destination` is asked AFTER the export: an identity switch can retire this engine while
+    /// it runs, and its state then belongs on that identity's shelf, not in the live file the next
+    /// identity imports (nil = drop).
+    func persist(engine: Engine, to destination: @Sendable () async -> URL?) async {
         // exportState() holds the engine mutex for 100s of ms on a large account — it runs on the
         // engine actor like every other call, so it can't race a mailbox receive / feed rebuild storm.
         let data = await engine.run { $0.exportState() }
+        guard let url = await destination() else { return }
         try? data.write(to: url,
                         options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }

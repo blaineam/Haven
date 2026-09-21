@@ -449,6 +449,10 @@ struct IdentityBackupView: View {
     @ObservedObject var accountStore: AccountStore
     @ObservedObject private var profile = ProfileStore.shared
     @State private var iCloudSync = AccountStore.iCloudSyncEnabled
+    @State private var backupEscrow = AccountStore.backupEscrowEnabled
+    @State private var hasSetAsideFeed = FeedStore.hasSetAsideState
+    @State private var recovering = false
+    @State private var recoverResult: String?
     @State private var identities: [AccountStore.IdentitySummary] = []
     @State private var switchTarget: AccountStore.IdentitySummary?
     @State private var renameTarget: AccountStore.IdentitySummary?
@@ -456,6 +460,50 @@ struct IdentityBackupView: View {
     @State private var deleteTarget: AccountStore.IdentitySummary?
     @State private var showFactoryReset = false
     @State private var showFactoryResetFinal = false
+
+    @ViewBuilder private var recoverySection: some View {
+        if hasSetAsideFeed {
+            Section {
+                Button {
+                    recovering = true
+                    let others = Set(identities.filter { !$0.isCurrent }.map(\.nodeHex))
+                    Task {
+                        let n = await FeedStore.shared.recoverSetAsideState(ownOtherIdentities: others)
+                        recovering = false
+                        hasSetAsideFeed = FeedStore.hasSetAsideState
+                        recoverResult = n.map { String(localized: "Recovered \($0) posts and messages into this identity.") }
+                            ?? String(localized: "There was nothing to recover in the earlier feed.")
+                    }
+                } label: {
+                    HStack {
+                        Label("Recover earlier posts & messages", systemImage: "clock.arrow.circlepath")
+                        if recovering { Spacer(); ProgressView() }
+                    }
+                }
+                .disabled(recovering)
+                .alert(recoverResult ?? "", isPresented: Binding(get: { recoverResult != nil }, set: { if !$0 { recoverResult = nil } })) {
+                    Button("OK", role: .cancel) { recoverResult = nil }
+                }
+            } header: { Text("Earlier feed found") }
+            footer: { Text("An identity switch or device restore set a feed aside on this device. Recovering merges its posts, messages and circles into the identity you're using now. Photos already on this device reappear with them.") }
+        }
+    }
+
+    @ViewBuilder private var backupSection: some View {
+        Section {
+            Toggle(isOn: $backupEscrow) {
+                Label("Include in device backups", systemImage: "iphone.and.arrow.forward")
+            }
+            .tint(HavenTheme.pink)
+            .onChange(of: backupEscrow) { _, on in accountStore.setBackupEscrow(on) }
+            Toggle(isOn: $iCloudSync) {
+                Label("Keep past identities in iCloud Keychain", systemImage: "icloud.fill")
+            }
+            .tint(HavenTheme.pink)
+            .onChange(of: iCloudSync) { _, on in accountStore.setICloudSync(on) }
+        } header: { Text("Backup") }
+        footer: { Text("With device backups on, restoring an iCloud or encrypted Finder backup to a new iPhone brings this identity with it, so you stay you. Turn on Advanced Data Protection to make the iCloud copy end-to-end encrypted. Past identities can separately be kept in iCloud Keychain so you can switch back to them on any of your devices.") }
+    }
 
     var body: some View {
         ZStack {
@@ -506,14 +554,8 @@ struct IdentityBackupView: View {
                 } header: { Text("Your identities") }
                 footer: { Text("Every identity you've used on this device — tap one to switch.") }
 
-                Section {
-                    Toggle(isOn: $iCloudSync) {
-                        Label("Back up to iCloud", systemImage: "icloud.fill")
-                    }
-                    .tint(HavenTheme.pink)
-                    .onChange(of: iCloudSync) { _, on in accountStore.setICloudSync(on) }
-                } header: { Text("iCloud backup") }
-                footer: { Text("Backs up an encrypted recovery copy to your iCloud Keychain — active keys never leave this device.") }
+                recoverySection
+                backupSection
 
                 Section {
                     NavigationLink { TransferIdentityView(accountStore: accountStore) } label: {

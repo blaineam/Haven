@@ -6,6 +6,16 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest waves (newest first)
+- **1.8.10 — upgrading to a new iPhone keeps you you (in development)** — an iCloud restore came up
+  "signed in" as a stranger: the Enclave-wrapped seed can't travel, but the onboarded flag, feed
+  and old device key did. Now a migratable, never-synced **device-backup escrow** carries the seed
+  (on by default), a keychain/UserDefaults **install sentinel** detects a restore onto new hardware
+  (fresh device key, stale device state dropped, and no pretending to be logged in when no escrow
+  came across), feeds are **shelved per identity** instead of one overwritten `.prev.json`, and
+  Settings can **recover** a feed an older build set aside. Verified on a simulator via a DEBUG
+  `HAVEN_SIMULATE_DEVICE_RESTORE=1|2` launch switch: same account + new device key + posts kept
+  with escrow; Welcome + feed shelved under its owner without; 3/3 posts merged back by recovery.
+  Next: cursor-paged own-device history sync + background processing for big accounts.
 - **1.8.4 — the UI stops touching the engine (in development, nothing shipped yet)** — 1.8.3 fixed
   the launch freeze one stack at a time; this wave is the *shape* that kept producing them.
   `FeedStore` held the engine handle directly and ~175 of its calls still ran on the main actor:

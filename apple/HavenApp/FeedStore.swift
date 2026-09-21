@@ -504,7 +504,15 @@ final class FeedStore: ObservableObject {
     /// online. The feed works offline too; the node just enables real delivery.
     /// Re-initialize for a different identity (e.g. after restoring from a transfer code).
     /// Tears down the old engine, networking, and on-disk state, then configures fresh.
-    func reconfigure(seed: Data) {
+    /// `liveStateIsIncoming`: the live file already belongs to the incoming identity — the
+    /// locked-launch case, where a throwaway engine booted over the real identity's state and
+    /// `reloadIfTemporary` now swaps the real identity back in. Shelving it would strand it.
+    func reconfigure(seed: Data, liveStateIsIncoming: Bool = false) {
+        // Captured BEFORE teardown: callers save the incoming seed first, so the keychain already
+        // names the NEW identity — only the running engine still knows whose state is on disk.
+        let outgoingHex = cachedAccountHex
+        let incomingHex = (try? Account.fromSeed(seed: seed))?.nodeIdHex() ?? ""
+        let shelve = !liveStateIsIncoming && (outgoingHex.isEmpty || outgoingHex != incomingHex)
         node = nil
         RelayClients.clearAll()   // cached clients wrap the old node's (now dead) endpoint
         // Stop Multipeer cleanly BEFORE dropping the reference — deinit-time teardown cancels the
@@ -513,17 +521,24 @@ final class FeedStore: ObservableObject {
         nearby?.stop()
         nearby = nil
         flushPersistIfPending()   // the outgoing engine's last debounced export lands before it goes
+        // …and "lands" is asynchronous: that export (or one already in flight) can finish after the
+        // shelve below. Route it to wherever the outgoing state now lives, never the live file the
+        // incoming identity is about to import.
+        retireEngine(to: shelve ? Self.shelfURL(ownerHex: outgoingHex) : stateURL)
         engine = nil
         items.removeAll()
         circles.removeAll()
-        // Back up (don't hard-delete) the outgoing identity's engine state, so adopting a new identity is
-        // recoverable instead of destructive. And RESET the self-sync base: a freshly-adopted (empty)
-        // identity must not diff against the previous identity's base and tombstone its circles — that
-        // bug propagated to the primary and wiped posts.
-        if FileManager.default.fileExists(atPath: stateURL.path) {
-            let backup = stateURL.deletingLastPathComponent().appendingPathComponent("haven-feed.prev.json")
-            try? FileManager.default.removeItem(at: backup)
-            try? FileManager.default.moveItem(at: stateURL, to: backup)
+        // Each identity keeps its OWN engine state file. The outgoing identity's state is shelved under
+        // its id and the incoming identity's shelf (if it has one) goes live — so switching A→B→A
+        // brings A's posts, DMs and circles back. (This used to be one `haven-feed.prev.json` slot:
+        // the second switch overwrote it and nothing ever read it, so switching back came up empty.)
+        // A re-configure of the SAME identity (the restore sheets call it right after switching)
+        // leaves the live file alone. And RESET the self-sync base: a freshly-adopted identity must
+        // not diff against the previous identity's base and tombstone its circles — that bug
+        // propagated to the primary and wiped posts.
+        if shelve {
+            Self.shelveLiveState(ownerHex: outgoingHex)
+            Self.unshelveState(ownerHex: incomingHex)
         }
         SelfSyncCoordinator.shared.reset()
         SharedStore.resetSeenMailbox()   // the new identity must not inherit the old ingestion cursor
@@ -855,6 +870,9 @@ final class FeedStore: ObservableObject {
         engine = booted   // the didSet drops the read model; the snapshot below refills it
         if let snapshot {
             cachedAccountHex = snapshot.accountHex
+            if !snapshot.accountHex.isEmpty, !DemoEnv.isDemo {
+                UserDefaults.standard.set(snapshot.accountHex, forKey: Self.lastAccountHexKey)
+            }
             cachedDeviceHex = snapshot.deviceHex
             cachedBundle = snapshot.bundle
             cachedProfileCard = snapshot.profileCard
@@ -2499,10 +2517,149 @@ final class FeedStore: ObservableObject {
 
     // MARK: - Persistence (so posts + contacts survive restarts and updates)
 
-    private var stateURL: URL {
+    private var stateURL: URL { Self.liveStateURL }
+    nonisolated private static var liveStateURL: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("haven-feed.json")
+    }
+
+    /// Where an identity's engine state waits while another identity is active.
+    nonisolated private static func shelvedStateURL(ownerHex: String) -> URL {
+        liveStateURL.deletingLastPathComponent().appendingPathComponent("haven-feed.id-\(ownerHex.lowercased()).json")
+    }
+
+    /// `ownerHex`'s shelf, or the legacy single slot when the owner is unknown.
+    nonisolated private static func shelfURL(ownerHex: String) -> URL {
+        ownerHex.isEmpty ? setAsideStateURL : shelvedStateURL(ownerHex: ownerHex)
+    }
+
+    /// Where a torn-down engine's late exports go (keyed by engine identity). A persist decides its
+    /// destination when the export finishes, not when it was queued — see `persistDestination`.
+    private var retiredEngineDestinations: [ObjectIdentifier: URL] = [:]
+    private func retireEngine(to url: URL) {
+        guard let engine else { return }
+        retiredEngineDestinations[ObjectIdentifier(engine)] = url
+    }
+    /// Factory reset: a torn-down engine's late export must not resurrect a wiped identity's feed.
+    func discardRetiredEngineWrites() { retiredEngineDestinations.removeAll() }
+    private func persistDestination(for e: Engine) -> URL? {
+        if e === engine { return stateURL }
+        return retiredEngineDestinations[ObjectIdentifier(e)]   // nil → an engine nobody owns: drop it
+    }
+
+    /// Move the live state file onto `ownerHex`'s shelf (replacing an older shelf copy). With no
+    /// known owner it falls back to the legacy single `haven-feed.prev.json` slot.
+    nonisolated private static func shelveLiveState(ownerHex: String) {
+        let fm = FileManager.default
+        let live = liveStateURL
+        guard fm.fileExists(atPath: live.path) else { return }
+        let dest = shelfURL(ownerHex: ownerHex)
+        try? fm.removeItem(at: dest)
+        try? fm.moveItem(at: live, to: dest)
+    }
+
+    /// Bring `ownerHex`'s shelved state back live, if there is one and nothing is live.
+    nonisolated private static func unshelveState(ownerHex: String) {
+        guard !ownerHex.isEmpty else { return }
+        let fm = FileManager.default
+        let shelf = shelvedStateURL(ownerHex: ownerHex)
+        guard fm.fileExists(atPath: shelf.path), !fm.fileExists(atPath: liveStateURL.path) else { return }
+        try? fm.moveItem(at: shelf, to: liveStateURL)
+    }
+
+    // MARK: Recovering a feed an older build set aside
+
+    /// The single slot builds before per-identity shelves moved the outgoing feed into on every
+    /// identity switch / restore — and never read back. After a device upgrade it typically holds
+    /// the WHOLE restored history (the old phone's feed, merged into the stray identity the restore
+    /// minted), so it is worth recovering into the real identity.
+    nonisolated static var setAsideStateURL: URL {
+        liveStateURL.deletingLastPathComponent().appendingPathComponent("haven-feed.prev.json")
+    }
+    nonisolated static var hasSetAsideState: Bool {
+        FileManager.default.fileExists(atPath: setAsideStateURL.path)
+    }
+
+    /// Merge the set-aside feed's posts, DMs, members and FRIENDS' keys into the running identity.
+    /// Returns how many events the file carried (nil if there was nothing usable). The file is
+    /// renamed, never deleted, so a second attempt stays possible.
+    ///
+    /// The file's own-identity material is stripped first — it may belong to a different identity
+    /// than the one running now: its epoch keys and circle secret (import converges slots larger-key-
+    /// wins, so a stray identity's key could displace the real one), rotation stamp, sealed-commit
+    /// cache, device rosters, seedless roster wire and profile card. `ownOtherIdentities` (this
+    /// device's other identity ids) are removed from the member lists and their events dropped, so
+    /// the stray identity doesn't become a member of the real account's circles.
+    func recoverSetAsideState(ownOtherIdentities: Set<String>) async -> Int? {
+        guard let engine else { return nil }
+        let url = Self.setAsideStateURL
+        let cleaned: (Data, Int)? = await Task.detached(priority: .userInitiated) {
+            guard let raw = try? Data(contentsOf: url) else { return nil }
+            return Self.stripOwnIdentityMaterial(raw, dropping: ownOtherIdentities)
+        }.value
+        guard let (data, count) = cleaned else { return nil }
+        await engine.run { $0.importState(data: data) }
+        guard self.engine === engine else { return nil }
+        persistNow()
+        await reloadCircles()
+        refresh()
+        let stamp = Int(Date().timeIntervalSince1970)
+        try? FileManager.default.moveItem(
+            at: url, to: url.deletingLastPathComponent().appendingPathComponent("haven-feed.prev.recovered-\(stamp).json"))
+        HavenLog.net("recoverSetAsideState: merged \(count) events from the set-aside feed")
+        return count
+    }
+
+    nonisolated private static func stripOwnIdentityMaterial(_ raw: Data, dropping own: Set<String>) -> (Data, Int)? {
+        guard var root = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any],
+              let circles = root["circles"] as? [[String: Any]] else { return nil }
+        let ownLower = Set(own.map { $0.lowercased() })
+        func bundleHex(_ v: Any) -> String {
+            guard let bytes = v as? [NSNumber], bytes.count >= 32 else { return "" }
+            return bytes.prefix(32).map { String(format: "%02x", $0.uint8Value) }.joined()
+        }
+        var events = 0
+        root["circles"] = circles.map { c -> [String: Any] in
+            var c = c
+            for k in ["my_epoch", "my_epoch_keys", "my_epoch_keys_alt", "my_circle_secret", "rotated_at", "cached_commit"] {
+                c.removeValue(forKey: k)
+            }
+            if let members = c["members"] as? [Any] {
+                c["members"] = members.filter { !ownLower.contains(bundleHex($0)) }
+            }
+            if let evs = c["events"] as? [[String: Any]] {
+                let kept = evs.filter { !ownLower.contains(($0["author"] as? String ?? "").lowercased()) }
+                events += kept.count
+                c["events"] = kept
+            }
+            return c
+        }
+        for k in ["device_rosters", "seedless_roster_wire", "cached_profile"] { root.removeValue(forKey: k) }
+        guard events > 0, let out = try? JSONSerialization.data(withJSONObject: root) else { return nil }
+        return (out, events)
+    }
+
+    /// Factory reset: no identity's state may survive, shelved or live.
+    nonisolated static func deleteAllShelvedState() {
+        let fm = FileManager.default
+        let dir = liveStateURL.deletingLastPathComponent()
+        guard let items = try? fm.contentsOfDirectory(atPath: dir.path) else { return }
+        for name in items where name == "haven-feed.prev.json" || (name.hasPrefix("haven-feed.id-") && name.hasSuffix(".json")) {
+            try? fm.removeItem(at: dir.appendingPathComponent(name))
+        }
+    }
+
+    /// The account whose state is in the live file, recorded at every boot so a device restore that
+    /// arrives WITHOUT its seed can still shelve that state under the right owner.
+    nonisolated private static let lastAccountHexKey = "haven.lastBootedAccountHex"
+
+    /// A backup restored onto a new phone without its identity: shelve the restored state under the
+    /// account it belongs to instead of merging it into the fresh identity about to boot. Restoring
+    /// that identity later (transfer code / link) un-shelves it in `reconfigure`.
+    nonisolated static func parkRestoredState() {
+        shelveLiveState(ownerHex: UserDefaults.standard.string(forKey: lastAccountHexKey) ?? "")
+        HavenLog.net("parkRestoredState: restored feed shelved; this phone starts without the old identity")
     }
     /// Trailing-edge debounce for `persist()`. Stall detector, 2026-09-01: at launch `configure`'s
     /// first persist() started a background `exportState` (100s of ms holding the engine mutex) at
@@ -2532,9 +2689,9 @@ final class FeedStore: ObservableObject {
         // exportState() serializes the WHOLE engine (100s of ms on a large account) and the atomic
         // write hits disk — both used to run on the main actor after every post/ingest burst and
         // froze the UI. The actor serializes writers so an older export can never clobber a newer one.
-        let url = stateURL
+        let destination: @Sendable () async -> URL? = { [weak self] in await self?.persistDestination(for: engine) }
         Task.detached(priority: .utility) {
-            await StatePersister.shared.persist(engine: engine, to: url)
+            await StatePersister.shared.persist(engine: engine, to: destination)
         }
     }
     /// Backgrounding / identity teardown: a debounced export must not outlive the process or the engine.
@@ -3282,6 +3439,12 @@ final class FeedStore: ObservableObject {
 
         switch op {
         #if DEBUG
+        case "recover_set_aside":
+            // QA: the Settings "Recover earlier posts & messages" action, headless.
+            let n = await recoverSetAsideState(ownOtherIdentities: [])
+            HavenLog.net("matrix-qa v2 recover_set_aside: \(n.map(String.init) ?? "nothing")")
+            qaWriteDump()
+            return
         case "approve_connections":
             // QA: approve every pending connection request.
             //
@@ -6713,14 +6876,14 @@ final class FeedStore: ObservableObject {
         SelfSyncCoordinator.shared.reset()
         SharedStore.resetSeenMailbox()
         pendingEnrollTicket = nil
-        // 3. Tear down the throwaway engine + its on-disk state, then boot SEEDLESS.
-        if FileManager.default.fileExists(atPath: stateURL.path) {
-            let backup = stateURL.deletingLastPathComponent().appendingPathComponent("haven-feed.prev.json")
-            try? FileManager.default.removeItem(at: backup)
-            try? FileManager.default.moveItem(at: stateURL, to: backup)
-        }
+        // 3. Tear down the throwaway engine + its on-disk state, then boot SEEDLESS. Flush FIRST: a
+        //    debounced export landing after the shelve would re-create the live file under the
+        //    throwaway identity and the seedless engine would import it.
+        let throwawayHex = cachedAccountHex
         nearby?.stop()   // clean Multipeer teardown before the reference drops (Bonjour cancel crash)
         flushPersistIfPending()   // the outgoing engine's last debounced export lands before it goes
+        retireEngine(to: Self.shelfURL(ownerHex: throwawayHex))   // …asynchronously — route it to the shelf
+        Self.shelveLiveState(ownerHex: throwawayHex)
         node = nil; nearby = nil; engine = nil; items.removeAll(); circles.removeAll()
         RelayClients.clearAll()
         // 4. Once the engine is up, ask the primary to push full state now (profile/circles/posts)

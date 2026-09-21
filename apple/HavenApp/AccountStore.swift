@@ -7,9 +7,10 @@ import Security
 /// Owns the user's Haven account. Persists only the 32-byte master seed in the
 /// Keychain; the full identity (all hybrid-PQ keys) is derived from it on launch.
 ///
-/// Multi-device: the seed can optionally sync across *your* Apple devices via iCloud
-/// Keychain (Apple's E2E sync), and can be moved to any client (web/Android/another
-/// phone) with a one-time transfer code / QR. The seed never touches a Haven server.
+/// Moving devices: the seed rides a device backup (iCloud / encrypted Finder / Quick Start) through
+/// the backup escrow, so restoring onto a new phone keeps the identity; it can also be moved to any
+/// client (web/Android/another phone) with a one-time transfer code / QR. It never live-syncs through
+/// iCloud Keychain and never touches a Haven server.
 @MainActor
 final class AccountStore: ObservableObject {
     /// The app's single instance (set at init). For non-View code that needs the account's link
@@ -42,6 +43,10 @@ final class AccountStore: ObservableObject {
             return
         }
         defer { observeSeedlessAdoption() }
+        // A backup restored onto a NEW phone: forget the old device's per-device state before
+        // anything reads it. The account seed itself comes back via the backup escrow (below).
+        let restoredToNewDevice = RestoreDetector.wasRestoredToNewDevice
+        if restoredToNewDevice { RestoreDetector.forgetPreviousDeviceState() }
         switch Self.loadSeedStatus() {
         case .found(let seed):
             if let restored = try? Account.fromSeed(seed: seed) {
@@ -60,6 +65,8 @@ final class AccountStore: ObservableObject {
                 // launch now performs ZERO keychain writes.
                 Self.archive(seed)
                 SharedSeed.write(seed)   // mirror into the shared group for the NSE
+                // Installs from before the backup escrow existed: plant it once, off the launch path.
+                Self.ensureBackupEscrowWhenUnlocked(seed)
             } else {
                 // Seed present but un-deriveable — NEVER overwrite it; use a temp identity.
                 account = Account.generate(); usingTemporaryIdentity = true
@@ -75,6 +82,18 @@ final class AccountStore: ObservableObject {
             } else {
                 account = Account.generate(); usingTemporaryIdentity = true
             }
+        case .foundEscrow(let seed):
+            // The device-local seed is gone but the backup escrow came across: this is the SAME
+            // account on a restored (usually new) phone. Adopt it — the restored state file, profile
+            // and roster all belong to it — and re-wrap it into this device's Secure Enclave.
+            if let restored = try? Account.fromSeed(seed: seed) {
+                account = restored
+                SharedSeed.write(seed)
+                HavenLog.net("AccountStore: identity recovered from the device-backup escrow")
+                Self.migrateLegacySeedWhenUnlocked(seed)   // saveSeed re-wraps + re-plants the escrow
+            } else {
+                account = Account.generate(); usingTemporaryIdentity = true
+            }
         case .notFound:
             // Genuinely a new install → make + save the first identity. (Only here do we write.)
             let fresh = Account.generate()
@@ -82,6 +101,16 @@ final class AccountStore: ObservableObject {
             Self.archive(fresh.secretSeed())
             SharedSeed.write(fresh.secretSeed())
             account = fresh
+            if restoredToNewDevice {
+                // Restored WITHOUT an escrowed seed (backup predates it, or the user opted out). The
+                // restored feed/profile/roster belong to an identity this phone no longer holds.
+                // Don't pretend to be logged in as it: park its feed under its own id (a later
+                // restore of that identity via transfer code picks it back up), drop its roster,
+                // and send the user to welcome, where Restore / Link are offered.
+                FeedStore.parkRestoredState()
+                DeviceRosterManager.shared.stepDown()
+                ProfileStore.shared.onboarded = false
+            }
         case .lockedOrError, .seError:
             // Keychain not accessible yet (locked / errSecInteractionNotAllowed), OR the seed is
             // SE-wrapped but the Enclave couldn't unwrap it right now (.seError — SE key locked,
@@ -105,13 +134,13 @@ final class AccountStore: ObservableObject {
     func reloadIfTemporary() {
         let status = Self.loadSeedStatus()
         let seedOpt: Data?
-        switch status { case .found(let d), .foundLegacy(let d): seedOpt = d; default: seedOpt = nil }
+        switch status { case .found(let d), .foundLegacy(let d), .foundEscrow(let d): seedOpt = d; default: seedOpt = nil }
         guard usingTemporaryIdentity, let seed = seedOpt,
               let restored = try? Account.fromSeed(seed: seed) else { return }
         account = restored
         usingTemporaryIdentity = false
         SharedSeed.write(seed)
-        FeedStore.shared.reconfigure(seed: account.secretSeed())
+        FeedStore.shared.reconfigure(seed: account.secretSeed(), liveStateIsIncoming: true)
     }
 
     /// Wipe the identity and create a new one ("start over"). The old identity is archived to
@@ -184,8 +213,8 @@ final class AccountStore: ObservableObject {
     func setICloudSync(_ on: Bool) {
         UserDefaults.standard.set(on, forKey: Self.syncDefaultsKey)
         let seed = account.secretSeed()
-        Self.deleteSeed()
-        Self.saveSeed(seed, synced: on)
+        // (The active seed never syncs through iCloud Keychain — see `saveSeed`. This toggle only
+        // moves the identity HISTORY archive; the device-backup escrow is `setBackupEscrow`.)
         SharedSeed.write(seed)
         // Migrate the recovery archive to match the new mode right away (SE-wrapped device-local
         // ⇄ plaintext synchronizable) so the toggle takes effect now, not on the next identity
@@ -236,8 +265,7 @@ final class AccountStore: ObservableObject {
         }
         guard let restored = try? Account.fromSeed(seed: seed) else { return false }
         Self.archive(account.secretSeed())   // keep the currently-active identity rollback-able first
-        Self.deleteSeed()
-        Self.saveSeed(seed, synced: Self.iCloudSyncEnabled)
+        Self.saveSeed(seed)   // replaces every representation, escrow included
         SharedSeed.write(seed)
         account = restored
         // Load THIS identity's world, not whatever the previous identity left in the engine/state file.
@@ -273,8 +301,9 @@ final class AccountStore: ObservableObject {
     // Devices without an Enclave (the Simulator, very old hardware) fall back to the previous
     // plaintext-keychain item, kept byte-for-byte compatible so existing users aren't disturbed.
     //
-    // The seed is ALWAYS device-local and NON-synchronizable in either representation. iCloud
-    // Keychain must never carry the identity — a syncable seed let a fresh install on one device
+    // The seed is ALWAYS NON-synchronizable in every representation (the device-backup escrow below
+    // is migratable, but only moves with a whole restored backup). iCloud Keychain SYNC must never
+    // carry the identity — a syncable seed let a fresh install on one device
     // roll another device's identity. Cross-device is only ever via an explicit, user-confirmed
     // transfer code. (SE-wrapped blobs are inherently device-bound: the Enclave key can't sync.)
 
@@ -333,9 +362,23 @@ final class AccountStore: ObservableObject {
     private static func migrateLegacySeedWhenUnlocked(_ seed: Data) {
         // saveSeed → deleteSeed clears BOTH keychain domains (DP + legacy) before wrapping, so a
         // single call retires every plaintext representation.
+        whenUnlocked { saveSeed(seed) }
+    }
+
+    /// Plant the device-backup escrow for an install that predates it. A read, then (once) a write —
+    /// both off the launch path, same discipline as the legacy migration.
+    private static func ensureBackupEscrowWhenUnlocked(_ seed: Data) {
+        guard backupEscrowEnabled else { return }
+        whenUnlocked {
+            if case .notFound = loadBackupEscrow() { storeBackupEscrow(seed) }
+        }
+    }
+
+    /// Run keychain maintenance on a utility queue once protected data is available.
+    private static func whenUnlocked(_ work: @escaping @Sendable () -> Void) {
         // A @Sendable closure, not a nested func: a nested func inherits this method's main-actor
         // isolation, which the protected-data observer below (a Sendable block) cannot call.
-        let run: @Sendable () -> Void = { DispatchQueue.global(qos: .utility).async { saveSeed(seed) } }
+        let run: @Sendable () -> Void = { DispatchQueue.global(qos: .utility).async { work() } }
         #if canImport(UIKit)
         DispatchQueue.main.async {
             if UIApplication.shared.isProtectedDataAvailable {
@@ -360,9 +403,12 @@ final class AccountStore: ObservableObject {
     // on a utility queue — a keychain write on a locked device parks in securityd (see init) — and
     // the class-level @MainActor made that an isolation violation. These are pure keychain /
     // Secure-Enclave helpers plus the NSLock-guarded seed cache; none touch main-actor state.
-    nonisolated private static func saveSeed(_ data: Data, synced: Bool = false) {
+    nonisolated private static func saveSeed(_ data: Data) {
         invalidateSeedCache()
-        deleteSeed()
+        // The escrow is replaced in place (never deleted first): on the restore path it is the ONLY
+        // copy of the seed until the Enclave wrap below lands.
+        if backupEscrowEnabled { storeBackupEscrow(data) } else { deleteBackupEscrow() }
+        deleteSeed(includingEscrow: false)
         if wrapAndStore(data) { return }   // Secure-Enclave path (device hardware).
         // Fallback: no Secure Enclave (Simulator / unsupported) → plaintext, device-local only.
         var query = baseQuery()
@@ -401,6 +447,10 @@ final class AccountStore: ObservableObject {
             seedCacheLock.lock(); cachedSeed = d; seedCacheLock.unlock()
             return d
         }
+        if case .foundEscrow(let d) = st {
+            seedCacheLock.lock(); cachedSeed = d; seedCacheLock.unlock()
+            return d
+        }
         if case .found(let d) = st {
             seedCacheLock.lock()
             cachedSeed = d
@@ -424,6 +474,9 @@ final class AccountStore: ObservableObject {
         /// From a LEGACY plaintext / synchronizable item. Needs the one-time SE migration — a
         /// keychain WRITE, which must never run inline on the launch path (see init for the crash).
         case foundLegacy(Data)
+        /// Only the device-BACKUP escrow is present (a restore onto a new device dropped the
+        /// device-local copies). Adopt it and re-wrap — a write, so off the launch path too.
+        case foundEscrow(Data)
         case notFound, lockedOrError, seError
     }
 
@@ -440,7 +493,10 @@ final class AccountStore: ObservableObject {
                 return .lockedOrError // SE key present but locked — transient, retry on unlock.
             case .missingKey, .failed:
                 // Ciphertext present but the Enclave key is gone or the decrypt failed. A real
-                // identity exists; regenerating here would destroy it. Treat as transient.
+                // identity exists; regenerating here would destroy it. The escrow holds the same
+                // seed (every saveSeed writes both) — e.g. an encrypted backup restored to the SAME
+                // phone brings the ciphertext back but not the Enclave key. Otherwise transient.
+                if case .found(let seed) = loadBackupEscrow() { return .foundEscrow(seed) }
                 return .seError
             }
         case .locked:
@@ -462,7 +518,7 @@ final class AccountStore: ObservableObject {
         if dpStatus == errSecSuccess { return dpData.map { .foundLegacy($0) } ?? .lockedOrError }
         if dpStatus != errSecItemNotFound { return .lockedOrError }
         // QA stub: absent in the DP keychain IS absent — a legacy probe would prompt on rebuild.
-        if SecureEnclaveBox.dataProtectionKeychainOnly { return .notFound }
+        if SecureEnclaveBox.dataProtectionKeychainOnly { return escrowOrNotFound() }
         let (legStatus, legData) = readPlain(dataProtection: false)
         switch legStatus {
         case errSecSuccess:
@@ -471,15 +527,24 @@ final class AccountStore: ObservableObject {
             // a keychain write on whatever thread asked for the seed, launch included. The deferred
             // migrator owns that hop now; a load must never write.
             return .foundLegacy(d)
-        case errSecItemNotFound: return .notFound
+        case errSecItemNotFound: return escrowOrNotFound()
         default: return .lockedOrError   // errSecInteractionNotAllowed, etc. — don't clobber
+        }
+    }
+
+    /// Last stop before "genuinely new install": the device-backup escrow.
+    private static func escrowOrNotFound() -> SeedStatus {
+        switch loadBackupEscrow() {
+        case .found(let seed): return .foundEscrow(seed)
+        case .locked: return .lockedOrError
+        case .notFound: return .notFound
         }
     }
 
     /// Deletes both seed representations (the SE-wrapped ciphertext and any plaintext copy). The
     /// Secure-Enclave private key itself is intentionally LEFT in place: it holds no identity (it
     /// only wraps the seed) and is reused for the next `saveSeed`, avoiding needless key churn.
-    nonisolated private static func deleteSeed() {
+    nonisolated private static func deleteSeed(includingEscrow: Bool = true) {
         invalidateSeedCache()
         // Clear both the data-protection AND legacy keychains so neither representation lingers
         // (stub: DP only — see keychainDomains).
@@ -491,6 +556,7 @@ final class AccountStore: ObservableObject {
             wrapped[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
             SecItemDelete(wrapped as CFDictionary)
         }
+        if includingEscrow { deleteBackupEscrow() }
     }
 
     // MARK: - Secure Enclave wrapping
@@ -546,6 +612,72 @@ final class AccountStore: ObservableObject {
         add[kSecAttrSynchronizable as String] = kCFBooleanFalse!
         let status = SecItemAdd(add as CFDictionary, nil)
         return status == errSecSuccess || status == errSecDuplicateItem
+    }
+
+    // MARK: - Device-backup escrow (moving to a new phone)
+    //
+    // The authoritative seed above is Secure-Enclave-wrapped and `ThisDeviceOnly`, so it can never
+    // leave this phone — which also meant an iCloud / Finder restore onto a NEW iPhone arrived with
+    // no identity at all. The escrow is a second copy made for exactly that move:
+    //
+    //   • `kSecAttrAccessibleAfterFirstUnlock` (NOT ThisDeviceOnly) → it rides an iCloud backup, an
+    //     ENCRYPTED Finder backup, and Quick Start device-to-device migration. An UNENCRYPTED Finder
+    //     backup cannot restore it to another device (Apple wraps those items to this device's key).
+    //   • NON-synchronizable → it never enters live iCloud Keychain sync, so it can't do what the old
+    //     synced seed did (a fresh install on one device rolling another device's identity). It only
+    //     moves when a whole backup is restored.
+    //   • Plaintext inside the keychain item (an Enclave key can't travel). Its protection is the
+    //     keychain's own data-protection class plus the backup's encryption — Advanced Data
+    //     Protection makes the iCloud path end-to-end. The trade vs. SE-only: a forensic keychain
+    //     extraction of an unlocked device now yields the seed. On by default; Settings can opt out.
+
+    nonisolated private static let escrowKey = "account-master-seed-backup"
+    nonisolated private static let escrowDisabledKey = "haven.identityBackupEscrow.disabled"
+    nonisolated static var backupEscrowEnabled: Bool { !UserDefaults.standard.bool(forKey: escrowDisabledKey) }
+
+    nonisolated private static func escrowQuery() -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+         kSecAttrAccount as String: escrowKey, kSecUseDataProtectionKeychain as String: true,
+         kSecAttrSynchronizable as String: kCFBooleanFalse!]
+    }
+
+    nonisolated private static func loadBackupEscrow() -> BlobStatus {
+        var q = escrowQuery()
+        q[kSecReturnData as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        switch SecItemCopyMatching(q as CFDictionary, &item) {
+        case errSecSuccess:
+            guard let d = item as? Data, d.count == 32 else { return .locked }   // present ≠ absent
+            return .found(d)
+        case errSecItemNotFound: return .notFound
+        default: return .locked
+        }
+    }
+
+    /// Update-or-add, so a failed write never leaves the escrow missing.
+    nonisolated private static func storeBackupEscrow(_ seed: Data) {
+        let attrs: [String: Any] = [kSecValueData as String: seed,
+                                    kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock]
+        let status = SecItemUpdate(escrowQuery() as CFDictionary, attrs as CFDictionary)
+        guard status == errSecItemNotFound else { return }
+        var add = escrowQuery()
+        for (k, v) in attrs { add[k] = v }
+        SecItemAdd(add as CFDictionary, nil)
+    }
+
+    nonisolated private static func deleteBackupEscrow() {
+        SecItemDelete(escrowQuery() as CFDictionary)
+    }
+
+    /// Settings: keep (default) or drop the device-backup escrow of the ACTIVE identity.
+    func setBackupEscrow(_ on: Bool) {
+        UserDefaults.standard.set(!on, forKey: Self.escrowDisabledKey)
+        let seed = account.secretSeed()
+        guard !seedless, !usingTemporaryIdentity else { return }
+        DispatchQueue.global(qos: .utility).async {
+            if on { Self.storeBackupEscrow(seed) } else { Self.deleteBackupEscrow() }
+        }
     }
 
     // MARK: - Recoverable identity history (for rolling back a changed identity)
@@ -771,6 +903,8 @@ final class AccountStore: ObservableObject {
         account = fresh
         ProfileStore.shared.reloadForCurrentIdentity()
         FeedStore.shared.reconfigure(seed: fresh.secretSeed())
+        FeedStore.shared.discardRetiredEngineWrites()
+        FeedStore.deleteAllShelvedState()   // every identity's shelved feed, incl. the one just shelved
         ProfileStore.shared.onboarded = false   // ← drops the user back on the welcome screen, fresh-install style
     }
 

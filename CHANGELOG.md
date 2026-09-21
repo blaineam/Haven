@@ -97,6 +97,25 @@ under keys the new device never held. For a big, old account that meant days of 
     awake (no relay copy at all), and relay with the old phone put to sleep mid-handoff (all media
     after it woke, every relay copy blanked afterwards).
 
+- **Big libraries no longer stall, and it resumes** (rc.4). On a real 2,068-item library rc.3 got
+  10 items across and stopped:
+  - The new phone asked for EVERY blob directly at once (and re-asked all of them every 45 s); the
+    old phone tried to stream thousands concurrently and choked. Direct asks are now a moving window
+    of 12; the relay fallback takes three pages at a time, never the whole library.
+  - The work only ran on the mailbox poll, which stretches to minutes when idle — ~20 s of transfer
+    every few minutes. A dedicated loop now runs back-to-back while either side has work, restarts on
+    launch/foreground (so a killed app resumes), and gets a background grace period to finish the
+    item in hand when the app is switched away.
+  - Nothing kept the phones awake, so the old one auto-locked and suspended mid-transfer. Both hold
+    the screen on while a transfer is active (derived like a call's hold, never latched), and the
+    old phone's banner says to keep Haven open.
+  - The relay marks a page's media ready after EACH upload, so downloads start immediately instead
+    of after the whole page (often hundreds of MB) is up.
+  - A source streaming media directly now keeps its manifest fresh, so the target doesn't mistake it
+    for asleep after two minutes and detour through the relay.
+  - Proven on simulators at scale: 420 posts / 1,261 media files in ~3 min, surviving the new phone
+    being killed mid-transfer and the old phone going away for 45 s (relay took over, direct resumed).
+
 Not yet: Android and desktop neither request nor serve the handoff (they ignore frame 36).
 
 ## 1.8.8 — 2026-09-12

@@ -132,6 +132,12 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The action's default is "tools platform-tools". The runner's cmdline-tools 16.0 repo no
+          # longer carries the long-deprecated `tools` package, so sdkmanager exits 1 and EVERY
+          # build died here (2026-09-21: every rc tag and every android-touching main push). The
+          # step below installs what the build actually needs.
+          packages: platform-tools
 
       - name: Install NDK + platform + build-tools
         run: |

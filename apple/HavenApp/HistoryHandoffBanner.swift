@@ -44,6 +44,8 @@ struct HistoryHandoffProgress: View {
         switch status.phase {
         case .waitingForSource:
             return "Open Haven on your other device, or leave it on a charger — it starts on its next wake."
+        case .receiving where status.mediaTotal > 0:
+            return "\(min(status.done, max(status.total, status.done))) of \(max(status.total, status.done)) posts and messages · \(min(status.mediaDone, status.mediaTotal)) of \(status.mediaTotal) photos and videos"
         case .receiving, .sending:
             if status.total > 0 {
                 return "\(min(status.done, status.total)) of \(status.total) posts and messages"

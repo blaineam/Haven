@@ -3448,7 +3448,24 @@ final class FeedStore: ObservableObject {
         case "posts_bulk":
             // QA: a history big enough to span many handoff pages.
             let n = Int(str("count")) ?? 50
-            for i in 0..<n { await postNow("\(body.isEmpty ? "bulk" : body) \(i)", media: []) }
+            // "photo_every": every k-th post carries a DISTINCT generated photo (distinct bytes →
+            // distinct content refs), so a handoff test has real media to move.
+            let every = Int(str("photo_every")) ?? 0
+            for i in 0..<n {
+                var refs: [String] = []
+                #if os(iOS)
+                if every > 0, i % every == 0 {
+                    let img = UIGraphicsImageRenderer(size: CGSize(width: 900, height: 700)).image { ctx in
+                        UIColor(hue: CGFloat(i % 37) / 37, saturation: 0.6, brightness: 0.9, alpha: 1).setFill()
+                        ctx.fill(CGRect(x: 0, y: 0, width: 900, height: 700))
+                        ("handoff \(i) \(UUID().uuidString.prefix(8))" as NSString).draw(at: CGPoint(x: 40, y: 320),
+                            withAttributes: [.font: UIFont.boldSystemFont(ofSize: 56), .foregroundColor: UIColor.white])
+                    }
+                    refs = [MediaStore.shared.addImage(img)]
+                }
+                #endif
+                await postNow("\(body.isEmpty ? "bulk" : body) \(i)", media: refs)
+            }
             HavenLog.net("matrix-qa v2 posts_bulk: \(n)")
             qaWriteDump()
             return
@@ -6560,6 +6577,50 @@ final class FeedStore: ObservableObject {
         return status
     }
 
+    /// Handoff media, DIRECT lane: ask my own devices (mesh + iroh) for these refs. The holder streams
+    /// them back over the existing own-device media path (frame 5, own-media key), which lands them
+    /// through `MediaStore.adopt` like any other transfer. Friends are not asked — this is a sync
+    /// between my devices, not a fetch.
+    func askMyDevicesForMedia(_ refs: [String]) {
+        guard engine != nil else { return }
+        let myHex = myNodeHex
+        if myOtherDeviceTargets().isEmpty {
+            // No sibling known yet to send to: refill the list; the next ask (≤45s) reaches it.
+            scheduleDeviceIdsFill()
+            HavenLog.sync("history handoff: no sibling device known yet for direct media — refreshing")
+        }
+        for ref in refs where !MediaStore.isSynthetic(ref) && !MediaStore.shared.hasLocalFile(ref) {
+            var plain = Data(myHex.utf8); plain.append(Data(ref.utf8))
+            let ask = resumeAsk(ref: ref, myHex: myHex)
+            nearbyBroadcast(ask == nil ? 3 : 33, ask ?? plain)
+            liveDeliverToMyDevices(ask == nil ? 3 : 33, ask ?? plain)
+        }
+    }
+
+    /// Handoff media, RELAY lane (source side): seal a local blob for `circleId` into a temp FILE —
+    /// never the whole video in memory. Sealed under the circle's CURRENT epoch, which the new device
+    /// holds once its roster was ingested, plus the account/device recipient list.
+    func sealMediaForHandoff(circleId: String, ref: String) async -> URL? {
+        guard let engine, let src = MediaStore.shared.storagePath(for: ref),
+              FileManager.default.fileExists(atPath: src.path) else { return nil }
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("handoff-\(UUID().uuidString).sealed")
+        let ok = await engine.run { $0.sealCircleMediaFile(circleId: circleId, inPath: src.path, outPath: out.path) }
+        return ok ? out : nil
+    }
+
+    /// Handoff media, RELAY lane (target side): open a reassembled sealed FILE and adopt it under
+    /// `ref` — `MediaStore.adopt` re-verifies the content address by streaming, so a wrong or
+    /// tampered blob is dropped, never stored.
+    func openHandoffMedia(circleId: String, sealed: URL, ref: String) async -> Bool {
+        guard let engine else { return false }
+        let out = MediaStore.shared.makeTempFile()
+        let ok = await engine.run { $0.openCircleMediaFile(circleId: circleId, sealedPath: sealed.path, outPath: out.path) }
+        guard ok else { try? FileManager.default.removeItem(at: out); return false }
+        let adopted = MediaStore.shared.adopt(ref, from: out)
+        if adopted { refresh() }
+        return adopted
+    }
+
     /// The handoff's progress denominator: total events across these circles.
     func historyEventCount(circleIds: [String]) async -> Int {
         guard let engine else { return 0 }
@@ -6595,6 +6656,10 @@ final class FeedStore: ObservableObject {
         let destination: @Sendable () async -> URL? = { [weak self] in await self?.persistDestination(for: engine) }
         await StatePersister.shared.persist(engine: engine, to: destination)
         if applied > 0 { refresh(); scheduleCircleSideEffects(circleId) }
+        // Every page carries the source's device roster. Refresh the read model's own-device list so
+        // the handoff's DIRECT media asks (live delivery to my other devices) can find the source —
+        // on a freshly linked device that list is empty until something refills it.
+        scheduleDeviceIdsFill(); dialTargetsCache.removeAll()
         return applied
     }
 

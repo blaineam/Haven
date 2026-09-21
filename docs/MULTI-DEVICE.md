@@ -182,6 +182,17 @@ through the relay instead, on the account lane only the account's own devices ca
    on disk. A page whose circle hasn't reached the device yet is retried, then skipped after four
    attempts. When the manifest is `complete` and every page is in, it marks the request `done`.
 
+**Media.** Pages are v2 (`"HVH2"`): after the envelopes, `u32 count × (u16 len ‖ content ref ‖ u64
+size)` — every blob the page's events name, companions expanded, limited to what the source holds.
+The target asks for them DIRECTLY first (frame 3 to its own devices; the source streams frame 5
+sealed with the own-media key) while the source's manifest is fresh (< 2 min). If nothing lands for
+90 s, or the source is asleep, it PUTs `history-need/<target>/<source>/<run>/<page>`; the source
+uploads that page's media (`seal_circle_media_file` → 8 MB chunks at
+`history/<target>/<source>/<run>/m/<ref>/<i>`) and writes `…/mready/<page>` = `{items:[{ref,
+chunks}]}`. The target reassembles to a file, `open_circle_media_file`, `MediaStore.adopt` (streamed
+content-address check), then overwrites the chunks and the ready marker with empty bodies; a need
+whose page completed directly first is withdrawn (empty body) so the source skips it.
+
 Paging is by `created_at`, strictly older than the previous page's oldest, with a timestamp tie
 kept on one page (`epoch_sync_bundle_paged`) — the events vector is arrival-ordered, so a
 positional "newest N" would skip events. Android and desktop ignore frame 36 and neither serve nor

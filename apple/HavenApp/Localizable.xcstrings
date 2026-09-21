@@ -56,6 +56,58 @@
         }
       }
     },
+    "%lld of %lld posts and messages · %lld of %lld photos and videos" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$lld von %2$lld Beiträgen und Nachrichten · %3$lld von %4$lld Fotos und Videos"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$lld de %2$lld publicaciones y mensajes · %3$lld de %4$lld fotos y videos"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$lld sur %2$lld posts et messages · %3$lld sur %4$lld photos et vidéos"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$lld di %2$lld post e messaggi · %3$lld di %4$lld foto e video"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "投稿とメッセージ %2$lld 件中 %1$lld 件 · 写真とビデオ %4$lld 件中 %3$lld 件"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "게시물과 메시지 %2$lld개 중 %1$lld개 · 사진과 동영상 %4$lld개 중 %3$lld개"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$lld de %2$lld posts e mensagens · %3$lld de %4$lld fotos e vídeos"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "帖子和消息 %1$lld/%2$lld · 照片和视频 %3$lld/%4$lld"
+          }
+        }
+      }
+    },
     "%lld posts and messages so far" : {
       "localizations" : {
         "de" : {

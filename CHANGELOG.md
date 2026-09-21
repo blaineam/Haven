@@ -78,8 +78,26 @@ under keys the new device never held. For a big, old account that meant days of 
   - An open device checks for requests every minute (was three). A failed roster HTTP put now logs
     why instead of silently backing the URL off.
 
-Not yet: Android and desktop neither request nor serve the handoff (they ignore frame 36), and
-old *media* is still fetched lazily per post, from the relay or a sibling.
+- **Photos and videos come with it** (rc.3). rc.2 moved every post but left the media to the old
+  lazy per-post fetch, so a restored phone showed history full of grey tiles. Now each handoff page
+  names the blobs its events carry (photos, videos and their thumb/preview/poster/original
+  companions — core `export_history_page` returns them), and the new device fetches them as part
+  of the same progress ("… · 57 of 180 photos and videos"):
+  - **Device to device first.** While the old phone is awake, the new one asks it directly over the
+    existing own-device media stream (mesh + iroh, own-media key) — nothing is copied to a server.
+  - **Relay only as a fallback, per page.** When direct makes no progress for 90 s (or the old phone
+    is asleep), the new device leaves `history-need/…/<page>`; the old phone uploads just that
+    page's media on its next wake — circle-sealed to a FILE and put up in 8 MB chunks, so a large
+    video never sits whole in memory — and marks it ready. The new device downloads, opens to a
+    file, verifies the content address by streaming, stores it, and blanks the relay copies. A need
+    is withdrawn if the page completes directly first.
+  - Fixed on the way: a freshly linked device's own-device list stayed empty until something else
+    refilled it, so its direct asks went nowhere. Every ingested page now refreshes it.
+  - Proven on two simulators through a local relay: 240 posts + 180 media files, direct with both
+    awake (no relay copy at all), and relay with the old phone put to sleep mid-handoff (all media
+    after it woke, every relay copy blanked afterwards).
+
+Not yet: Android and desktop neither request nor serve the handoff (they ignore frame 36).
 
 ## 1.8.8 — 2026-09-12
 

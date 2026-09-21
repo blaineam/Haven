@@ -27,6 +27,13 @@ import Foundation
 /// Each page is self-sufficient (it carries the source's roster + key commit), so the target can
 /// open it whenever it arrives. Frame 36 is only a "look now" hint — the relay copy is the request.
 /// Pages are sealed exactly like the own-device catch-up, so nothing new is exposed to the relay.
+///
+/// MEDIA rides the same handoff and the same progress. Each page names the blobs its events carry
+/// (photos, videos, and their thumb/preview/poster/original companions). The target asks the source
+/// for them DIRECTLY first — the own-device media stream over the mesh and iroh, nothing parked on a
+/// server. If that stalls (the source is asleep, or the two can't reach each other), the target
+/// leaves a per-page "need" on the lane and the source uploads just that page's media, circle-sealed
+/// and chunked; the target downloads, verifies, stores, and blanks the relay copies.
 @MainActor
 final class HistoryHandoff: ObservableObject {
     static let shared = HistoryHandoff()
@@ -48,7 +55,14 @@ final class HistoryHandoff: ObservableObject {
         var done = 0
         /// Total events expected; 0 = not known yet.
         var total = 0
-        var fraction: Double? { total > 0 ? min(1, Double(done) / Double(total)) : nil }
+        /// Photos/videos (and their companions) received / known so far — the target's media count.
+        var mediaDone = 0
+        var mediaTotal = 0
+        /// One bar for both: posts and media weigh the same per item.
+        var fraction: Double? {
+            let t = total + mediaTotal
+            return t > 0 ? min(1, Double(done + mediaDone) / Double(t)) : nil
+        }
     }
     @Published private(set) var status = Status()
 
@@ -67,6 +81,8 @@ final class HistoryHandoff: ObservableObject {
             st.phase = w.run == nil ? .waitingForSource : .receiving
             st.done = w.receivedEvents
             st.total = w.totalEvents
+            st.mediaDone = w.mediaDone
+            st.mediaTotal = w.mediaTotal
         } else if let s = serves.values.first(where: { !$0.complete }) {
             st.phase = .sending
             st.done = s.servedEvents
@@ -98,8 +114,28 @@ final class HistoryHandoff: ObservableObject {
         var lastNudgeAt: UInt64 = 0
         /// Consecutive attempts at a page whose circle isn't on this device yet.
         var heldAttempts = 0
+        /// Pages whose posts are in but whose media isn't yet, oldest first.
+        var mediaQueue: [MediaTask] = []
+        var mediaDone = 0
+        var mediaTotal = 0
+        var lastNeedNudgeAt: UInt64 = 0
     }
-    private static let wantKey = "haven.historyHandoff.want.v1"
+
+    /// One page's outstanding media on the target.
+    private struct MediaTask: Codable {
+        var page: Int
+        var circle: String
+        var pending: [HistoryHandoffWire.MediaItem]
+        /// Direct lane: when we first/last asked the source, and when something last landed.
+        var firstAskAt: UInt64 = 0
+        var lastAskAt: UInt64 = 0
+        var lastProgressAt: UInt64 = 0
+        /// Relay lane: the "need" is on the lane; attempts at downloading what the source put up.
+        var needPut = false
+        var relayAttempts = 0
+    }
+    /// v2: v1 records (rc.1/rc.2) lack the media fields; a stale one is simply re-requested.
+    private static let wantKey = "haven.historyHandoff.want.v2"
     private var want: Want? {
         get {
             guard let d = UserDefaults.standard.data(forKey: Self.wantKey) else { return nil }
@@ -197,13 +233,22 @@ final class HistoryHandoff: ObservableObject {
             }
             w.received += applied
             w.receivedEvents += HistoryHandoffWire.eventCount(page.envelopes)
+            let missing = page.media.filter { !MediaStore.shared.hasLocalFile($0.ref) }
+            if !missing.isEmpty {
+                w.mediaQueue.append(MediaTask(page: w.nextPage, circle: page.circleId, pending: missing))
+                w.mediaTotal += missing.count
+            }
             w.nextPage += 1
             w.heldAttempts = 0
             want = w
             progressed = true
         }
-        if m.complete && w.nextPage >= m.pages {
-            HavenLog.sync("history handoff: complete — \(w.received) envelopes over \(m.pages) pages")
+        if Date() < deadline, !w.mediaQueue.isEmpty {
+            if await pullMedia(&w, account: w.account, me: me, manifest: m, until: deadline) { progressed = true }
+            want = w
+        }
+        if m.complete && w.nextPage >= m.pages && w.mediaQueue.isEmpty {
+            HavenLog.sync("history handoff: complete — \(w.received) envelopes over \(m.pages) pages, \(w.mediaDone)/\(w.mediaTotal) media")
             receivedBanner = true
             want = nil
             // Tell the source it can stop considering this ask.
@@ -217,6 +262,144 @@ final class HistoryHandoff: ObservableObject {
         return progressed
     }
     private var pulling = false
+
+    /// Work the media queue: count what has landed (direct transfers arrive on their own), ask the
+    /// source directly while it is live, and fall back to the relay per page when direct stalls.
+    private func pullMedia(_ w: inout Want, account: String, me: String,
+                           manifest m: HistoryHandoffWire.Manifest, until deadline: Date) async -> Bool {
+        let now = HistoryHandoffWire.nowMs()
+        // Live = the source touched its manifest in the last two minutes, i.e. it is awake right now
+        // and can stream. Otherwise asking directly only burns the wait before the relay fallback.
+        let sourceLive = now &- (m.updatedAt ?? 0) < 120_000
+        var progressed = false
+        var i = 0
+        while i < w.mediaQueue.count, Date() < deadline {
+            var t = w.mediaQueue[i]
+            let before = t.pending.count
+            t.pending.removeAll { MediaStore.shared.hasLocalFile($0.ref) }
+            if t.pending.count < before {
+                w.mediaDone += before - t.pending.count
+                t.lastProgressAt = now
+                progressed = true
+            }
+            if t.pending.isEmpty {
+                if t.needPut { await blankRelayMedia(account: account, me: me, manifest: m, page: t.page) }
+                w.mediaQueue.remove(at: i); continue
+            }
+            if t.needPut {
+                progressed = await pullRelayMedia(&t, &w, account: account, me: me, manifest: m, until: deadline) || progressed
+            } else if sourceLive && (t.firstAskAt == 0 || now &- t.lastProgressAt < 90_000) {
+                // DIRECT: (re-)ask every 45s while things keep landing.
+                if t.firstAskAt == 0 { t.firstAskAt = now; t.lastProgressAt = now }
+                if now &- t.lastAskAt > 45_000 {
+                    FeedStore.shared.askMyDevicesForMedia(t.pending.map(\.ref))
+                    t.lastAskAt = now
+                }
+            } else {
+                // Direct stalled (or the source is asleep): ask for this page's media on the relay.
+                let key = HistoryHandoffWire.needKey(account, me, m.source, m.run, t.page)
+                if await SelfSyncCoordinator.shared.accountLanePut(key, Data("1".utf8)) {
+                    t.needPut = true
+                    HavenLog.sync("history handoff: page \(t.page) media → relay (\(t.pending.count) items, source \(sourceLive ? "stalled" : "asleep"))")
+                    if now &- w.lastNeedNudgeAt > 60_000 {
+                        w.lastNeedNudgeAt = now
+                        FeedStore.shared.nudgeMyDevicesForHistory()
+                        PushManager.shared.wakeMyDevices()
+                    }
+                }
+            }
+            if t.pending.isEmpty {
+                if t.needPut { await blankRelayMedia(account: account, me: me, manifest: m, page: t.page) }
+                w.mediaQueue.remove(at: i); continue
+            }
+            w.mediaQueue[i] = t
+            i += 1
+        }
+        return progressed
+    }
+
+    /// RELAY lane for one page: once the source has marked it ready, download each blob's chunks to
+    /// a file, open + verify + adopt, then blank the relay copy.
+    private func pullRelayMedia(_ t: inout MediaTask, _ w: inout Want, account: String, me: String,
+                                manifest m: HistoryHandoffWire.Manifest, until deadline: Date) async -> Bool {
+        guard let raw = await SelfSyncCoordinator.shared.accountLaneGet(
+                HistoryHandoffWire.mediaReadyKey(account, me, m.source, m.run, t.page)),
+              let ready = try? JSONDecoder().decode(HistoryHandoffWire.MediaReady.self, from: raw) else {
+            return false   // the source hasn't put it up yet
+        }
+        let chunksByRef = Dictionary(ready.items.map { ($0.ref, $0.chunks) }, uniquingKeysWith: { a, _ in a })
+        var progressed = false
+        for item in t.pending where Date() < deadline {
+            guard let chunks = chunksByRef[item.ref] else {
+                // The source no longer holds it — nothing to wait for.
+                t.pending.removeAll { $0.ref == item.ref }
+                w.mediaTotal = max(w.mediaDone, w.mediaTotal - 1)
+                continue
+            }
+            switch await downloadRelayMedia(account: account, me: me, manifest: m, ref: item.ref, chunks: chunks, circle: t.circle) {
+            case .stored:
+                t.pending.removeAll { $0.ref == item.ref }
+                w.mediaDone += 1
+                progressed = true
+            case .unopenable:
+                HavenLog.sync("history handoff: media \(item.ref.prefix(12)) unopenable — skipped")
+                t.pending.removeAll { $0.ref == item.ref }
+                w.mediaTotal = max(w.mediaDone, w.mediaTotal - 1)
+            case .missingChunk:
+                t.relayAttempts += 1
+                if t.relayAttempts >= 6 {
+                    HavenLog.sync("history handoff: page \(t.page) media incomplete on the relay — giving up on \(t.pending.count)")
+                    w.mediaTotal = max(w.mediaDone, w.mediaTotal - t.pending.count)
+                    t.pending.removeAll()
+                }
+                return progressed
+            }
+        }
+        return progressed
+    }
+
+    private enum RelayMedia { case stored, missingChunk, unopenable }
+
+    /// A page's media is all here: blank every relay copy the source put up for it, however each item
+    /// actually arrived (a late direct stream can beat the relay download — then nothing else would).
+    private func blankRelayMedia(account: String, me: String, manifest m: HistoryHandoffWire.Manifest, page: Int) async {
+        // Withdraw the need first (an empty body), so a source that hasn't uploaded yet never does.
+        _ = await SelfSyncCoordinator.shared.accountLanePut(HistoryHandoffWire.needKey(account, me, m.source, m.run, page), Data())
+        let readyKey = HistoryHandoffWire.mediaReadyKey(account, me, m.source, m.run, page)
+        guard let raw = await SelfSyncCoordinator.shared.accountLaneGet(readyKey),
+              let ready = try? JSONDecoder().decode(HistoryHandoffWire.MediaReady.self, from: raw) else { return }
+        for item in ready.items {
+            for c in 0..<item.chunks {
+                _ = await SelfSyncCoordinator.shared.accountLanePut(
+                    HistoryHandoffWire.mediaChunkKey(account, me, m.source, m.run, item.ref, c), Data())
+            }
+        }
+        _ = await SelfSyncCoordinator.shared.accountLanePut(readyKey, Data())
+    }
+
+    private func downloadRelayMedia(account: String, me: String, manifest m: HistoryHandoffWire.Manifest,
+                                    ref: String, chunks: Int, circle: String) async -> RelayMedia {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("handoff-in-\(UUID().uuidString).sealed")
+        FileManager.default.createFile(atPath: tmp.path, contents: nil)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        guard let fh = try? FileHandle(forWritingTo: tmp) else { return .missingChunk }
+        for c in 0..<chunks {
+            guard let d = await SelfSyncCoordinator.shared.accountLaneGet(
+                    HistoryHandoffWire.mediaChunkKey(account, me, m.source, m.run, ref, c)), !d.isEmpty else {
+                try? fh.close()
+                return .missingChunk
+            }
+            fh.write(d)
+        }
+        try? fh.close()
+        guard await FeedStore.shared.openHandoffMedia(circleId: circle, sealed: tmp, ref: ref) else { return .unopenable }
+        // Stored: blank the relay copy (the lane is never swept; don't leave a second library there).
+        for c in 0..<chunks {
+            _ = await SelfSyncCoordinator.shared.accountLanePut(
+                HistoryHandoffWire.mediaChunkKey(account, me, m.source, m.run, ref, c), Data())
+        }
+        return .stored
+    }
 
     /// The manifest to follow for this request: the source already being followed while it is still
     /// live, otherwise the live one furthest along. (Several of my devices may answer; following one
@@ -251,7 +434,31 @@ final class HistoryHandoff: ObservableObject {
         var totalEvents = 0
         var servedEvents = 0
     }
-    private static let serveKey = "haven.historyHandoff.serve.v1"
+    private static let serveKey = "haven.historyHandoff.serve.v2"
+
+    /// Per-run media bookkeeping on the source — kept in a FILE, not defaults (a big account names
+    /// tens of thousands of blobs): which refs each page named, which pages were relayed, and what is
+    /// already on the relay.
+    private struct RunMedia: Codable {
+        var pageMedia: [String: PageMedia] = [:]
+        var relayed: [Int] = []
+        var uploaded: [String: Int] = [:]
+        struct PageMedia: Codable { var circle: String; var refs: [String] }
+    }
+    private static func runMediaURL(device: String, run: String) -> URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("haven-handoff", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("\(device.prefix(16))-\(run).json")
+    }
+    private static func loadRunMedia(device: String, run: String) -> RunMedia {
+        guard let d = try? Data(contentsOf: runMediaURL(device: device, run: run)),
+              let r = try? JSONDecoder().decode(RunMedia.self, from: d) else { return RunMedia() }
+        return r
+    }
+    private static func saveRunMedia(_ r: RunMedia, device: String, run: String) {
+        if let d = try? JSONEncoder().encode(r) { try? d.write(to: runMediaURL(device: device, run: run), options: .atomic) }
+    }
     private var serves: [String: Serve] {
         get {
             guard let d = UserDefaults.standard.data(forKey: Self.serveKey) else { return [:] }
@@ -284,7 +491,15 @@ final class HistoryHandoff: ObservableObject {
             let device = String(key.split(separator: "/").last ?? "").lowercased()
             guard device.count == 64, device != me,
                   let raw = await SelfSyncCoordinator.shared.accountLaneGet(key),
-                  let req = try? JSONDecoder().decode(HistoryHandoffWire.Request.self, from: raw), req.done != true else { continue }
+                  let req = try? JSONDecoder().decode(HistoryHandoffWire.Request.self, from: raw) else { continue }
+            if req.done == true {
+                // The target has everything: drop this run's bookkeeping.
+                if let old = serves[device] {
+                    try? FileManager.default.removeItem(at: Self.runMediaURL(device: device, run: old.run))
+                    serves[device] = nil
+                }
+                continue
+            }
             var s = serves[device]
             if s == nil || s!.requestAt != req.at {
                 // Another of my devices already answering this ask? Let it finish (unless it went quiet).
@@ -301,9 +516,11 @@ final class HistoryHandoff: ObservableObject {
                           totalEvents: await FeedStore.shared.historyEventCount(circleIds: order))
                 HavenLog.sync("history handoff: serving \(device.prefix(8)) — \(s!.order.count) circles")
             }
-            guard var run = s, !run.complete else { continue }
-            if await serveRun(&run, account: acct, source: me, until: deadline) { did = true }
+            guard var run = s else { continue }
+            if !run.complete, await serveRun(&run, account: acct, source: me, until: deadline) { did = true }
             serves[device] = run
+            // Pages whose media the target couldn't get directly — whether or not paging is finished.
+            if Date() < deadline, await serveNeeds(run, account: acct, source: me, until: deadline) { did = true }
             if Date() >= deadline { break }
         }
         return did
@@ -340,10 +557,22 @@ final class HistoryHandoff: ObservableObject {
                     return did   // engine went away (identity switch / teardown)
                 }
                 if page.events == 0 { run.finished.append(cid); continue }
-                let blob = HistoryHandoffWire.encodePage(circleId: cid, envelopes: page.envelopes)
+                // Name the page's media (only what this device actually holds) so the target can ask for it.
+                let media: [HistoryHandoffWire.MediaItem] = HistoryHandoffWire.blobRefs(page.mediaRefs).compactMap { ref in
+                    guard let url = MediaStore.shared.storagePath(for: ref),
+                          let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int64
+                    else { return nil }
+                    return HistoryHandoffWire.MediaItem(ref: ref, size: size)
+                }
+                let blob = HistoryHandoffWire.encodePage(circleId: cid, envelopes: page.envelopes, media: media)
                 guard await SelfSyncCoordinator.shared.accountLanePut(
                     HistoryHandoffWire.pageKey(account, run.device, source, run.run, run.pages), blob) else {
                     return did   // no relay took it — resume from this cursor on the next wake
+                }
+                if !media.isEmpty {
+                    var rm = Self.loadRunMedia(device: run.device, run: run.run)
+                    rm.pageMedia[String(run.pages)] = RunMedia.PageMedia(circle: cid, refs: media.map(\.ref))
+                    Self.saveRunMedia(rm, device: run.device, run: run.run)
                 }
                 run.pages += 1
                 run.servedEvents += Int(page.events)
@@ -365,6 +594,63 @@ final class HistoryHandoff: ObservableObject {
         if let body = try? JSONEncoder().encode(m) {
             _ = await SelfSyncCoordinator.shared.accountLanePut(HistoryHandoffWire.manifestKey(account, run.device, source), body)
         }
+    }
+
+    /// RELAY fallback, source side: upload the media of every page the target asked for, then mark
+    /// the page ready. Resumable — what's already up is remembered per run.
+    private func serveNeeds(_ run: Serve, account: String, source: String, until deadline: Date) async -> Bool {
+        let keys = await SelfSyncCoordinator.shared.accountLaneList(HistoryHandoffWire.needPrefix(account, run.device, source, run.run))
+        guard !keys.isEmpty else { return false }
+        var rm = Self.loadRunMedia(device: run.device, run: run.run)
+        var did = false
+        for key in keys.sorted() {
+            guard let n = Int(key.split(separator: "/").last ?? ""), !rm.relayed.contains(n) else { continue }
+            // A withdrawn need (empty body): the target got this page's media directly after all.
+            if let body = await SelfSyncCoordinator.shared.accountLaneGet(key), body.isEmpty {
+                rm.relayed.append(n); Self.saveRunMedia(rm, device: run.device, run: run.run)
+                continue
+            }
+            let pm = rm.pageMedia[String(n)]
+            var ready: [HistoryHandoffWire.MediaReady.Ready] = []
+            for ref in pm?.refs ?? [] {
+                if let c = rm.uploaded[ref] { ready.append(.init(ref: ref, chunks: c)); continue }
+                guard Date() < deadline else { Self.saveRunMedia(rm, device: run.device, run: run.run); return did }
+                guard MediaStore.shared.hasLocalFile(ref) else { continue }   // evicted since — not ours to send
+                guard let chunks = await uploadMedia(ref: ref, circle: pm!.circle, account: account,
+                                                     target: run.device, source: source, run: run.run) else {
+                    Self.saveRunMedia(rm, device: run.device, run: run.run)
+                    return did   // no relay took it — resume on the next wake
+                }
+                rm.uploaded[ref] = chunks
+                ready.append(.init(ref: ref, chunks: chunks))
+                Self.saveRunMedia(rm, device: run.device, run: run.run)
+                did = true
+            }
+            let body = (try? JSONEncoder().encode(HistoryHandoffWire.MediaReady(items: ready))) ?? Data()
+            guard await SelfSyncCoordinator.shared.accountLanePut(
+                    HistoryHandoffWire.mediaReadyKey(account, run.device, source, run.run, n), body) else { break }
+            rm.relayed.append(n)
+            Self.saveRunMedia(rm, device: run.device, run: run.run)
+            HavenLog.sync("history handoff: page \(n) media on the relay for \(run.device.prefix(8)) (\(ready.count) items)")
+            did = true
+        }
+        return did
+    }
+
+    /// Seal one blob to a temp file and put it on the lane in fixed chunks — never the whole video in
+    /// memory. Returns the chunk count, nil if any chunk failed.
+    private func uploadMedia(ref: String, circle: String, account: String, target: String, source: String, run: String) async -> Int? {
+        guard let sealed = await FeedStore.shared.sealMediaForHandoff(circleId: circle, ref: ref) else { return nil }
+        defer { try? FileManager.default.removeItem(at: sealed) }
+        guard let fh = try? FileHandle(forReadingFrom: sealed) else { return nil }
+        defer { try? fh.close() }
+        var index = 0
+        while let chunk = try? fh.read(upToCount: HistoryHandoffWire.mediaChunkBytes), !chunk.isEmpty {
+            guard await SelfSyncCoordinator.shared.accountLanePut(
+                    HistoryHandoffWire.mediaChunkKey(account, target, source, run, ref, index), chunk) else { return nil }
+            index += 1
+        }
+        return index > 0 ? index : nil
     }
 
     // MARK: - Driving it

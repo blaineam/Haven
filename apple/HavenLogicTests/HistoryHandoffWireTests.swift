@@ -1,6 +1,42 @@
 import XCTest
 
 final class HistoryHandoffWireTests: XCTestCase {
+    func testV2PageCarriesItsMediaIndex() {
+        let media = [HistoryHandoffWire.MediaItem(ref: "i:aaa", size: 123_456),
+                     HistoryHandoffWire.MediaItem(ref: "v:bbb", size: 700_000_000)]
+        let page = HistoryHandoffWire.encodePage(circleId: "default", envelopes: [Data([0x02, 9])], media: media)
+        let back = HistoryHandoffWire.decodePage(page)
+        XCTAssertEqual(back?.envelopes, [Data([0x02, 9])])
+        XCTAssertEqual(back?.media, media, "sizes past 4 GB-safe range round-trip too")
+    }
+
+    func testV1PagesFromOlderSourcesStillDecodeWithoutMedia() {
+        // Hand-built v1: "HVH1" ‖ u16 cid ‖ cid ‖ u32 count ‖ (u32 len ‖ env)
+        var v1 = Data("HVH1".utf8)
+        v1.append(contentsOf: [1, 0]); v1.append(Data("c".utf8))
+        v1.append(contentsOf: [1, 0, 0, 0]); v1.append(contentsOf: [2, 0, 0, 0]); v1.append(contentsOf: [0x02, 7])
+        let back = HistoryHandoffWire.decodePage(v1)
+        XCTAssertEqual(back?.circleId, "c")
+        XCTAssertEqual(back?.envelopes, [Data([0x02, 7])])
+        XCTAssertEqual(back?.media.count, 0)
+    }
+
+    func testBlobRefsExpandEveryCompanionMarker() {
+        // Real content refs are `<kind>_<sha256>` (the markers are colon-delimited around them).
+        let photo = "img_" + String(repeating: "a", count: 64), thumb = "img_" + String(repeating: "b", count: 64)
+        let clip = "vid_" + String(repeating: "c", count: 64), poster = "img_" + String(repeating: "d", count: 64)
+        let entries = [photo, MediaVariants.thumbMarker(content: photo, thumb: thumb),
+                       MediaVariants.posterMarker(video: clip, poster: poster), photo]
+        XCTAssertEqual(HistoryHandoffWire.blobRefs(entries), [photo, thumb, clip, poster])
+    }
+
+    func testMediaKeysAreRelaySafe() {
+        let key = HistoryHandoffWire.mediaChunkKey("aa", "tt", "ss", "1", "img_abc/../x", 3)
+        XCTAssertFalse(key.contains(".."), "a ref can't climb out of its run directory")
+        XCTAssertTrue(key.hasSuffix("/3"))
+        XCTAssertEqual(HistoryHandoffWire.keySafe("img_abc"), "img_abc")
+    }
+
     func testPageRoundTripsEveryEnvelopeByteForByte() {
         let envs = [Data([0x04, 1, 2, 3]), Data(), Data(repeating: 0xAB, count: 70_000), Data([0x03])]
         let page = HistoryHandoffWire.encodePage(circleId: "dm:aa:bb", envelopes: envs)

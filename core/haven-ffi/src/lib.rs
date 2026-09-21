@@ -96,6 +96,10 @@ pub struct HistoryPageFfi {
     pub oldest_ms: u64,
     /// Events on this page. 0 = the beginning of this circle's history has been reached.
     pub events: u32,
+    /// Every media-list entry the page's events carry (posts, comments, edits) — content refs AND
+    /// the variant markers (`thumb:…`, `poster:…`) exactly as signed, deduped. The handoff sends
+    /// the blobs these name alongside the page, so the new device isn't left fetching them lazily.
+    pub media_refs: Vec<String>,
 }
 
 /// Content-epoch namespace for MLS-keyed circles (M3, §4.5). When the keying flip is live, the
@@ -6257,9 +6261,9 @@ impl HavenSocial {
     ///
     /// Own devices only. Friends get `sync_envelopes_page`, which never forwards others' events.
     pub fn export_history_page(&self, circle_id: String, before_ms: u64, limit: u32) -> HistoryPageFfi {
-        let (envelopes, oldest_ms, events) =
+        let (envelopes, oldest_ms, events, media_refs) =
             self.epoch_sync_bundle_paged(&circle_id, false, limit.max(1), false, before_ms);
-        HistoryPageFfi { envelopes, oldest_ms, events }
+        HistoryPageFfi { envelopes, oldest_ms, events, media_refs }
     }
 
     /// How many events `export_history_page` pages through for this circle — the history handoff's
@@ -7015,13 +7019,14 @@ have_seed={} have_device={} members={}",
 
 impl HavenSocial {
     /// `epoch_sync_bundle_inner`, also reporting the page it chose: (bundle, oldest `created_at` on
-    /// it, event count). The count/oldest are 0 for head-only bundles and empty pages.
+    /// it, event count, the media-list entries its events carry). Zero/empty for head-only bundles
+    /// and empty pages.
     pub(crate) fn epoch_sync_bundle_paged(
         &self, circle_id: &str, mine_only: bool, limit: u32, head_only: bool, before_ms: u64,
-    ) -> (Vec<Vec<u8>>, u64, u32) {
+    ) -> (Vec<Vec<u8>>, u64, u32, Vec<String>) {
         let mut st = self.state.lock().unwrap();
         let me_hex = hex(&st.me().node_id_bytes());
-        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return (vec![], 0, 0) };
+        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return (vec![], 0, 0, vec![]) };
         // SENDER-expired content must never ride another bundle: a lapsed `retention_secs` is the
         // author's promise to the whole circle, so it purges here even if the app never calls
         // `purge_expired`. Viewer/circle retention is deliberately NOT applied — this path has no
@@ -7092,7 +7097,7 @@ impl HavenSocial {
                     st.circles[idx].ensure_epoch();
                 }
                 let e = st.circles[idx].my_epoch;
-                let Some(k) = st.circles[idx].current_key() else { return (vec![], 0, 0) };
+                let Some(k) = st.circles[idx].current_key() else { return (vec![], 0, 0, vec![]) };
                 (e, k)
             }
         };
@@ -7179,7 +7184,7 @@ impl HavenSocial {
         };
         if head_only {
             append_tree(&mut out);
-            return (out, 0, 0); // roster + current key commit (or the tree) — no event re-seals
+            return (out, 0, 0, vec![]); // roster + current key commit (or the tree) — no event re-seals
         }
         let mut picked: Vec<&Event> = st.circles[idx]
             .events
@@ -7206,6 +7211,18 @@ impl HavenSocial {
         let oldest = picked.iter().map(|e| e.created_at).min().unwrap_or(0);
         let count = picked.len() as u32;
         let events: Vec<Event> = picked.into_iter().cloned().collect();
+        let mut media: Vec<String> = Vec::new();
+        {
+            for e in &events {
+                let list = match &e.kind {
+                    EventKind::Post { media, .. } | EventKind::Comment { media, .. } | EventKind::Edit { media, .. } => media,
+                    _ => continue,
+                };
+                for m in list {
+                    if !media.contains(m) { media.push(m.clone()); }
+                }
+            }
+        }
         let compact = circle_is_compact_wire_capable(&st, idx);
         for e in &events {
             if let Ok(env) = seal_event_in_epoch(signer_of(&st, author_under_device), circle_id, epoch, &key, e) {
@@ -7215,7 +7232,7 @@ impl HavenSocial {
         // Tree wires + join ack + admin grants (built up front). In M2/parked they ride ALONGSIDE the
         // KeyCommit (shadow); when LIVE they ARE the key distribution (§4.5). Additive either way.
         append_tree(&mut out);
-        (out, oldest, count)
+        (out, oldest, count, media)
     }
 
     /// The ACCOUNT signing secret, for the in-process uses that must assert the account key itself.
@@ -9391,7 +9408,8 @@ mod net_tests {
         }
         // A timestamp tie that a page boundary would otherwise split.
         alice.post(cid.clone(), "alice-tie-a".into(), vec![], None, None, false, false, now + 20_000).unwrap();
-        alice.post(cid.clone(), "alice-tie-b".into(), vec![], None, None, false, false, now + 20_000).unwrap();
+        alice.post(cid.clone(), "alice-tie-b".into(),
+                   vec!["i:photo-b".into(), "thumb:i:photo-b:i:thumb-b".into()], None, None, false, false, now + 20_000).unwrap();
         for i in 0..4u64 {
             bob.post(cid.clone(), format!("bob-{i}"), vec![], None, None, false, false, now + i).unwrap();
         }
@@ -9404,6 +9422,7 @@ mod net_tests {
         let mut before = 0u64;
         let mut seen = 0usize;
         let mut last_oldest = u64::MAX;
+        let mut media_seen: Vec<String> = Vec::new();
         loop {
             let page = alice.export_history_page(cid.clone(), before, 3);
             if page.events == 0 { break; }
@@ -9411,10 +9430,13 @@ mod net_tests {
             assert!(page.oldest_ms < last_oldest, "pages walk strictly backwards in time");
             last_oldest = page.oldest_ms;
             seen += page.events as usize;
+            media_seen.extend(page.media_refs.clone());
             for env in page.envelopes { let _ = alice_phone2.receive(cid.clone(), env); }
             before = page.oldest_ms;
         }
         assert_eq!(seen, total, "every event lands on exactly one page — the tie is not split");
+        assert_eq!(media_seen, vec!["i:photo-b".to_string(), "thumb:i:photo-b:i:thumb-b".to_string()],
+                   "a page names the media its events carry, markers included, exactly once");
 
         // The new device holds everything, friends' posts included, each still authored as its author.
         let feed = alice_phone2.feed(cid.clone(), now + 60_000, None);

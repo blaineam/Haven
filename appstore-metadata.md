@@ -32,9 +32,10 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Free. A private, end‑to‑end encrypted home for your closest people — no ads, no tracking, no subscription. Peer‑to‑peer, post‑quantum, yours.
 
 ## whats_new
-1.8.9 — A clearer name on the App Store.
-- Haven is now listed as "Haven Private Circles", so the name says what it is where people search. The app on your device is still just Haven.
-- No changes to the app itself in this one.
+1.8.10 — Moving to a new iPhone keeps you you.
+- Restoring a backup onto a new iPhone now brings your Haven identity with it, instead of quietly starting you over as someone new (Settings ▸ Identity & backup ▸ Include in device backups).
+- A new or restored device gets your whole history from your other devices through your relay — the old phone no longer has to stay open next to it.
+- Switching identities keeps each one's posts and messages, and a feed set aside on this device can be recovered in Settings.
 
 ## whats_new_previous
 1.8.1 — Smoother feed, cooler phone.

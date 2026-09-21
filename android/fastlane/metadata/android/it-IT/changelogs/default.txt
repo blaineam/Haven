@@ -1,3 +1,3 @@
-1.8.8 — Foto a schermo intero: la musica continua e lo zoom segue il dito.
-- Tocca una foto in un post con musica e il brano prosegue, con il suo pulsante di silenziamento nell'angolo. Si fa da parte se un video ha un audio proprio.
-- Una foto ingrandita ora segue il dito invece di saltare quando lo sollevi. Un doppio tocco ingrandisce nel punto toccato e il titolo non copre più i puntini in basso.
+1.8.10 — Meno buchi quando i tuoi dispositivi si allineano.
+- L’allineamento della cronologia tra i tuoi dispositivi non salta più i post arrivati in disordine.
+- Le novità più grandi di questa versione riguardano iPhone e Mac: passando a un nuovo telefono conservi identità e tutta la cronologia.

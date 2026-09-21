@@ -34,9 +34,10 @@ privado,criptografado,família,amigos,mensagens,seguro,offline,chamadas,sem anú
 Grátis. Um espaço privado e criptografado de ponta a ponta para seus mais próximos — sem anúncios, sem rastreamento, sem assinatura. Peer-to-peer, pós-quântico, seu.
 
 ## whats_new
-1.8.9 — Um nome mais claro na App Store.
-- O Haven agora aparece como "Haven Private Circles", para que o nome diga o que ele é onde as pessoas procuram. No seu aparelho, o app continua sendo só Haven.
-- Nenhuma mudança no app em si desta vez.
+1.8.10 — Ao mudar para um iPhone novo, você continua sendo você.
+- Restaurar um backup em um iPhone novo agora traz sua identidade do Haven junto, em vez de fazer você recomeçar como outra pessoa (Ajustes ▸ Identidade e backup ▸ Incluir nos backups do dispositivo).
+- Um dispositivo novo ou restaurado recebe todo o seu histórico dos seus outros dispositivos pelo seu relay — o telefone antigo não precisa mais ficar aberto ao lado.
+- Ao trocar de identidade, cada uma mantém seus posts e mensagens, e um feed separado neste dispositivo pode ser recuperado nos Ajustes.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

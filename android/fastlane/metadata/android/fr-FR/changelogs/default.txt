@@ -1,3 +1,3 @@
-1.8.8 — Photos en plein écran : la musique continue et le zoom suit votre doigt.
-- Touchez une photo d'une publication avec musique : le morceau continue, avec son bouton de sourdine dans le coin. Il s'efface devant une vidéo qui a déjà du son.
-- Une photo zoomée suit désormais votre doigt au lieu de sauter quand vous relâchez. Un double toucher zoome à l'endroit touché, et le titre ne recouvre plus les points du bas.
+1.8.10 — Moins de trous quand vos appareils se mettent à jour.
+- La synchronisation de l’historique entre vos appareils ne saute plus les posts arrivés dans le désordre.
+- Les grands changements de cette version concernent iPhone et Mac : passer à un nouveau téléphone conserve votre identité et tout votre historique.

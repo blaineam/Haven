@@ -34,9 +34,10 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Kostenlos. Ein privates, Ende-zu-Ende verschlüsseltes Zuhause für deine Liebsten – keine Werbung, kein Tracking, kein Abo. Peer-to-Peer, Post-Quanten-sicher, deins.
 
 ## whats_new
-1.8.9 — Ein klarerer Name im App Store.
-- Haven heißt im App Store jetzt „Haven Private Circles" — so sagt der Name schon bei der Suche, worum es geht. Auf deinem Gerät bleibt die App einfach Haven.
-- An der App selbst ändert sich diesmal nichts.
+1.8.10 — Beim Umzug auf ein neues iPhone bleibst du du.
+- Stellst du ein Backup auf einem neuen iPhone wieder her, kommt deine Haven-Identität jetzt mit, statt dich still als jemand Neues neu anfangen zu lassen (Einstellungen ▸ Identität & Backup ▸ In Gerätebackups einschließen).
+- Ein neues oder wiederhergestelltes Gerät erhält deinen ganzen Verlauf von deinen anderen Geräten über dein Relay — das alte Handy muss nicht mehr daneben geöffnet bleiben.
+- Beim Wechsel der Identität behält jede ihre Beiträge und Nachrichten, und ein beiseitegelegter Feed lässt sich in den Einstellungen wiederherstellen.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

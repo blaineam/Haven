@@ -1,3 +1,3 @@
-1.8.8 — Full-screen photos: the song plays on, and zoom follows your finger.
-- Tap a photo on a post with music and the song keeps playing, with its own mute in the corner. It steps aside for a video with sound of its own.
-- A zoomed photo now follows your finger instead of jumping when you let go, and double tap zooms where you tapped. The song's name no longer covers the dots at the bottom.
+1.8.10 — Fewer gaps when your devices catch up.
+- Catching up history between your devices no longer skips posts that arrived out of order.
+- The bigger changes in this release are for iPhone and Mac: moving to a new phone keeps your identity and brings your whole history.

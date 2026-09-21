@@ -150,6 +150,13 @@ final class PushManager: NSObject, ObservableObject {
         post("/notify", ["nodeId": nodeId, "event": event, "silent": true])
     }
 
+    /// Wake my OWN other devices with no event — a silent "check in". The history handoff uses it so
+    /// a pocketed old phone looks at the account lane now instead of on its next scheduled wake.
+    func wakeMyDevices() {
+        guard let nodeId = myNodeId() else { return }
+        post("/notify", ["nodeId": nodeId, "silent": true])
+    }
+
     private var isSandbox: Bool {
         #if DEBUG
         return true   // Xcode/dev builds use the APNs sandbox

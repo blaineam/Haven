@@ -91,6 +91,8 @@ final class AccountStore: ObservableObject {
                 SharedSeed.write(seed)
                 HavenLog.net("AccountStore: identity recovered from the device-backup escrow")
                 Self.migrateLegacySeedWhenUnlocked(seed)   // saveSeed re-wraps + re-plants the escrow
+                // The backup is as old as the backup: whatever my other devices saw since, ask them.
+                if restoredToNewDevice { HistoryHandoff.shared.requestHistory(reason: "restored onto a new device") }
             } else {
                 account = Account.generate(); usingTemporaryIdentity = true
             }
@@ -270,6 +272,8 @@ final class AccountStore: ObservableObject {
         account = restored
         // Load THIS identity's world, not whatever the previous identity left in the engine/state file.
         FeedStore.shared.reconfigure(seed: seed)
+        // Joined an existing account: its history lives on my other devices — ask for all of it.
+        HistoryHandoff.shared.requestHistory(reason: "linked by transfer code")
         _ = SharedInbox.drain()
         SharedLockedCircles.write([])
         // Seed a transport so SelfSync can immediately bootstrap (pull slots + mailbox).
@@ -904,6 +908,7 @@ final class AccountStore: ObservableObject {
         ProfileStore.shared.reloadForCurrentIdentity()
         FeedStore.shared.reconfigure(seed: fresh.secretSeed())
         FeedStore.shared.discardRetiredEngineWrites()
+        HistoryHandoff.shared.reset()
         FeedStore.deleteAllShelvedState()   // every identity's shelved feed, incl. the one just shelved
         ProfileStore.shared.onboarded = false   // ← drops the user back on the welcome screen, fresh-install style
     }

@@ -16,6 +16,9 @@ import AppKit
 final class NotificationManager {
     static let shared = NotificationManager()
     static let refreshTaskId = "com.blaineam.kith.refresh"
+    /// Long-running history handoff (either role) — iOS runs processing tasks while the phone is
+    /// idle, typically charging overnight, which is exactly when a big account's backlog should move.
+    static let historyTaskId = "com.blaineam.kith.history"
 
     private var authorized = false
     // Dedupe keys of everything we've already notified about — PERSISTED. This was in-memory
@@ -74,8 +77,46 @@ final class NotificationManager {
             // would trap. Hop onto the main actor properly instead — this was the BG crash.
             Task { @MainActor in self.handleRefresh(refresh) }
         }
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.historyTaskId, using: nil) { task in
+            guard let processing = task as? BGProcessingTask else { task.setTaskCompleted(success: false); return }
+            Task { @MainActor in self.handleHistoryProcessing(processing) }
+        }
         #endif
     }
+
+    #if os(iOS)
+    /// Book an idle-time processing window while a history handoff is unfinished on this device.
+    func scheduleHistoryProcessing() {
+        guard HistoryHandoff.shared.hasOutstandingWork else { return }
+        let req = BGProcessingTaskRequest(identifier: Self.historyTaskId)
+        req.requiresNetworkConnectivity = true
+        req.requiresExternalPower = false
+        try? BGTaskScheduler.shared.submit(req)
+    }
+
+    private func handleHistoryProcessing(_ task: BGProcessingTask) {
+        let work = Task { @MainActor in
+            defer {
+                FeedStore.shared.syncForegroundFromSystem()
+                self.scheduleHistoryProcessing()   // still unfinished → ask for another window
+                task.setTaskCompleted(success: !Task.isCancelled)
+            }
+            FeedStore.shared.syncForegroundFromSystem()
+            if !FeedStore.shared.engineReady {
+                FeedStore.shared.configureForCurrentIdentity()
+                for _ in 0..<40 where !FeedStore.shared.engineReady { try? await Task.sleep(nanoseconds: 250_000_000) }
+            }
+            // Minutes-long windows: step until done or cancelled. Waiting on the OTHER device (its
+            // pages aren't up yet) is not worth the window — give up after a few idle steps.
+            var idle = 0
+            while !Task.isCancelled, HistoryHandoff.shared.hasOutstandingWork, idle < 3 {
+                idle = await HistoryHandoff.shared.tick(budget: 60) ? 0 : idle + 1
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+        task.expirationHandler = { work.cancel() }
+    }
+    #endif
 
     /// Ask iOS to wake us again later (it decides the real cadence) — **only when there is real work
     /// waiting**. No-op on macOS.
@@ -110,6 +151,7 @@ final class NotificationManager {
     private var backgroundWorkOutstanding: Bool {
         BackgroundUploader.shared.hasAnyPending
             || MediaBackupQueue.shared.hasAnyPending
+            || HistoryHandoff.shared.hasOutstandingWork
             || SharedStore.anyOutstandingBacklog()
     }
 

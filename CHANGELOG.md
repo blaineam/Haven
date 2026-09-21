@@ -42,9 +42,28 @@ device id.
   `saveSeed`'s `synced` flag was ignored). It is now labelled for what it does, and the docs no
   longer describe a passphrase that never existed.
 
-Still open: history sync to a new *linked* device is small-batch and foreground-only (own-device
-catch-up re-sends the newest 6 envelopes per circle, with no cursor), and relay copies stay
-unreadable until the old device re-seals them.
+### Fixed — a new or restored phone gets your whole history, without both phones staying open
+
+A new device got history in small chunks and only while both phones were open and awake: one
+push of the posts the old phone had authored, then the newest 6 envelopes per circle every
+5 minutes with no cursor (skipped when the phone was even slightly warm), and relay copies sealed
+under keys the new device never held. For a big, old account that meant days of babysitting.
+
+- **History handoff through the relay** (`HistoryHandoff.swift`, docs/MULTI-DEVICE.md). The new
+  device leaves a request on the account's private relay lane and wakes its siblings (silent push
+  + frame 36). Any device holding the history uploads it there in pages — newest first, round-robin
+  across circles, friends' posts and DMs included — resuming on every wake it gets, including an
+  idle-time background processing window. The new device downloads and ingests pages whenever *it*
+  runs. Neither has to be open, and they never have to be awake at the same time.
+- Requested automatically on a restore onto new hardware, a transfer-code link and seedless
+  enrollment; any device can ask from Settings ▸ Devices ▸ "Get full history from my other
+  devices".
+- Core: `export_history_page` (all members' events, cursor + count returned). Paged exports now
+  select by time, not position, and never split a timestamp tie across pages — the events vector is
+  in arrival order, so the old positional "newest N" could skip events permanently.
+
+Not yet: Android and desktop neither request nor serve the handoff (they ignore frame 36), and
+old *media* is still fetched lazily per post, from the relay or a sibling.
 
 ## 1.8.8 — 2026-09-12
 

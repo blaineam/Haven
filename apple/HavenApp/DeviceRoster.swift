@@ -351,6 +351,25 @@ struct AuthorizedDevicesView: View {
         }
     }
 
+    @State private var historyRequested = HistoryHandoff.shared.isWaiting
+
+    /// Pull the whole backlog from my other devices through the relay (HistoryHandoff).
+    @ViewBuilder private var historySection: some View {
+        Section {
+            Button {
+                HistoryHandoff.shared.requestHistory(reason: "asked from Settings")
+                historyRequested = true
+            } label: {
+                Label(historyRequested ? "Receiving history from your other devices…" : "Get full history from my other devices",
+                      systemImage: "clock.arrow.2.circlepath")
+            }
+            .disabled(historyRequested)
+        } footer: {
+            Text("Your other devices upload your posts, messages and circles to your relay the next time they wake — they don't need to stay open — and this device downloads them in the background.")
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     var body: some View {
         ZStack {
             HavenBackground()
@@ -428,6 +447,8 @@ struct AuthorizedDevicesView: View {
                 } header: { Text("Authorized devices") }
                 footer: { Text(Self.revocationCaveat)
                     .fixedSize(horizontal: false, vertical: true) }
+
+                historySection
 
                 // Only a device that ISN'T already the primary offers these. The primary (roster on) shows
                 // just the roster + revoke above.

@@ -5778,6 +5778,9 @@ final class FeedStore: ObservableObject {
             // when the user opens the app. Envelope text is enough for the banner.
         }
         guard engine != nil else { return gotFromHints > 0 }
+        // History handoff, bounded to leave the rest of the window for the mailbox: a pocketed old
+        // phone serves the new one from here — a push wake, a refresh, the safety sweep.
+        await HistoryHandoff.shared.tick(budget: 12)
         // One media-backup pass only — drain itself refuses to re-arm while backgrounded. Runs even
         // on a no-LIST wake: finishing an owed upload is exactly why such a wake was requested.
         defer { if let engine { MediaBackupQueue.shared.drainPersisted(engine: engine) } }
@@ -5792,6 +5795,13 @@ final class FeedStore: ObservableObject {
     func pollMailboxNow() {
         guard engine != nil else { return }
         guard !HavenNet.offline else { return }   // HAVEN_NO_NET — see `armMailboxTimer`
+        // History handoff: a bounded step each poll while either role has work; a cheap LIST of a
+        // tiny account-lane prefix every few minutes otherwise, so a request is noticed promptly.
+        let tickNow = now()
+        if HistoryHandoff.shared.hasOutstandingWork || tickNow - lastHandoffCheckMs > 180_000 {
+            lastHandoffCheckMs = tickNow
+            Task { @MainActor in await HistoryHandoff.shared.tick(budget: 20) }
+        }
         // Offline friend invites ride the same cadence: cheap no-op when nothing is pending.
         Task { await FriendInviteStore.shared.tick() }
         // Multi-device self-sync (profile, pins, contacts, read watermarks, circles) syncs the user's
@@ -5806,6 +5816,8 @@ final class FeedStore: ObservableObject {
             Task { @MainActor in await self.pullMailbox(circleIds: self.circles.map { $0.id }) }
         }
     }
+
+    private var lastHandoffCheckMs: UInt64 = 0
 
     private func selfSyncAndPull() {
         let force = selfSyncForced
@@ -6491,8 +6503,56 @@ final class FeedStore: ObservableObject {
         case 33: handleMediaResumeRequest(payload)                   // re-request carrying a bitmap of what they already have
         case 35: CallManager.shared.handleEndedElsewhere(payload)   // my account ENDED this call elsewhere
         case 34: handleHistoryRequest(payload)                       // "send me the page of your history before X"
+        case HistoryHandoff.nudgeFrame:                              // 36: a device of mine asked for the whole history
+            Task { @MainActor in await HistoryHandoff.shared.tick(budget: 25) }
         default: break
         }
+    }
+
+    // MARK: - History handoff hooks (HistoryHandoff.swift, wire 36)
+
+    /// One page of a circle's whole history for a new device of mine, off the main actor.
+    func exportHistoryPage(circleId: String, before: UInt64, limit: UInt32) async -> HistoryPageFfi? {
+        guard let engine else { return nil }
+        let page = await engine.run { $0.exportHistoryPage(circleId: circleId, beforeMs: before, limit: limit) }
+        return self.engine === engine ? page : nil
+    }
+
+    /// Ingest one handoff page. nil = its circle isn't on this device yet (the page must be kept and
+    /// retried — `receive` doesn't record envelopes for an unknown circle, so a retry still applies).
+    /// Otherwise the number applied, AFTER the engine state holding them is on disk: the caller
+    /// advances its cursor past this page only then, so a kill mid-page re-ingests instead of losing it.
+    func ingestHandoffPage(circleId: String, envelopes: [Data]) async -> Int? {
+        guard let engine else { return nil }
+        guard circles.contains(where: { $0.id == circleId }) else { return nil }
+        // Control first (roster 0x04, key commit 0x03) so the page's events open on first try.
+        let ordered = envelopes.sorted { a, b in
+            func rank(_ d: Data) -> Int { d.first == 0x04 ? 0 : d.first == 0x03 ? 1 : 2 }
+            return rank(a) < rank(b)
+        }
+        var applied = 0
+        var i = 0
+        // Sliced with air between engine holds, like the mailbox drain: a page is a couple hundred
+        // unseals, and one monolithic hold parks any main-thread read behind the unfair mutex.
+        while i < ordered.count {
+            let slice = Array(ordered[i..<min(i + 8, ordered.count)])
+            i += 8
+            applied += await engine.run { s in
+                slice.reduce(0) { n, env in n + (((try? s.receive(circleId: circleId, envelope: env)) == true) ? 1 : 0) }
+            }
+            guard self.engine === engine else { return nil }
+            try? await Task.sleep(nanoseconds: 3_000_000)
+        }
+        persistDebouncePending = false
+        let destination: @Sendable () async -> URL? = { [weak self] in await self?.persistDestination(for: engine) }
+        await StatePersister.shared.persist(engine: engine, to: destination)
+        if applied > 0 { refresh(); scheduleCircleSideEffects(circleId) }
+        return applied
+    }
+
+    /// Frame 36 to my own devices: "a history request is waiting on the account lane".
+    func nudgeMyDevicesForHistory() {
+        sendToMyDevices(HistoryHandoff.nudgeFrame, Data(DeviceKeyStore.deviceNodeHex().utf8))
     }
 
     // MARK: - Lazy history (wire 34)
@@ -6890,6 +6950,8 @@ final class FeedStore: ObservableObject {
         //    → it answers with the type-23 slot that seeds our base, plus the circle events. The
         //    boot is asynchronous, so the ask rides its completion.
         configure(mode: .seedless(accountBundle: grant.accountBundle, deviceSeed: deviceSeed)) { [weak self] in
+            // The full-state push is the recent picture; the whole backlog comes via the handoff.
+            HistoryHandoff.shared.requestHistory(reason: "enrolled as a linked device")
             self?.sendToMyDevices(26, Data(DeviceKeyStore.deviceNodeHex().utf8))
         }
         NotificationManager.shared.notify(title: "Device linked",

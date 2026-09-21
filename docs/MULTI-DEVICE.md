@@ -153,6 +153,40 @@ Android, and desktop all inherit it.
    key** → trusted automatically, optionally with a transparent *"Blaine linked a new
    device (MacBook)"* notice (iMessage-style).
 
+## History handoff (a new device gets the whole backlog)
+
+A newly linked or restored device used to receive history only in small, awake-together chunks:
+one fire-and-forget push of the posts the old device *authored*, then the own-device catch-up's
+newest 6 envelopes per circle every 5 minutes (no cursor), and relay mailbox copies it could not
+open (sealed under epoch keys from before it existed). Since 1.8.10 (Apple) the backlog moves
+through the relay instead, on the account lane only the account's own devices can read:
+
+1. The new device PUTs `haven/self/<acct>/history-req/<its device id>` = `{v, device, at}` and
+   nudges its siblings (a silent `/notify` to the account + wire frame **36**, "look at the
+   account lane now"). Triggers: restore onto new hardware, linking by transfer code, seedless
+   enrollment, and Settings ▸ Devices ▸ "Get full history from my other devices".
+2. Any device holding history notices the request on its next sync — foreground poll, push wake,
+   background refresh, or an idle-time `BGProcessingTask` (`com.blaineam.kith.history`) — and
+   exports it with `export_history_page` (every member's events, re-sealed under its current epoch
+   like the own-device catch-up; a page is self-sufficient, carrying the roster + key commit),
+   newest first and round-robin across circles, 120 events per page:
+   `haven/self/<acct>/history/<target>/<source>/<run>/<n>` = `"HVH1" ‖ u16 len ‖ circle id ‖
+   u32 count ‖ (u32 len ‖ envelope)*`, one circle per page. After each page it rewrites its OWN
+   manifest `…/history-m/<target>/<source>` = `{v, run, source, forRequest, pages, complete,
+   updatedAt}` — per source, so two devices holding the history never clobber each other's
+   progress; a source defers to another that is already answering unless that one has been quiet
+   for 45 minutes. Progress is persisted, so a pocketed source resumes on its next wake.
+3. The target follows one source's manifest for its request (switching only if it goes stale),
+   downloads pages in order, ingests each (sliced,
+   control envelopes first), and advances its cursor only after the engine state holding the page is
+   on disk. A page whose circle hasn't reached the device yet is retried, then skipped after four
+   attempts. When the manifest is `complete` and every page is in, it marks the request `done`.
+
+Paging is by `created_at`, strictly older than the previous page's oldest, with a timestamp tie
+kept on one page (`epoch_sync_bundle_paged`) — the events vector is arrival-ordered, so a
+positional "newest N" would skip events. Android and desktop ignore frame 36 and neither serve nor
+request yet; the lane is plain relay storage, so adding them is client work only.
+
 ## Receiving on all devices (how it actually works today)
 
 > **This describes the sender-key/epoch path, not the tree.** There is still no `mls-rs` dependency

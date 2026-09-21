@@ -15,7 +15,12 @@ Updated continuously. (Times in your local day.)
   Settings can **recover** a feed an older build set aside. Verified on a simulator via a DEBUG
   `HAVEN_SIMULATE_DEVICE_RESTORE=1|2` launch switch: same account + new device key + posts kept
   with escrow; Welcome + feed shelved under its owner without; 3/3 posts merged back by recovery.
-  Next: cursor-paged own-device history sync + background processing for big accounts.
+  Then the **history handoff**: a new/restored device requests the whole backlog on the account's
+  private relay lane (`haven/self/<acct>/history-req/…` + silent push + frame 36); any device that
+  holds it uploads time-ordered, resumable pages (`export_history_page`, friends' posts and DMs
+  included) on whatever wake it gets — foreground, push, refresh or an idle `BGProcessingTask` —
+  and the new device ingests them on its own schedule. No more both-phones-open babysitting.
+  Apple only for now; Android/desktop ignore frame 36.
 - **1.8.4 — the UI stops touching the engine (in development, nothing shipped yet)** — 1.8.3 fixed
   the launch freeze one stack at a time; this wave is the *shape* that kept producing them.
   `FeedStore` held the engine handle directly and ~175 of its calls still ran on the main actor:

@@ -139,6 +139,7 @@ targets:
           - voip
         BGTaskSchedulerPermittedIdentifiers:
           - com.blaineam.kith.refresh
+          - com.blaineam.kith.history
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith
@@ -422,6 +423,9 @@ targets:
       # build entirely (silently — nothing runs this scheme in CI). The pure URL derivation moved to
       # HavenFabric.swift as HavenHairpin; the socket code stays in the app where its deps live.
       - path: HavenApp/HavenFabric.swift
+      # The history handoff's relay keys + page codec — Foundation only, split out of
+      # HistoryHandoff.swift (which needs FeedStore / the FFI) so the format is covered here.
+      - path: HavenApp/HistoryHandoffWire.swift
       - path: HavenApp/HavenLog.swift
       - path: Shared/SharedNotificationPrivacy.swift
       - path: HavenLogicTests

@@ -836,6 +836,36 @@ final class SelfSyncCoordinator {
         }
     }
 
+    // MARK: account lane (other own-account blobs — the history handoff)
+    //
+    // `haven/self/<acct>/…` is readable and writable only by this account's own fleet (the relay's
+    // owner-or-roster-device gate), and never swept — the same lane the state slots ride. These let
+    // other features use it through the same relay/HTTP/S3 ladder without re-implementing it.
+
+    /// Write to every transport. True if at least one took it.
+    func accountLanePut(_ key: String, _ data: Data) async -> Bool {
+        var ok = false
+        for t in gatherTransports() where await tUpload(t, key, data) { ok = true }
+        return ok
+    }
+
+    /// The first transport that has it.
+    func accountLaneGet(_ key: String) async -> Data? {
+        for t in gatherTransports() {
+            if let d = await tFetch(t, key) { return d }
+        }
+        return nil
+    }
+
+    /// Union of keys under `prefix` across transports.
+    func accountLaneList(_ prefix: String) async -> [String] {
+        var out = Set<String>()
+        for t in gatherTransports() { out.formUnion(await tList(t, prefix)) }
+        return Array(out)
+    }
+
+    var hasAccountLane: Bool { !gatherTransports().isEmpty }
+
     // MARK: transports (relay + S3 — self-sync works with either, or both)
 
     private enum Transport { case relay(String); case s3(S3Client) }

@@ -160,6 +160,58 @@
         }
       }
     },
+    "Get full history from my other devices" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vollständigen Verlauf von meinen anderen Geräten holen"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obtener todo el historial de mis otros dispositivos"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Récupérer tout l’historique de mes autres appareils"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recupera tutta la cronologia dagli altri miei dispositivi"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ほかのデバイスから全履歴を取得"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "내 다른 기기에서 전체 기록 가져오기"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obter todo o histórico dos meus outros dispositivos"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "从我的其他设备获取完整历史记录"
+          }
+        }
+      }
+    },
     "Include in device backups" : {
       "localizations" : {
         "de" : {
@@ -260,6 +312,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "在 iCloud 钥匙串中保留以往身份"
+          }
+        }
+      }
+    },
+    "Receiving history from your other devices…" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Verlauf wird von deinen anderen Geräten empfangen …"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recibiendo el historial de tus otros dispositivos…"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Réception de l’historique de vos autres appareils…"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ricezione della cronologia dagli altri tuoi dispositivi…"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ほかのデバイスから履歴を受信中…"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "다른 기기에서 기록을 받는 중…"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recebendo o histórico dos seus outros dispositivos…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在从你的其他设备接收历史记录…"
           }
         }
       }
@@ -468,6 +572,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "开启设备备份后，将 iCloud 备份或加密的访达备份恢复到新 iPhone 时，此身份也会随之迁移，你依然是你。开启“高级数据保护”可让 iCloud 副本端到端加密。以往身份可另外保存在 iCloud 钥匙串中，方便你在任意设备上切换回去。"
+          }
+        }
+      }
+    },
+    "Your other devices upload your posts, messages and circles to your relay the next time they wake — they don't need to stay open — and this device downloads them in the background." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Deine anderen Geräte laden deine Beiträge, Nachrichten und Kreise beim nächsten Aufwachen auf dein Relay hoch – sie müssen nicht geöffnet bleiben – und dieses Gerät lädt sie im Hintergrund herunter."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tus otros dispositivos suben tus publicaciones, mensajes y círculos a tu relay la próxima vez que se activen —no hace falta que sigan abiertos— y este dispositivo los descarga en segundo plano."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vos autres appareils envoient vos posts, messages et cercles sur votre relais à leur prochain réveil — inutile de les laisser ouverts — et cet appareil les télécharge en arrière-plan."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gli altri tuoi dispositivi caricano post, messaggi e cerchie sul tuo relay al prossimo risveglio (non serve tenerli aperti) e questo dispositivo li scarica in background."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ほかのデバイスが次に起動したときに投稿・メッセージ・サークルをリレーへアップロードします（開いたままにする必要はありません）。このデバイスはそれをバックグラウンドでダウンロードします。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "다른 기기가 다음에 깨어날 때 게시물, 메시지, 서클을 릴레이에 업로드하며(계속 열어 둘 필요 없음), 이 기기는 백그라운드에서 이를 다운로드합니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Seus outros dispositivos enviam seus posts, mensagens e círculos para o seu relay na próxima vez que forem ativados — não precisam ficar abertos — e este dispositivo os baixa em segundo plano."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你的其他设备会在下次唤醒时将帖子、消息和圈子上传到你的中继（无需保持打开），此设备会在后台下载它们。"
           }
         }
       }

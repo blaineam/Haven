@@ -302,6 +302,9 @@ struct HavenApp: App {
                 // app-switch is handled by NSApplication.didResignActive in AudioCoordinator instead.)
                 AudioCoordinator.shared.pauseForBackground()
                 NotificationManager.shared.scheduleRefresh()
+                #if os(iOS)
+                NotificationManager.shared.scheduleHistoryProcessing()
+                #endif
                 BiometricGate.shared.relockAll()   // re-lock biometric circles on the way out
                 // Re-derive the screen-awake assertion. A latched `isIdleTimerDisabled` from a call
                 // that never tore down cleanly would otherwise keep the phone from sleeping for the

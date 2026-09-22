@@ -1,3 +1,4 @@
-1.8.10 — Fewer gaps when your devices catch up.
+1.8.10 — Older photos load, and fewer gaps between devices.
+- Photos in posts older than a week now load when you scroll to them, instead of spinning forever.
 - Catching up history between your devices no longer skips posts that arrived out of order.
-- The bigger changes in this release are for iPhone and Mac: moving to a new phone keeps your identity and brings your whole history.
+- Fewer background wake-ups for your friends when someone opens your older posts.

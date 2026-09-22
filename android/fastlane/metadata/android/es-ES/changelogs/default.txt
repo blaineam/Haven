@@ -1,3 +1,4 @@
-1.8.10 — Menos huecos cuando tus dispositivos se ponen al día.
+1.8.10 — Las fotos antiguas cargan y hay menos huecos entre dispositivos.
+- Las fotos de publicaciones de hace más de una semana ahora cargan al llegar a ellas, en lugar de quedarse cargando para siempre.
 - Al sincronizar el historial entre tus dispositivos ya no se saltan publicaciones que llegaron desordenadas.
-- Los cambios grandes de esta versión son para iPhone y Mac: al pasar a un teléfono nuevo conservas tu identidad y todo tu historial.
+- Menos activaciones en segundo plano para tus amigos cuando alguien abre tus publicaciones antiguas.

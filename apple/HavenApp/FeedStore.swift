@@ -7936,11 +7936,19 @@ final class FeedStore: ObservableObject {
     /// deep-link nicety); the receiver keys on the ref.
     func announceMediaLanded(ref: String, circleId: String) {
         guard engine != nil else { return }
-        let postId = messages(in: circleId).first(where: { item in
+        let post = messages(in: circleId).first(where: { item in
             item.isMe && (item.media.contains(ref)
                           || MediaVariants.allThumbs(in: item.media).contains(ref)
                           || MediaVariants.allPosters(in: item.media).contains(ref))
-        })?.id ?? ""
+        })
+        // Only a FRESH post's media is news. The upload lane's "just queued" test also matched old
+        // media re-uploaded because one friend asked for it (media-wanted re-seal) — and then woke
+        // EVERY member with a push plus call-lane frames to all their devices, per blob: hundreds
+        // of silent pushes to a circle while a friend scrolled an old feed. The asker is answered
+        // on its own path; the rest of the circle doesn't need to hear about a years-old photo.
+        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+        guard let post, nowMs &- post.createdAt < 600_000 else { return }
+        let postId = post.id
         var f = Data(myNodeHex.utf8)
         lpAppend(&f, Data(ref.utf8))
         lpAppend(&f, Data(circleId.utf8))

@@ -1,3 +1,4 @@
-1.8.10 — Moins de trous quand vos appareils se mettent à jour.
+1.8.10 — Les anciennes photos se chargent, et moins de trous entre appareils.
+- Les photos des posts de plus d’une semaine se chargent désormais quand vous y arrivez, au lieu de tourner sans fin.
 - La synchronisation de l’historique entre vos appareils ne saute plus les posts arrivés dans le désordre.
-- Les grands changements de cette version concernent iPhone et Mac : passer à un nouveau téléphone conserve votre identité et tout votre historique.
+- Moins de réveils en arrière-plan pour vos amis quand quelqu’un ouvre vos anciens posts.

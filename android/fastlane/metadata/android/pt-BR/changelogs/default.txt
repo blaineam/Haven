@@ -1,3 +1,4 @@
-1.8.10 — Menos lacunas quando seus dispositivos se atualizam.
+1.8.10 — Fotos antigas carregam e há menos lacunas entre dispositivos.
+- Fotos de posts com mais de uma semana agora carregam quando você chega até elas, em vez de ficarem carregando para sempre.
 - A sincronização do histórico entre seus dispositivos não pula mais posts que chegaram fora de ordem.
-- As mudanças maiores desta versão são para iPhone e Mac: ao trocar de telefone, você mantém sua identidade e todo o histórico.
+- Menos ativações em segundo plano para seus amigos quando alguém abre seus posts antigos.

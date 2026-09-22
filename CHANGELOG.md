@@ -145,8 +145,17 @@ for bulk archive imports, keyed on the post's own date), on the promise that it 
 is actually opened" — but on Android nothing fetched a photo on screen (only videos and file
 downloads did). iOS has always requested media when a tile appears. Android now does too: a photo
 placeholder (feed, grid or viewer) that comes on screen without its bytes asks for them — relay
-first, then a direct ask to peers — throttled to once a minute per ref, and never for media the user
-deliberately removed from the device.
+first, then a direct ask to peers — throttled to once a minute per ref (direct peer asks capped at 8 per 20 s so a fast scroll can't
+burst at friends' phones), and never for media the user deliberately removed from the device.
+
+### Fixed — hundreds of silent pushes to a circle while a friend browsed old posts (iOS + Android)
+
+When a friend's phone reports it can't get one of your photos, your device re-uploads it — and the
+upload lane then announced it to the WHOLE circle as if it were a brand-new post: a silent push to
+every member plus call-lane frames to all their devices, per blob. The "just posted" test looked at
+when the upload was queued, not when the post was made. Seen live as 1,000+ pushes from one phone
+during a transfer. Now only a post made in the last 10 minutes is announced; the asker is still
+answered on its own path.
 
 ## 1.8.8 — 2026-09-12
 

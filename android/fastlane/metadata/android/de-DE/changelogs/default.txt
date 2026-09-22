@@ -1,3 +1,4 @@
-1.8.10 — Weniger Lücken, wenn deine Geräte aufholen.
+1.8.10 — Ältere Fotos laden, und weniger Lücken zwischen Geräten.
+- Fotos in Beiträgen, die älter als eine Woche sind, laden jetzt beim Scrollen, statt endlos zu drehen.
 - Beim Abgleich des Verlaufs zwischen deinen Geräten gehen keine Beiträge mehr verloren, die in anderer Reihenfolge ankamen.
-- Die größeren Neuerungen dieser Version betreffen iPhone und Mac: Beim Umzug auf ein neues Gerät bleiben Identität und ganzer Verlauf erhalten.
+- Weniger Hintergrund-Weckrufe für deine Freunde, wenn jemand deine älteren Beiträge öffnet.

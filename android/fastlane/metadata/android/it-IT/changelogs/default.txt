@@ -1,3 +1,4 @@
-1.8.10 — Meno buchi quando i tuoi dispositivi si allineano.
+1.8.10 — Le foto più vecchie si caricano, e meno buchi tra i dispositivi.
+- Le foto dei post più vecchi di una settimana ora si caricano quando ci arrivi, invece di restare in caricamento.
 - L’allineamento della cronologia tra i tuoi dispositivi non salta più i post arrivati in disordine.
-- Le novità più grandi di questa versione riguardano iPhone e Mac: passando a un nuovo telefono conservi identità e tutta la cronologia.
+- Meno risvegli in background per i tuoi amici quando qualcuno apre i tuoi post più vecchi.

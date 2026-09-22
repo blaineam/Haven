@@ -1648,14 +1648,18 @@ object HavenNet : InboundListener {
      * (a deep-link nicety); the receiver keys on the ref. Apple FeedStore.announceMediaLanded.
      */
     private fun announceMediaLanded(ref: String, circleId: String) {
-        val postId = runCatching {
+        val post = runCatching {
             social.feed(circleId, nowMs(), null).firstOrNull { item ->
                 item.isMe && (item.media.contains(ref) ||
                     MediaVariants.allPreviews(item.media).contains(ref) ||
                     MediaVariants.allThumbs(item.media).contains(ref) ||
                     item.media.mapNotNull { MediaVariants.parsePoster(it)?.second }.contains(ref))
-            }?.id
-        }.getOrNull() ?: ""
+            }
+        }.getOrNull()
+        // Only a FRESH post's media is news (Apple parity). Old media re-uploaded for ONE asker
+        // (media-wanted re-seal) used to wake every member with a push per blob.
+        if (post == null || System.currentTimeMillis().toULong() - post.createdAt >= 600_000uL) return
+        val postId = post.id
         val body = mediaFrameBody(ref, circleId, postId)
         for (member in runCatching { social.contactNodeIds(circleId) }.getOrDefault(emptyList())) {
             CallManager.sealedSend(Wire.MEDIA_AVAILABLE, body, member)
@@ -6271,10 +6275,19 @@ object HavenNet : InboundListener {
         val last = viewRequestedAt[ref]
         if (last != null && now - last < 60_000) return
         viewRequestedAt[ref] = now
-        enqueueRestore(circleId, ref)
+        enqueueRestore(circleId, ref)   // relay: one blob at a time already, no budget needed
+        // The direct ask fans out to every contact's devices, so a fast scroll through an old feed
+        // must not become a burst at friends' phones: at most 8 per 20s. The relay restore above
+        // and the next on-screen appearance (≥1 min later) cover anything the budget skipped.
+        synchronized(viewAskTimes) {
+            viewAskTimes.removeAll { now - it > 20_000 }
+            if (viewAskTimes.size >= 8) return
+            viewAskTimes.add(now)
+        }
         val payload = nodeIdHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8)
         askForMedia(ref, payload, contacts.map { it.idHex })
     }
+    private val viewAskTimes = ArrayList<Long>()
 
     fun downloadEvicted(ref: String) {
         EvictedMediaStore.clear(ref)

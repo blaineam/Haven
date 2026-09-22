@@ -6591,17 +6591,25 @@ final class FeedStore: ObservableObject {
     func askMyDevicesForMedia(_ refs: [String]) {
         guard engine != nil else { return }
         let myHex = myNodeHex
-        if myOtherDeviceTargets().isEmpty {
+        let targets = myOtherDeviceTargets()
+        if targets.isEmpty {
             // No sibling known yet to send to: refill the list; the next ask (≤45s) reaches it.
             scheduleDeviceIdsFill()
-            HavenLog.sync("history handoff: no sibling device known yet for direct media — refreshing")
         }
+        HavenLog.sync("history handoff: direct ask \(refs.count) → iroh \(targets.map { String($0.prefix(8)) }) mesh peers=\(nearby?.connectedPeerCount ?? -1)")
         for ref in refs where !MediaStore.isSynthetic(ref) && !MediaStore.shared.hasLocalFile(ref) {
             var plain = Data(myHex.utf8); plain.append(Data(ref.utf8))
             let ask = resumeAsk(ref: ref, myHex: myHex)
             nearbyBroadcast(ask == nil ? 3 : 33, ask ?? plain)
             liveDeliverToMyDevices(ask == nil ? 3 : 33, ask ?? plain)
         }
+    }
+
+    /// Chunks received so far across these refs' in-flight transfers — the handoff's stall test. A
+    /// big video can stream for minutes before it completes; counting only finished files read that
+    /// as "stalled" and sent the page to the relay while the direct stream was working.
+    func directChunkProgress(_ refs: [String]) -> Int {
+        refs.reduce(0) { $0 + (incoming[$1]?.got.count ?? 0) }
     }
 
     /// Handoff media, RELAY lane (source side): seal a local blob for `circleId` into a temp FILE —
@@ -8594,7 +8602,7 @@ final class FeedStore: ObservableObject {
         // a peer draining a backlog of them.
         let localURL = MediaStore.shared.storagePath(for: ref)
         let haveLocal = localURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
-        HavenLog.net("media REQ ref=\(ref.prefix(12)) have=\(haveLocal) from=\(requesterHex.prefix(8))")
+        HavenLog.net("media REQ ref=\(ref.prefix(20)) have=\(haveLocal) from=\(requesterHex.prefix(8))")
         // ULTRA-CONSTRAINED LINK: serve only what may cross it.
         //
         // The upload gate covered MediaBackupQueue — pushing blobs to relays — and nothing else. A
@@ -8614,6 +8622,11 @@ final class FeedStore: ObservableObject {
             reverifyBackupAfterDirectAsk(ref)
             if servingNow.contains("\(ref)|\(requesterHex)") {
                 HavenLog.net("media REQ ref=\(ref.prefix(12)) — already streaming to \(requesterHex.prefix(8)), ignoring")
+            } else if requesterHex == myNodeHex,
+                      servingNow.filter({ $0.hasSuffix("|\(requesterHex)") }).count >= Self.maxOwnStreams {
+                // A dozen concurrent own-device streams split one rate-limited link twelve ways, and
+                // a 200 KB photo sat behind 4 GB of video. Cap it; the asker re-asks (smallest first).
+                HavenLog.net("media REQ ref=\(ref.prefix(12)) — \(Self.maxOwnStreams) own-device streams already running, deferring")
             } else if shouldServeNearby(ref, requester: requesterHex) {
                 sendMediaChunks(ref: ref, fileURL: url, to: requesterHex)
             }
@@ -8744,6 +8757,9 @@ final class FeedStore: ObservableObject {
         HavenLog.net("media RESUME ref=\(ref.prefix(12)) from=\(requesterHex.prefix(8)): \(missing.count)/\(total) chunks still needed")
         if servingNow.contains("\(ref)|\(requesterHex)") {
             HavenLog.net("media RESUME ref=\(ref.prefix(12)) — already streaming to \(requesterHex.prefix(8)), ignoring")
+        } else if requesterHex == myNodeHex,
+                  servingNow.filter({ $0.hasSuffix("|\(requesterHex)") }).count >= Self.maxOwnStreams {
+            HavenLog.net("media RESUME ref=\(ref.prefix(12)) — \(Self.maxOwnStreams) own-device streams already running, deferring")
         } else if shouldServeNearby(ref, requester: requesterHex, isResume: true) {
             sendMediaChunks(ref: ref, fileURL: url, to: requesterHex, missing: missing)
         }
@@ -8834,6 +8850,9 @@ final class FeedStore: ObservableObject {
     ///
     /// **Resume is exempt** (short 3s floor only): a rate-limit abort used to stamp `servedAt` and then
     /// reject frame-33 resumes for 25s, so partial videos never refilled holes.
+    /// Concurrent media streams to my own other devices (see handleMediaRequest).
+    private static let maxOwnStreams = 3
+
     private func shouldServeNearby(_ ref: String, requester: String? = nil, isResume: Bool = false) -> Bool {
         let nowMs = now()
         let key = requester.map { "\(ref)|\($0.prefix(16))" } ?? ref
@@ -8914,7 +8933,10 @@ final class FeedStore: ObservableObject {
             // no way at all for one of your devices to hand a blob to another. Combined with the ask
             // never reaching a sibling over iroh (see `askForMedia`), your own media between your own
             // devices was strictly LAN-only, which is not how any other frame in this app behaves.
-            let ownTargets = myOtherDeviceTargets()
+            // + the device(s) a history handoff is being served to: the cached own roster can lag a
+            // device that just joined, and without its id the only path left was the rate-limited mesh.
+            var ownTargets = myOtherDeviceTargets()
+            for t in HistoryHandoff.shared.handoffTargets where !ownTargets.contains(t) { ownTargets.append(t) }
             // BOUNDED in-flight iroh sends. This loop runs on a plain dispatch queue and cannot await,
             // so each chunk's send is a detached Task — and without a gate a 1,231-chunk video spawns
             // 1,231 of them as fast as the file reads, with no backpressure whatsoever. The link then

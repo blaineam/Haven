@@ -55,6 +55,15 @@ final class NearbyTransport: NSObject {
     private static let maxFramesPerSecond: Double = 24
     private static let burstFrames: Double = 48
 
+    /// A history handoff between my own devices (both open, usually charging) is the one time the
+    /// everyday heat budget is the wrong trade: at 256 KB/s a 4 GB library takes most of a day.
+    /// Set by `HistoryHandoff` while a transfer is active; the thermal gate there still parks it.
+    nonisolated(unsafe) static var handoffBoost = false
+    private static var rateBytes: Double { handoffBoost ? 3 * 1024 * 1024 : bytesPerSecond }
+    private static var rateBurstBytes: Double { handoffBoost ? 6 * 1024 * 1024 : burstBytes }
+    private static var rateFrames: Double { handoffBoost ? 120 : maxFramesPerSecond }
+    private static var rateBurstFrames: Double { handoffBoost ? 240 : burstFrames }
+
     private let rateLock = NSLock()
     private var byteTokens: Double = NearbyTransport.burstBytes
     private var frameTokens: Double = NearbyTransport.burstFrames
@@ -382,7 +391,7 @@ final class NearbyTransport: NSObject {
         byteTokens -= needBytes
         rateLock.unlock()
 
-        enqueuePaced(frame, waitMs: sendClass == .bulk && frame.count > 4096 ? 12 : 0)
+        enqueuePaced(frame, waitMs: sendClass == .bulk && frame.count > 4096 && !Self.handoffBoost ? 12 : 0)
         return true
     }
 
@@ -395,7 +404,7 @@ final class NearbyTransport: NSObject {
             if broadcast(frame, class: sendClass) { return true }
             attempt += 1
             let need = max(Double(frame.count), 1024)
-            let sec = min(0.35, max(0.04, need / Self.bytesPerSecond))
+            let sec = min(0.35, max(0.01, need / Self.rateBytes))
             Thread.sleep(forTimeInterval: sec)
             if sendBacklogHigh {
                 Thread.sleep(forTimeInterval: 0.15)
@@ -412,8 +421,8 @@ final class NearbyTransport: NSObject {
         let dt = now.timeIntervalSince(lastRefill)
         lastRefill = now
         if dt > 0 {
-            byteTokens = min(Self.burstBytes, byteTokens + dt * Self.bytesPerSecond)
-            frameTokens = min(Self.burstFrames, frameTokens + dt * Self.maxFramesPerSecond)
+            byteTokens = min(Self.rateBurstBytes, byteTokens + dt * Self.rateBytes)
+            frameTokens = min(Self.rateBurstFrames, frameTokens + dt * Self.rateFrames)
         }
     }
 
@@ -434,6 +443,11 @@ final class NearbyTransport: NSObject {
             try? self.session.send(frame, toPeers: peers, with: .reliable)
         }
     }
+}
+
+extension NearbyTransport {
+    /// Connected mesh peers right now (diagnostics).
+    var connectedPeerCount: Int { cachedPeers.count }
 }
 
 extension NearbyTransport: MCSessionDelegate {

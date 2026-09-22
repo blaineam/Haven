@@ -116,6 +116,25 @@ under keys the new device never held. For a big, old account that meant days of 
   - Proven on simulators at scale: 420 posts / 1,261 media files in ~3 min, surviving the new phone
     being killed mid-transfer and the old phone going away for 45 s (relay took over, direct resumed).
 
+- **Proven on Blaine's real phones** (rc.5): a 1,875-post, 2,293-item library (4.4 GB, incl.
+  225 kept-story blobs) finished iPhone 17 Pro Max → iPhone 18 Pro Max, all direct. What the live
+  logs found and fixed along the way:
+  - A source only counted as busy while actively sending, so after a relaunch it looked asleep,
+    stopped its heartbeat, and the target never asked it directly — each side waiting on the other.
+    A source now stays active (loop, banner, screen on, 30 s manifest heartbeat) until the target
+    marks its request done; abandoned runs expire after three days.
+  - The stall test counted finished FILES, so a 130 MB video streaming fine read as "stalled" and
+    its page went to a relay that was unreachable. It now counts chunks; direct asks go smallest
+    first; the source caps own-device streams at three; a relay page that never starts is pulled
+    back to direct after 5 min; a page that stalled stays on the relay instead of flip-flopping.
+  - Own-device media now also goes to the handoff target's device id over iroh (the cached roster
+    lagged the new phone), and the mesh rate cap lifts 256 KB/s → 3 MB/s while a handoff runs.
+  - rc.3 queues had put every page on the relay; pages the source hasn't started are reclaimed for
+    direct. Relay pages are served in page order. rc.3-era ready markers without `complete` count
+    as complete.
+  - Kept stories: their media (snapshots, no live event) now rides a media-only page.
+  - DEBUG `HavenLog` echoes via NSLog so `devicectl --console` shows it on a real device.
+
 Not yet: Android and desktop neither request nor serve the handoff (they ignore frame 36).
 
 ## 1.8.8 — 2026-09-12

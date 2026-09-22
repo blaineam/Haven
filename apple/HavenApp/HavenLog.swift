@@ -27,7 +27,10 @@ enum HavenLog {
     @inline(__always)
     private static func echo(_ category: String, _ msg: String) {
         #if DEBUG
-        print("[haven.\(category)] \(msg)")
+        // NSLog, not print: `devicectl process launch --console` (and any pipe) block-buffers a
+        // Swift print, so on a real device the lines arrived in bursts, or never. NSLog goes to
+        // stderr unbuffered.
+        NSLog("%@", "[haven.\(category)] \(msg)")
         #endif
     }
 }

@@ -1081,6 +1081,10 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
     // top of media that finished — reported from the field as "media obviously downloaded and
     // blurred, with a loading status hanging over it". Apple parity (MissingMediaPlaceholder).
     val bytesPresent = LocalMedia.has(ref)
+    // On screen without its bytes → fetch it (older posts are never prefetched full-size).
+    LaunchedEffect(circleId, ref, bytesPresent) {
+        if (!bytesPresent) com.blaineam.haven.core.HavenNet.requestMediaOnView(circleId, ref)
+    }
     val unavailable = com.blaineam.haven.core.HavenNet.unavailableMedia.contains(ref)
     val waiting = com.blaineam.haven.core.HavenNet.waitingForSenderMedia.contains(ref)
     val progress = com.blaineam.haven.core.HavenNet.mediaRestoreProgress[ref]

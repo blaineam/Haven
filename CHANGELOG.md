@@ -137,6 +137,17 @@ under keys the new device never held. For a big, old account that meant days of 
 
 Not yet: Android and desktop neither request nor serve the handoff (they ignore frame 36).
 
+### Fixed — Android: photos in posts older than a week never loaded
+
+A friend on Android saw media on the newest few posts and a permanent "loading" on everything
+older. The background media sweep skips FULL-size media for posts older than a week (a rule meant
+for bulk archive imports, keyed on the post's own date), on the promise that it "downloads when it
+is actually opened" — but on Android nothing fetched a photo on screen (only videos and file
+downloads did). iOS has always requested media when a tile appears. Android now does too: a photo
+placeholder (feed, grid or viewer) that comes on screen without its bytes asks for them — relay
+first, then a direct ask to peers — throttled to once a minute per ref, and never for media the user
+deliberately removed from the device.
+
 ## 1.8.8 — 2026-09-12
 
 On the App Store this release also carries 1.8.7's work below: 1.8.7 was tagged and shipped to

@@ -6253,6 +6253,29 @@ object HavenNet : InboundListener {
     /** User tapped "Download" on a placeholder for a blob we deliberately evicted: clear the eviction
      *  (so the normal missing-media path may fetch it), request it now (relay restore + a direct peer
      *  ask), and surface a spinner. If it hasn't arrived in ~45s, mark it unavailable. */
+    /** When each ref was last requested because it came on screen — see [requestMediaOnView]. */
+    private val viewRequestedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * A photo (or its placeholder) came on screen without its bytes: fetch it now. Apple parity —
+     * iOS requests media when a tile appears. The background sweep deliberately skips FULL-size
+     * media for posts older than a week ([BACKFILL_LAZY_MS]), promising it "downloads when it is
+     * actually opened"; on Android nothing did that for photos, so a friend's posts older than a week
+     * never loaded, whatever the author's phone was doing. Relay first, then a direct ask to peers —
+     * the same two lanes the sweep uses — throttled to once a minute per ref, and never for media
+     * this device deliberately removed (that tile offers its own Download button).
+     */
+    fun requestMediaOnView(circleId: String, ref: String) {
+        if (LocalMedia.has(ref) || EvictedMediaStore.contains(ref)) return
+        val now = System.currentTimeMillis()
+        val last = viewRequestedAt[ref]
+        if (last != null && now - last < 60_000) return
+        viewRequestedAt[ref] = now
+        enqueueRestore(circleId, ref)
+        val payload = nodeIdHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8)
+        askForMedia(ref, payload, contacts.map { it.idHex })
+    }
+
     fun downloadEvicted(ref: String) {
         EvictedMediaStore.clear(ref)
         unavailableMedia.remove(ref)

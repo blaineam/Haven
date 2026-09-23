@@ -1,4 +1,3 @@
-1.8.10 — Le foto più vecchie si caricano, e meno buchi tra i dispositivi.
-- Le foto dei post più vecchi di una settimana ora si caricano quando ci arrivi, invece di restare in caricamento.
-- L’allineamento della cronologia tra i tuoi dispositivi non salta più i post arrivati in disordine.
-- Meno risvegli in background per i tuoi amici quando qualcuno apre i tuoi post più vecchi.
+1.8.11 — Guardati durante le videochiamate.
+- L’anteprima a specchio della tua fotocamera ora compare nell’angolo durante una chiamata, così puoi controllare come appari mentre parlate.
+- Con la fotocamera spenta, l’angolo mostra un’icona di fotocamera disattivata invece di un riquadro nero vuoto.

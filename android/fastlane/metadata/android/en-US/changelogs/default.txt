@@ -1,4 +1,3 @@
-1.8.10 — Older photos load, and fewer gaps between devices.
-- Photos in posts older than a week now load when you scroll to them, instead of spinning forever.
-- Catching up history between your devices no longer skips posts that arrived out of order.
-- Fewer background wake-ups for your friends when someone opens your older posts.
+1.8.11 — See yourself on video calls.
+- The mirrored camera preview of your own side now shows in the corner during a call, so you can check how you look while you talk.
+- With your camera off, that corner shows a camera-off icon instead of an empty black box.

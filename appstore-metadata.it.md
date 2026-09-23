@@ -34,10 +34,9 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Gratis. Una casa privata e crittografata end‑to‑end per i tuoi cari — niente pubblicità, niente tracciamento, nessun abbonamento. Peer‑to‑peer, post‑quantistica, tua.
 
 ## whats_new
-1.8.10 — Passando a un nuovo iPhone resti te stesso.
-- Ripristinare un backup su un nuovo iPhone ora porta con sé la tua identità Haven, invece di farti ricominciare da capo come qualcun altro (Impostazioni ▸ Identità e backup ▸ Includi nei backup del dispositivo).
-- Un dispositivo nuovo o ripristinato riceve tutta la tua cronologia dagli altri dispositivi tramite il tuo relay: il vecchio telefono non deve più restare aperto accanto.
-- Cambiando identità, ognuna conserva i propri post e messaggi, e un feed messo da parte su questo dispositivo si può recuperare nelle Impostazioni.
+1.8.11 — Videochiamate più chiare con gli amici su Android.
+- Gli amici che ti chiamano da un telefono Android ora vedono la propria anteprima della fotocamera a specchio nell’angolo, per controllare come appaiono mentre parlate.
+- Questo aggiornamento non cambia nient’altro su iPhone, iPad o Mac.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

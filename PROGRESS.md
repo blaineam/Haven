@@ -6,7 +6,10 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest waves (newest first)
-- **1.8.10 — upgrading to a new iPhone keeps you you (in development)** — an iCloud restore came up
+- **1.8.11 — Android callers can see themselves (cut 2026-09-23)** — the mirrored corner self-preview
+  sat under the full-screen remote SurfaceView and was bound to a null track; now a media overlay
+  bound to a state-backed track, with a camera-off glyph. Android-only change; Apple ships notes-only.
+- **1.8.10 — upgrading to a new iPhone keeps you you (live 2026-09-22)** — an iCloud restore came up
   "signed in" as a stranger: the Enclave-wrapped seed can't travel, but the onboarded flag, feed
   and old device key did. Now a migratable, never-synced **device-backup escrow** carries the seed
   (on by default), a keychain/UserDefaults **install sentinel** detects a restore onto new hardware

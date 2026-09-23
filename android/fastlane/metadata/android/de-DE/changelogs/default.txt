@@ -1,4 +1,3 @@
-1.8.10 — Ältere Fotos laden, und weniger Lücken zwischen Geräten.
-- Fotos in Beiträgen, die älter als eine Woche sind, laden jetzt beim Scrollen, statt endlos zu drehen.
-- Beim Abgleich des Verlaufs zwischen deinen Geräten gehen keine Beiträge mehr verloren, die in anderer Reihenfolge ankamen.
-- Weniger Hintergrund-Weckrufe für deine Freunde, wenn jemand deine älteren Beiträge öffnet.
+1.8.11 — Sieh dich selbst im Videoanruf.
+- Die gespiegelte Kameravorschau deiner eigenen Seite erscheint jetzt während eines Anrufs in der Ecke, damit du siehst, wie du aussiehst, während ihr redet.
+- Ist deine Kamera aus, zeigt die Ecke ein Kamera-aus-Symbol statt eines leeren schwarzen Felds.

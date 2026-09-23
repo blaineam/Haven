@@ -34,10 +34,9 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Gratuit. Un espace privé, chiffré de bout en bout, pour vos proches — sans pub, sans suivi, sans abonnement. Pair‑à‑pair, post‑quantique, à vous.
 
 ## whats_new
-1.8.10 — En passant à un nouvel iPhone, vous restez vous.
-- Restaurer une sauvegarde sur un nouvel iPhone emporte désormais votre identité Haven, au lieu de vous faire repartir de zéro comme quelqu’un d’autre (Réglages ▸ Identité et sauvegarde ▸ Inclure dans les sauvegardes de l’appareil).
-- Un appareil nouveau ou restauré reçoit tout votre historique depuis vos autres appareils via votre relais : l’ancien téléphone n’a plus besoin de rester ouvert à côté.
-- Changer d’identité conserve les posts et messages de chacune, et un fil mis de côté sur cet appareil peut être récupéré dans les Réglages.
+1.8.11 — Des appels vidéo plus clairs avec vos amis sur Android.
+- Les amis qui vous appellent depuis un téléphone Android voient désormais leur propre aperçu caméra en miroir dans le coin, pour vérifier leur image pendant que vous parlez.
+- Rien d’autre ne change sur iPhone, iPad ou Mac dans cette mise à jour.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

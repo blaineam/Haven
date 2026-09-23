@@ -34,10 +34,9 @@ privado,criptografado,família,amigos,mensagens,seguro,offline,chamadas,sem anú
 Grátis. Um espaço privado e criptografado de ponta a ponta para seus mais próximos — sem anúncios, sem rastreamento, sem assinatura. Peer-to-peer, pós-quântico, seu.
 
 ## whats_new
-1.8.10 — Ao mudar para um iPhone novo, você continua sendo você.
-- Restaurar um backup em um iPhone novo agora traz sua identidade do Haven junto, em vez de fazer você recomeçar como outra pessoa (Ajustes ▸ Identidade e backup ▸ Incluir nos backups do dispositivo).
-- Um dispositivo novo ou restaurado recebe todo o seu histórico dos seus outros dispositivos pelo seu relay — o telefone antigo não precisa mais ficar aberto ao lado.
-- Ao trocar de identidade, cada uma mantém seus posts e mensagens, e um feed separado neste dispositivo pode ser recuperado nos Ajustes.
+1.8.11 — Chamadas de vídeo mais claras com amigos no Android.
+- Amigos que ligam para você de um celular Android agora veem a própria prévia espelhada da câmera no canto, para conferir como estão aparecendo enquanto vocês conversam.
+- Nada mais muda no iPhone, iPad ou Mac nesta atualização.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

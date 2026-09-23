@@ -7,7 +7,7 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 1.8.10 — in development
+## 1.8.11 — 2026-09-23
 
 ### Fixed — Android: you can see yourself on a video call again
 
@@ -17,6 +17,8 @@ The preview tile now renders as a media overlay above the remote video. The loca
 is also Compose state now, so a preview that composed before the camera came up rebinds when it
 does, instead of staying attached to nothing. With the camera off, the tile shows a camera-off
 glyph instead of an empty black chip.
+
+## 1.8.10 — 2026-09-22
 
 ### Fixed — moving to a new iPhone keeps your identity, and your feed survives identity switches
 

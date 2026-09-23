@@ -1,4 +1,3 @@
-1.8.10 — Fotos antigas carregam e há menos lacunas entre dispositivos.
-- Fotos de posts com mais de uma semana agora carregam quando você chega até elas, em vez de ficarem carregando para sempre.
-- A sincronização do histórico entre seus dispositivos não pula mais posts que chegaram fora de ordem.
-- Menos ativações em segundo plano para seus amigos quando alguém abre seus posts antigos.
+1.8.11 — Veja você mesmo nas chamadas de vídeo.
+- A prévia espelhada da sua câmera agora aparece no canto durante a chamada, para você conferir como está aparecendo enquanto conversam.
+- Com a câmera desligada, o canto mostra um ícone de câmera desligada em vez de uma caixa preta vazia.

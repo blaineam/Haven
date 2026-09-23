@@ -34,10 +34,9 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Kostenlos. Ein privates, Ende-zu-Ende verschlüsseltes Zuhause für deine Liebsten – keine Werbung, kein Tracking, kein Abo. Peer-to-Peer, Post-Quanten-sicher, deins.
 
 ## whats_new
-1.8.10 — Beim Umzug auf ein neues iPhone bleibst du du.
-- Stellst du ein Backup auf einem neuen iPhone wieder her, kommt deine Haven-Identität jetzt mit, statt dich still als jemand Neues neu anfangen zu lassen (Einstellungen ▸ Identität & Backup ▸ In Gerätebackups einschließen).
-- Ein neues oder wiederhergestelltes Gerät erhält deinen ganzen Verlauf von deinen anderen Geräten über dein Relay — das alte Handy muss nicht mehr daneben geöffnet bleiben.
-- Beim Wechsel der Identität behält jede ihre Beiträge und Nachrichten, und ein beiseitegelegter Feed lässt sich in den Einstellungen wiederherstellen.
+1.8.11 — Bessere Videoanrufe mit Freunden auf Android.
+- Freunde, die dich von einem Android-Handy aus anrufen, sehen jetzt ihre eigene gespiegelte Kameravorschau in der Ecke und können prüfen, wie sie aussehen, während ihr redet.
+- Auf iPhone, iPad und Mac ändert sich in diesem Update sonst nichts.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

@@ -34,9 +34,9 @@ privado,cifrado,familia,amigos,mensajería,seguro,sin conexión,llamadas,sin anu
 Gratis. Un hogar privado y cifrado de extremo a extremo para los tuyos: sin anuncios, sin rastreo, sin suscripción. Peer-to-peer, poscuántico, tuyo.
 
 ## whats_new
-1.8.11 — Videollamadas más claras con amigos en Android.
-- Los amigos que te llaman desde un teléfono Android ahora ven su propia vista previa de cámara reflejada en la esquina, para comprobar cómo se ven mientras habláis.
-- Esta actualización no cambia nada más en iPhone, iPad ni Mac.
+1.8.11 — Mejores videollamadas.
+- Todos en una videollamada ven ahora su propia vista previa de cámara reflejada en la esquina, para comprobar cómo se ven mientras habláis.
+- Con la cámara apagada, la vista previa muestra un icono de cámara apagada en lugar de un recuadro vacío.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

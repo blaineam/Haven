@@ -34,9 +34,9 @@ privado,criptografado,família,amigos,mensagens,seguro,offline,chamadas,sem anú
 Grátis. Um espaço privado e criptografado de ponta a ponta para seus mais próximos — sem anúncios, sem rastreamento, sem assinatura. Peer-to-peer, pós-quântico, seu.
 
 ## whats_new
-1.8.11 — Chamadas de vídeo mais claras com amigos no Android.
-- Amigos que ligam para você de um celular Android agora veem a própria prévia espelhada da câmera no canto, para conferir como estão aparecendo enquanto vocês conversam.
-- Nada mais muda no iPhone, iPad ou Mac nesta atualização.
+1.8.11 — Chamadas de vídeo melhores.
+- Todos em uma chamada de vídeo agora veem a própria prévia espelhada da câmera no canto, para conferir como estão aparecendo enquanto conversam.
+- Com a câmera desligada, a prévia mostra um ícone de câmera desligada em vez de uma caixa vazia.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

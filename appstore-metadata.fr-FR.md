@@ -34,9 +34,9 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Gratuit. Un espace privé, chiffré de bout en bout, pour vos proches — sans pub, sans suivi, sans abonnement. Pair‑à‑pair, post‑quantique, à vous.
 
 ## whats_new
-1.8.11 — Des appels vidéo plus clairs avec vos amis sur Android.
-- Les amis qui vous appellent depuis un téléphone Android voient désormais leur propre aperçu caméra en miroir dans le coin, pour vérifier leur image pendant que vous parlez.
-- Rien d’autre ne change sur iPhone, iPad ou Mac dans cette mise à jour.
+1.8.11 — Des appels vidéo améliorés.
+- Chaque participant à un appel vidéo voit désormais son propre aperçu caméra en miroir dans le coin, pour vérifier son image pendant que vous parlez.
+- Caméra coupée, l’aperçu affiche une icône de caméra désactivée au lieu d’un cadre vide.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

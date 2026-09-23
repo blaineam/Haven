@@ -34,9 +34,9 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Gratis. Una casa privata e crittografata end‑to‑end per i tuoi cari — niente pubblicità, niente tracciamento, nessun abbonamento. Peer‑to‑peer, post‑quantistica, tua.
 
 ## whats_new
-1.8.11 — Videochiamate più chiare con gli amici su Android.
-- Gli amici che ti chiamano da un telefono Android ora vedono la propria anteprima della fotocamera a specchio nell’angolo, per controllare come appaiono mentre parlate.
-- Questo aggiornamento non cambia nient’altro su iPhone, iPad o Mac.
+1.8.11 — Videochiamate migliori.
+- Tutti in una videochiamata ora vedono la propria anteprima della fotocamera a specchio nell’angolo, per controllare come appaiono mentre parlate.
+- Con la fotocamera spenta, l’anteprima mostra un’icona di fotocamera disattivata invece di un riquadro vuoto.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

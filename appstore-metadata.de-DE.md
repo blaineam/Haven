@@ -34,9 +34,9 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Kostenlos. Ein privates, Ende-zu-Ende verschlüsseltes Zuhause für deine Liebsten – keine Werbung, kein Tracking, kein Abo. Peer-to-Peer, Post-Quanten-sicher, deins.
 
 ## whats_new
-1.8.11 — Bessere Videoanrufe mit Freunden auf Android.
-- Freunde, die dich von einem Android-Handy aus anrufen, sehen jetzt ihre eigene gespiegelte Kameravorschau in der Ecke und können prüfen, wie sie aussehen, während ihr redet.
-- Auf iPhone, iPad und Mac ändert sich in diesem Update sonst nichts.
+1.8.11 — Bessere Videoanrufe.
+- Alle in einem Videoanruf sehen jetzt ihre eigene gespiegelte Kameravorschau in der Ecke und können prüfen, wie sie aussehen, während ihr redet.
+- Ist deine Kamera aus, zeigt die Vorschau ein Kamera-aus-Symbol statt eines leeren Felds.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

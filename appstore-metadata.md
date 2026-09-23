@@ -32,9 +32,9 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 Free. A private, end‑to‑end encrypted home for your closest people — no ads, no tracking, no subscription. Peer‑to‑peer, post‑quantum, yours.
 
 ## whats_new
-1.8.11 — Clearer video calls with friends on Android.
-- Friends calling you from an Android phone now see their own mirrored camera preview in the corner, so they can check how they look while you talk.
-- Nothing else changes on iPhone, iPad or Mac in this update.
+1.8.11 — Better video calls.
+- Everyone on a video call now sees their own mirrored camera preview in the corner, so you can check how you look while you talk.
+- With your camera off, the preview shows a camera-off icon instead of an empty box.
 
 ## whats_new_previous
 1.8.1 — Smoother feed, cooler phone.

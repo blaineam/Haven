@@ -67,11 +67,15 @@ import org.webrtc.VideoTrack
  * across recomposition so tracks bind reliably.
  */
 @Composable
-fun CallVideoTile(track: VideoTrack?, modifier: Modifier = Modifier, mirror: Boolean = false, fit: Boolean = false) {
+fun CallVideoTile(track: VideoTrack?, modifier: Modifier = Modifier, mirror: Boolean = false, fit: Boolean = false, overlay: Boolean = false) {
     val context = LocalContext.current
     val view = remember {
         SurfaceViewRenderer(context).apply {
             init(CallManager.eglBase.eglBaseContext, null)
+            // A tile drawn ON TOP of another video (the self-preview) must say so: every renderer is
+            // its own SurfaceView window, and without this the full-screen remote surface is
+            // composited over the small one — the corner preview was there, just never visible.
+            if (overlay) setZOrderMediaOverlay(true)
             setEnableHardwareScaler(true)
             setMirror(mirror)
             // Screen shares aspect-FIT (show the whole screen, letterboxed); camera tiles fill.
@@ -260,7 +264,12 @@ private fun InCall() {
         Box(
             Modifier.align(Alignment.TopEnd).padding(12.dp).size(96.dp, 132.dp)
                 .clip(RoundedCornerShape(12.dp)).background(CallChip),
-        ) { CallVideoTile(CallManager.localVideo, Modifier.fillMaxSize(), mirror = true) }
+        ) {
+            CallVideoTile(CallManager.localVideo, Modifier.fillMaxSize(), mirror = true, overlay = true)
+            // Camera off: the track sends black, so say why instead of showing an empty chip.
+            if (!cameraOn) Icon(Icons.Filled.VideocamOff, null, tint = CallSecondary,
+                modifier = Modifier.align(Alignment.Center).size(28.dp))
+        }
 
         // Title + minimize (return to the app while the call continues).
         Row(Modifier.align(Alignment.TopStart).padding(16.dp), verticalAlignment = Alignment.CenterVertically) {

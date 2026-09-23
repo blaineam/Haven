@@ -60,7 +60,15 @@ object CallManager {
     val remoteScreen: SnapshotStateMap<String, VideoTrack?> = mutableStateMapOf()
     /** Peers whose camera is currently OFF — show their avatar, not a frozen last frame. */
     val remoteCameraOff: SnapshotStateList<String> = mutableStateListOf()
-    var localVideo: VideoTrack? = null; private set
+    /**
+     * The local camera track. Compose STATE, not a plain var: the call screen composes before
+     * [startCamera] creates the track, and a plain var never told the self-preview tile to rebind —
+     * it stayed attached to `null` and the caller never saw themselves.
+     */
+    private val localVideoState = mutableStateOf<VideoTrack?>(null)
+    var localVideo: VideoTrack?
+        get() = localVideoState.value
+        private set(value) { localVideoState.value = value }
 
     lateinit var eglBase: EglBase; private set
 

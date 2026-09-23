@@ -9,6 +9,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 1.8.10 — in development
 
+### Fixed — Android: you can see yourself on a video call again
+
+The mirrored corner self-preview was drawn but never visible. Every WebRTC renderer is its own
+`SurfaceView`, and the full-screen view of the other person was composited over the small one.
+The preview tile now renders as a media overlay above the remote video. The local camera track
+is also Compose state now, so a preview that composed before the camera came up rebinds when it
+does, instead of staying attached to nothing. With the camera off, the tile shows a camera-off
+glyph instead of an empty black chip.
+
 ### Fixed — moving to a new iPhone keeps your identity, and your feed survives identity switches
 
 Restoring an iCloud (or encrypted Finder) backup onto a new iPhone came up signed in, but as a

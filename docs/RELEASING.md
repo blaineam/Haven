@@ -158,6 +158,14 @@ whatever assets they were published with; the switch only affects future release
 
 ## Cutting a release
 
+> **Pending for 1.8.12 (added 2026-09-24):** localized App Store screenshots for all 9 locales are
+> captured and framed locally (iPhone + iPad; Mac still needs `CAP_LOCALES=big8
+> ./Tools/capture_screenshots.sh mac` on an unlocked Mac with Haven quit). `apple-store.yml` submits
+> automatically, so upload them into the new version FIRST:
+> `cd Haven && ../_shared/update-screenshots.sh --skip-capture` (ASC key env set). Remove this note
+> once 1.8.12 ships with them.
+
+
 Releases go out in **two hops: candidate, then promote.** Testers get the exact build that ships.
 
 1. **Land the work.** Update `CHANGELOG.md` (one entry, all platforms).

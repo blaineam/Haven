@@ -88,7 +88,11 @@ resolve_device_name() {
 capture_sim() {
   local devName="$1" key="$2"
   echo "==> $devName ($key)"
-  local udid; udid="$(cap_resolve_udid "$devName")"
+  # A dedicated sim can be pinned by UDID (HAVEN_SHOTS_UDID_IPHONE / HAVEN_SHOTS_UDID_IPAD) —
+  # cap_resolve_udid's name lookup can't find custom-named sims.
+  local udid=""
+  case "$key" in iphone*) udid="${HAVEN_SHOTS_UDID_IPHONE:-}" ;; ipad*) udid="${HAVEN_SHOTS_UDID_IPAD:-}" ;; esac
+  [ -n "$udid" ] || udid="$(cap_resolve_udid "$devName")"
   [ -n "$udid" ] || { echo "!! no simulator for $devName" >&2; return 1; }
   echo "  UDID: $udid"
 
@@ -225,25 +229,46 @@ SWIFT
   APP="$(find "$derived/Build/Products" -maxdepth 2 -name "Haven.app" | head -1)"
   [ -n "$APP" ] || { echo "  no HavenMac .app produced" >&2; return 1; }
 
+  # NEVER touch the owner's installed Haven: the debug build shares its bundle id, container and
+  # keychain group, and the window lookup matches by owner name. Refuse if a non-harness Haven runs,
+  # and only ever kill OUR binary (a bare `pkill -f Haven.app/…` also killed /Applications/Haven.app).
+  local BIN="$APP/Contents/MacOS/Haven"
+  if pgrep -fl "Haven.app/Contents/MacOS/Haven" | grep -v -F "$BIN" | grep -q .; then
+    echo "  !! another Haven is running (the owner's real app) — quit it first; not capturing." >&2
+    return 1
+  fi
+  kill_harness() { pkill -f -- "$BIN" 2>/dev/null; sleep 1; }
+
   rm -rf "${OUT:?}/$key"; mkdir -p "$OUT/$key"
   mute_on
-  caffeinate -d -i -u -t 600 >/dev/null 2>&1 &  local caff=$!
-  for entry in "${SCENES[@]}"; do
-    local tab="${entry%%|*}" rest="${entry#*|}"
-    local scene="${rest%%|*}" file="${rest#*|}"
-    pkill -f "Haven.app/Contents/MacOS/Haven" 2>/dev/null; sleep 1
-    # Exec the binary directly — env vars do NOT survive LaunchServices (`open`).
-    HAVEN_DEMO=1 HAVEN_SKIP_ONBOARDING=1 HAVEN_NO_NET=1 HAVEN_TAB="$tab" HAVEN_SCENE="$scene" \
-      "$APP/Contents/MacOS/Haven" >/dev/null 2>&1 &
-    sleep 7
-    local wid; wid="$(swift "$SHARED/mac-window-id.swift" "Haven" 2>/dev/null)"
-    if [ -n "$wid" ]; then
-      screencapture -o -x -l"$wid" "$OUT/$key/$file" 2>/dev/null && echo "  $key/$file (window $wid)"
-    else
-      echo "  !! no window for scene $scene" >&2
-    fi
+  caffeinate -d -i -u -t 1800 >/dev/null 2>&1 &  local caff=$!
+  # Base (en-US) set, then one COMPLETE set per CAP_LOCALES locale under mac/<locale>/ — a locale
+  # dir uploads as that locale's whole set, so every scene must be in it.
+  local LOC dest
+  for LOC in "" $(cap_locales); do
+    dest="$OUT/$key${LOC:+/$LOC}"; mkdir -p "$dest"
+    [ -n "$LOC" ] && echo "  — locale $LOC"
+    for entry in "${SCENES[@]}"; do
+      local tab="${entry%%|*}" rest="${entry#*|}"
+      local scene="${rest%%|*}" file="${rest#*|}"
+      kill_harness
+      # Exec the binary directly — env vars do NOT survive LaunchServices (`open`). AppleLanguages
+      # as an argument-domain default localizes this process only (the Mac's global prefs untouched).
+      # shellcheck disable=SC2046
+      HAVEN_DEMO=1 HAVEN_SKIP_ONBOARDING=1 HAVEN_NO_NET=1 HAVEN_TAB="$tab" HAVEN_SCENE="$scene" \
+        "$BIN" $( [ -n "$LOC" ] && cap_locale_args "$LOC" ) >/dev/null 2>&1 &
+      local hpid=$!
+      sleep 9
+      # By PID, not owner name — "Haven" would also match any other Haven window on screen.
+      local wid; wid="$(swift "$SHARED/mac-window-id.swift" "$hpid" 2>/dev/null)"
+      if [ -n "$wid" ]; then
+        screencapture -o -x -l"$wid" "$dest/$file" 2>/dev/null && echo "  $key${LOC:+/$LOC}/$file (window $wid)"
+      else
+        echo "  !! no window for scene $scene${LOC:+ ($LOC)}" >&2
+      fi
+    done
   done
-  pkill -f "Haven.app/Contents/MacOS/Haven" 2>/dev/null
+  kill_harness
   kill "$caff" 2>/dev/null
   mute_off
 }

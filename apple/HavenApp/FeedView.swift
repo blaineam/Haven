@@ -308,7 +308,7 @@ struct FeedView: View {
             }
         } label: {
             HStack(spacing: 4) {
-                Text(store.activeCircleName).font(.headline)
+                Text(store.activeCircleTitle).font(.headline)
                 Image(systemName: "chevron.down").font(.caption2)
             }
             .foregroundStyle(.primary)
@@ -442,7 +442,7 @@ struct FeedView: View {
                     CircleLockView(circleName: store.activeCircleName, circleId: store.activeCircleId)
                 }
             }
-            .navigationTitle(store.activeCircleName)
+            .navigationTitle(store.activeCircleTitle)
             .havenInlineNavTitle()
             .toolbar {
                 #if os(macOS)
@@ -665,7 +665,7 @@ struct FeedView: View {
                     Button { storyIndex = store.storyStartIndex(forGroup: gi); showStories = true } label: {
                         VStack(spacing: 6) {
                             storyThumb(group.items.last ?? group.items[0])   // latest as the cover
-                            Text((group.items.first?.isMe ?? false) ? "You" : (ContactsStore.shared.name(forNodePrefix: group.author) ?? friendName))
+                            Text((group.items.first?.isMe ?? false) ? String(localized: "You") : (ContactsStore.shared.name(forNodePrefix: group.author) ?? friendName))
                                 .font(.caption2).foregroundStyle(.secondary).lineLimit(1).frame(maxWidth: 64)
                         }
                     }
@@ -704,12 +704,15 @@ struct FeedView: View {
     }
 
     private var connectionText: String {
-        guard store.online else { return "Offline — posts sync when you reconnect" }
-        var paths: [String] = []
-        if store.internetActive { paths.append("internet") }
-        if store.nearbyActive { paths.append("nearby") }
-        if paths.isEmpty { return "Online — looking for your circle…" }
-        return "Connected · " + paths.joined(separator: " + ")
+        // Whole phrases, not glued fragments — a returned String is NOT auto-localized, so each
+        // variant needs its own catalog key (the banner shipped English in every locale).
+        guard store.online else { return String(localized: "Offline — posts sync when you reconnect") }
+        switch (store.internetActive, store.nearbyActive) {
+        case (true, true): return String(localized: "Connected · internet + nearby")
+        case (true, false): return String(localized: "Connected · internet")
+        case (false, true): return String(localized: "Connected · nearby")
+        case (false, false): return String(localized: "Online — looking for your circle…")
+        }
     }
 
     private var composerBar: some View {
@@ -1522,7 +1525,7 @@ struct PostCommentsList: View {
 
 
     private func commentAuthorName(_ c: FeedCommentFfi) -> String {
-        if c.isMe { return "You" }
+        if c.isMe { return String(localized: "You") }
         return ContactsStore.shared.name(forNodePrefix: c.authorShort) ?? friendName
     }
 
@@ -2034,11 +2037,11 @@ struct PostCard: View {
 
     /// Display name for the post's author — resolved from your contacts by node id.
     private var authorName: String {
-        if item.isMe { return "You" }
+        if item.isMe { return String(localized: "You") }
         return ContactsStore.shared.name(forNodePrefix: item.authorShort) ?? friendName
     }
     private func commentAuthorName(_ c: FeedCommentFfi) -> String {
-        if c.isMe { return "You" }
+        if c.isMe { return String(localized: "You") }
         return ContactsStore.shared.name(forNodePrefix: c.authorShort) ?? friendName
     }
 
@@ -2724,7 +2727,7 @@ struct ProfileView: View {
     private var header: some View {
         VStack(spacing: 8) {
             HavenAvatar(image: profile.avatar, emoji: profile.emoji, size: 76)
-            Text(profile.displayName.isEmpty ? "You" : profile.displayName).font(.title3.bold())
+            Text(profile.displayName.isEmpty ? String(localized: "You") : profile.displayName).font(.title3.bold())
             Text("\(store.myPosts.count) post\(store.myPosts.count == 1 ? "" : "s") · a copy lives on your device")
                 .font(.caption).foregroundStyle(.secondary)
         }

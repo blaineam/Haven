@@ -1302,6 +1302,13 @@ final class FeedStore: ObservableObject {
     var activeCircleName: String {
         displayName(forCircle: activeCircleId)
     }
+    /// `activeCircleName` for on-screen titles only: the core names every default circle "My Circle"
+    /// (it travels on the wire and into call invites, so it stays English there) — show that untouched
+    /// default in the reader's language.
+    var activeCircleTitle: String {
+        let name = activeCircleName
+        return name == "My Circle" ? String(localized: "My Circle") : name
+    }
 
     /// What to SHOW a circle as: my own private nickname if I've set one, else its real name. The
     /// real name is what travels on the wire and what everyone else sees — renaming it for myself

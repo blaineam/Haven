@@ -103,6 +103,9 @@ final class CallManager: NSObject, ObservableObject {
     var mediaConnected: Bool {
         lastPeerState.values.contains { $0 == .connected || $0 == .completed }
             || !hairpinPeers.isEmpty
+            // Screenshot demo (DEBUG-only via DemoEnv): the synthetic call has no peers, so it sat on
+            // "Connecting media…" in every store shot.
+            || (DemoEnv.isDemo && inCall && !connecting)
     }
     /// Peers whose media is currently relayed over the /webrtc/hairpin WebSocket (ICE failed).
     private var hairpinPeers: Set<String> = []
@@ -2212,13 +2215,15 @@ struct CallOverlay: View {
         // there will not be one. This used to be a `fatalError` — the app simply died on answering —
         // so the whole point of making it survivable is that it now has something to SAY. Checked
         // before `connecting`, because a call that can't start must not sit on "Calling…" forever.
-        if call.mediaFailed { return "Couldn't start audio" }
-        if call.connecting { return "Calling…" }
+        // String(localized:) — a returned String is not auto-localized (the call header was English
+        // in every locale).
+        if call.mediaFailed { return String(localized: "Couldn't start audio") }
+        if call.connecting { return String(localized: "Calling…") }
         // Answered but no ICE path yet: say so — "Connected" with silence erodes trust in the
         // label (and hides real media-path failures from the person staring at the screen).
-        guard call.mediaConnected else { return "Connecting media…" }
+        guard call.mediaConnected else { return String(localized: "Connecting media…") }
         let n = call.participants.count
-        return n > 1 ? "\(n) participants" : "Connected"
+        return n > 1 ? String(localized: "\(n) participants") : String(localized: "Connected")
     }
 
     /// A grid of remote participant tiles. Column count adapts to the *shape* of the space, not a

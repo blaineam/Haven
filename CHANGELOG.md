@@ -9,6 +9,27 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed — Apple: the feed banner, call header, "You" and "My Circle" now follow your language
+
+Several labels were built as plain strings in code, which SwiftUI does not translate, so they
+stayed English in every language: the feed's connection line ("Connected · internet", "Offline —
+posts sync when you reconnect", "Online — looking for your circle…"), the call header ("Calling…",
+"Connecting media…", "3 participants", "Couldn't start audio"), "You" on your own stories, posts
+and comments, and the default circle's title "My Circle" (its name on the wire stays as it is — only
+the on-screen title is translated). All now come from the string catalog in the eight other
+languages.
+
+### Store — App Store screenshots captured in all nine languages
+
+The iPhone and iPad App Store sets had been uploaded as the English captures in every locale, and
+French and Simplified Chinese had no sets at all. `apple/Tools/capture_screenshots.sh` now captures
+all seven scenes per locale on dedicated simulators (`HAVEN_SHOTS_UDID_IPHONE` /
+`HAVEN_SHOTS_UDID_IPAD`), and its macOS leg loops the same locales (`CAP_LOCALES=big8
+./Tools/capture_screenshots.sh mac`) instead of producing English only. The Mac leg also stops
+killing any installed Haven (it now kills only the harness binary, finds the window by PID, and
+refuses to run while another Haven is open). The screenshot demo's call now reads as connected. The
+website's localized renders were refreshed from the new captures.
+
 ### Docs — the website's front page is a short magazine now
 
 `web/index.html` (wemiller.com/apps/haven) drops the feature spreads, pull quotes, privacy and

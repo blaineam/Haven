@@ -253,7 +253,7 @@ struct YouView: View {
                     }
             }
             .buttonStyle(.plain)
-            Text(profile.displayName.isEmpty ? "You" : profile.displayName)
+            Text(profile.displayName.isEmpty ? String(localized: "You") : profile.displayName)
                 .font(.title2.bold())
             if !profile.bio.isEmpty {
                 Text(profile.bio)

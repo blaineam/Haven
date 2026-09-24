@@ -7,6 +7,22 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Docs — the website's front page is a short magazine now
+
+`web/index.html` (wemiller.com/apps/haven) drops the feature spreads, pull quotes, privacy and
+security card grids, relay teaser, stat row, pricing card and the seven-card download grid for:
+one promise, one download button that adapts to the visitor's device (label now translated),
+four stories with localized renders (feed, story, thread, call from `apple/screenshots/iphone-6.9`
+in all nine languages; the Windows laptop from `desktop/screenshots/windows`, English until a
+localized capture exists), one trust beat, a six-question FAQ with the EU/France note last, and a
+closing button with every other platform as one quiet line of links. Linux and Steam Deck links
+still resolve from the latest GitHub release's assets — and no longer pick the relay's `.deb`
+(it sorted first) over the desktop app's. The honest-limits and security detail lives on in
+`docs/` and the FAQ. `web/i18n/i18n.js` is synced with the portfolio's runtime so renders swap
+per language via `web/assets/screens/manifest.json`.
+
 ## 1.8.11 — 2026-09-23
 
 ### Fixed — Android: you can see yourself on a video call again

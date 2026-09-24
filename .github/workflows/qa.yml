@@ -71,7 +71,7 @@ jobs:
         run: node ../_shared/soren/soren.mjs ci Haven ${{ github.event.inputs.suites || 'ios macos' }} --junit soren-apple.xml
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: soren-junit-apple, path: Haven/soren-apple.xml, if-no-files-found: warn }
+        with: { name: soren-junit-apple, path: Haven/soren-apple.xml, if-no-files-found: warn, retention-days: 3 }
 
   # ── Core: the Rust workspace (haven-p2p + haven_ffi incl. the migration harness) ──
   core:
@@ -92,7 +92,7 @@ jobs:
         run: node ../_shared/soren/soren.mjs ci Haven ${{ github.event.inputs.suites || 'core' }} --junit soren-core.xml
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: soren-junit-core, path: Haven/soren-core.xml, if-no-files-found: warn }
+        with: { name: soren-junit-core, path: Haven/soren-core.xml, if-no-files-found: warn, retention-days: 3 }
 
   # ── Desktop: the Tauri Rust side + the web-UI syntax gate ─────────────────────────
   desktop:
@@ -118,7 +118,7 @@ jobs:
         run: node ../_shared/soren/soren.mjs ci Haven ${{ github.event.inputs.suites || 'desktop desktop-ui' }} --junit soren-desktop.xml
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: soren-junit-desktop, path: Haven/soren-desktop.xml, if-no-files-found: warn }
+        with: { name: soren-junit-desktop, path: Haven/soren-desktop.xml, if-no-files-found: warn, retention-days: 3 }
 
   # ── Android: JVM unit tests (connected/instrumented tests need an emulator and are
   #    gracefully skipped by Soren when none is running). Needs the Rust core .so + the
@@ -161,4 +161,4 @@ jobs:
         run: node ../_shared/soren/soren.mjs ci Haven ${{ github.event.inputs.suites || 'android' }} --junit soren-android.xml
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: soren-junit-android, path: Haven/soren-android.xml, if-no-files-found: warn }
+        with: { name: soren-junit-android, path: Haven/soren-android.xml, if-no-files-found: warn, retention-days: 3 }

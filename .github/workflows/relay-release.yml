@@ -140,6 +140,7 @@ jobs:
           name: relay-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 1
 
   macos:
     needs: meta
@@ -178,6 +179,7 @@ jobs:
           name: relay-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 1
 
   windows:
     needs: meta
@@ -212,6 +214,7 @@ jobs:
           name: relay-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 1
 
   release:
     needs: [build, macos, windows]

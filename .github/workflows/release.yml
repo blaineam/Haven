@@ -216,6 +216,7 @@ jobs:
           name: relay-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 1
 
   # ── Relay: Windows .exe (x86-64 + Arm64) ────────────────────────────────────────────────
   relay-windows:
@@ -250,6 +251,7 @@ jobs:
           name: relay-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 1
 
   # ── Desktop installers (Windows + Linux) ───────────────────────────────────────────────
   desktop:
@@ -498,6 +500,7 @@ jobs:
           name: desktop-${{ matrix.name }}
           path: out/*
           if-no-files-found: error
+          retention-days: 1
           retention-days: 7
 
   # Separate from the build ON PURPOSE: environmental failures here retry in ~2 minutes via
@@ -599,12 +602,14 @@ jobs:
         with:
           bundle: haven.flatpak
           manifest-path: desktop/flatpak/com.blaineam.haven.yml
-          cache-key: flatpak-${{ github.sha }}
+          cache: false
+          upload-artifact: false
       - uses: actions/upload-artifact@v4
         with:
           name: flatpak
           path: haven.flatpak
           if-no-files-found: error
+          retention-days: 1
 
   # ── Publish one Release with every artifact + a version-pinned Flatpak manifest ─────────
   publish:

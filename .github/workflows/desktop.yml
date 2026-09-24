@@ -98,6 +98,7 @@ jobs:
             desktop/src-tauri/target/release/bundle/**/*.rpm
             desktop/src-tauri/target/release/bundle/**/*.AppImage
           if-no-files-found: ignore
+          retention-days: 3
 
   # SteamOS / Steam Deck (and any Flatpak distro). Builds the Flatpak from the .deb the
   # Linux build job just produced, so the artifact matches what users sideload via Discover.
@@ -134,9 +135,11 @@ jobs:
         with:
           bundle: haven.flatpak
           manifest-path: desktop/flatpak/com.blaineam.haven.yml
-          cache-key: flatpak-${{ github.sha }}
+          cache: false
+          upload-artifact: false
       - uses: actions/upload-artifact@v4
         with:
           name: haven-steamos-flatpak
           path: haven.flatpak
           if-no-files-found: ignore
+          retention-days: 3

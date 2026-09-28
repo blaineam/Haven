@@ -9430,7 +9430,11 @@ final class FeedStore: ObservableObject {
         // says nothing about reachability — recording it made the next sync pass treat the peer as
         // warm and skip the hello/roster that completes the handshake on their side.
         if viaNearby || senderDevice != nil { recordHeard(idHex) }
-        forgiveDials(accountHex: idHex, extra: senderDevice.map { [$0] } ?? [])
+        // Fresh reachability evidence (a live-lane hello, or a brand-new member): clear their dial
+        // backoff. Not for every old mailbox hello from a known member — that is no evidence at all.
+        if senderDevice != nil || !reads.engineKnows {
+            forgiveDials(accountHex: idHex, extra: senderDevice.map { [$0] } ?? [])
+        }
         persist(); await reloadCircles()
         if let card = reads.card, !card.name.isEmpty {
             ContactsStore.shared.setCard(idHex: idHex, name: card.name, bio: card.bio, link: card.link,

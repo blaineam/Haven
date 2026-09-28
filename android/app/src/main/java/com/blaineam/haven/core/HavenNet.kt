@@ -1935,8 +1935,11 @@ object HavenNet : InboundListener {
         if (senderDevice != null && senderDevice.length == 64 && !senderDevice.equals(idHex, ignoreCase = true)) {
             recordDeviceHints(idHex, listOf(senderDevice))
         }
-        // A hello is fresh evidence they're reachable: drop any dial backoff armed while they weren't.
-        if (!blocked.contains(idHex)) forgiveDials(idHex, listOfNotNull(senderDevice))
+        // A LIVE-lane hello (or a brand-new contact's) is fresh evidence they're reachable: drop any
+        // dial backoff armed while they weren't. An old mailbox hello from a known contact is not.
+        if (senderDevice != null || contacts.none { it.idHex.equals(idHex, ignoreCase = true) }) {
+            forgiveDials(idHex, listOfNotNull(senderDevice))
+        }
         val actualVerify = runCatching { social.bundleVerificationHex(hello.bundle) }.getOrNull()
             ?: return HelloOutcome(true, "malformed")
         val name = runCatching { social.verifyProfile(hello.bundle, hello.signedProfile) }.getOrNull() ?: "Someone"

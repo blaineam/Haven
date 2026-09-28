@@ -5079,8 +5079,11 @@ impl Engine {
                 self.record_device_hints(&id_hex, vec![dev.to_lowercase()]);
             }
         }
-        // A hello is fresh evidence they're reachable: drop any dial backoff armed while they weren't.
-        self.forgive_dials(&id_hex, sender_device.as_deref());
+        // A LIVE-lane hello is fresh evidence they're reachable: drop any dial backoff armed while
+        // they weren't (a relayed/mailbox hello proves nothing about reachability).
+        if sender_device.is_some() {
+            self.forgive_dials(&id_hex, sender_device);
+        }
         let Ok(actual_verify) = self.social.bundle_verification_hex(hello.bundle.clone()) else { return };
         // Switch-Flip 1.0.7 §0/§1: learn this peer's seed-drop + MLS capability from their signed
         // profile card (verified in-core; a forged/absent marker reads as legacy 0). This is the

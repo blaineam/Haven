@@ -12,6 +12,7 @@ struct CircleView: View {
     @State private var showSettings = false   // macOS only — the gear is a NavigationLink on iOS
     @State private var nicknameTarget: Contact?
     @State private var nicknameDraft = ""
+    @Environment(\.dismiss) private var dismiss
 
     private var isDefault: Bool { store.activeCircleId == "default" }
     private var nonContactMembers: [String] { store.nonContactMembers(in: store.activeCircleId) }
@@ -315,6 +316,18 @@ struct CircleView: View {
 
     /// Per-person actions — the context menu on both platforms (and the only row actions macOS has).
     @ViewBuilder private func rowMenu(_ c: Contact) -> some View {
+        // Private, one-to-one — the way to write to just this person instead of the whole circle.
+        if c.idHex != store.myNodeHex {
+            Button {
+                let dm = store.startDM(with: c.idHex, name: c.displayName)
+                DMDraftStore.shared.stage(circleId: dm, text: "")
+                dismiss()
+                DeepLinkRouter.shared.requestedTab = "messages"
+            } label: {
+                Label("Message \(c.displayName)", systemImage: "bubble.left")
+            }
+            Divider()
+        }
         Button { nicknameDraft = c.nickname ?? ""; nicknameTarget = c } label: {
             Label("Set nickname", systemImage: "pencil")
         }

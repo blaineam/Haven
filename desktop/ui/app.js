@@ -7281,7 +7281,24 @@ function pcFor(peer) {
   pc.onicecandidate = (e) => {
     if (e.candidate) invoke("call_signal", { kind: "ice", sessionId: call.session, to: peer, json: JSON.stringify({ c: e.candidate.candidate, m: e.candidate.sdpMLineIndex, i: e.candidate.sdpMid }) });
   };
-  pc.ontrack = (e) => { call.remote = call.remote || {}; call.remote[peer] = e.streams[0]; renderCallOverlay(); };
+  pc.ontrack = (e) => {
+    // Apple/Android publish a screen share as a SECOND video track under stream id "screen"
+    // (track id "screen0" as fallback). Before this, it overwrote the peer's camera stream —
+    // which also carries their AUDIO — so a phone sharing its screen went silent here.
+    const streamIds = e.streams.map((st) => st.id);
+    const isScreen = e.track.kind === "video" && (streamIds.length ? streamIds.includes("screen") : e.track.id === "screen0");
+    console.info("[HavenScreenShare] remote", e.track.kind, "track", e.track.id, "streams", streamIds, "->", isScreen ? "SCREEN" : "camera");
+    if (isScreen) {
+      const st = e.streams[0] || new MediaStream([e.track]);
+      call.remoteScreen = call.remoteScreen || {};
+      call.remoteScreen[peer] = st;
+      const clear = () => { if (call.remoteScreen && call.remoteScreen[peer] === st) { delete call.remoteScreen[peer]; renderCallOverlay(); } };
+      st.onremovetrack = clear; e.track.onended = clear;
+    } else {
+      call.remote = call.remote || {}; call.remote[peer] = e.streams[0];
+    }
+    renderCallOverlay();
+  };
   pc.onconnectionstatechange = () => {
     const st = pc.connectionState;
     // Transport events do NOT answer calls. An early promote here flipped the CALLER to
@@ -7403,6 +7420,7 @@ async function onCallEvent(payload) {
       const pc = call.pcs.get(c.from); if (pc) pc.close();
       call.pcs.delete(c.from); call.roster.delete(c.from);
       if (call.remote) delete call.remote[c.from];
+      if (call.remoteScreen) delete call.remoteScreen[c.from];
       if (invitees().length === 0) teardownCall("hangup-frame-last-peer"); else renderCallOverlay();
       break;
     }
@@ -7488,7 +7506,7 @@ function teardownCall(reason) {
   call.screenOn = false; call.camTrack = null; call.camOff = {};
   call.pcs.forEach((pc) => pc.close()); call.pcs.clear();
   if (call.localStream) call.localStream.getTracks().forEach((t) => t.stop());
-  call.localStream = null; call.remote = {}; call.mediaPending = null;
+  call.localStream = null; call.remote = {}; call.remoteScreen = {}; call.mediaPending = null;
   call.roster.clear(); call.session = ""; call.ringing = false; call.connecting = false; call.inCall = false; qaPushCallState();
   syncFeedVideoSound();   // restore the user's global video-sound choice now the call is over
   renderCallOverlay();
@@ -7724,7 +7742,14 @@ function callPersonSurface(peer, cls) {
   const camOff = !!(call.camOff && call.camOff[peer]);
   const speaking = call.activeSpeaker === peer;
   const surf = el("div", { class: cls + (speaking ? " speaking" : ""), "data-peer": peer });
-  if (!camOff && call.remote && call.remote[peer]) {
+  const screen = call.remoteScreen && call.remoteScreen[peer];
+  if (screen) {
+    // Their shared screen takes over their surface, aspect-FIT so the whole screen is legible.
+    const v = el("video", { autoplay: "", playsinline: "", muted: "", style: "object-fit:contain;background:#000" });
+    v.srcObject = screen;
+    surf.append(v);
+    if (cls === "call-tile") surf.append(el("div", { class: "call-tile-shade" }));
+  } else if (!camOff && call.remote && call.remote[peer]) {
     const v = el("video", { autoplay: "", playsinline: "", muted: "" });
     v.srcObject = call.remote[peer];
     applySink(v);

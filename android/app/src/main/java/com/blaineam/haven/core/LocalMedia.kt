@@ -630,6 +630,45 @@ object LocalMedia {
         return checked(ref, stored)   // fall back to raw (was stored unsealed)
     }
 
+    /** A plaintext file to stream [ref] to a peer from; [release] when the serve ends. */
+    class ServeFile(val file: File, private val temp: Boolean) {
+        fun release() { if (temp) runCatching { file.delete() } }
+    }
+
+    /**
+     * The plaintext of [ref] as a FILE, for serving it to a peer in chunks — Apple's serve reads the
+     * file through a handle, and so does this now.
+     *
+     * [loadAnyCircle] decrypted the whole blob onto the managed heap to serve it: a 100 MB video
+     * meant a 100 MB ByteArray (plus a copy per chunk) for the whole minutes-long serve, and anything
+     * over the heap budget simply could not be served at all. This decrypts file→file in NATIVE
+     * memory (the [videoFile] route), verifies the digest by streaming, and hands back a scratch file
+     * in the playback-cache dir (which clear() and the orphan sweep own). A legacy UNSEALED blob is
+     * served in place. Null if missing, undecryptable, or not the bytes the ref names.
+     */
+    fun openForServing(ref: String): ServeFile? {
+        val f = mediaFile(ref)
+        if (!f.exists()) return null
+        val circles = runCatching { HavenNet.engine.circles() }.getOrDefault(emptyList())
+        val out = File(plainDir, "serve-${java.util.UUID.randomUUID()}.tmp")
+        for (c in circles) {
+            val ok = runCatching {
+                HavenNet.engine.openCircleMediaFile(c.id, f.absolutePath, out.absolutePath)
+            }.getOrDefault(false)
+            if (ok && out.exists()) {
+                if (verifiesRef(ref, out)) return ServeFile(out, temp = true)
+                android.util.Log.w("LocalMedia", "media REJECTED ${ref.take(12)}: decrypted bytes do not match its content address — not serving")
+                runCatching { out.delete() }
+                return null
+            }
+        }
+        runCatching { out.delete() }
+        // Opened for no circle: a legacy blob stored unsealed is its own plaintext — if it verifies.
+        val head = runCatching { f.inputStream().use { ins -> ByteArray(4).also { ins.read(it) } } }.getOrNull()
+        if (head != null && isSealedEnvelope(head)) return null
+        return if (verifiesRef(ref, f)) ServeFile(f, temp = false) else null
+    }
+
     /**
      * Does the sealed blob we hold for [ref] actually OPEN for one of our circles?
      *

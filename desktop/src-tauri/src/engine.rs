@@ -9935,12 +9935,91 @@ impl Engine {
         if reference.is_empty() || !self.media.has(&reference) {
             return;
         }
-        // They had to come to US for bytes we already backed up — so no relay served them. That is a
-        // signal about our own backup, not just a request to answer.
-        self.reverify_backup_after_direct_ask(&reference).await;
+        if !self.relay_first_allows_stream(&reference, &requester).await {
+            return;
+        }
         let Some(bytes) = self.media.load_any_circle(&self.social, &reference) else { return };
         // Frame 3 means "send everything" and always has — see `wire::MEDIA_RESUME_REQ`.
         self.serve_chunks_once(&reference, &requester, &bytes, None).await;
+    }
+
+    /// Relay-first serving (Apple `HeavyWorkPolicy.decideServe` / Android parity, desktop subset).
+    ///
+    /// A friend asking us for a blob a relay already holds is pointed at the relay (frame 32) instead
+    /// of being streamed a KEM-sealed chunk at a time — the phone-side version of this is what kept a
+    /// user's iPhone hot mid-call. Up to three hints per ref per requester per 30 minutes; a requester
+    /// that keeps asking after that provably cannot read the relay copy and is served directly. Nothing
+    /// is streamed while a call is up here (it owns the uplink). Returns whether to stream now.
+    async fn relay_first_allows_stream(self: &Arc<Self>, reference: &str, requester: &str) -> bool {
+        const MAX_HINTS: u32 = 3;
+        const WINDOW_MS: u64 = 30 * 60_000;
+        static HINTS: std::sync::OnceLock<StdMutex<HashMap<String, (u32, u64)>>> = std::sync::OnceLock::new();
+        let short = |r: &str| r.chars().take(12).collect::<String>();
+        let own = requester.eq_ignore_ascii_case(&self.social.my_node_hex());
+        if matches!(self.qa_call_state(), Some((ringing, in_call)) if ringing || in_call) {
+            log::info!("media REQ {}: not serving — a call is up", short(reference));
+            return false;
+        }
+        let own_relay = self.own_hosted_relay_hex();
+        let suffix = format!("|{reference}");
+        let on_relay = {
+            let st = self.dyn_state.lock();
+            st.media_backed_up.iter().any(|k| {
+                k.ends_with(&suffix) && (own_relay.is_empty() || !k.starts_with(&format!("{own_relay}|")))
+            })
+        };
+        if !on_relay {
+            return true;
+        }
+        // They had to come to US for bytes we already backed up — so no relay served them. That is a
+        // signal about our own backup, not just a request to answer.
+        self.reverify_backup_after_direct_ask(reference).await;
+        if own {
+            return true; // own devices ride the cheap account-key lane
+        }
+        let mut circle_id: Option<String> = None;
+        'outer: for c in self.social.circles() {
+            for item in self.social.feed(c.id.clone(), now_ms(), None) {
+                if item.media.iter().any(|m| m == reference)
+                    || item.comments.iter().any(|cm| cm.media.iter().any(|m| m == reference))
+                {
+                    circle_id = Some(c.id.clone());
+                    break 'outer;
+                }
+            }
+        }
+        let Some(circle_id) = circle_id else { return true };
+        if self.relays_for(&circle_id).is_empty() {
+            return true;
+        }
+        let now = now_ms();
+        let hinted = {
+            let mut map = HINTS.get_or_init(|| StdMutex::new(HashMap::new())).lock();
+            if map.len() > 2_000 {
+                map.clear();
+            }
+            let e = map.entry(format!("{reference}|{requester}")).or_insert((0, now));
+            if now.saturating_sub(e.1) >= WINDOW_MS {
+                *e = (0, now);
+            }
+            if e.0 >= MAX_HINTS {
+                false
+            } else {
+                e.0 += 1;
+                true
+            }
+        };
+        if !hinted {
+            return true; // hint budget spent — their relay fetch keeps failing; serve directly
+        }
+        log::info!(
+            "media REQ {} from {}: on a relay — hinting instead of streaming",
+            short(reference),
+            &requester[..requester.len().min(8)]
+        );
+        let body = self.media_frame_body(reference, &circle_id, "");
+        self.send_call_frame(wire::MEDIA_AVAILABLE, &body, requester);
+        false
     }
 
     /// A peer asked us DIRECTLY for a blob we hold — meaning they could not fetch it from any relay we
@@ -9995,6 +10074,9 @@ impl Engine {
     async fn handle_media_resume_request(self: &Arc<Self>, body: &[u8]) {
         let Some(req) = wire::parse_resume_frame(body) else { return };
         if !self.media.has(&req.reference) {
+            return;
+        }
+        if !self.relay_first_allows_stream(&req.reference, &req.requester_hex).await {
             return;
         }
         let Some(bytes) = self.media.load_any_circle(&self.social, &req.reference) else { return };

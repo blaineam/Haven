@@ -50,9 +50,15 @@ final class WebRTCCall: NSObject {
     /// Outbound signaling (sealed + sent by CallManager) + remote-track callbacks.
     var onLocalSDP: ((RTCSessionDescription) -> Void)?
     var onLocalCandidate: ((RTCIceCandidate) -> Void)?
-    var onRemoteVideoTrack: ((RTCVideoTrack) -> Void)?
-    /// Fires with a track id when a remote video track is removed (e.g. peer stopped screen sharing).
-    var onRemoteVideoTrackEnded: ((String) -> Void)?
+    /// Fires with a remote video track and whether it is the peer's SCREEN share (vs camera) —
+    /// decided by stream id, see `isScreenTrack`.
+    var onRemoteVideoTrack: ((RTCVideoTrack, _ isScreen: Bool) -> Void)?
+    /// Fires when a remote video track is removed (e.g. peer stopped screen sharing), with whether
+    /// it had been routed as the screen share.
+    var onRemoteVideoTrackEnded: ((_ isScreen: Bool) -> Void)?
+    /// Receiver ids currently routed as a screen share. Touched from WebRTC's signaling thread.
+    private var screenReceiverIds = Set<String>()
+    private let screenReceiverLock = NSLock()
     var onStateChange: ((RTCIceConnectionState) -> Void)?
     /// Fires once the remote description is actually applied — only then is it safe to add the
     /// peer's ICE candidates.
@@ -358,6 +364,19 @@ final class WebRTCCall: NSObject {
     /// The track id used for the screen-share track. Used on the receiving side to tell a peer's
     /// screen track apart from their camera track (`video0`).
     static let screenTrackId = "screen0"
+    /// The stream id every platform publishes its screen track under (Android: `ScreenSharePolicy`).
+    static let screenStreamId = "screen"
+
+    /// Is an incoming video track the peer's screen share? The STREAM id is authoritative — it rides
+    /// every (re)negotiation in `a=msid`, whereas a Unified-Plan receiver's track id is fixed when
+    /// its transceiver is created and need not match the sender's. Routing by track id alone let an
+    /// Android screen track land in the CAMERA slot, where the view kept showing the last camera
+    /// frame: "the video froze and the share never appeared". Track id is only the fallback when
+    /// the sender announced no stream. Mirrors Android `ScreenSharePolicy.isScreenTrack`.
+    static func isScreenTrack(trackId: String, streamIds: [String]) -> Bool {
+        if !streamIds.isEmpty { return streamIds.contains(screenStreamId) }
+        return trackId == screenTrackId
+    }
 
     /// Whether the screen track currently exists (sharing is active on this connection).
     var isSharingScreen: Bool { screenTrack != nil }
@@ -371,7 +390,7 @@ final class WebRTCCall: NSObject {
         let track = WebRTCCall.factory.videoTrack(with: source, trackId: WebRTCCall.screenTrackId)
         screenSource = source; screenTrack = track
         // Use a distinct stream id so the receiver groups it separately from the camera.
-        pc.add(track, streamIds: ["screen"])
+        pc.add(track, streamIds: [WebRTCCall.screenStreamId])
         // Screen content gets more headroom than the camera (text needs the detail), but is
         // still capped + degradable so it can't starve the camera/audio.
         tuneVideoSender(trackId: track.trackId, maxBitrateBps: 2_500_000)
@@ -495,10 +514,25 @@ extension WebRTCCall: RTCPeerConnectionDelegate {
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didAdd rtpReceiver: RTCRtpReceiver,
                         streams mediaStreams: [RTCMediaStream]) {
-        if let track = rtpReceiver.track as? RTCVideoTrack { onRemoteVideoTrack?(track) }
+        guard let track = rtpReceiver.track as? RTCVideoTrack else { return }
+        let streamIds = mediaStreams.map(\.streamId)
+        let isScreen = WebRTCCall.isScreenTrack(trackId: track.trackId, streamIds: streamIds)
+        HavenLog.call("screenshare: remote video receiver=\(rtpReceiver.receiverId) track=\(track.trackId) "
+                      + "streams=\(streamIds) -> \(isScreen ? "SCREEN" : "camera")")
+        screenReceiverLock.lock()
+        if isScreen { screenReceiverIds.insert(rtpReceiver.receiverId) }
+        else { screenReceiverIds.remove(rtpReceiver.receiverId) }
+        screenReceiverLock.unlock()
+        onRemoteVideoTrack?(track, isScreen)
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove rtpReceiver: RTCRtpReceiver) {
-        if let track = rtpReceiver.track as? RTCVideoTrack { onRemoteVideoTrackEnded?(track.trackId) }
+        guard let track = rtpReceiver.track as? RTCVideoTrack else { return }
+        screenReceiverLock.lock()
+        let wasScreen = screenReceiverIds.remove(rtpReceiver.receiverId) != nil
+        screenReceiverLock.unlock()
+        let isScreen = wasScreen || track.trackId == WebRTCCall.screenTrackId
+        HavenLog.call("screenshare: remote video removed receiver=\(rtpReceiver.receiverId) screen=\(isScreen)")
+        onRemoteVideoTrackEnded?(isScreen)
     }
     // Unused delegate methods.
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}

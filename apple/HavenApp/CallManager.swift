@@ -1099,21 +1099,23 @@ final class CallManager: NSObject, ObservableObject {
                 FeedStore.shared.sendCallFrame(18, f, to: peer)
             }
         }
-        c.onRemoteVideoTrack = { [weak self] track in
+        c.onRemoteVideoTrack = { [weak self] track, isScreen in
             Task { @MainActor in
                 guard let self else { return }
                 // The screen-share track is published separately so the grid can promote it.
-                if track.trackId == WebRTCCall.screenTrackId {
+                // `isScreen` is decided by STREAM id (WebRTCCall.isScreenTrack) — never let a
+                // screen track overwrite the camera slot.
+                if isScreen {
                     self.remoteScreenTracks[peer] = track
                 } else {
                     self.remoteVideoTracks[peer] = track
                 }
             }
         }
-        c.onRemoteVideoTrackEnded = { [weak self] trackId in
+        c.onRemoteVideoTrackEnded = { [weak self] isScreen in
             Task { @MainActor in
                 guard let self else { return }
-                if trackId == WebRTCCall.screenTrackId { self.remoteScreenTracks[peer] = nil }
+                if isScreen { self.remoteScreenTracks[peer] = nil }
                 else { self.remoteVideoTracks[peer] = nil }
             }
         }

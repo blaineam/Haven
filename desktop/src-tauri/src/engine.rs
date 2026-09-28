@@ -1203,6 +1203,25 @@ impl Engine {
         let _ = p.save(&self.paths);
     }
 
+    /// Fresh evidence a peer is reachable NOW (approved, a hello from them): clear the iroh dial
+    /// backoff on every id we'd dial them on, so the next send tries at once instead of sitting out a
+    /// gate armed while they were offline (iOS/Android `forgiveDials` parity).
+    fn forgive_dials(&self, account_hex: &str, extra: Option<&str>) {
+        let Some(node) = self.node.lock().clone() else { return };
+        let acct = account_hex.to_lowercase();
+        let mut ids: Vec<String> = vec![acct.clone()];
+        ids.extend(self.social.device_node_ids_for(acct.clone()).into_iter().map(|d| d.to_lowercase()));
+        ids.extend(self.device_hints_for(&acct));
+        if let Some(e) = extra {
+            ids.push(e.to_lowercase());
+        }
+        ids.sort();
+        ids.dedup();
+        for id in ids.into_iter().filter(|i| i.len() == 64) {
+            let _ = node.forgive_dial(id);
+        }
+    }
+
     fn device_hints_for(&self, account_hex: &str) -> Vec<String> {
         self.prefs.lock().device_hints.get(&account_hex.to_lowercase()).cloned().unwrap_or_default()
     }
@@ -4401,6 +4420,7 @@ impl Engine {
             // stay dropped (handshake guard) and self-sync re-severs them on every pass.
             self.clear_circle_removal(DEFAULT_CIRCLE, &req.id_hex);
             self.accept_contact(DEFAULT_CIRCLE, &req.bundle, &req.id_hex, &req.name, &req.verify_hex, true);
+            self.forgive_dials(&req.id_hex, None); // a fresh start on their dial gate (iOS/Android parity)
             self.nudge_self_sync(); // the new contact (+ lifted tombstone) rides a prompt pass
             // If this approval answers a ticketed offline invite, park the grant on my relays so
             // the acceptor completes the friendship whenever they next come online.
@@ -4893,12 +4913,18 @@ impl Engine {
             targets.push(to_node_hex.to_string());
         }
         // Invite-link dial hints bridge the roster bootstrap: until this contact's signed roster
-        // lands, their account id resolves to no node — the hint is the only real id.
+        // lands, their account id resolves to no node — the hint is the only real id. Hints go
+        // FIRST, and with a hint in hand the bare account id is dropped: only per-device builds mint
+        // hints, and their account id resolves to no endpoint — a guaranteed connect timeout plus a
+        // dial-gate strike per send (iOS/Android `DialOrder` parity).
         let hints = self.device_hints_for(to_node_hex);
-        for h in &hints {
+        for h in hints.iter().rev() {
             if !targets.iter().any(|t| t.eq_ignore_ascii_case(h)) {
-                targets.push(h.clone());
+                targets.insert(0, h.clone());
             }
+        }
+        if !hints.is_empty() && targets.len() > 1 {
+            targets.retain(|t| !t.eq_ignore_ascii_case(to_node_hex));
         }
         // Nothing but the account id, which is an identity and not an address: this peer is
         // unreachable except through a relay we happen to share. Ask the public directory for their
@@ -5053,6 +5079,8 @@ impl Engine {
                 self.record_device_hints(&id_hex, vec![dev.to_lowercase()]);
             }
         }
+        // A hello is fresh evidence they're reachable: drop any dial backoff armed while they weren't.
+        self.forgive_dials(&id_hex, sender_device.as_deref());
         let Ok(actual_verify) = self.social.bundle_verification_hex(hello.bundle.clone()) else { return };
         // Switch-Flip 1.0.7 §0/§1: learn this peer's seed-drop + MLS capability from their signed
         // profile card (verified in-core; a forged/absent marker reads as legacy 0). This is the

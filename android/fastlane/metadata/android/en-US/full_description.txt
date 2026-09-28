@@ -1,15 +1,16 @@
 Haven is a private social network for the people who actually matter. No ads. No tracking. No algorithm deciding what you see. No company server holding your memories.
 
-Everything you share is end-to-end encrypted with hybrid post-quantum cryptography and travels directly between your devices — over the internet, or over Bluetooth and Wi-Fi when you're together offline. Even we can't read it.
+Everything you share is end-to-end encrypted with hybrid post-quantum cryptography and travels between your devices over the internet — directly, or through a relay that can't read it — or over Bluetooth and Wi-Fi when you're together offline. Even we can't read it.
 
-• Private circles — share with family and close friends in separate, invite-only circles
+• Private circles — share with family and close friends in separate, invite-only circles, and always see exactly who a post will reach
 • Posts, photos, videos & stories — with a modern camera, easy captions, and a song
 • Direct & group messages — sender names, timestamps, delivery checks, plus scheduled and screenshot-protected secret messages
 • Group voice & video calls — 1:1 and group, with screen sharing, peer-to-peer, with no call server in the middle
 • All your devices in sync — start on your phone, pick up on a tablet or desktop
 • Disappearing posts — you decide how long things stick around
 • Nearby sharing — works with no internet at all, phone to phone
-• Bring your own storage — keep memories alive on your own S3 bucket or a relay you run
+• Your relay does the heavy lifting — photos and videos go up once to a relay you run and friends fetch them from there, so your phone stays cool; or keep memories on your own S3 bucket
+• Stays out of your way — big transfers wait while you're on a call, or when your phone is hot or in Battery Saver
 • No account, no phone number, no email — your identity lives only on your device
 
 Haven is a stronghold for the people you love. It's built so that no one — not advertisers, not data brokers, not even the people who made it — can get between you and your circle.

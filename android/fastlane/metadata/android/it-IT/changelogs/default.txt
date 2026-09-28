@@ -1,3 +1,7 @@
-1.8.11 — Guardati durante le videochiamate.
-- L’anteprima a specchio della tua fotocamera ora compare nell’angolo durante una chiamata, così puoi controllare come appari mentre parlate.
-- Con la fotocamera spenta, l’angolo mostra un’icona di fotocamera disattivata invece di un riquadro nero vuoto.
+2.0.0 — Più leggero, più veloce, più chiaro.
+• Foto e video vanno una volta sul relay della tua cerchia e gli amici li scaricano da lì: il telefono si scalda meno.
+• I trasferimenti pesanti si fermano in chiamata, col caldo o col Risparmio energetico.
+• Vedi chi raggiunge un post, invia in privato con un tocco, scrivi dal profilo.
+• Nuovi amici collegati in pochi secondi.
+• Avvio più rapido, scorrimento fluido, sincronizzazione onesta.
+• La condivisione schermo da Android ora arriva a tutti.

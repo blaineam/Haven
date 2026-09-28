@@ -1463,6 +1463,18 @@ impl HavenNode {
         self.node.node_id_hex()
     }
 
+    /// Clear the dial backoff for one peer (hex node id) — call on fresh reachability evidence: a
+    /// friend added / approved, or an inbound frame from them. Returns whether a gate was cleared.
+    pub fn forgive_dial(&self, node_hex: String) -> bool {
+        self.node.forgive_dial(&node_hex.to_lowercase())
+    }
+
+    /// Re-open all gated peers once (network path changed). Strike counts are kept, so a still-dead
+    /// peer fails once and returns to its long cooldown. Returns how many gates were re-opened.
+    pub fn forgive_all_dials(&self) -> u32 {
+        self.node.forgive_all_dials() as u32
+    }
+
     /// A relay client that dials `relay_node_hex` over THIS node's WARM, DERP-established endpoint, instead
     /// of RelayClient::connect binding a fresh endpoint that cold-starts DERP on every fetch (the reason a
     /// cross-network relay GET timed out at 30s while messaging showed "Connected · Relay"). Reuses the
@@ -1626,6 +1638,14 @@ struct Circle {
     pending_tree: Vec<Vec<u8>>,
     /// Per-poll replay attempts since the buffer last CHANGED — bounds the poll-driven retry.
     pending_tree_retries: u8,
+    /// Key commits from a committer I can't resolve YET (not a member, no verified roster naming the
+    /// signing device) — the FOURTH instance of the mark-seen-on-failure trap. A brand-new friend's
+    /// first commit routinely lands in my mailbox BEFORE their bundle is added to the circle (the
+    /// grant/hello and the commit race); dropping it stranded every post they sealed under that epoch
+    /// in `pending_epoch` until the next periodic history resend (minutes to an hour). Parked here and
+    /// replayed by `drain_pending_commits` whenever a member is added, a roster is stored, or state is
+    /// imported. Bounded + deduped; persisted (additive) like `pending_epoch`.
+    pending_commit: Vec<Vec<u8>>,
     id: String,
     name: String,
     members: Vec<HavenId>,
@@ -1806,6 +1826,7 @@ impl Circle {
             epoch_moved: false,
             pending_tree: vec![],
             pending_tree_retries: 0,
+            pending_commit: vec![],
             id,
             name,
             members: vec![],
@@ -4052,6 +4073,9 @@ fn receive_key_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
         // peer slot — preserving multi-device convergence now that siblings sign commits under device keys.
         (bundle, hex(&acct))
     } else {
+        // Committer not resolvable YET (a new friend whose bundle/roster hasn't landed). Park it —
+        // the mailbox already marked its key seen, so dropping it here lost the key until a resend.
+        park_pending_commit(&mut st.circles[idx], body);
         return Ok(false);
     };
     // Dual-open: try this DEVICE's key first (content sealed to my device bundle — Option 1), then fall
@@ -4126,6 +4150,36 @@ fn receive_key_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
         drain_pending(st, idx); // a newly-learned key may unlock events that arrived early
     }
     Ok(is_new)
+}
+
+/// Max parked key commits per circle. Commits are one per (committer device, epoch), so even a large
+/// circle's worth of not-yet-known joiners fits; evict-oldest like `park_pending`.
+const PENDING_COMMIT_CAP: usize = 64;
+
+/// Park a key commit (untagged body) whose committer isn't resolvable yet (capped + de-duped).
+fn park_pending_commit(c: &mut Circle, body: &[u8]) {
+    if c.pending_commit.iter().any(|p| p == body) {
+        return;
+    }
+    if c.pending_commit.len() >= PENDING_COMMIT_CAP {
+        c.pending_commit.remove(0);
+    }
+    c.pending_commit.push(body.to_vec());
+}
+
+/// Replay parked key commits after the circle learned a member / roster. Still-unresolvable ones go
+/// straight back into the buffer (`receive_key_commit` re-parks them); ones whose committer is now
+/// known but that don't open for me are dropped (terminal). A newly-applied key drains `pending_epoch`
+/// inside `receive_key_commit`. Returns whether any key was newly learned.
+fn drain_pending_commits(st: &mut NetState, idx: usize) -> bool {
+    let pending = std::mem::take(&mut st.circles[idx].pending_commit);
+    let mut learned = false;
+    for raw in pending {
+        if let Ok(true) = receive_key_commit(st, idx, &raw) {
+            learned = true;
+        }
+    }
+    learned
 }
 
 /// Park an epoch-sealed envelope in the circle's durable pending buffer (capped + de-duped).
@@ -4388,6 +4442,11 @@ fn drain_pending_tree(st: &mut NetState, idx: usize) {
 fn drain_all_pending(st: &mut NetState) -> bool {
     let before: usize = st.circles.iter().map(|c| c.events.len()).sum();
     for idx in 0..st.circles.len() {
+        // Parked key commits first: a roster/member that just landed may resolve their committer,
+        // and each newly-applied key unlocks `pending_epoch` content below.
+        if !st.circles[idx].pending_commit.is_empty() {
+            drain_pending_commits(st, idx);
+        }
         drain_pending(st, idx);
     }
     let after: usize = st.circles.iter().map(|c| c.events.len()).sum();
@@ -4495,6 +4554,10 @@ struct PersistCircle {
     pending_epoch: Vec<Vec<u8>>,
     #[serde(default)]
     pending_tree: Vec<Vec<u8>>,
+    /// Key commits parked because their committer wasn't resolvable yet (see `Circle::pending_commit`).
+    /// Defaulted so older state files load with none; older builds ignore the field.
+    #[serde(default)]
+    pending_commit: Vec<Vec<u8>>,
     /// MLS M3: the pinned circle creator (Remove/Add authority root, §4.3). Defaulted so old state
     /// files load with no creator (⇒ no tree Remove is accepted until one is learned).
     #[serde(default)]
@@ -5463,6 +5526,13 @@ impl HavenSocial {
         }
         if !circle.members.iter().any(|c| c.node_id_bytes() == id.node_id_bytes()) {
             circle.members.push(id);
+            // A brand-new member's key commit may already be parked (it raced the grant/hello).
+            // Replay it now so their first posts open immediately instead of after a resend.
+            if let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) {
+                if !st.circles[idx].pending_commit.is_empty() {
+                    drain_pending_commits(&mut st, idx);
+                }
+            }
         }
         Ok(node_hex)
     }
@@ -5490,6 +5560,11 @@ impl HavenSocial {
         }
         if !circle.members.iter().any(|m| m.node_id_bytes() == bundle.node_id_bytes()) {
             circle.members.push(bundle);
+            if let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) {
+                if !st.circles[idx].pending_commit.is_empty() {
+                    drain_pending_commits(&mut st, idx);
+                }
+            }
         }
         Ok(())
     }
@@ -6942,6 +7017,7 @@ have_seed={} have_device={} members={}",
                 cached_commit: c.cached_commit.clone(),
                 pending_epoch: c.pending_epoch.clone(),
                 pending_tree: c.pending_tree.clone(),
+                pending_commit: c.pending_commit.clone(),
                 creator: c.creator,
                 creator_pinned: c.creator_pinned,
                 admin_grants: c.admin_grants.clone(),
@@ -7009,6 +7085,7 @@ have_seed={} have_device={} members={}",
                 cached_commit: None,
                 pending_epoch: vec![],
                 pending_tree: vec![],
+                pending_commit: vec![],
                 creator: None,
                 creator_pinned: false,
                 admin_grants: vec![],
@@ -7490,6 +7567,9 @@ impl HavenSocial {
         }
         for raw in pc.pending_tree {
             park_pending_tree(&mut st.circles[idx], &raw);
+        }
+        for raw in pc.pending_commit {
+            park_pending_commit(&mut st.circles[idx], &raw);
         }
         // A restart is a natural convergence point: the keys/rosters we already hold may open what
         // was parked, and a restored tree buffer may contain the very commit whose loss forked us.

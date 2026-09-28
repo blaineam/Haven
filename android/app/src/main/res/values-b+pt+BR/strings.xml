@@ -188,8 +188,6 @@ O que já tentei:
     <string name="circle_disappear_1h">Depois de 1 hora</string>
     <string name="circle_after_1_day">Depois de 1 dia</string>
     <string name="circle_after_1_week">Depois de 1 semana</string>
-    <string name="circle_composer_placeholder">Compartilhe com seu círculo…</string>
-    <string name="circle_post_cd">Post</string>
     <string name="circle_send_later_title">Enviar depois</string>
     <string name="circle_send_later_description">Publica deste celular quando chegar a hora (se estiver fechado, ele envia da próxima vez que você abrir o Haven).</string>
     <string name="circle_send_in_1_hour">Em 1 hora</string>
@@ -318,7 +316,6 @@ O que já tentei:
     <string name="circle_audio_reply_cd">Resposta em áudio</string>
     <string name="circle_attach_to_reply_cd">Anexar à resposta</string>
     <string name="circle_photo_or_video">Foto ou vídeo</string>
-    <string name="circle_add_reply_placeholder">Escreva uma resposta…</string>
     <string name="circle_send_reply_cd">Enviar resposta</string>
     <string name="circle_more_reactions_cd">Mais reações</string>
     <string name="circle_link_copied">Link copiado</string>
@@ -736,4 +733,21 @@ O que já tentei:
     <string name="story_expired_body">Stories somem após 24 horas, a menos que o autor tenha mantido no perfil.</string>
     <string name="view_story">Ver story</string>
     <string name="story_no_longer_available">Story não está mais disponível</string>
+    <!-- Composer audience: a circle post goes to EVERYONE in it; make that unmistakable. -->
+    <string name="composer_audience_everyone">Todos em %1$s</string>
+    <string name="composer_audience_everyone_count">Todos em %1$s · %2$s</string>
+    <string name="composer_one_person">1 pessoa</string>
+    <string name="composer_n_people">%1$d pessoas</string>
+    <string name="composer_placeholder">Publique para todos…</string>
+    <string name="circle_reply_placeholder_generic">Responda a todos…</string>
+    <string name="composer_post_button">Publicar</string>
+    <string name="composer_post_cd_named">Publicar para todos em %1$s</string>
+    <string name="composer_audience_cd">Publicando para: %1$s. Abre opções, incluindo enviar em privado para uma pessoa</string>
+    <string name="composer_send_privately">Enviar em privado para alguém…</string>
+    <string name="audience_confirm_title">Publicar para todos em %1$s?</string>
+    <string name="audience_confirm_body">Isso será compartilhado com todos em %1$s (%2$s). Para enviar só para uma pessoa, use Mensagem.</string>
+    <string name="audience_confirm_post">Publicar para todos</string>
+    <string name="audience_confirm_private">Enviar em privado…</string>
+    <string name="circle_reply_placeholder_named">Responda a todos em %1$s…</string>
+    <string name="circle_member_message_cd">Enviar mensagem privada para %1$s</string>
 </resources>

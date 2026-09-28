@@ -153,8 +153,6 @@
     <string name="circle_disappear_1h">1時間後</string>
     <string name="circle_after_1_day">1日後</string>
     <string name="circle_after_1_week">1週間後</string>
-    <string name="circle_composer_placeholder">サークルにシェア…</string>
-    <string name="circle_post_cd">投稿</string>
     <string name="circle_send_later_title">あとで送信</string>
     <string name="circle_send_later_description">時間になると、この端末から投稿します（間に合わなかったときは、次に Haven を開いたときにまとめて送信します）。</string>
     <string name="circle_send_in_1_hour">1時間後</string>
@@ -283,7 +281,6 @@
     <string name="circle_audio_reply_cd">音声で返信</string>
     <string name="circle_attach_to_reply_cd">返信に添付</string>
     <string name="circle_photo_or_video">写真または動画</string>
-    <string name="circle_add_reply_placeholder">返信を書く…</string>
     <string name="circle_send_reply_cd">返信を送信</string>
     <string name="circle_more_reactions_cd">その他のリアクション</string>
     <string name="circle_link_copied">リンクをコピーしました</string>
@@ -701,4 +698,21 @@
     <string name="story_expired_body">ストーリーは24時間で消えます。作者がプロフィールに残していない場合は表示できません。</string>
     <string name="view_story">ストーリーを見る</string>
     <string name="story_no_longer_available">ストーリーはもう利用できません</string>
+    <!-- Composer audience: a circle post goes to EVERYONE in it; make that unmistakable. -->
+    <string name="composer_audience_everyone">%1$s の全員</string>
+    <string name="composer_audience_everyone_count">%1$s の全員 · %2$s</string>
+    <string name="composer_one_person">1人</string>
+    <string name="composer_n_people">%1$d人</string>
+    <string name="composer_placeholder">全員に投稿…</string>
+    <string name="circle_reply_placeholder_generic">全員に返信…</string>
+    <string name="composer_post_button">投稿</string>
+    <string name="composer_post_cd_named">%1$s の全員に投稿</string>
+    <string name="composer_audience_cd">投稿先：%1$s。1人だけに非公開で送るなどのオプションを開きます</string>
+    <string name="composer_send_privately">特定の人に非公開で送信…</string>
+    <string name="audience_confirm_title">%1$s の全員に投稿しますか？</string>
+    <string name="audience_confirm_body">%1$s の全員（%2$s）に共有されます。1人だけに送るには「メッセージ」を使ってください。</string>
+    <string name="audience_confirm_post">全員に投稿</string>
+    <string name="audience_confirm_private">代わりに非公開で送信…</string>
+    <string name="circle_reply_placeholder_named">%1$s の全員に返信…</string>
+    <string name="circle_member_message_cd">%1$s に非公開でメッセージ</string>
 </resources>

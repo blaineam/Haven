@@ -182,8 +182,6 @@
     <string name="circle_disappear_1h">After 1 hour</string>
     <string name="circle_after_1_day">After 1 day</string>
     <string name="circle_after_1_week">After 1 week</string>
-    <string name="circle_composer_placeholder">Share with your circle…</string>
-    <string name="circle_post_cd">Post</string>
     <string name="circle_send_later_title">Send later</string>
     <string name="circle_send_later_description">Posts from this phone when the time comes (it catches up next time you open Haven).</string>
     <string name="circle_send_in_1_hour">In 1 hour</string>
@@ -312,7 +310,6 @@
     <string name="circle_audio_reply_cd">Audio reply</string>
     <string name="circle_attach_to_reply_cd">Attach to reply</string>
     <string name="circle_photo_or_video">Photo or video</string>
-    <string name="circle_add_reply_placeholder">Add a reply…</string>
     <string name="circle_send_reply_cd">Send reply</string>
     <string name="circle_more_reactions_cd">More reactions</string>
     <string name="circle_link_copied">Link copied</string>
@@ -823,4 +820,21 @@
     <string name="edit_post_change_song">Change</string>
     <string name="edit_post_video_muted">Video muted</string>
     <string name="edit_post_video_sound">Play video sound</string>
+    <!-- Composer audience: a circle post goes to EVERYONE in it; make that unmistakable. -->
+    <string name="composer_audience_everyone">Everyone in %1$s</string>
+    <string name="composer_audience_everyone_count">Everyone in %1$s · %2$s</string>
+    <string name="composer_one_person">1 person</string>
+    <string name="composer_n_people">%1$d people</string>
+    <string name="composer_placeholder">Post to everyone…</string>
+    <string name="circle_reply_placeholder_generic">Reply to everyone…</string>
+    <string name="composer_post_button">Post</string>
+    <string name="composer_post_cd_named">Post to everyone in %1$s</string>
+    <string name="composer_audience_cd">Posting to %1$s. Opens options, including sending privately to one person</string>
+    <string name="composer_send_privately">Send privately to someone…</string>
+    <string name="audience_confirm_title">Post to everyone in %1$s?</string>
+    <string name="audience_confirm_body">This will be shared with everyone in %1$s (%2$s). To send to just one person, use Message.</string>
+    <string name="audience_confirm_post">Post to everyone</string>
+    <string name="audience_confirm_private">Send privately instead…</string>
+    <string name="circle_reply_placeholder_named">Reply to everyone in %1$s…</string>
+    <string name="circle_member_message_cd">Message %1$s privately</string>
 </resources>

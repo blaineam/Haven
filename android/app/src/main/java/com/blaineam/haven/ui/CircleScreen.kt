@@ -64,7 +64,7 @@ import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -86,6 +86,8 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -192,6 +194,24 @@ fun CircleScreen(onAddFriend: () -> Unit) {
     var disappearSecs by remember { mutableStateOf<ULong?>(null) }  // disappearing post (retention)
     var showDisappearMenu by remember { mutableStateOf(false) }
     var showSchedule by remember { mutableStateOf(false) }   // "send later" dialog
+    // Composer audience (see ComposerAudience): who a post here reaches, the one-time per-circle
+    // "this goes to everyone" check, and the "Send privately…" DM picker (draft carried over).
+    val audienceName = remember(active, circlesVersion) { HavenNet.circleName(active) }
+    val audienceCount = remember(active, circlesVersion, HavenNet.contacts.size, HavenNet.blocked.size) {
+        ComposerAudience.othersCount(active)
+    }
+    var showAudienceConfirm by remember { mutableStateOf(false) }
+    var showPrivatePicker by remember { mutableStateOf(false) }
+    fun postNow() {
+        val actionsBefore = com.blaineam.haven.support.RatingManager.significantActions(context)
+        HavenNet.post(active, draft.trim(), pendingMedia.toList(), pendingMusic, retentionSecs = disappearSecs)
+        draft = ""; pendingMedia.clear(); pendingMusic = null; disappearSecs = null
+        // HavenNet.post records a significant action only when the engine accepted the
+        // post — so "the count moved" is exactly "a publish just succeeded".
+        if (com.blaineam.haven.support.RatingManager.significantActions(context) > actionsBefore) {
+            com.blaineam.haven.support.RatingManager.maybeAskAfterPublish(context)
+        }
+    }
     var cameraForPost by remember { mutableStateOf(false) }
     val camPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         if (grants[android.Manifest.permission.CAMERA] == true) { if (cameraForPost) showPostCamera = true else showStoryCamera = true }
@@ -419,29 +439,36 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                     }
                 }
             }
+            // Say out loud who this reaches — the audience used to be implicit in the circle switcher,
+            // and people posted private things to the whole circle meaning to write to one person.
+            Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 12.dp, top = 2.dp)) {
+                ComposerAudienceChip(audienceName, audienceCount) { showPrivatePicker = true }
+            }
             // Composer text + send.
             Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 12.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = draft, onValueChange = { draft = it },
-                    placeholder = { Text(stringResource(R.string.circle_composer_placeholder)) },
+                    placeholder = { Text(stringResource(R.string.composer_placeholder)) },   // the chip above names the circle
                     modifier = Modifier.weight(1f), shape = RoundedCornerShape(22.dp), maxLines = 4,
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
                 )
                 Spacer(Modifier.size(8.dp))
                 val canPost = draft.isNotBlank() || pendingMedia.isNotEmpty() || pendingMusic != null
-                // The glyph is white-on-brand-gradient — never themed.
-                Box(Modifier.size(48.dp).clip(CircleShape).background(HavenTheme.brandHorizontal)
+                // Labeled "Post", not a bare paper plane: the plane is what a private message's send
+                // looks like, and this goes to the whole circle. White-on-brand-gradient — never themed.
+                val postCd = stringResource(R.string.composer_post_cd_named, audienceName)
+                Box(Modifier.height(48.dp).clip(CircleShape).background(HavenTheme.brandHorizontal)
                     .clickable(enabled = canPost) {
-                        val actionsBefore = com.blaineam.haven.support.RatingManager.significantActions(context)
-                        HavenNet.post(active, draft.trim(), pendingMedia.toList(), pendingMusic, retentionSecs = disappearSecs)
-                        draft = ""; pendingMedia.clear(); pendingMusic = null; disappearSecs = null
-                        // HavenNet.post records a significant action only when the engine accepted the
-                        // post — so "the count moved" is exactly "a publish just succeeded".
-                        if (com.blaineam.haven.support.RatingManager.significantActions(context) > actionsBefore) {
-                            com.blaineam.haven.support.RatingManager.maybeAskAfterPublish(context)
-                        }
-                    }, contentAlignment = Alignment.Center) { Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.circle_post_cd), tint = Color.White) }
+                        if (ComposerAudience.needsConfirmation(context, active, audienceCount)) showAudienceConfirm = true
+                        else postNow()
+                    }
+                    .padding(horizontal = 18.dp)
+                    .semantics { contentDescription = postCd },
+                    contentAlignment = Alignment.Center) {
+                    Text(stringResource(R.string.composer_post_button), color = Color.White,
+                        fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                }
             }
             }
         }
@@ -477,6 +504,25 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                 onDismiss = { showMusicDialog = false },
             )
         }
+    }
+    if (showAudienceConfirm) {
+        AudienceConfirmDialog(
+            circleName = audienceName, count = audienceCount,
+            onPost = { showAudienceConfirm = false; ComposerAudience.acknowledge(context, active); postNow() },
+            onSendPrivately = { showAudienceConfirm = false; showPrivatePicker = true },
+            onDismiss = { showAudienceConfirm = false },
+        )
+    }
+    if (showPrivatePicker) {
+        // Attachments stay in this composer; only the words travel to the private thread.
+        NewMessagePicker(
+            onDismiss = { showPrivatePicker = false },
+            onStart = { picks ->
+                showPrivatePicker = false
+                ComposerAudience.sendPrivately(picks, draft.trim())
+                draft = ""
+            },
+        )
     }
     if (showSchedule) {
         fun doSchedule(sendAtMs: Long) {
@@ -590,6 +636,18 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
                         HavenAvatar(m.idHex, m.name, size = 30.dp)
                         Spacer(Modifier.size(8.dp))
                         Text(m.name, color = HavenTheme.textPrimary, modifier = Modifier.weight(1f), maxLines = 1)
+                        // Private, one-to-one — the way to write to just this person instead of the
+                        // whole circle. Only for people I hold as contacts (a DM needs their keys).
+                        val asContact = HavenNet.contacts.firstOrNull { it.idHex.equals(m.idHex, true) }
+                        if (asContact != null && !m.idHex.equals(HavenNet.nodeIdHex, true)) {
+                            val cd = stringResource(R.string.circle_member_message_cd, m.name)
+                            Box(Modifier.size(34.dp).clip(CircleShape).clickable {
+                                ComposerAudience.openThread(HavenNet.startDm(asContact))
+                                onDismiss()
+                            }.semantics { contentDescription = cd }, contentAlignment = Alignment.Center) {
+                                Icon(Icons.AutoMirrored.Filled.Chat, null, tint = HavenTheme.pink, modifier = Modifier.size(18.dp))
+                            }
+                        }
                         Text(stringResource(R.string.common_remove), color = HavenTheme.pink, fontSize = 13.sp,
                             modifier = Modifier.clickable { HavenNet.removeFromCircle(circleId, m.idHex) }.padding(horizontal = 6.dp, vertical = 4.dp))
                         Text(stringResource(R.string.circle_block), color = Color(0xFFEF4444), fontSize = 13.sp,
@@ -2715,9 +2773,14 @@ fun PostCard(
                 }
             }
             Spacer(Modifier.size(4.dp))
+            // Replies are read by the whole circle, not just the author — the placeholder says so.
+            // Names the circle when it fits; a long name falls back to the plain "Reply to everyone…".
+            val replyAudience = remember(circleId) { HavenNet.circleName(circleId) }
             OutlinedTextField(
                 value = commentDraft, onValueChange = { commentDraft = it },
-                placeholder = { Text(stringResource(R.string.circle_add_reply_placeholder), fontSize = 13.sp) },
+                placeholder = { Text(
+                    if (replyAudience.length <= 14) stringResource(R.string.circle_reply_placeholder_named, replyAudience)
+                    else stringResource(R.string.circle_reply_placeholder_generic), fontSize = 13.sp, maxLines = 1) },
                 modifier = Modifier.weight(1f), shape = RoundedCornerShape(18.dp), maxLines = 5,
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),

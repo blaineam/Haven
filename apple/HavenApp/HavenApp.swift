@@ -238,6 +238,8 @@ struct HavenApp: App {
         // this?" against the constraint reported here, and an unseeded monitor would answer the
         // first few as if the link were unconstrained.
         LowDataMonitor.shared.start()
+        // Calls (Haven + cellular/FaceTime), thermal, Low Power Mode → the heavy-media-I/O gate.
+        HeavyWorkMonitor.shared.start()
         #if DEBUG
         // Names any main-thread freeze (symbolicated stack in the unified log /
         // stdout) instead of leaving it to guesswork. DEBUG-only; never ships.

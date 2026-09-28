@@ -8,6 +8,8 @@ import Foundation
 ///   .fair      → skip the self-sync pass, skip the putHello mailbox fan-out, HALVE media
 ///                budgets, double timer intervals (the existing adaptiveInterval stretch).
 ///   .serious+  → park media retries and the mailbox poll entirely (existing parks stay).
+///   suspend    → .serious+, ANY call, or Low Power Mode (`HeavyWorkPolicy`): also park peer media
+///                serving, backfill uploads, full-size prefetch, history handoff.
 ///
 /// Cross-platform: `thermalState` exists on macOS too (a hosting Mac under load reports .fair),
 /// so the gates apply everywhere; explicit user actions bypass them via their own `force` paths.
@@ -29,12 +31,17 @@ enum ThermalPolicy {
         }
     }
 
-    /// .fair+: the multi-transport self-sync LIST/FETCH/merge pass is deferrable heat.
-    static var skipSelfSync: Bool { isFairOrWorse }
+    /// Hot, in ANY call (Haven or cellular/FaceTime), or in Low Power Mode — the heavy-media-I/O
+    /// gate (`HeavyWorkPolicy.Conditions.suspendHeavyIO`, sampled by `HeavyWorkMonitor`). Peer media
+    /// serving, backfill uploads, full-size prefetch, history handoff and self-sync all wait on it.
+    static var suspendHeavyIO: Bool { isSeriousOrWorse || HeavyWorkMonitor.current.suspendHeavyIO }
+
+    /// .fair+ (or suspended): the multi-transport self-sync LIST/FETCH/merge pass is deferrable heat.
+    static var skipSelfSync: Bool { isFairOrWorse || suspendHeavyIO }
     /// .fair+: the per-contact HELLO mailbox PUT fan-out is deferrable heat.
     static var skipHelloFanOut: Bool { isFairOrWorse }
-    /// .serious+: media retry loops park until the SoC recovers (a push still wakes them).
-    static var parkMediaRetries: Bool { isSeriousOrWorse }
+    /// .serious+ (or suspended): media retry loops park until the gate lifts (a push still wakes them).
+    static var parkMediaRetries: Bool { suspendHeavyIO }
 
     /// Halve a media-work budget at .fair+ (never below 1 so progress can't fully stall).
     static func mediaBudget(_ base: Int) -> Int {

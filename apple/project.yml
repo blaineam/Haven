@@ -427,6 +427,9 @@ targets:
       # HistoryHandoff.swift (which needs FeedStore / the FFI) so the format is covered here.
       - path: HavenApp/HistoryHandoffWire.swift
       - path: HavenApp/HavenLog.swift
+      # Relay-first media serving + the call/thermal/Low-Power heavy-I/O gate — pure decisions,
+      # Foundation only (the live sampling is HeavyWorkMonitor.swift, app-only).
+      - path: HavenApp/HeavyWorkPolicy.swift
       - path: Shared/SharedNotificationPrivacy.swift
       - path: HavenLogicTests
     settings:

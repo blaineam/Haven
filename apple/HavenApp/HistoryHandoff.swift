@@ -677,7 +677,7 @@ final class HistoryHandoff: ObservableObject {
     /// uploaded. Cheap when there's nothing to do: one LIST of a tiny prefix.
     @discardableResult
     func serve(until deadline: Date) async -> Bool {
-        guard !serving, !ThermalPolicy.isSeriousOrWorse else { return false }
+        guard !serving, !ThermalPolicy.suspendHeavyIO else { return false }
         let acct = AccountStore.currentNodeHex()
         guard !acct.isEmpty, SelfSyncCoordinator.shared.hasAccountLane else { return false }
         // Nothing to serve from until the engine is up with its circles — a run started now would
@@ -917,7 +917,8 @@ final class HistoryHandoff: ObservableObject {
     @discardableResult
     func tick(budget: TimeInterval) async -> Bool {
         // Both roles are real crypto per envelope; a hot phone waits (the work resumes where it was).
-        guard !ThermalPolicy.isSeriousOrWorse else { return false }
+        // A call or Low Power Mode parks it too (`ThermalPolicy.suspendHeavyIO`).
+        guard !ThermalPolicy.suspendHeavyIO else { return false }
         let deadline = Date().addingTimeInterval(budget)
         var moved = false
         if isWaiting { moved = await pull(until: deadline) }

@@ -59,10 +59,13 @@ final class NearbyTransport: NSObject {
     /// everyday heat budget is the wrong trade: at 256 KB/s a 4 GB library takes most of a day.
     /// Set by `HistoryHandoff` while a transfer is active; the thermal gate there still parks it.
     nonisolated(unsafe) static var handoffBoost = false
-    private static var rateBytes: Double { handoffBoost ? 3 * 1024 * 1024 : bytesPerSecond }
-    private static var rateBurstBytes: Double { handoffBoost ? 6 * 1024 * 1024 : burstBytes }
-    private static var rateFrames: Double { handoffBoost ? 120 : maxFramesPerSecond }
-    private static var rateBurstFrames: Double { handoffBoost ? 240 : burstFrames }
+    /// The boost only applies while heavy I/O is allowed — never during a call, in Low Power Mode,
+    /// or hot (`HeavyWorkMonitor`); a handoff in progress drops back to the normal pace then.
+    private static var boosted: Bool { handoffBoost && !HeavyWorkMonitor.current.suspendHeavyIO }
+    private static var rateBytes: Double { boosted ? 3 * 1024 * 1024 : bytesPerSecond }
+    private static var rateBurstBytes: Double { boosted ? 6 * 1024 * 1024 : burstBytes }
+    private static var rateFrames: Double { boosted ? 120 : maxFramesPerSecond }
+    private static var rateBurstFrames: Double { boosted ? 240 : burstFrames }
 
     private let rateLock = NSLock()
     private var byteTokens: Double = NearbyTransport.burstBytes
@@ -391,7 +394,7 @@ final class NearbyTransport: NSObject {
         byteTokens -= needBytes
         rateLock.unlock()
 
-        enqueuePaced(frame, waitMs: sendClass == .bulk && frame.count > 4096 && !Self.handoffBoost ? 12 : 0)
+        enqueuePaced(frame, waitMs: sendClass == .bulk && frame.count > 4096 && !Self.boosted ? 12 : 0)
         return true
     }
 

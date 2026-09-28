@@ -144,6 +144,16 @@ final class MediaBackupQueue {
     /// mid-upload when the app was killed still reaches the relay.
     func drainPersisted(engine: Engine) { drain(engine: engine) }
 
+    /// Move a queued backfill job to the FRONT of the priority lane: a peer is waiting on this blob
+    /// (we answered their direct ask with "it'll be on the relay" instead of streaming it). No-op
+    /// when the ref is not queued, already prioritized, or already in flight. The next pass takes it.
+    func promote(_ ref: String) {
+        guard let i = pending.firstIndex(where: { $0.ref == ref }) else { return }
+        let job = pending.remove(at: i)
+        priorityPending.insert(Job(ref: job.ref, cid: job.cid, at: nil), at: 0)
+        save()
+    }
+
     private func drain(engine: Engine) {
         // HAVEN_NO_NET: media backup is an outbound lane, and `configureForCurrentIdentity` calls
         // `drainPersisted` BEFORE its offline guard. The queue is persisted, so refusing here only
@@ -190,6 +200,11 @@ final class MediaBackupQueue {
             // Filter rather than take the head, or a few permanently-stalled refs at the front
             // starve everything behind them (head-of-line blocking).
             let budget = 5
+            // HEAVY-I/O GATE (HeavyWorkPolicy.uploadBudget): during a call / Low Power Mode / .serious
+            // the priority lane (media you just authored — what spares every future peer serve)
+            // keeps going ONE job per pass and the backfill lane waits; .critical stops both. The
+            // gate lifting re-drives this queue (HeavyWorkMonitor → FeedStore.heavyWorkLifted).
+            let gate = HeavyWorkPolicy.uploadBudget(base: budget, HeavyWorkMonitor.current)
             // ULTRA-CONSTRAINED LINK: previews only (docs/PREVIEW-TIER-DESIGN.md §4.1).
             //
             // A ~6 KB preview is the one media that can actually cross a satellite bearer; the
@@ -207,8 +222,8 @@ final class MediaBackupQueue {
                 if MediaBackupBackoff.shouldSkip(job.ref) { return false }
                 return !previewsOnly || MediaStore.shared.maySendOnUltraConstrained(job.ref)
             }
-            let hiWork = Array(priorityPending.filter(sendable).prefix(budget))
-            let loWork = Array(pending.filter(sendable).prefix(budget - hiWork.count))
+            let hiWork = Array(priorityPending.filter(sendable).prefix(gate.priority))
+            let loWork = Array(pending.filter(sendable).prefix(min(gate.backfill, budget - hiWork.count)))
             guard !hiWork.isEmpty || !loWork.isEmpty else {
                 // Everything queued is inside its backoff window. Do NOT re-arm on a timer: the
                 // 2-minute backfill sweep already re-enqueues refs whose window has elapsed (it is
@@ -226,7 +241,15 @@ final class MediaBackupQueue {
             reindexPending()   // taken off the lanes but still pending — the indicator must agree
             var failedHi: [Job] = []
             var failedLo: [Job] = []
+            var preempted: [Job] = []
             for (job, isPriority) in hiWork.map({ ($0, true) }) + loWork.map({ ($0, false) }) {
+                // Fresh media outranks backfill MID-PASS: a post authored (or a blob promoted for a
+                // waiting peer) while this pass works through large backfill jobs used to wait for
+                // the whole pass. Hand the untouched backfill jobs back and start a new pass now.
+                if !isPriority, !preempted.isEmpty || priorityPending.contains(where: sendable) {
+                    preempted.append(job)
+                    continue
+                }
                 // Own hosted store: if the blob is already local under the media key, ledger it and
                 // skip the expensive seal path for that dest (backup still mirrors to remote peers).
                 let ok = await SharedStore.backup(ref: job.ref, circleId: job.cid, engine: engine)
@@ -254,11 +277,15 @@ final class MediaBackupQueue {
                     MediaBackupBackoff.recordStalled(job.ref)
                     HavenLog.sync("media-backup RETRY ref=\(job.ref.prefix(16)) circle=\(job.cid.prefix(12)) lane=\(isPriority ? "hi" : "lo") — pass failed, backing off")
                     if isPriority { failedHi.append(job) } else { failedLo.append(job) }
-                } else if isPriority, let at = job.at,
-                          UInt64(Date().timeIntervalSince1970 * 1000) &- at < 600_000 {
-                    // A FRESH post's blob just landed on a relay — tell the circle so their devices
-                    // prefetch NOW instead of on their next missing-media sweep (frame 32).
-                    FeedStore.shared.announceMediaLanded(ref: job.ref, circleId: job.cid)
+                } else {
+                    // Anyone we told "it'll be on the relay" instead of streaming it: tell them now.
+                    FeedStore.shared.mediaBackupLanded(ref: job.ref, circleId: job.cid)
+                    if isPriority, let at = job.at,
+                       UInt64(Date().timeIntervalSince1970 * 1000) &- at < 600_000 {
+                        // A FRESH post's blob just landed on a relay — tell the circle so their devices
+                        // prefetch NOW instead of on their next missing-media sweep (frame 32).
+                        FeedStore.shared.announceMediaLanded(ref: job.ref, circleId: job.cid)
+                    }
                 }
                 // Yield between large jobs so SwiftUI / Multipeer can run.
                 try? await Task.sleep(nanoseconds: 50_000_000)
@@ -273,8 +300,17 @@ final class MediaBackupQueue {
             pending.append(contentsOf: failedLo.filter { j in
                 !pending.contains(where: { $0.ref == j.ref && $0.cid == j.cid })
             })
+            // Preempted backfill never started — it goes back to the FRONT, keeping its place.
+            pending.insert(contentsOf: preempted.filter { j in
+                !pending.contains(where: { $0.ref == j.ref && $0.cid == j.cid })
+            }, at: 0)
             save()
             draining = false
+            if !preempted.isEmpty {
+                HavenLog.sync("media-backup: fresh media queued mid-pass — \(preempted.count) backfill job(s) yield to it")
+                drain(engine: engine)
+                return
+            }
             // Re-arm ONLY for work that is actually retryable now. Re-arming whenever the lanes
             // are non-empty is what turned a permanently-unreachable relay into a 2-second forever
             // loop: the queue is never empty in that state, so the timer never stopped.

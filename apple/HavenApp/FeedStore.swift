@@ -1130,6 +1130,7 @@ final class FeedStore: ObservableObject {
 
     /// CallManager's call lifecycle hook: arm the live-call HTTP poll on call start, kill it on end.
     func callActivityChanged(_ inProgress: Bool) {
+        HeavyWorkMonitor.shared.refresh()   // a call suspends heavy media I/O (HeavyWorkPolicy)
         if inProgress {
             guard liveCallTimer == nil else { return }
             liveCallTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
@@ -2075,9 +2076,13 @@ final class FeedStore: ObservableObject {
         // The engine derives event ids internally (BLAKE3 at author time) — the pass read back the id
         // of the message just created so the sealed banner's `p` deep-link opens THIS thread entry.
         // Best-effort: nil keeps the legacy circle route.
+        // UPLOAD BEFORE BROADCAST: queue the media for the relay (priority lane, thumbs/posters
+        // first) BEFORE the event goes out, so receivers' first relay lookup races a running upload
+        // instead of one that has not started — and so they are not driven to ask this phone for
+        // the bytes directly. Enqueue is synchronous bookkeeping; the post appears no later.
+        enqueueAuthoredMedia(media, circleId: circleId, engine: engine)
         broadcastEvent(circleId, a, banner: .forPost(circleId: circleId, circleName: name, body: body, media: media, story: false, postId: a.eventId))
         postTick += 1
-        enqueueAuthoredMedia(media, circleId: circleId, engine: engine)
         // Heal 403-before-roster: publish device ids, then reannounce relay so the peer learns
         // public media URL immediately (cross-device / friend video DMs).
         if !media.isEmpty {
@@ -4417,9 +4422,13 @@ final class FeedStore: ObservableObject {
         let name = circles.first(where: { $0.id == cid })?.name ?? "your circle"
         // The pass read back the engine-derived id of the post just authored so the sealed banner
         // carries `p` (exact tap route on the recipient). Best-effort — nil keeps the legacy circle route.
+        // UPLOAD BEFORE BROADCAST: queue the media for the relay (priority lane, thumbs/posters
+        // first) BEFORE the event goes out, so receivers' first relay lookup races a running upload
+        // instead of one that has not started — and so they are not driven to ask this phone for
+        // the bytes directly. Enqueue is synchronous bookkeeping; the post appears no later.
+        enqueueAuthoredMedia(media, circleId: cid, engine: engine)
         broadcastEvent(cid, a, banner: .forPost(circleId: cid, circleName: name, body: body, media: media, story: story, postId: a.eventId))
         postTick += 1; publishedPostCount += 1; refresh()
-        enqueueAuthoredMedia(media, circleId: cid, engine: engine)
         identifyAndAttachSong(postId: a.eventId, circleId: cid, media: media, music: music, muteVideo: muteVideo)
         if !media.isEmpty {
             Task { await SharedStore.publishDeviceRoster(engine: engine) }
@@ -4603,10 +4612,10 @@ final class FeedStore: ObservableObject {
                 try s.post(circleId: circleId, body: body, media: media, music: nil, retentionSecs: nil, story: false, muteVideo: false, createdAt: ts)
             }), self.engine === engine else { return }
             let name = self.circles.first(where: { $0.id == circleId })?.name ?? "your circle"
+            self.enqueueAuthoredMedia(media, circleId: circleId, engine: engine)   // upload before broadcast
             self.broadcastEvent(circleId, a, banner: .forPost(circleId: circleId, circleName: name, body: body, media: media, story: false, postId: a.eventId))
             self.postTick += 1
             if circleId == self.activeCircleId { self.refresh() }
-            self.enqueueAuthoredMedia(media, circleId: circleId, engine: engine)
         }
     }
 
@@ -4748,8 +4757,8 @@ final class FeedStore: ObservableObject {
             try s.comment(circleId: circleId, target: id, body: body, media: media, createdAt: ts)
         }), self.engine === engine else { return }
         let name = circles.first(where: { $0.id == circleId })?.name ?? "your circle"
+        enqueueAuthoredMedia(media, circleId: circleId, engine: engine)   // upload before broadcast
         broadcastEvent(circleId, a, banner: .forComment(body: body, circleId: circleId, circleName: name, postId: id))
-        enqueueAuthoredMedia(media, circleId: circleId, engine: engine)
         refresh()
     }
     /// Auto-save freshly-received media to Photos (Haven ▸ Received) when "Save to Photos" is on.
@@ -4773,8 +4782,8 @@ final class FeedStore: ObservableObject {
                 try s.edit(circleId: cid, target: id, body: body, media: media, music: music, muteVideo: muteVideo, createdAt: ts)
             }), self.engine === engine else { return }
             let name = self.circles.first(where: { $0.id == cid })?.name ?? "your circle"
+            self.enqueueAuthoredMedia(media, circleId: cid, engine: engine)   // upload before broadcast
             self.broadcastEvent(cid, a, banner: .forEdit(circleId: cid, circleName: name, postId: id)); self.refresh()
-            self.enqueueAuthoredMedia(media, circleId: cid, engine: engine)
             // Only a NEWLY added video is fingerprinted — an edit that merely removed a chip is respected.
             if MediaVariants.displayRefs(media).contains(where: { MediaKind(ref: $0) == .video && !before.contains($0) }) {
                 self.identifyAndAttachSong(postId: id, circleId: cid, media: media, music: music, muteVideo: muteVideo)
@@ -5266,20 +5275,13 @@ final class FeedStore: ObservableObject {
         #endif
         if nowMs - lastMediaBackfillMs > mediaEvery {
             lastMediaBackfillMs = nowMs
-            #if os(iOS)
-            // Don't thrash media backup while the SoC is already warm.
-            let hot: Bool = {
-                switch ProcessInfo.processInfo.thermalState {
-                case .fair, .serious, .critical: return true
-                default: return false
-                }
-            }()
-            if !hot {
+            // Relay upload is what spares this device every FUTURE peer serve, so a merely warm
+            // (.fair) phone keeps backing up — it was the reverse (backup skipped at .fair while
+            // peer streaming carried on), which is exactly backwards. What parks the backfill is the
+            // heavy-I/O gate: .serious+, any call, Low Power Mode (the queue drain enforces it too).
+            if !ThermalPolicy.suspendHeavyIO {
                 backfillMailboxMedia(circleIds: circles.map { $0.id })
             }
-            #else
-            backfillMailboxMedia(circleIds: circles.map { $0.id })
-            #endif
             // Re-publish our account-signed device roster to every known relay, so a HEADLESS relay
             // (which only knows account ids from its link) authorizes THIS device's id and stops
             // ERR-forbidding our mailbox ops — the "my own NAS relay rejects my phone" fix.
@@ -8257,18 +8259,45 @@ final class FeedStore: ObservableObject {
         mediaReqCircle[ref] = circle   // remember the circle so a peer-delivered blob re-mirrors correctly
         let myHex = myNodeHex
         var payload = Data(myHex.utf8); payload.append(Data(ref.utf8))
-        askForMedia(ref: ref, myHex: myHex, plain: payload)   // resumes from a partial when we have one
         // Always include the ref's OWN circle, even if it isn't in `circles` yet — a DM's relay copy
         // lives under its dm: circle, and restoring only from the circles list would skip it.
         var circleIds = circles.map { $0.id }
         if !circleIds.contains(circle) { circleIds.append(circle) }
-        Task { @MainActor in   // also pull from the circle's shared store if one exists
+        // RELAY FIRST, peers only on a miss. This used to fire the peer ask AND the relay restore
+        // together, so every view of a missing photo (and every frame-32 "it's on the relay now")
+        // also made every holder start streaming it — the relay copy won the race and the peer
+        // streams were pure waste, on phones that may have been in a call. A partial in flight
+        // still resumes straight away (frame 33 carries only the missing windows).
+        // Media is mirrored to every known relay, so ANY circle's mailbox can hold it (restore walks
+        // them all) — the same test the missing-media sweep uses.
+        let circleHasRelay = circleIds.contains { SharedStore.hasMailbox($0) }
+        guard circleHasRelay, incoming[ref] == nil else {
+            if mayDirectAsk(ref, circleHasRelay: circleHasRelay) { askForMedia(ref: ref, myHex: myHex, plain: payload) }
+            return
+        }
+        Task { @MainActor in
             if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, engine: engine) {
                 MediaStore.shared.store(ref, data); mediaArrived(ref); MediaFetchBackoff.clear(ref)
                 autoSaveReceived(ref); scheduleRefresh()
+            } else if !MediaStore.shared.has(ref), self.mayDirectAsk(ref, circleHasRelay: true) {
+                self.askForMedia(ref: ref, myHex: myHex, plain: payload)
             }
         }
     }
+
+    /// Requester patience (`HeavyWorkPolicy.mayDirectAskAfterRelayMiss`): may a relay miss for `ref`
+    /// fall through to asking peers directly right now?
+    private func mayDirectAsk(_ ref: String, circleHasRelay: Bool) -> Bool {
+        let nowMs = now()
+        let age = mediaRefBornAt[ref].map { nowMs >= $0 ? nowMs &- $0 : 0 }
+        let ok = HeavyWorkPolicy.mayDirectAskAfterRelayMiss(
+            small: smallMediaRefs.contains(ref), circleHasRelay: circleHasRelay, ageMs: age,
+            userInitiated: false, HeavyWorkMonitor.current)
+        if !ok { HavenLog.relay("MEDIA-FETCH ref=\(ref.prefix(10)): relay miss — waiting for the relay, not asking peers (\(HeavyWorkMonitor.current.suspendHeavyIO ? HeavyWorkMonitor.current.reason : "fresh"))") }
+        return ok
+    }
+    /// Thumb / poster / preview refs seen by the feed scan — ≤32 KB, exempt from the heavy-I/O gate.
+    private var smallMediaRefs = Set<String>()
 
     // MARK: - Missing-media fetch lanes (fresh vs old)
     //
@@ -8410,12 +8439,15 @@ final class FeedStore: ObservableObject {
             for ref in candidates where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref)
                 && !EvictedMediaStore.shared.contains(ref) {
                 if missing[ref] == nil || fresh { missing[ref] = (circleId, fresh) }
+                // Who to ask (author first) and how fresh it is (relay patience) — see askForMedia.
+                noteMediaOrigin([ref], authorShort: item.authorShort, isMe: item.isMe, createdAt: item.createdAt)
             }
             // Thumb companions prefetch for EVERY post regardless of lane/data saver — ≤32KB by
             // contract, and they're what makes the loading placeholder look like the photo.
             for t in MediaVariants.allThumbs(in: item.media)
                 where !MediaStore.shared.has(t) && !unopenableMedia.contains(t) {
                 thumbs[t] = circleId
+                noteMediaOrigin([t], authorShort: item.authorShort, isMe: item.isMe, createdAt: item.createdAt)
             }
             // PREVIEWS ride the same priority lane, and must: a preview ref is named only INSIDE its
             // marker and never listed in `item.media`, so nothing else ever asks for it. Without
@@ -8425,6 +8457,7 @@ final class FeedStore: ObservableObject {
             for v in MediaVariants.allPreviews(in: item.media)
                 where !MediaStore.shared.has(v) && !unopenableMedia.contains(v) {
                 thumbs[v] = circleId
+                noteMediaOrigin([v], authorShort: item.authorShort, isMe: item.isMe, createdAt: item.createdAt)
             }
             // POSTERS ride the same priority lane, for the same reason: a poster is a small still,
             // not a video. It used to queue in `missing` behind the full-size clips — so the tile
@@ -8437,6 +8470,7 @@ final class FeedStore: ObservableObject {
             for p in MediaVariants.allPosters(in: item.media)
                 where !MediaStore.shared.has(p) && !unopenableMedia.contains(p) {
                 thumbs[p] = circleId
+                noteMediaOrigin([p], authorShort: item.authorShort, isMe: item.isMe, createdAt: item.createdAt)
             }
             for c in item.comments {
                 // Same lazy rule as the post itself — a backfilled thread's attachments load on tap.
@@ -8445,10 +8479,12 @@ final class FeedStore: ObservableObject {
                 for ref in cands where !MediaStore.isSynthetic(ref) && !MediaStore.shared.has(ref)
                     && !EvictedMediaStore.shared.contains(ref) && !unopenableMedia.contains(ref) {
                     if missing[ref] == nil || fresh { missing[ref] = (circleId, fresh) }
+                    noteMediaOrigin([ref], authorShort: c.authorShort, isMe: c.isMe, createdAt: c.createdAt)
                 }
                 for t in MediaVariants.allThumbs(in: c.media) + MediaVariants.allPosters(in: c.media)
                     where !MediaStore.shared.has(t) && !unopenableMedia.contains(t) {
                     thumbs[t] = circleId
+                    noteMediaOrigin([t], authorShort: c.authorShort, isMe: c.isMe, createdAt: c.createdAt)
                 }
             }
         }
@@ -8468,6 +8504,8 @@ final class FeedStore: ObservableObject {
         let circleIds = circles.map { $0.id }
         SyncMetrics.shared.nbMediaPending = missing.count
         let hasMailbox = circleIds.contains(where: { SharedStore.hasMailbox($0) })
+        if smallMediaRefs.count > 5000 { smallMediaRefs.removeAll() }
+        smallMediaRefs.formUnion(thumbs.keys)
 
         // One fetch attempt for `ref` — relay-first, then the peer ask (shared tail of both lanes).
         // RELAY-FIRST: pull the stored copy from the circle's mailbox (own hosted store → relay
@@ -8483,7 +8521,7 @@ final class FeedStore: ObservableObject {
             // only. The peer ask still goes out, because it carries different bytes under a different
             // key and is exactly the lane that can still succeed here.
             if unopenableMedia.contains(ref) {
-                directAsk()
+                if self.mayDirectAsk(ref, circleHasRelay: false) { directAsk() }
                 return
             }
             if hasMailbox {
@@ -8505,12 +8543,16 @@ final class FeedStore: ObservableObject {
                         MediaStore.shared.store(ref, data); self.mediaArrived(ref)
                         MediaFetchBackoff.clear(ref); self.fastReq[ref] = nil
                         self.autoSaveReceived(ref); self.scheduleRefresh()
-                    } else {
+                    } else if self.mayDirectAsk(ref, circleHasRelay: true) {
+                        // Relay didn't have it (or unreachable) → ask a peer. NOT for a fresh ref:
+                        // the author's upload is most likely still running, and asking now is what
+                        // made their phone stream the file itself (see HeavyWorkPolicy). Frame 32 or
+                        // the next retry of this lane pulls it from the relay instead.
                         HavenLog.relay("MEDIA-FETCH miss ref=\(ref.prefix(10)) — relay had none, asking peers")
-                        directAsk()   // relay didn't have it (or unreachable) → ask a peer
+                        directAsk()
                     }
                 }
-            } else {
+            } else if self.mayDirectAsk(ref, circleHasRelay: false) {
                 HavenLog.relay("MEDIA-FETCH ref=\(ref.prefix(10)) no-mailbox → peer-only")
                 directAsk()           // no mailbox in any circle → peer-to-peer is the only path
             }
@@ -8518,8 +8560,11 @@ final class FeedStore: ObservableObject {
 
         // FRESH lane: 5s/10s/20s/45s/90s, then park (the ref ages into the old lane naturally).
         var fastActive = false
+        // Full-size prefetch waits out a call / Low Power Mode / heat (thumbs above never do); the
+        // gate lifting re-runs this pass (`heavyWorkLifted`), so nothing needs to stay armed.
+        let prefetchSuspended = ThermalPolicy.suspendHeavyIO
         var fastBudget = ThermalPolicy.mediaBudget(8)
-        for (ref, info) in missing where info.fresh {
+        for (ref, info) in missing where info.fresh && !prefetchSuspended {
             let st = fastReq[ref] ?? (n: 0, due: 0)
             guard st.n < Self.fastSteps.count else { continue }   // fast rounds spent — parked
             fastActive = true
@@ -8632,9 +8677,6 @@ final class FeedStore: ObservableObject {
         }
         if haveLocal, requesterHex == myNodeHex { HistoryHandoff.shared.noteSending() }   // my other device, mid-handoff
         if haveLocal, let url = localURL {
-            // They had to come to US for bytes we already backed up — so a relay didn't serve them.
-            // That is a signal about our own backup, not just a request to answer. See below.
-            reverifyBackupAfterDirectAsk(ref)
             if servingNow.contains("\(ref)|\(requesterHex)") {
                 HavenLog.net("media REQ ref=\(ref.prefix(12)) — already streaming to \(requesterHex.prefix(8)), ignoring")
             } else if requesterHex == myNodeHex,
@@ -8642,22 +8684,120 @@ final class FeedStore: ObservableObject {
                 // A dozen concurrent own-device streams split one rate-limited link twelve ways, and
                 // a 200 KB photo sat behind 4 GB of video. Cap it; the asker re-asks (smallest first).
                 HavenLog.net("media REQ ref=\(ref.prefix(12)) — \(Self.maxOwnStreams) own-device streams already running, deferring")
-            } else if shouldServeNearby(ref, requester: requesterHex) {
-                sendMediaChunks(ref: ref, fileURL: url, to: requesterHex)
+            } else {
+                relayFirstServe(ref: ref, requesterHex: requesterHex) { [weak self] in
+                    guard let self, self.shouldServeNearby(ref, requester: requesterHex) else { return }
+                    self.sendMediaChunks(ref: ref, fileURL: url, to: requesterHex)
+                }
             }
             return
         }
-        // I don't hold it locally — if I'm the circle's backup, restore it and serve.
-        guard SharedStore.isVolunteering, let engine else { return }
-        let circleIds = circles.map { $0.id }
-        Task { @MainActor in
-            if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, engine: engine) {
-                MediaStore.shared.store(ref, data)
-                if let url = MediaStore.shared.storagePath(for: ref) {
-                    sendMediaChunks(ref: ref, fileURL: url, to: requesterHex)
-                }
+        // I don't hold it locally. A circle backup volunteer used to RESTORE the whole blob from the
+        // relay and then stream it peer-to-peer — two full transfers on this device to deliver bytes
+        // the requester could have pulled from that very relay. Point them at it instead (frame 32),
+        // bounded like every other hint; the requester's own relay fetch does the rest.
+        guard SharedStore.isVolunteering, requesterHex != myNodeHex, isContact(requesterHex) else { return }
+        let cid = mediaReqCircle[ref] ?? ""
+        guard !cid.isEmpty, SharedStore.hasMailbox(cid), noteRelayHint(ref: ref, to: requesterHex) else { return }
+        HavenLog.net("media REQ ref=\(ref.prefix(12)) — volunteer, not holding it: hinting \(requesterHex.prefix(8)) at the relay")
+        sendMediaAvailable(ref: ref, circleId: cid, postId: "", to: requesterHex)
+    }
+
+    // MARK: - Relay-first serving
+
+    /// Relay hints (frame 32) sent per `ref|requester`: how many, and when the window opened.
+    private var relayHintsSent: [String: (n: Int, at: UInt64)] = [:]
+    private static let relayHintWindowMs: UInt64 = 30 * 60_000
+    /// Requesters waiting for OUR upload of a ref to land: ref → requester → circle id.
+    private var hintOnUpload: [String: [String: String]] = [:]
+
+    private func relayHintCount(ref: String, requester: String) -> Int {
+        guard let e = relayHintsSent["\(ref)|\(requester)"], now() &- e.at < Self.relayHintWindowMs else { return 0 }
+        return e.n
+    }
+
+    /// Record one hint; false once the per-window budget is spent (the caller then stays quiet).
+    private func noteRelayHint(ref: String, to requester: String) -> Bool {
+        let key = "\(ref)|\(requester)"
+        let nowMs = now()
+        var e = relayHintsSent[key] ?? (n: 0, at: nowMs)
+        if nowMs &- e.at >= Self.relayHintWindowMs { e = (n: 0, at: nowMs) }
+        guard e.n < HeavyWorkPolicy.maxRelayHints else { return false }
+        e.n += 1
+        relayHintsSent[key] = e
+        if relayHintsSent.count > 2000 { relayHintsSent.removeAll() }
+        return true
+    }
+
+    /// The serving half of "the relay is the media path" (`HeavyWorkPolicy.decideServe`).
+    ///
+    /// A friend asking for a blob that a relay holds — or that our own upload is about to put there —
+    /// is pointed at the relay (frame 32) instead of being streamed a KEM-sealed chunk at a time from
+    /// this phone. Streaming to friends is for circles with NO relay, or for a requester that keeps
+    /// asking after `maxRelayHints` hints (its relay fetch fails for a reason a hint cannot fix), and
+    /// never during a call, in Low Power Mode, or warm. `serve` runs only for a `.stream` verdict.
+    private func relayFirstServe(ref: String, requesterHex: String, serve: @escaping @MainActor () -> Void) {
+        let own = requesterHex == myNodeHex
+        let decide: @MainActor (String?) -> Void = { [weak self] cid in
+            guard let self else { return }
+            let ownRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
+            let req = HeavyWorkPolicy.ServeRequest(
+                isOwnDevice: own,
+                isHandoffTarget: own && !HistoryHandoff.shared.handoffTargets.isEmpty,
+                onRelay: MediaBackupLedger.hasAnyRemote(ref, ownRelayHex: ownRelay),
+                uploadPending: MediaBackupQueue.shared.hasPending(ref) || self.reverifyInFlight.contains(ref),
+                circleHasRelay: cid.map { SharedStore.hasMailbox($0) } ?? false,
+                hintsAlreadySent: self.relayHintCount(ref: ref, requester: requesterHex))
+            let verdict = HeavyWorkPolicy.decideServe(req, HeavyWorkMonitor.current)
+            switch verdict {
+            case .stream:
+                // They came to US for bytes we believe are backed up — so a relay didn't serve them.
+                // That is a signal about our own backup copy (see reverifyBackupAfterDirectAsk).
+                if req.onRelay { self.reverifyBackupAfterDirectAsk(ref) }
+                serve()
+            case .hintRelay:
+                guard let cid, self.noteRelayHint(ref: ref, to: requesterHex) else { return }
+                HavenLog.net("media REQ ref=\(ref.prefix(12)) from=\(requesterHex.prefix(8)) — on a relay: hinting instead of streaming")
+                self.reverifyBackupAfterDirectAsk(ref)
+                self.sendMediaAvailable(ref: ref, circleId: cid, postId: "", to: requesterHex)
+            case .hintWhenUploaded:
+                guard self.noteRelayHint(ref: ref, to: requesterHex) else { return }
+                HavenLog.net("media REQ ref=\(ref.prefix(12)) from=\(requesterHex.prefix(8)) — our relay upload is pending: finishing it first")
+                self.hintOnUpload[ref, default: [:]][requesterHex] = cid ?? ""
+                if self.hintOnUpload.count > 500 { self.hintOnUpload.removeAll() }
+                MediaBackupQueue.shared.promote(ref)
+            case .decline(let why):
+                HavenLog.net("media REQ ref=\(ref.prefix(12)) from=\(requesterHex.prefix(8)) — not serving: \(why)")
             }
         }
+        if own { decide(mediaReqCircle[ref]); return }
+        if let cid = mediaReqCircle[ref] { decide(cid); return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            decide(await self.circleId(holding: ref))
+        }
+    }
+
+    /// `MediaBackupQueue` confirmed `ref` on a relay: answer everyone who asked us for it while the
+    /// upload was pending (frame 32 → they pull it from the relay now).
+    func mediaBackupLanded(ref: String, circleId: String) {
+        guard let waiting = hintOnUpload.removeValue(forKey: ref) else { return }
+        for (requester, cid) in waiting {
+            let circle = cid.isEmpty ? circleId : cid
+            if requester == myNodeHex { continue }   // own devices re-ask on their own lane
+            HavenLog.net("media ref=\(ref.prefix(12)) landed on a relay — telling \(requester.prefix(8))")
+            sendMediaAvailable(ref: ref, circleId: circle, postId: "", to: requester)
+        }
+    }
+
+    /// The heavy-I/O gate lifted (call ended, cooled down, Low Power Mode off): resume what it parked
+    /// now, rather than on each lane's next timer.
+    func heavyWorkLifted() {
+        guard let engine else { return }
+        HavenLog.net("heavy-work gate lifted — resuming media prefetch + relay uploads")
+        lastMediaScanMs = 0
+        requestMissingMedia()
+        MediaBackupQueue.shared.drainPersisted(engine: engine)
     }
 
     /// Refs whose relay backup a direct ask has already prompted us to re-check.
@@ -8690,6 +8830,11 @@ final class FeedStore: ObservableObject {
     /// out to actually lack (see `holdsCompleteBlob`), and does nothing when every copy checks out.
     @MainActor private func reverifyBackupAfterDirectAsk(_ ref: String) {
         guard let engine, !MediaStore.isSynthetic(ref) else { return }
+        // Already queued / uploading: the re-probe would only race the upload that is about to
+        // settle the question. And a probe is a relay round-trip plus a possible re-upload — heavy
+        // I/O the call / thermal / Low Power gate defers like the rest.
+        if MediaBackupQueue.shared.hasPending(ref) || reverifyInFlight.contains(ref)
+            || ThermalPolicy.suspendHeavyIO { return }
         let nowMs = now()
         if let at = backupReverifiedAt[ref], nowMs &- at < Self.backupReverifyIntervalMs { return }
         // A SECOND brake, on the rate rather than on each ref.
@@ -8708,13 +8853,20 @@ final class FeedStore: ObservableObject {
         lastBackupReverifyAtMs = nowMs
         backupReverifiedAt[ref] = nowMs
         if backupReverifiedAt.count > 2000 { backupReverifiedAt.removeAll() }
+        reverifyInFlight.insert(ref)
         Task { @MainActor in
+            defer { self.reverifyInFlight.remove(ref) }
             guard let cid = await self.circleId(holding: ref), self.engine === engine else { return }
             MediaBackupLedger.forget(ref)   // the verdict we're re-testing
             HavenLog.sync("media REQ \(ref.prefix(10)): asked directly for media we backed up — re-probing its relay copies")
-            _ = await SharedStore.backup(ref: ref, circleId: cid, engine: engine)
+            if await SharedStore.backup(ref: ref, circleId: cid, engine: engine) {
+                self.mediaBackupLanded(ref: ref, circleId: cid)
+            }
         }
     }
+    /// Refs whose relay copy a re-probe is checking/repairing right now — counted as "upload pending"
+    /// by the relay-first serve (the ledger entry is forgotten for the duration).
+    private var reverifyInFlight = Set<String>()
 
     /// The circle whose feed references `ref` — the one whose relays are supposed to hold its bytes.
     ///
@@ -8775,8 +8927,12 @@ final class FeedStore: ObservableObject {
         } else if requesterHex == myNodeHex,
                   servingNow.filter({ $0.hasSuffix("|\(requesterHex)") }).count >= Self.maxOwnStreams {
             HavenLog.net("media RESUME ref=\(ref.prefix(12)) — \(Self.maxOwnStreams) own-device streams already running, deferring")
-        } else if shouldServeNearby(ref, requester: requesterHex, isResume: true) {
-            sendMediaChunks(ref: ref, fileURL: url, to: requesterHex, missing: missing)
+        } else {
+            // Same relay-first / heavy-I/O gate as a first request (frame 3).
+            relayFirstServe(ref: ref, requesterHex: requesterHex) { [weak self] in
+                guard let self, self.shouldServeNearby(ref, requester: requesterHex, isResume: true) else { return }
+                self.sendMediaChunks(ref: ref, fileURL: url, to: requesterHex, missing: missing)
+            }
         }
     }
 
@@ -8822,14 +8978,15 @@ final class FeedStore: ObservableObject {
     /// your phone is holding right there is unreachable from your Mac for as long as both sit open,
     /// with no diagnosis anywhere: the fetch just kept "asking peers" that could never answer.
     @MainActor private func askForMedia(ref: String, myHex: String, plain: Data) {
+        let friends = mediaAskFriends(ref)
         guard let resume = resumeAsk(ref: ref, myHex: myHex) else {
             nearbyBroadcast(3, plain)
-            for contact in ContactsStore.shared.contacts { sendIroh(3, plain, to: contact.idHex) }
+            for hex in friends { sendIroh(3, plain, to: hex) }
             liveDeliverToMyDevices(3, plain)
             return
         }
         nearbyBroadcast(33, resume)
-        for contact in ContactsStore.shared.contacts { sendIroh(33, resume, to: contact.idHex) }
+        for hex in friends { sendIroh(33, resume, to: hex) }
         liveDeliverToMyDevices(33, resume)
         guard resumeFallbackPending.insert(ref).inserted else { return }
         let before = incoming[ref]?.got.count ?? 0
@@ -8840,8 +8997,42 @@ final class FeedStore: ObservableObject {
             guard !MediaStore.shared.has(ref), (self.incoming[ref]?.got.count ?? 0) == before else { return }
             HavenLog.net("media RESUME ref=\(ref.prefix(12)): no answer to frame 33 — falling back to a full request")
             self.nearbyBroadcast(3, plain)
-            for contact in ContactsStore.shared.contacts { self.sendIroh(3, plain, to: contact.idHex) }
+            for hex in friends { self.sendIroh(3, plain, to: hex) }
             self.liveDeliverToMyDevices(3, plain)
+        }
+    }
+
+    /// Who, among my FRIENDS, a direct media ask goes to over iroh.
+    ///
+    /// It used to be every contact, every time — so every holder in the circle answered at once and
+    /// each streamed the whole file (that is how an author's phone ended up serving the same video to
+    /// several people while its own relay upload was still running). Ask the AUTHOR first: they hold
+    /// it by definition. My own media → no friend at all (my own devices get the ask separately).
+    /// After `targetedAsksBeforeBroadcast` targeted asks with no bytes, widen to every contact so
+    /// media whose author is offline can still come from another holder.
+    @MainActor private func mediaAskFriends(_ ref: String) -> [String] {
+        let n = (directAskCount[ref] ?? 0) + 1
+        directAskCount[ref] = n
+        if directAskCount.count > 2000 { directAskCount.removeAll() }
+        let all = ContactsStore.shared.contacts.map(\.idHex)
+        guard n <= HeavyWorkPolicy.targetedAsksBeforeBroadcast, let author = mediaRefAuthor[ref] else { return all }
+        if author == Self.selfAuthorMark { return [] }
+        if let hex = ContactsStore.shared.idHex(forNodePrefix: author) { return [hex] }
+        return all
+    }
+    /// Direct asks sent per ref this session (drives the author-first → everyone widening).
+    private var directAskCount: [String: Int] = [:]
+    /// Ref → author short id (or `selfAuthorMark`) and ref → authored-at ms, learned from the feed scan.
+    private var mediaRefAuthor: [String: String] = [:]
+    private var mediaRefBornAt: [String: UInt64] = [:]
+    private static let selfAuthorMark = "<me>"
+
+    /// Remember who authored `refs` and when (bounded caches; the scan refills them).
+    private func noteMediaOrigin(_ refs: [String], authorShort: String, isMe: Bool, createdAt: UInt64) {
+        if mediaRefAuthor.count > 5000 { mediaRefAuthor.removeAll(); mediaRefBornAt.removeAll() }
+        for r in refs {
+            mediaRefAuthor[r] = isMe ? Self.selfAuthorMark : authorShort
+            mediaRefBornAt[r] = createdAt
         }
     }
 
@@ -8887,6 +9078,9 @@ final class FeedStore: ObservableObject {
     /// for a newly-connected sibling that has nothing yet.
     private func pushOwnMediaNearby(freshPeer: Bool = false) {
         guard engine != nil, nearby != nil else { return }
+        // Unsolicited bulk push — the first thing to drop during a call / Low Power Mode / heat.
+        // The sibling still asks for what it needs (frame 3), which goes through the same gate.
+        guard !ThermalPolicy.suspendHeavyIO else { return }
         if freshPeer { pushedNearby.removeAll() }
         let me = myNodeHex
         var refs: [String] = []
@@ -8950,8 +9144,9 @@ final class FeedStore: ObservableObject {
             // devices was strictly LAN-only, which is not how any other frame in this app behaves.
             // + the device(s) a history handoff is being served to: the cached own roster can lag a
             // device that just joined, and without its id the only path left was the rate-limited mesh.
-            var ownTargets = myOtherDeviceTargets()
-            for t in HistoryHandoff.shared.handoffTargets where !ownTargets.contains(t) { ownTargets.append(t) }
+            var ownTargetList = myOtherDeviceTargets()
+            for t in HistoryHandoff.shared.handoffTargets where !ownTargetList.contains(t) { ownTargetList.append(t) }
+            let ownTargets = ownTargetList   // immutable for the background serve loop
             // BOUNDED in-flight iroh sends. This loop runs on a plain dispatch queue and cannot await,
             // so each chunk's send is a detached Task — and without a gate a 1,231-chunk video spawns
             // 1,231 of them as fast as the file reads, with no backpressure whatsoever. The link then
@@ -8968,6 +9163,12 @@ final class FeedStore: ObservableObject {
                 }
                 for index in 0..<total {
                     if let missing, !missing.contains(index) { continue }   // requester already has it
+                    // A call started / Low Power Mode / hot mid-stream: stop here. The sibling holds
+                    // a partial and resumes (frame 33) from this exact chunk once the gate lifts.
+                    if HeavyWorkMonitor.current.suspendHeavyIO {
+                        HavenLog.net("media serve ref=\(ref.prefix(12)): paused at chunk \(index)/\(total) — \(HeavyWorkMonitor.current.reason)")
+                        break
+                    }
                     try? handle.seek(toOffset: UInt64(index) * UInt64(chunkSize))
                     let chunk = handle.readData(ofLength: chunkSize)
                     if chunk.isEmpty { break }
@@ -9011,8 +9212,20 @@ final class FeedStore: ObservableObject {
                 try? handle.close()
                 Task { @MainActor in self?.servingNow.remove(serveKey) }
             }
+            // BOUNDED in-flight iroh sends, like the own-device path's semaphore: an unbounded
+            // detached send per chunk had no backpressure at all, so a video queued hundreds of
+            // sends as fast as the engine could seal them — radio and CPU flat out, on a phone that
+            // may be in a call. At most `irohWindow` outstanding; the loop awaits the oldest.
+            let irohWindow = 4
+            var irohInFlight: [Task<Void, Never>] = []
             for index in 0..<total {
                 if let missing, !missing.contains(index) { continue }   // requester already has it
+                // Friend serving is the first thing the heavy-I/O gate drops (a call, Low Power
+                // Mode, .fair+). Stop mid-file; the requester resumes from its bitmap later.
+                if !HeavyWorkMonitor.current.peerServingAllowedForFriends {
+                    HavenLog.net("media serve ref=\(ref.prefix(12)) → \(requesterHex.prefix(8)): paused at chunk \(index)/\(total) — \(HeavyWorkMonitor.current.reason)")
+                    break
+                }
                 try? handle.seek(toOffset: UInt64(index) * UInt64(chunkSize))
                 let chunk = handle.readData(ofLength: chunkSize)
                 if chunk.isEmpty { break }
@@ -9030,8 +9243,12 @@ final class FeedStore: ObservableObject {
                     HavenLog.net("media serve ref=\(ref.prefix(12)) → \(requesterHex.prefix(8)): rate-limit give-up at chunk \(index)/\(total)")
                     break
                 }
-                if let node { Task.detached { try? await node.sendToNode(nodeIdHex: requesterHex, payload: out) } }
+                if let node {
+                    if irohInFlight.count >= irohWindow { await irohInFlight.removeFirst().value }
+                    irohInFlight.append(Task.detached { try? await node.sendToNode(nodeIdHex: requesterHex, payload: out) })
+                }
             }
+            for t in irohInFlight { await t.value }
         }
     }
 

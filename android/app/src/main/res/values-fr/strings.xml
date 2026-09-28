@@ -154,8 +154,6 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="circle_disappear_1h">Au bout d\'1 heure</string>
     <string name="circle_after_1_day">Au bout d\'1 jour</string>
     <string name="circle_after_1_week">Au bout d\'1 semaine</string>
-    <string name="circle_composer_placeholder">Partagez avec votre cercle…</string>
-    <string name="circle_post_cd">Publier</string>
     <string name="circle_send_later_title">Envoyer plus tard</string>
     <string name="circle_send_later_description">Sera publié depuis ce téléphone le moment venu (Haven se rattrape à la prochaine ouverture).</string>
     <string name="circle_send_in_1_hour">Dans 1 heure</string>
@@ -284,7 +282,6 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="circle_audio_reply_cd">Réponse audio</string>
     <string name="circle_attach_to_reply_cd">Joindre à la réponse</string>
     <string name="circle_photo_or_video">Photo ou vidéo</string>
-    <string name="circle_add_reply_placeholder">Ajouter une réponse…</string>
     <string name="circle_send_reply_cd">Envoyer la réponse</string>
     <string name="circle_more_reactions_cd">Plus de réactions</string>
     <string name="circle_link_copied">Lien copié</string>
@@ -701,4 +698,20 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="story_expired_body">Les stories disparaissent après 24 heures, sauf si l\'auteur les a conservées sur son profil.</string>
     <string name="view_story">Voir la story</string>
     <string name="story_no_longer_available">Story plus disponible</string>
+    <!-- Composer audience: a circle post goes to EVERYONE in it; make that unmistakable. -->
+    <string name="composer_audience_everyone">Tout le monde dans %1$s</string>
+    <string name="composer_audience_everyone_count">Tout le monde dans %1$s · %2$s</string>
+    <string name="composer_one_person">1 personne</string>
+    <string name="composer_n_people">%1$d personnes</string>
+    <string name="composer_placeholder_named">Partagez avec tout le monde dans %1$s…</string>
+    <string name="composer_post_button">Publier</string>
+    <string name="composer_post_cd_named">Publier pour tout le monde dans %1$s</string>
+    <string name="composer_audience_cd">Publication pour : %1$s. Ouvre des options, dont l\'envoi en privé à une personne</string>
+    <string name="composer_send_privately">Envoyer en privé à quelqu\'un…</string>
+    <string name="audience_confirm_title">Publier pour tout le monde dans %1$s ?</string>
+    <string name="audience_confirm_body">Ce sera partagé avec tout le monde dans %1$s (%2$s). Pour l\'envoyer à une seule personne, utilisez Message.</string>
+    <string name="audience_confirm_post">Publier pour tout le monde</string>
+    <string name="audience_confirm_private">Envoyer plutôt en privé…</string>
+    <string name="circle_reply_placeholder_named">Répondre à tout le monde dans %1$s…</string>
+    <string name="circle_member_message_cd">Envoyer un message privé à %1$s</string>
 </resources>

@@ -153,8 +153,6 @@
     <string name="circle_disappear_1h">1시간 후</string>
     <string name="circle_after_1_day">1일 후</string>
     <string name="circle_after_1_week">1주 후</string>
-    <string name="circle_composer_placeholder">서클에 공유해 보세요…</string>
-    <string name="circle_post_cd">게시물</string>
     <string name="circle_send_later_title">나중에 보내기</string>
     <string name="circle_send_later_description">시간이 되면 이 휴대폰에서 올라가요(그때 꺼져 있었다면 다음에 Haven을 열 때 이어서 올라가요).</string>
     <string name="circle_send_in_1_hour">1시간 뒤</string>
@@ -283,7 +281,6 @@
     <string name="circle_audio_reply_cd">음성 답글</string>
     <string name="circle_attach_to_reply_cd">답글에 첨부</string>
     <string name="circle_photo_or_video">사진 또는 동영상</string>
-    <string name="circle_add_reply_placeholder">답글 달기…</string>
     <string name="circle_send_reply_cd">답글 보내기</string>
     <string name="circle_more_reactions_cd">반응 더 보기</string>
     <string name="circle_link_copied">링크 복사됨</string>
@@ -701,4 +698,20 @@
     <string name="story_expired_body">스토리는 24시간 후 사라집니다. 작성자가 프로필에 보관하지 않았다면 볼 수 없습니다.</string>
     <string name="view_story">스토리 보기</string>
     <string name="story_no_longer_available">스토리를 더 이상 볼 수 없음</string>
+    <!-- Composer audience: a circle post goes to EVERYONE in it; make that unmistakable. -->
+    <string name="composer_audience_everyone">%1$s의 모든 사람</string>
+    <string name="composer_audience_everyone_count">%1$s의 모든 사람 · %2$s</string>
+    <string name="composer_one_person">1명</string>
+    <string name="composer_n_people">%1$d명</string>
+    <string name="composer_placeholder_named">%1$s의 모든 사람과 공유…</string>
+    <string name="composer_post_button">게시</string>
+    <string name="composer_post_cd_named">%1$s의 모든 사람에게 게시</string>
+    <string name="composer_audience_cd">게시 대상: %1$s. 한 사람에게 비공개로 보내기 등 옵션을 엽니다</string>
+    <string name="composer_send_privately">한 사람에게 비공개로 보내기…</string>
+    <string name="audience_confirm_title">%1$s의 모든 사람에게 게시할까요?</string>
+    <string name="audience_confirm_body">%1$s의 모든 사람(%2$s)에게 공유됩니다. 한 사람에게만 보내려면 메시지를 사용하세요.</string>
+    <string name="audience_confirm_post">모두에게 게시</string>
+    <string name="audience_confirm_private">대신 비공개로 보내기…</string>
+    <string name="circle_reply_placeholder_named">%1$s의 모든 사람에게 답글…</string>
+    <string name="circle_member_message_cd">%1$s에게 비공개 메시지</string>
 </resources>

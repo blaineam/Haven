@@ -335,7 +335,7 @@ fun UnreadBadge(count: Int) {
 /** Pick who to message: one contact for a 1:1, two or more for a group DM. This is the ONLY way into
  *  a new thread now that the list shows conversations rather than the whole address book. */
 @Composable
-private fun NewMessagePicker(onDismiss: () -> Unit, onStart: (List<Contact>) -> Unit) {
+internal fun NewMessagePicker(onDismiss: () -> Unit, onStart: (List<Contact>) -> Unit) {
     val contacts = HavenNet.contacts
     val picked = remember { mutableStateListOf<String>() }
     androidx.compose.material3.AlertDialog(

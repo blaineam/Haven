@@ -461,6 +461,9 @@ object HavenNet : InboundListener {
             HavenSocial(core.seed)
         }
         LocalMedia.init(appContext)
+        // Calls (Haven + any other), thermal, Battery Saver → the heavy-media-I/O gate.
+        HeavyWorkMonitor.onLifted = { heavyWorkLifted() }
+        HeavyWorkMonitor.start(appContext)
         Presign.init(appContext)
         CircleLock.init(appContext)
         CircleRemovals.init(appContext)
@@ -2108,9 +2111,12 @@ object HavenNet : InboundListener {
         // message just created so the sealed banner's `p` deep-link opens THIS thread entry (Apple
         // FeedStore.sendMessage parity). Best-effort: null keeps the legacy circle route.
         val postId = runCatching { social.lastAuthoredEventId(circleId, ts) }.getOrNull()
+        // UPLOAD BEFORE BROADCAST (Apple parity): queue the media for the relay BEFORE the event
+        // goes out, so receivers' first relay lookup races a running upload rather than one that has
+        // not started — and they are not driven to ask this phone for the bytes directly.
+        enqueueAuthoredMedia(circleId, withThumbs)   // priority lane, thumbs first
         afterAuthor(circleId, env,
             PushBanner.forPost(circleId, circleName(circleId), body, withThumbs, story = false, postId = postId))
-        enqueueAuthoredMedia(circleId, withThumbs)   // priority lane, thumbs first
         // Sending into a thread is what makes it "recent" — republish so the Direct Share row is
         // ordered by the conversations the user is actually in.
         runCatching { ShareShortcuts.refresh(appContext) }
@@ -3008,7 +3014,10 @@ object HavenNet : InboundListener {
         }
         // Push MY media up to every circle relay periodically (idempotent — skips blobs already present),
         // so a sibling reading the relay finds it. The nearby chunk path is unreliable; the relay is durable.
-        if (nowMs - lastMediaBackfillMs > 120_000) {
+        // Parked (not skipped for good) during a call / Battery Saver / SEVERE+: the next tick after the
+        // gate lifts runs it. Merely warm (MODERATE) keeps backing up — the relay upload is what
+        // spares this device every future peer serve (HeavyWorkPolicy).
+        if (nowMs - lastMediaBackfillMs > 120_000 && !HeavyWorkMonitor.current.suspendHeavyIO) {
             lastMediaBackfillMs = nowMs
             // Event envelopes at most DAILY (persisted across launches): re-uploads are idempotent
             // now (deterministic envelopes + the persisted seen-set), but the re-seal is still a
@@ -3504,9 +3513,12 @@ object HavenNet : InboundListener {
         // (exact tap route on the recipient — Apple FeedStore.post parity). Best-effort: null keeps
         // the legacy circle route.
         val postId = runCatching { social.lastAuthoredEventId(circleId, ts) }.getOrNull()
+        // UPLOAD BEFORE BROADCAST (Apple parity): queue the media for the relay BEFORE the event
+        // goes out, so receivers' first relay lookup races a running upload rather than one that has
+        // not started — and they are not driven to ask this phone for the bytes directly.
+        enqueueAuthoredMedia(circleId, withThumbs)   // serialized priority lane: thumbs → posters → blobs
         afterAuthor(circleId, env,
             PushBanner.forPost(circleId, circleName(circleId), body, withThumbs, story = false, postId = postId))
-        enqueueAuthoredMedia(circleId, withThumbs)   // serialized priority lane: thumbs → posters → blobs
         // A post the engine accepted is Haven's one "significant action" for the rating gates.
         com.blaineam.haven.support.RatingManager.recordSignificantAction(appContext)
         // "Save my posts to Photos" (per-circle override, falling back to the app-wide default).
@@ -3538,8 +3550,8 @@ object HavenNet : InboundListener {
         val env = runCatching {
             social.post(circleId, body, withThumbs, music, null, story, false, createdAt)
         }.getOrNull() ?: return
+        enqueueAuthoredMedia(circleId, withThumbs)   // upload before broadcast
         afterAuthor(circleId, env, banner = null, bulk = true)   // null banner → silent wake
-        enqueueAuthoredMedia(circleId, withThumbs)
         // Coalesce the feed's recompose. afterAuthor bumps feedVersion per post, which is right for
         // one post and wrong for three hundred: an import would recompose the circle screen 372
         // times in a row. Apple hit exactly this and throttles its feed rebuild during an import
@@ -3639,9 +3651,9 @@ object HavenNet : InboundListener {
             social.post(circleId, body, media, music, 86_400UL, true, false, ts)
         }.getOrNull() ?: return
         val postId = runCatching { social.lastAuthoredEventId(circleId, ts) }.getOrNull()   // best-effort `p` tag (see `post`)
+        enqueueAuthoredMedia(circleId, media)   // priority lane, BEFORE the broadcast: the story's blob beats any backfill
         afterAuthor(circleId, env,
             PushBanner.forPost(circleId, circleName(circleId), body, media, story = true, postId = postId))
-        enqueueAuthoredMedia(circleId, media)   // priority lane: the story's blob beats any backfill
     }
 
     /** React / unreact / comment on a post — author + broadcast, same as a post. */
@@ -3659,8 +3671,8 @@ object HavenNet : InboundListener {
         // A media-only reply (a photo or a voice note with no text) is valid — iOS allows it too.
         if (body.isBlank() && media.isEmpty()) return
         val env = runCatching { social.comment(circleId, postId, body, media, nowMs()) }.getOrNull() ?: return
+        media.forEach { enqueueBackup(circleId, it, priority = true) }   // before the broadcast; a fresh reply's media beats backfill
         afterAuthor(circleId, env, PushBanner.forComment(body, circleId, circleName(circleId), postId))
-        media.forEach { enqueueBackup(circleId, it, priority = true) }   // a fresh reply's media beats backfill
     }
 
     /**
@@ -4121,6 +4133,9 @@ object HavenNet : InboundListener {
      */
     private fun pushOwnMediaNearby(freshPeer: Boolean = false) {
         if (!ready || !NearbyTransport.active) return
+        // Unsolicited bulk push — the first thing to drop during a call / Battery Saver / heat. The
+        // sibling still asks for what it needs (frame 3), which goes through the same gate.
+        if (HeavyWorkMonitor.refresh().suspendHeavyIO) return
         val me = runCatching { social.myNodeHex() }.getOrNull() ?: return
         if (freshPeer) pushedNearby.clear()
         val refs = LinkedHashSet<String>()
@@ -4137,8 +4152,10 @@ object HavenNet : InboundListener {
             if (!shouldServeNearby(ref)) continue
             // Guarded like the request-driven serves: this runs off a TICK, so without it a slow push
             // that hasn't finished by the next pass gets a second copy of itself started on top.
-            val bytes = LocalMedia.loadAnyCircle(ref) ?: continue
-            serveOnce(ref, me) { sendMediaChunks(ref, bytes, me) }
+            serveOnce(ref, me) {
+                val sf = LocalMedia.openForServing(ref) ?: return@serveOnce
+                try { sendMediaChunks(ref, sf.file, me) } finally { sf.release() }
+            }
             budget--
         }
         if (pushedNearby.size > 5000) pushedNearby.clear()
@@ -5627,7 +5644,8 @@ object HavenNet : InboundListener {
         // Multi-device self-sync: converge this user's OWN devices (profile/settings/contacts/
         // blocked/circles) over the same relays. Has its own transport + in-flight guard, and a
         // refresh trigger (selfSyncDidApply) when a peer device's state arrives.
-        runCatching { SelfSyncCoordinator.sync(social) }
+        // Deferred (like Apple's ThermalPolicy.skipSelfSync) during a call / Battery Saver / SEVERE+.
+        if (!HeavyWorkMonitor.current.suspendHeavyIO) runCatching { SelfSyncCoordinator.sync(social) }
         // Persist whenever ANY receive ran — even a "nothing changed" pass may have buffered
         // envelopes into pending_epoch, and those buffers must survive process death.
         if (receiveRan && !changed) persist()
@@ -5764,7 +5782,10 @@ object HavenNet : InboundListener {
          *  itself to the circle (frame 32) instead of waiting out everyone's missing-media sweep. */
         class Backup(ref: String, circleId: String, val force: Boolean = false,
                      val priority: Boolean = false, val atMs: Long = 0L) : MediaJob(ref, circleId)
-        class Restore(ref: String, circleId: String) : MediaJob(ref, circleId)
+        /** [onMiss] runs when no relay could supply the blob — the requester's direct peer ask,
+         *  now strictly AFTER the relay (it used to go out alongside it, so every holder streamed
+         *  bytes the relay was about to deliver). */
+        class Restore(ref: String, circleId: String, val onMiss: (() -> Unit)? = null) : MediaJob(ref, circleId)
     }
     // Unlimited buffer + a single consumer = strictly serial; the dedup set + cap below bound it.
     // The priority channel is drained FIRST: without it a fresh story's blob queued behind a long
@@ -5791,6 +5812,17 @@ object HavenNet : InboundListener {
                         mediaQueue.onReceive { it }
                     }
                 val key = jobKey(job)
+                // HEAVY-I/O GATE (HeavyWorkPolicy.backupAllowed): CRITICAL thermal holds the whole
+                // queue; during a call / Battery Saver / SEVERE only just-authored uploads proceed —
+                // they are what spares every future peer serve. A skipped backfill job stays in the
+                // durable pending set, and the gate lifting re-offers it (heavyWorkLifted →
+                // drainPersistedBackups).
+                while (HeavyWorkMonitor.refresh().pauseEverything) delay(15_000)
+                if (job is MediaJob.Backup && !job.force &&
+                    !HeavyWorkPolicy.backupAllowed(job.priority, HeavyWorkMonitor.current)) {
+                    synchronized(mediaQueueLock) { mediaQueueKeys.remove(key) }
+                    continue
+                }
                 // Process ONE blob at a time — peak memory ≈ a single media file, not the library.
                 runCatching {
                     when (job) {
@@ -5800,6 +5832,7 @@ object HavenNet : InboundListener {
                             // start / background sync / 2-min backfill retries it — the media reaches a
                             // relay even if the app was killed the instant after the post was made.
                             val landed = uploadMedia(job.circleId, job.ref, job.force)
+                            if (landed) mediaBackupLanded(job.ref, job.circleId)   // peers told to wait for it
                             if (landed && !job.force) {
                                 clearPendingBackup(job.ref, job.circleId)
                                 // A FRESH post's blob just landed on a relay — tell the circle so their
@@ -5823,6 +5856,8 @@ object HavenNet : InboundListener {
                             if (got) {
                                 mediaArrived(job.ref)
                                 withContext(Dispatchers.Main) { feedVersion.value++ }
+                            } else if (!LocalMedia.has(job.ref)) {
+                                job.onMiss?.invoke()
                             }
                         }
                     }
@@ -5869,12 +5904,26 @@ object HavenNet : InboundListener {
     }
 
     /** Enqueue a missing media blob to fetch from the circle's relays — serialized (one at a time). */
-    private fun enqueueRestore(circleId: String, ref: String) {
+    private fun enqueueRestore(circleId: String, ref: String, onMiss: (() -> Unit)? = null) {
         if (LocalMedia.isSynthetic(ref)) return   // geo: pins et al. carry no bytes — nothing to fetch
-        val job = MediaJob.Restore(ref, circleId)
+        val job = MediaJob.Restore(ref, circleId, onMiss)
         if (!offerMediaJob(jobKey(job))) return
         ensureMediaQueueDraining()
         mediaQueue.trySend(job)
+    }
+
+    /**
+     * A peer is waiting on [ref] (we answered its direct ask with "it'll be on the relay" instead of
+     * streaming it): put its pending backfill upload on the PRIORITY lane. The Channel cannot reorder,
+     * so this sends a second, priority copy past the dedup; whichever runs second finds the ledger
+     * already confirming the blob and returns without re-uploading.
+     */
+    private fun promoteBackup(ref: String) {
+        ensurePendingBackups()
+        val key = synchronized(pendingBackupsLock) { pendingBackups.firstOrNull { it.substringBeforeLast('|') == ref } } ?: return
+        val cid = key.substringAfterLast('|')
+        ensureMediaQueueDraining()
+        mediaPriorityQueue.trySend(MediaJob.Backup(ref, cid, priority = true))
     }
 
     /** Returns true if [key] is newly accepted (dedup + bounded so the queue can't grow unbounded). */
@@ -6275,19 +6324,76 @@ object HavenNet : InboundListener {
         val last = viewRequestedAt[ref]
         if (last != null && now - last < 60_000) return
         viewRequestedAt[ref] = now
-        enqueueRestore(circleId, ref)   // relay: one blob at a time already, no budget needed
-        // The direct ask fans out to every contact's devices, so a fast scroll through an old feed
-        // must not become a burst at friends' phones: at most 8 per 20s. The relay restore above
-        // and the next on-screen appearance (≥1 min later) cover anything the budget skipped.
-        synchronized(viewAskTimes) {
-            viewAskTimes.removeAll { now - it > 20_000 }
-            if (viewAskTimes.size >= 8) return
-            viewAskTimes.add(now)
+        // RELAY FIRST; the direct ask only if the relay misses (it used to go out alongside the
+        // restore, so every holder streamed bytes the relay was about to deliver).
+        enqueueRestore(circleId, ref) {
+            if (!mayDirectAsk(ref, circleHasRelay = true)) return@enqueueRestore
+            // The direct ask reaches friends' phones, so a fast scroll through an old feed must not
+            // become a burst: at most 8 per 20s. The next on-screen appearance (≥1 min later) covers
+            // anything the budget skipped.
+            val t = System.currentTimeMillis()
+            synchronized(viewAskTimes) {
+                viewAskTimes.removeAll { t - it > 20_000 }
+                if (viewAskTimes.size >= 8) return@enqueueRestore
+                viewAskTimes.add(t)
+            }
+            val payload = nodeIdHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8)
+            askForMedia(ref, payload, mediaAskTargets(ref))
         }
-        val payload = nodeIdHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8)
-        askForMedia(ref, payload, contacts.map { it.idHex })
     }
     private val viewAskTimes = ArrayList<Long>()
+
+    // ---- Requester patience + author-first asks (Apple FeedStore parity) --------------------
+
+    /** Thumb / poster / preview refs seen by the sweep — ≤32 KB, exempt from the heavy-I/O gate. */
+    private val smallMediaRefs = HashSet<String>()
+    /** ref → author short id (or [SELF_AUTHOR]) and ref → authored-at ms, learned from the sweep. */
+    private val mediaRefAuthor = HashMap<String, String>()
+    private val mediaRefBornAt = HashMap<String, Long>()
+    /** Direct asks sent per ref this session (drives the author-first → everyone widening). */
+    private val directAskCount = HashMap<String, Int>()
+    private val SELF_AUTHOR = "<me>"
+
+    private fun noteMediaOrigin(ref: String, authorShort: String, isMe: Boolean, createdAt: ULong) {
+        synchronized(mediaRefAuthor) {
+            if (mediaRefAuthor.size > 5000) { mediaRefAuthor.clear(); mediaRefBornAt.clear() }
+            mediaRefAuthor[ref] = if (isMe) SELF_AUTHOR else authorShort
+            mediaRefBornAt[ref] = createdAt.toLong()
+        }
+    }
+
+    /** May a relay miss for [ref] fall through to asking peers directly right now? */
+    private fun mayDirectAsk(ref: String, circleHasRelay: Boolean): Boolean {
+        val now = System.currentTimeMillis()
+        val born = synchronized(mediaRefAuthor) { mediaRefBornAt[ref] }
+        val small = synchronized(smallMediaRefs) { smallMediaRefs.contains(ref) }
+        val cond = HeavyWorkMonitor.current
+        val ok = HeavyWorkPolicy.mayDirectAskAfterRelayMiss(
+            small = small, circleHasRelay = circleHasRelay,
+            ageMs = born?.let { if (now >= it) now - it else 0L }, userInitiated = false, c = cond)
+        if (!ok) Log.i("MediaSync", "fetch ${ref.take(10)}: relay miss — waiting for the relay, not asking peers (${if (cond.suspendHeavyIO) cond.reason else "fresh"})")
+        return ok
+    }
+
+    /**
+     * Who, among my FRIENDS, a direct media ask goes to. It used to be every contact, every time —
+     * so every holder answered at once and each streamed the whole file. Ask the AUTHOR first (they
+     * hold it by definition); my own media → no friend (my own devices get the ask separately). After
+     * [HeavyWorkPolicy.TARGETED_ASKS_BEFORE_BROADCAST] targeted asks, widen to every contact so media
+     * whose author is offline can still come from another holder.
+     */
+    private fun mediaAskTargets(ref: String): List<String> {
+        val all = contacts.map { it.idHex }
+        val (n, author) = synchronized(mediaRefAuthor) {
+            val n = (directAskCount[ref] ?: 0) + 1
+            directAskCount[ref] = n
+            if (directAskCount.size > 2000) directAskCount.clear()
+            n to mediaRefAuthor[ref]
+        }
+        if (n > HeavyWorkPolicy.TARGETED_ASKS_BEFORE_BROADCAST || author == null) return all
+        if (author == SELF_AUTHOR) return emptyList()
+        return all.firstOrNull { it.startsWith(author, ignoreCase = true) }?.let { listOf(it) } ?: all
+    }
 
     fun downloadEvicted(ref: String) {
         EvictedMediaStore.clear(ref)
@@ -6308,10 +6414,18 @@ object HavenNet : InboundListener {
                 }
             }?.id
         }.getOrNull()
-        if (circleId != null) enqueueRestore(circleId, ref)   // relay-first (mailbox → HTTP → S3 → iroh)
         // Direct peer ask (tiny frame, no blob in RAM) — same per-ref request requestMissingMedia makes.
+        // A person tapped Download, so no freshness patience — but still relay FIRST when there is a
+        // circle to restore from, and never while heavy I/O is suspended (a call, Battery Saver, hot).
         val payload = nodeIdHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8)
-        askForMedia(ref, payload, contacts.map { it.idHex })   // resumes from a partial when we hold one
+        val ask = {
+            if (HeavyWorkPolicy.mayDirectAskAfterRelayMiss(small = false, circleHasRelay = true, ageMs = null,
+                    userInitiated = true, c = HeavyWorkMonitor.refresh())) {
+                askForMedia(ref, payload, mediaAskTargets(ref))   // resumes from a partial when we hold one
+            }
+        }
+        if (circleId != null) enqueueRestore(circleId, ref) { ask() }   // relay-first (mailbox → HTTP → S3 → iroh)
+        else ask()
         scope.launch {
             kotlinx.coroutines.delay(45_000)
             downloadingMedia.remove(ref)
@@ -6386,11 +6500,14 @@ object HavenNet : InboundListener {
                 // we're not in would kill an own-device transfer that was actively succeeding,
                 // mid-flight, with nothing left to re-ask. (Apple hit exactly that: a peer transfer
                 // died at 823/1231 chunks the instant a relay copy failed to open.)
-                fun consider(ref: String) {
+                fun consider(ref: String, authorShort: String = item.authorShort, isMe: Boolean = item.isMe,
+                             createdAt: ULong = item.createdAt) {
                     if (LocalMedia.isSynthetic(ref) || LocalMedia.has(ref) ||
                         EvictedMediaStore.contains(ref)) return
                     val prior = missing[ref]
                     if (prior == null || (fresh && !prior.second)) missing[ref] = c.id to fresh
+                    // Who to ask (author first) and how fresh it is (relay patience) — see askForMedia.
+                    noteMediaOrigin(ref, authorShort, isMe, createdAt)
                 }
                 // BACKFILL IS LAZY (Apple parity). A post whose creation date is far older than now
                 // did not just happen — it arrived from an archive import or a history sync.
@@ -6424,10 +6541,19 @@ object HavenNet : InboundListener {
                     }
                 }
                 // Same lazy rule as the post — a backfilled thread's attachments load on tap.
-                if (!backfill) item.comments.forEach { cm -> cm.media.forEach { consider(it) } }
+                if (!backfill) item.comments.forEach { cm ->
+                    cm.media.forEach { consider(it, cm.authorShort, cm.isMe, cm.createdAt) }
+                }
             }
         }
         SyncMetrics.setPending(missing.size)   // media refs still missing locally (iOS nbMediaPending)
+        synchronized(smallMediaRefs) {
+            if (smallMediaRefs.size > 5000) smallMediaRefs.clear()
+            smallMediaRefs.addAll(thumbs.keys)
+        }
+        // Full-size prefetch waits out a call / Battery Saver / heat; thumbs (below) never do. The
+        // gate lifting re-runs this pass (heavyWorkLifted), so nothing needs to stay armed.
+        val prefetchSuspended = HeavyWorkMonitor.refresh().suspendHeavyIO
         // Per-circle breakdown. A whole-set count hid the thing that mattered: every ref in flight
         // belonged to `default` and not one came from a dm: circle, so DM media was never being
         // ASKED for — which looks identical to "DM media won't decrypt" from the outside.
@@ -6470,6 +6596,7 @@ object HavenNet : InboundListener {
             idx++
         }
         for ((ref, info) in ordered.map { it.key to it.value }) {
+            if (prefetchSuspended) break
             val (circleId, fresh) = info
             if (fresh) {
                 val st = synchronized(fastReq) { fastReq[ref] } ?: (0 to 0L)
@@ -6482,17 +6609,24 @@ object HavenNet : InboundListener {
                 }
                 // The relay half only for refs whose stored copy opened (or was never tried): re-pulling
                 // a blob we already know we cannot decrypt repairs nothing and costs a full download
-                // each sweep. The peer ask below always goes out — see `consider`.
-                if (!unopenableMedia.contains(ref)) enqueueRestore(circleId, ref)
+                // each sweep. The peer ask goes out regardless for those — see `consider` — but for
+                // everything else only AFTER the relay misses, and for a fresh ref not at all until
+                // its relay patience runs out (the author's upload is most likely still running).
                 requestedRefs.add(ref)
                 val payload = myHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8)
-                askForMedia(ref, payload, contacts.map { it.idHex })
+                if (unopenableMedia.contains(ref)) {
+                    if (mayDirectAsk(ref, circleHasRelay = false)) askForMedia(ref, payload, mediaAskTargets(ref))
+                } else {
+                    enqueueRestore(circleId, ref) {
+                        if (mayDirectAsk(ref, circleHasRelay = true)) askForMedia(ref, payload, mediaAskTargets(ref))
+                    }
+                }
                 continue
             }
             // SERIALIZED RESTORE: the relay fetch loads a FULL blob into RAM, so it goes through the
             // single media-transfer queue (one blob at a time) instead of one concurrent coroutine per
             // missing ref — which used to pull the whole library into memory at once and OOM-crash.
-            if (!unopenableMedia.contains(ref)) enqueueRestore(circleId, ref)
+            val relayTried = !unopenableMedia.contains(ref)
             // AN ACTIVE PEER TRANSFER GETS A FASTER HEARTBEAT THAN THE 5-MINUTE COOLDOWN.
             //
             // That cooldown is sized for a ref nobody is sending: don't nag. A partial that is still
@@ -6508,13 +6642,21 @@ object HavenNet : InboundListener {
             val cooldown = if (inFlight) 10_000L else 300_000L
             val stale = (mediaReqAt[ref]?.let { nowMs - it > cooldown } ?: true)
             val allowDirect = stale && directBudget > 0
-            if (!allowDirect) continue
-            // Peer re-request (tiny frame, no blob in RAM) stays direct but throttled/budgeted so we
-            // never flood; the content-addressed relay restore above is the real, memory-bounded path.
+            if (!allowDirect) {
+                if (relayTried) enqueueRestore(circleId, ref)
+                continue
+            }
+            // Peer re-request (tiny frame, no blob in RAM) stays throttled/budgeted so we never flood,
+            // and now goes out only when the relay restore MISSES (a growing partial's heartbeat goes
+            // straight out — the bytes are already arriving from a peer). resumes from a partial.
             mediaReqAt[ref] = nowMs; directBudget--
             requestedRefs.add(ref)
             val payload = myHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8)
-            askForMedia(ref, payload, contacts.map { it.idHex })   // resumes from a partial when we hold one
+            val ask = { if (mayDirectAsk(ref, circleHasRelay = relayTried)) askForMedia(ref, payload, mediaAskTargets(ref)) }
+            if (relayTried && !inFlight) enqueueRestore(circleId, ref) { ask() } else {
+                if (relayTried) enqueueRestore(circleId, ref)
+                ask()
+            }
         }
         if (fastActive) armFastMediaSweep()
         // Thumbs: no lanes, no data-saver gate — they are what makes the loading placeholder look
@@ -7725,6 +7867,10 @@ object HavenNet : InboundListener {
      */
     private fun reverifyBackupAfterDirectAsk(ref: String) {
         if (LocalMedia.isSynthetic(ref)) return
+        // Already queued / uploading: the probe would only race the upload about to settle it. And a
+        // probe is a relay round-trip plus a possible re-upload — heavy I/O the call / thermal /
+        // power-save gate defers like the rest (Apple parity).
+        if (hasPendingBackup(ref) || HeavyWorkMonitor.current.suspendHeavyIO) return
         // `System.currentTimeMillis()`, not `nowMs()` — the latter is ULong (it feeds the FFI's
         // timestamps); this is a plain wall-clock throttle, like `mediaServedAt`.
         val now = System.currentTimeMillis()
@@ -7769,14 +7915,153 @@ object HavenNet : InboundListener {
             Log.i(TAG, "media REQ ${ref.take(12)} — refused, link is ultra-constrained")
             return
         }
-        // They had to come to US for bytes we already backed up — so no relay served them. That is a
-        // signal about our own backup, not just a request to answer.
-        reverifyBackupAfterDirectAsk(ref)
-        // Rate-limit: a waiting requester re-asks every cycle, so without this we re-served the same blobs
-        // hundreds of times and flooded the send queue so nothing drained. One serve per ref per 25s.
-        if (!shouldServeNearby(ref)) return
-        val bytes = LocalMedia.loadAnyCircle(ref) ?: return
-        serveOnce(ref, requester) { sendMediaChunks(ref, bytes, requester) }
+        relayFirstServe(ref, requester, resume = null)
+    }
+
+    // ---- Relay-first serving (Apple FeedStore.relayFirstServe parity) ---------------------------
+
+    /** Relay hints (frame 32) sent per "ref|requester": (count, window start ms). */
+    private val relayHintsSent = HashMap<String, Pair<Int, Long>>()
+    private val RELAY_HINT_WINDOW_MS = 30 * 60_000L
+    /** Requesters waiting for OUR upload of a ref to land: ref → (requester → circleId). */
+    private val hintOnUpload = HashMap<String, HashMap<String, String>>()
+    /** ref → circle, for refs we have been asked to serve (the feed walk is not free). */
+    private val serveCircleCache = object : LinkedHashMap<String, String>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 1000
+    }
+
+    private fun relayHintCount(ref: String, requester: String): Int = synchronized(relayHintsSent) {
+        val e = relayHintsSent["$ref|$requester"] ?: return 0
+        if (System.currentTimeMillis() - e.second >= RELAY_HINT_WINDOW_MS) 0 else e.first
+    }
+
+    /** Record one hint; false once the per-window budget is spent (the caller stays quiet). */
+    private fun noteRelayHint(ref: String, requester: String): Boolean = synchronized(relayHintsSent) {
+        val key = "$ref|$requester"
+        val now = System.currentTimeMillis()
+        var e = relayHintsSent[key] ?: (0 to now)
+        if (now - e.second >= RELAY_HINT_WINDOW_MS) e = 0 to now
+        if (e.first >= HeavyWorkPolicy.MAX_RELAY_HINTS) return false
+        relayHintsSent[key] = (e.first + 1) to e.second
+        if (relayHintsSent.size > 2000) relayHintsSent.clear()
+        true
+    }
+
+    private fun circleOfRef(ref: String): String? {
+        synchronized(serveCircleCache) { serveCircleCache[ref] }?.let { return it }
+        val found = runCatching {
+            social.circles().firstOrNull { c ->
+                social.feed(c.id, nowMs(), null).any { item ->
+                    item.media.contains(ref) || item.comments.any { it.media.contains(ref) }
+                }
+            }?.id
+        }.getOrNull() ?: return null
+        synchronized(serveCircleCache) { serveCircleCache[ref] = found }
+        return found
+    }
+
+    /** Confirmed (ledger) on a relay OTHER than the one this device hosts in-process. */
+    private fun isBackedUpRemote(ref: String): Boolean {
+        ensureLedger()
+        val own = ownHostedRelayHex()
+        return synchronized(backedUp) {
+            backedUp.any { it.endsWith("|$ref") && (own.isEmpty() || !it.startsWith("$own|")) }
+        }
+    }
+
+    /**
+     * The serving half of "the relay is the media path" ([HeavyWorkPolicy.decideServe]). A friend
+     * asking for a blob a relay holds — or that our own upload is about to put there — is pointed at
+     * the relay (frame 32) instead of being streamed a KEM-sealed chunk at a time from this phone.
+     * Friends are streamed only when the circle has NO relay (or after [HeavyWorkPolicy.MAX_RELAY_HINTS]
+     * hints), and never during a call, in Battery Saver, or warm. [resume] = a frame-33 bitmap ask.
+     */
+    private fun relayFirstServe(ref: String, requester: String, resume: MediaResume.Request?) {
+        scope.launch(Dispatchers.IO) {
+            val cond = HeavyWorkMonitor.refresh()
+            val own = runCatching { social.myNodeHex() }.getOrNull() == requester
+            val cid = if (own) null else circleOfRef(ref)
+            val req = HeavyWorkPolicy.ServeRequest(
+                isOwnDevice = own,
+                onRelay = isBackedUpRemote(ref),
+                uploadPending = hasPendingBackup(ref),
+                circleHasRelay = cid?.let { relaysFor(it).isNotEmpty() } ?: false,
+                hintsAlreadySent = relayHintCount(ref, requester),
+            )
+            when (val verdict = HeavyWorkPolicy.decideServe(req, cond)) {
+                is HeavyWorkPolicy.ServeDecision.Stream -> {
+                    // They came to US for bytes we believe are backed up — so no relay served them.
+                    // That is a signal about our own backup copy (see reverifyBackupAfterDirectAsk).
+                    if (req.onRelay) reverifyBackupAfterDirectAsk(ref)
+                    streamServe(ref, requester, resume)
+                }
+                is HeavyWorkPolicy.ServeDecision.HintRelay -> {
+                    if (cid == null || !noteRelayHint(ref, requester)) return@launch
+                    Log.i("MediaSync", "media REQ ${ref.take(12)} from=${requester.take(8)} — on a relay: hinting instead of streaming")
+                    reverifyBackupAfterDirectAsk(ref)
+                    CallManager.sealedSend(Wire.MEDIA_AVAILABLE, mediaFrameBody(ref, cid, ""), requester)
+                }
+                is HeavyWorkPolicy.ServeDecision.HintWhenUploaded -> {
+                    if (!noteRelayHint(ref, requester)) return@launch
+                    Log.i("MediaSync", "media REQ ${ref.take(12)} from=${requester.take(8)} — our relay upload is pending: finishing it first")
+                    synchronized(hintOnUpload) {
+                        hintOnUpload.getOrPut(ref) { HashMap() }[requester] = cid.orEmpty()
+                        if (hintOnUpload.size > 500) hintOnUpload.clear()
+                    }
+                    promoteBackup(ref)
+                }
+                is HeavyWorkPolicy.ServeDecision.Decline ->
+                    Log.i("MediaSync", "media REQ ${ref.take(12)} from=${requester.take(8)} — not serving: ${verdict.why}")
+            }
+        }
+    }
+
+    /** A backup of [ref] just landed on a relay: answer everyone told to wait for it (frame 32). */
+    private fun mediaBackupLanded(ref: String, circleId: String) {
+        val waiting = synchronized(hintOnUpload) { hintOnUpload.remove(ref) } ?: return
+        val me = runCatching { social.myNodeHex() }.getOrNull()
+        for ((requester, cid) in waiting) {
+            if (requester == me) continue   // own devices re-ask on their own lane
+            Log.i("MediaSync", "media ${ref.take(12)} landed on a relay — telling ${requester.take(8)}")
+            CallManager.sealedSend(Wire.MEDIA_AVAILABLE, mediaFrameBody(ref, cid.ifEmpty { circleId }, ""), requester)
+        }
+    }
+
+    /** Open [ref] as a plaintext file and stream it (all of it, or a resume's missing chunks). */
+    private fun streamServe(ref: String, requester: String, resume: MediaResume.Request?) {
+        // Rate-limit: a waiting requester re-asks every cycle, so without this we re-served the same
+        // blobs hundreds of times and flooded the send queue so nothing drained. One serve per ref per
+        // 25s (a resume skips it — it only asks for holes, and a stamped first serve must not block it).
+        if (resume == null && !shouldServeNearby(ref)) return
+        serveOnce(ref, requester) {
+            val sf = LocalMedia.openForServing(ref) ?: return@serveOnce
+            try {
+                val size = sf.file.length()
+                val total = maxOf(1, ((size + mediaChunkSize - 1) / mediaChunkSize).toInt())
+                // A declared total that disagrees with ours means their partial was built against
+                // different bytes, so their bitmap indexes something else and honouring it would leave
+                // permanent holes: send everything and let the content-address check at adopt decide.
+                // Expanding their bitmap only HERE — after the totals agree — is what bounds the work by
+                // a file we hold rather than by the chunk count the peer declared.
+                val missing = if (resume != null && total == resume.total) {
+                    val theirs = MediaResume.indices(resume.bitmap, total)
+                    (0 until total).filterNot { it in theirs }.toSet()
+                } else null
+                if (missing != null && missing.isEmpty()) return@serveOnce   // last chunk in flight
+                if (resume != null) Log.i("MediaSync", "resume ref=${ref.take(12)} from=${requester.take(8)}: ${missing?.size ?: total}/$total chunks still needed")
+                sendMediaChunks(ref, sf.file, requester, missing)
+            } finally {
+                sf.release()
+            }
+        }
+    }
+
+    /** The heavy-I/O gate lifted (call over, cooled down, Battery Saver off): resume parked work. */
+    private fun heavyWorkLifted() {
+        if (!ready) return
+        Log.i(TAG, "heavy-work gate lifted — resuming media prefetch + relay uploads")
+        runCatching { requestMissingMedia() }
+        runCatching { drainPersistedBackups() }
     }
 
     /**
@@ -7818,28 +8103,43 @@ object HavenNet : InboundListener {
      * everything, which is what a first request (frame 3) always means.
      */
     private suspend fun sendMediaChunks(
-        ref: String, bytes: ByteArray, requesterHex: String, missing: Set<Int>? = null,
+        ref: String, file: java.io.File, requesterHex: String, missing: Set<Int>? = null,
     ) {
-        val total = maxOf(1, (bytes.size + mediaChunkSize - 1) / mediaChunkSize)
+        // Read from the FILE, one chunk at a time (Apple parity): the whole plaintext used to sit on
+        // the managed heap for the entire serve, plus a copy per chunk.
+        val size = file.length()
+        val total = maxOf(1, ((size + mediaChunkSize - 1) / mediaChunkSize).toInt())
         SyncMetrics.incOut()   // a media item is being served/pushed (iOS nbMediaOut += 1)
         val refBytes = ref.toByteArray(Charsets.UTF_8)
         val isOwn = runCatching { social.myNodeHex() }.getOrNull() == requesterHex
-        var index = 0
-        var offset = 0
-        while (offset < bytes.size) {
-            val end = minOf(offset + mediaChunkSize, bytes.size)
-            if (missing != null && index !in missing) { offset = end; index++; continue }
-            val chunk = bytes.copyOfRange(offset, end)
-            val sealed = if (isOwn) sealOwnMedia(chunk) else runCatching { social.sealMedia(requesterHex, chunk) }.getOrNull()
-            if (sealed == null) {
-                // A failed seal abandons the transfer MID-FILE, leaving the requester with a partial
-                // set it can't complete on its own — say which chunk rather than stopping silently.
-                // (With resume that partial is no longer a dead end: it re-asks for exactly the holes.)
-                Log.w("MediaSync", "serve ref=${ref.take(12)} → ${requesterHex.take(8)}: seal FAILED at chunk $index; transfer abandoned")
-                return
+        val buf = ByteArray(mediaChunkSize)
+        java.io.RandomAccessFile(file, "r").use { raf ->
+            for (index in 0 until total) {
+                if (missing != null && index !in missing) continue   // requester already has it
+                // A call started / Battery Saver / hot mid-stream: stop here. The requester holds a
+                // partial and resumes (frame 33) from this exact chunk once the gate lifts. Friends
+                // stop earlier (the friend-serving line); own devices only on a full suspend.
+                val cond = if (index % 64 == 0) HeavyWorkMonitor.refresh() else HeavyWorkMonitor.current
+                if (if (isOwn) cond.suspendHeavyIO else !cond.peerServingAllowedForFriends) {
+                    Log.i("MediaSync", "serve ref=${ref.take(12)} → ${requesterHex.take(8)}: paused at chunk $index/$total — ${cond.reason}")
+                    return
+                }
+                val offset = index.toLong() * mediaChunkSize
+                val len = minOf(mediaChunkSize.toLong(), size - offset).toInt()
+                if (len <= 0) break
+                raf.seek(offset)
+                raf.readFully(buf, 0, len)
+                val chunk = buf.copyOf(len)
+                val sealed = if (isOwn) sealOwnMedia(chunk) else runCatching { social.sealMedia(requesterHex, chunk) }.getOrNull()
+                if (sealed == null) {
+                    // A failed seal abandons the transfer MID-FILE, leaving the requester with a partial
+                    // set it can't complete on its own — say which chunk rather than stopping silently.
+                    // (With resume that partial is no longer a dead end: it re-asks for exactly the holes.)
+                    Log.w("MediaSync", "serve ref=${ref.take(12)} → ${requesterHex.take(8)}: seal FAILED at chunk $index; transfer abandoned")
+                    return
+                }
+                sendFrameAwait(Wire.MEDIA_CHUNK, chunkFrame(refBytes, index, total, sealed), requesterHex)
             }
-            sendFrameAwait(Wire.MEDIA_CHUNK, chunkFrame(refBytes, index, total, sealed), requesterHex)
-            offset = end; index++
         }
     }
 
@@ -7934,21 +8234,8 @@ object HavenNet : InboundListener {
     private fun handleMediaResumeRequest(body: ByteArray) {
         val req = MediaResume.decode(body) ?: return
         if (!LocalMedia.has(req.ref)) return
-        if (!shouldServeNearby(req.ref)) return
-        val bytes = LocalMedia.loadAnyCircle(req.ref) ?: return
-        val total = maxOf(1, (bytes.size + mediaChunkSize - 1) / mediaChunkSize)
-        // A declared total that disagrees with ours means their partial was built against different
-        // bytes, so their bitmap indexes something else and honouring it would leave permanent holes.
-        // Send everything and let the content-address check at adopt decide which copy is real.
-        // Expanding their bitmap only HERE — after the totals agree — is what bounds the work by a file
-        // we hold rather than by the chunk count the peer declared (see MediaResume.Request).
-        val missing = if (total == req.total) {
-            val theirs = MediaResume.indices(req.bitmap, total)
-            (0 until total).filterNot { it in theirs }.toSet()
-        } else null
-        if (missing != null && missing.isEmpty()) return   // they have it all; the last chunk is in flight
-        Log.i("MediaSync", "resume ref=${req.ref.take(12)} from=${req.requesterHex.take(8)}: ${missing?.size ?: total}/$total chunks still needed")
-        serveOnce(req.ref, req.requesterHex) { sendMediaChunks(req.ref, bytes, req.requesterHex, missing) }
+        // Same relay-first / heavy-I/O gate as a first request; the bitmap is honoured in streamServe.
+        relayFirstServe(req.ref, req.requesterHex, resume = req)
     }
 
     /**

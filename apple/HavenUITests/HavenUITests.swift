@@ -68,6 +68,9 @@ final class HavenUITests: XCTestCase {
         field.tap()
         field.typeText("a sealed post from the UI test")
         app.buttons["composeSend"].tap()
+        // A circle with more than one other person asks once "Post to everyone in <Circle>?".
+        let confirm = app.buttons["Post to everyone"]
+        if confirm.waitForExistence(timeout: 2) { confirm.tap() }
 
         let posted = app.staticTexts["a sealed post from the UI test"]
         XCTAssertTrue(posted.waitForExistence(timeout: 10), "new post should appear in the feed")

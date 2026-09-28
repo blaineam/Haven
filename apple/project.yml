@@ -426,6 +426,8 @@ targets:
       # The history handoff's relay keys + page codec — Foundation only, split out of
       # HistoryHandoff.swift (which needs FeedStore / the FFI) so the format is covered here.
       - path: HavenApp/HistoryHandoffWire.swift
+      # Bounded relay fan-out + the dial-target order for a new friend. Swift concurrency only.
+      - path: HavenApp/ReachPolicy.swift
       - path: HavenApp/HavenLog.swift
       # Relay-first media serving + the call/thermal/Low-Power heavy-I/O gate — pure decisions,
       # Foundation only (the live sampling is HeavyWorkMonitor.swift, app-only).

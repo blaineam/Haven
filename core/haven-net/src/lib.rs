@@ -650,6 +650,32 @@ impl Node {
         }
     }
 
+    /// Forgive the dial backoff for ONE peer — the app has fresh evidence it is reachable (a friend was
+    /// just added/approved, or a frame from them just arrived). Without this a new friend whose first
+    /// dial raced their node coming up sat out 2→30 min on mobile before we'd try again. Clears the
+    /// strike count too: the evidence is specific to this peer. Returns whether a gate was cleared.
+    pub fn forgive_dial(&self, node_hex: &str) -> bool {
+        let Ok(bytes) = decode_hex32(node_hex) else { return false };
+        let Ok(id) = EndpointId::from_bytes(&bytes) else { return false };
+        lock(&self.dial_gate).remove(&id).is_some()
+    }
+
+    /// Re-open every gated peer NOW (a network path change: the old failures may have been ours).
+    /// Keeps each peer's strike count, so an id that is genuinely dead fails once more and goes
+    /// straight back to its long cooldown — one probe per path change, never a dial storm.
+    pub fn forgive_all_dials(&self) -> usize {
+        let now = std::time::Instant::now();
+        let mut gate = lock(&self.dial_gate);
+        let mut n = 0;
+        for g in gate.values_mut() {
+            if g.until > now {
+                g.until = now;
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// How many dials were actually handed to `endpoint.connect` over this node's lifetime.
     /// Diagnostics + the single-flight regression test (a send burst to one dead id must
     /// produce ONE attempt, not one per sender).
@@ -1027,4 +1053,37 @@ fn decode_hex32(s: &str) -> Result<[u8; 32]> {
         out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| anyhow!("bad hex"))?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod forgive_dial_tests {
+    use super::*;
+
+    /// A struck peer must be re-dialable the moment the app forgives it (new friend / inbound frame),
+    /// and a path-change forgive-all must re-open the gate while KEEPING the strike count.
+    #[tokio::test]
+    async fn forgive_clears_one_gate_and_forgive_all_keeps_strikes() {
+        let me = haven_p2p::identity::Identity::generate();
+        let node = Node::spawn(me.node_secret_bytes(), Arc::new(|_: [u8; 32], _: Vec<u8>| {})).await.unwrap();
+        let a = haven_p2p::identity::Identity::generate().public().node_id_bytes();
+        let b = haven_p2p::identity::Identity::generate().public().node_id_bytes();
+        let hex = |x: &[u8; 32]| x.iter().map(|v| format!("{v:02x}")).collect::<String>();
+        let (ia, ib) = (EndpointId::from_bytes(&a).unwrap(), EndpointId::from_bytes(&b).unwrap());
+        {
+            let mut g = lock(&node.dial_gate);
+            strike_dial_gate(&mut g, ia);
+            strike_dial_gate(&mut g, ib);
+            strike_dial_gate(&mut g, ib);
+        }
+        assert!(node.forgive_dial(&hex(&a)), "gate for a cleared");
+        assert!(!node.forgive_dial(&hex(&a)), "nothing left to clear");
+        assert!(!node.forgive_dial("not-hex"));
+        assert_eq!(node.forgive_all_dials(), 1, "b re-opened");
+        let g = lock(&node.dial_gate);
+        let gb = g.get(&ib).expect("b still tracked");
+        assert_eq!(gb.fails, 2, "strike count kept so a dead peer returns to its long cooldown");
+        assert!(std::time::Instant::now() >= gb.until);
+        drop(g);
+        node.shutdown().await;
+    }
 }

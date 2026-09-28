@@ -152,25 +152,38 @@ fun CircleScreen(onAddFriend: () -> Unit) {
     // Repair an account that was imported into twice, without being asked. Once per session, and a
     // no-op when nothing is duplicated — the rule is shared with iOS (PostDedupe).
     LaunchedEffect(active, version) { HavenNet.sweepDuplicateImportsOnce(active) }
-    val items: List<FeedItemFfi> = remember(version, active, profile.retentionDays, circleSettingsVersion, circlesVersion, HavenNet.blocked.size, showHidden, hiddenCount) {
-        // Per-circle auto-delete override (falls back to the app-wide retention default).
-        val raw = runCatching { HavenNet.engine.feed(active, nowMs(), com.blaineam.haven.core.CircleSettings.retentionSecs(active)) }.getOrDefault(emptyList())
-        // Hide posts from blocked people and from anyone no longer in this circle (removed members),
-        // so a removal actually clears their content even if a later sync re-ingests their old events.
-        // null = the lookup failed (don't blank the feed); empty list = a genuine solo circle (hide
-        // everyone else). My own posts always stay.
-        val memberHexes: List<String>? = runCatching { HavenNet.membersOf(active).map { it.idHex } }.getOrNull()
-        raw.filter { fi ->
-            val allowedAuthor = when {
-                fi.isMe -> true
-                HavenNet.blocked.any { it.startsWith(fi.authorShort) } -> false
-                memberHexes == null -> true   // membership lookup failed — don't hide everything
-                else -> memberHexes.any { it.startsWith(fi.authorShort) }
+    // The feed read (`engine.feed` decodes + re-opens every envelope in the circle) runs OFF the main
+    // thread. It used to run inside `remember` during composition, so every feedVersion bump — each
+    // ingest burst, media landing, periodic tick — decoded the whole circle on the UI thread.
+    // produceState keeps the last list while a re-read runs (no flash on a version bump); it is
+    // tagged with its circle so switching circles never shows the previous circle's posts.
+    val feedRead by androidx.compose.runtime.produceState(
+        initialValue = "" to emptyList<FeedItemFfi>(),
+        version, active, profile.retentionDays, circleSettingsVersion, circlesVersion, HavenNet.blocked.size, showHidden, hiddenCount,
+    ) {
+        val circle = active
+        val showHiddenNow = showHidden
+        value = circle to kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            // Per-circle auto-delete override (falls back to the app-wide retention default).
+            val raw = runCatching { HavenNet.engine.feed(circle, nowMs(), com.blaineam.haven.core.CircleSettings.retentionSecs(circle)) }.getOrDefault(emptyList())
+            // Hide posts from blocked people and from anyone no longer in this circle (removed members),
+            // so a removal actually clears their content even if a later sync re-ingests their old events.
+            // null = the lookup failed (don't blank the feed); empty list = a genuine solo circle (hide
+            // everyone else). My own posts always stay.
+            val memberHexes: List<String>? = runCatching { HavenNet.membersOf(circle).map { it.idHex } }.getOrNull()
+            raw.filter { fi ->
+                val allowedAuthor = when {
+                    fi.isMe -> true
+                    HavenNet.blocked.any { it.startsWith(fi.authorShort) } -> false
+                    memberHexes == null -> true   // membership lookup failed — don't hide everything
+                    else -> memberHexes.any { it.startsWith(fi.authorShort) }
+                }
+                // Personal per-post hide (reversible via the "show hidden" toggle).
+                allowedAuthor && (showHiddenNow || !com.blaineam.haven.core.HiddenStore.isHidden(fi.id))
             }
-            // Personal per-post hide (reversible via the "show hidden" toggle).
-            allowedAuthor && (showHidden || !com.blaineam.haven.core.HiddenStore.isHidden(fi.id))
         }
     }
+    val items: List<FeedItemFfi> = if (feedRead.first == active) feedRead.second else emptyList()
     val storyGroups = remember(items) { groupStories(items) }
     // Stories live in the tray, not the list. Unsent posts are gone too — a "Message unsent" tombstone
     // in the feed is clutter, not information (PostCard still renders it for a deep link / comment sheet).

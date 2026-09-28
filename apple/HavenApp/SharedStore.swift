@@ -1456,6 +1456,18 @@ enum SharedStore {
         rosterPullAt[accountHex.lowercased()] = Date()
         if rosterPullAt.count > 500 { rosterPullAt.removeAll() }
     }
+    /// Forget the backoff — for one contact, or everyone (nil). Called when there is NEW reason to
+    /// expect the roster is fetchable now: a relay was just adopted (a pull that ran with no relay
+    /// to ask burned the whole 10 min on nothing), a friend was approved, an invite grant arrived.
+    static func clearRosterPullBackoff(_ accountHex: String? = nil) {
+        if let accountHex { rosterPullAt.removeValue(forKey: accountHex.lowercased()) }
+        else { rosterPullAt.removeAll() }
+    }
+    /// Whether a roster pull has anywhere to look: a relay to ask, or our own hosted store. With
+    /// none, an attempt learns nothing and must NOT start the backoff clock.
+    static func rosterPullHasCandidates() -> Bool {
+        RelayHost.shared.serving || RelayMailboxStore.shared.allRelays().contains { !$0.hasPrefix("s3:") }
+    }
 
     /// Posted when a contact's roster CHANGED, which moves the circle epoch. The observer re-seals
     /// my history under the new epoch (see `backfillMailbox`) — matching AccountStore's
@@ -2896,175 +2908,154 @@ enum SharedStore {
 
     /// Poll the mailbox for envelopes we haven't seen. Returns (circleId, key, envelope) triples.
     /// Keys are needed so HELLO blobs (`/__hello__/`) can be routed to handleHello, not receive().
+    ///
+    /// CONCURRENT within the pass (bounded): each (circle, relay) pair is one unit, and up to
+    /// `mailboxUnitConcurrency` units run at once — so one dead relay's 20–60s timeouts no longer
+    /// delay every other circle behind it. Units start in `circleIds` order, so callers put the
+    /// circle on screen first. This is parallelism INSIDE one pass only: `pullMailbox` stays
+    /// single-flight, and nothing here marks a key seen (the ingest does, after the bytes are in
+    /// hand and the engine state is saved) — both mailbox invariants are untouched.
     static func pollMailbox(circleIds: [String]) async -> [(String, String, Data)] {
-        var out: [(String, String, Data)] = []
         let myHelloIds = myHelloClaimIds()   // hello slots addressed to anyone else stay untouched
+        let claims = MailboxPassClaims()
+        var units: [MailboxPollUnit] = []
         for cid in circleIds {
-            let prefix = "haven/mailbox/\(cid)/"
             let nodes = relayNodes(cid)
-            if !nodes.isEmpty {
+            if nodes.isEmpty {
+                units.append(MailboxPollUnit(cid: cid, node: nil))
+            } else {
                 // Read from ALL relays; seenMailbox is keyed by the content-addressed key, so the
                 // same envelope mirrored on several relays is ingested exactly once (dedup).
-                for node in nodes {
-                    // OUR OWN hosted relay: read the local store directly — we can't dial ourselves
-                    // (self-dial guard), so this is how the host ingests what a sibling device or a
-                    // friend uploaded to it (the previously-missing read-own-relay path).
-                    if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
-                        let host = RelayHost.shared
-                        // LIST and FILTER off-main too, not just the reads. `localList` enumerates the
-                        // whole circle prefix — one real store here holds 7,557 keys in a single
-                        // circle — and the seen-set filter walks every one of them. Leaving those two
-                        // on the main actor meant that even with nothing new to fetch, every poll
-                        // still cost ~10k directory entries plus 10k set lookups on the thread drawing
-                        // the UI, per circle. Fast enough to hide on an M4; not on an M1 with a real
-                        // store behind it. The seen-set is NSLock-guarded and always was — it just
-                        // wasn't declared callable from off the main actor.
-                        //
-                        // LINKED-HOST RECOVERY: also re-offer a bounded set of already-seen *control*
-                        // envelopes (key commits 0x03, device rosters 0x04). A Mac hosting the relay
-                        // can mark those seen before it can open them (roster lag / dual-open race /
-                        // older mark-at-fetch), leave peer_epoch_keys empty, and then never retry —
-                        // while the iPhone (linked, push-capable) decrypts the same traffic fine.
-                        // Cap keeps the retry cheap; once keys land, receive returns false for
-                        // duplicates and we stop thrashing.
-                        let scan: (all: Int, want: [String], reoffered: Int) = await Task.detached(priority: .utility) {
-                            let all = host.localList(prefix).filter { !$0.contains("/__live__/") }
-                            var want = all.filter { !seenContains($0) && helloKeyClaimable($0, myIds: myHelloIds) }
-                            let unseenOnly = want.count
-                            // Re-probe seen control-plane keys (bounded). Prefer unread first.
-                            // Cap both hits and files inspected so a fat circle (thousands of
-                            // already-seen event blobs) does not re-read the whole store every poll.
-                            var controlBudget = 48
-                            var seenScanned = 0
-                            for key in all where seenContains(key) && controlBudget > 0 && seenScanned < 300 {
-                                seenScanned += 1
-                                guard let data = host.localGet(key), let tag = data.first else { continue }
-                                // 0x03 = key commit, 0x04 = device roster — must land before events.
-                                if tag == 0x03 || tag == 0x04 {
-                                    want.append(key)
-                                    controlBudget -= 1
-                                }
-                            }
-                            return (all.count, want, want.count - unseenOnly)
-                        }.value
-                        var fresh = scan.want
-                        let localKeys = scan.all
-                        // BOUND the pass. On a freshly-enabled relay nothing is in the seen-set, so
-                        // "fresh" is the WHOLE store — thousands of envelopes — and this loop used to
-                        // read every one of them synchronously ON THE MAIN THREAD (SharedStore is
-                        // @MainActor and RelayHost was too). That is why enabling the relay made the
-                        // app unresponsive within seconds rather than gradually: one poll could block
-                        // main for thousands of file reads back to back. The remainder is picked up by
-                        // the next poll — ingestion is idempotent and the seen-set carries across.
-                        let cap = 200
-                        let deferred = max(0, fresh.count - cap)
-                        if deferred > 0 { fresh = Array(fresh.prefix(cap)) }
-                        // Drained-proof gating must ignore the ALWAYS-present control re-offer
-                        // (≤48 already-seen 0x03/0x04 keys re-fed by design) — counting them kept
-                        // `fresh` nonzero forever and permanently blocked parked re-opens.
-                        noteBacklog(node, cid, keys: localKeys,
-                                    fresh: max(0, fresh.count - scan.reoffered), deferred: deferred)
-                        HavenLog.relay("poll OWN relay \(cid): \(localKeys) keys, \(fresh.count) new\(deferred > 0 ? " (+\(deferred) next poll)" : "")")
-                        // Read OFF the main actor — RelayHost's accessors are nonisolated precisely so
-                        // this file I/O doesn't have to happen on the thread drawing the UI.
-                        let read: [(String, Data)] = await Task.detached(priority: .utility) {
-                            var acc: [(String, Data)] = []
-                            for key in fresh {
-                                if let data = host.localGet(key) { acc.append((key, data)) }
-                            }
-                            return acc
-                        }.value
-                        // Mark seen only once the bytes are in hand, so a failed read is retried on the
-                        // next poll instead of being skipped forever.
-                        for (key, data) in read { out.append((cid, key, data)) }
-                        continue
+                for node in nodes { units.append(MailboxPollUnit(cid: cid, node: node)) }
+            }
+        }
+        let parts = await fanOut(units, limit: mailboxUnitConcurrency) { u -> [(String, String, Data)] in
+            if let node = u.node {
+                return await pollMailboxRelay(cid: u.cid, node: node, myHelloIds: myHelloIds, claims: claims)
+            }
+            return await pollMailboxNonRelay(cid: u.cid)
+        }
+        return parts.flatMap { $0 }
+    }
+
+    /// (circle, relay) units in flight at once, and per-unit concurrent key GETs. Bounded so a big
+    /// backlog can't open hundreds of sockets: at most units × keys requests at any moment.
+    static let mailboxUnitConcurrency = 4
+    static let mailboxKeyFetchConcurrency = 4
+
+    /// One relay's share of a mailbox pass for one circle (the body of the old serial loop).
+    private static func pollMailboxRelay(cid: String, node: String, myHelloIds: Set<String>,
+                                         claims: MailboxPassClaims) async -> [(String, String, Data)] {
+        var out: [(String, String, Data)] = []
+        let prefix = "haven/mailbox/\(cid)/"
+        // OUR OWN hosted relay: read the local store directly — we can't dial ourselves
+        // (self-dial guard), so this is how the host ingests what a sibling device or a
+        // friend uploaded to it (the previously-missing read-own-relay path).
+        if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+            let host = RelayHost.shared
+            // LIST and FILTER off-main too, not just the reads. `localList` enumerates the
+            // whole circle prefix — one real store here holds 7,557 keys in a single
+            // circle — and the seen-set filter walks every one of them. Leaving those two
+            // on the main actor meant that even with nothing new to fetch, every poll
+            // still cost ~10k directory entries plus 10k set lookups on the thread drawing
+            // the UI, per circle. Fast enough to hide on an M4; not on an M1 with a real
+            // store behind it. The seen-set is NSLock-guarded and always was — it just
+            // wasn't declared callable from off the main actor.
+            //
+            // LINKED-HOST RECOVERY: also re-offer a bounded set of already-seen *control*
+            // envelopes (key commits 0x03, device rosters 0x04). A Mac hosting the relay
+            // can mark those seen before it can open them (roster lag / dual-open race /
+            // older mark-at-fetch), leave peer_epoch_keys empty, and then never retry —
+            // while the iPhone (linked, push-capable) decrypts the same traffic fine.
+            // Cap keeps the retry cheap; once keys land, receive returns false for
+            // duplicates and we stop thrashing.
+            let scan: (all: Int, want: [String], reoffered: Int) = await Task.detached(priority: .utility) {
+                let all = host.localList(prefix).filter { !$0.contains("/__live__/") }
+                var want = all.filter { !seenContains($0) && helloKeyClaimable($0, myIds: myHelloIds) }
+                let unseenOnly = want.count
+                // Re-probe seen control-plane keys (bounded). Prefer unread first.
+                // Cap both hits and files inspected so a fat circle (thousands of
+                // already-seen event blobs) does not re-read the whole store every poll.
+                var controlBudget = 48
+                var seenScanned = 0
+                for key in all where seenContains(key) && controlBudget > 0 && seenScanned < 300 {
+                    seenScanned += 1
+                    guard let data = host.localGet(key), let tag = data.first else { continue }
+                    // 0x03 = key commit, 0x04 = device roster — must land before events.
+                    if tag == 0x03 || tag == 0x04 {
+                        want.append(key)
+                        controlBudget -= 1
                     }
-                    // Plain-HTTP LIST+GET first — same reason as uploadEvent: iroh dial may be
-                    // unreachable while the relay's media port answers. Delta-LIST: echo the last
-                    // digest for this (relay, circle) so an unchanged mailbox is one bodiless 204
-                    // instead of a full key dump + N seen-set walks (the idle radio saver).
-                    if let http = RelayMailboxStore.shared.httpInterface(node) {
-                        var listedViaHttp = false
-                        let digestKey = "\(node)|\(cid)"
-                        for base in http.urls where !httpUrlBad(base) {
-                            switch await httpListDelta(base, http.token, prefix, digest: mailboxListDigests[digestKey]) {
-                            case .success(let r):
-                                listedViaHttp = true
-                                // HTTP LIST is a real reachability proof — without this the UI only
-                                // greened on iroh dial success, so free-CF (HTTP-only) relays flapped
-                                // orange whenever a dial timed out while HTTP was fine.
-                                RelayHealth.shared.recordSuccess(node)
-                                RelayMailboxStore.shared.markSeen(node)
-                                guard let keys = r.keys else { break }   // 204: nothing new — skip the GETs
-                                // Unclaimed live-call frames are NOT content: they're claimed by the
-                                // in-call 2s poll, and GETting them here just re-fetched frames that
-                                // then failed receive() forever. Same for hello slots addressed to
-                                // other ids (theirs to claim). Control-plane first, capped batch.
-                                // OFF-MAIN, like the hosted path a few lines up already does.
-                                //
-                                // This filter+sort is pure STRING work over every key a relay lists —
-                                // seenContains does set lookups on full key strings, helloKeyClaimable
-                                // splits and prefix-matches, controlKeyRank scans for markers. Cheap
-                                // per key, thousands of keys, and it ran on the MAIN ACTOR every poll
-                                // because SharedStore is a @MainActor enum.
-                                //
-                                // A Time Profiler run attributed 4.4% of ALL main-thread samples to
-                                // pullMailbox, every one of them under pollMailbox, and the leaves were
-                                // String._uncheckedFromUTF8 / Substring.subscript / _allASCII /
-                                // KeyPath._projectReadOnly — this loop, not crypto and not rendering.
-                                // It is also why the main thread never reached idle: polls never stop.
-                                var fresh = await Task.detached(priority: .utility) { () -> [String] in
-                                    var f = keys.filter {
-                                        !seenContains($0) && !$0.contains("/__live__/")
-                                            && helloKeyClaimable($0, myIds: myHelloIds)
-                                    }
-                                    f.sort { controlKeyRank($0) < controlKeyRank($1) }
-                                    return f
-                                }.value
-                                let deferred = max(0, fresh.count - mailboxFetchCap)
-                                if deferred > 0 { fresh = Array(fresh.prefix(mailboxFetchCap)) }
-                                noteBacklog(node, cid, keys: keys.count, fresh: fresh.count, deferred: deferred)
-                                var allFetched = true
-                                for key in fresh {
-                                    if case .success(let data?) = await httpGet(base, http.token, key) {
-                                        out.append((cid, key, data))
-                                    } else {
-                                        allFetched = false
-                                    }
-                                }
-                                // Commit the digest ONLY when this listing is fully drained — a 204
-                                // next poll must never hide keys we still owe a GET.
-                                if allFetched, deferred == 0, let d = r.digest, !d.isEmpty {
-                                    mailboxListDigests[digestKey] = d
-                                    if mailboxListDigests.count > 500 { mailboxListDigests.removeAll() }
-                                }
-                            case .failure(is RelayForbidden):
-                                noteRefused(node, "mailbox list")
-                                // Reachable enough to refuse — not a dead endpoint.
-                                RelayHealth.shared.recordSuccess(node)
-                            case .failure:
-                                markHttpUrlBad(base)
-                            }
-                            if listedViaHttp { break }
-                        }
-                        if listedViaHttp { continue }
-                    }
-                    guard let c = await RelayClients.client(node) else { continue }
-                    // list() now throws so a dead iroh dial isn't read as an empty mailbox;
-                    // a failure means this relay gave us nothing — try the next one.
-                    guard let keys = try? await c.list(prefix: prefix) else { continue }
+                }
+                return (all.count, want, want.count - unseenOnly)
+            }.value
+            var fresh = scan.want
+            let localKeys = scan.all
+            // BOUND the pass. On a freshly-enabled relay nothing is in the seen-set, so
+            // "fresh" is the WHOLE store — thousands of envelopes — and this loop used to
+            // read every one of them synchronously ON THE MAIN THREAD (SharedStore is
+            // @MainActor and RelayHost was too). That is why enabling the relay made the
+            // app unresponsive within seconds rather than gradually: one poll could block
+            // main for thousands of file reads back to back. The remainder is picked up by
+            // the next poll — ingestion is idempotent and the seen-set carries across.
+            let cap = 200
+            let deferred = max(0, fresh.count - cap)
+            if deferred > 0 { fresh = Array(fresh.prefix(cap)) }
+            // Drained-proof gating must ignore the ALWAYS-present control re-offer
+            // (≤48 already-seen 0x03/0x04 keys re-fed by design) — counting them kept
+            // `fresh` nonzero forever and permanently blocked parked re-opens.
+            noteBacklog(node, cid, keys: localKeys,
+                        fresh: max(0, fresh.count - scan.reoffered), deferred: deferred)
+            HavenLog.relay("poll OWN relay \(cid): \(localKeys) keys, \(fresh.count) new\(deferred > 0 ? " (+\(deferred) next poll)" : "")")
+            // Read OFF the main actor — RelayHost's accessors are nonisolated precisely so
+            // this file I/O doesn't have to happen on the thread drawing the UI.
+            let read: [(String, Data)] = await Task.detached(priority: .utility) {
+                var acc: [(String, Data)] = []
+                for key in fresh {
+                    if let data = host.localGet(key) { acc.append((key, data)) }
+                }
+                return acc
+            }.value
+            // Mark seen only once the bytes are in hand, so a failed read is retried on the
+            // next poll instead of being skipped forever.
+            for (key, data) in read { out.append((cid, key, data)) }
+            return out
+        }
+        // Plain-HTTP LIST+GET first — same reason as uploadEvent: iroh dial may be
+        // unreachable while the relay's media port answers. Delta-LIST: echo the last
+        // digest for this (relay, circle) so an unchanged mailbox is one bodiless 204
+        // instead of a full key dump + N seen-set walks (the idle radio saver).
+        if let http = RelayMailboxStore.shared.httpInterface(node) {
+            var listedViaHttp = false
+            let digestKey = "\(node)|\(cid)"
+            for base in http.urls where !httpUrlBad(base) {
+                switch await httpListDelta(base, http.token, prefix, digest: mailboxListDigests[digestKey]) {
+                case .success(let r):
+                    listedViaHttp = true
+                    // HTTP LIST is a real reachability proof — without this the UI only
+                    // greened on iroh dial success, so free-CF (HTTP-only) relays flapped
+                    // orange whenever a dial timed out while HTTP was fine.
                     RelayHealth.shared.recordSuccess(node)
                     RelayMailboxStore.shared.markSeen(node)
-                    // We reached this relay over iroh but hold no usable HTTP interface for it —
-                    // exactly the state a restarted CLI relay (rotated free-tunnel URL) leaves every
-                    // client in, where mailbox flows and MEDIA silently dies (the blob dial drops
-                    // cross-NAT). Fetch its self-published interface and adopt + re-announce.
-                    FeedStore.shared.refreshRelayInterfaceIfNeeded(node)
-                    // Same shape as the HTTP path: skip unclaimed live-call frames + other ids'
-                    // hello slots, control first, cap.
-                    // Off-main for the same reason as the HTTP path above: string work over every
-                    // listed key, on the main actor, on every poll.
-                    let fresh = await Task.detached(priority: .utility) { () -> [String] in
+                    guard let keys = r.keys else { break }   // 204: nothing new — skip the GETs
+                    // Unclaimed live-call frames are NOT content: they're claimed by the
+                    // in-call 2s poll, and GETting them here just re-fetched frames that
+                    // then failed receive() forever. Same for hello slots addressed to
+                    // other ids (theirs to claim). Control-plane first, capped batch.
+                    // OFF-MAIN, like the hosted path a few lines up already does.
+                    //
+                    // This filter+sort is pure STRING work over every key a relay lists —
+                    // seenContains does set lookups on full key strings, helloKeyClaimable
+                    // splits and prefix-matches, controlKeyRank scans for markers. Cheap
+                    // per key, thousands of keys, and it ran on the MAIN ACTOR every poll
+                    // because SharedStore is a @MainActor enum.
+                    //
+                    // A Time Profiler run attributed 4.4% of ALL main-thread samples to
+                    // pullMailbox, every one of them under pollMailbox, and the leaves were
+                    // String._uncheckedFromUTF8 / Substring.subscript / _allASCII /
+                    // KeyPath._projectReadOnly — this loop, not crypto and not rendering.
+                    // It is also why the main thread never reached idle: polls never stop.
+                    var fresh = await Task.detached(priority: .utility) { () -> [String] in
                         var f = keys.filter {
                             !seenContains($0) && !$0.contains("/__live__/")
                                 && helloKeyClaimable($0, myIds: myHelloIds)
@@ -3072,29 +3063,125 @@ enum SharedStore {
                         f.sort { controlKeyRank($0) < controlKeyRank($1) }
                         return f
                     }.value
-                    noteBacklog(node, cid, keys: keys.count, fresh: min(fresh.count, mailboxFetchCap),
-                                deferred: max(0, fresh.count - mailboxFetchCap))
-                    for key in fresh.prefix(mailboxFetchCap) {
-                        if let data = await c.get(key: key) { out.append((cid, key, data)) }
-                    }
-                }
-            } else if PresignStore.shared.hasPool(cid) && !isOwner(cid) {
-                // Member: LIST + GET via the pre-signed pool URLs (no credentials).
-                if let listURL = await PresignStore.shared.listURL(cid), let xml = await S3Client.getURL(listURL) {
-                    for key in S3Client.parseListKeys(xml) where !seenContains(key) {
-                        if let g = await PresignStore.shared.getURL(circleId: cid, key: key), let data = await S3Client.getURL(g) {
-                            out.append((cid, key, data))
+                    let deferred = max(0, fresh.count - mailboxFetchCap)
+                    if deferred > 0 { fresh = Array(fresh.prefix(mailboxFetchCap)) }
+                    noteBacklog(node, cid, keys: keys.count, fresh: fresh.count, deferred: deferred)
+                    // GETs run CONCURRENTLY (bounded): up to 200 awaited one-by-one meant a slow relay
+                    // held the whole pass — every other circle and relay waited behind it. A key a
+                    // sibling relay's task already brought in this pass is skipped (mirrors hold the
+                    // same content-addressed key); skipping is not a failure for this listing.
+                    var allFetched = true
+                    let token = http.token
+                    let got = await fanOut(fresh, limit: Self.mailboxKeyFetchConcurrency) { key -> (Data?, Bool) in
+                        if claims.has(cid, key) { return (nil, true) }
+                        if case .success(let data?) = await httpGet(base, token, key) {
+                            claims.add(cid, key)
+                            return (data, true)
                         }
+                        return (nil, false)
+                    }
+                    for (i, r) in got.enumerated() {
+                        if let data = r.0 { out.append((cid, fresh[i], data)) }
+                        if !r.1 { allFetched = false }
+                    }
+                    // Commit the digest ONLY when this listing is fully drained — a 204
+                    // next poll must never hide keys we still owe a GET.
+                    if allFetched, deferred == 0, let d = r.digest, !d.isEmpty {
+                        mailboxListDigests[digestKey] = d
+                        if mailboxListDigests.count > 500 { mailboxListDigests.removeAll() }
+                    }
+                case .failure(is RelayForbidden):
+                    noteRefused(node, "mailbox list")
+                    // Reachable enough to refuse — not a dead endpoint.
+                    RelayHealth.shared.recordSuccess(node)
+                case .failure:
+                    markHttpUrlBad(base)
+                }
+                if listedViaHttp { break }
+            }
+            if listedViaHttp { return out }
+        }
+        guard let c = await RelayClients.client(node) else { return out }
+        // list() now throws so a dead iroh dial isn't read as an empty mailbox;
+        // a failure means this relay gave us nothing — try the next one.
+        guard let keys = try? await c.list(prefix: prefix) else { return out }
+        RelayHealth.shared.recordSuccess(node)
+        RelayMailboxStore.shared.markSeen(node)
+        // We reached this relay over iroh but hold no usable HTTP interface for it —
+        // exactly the state a restarted CLI relay (rotated free-tunnel URL) leaves every
+        // client in, where mailbox flows and MEDIA silently dies (the blob dial drops
+        // cross-NAT). Fetch its self-published interface and adopt + re-announce.
+        FeedStore.shared.refreshRelayInterfaceIfNeeded(node)
+        // Same shape as the HTTP path: skip unclaimed live-call frames + other ids'
+        // hello slots, control first, cap.
+        // Off-main for the same reason as the HTTP path above: string work over every
+        // listed key, on the main actor, on every poll.
+        let fresh = await Task.detached(priority: .utility) { () -> [String] in
+            var f = keys.filter {
+                !seenContains($0) && !$0.contains("/__live__/")
+                    && helloKeyClaimable($0, myIds: myHelloIds)
+            }
+            f.sort { controlKeyRank($0) < controlKeyRank($1) }
+            return f
+        }.value
+        noteBacklog(node, cid, keys: keys.count, fresh: min(fresh.count, mailboxFetchCap),
+                    deferred: max(0, fresh.count - mailboxFetchCap))
+        let batch = Array(fresh.prefix(mailboxFetchCap))
+        let got = await fanOut(batch, limit: Self.mailboxKeyFetchConcurrency) { key -> Data? in
+            if claims.has(cid, key) { return nil }
+            guard let data = await c.get(key: key) else { return nil }
+            claims.add(cid, key)
+            return data
+        }
+        for (i, data) in got.enumerated() {
+            if let data { out.append((cid, batch[i], data)) }
+        }
+        return out
+    }
+
+    /// A circle with no relay: the S3 / pre-signed pool path (unchanged, one unit per circle).
+    private static func pollMailboxNonRelay(cid: String) async -> [(String, String, Data)] {
+        var out: [(String, String, Data)] = []
+        let prefix = "haven/mailbox/\(cid)/"
+        if PresignStore.shared.hasPool(cid) && !isOwner(cid) {
+            // Member: LIST + GET via the pre-signed pool URLs (no credentials).
+            if let listURL = await PresignStore.shared.listURL(cid), let xml = await S3Client.getURL(listURL) {
+                for key in S3Client.parseListKeys(xml) where !seenContains(key) {
+                    if let g = await PresignStore.shared.getURL(circleId: cid, key: key), let data = await S3Client.getURL(g) {
+                        out.append((cid, key, data))
                     }
                 }
-            } else if let s3 = isOwner(cid) ? ownerS3() : mailboxClient(), let s3keys = try? await s3.listKeys(prefix: prefix) {
-                for key in s3keys where !seenContains(key) {
-                    if let data = try? await s3.getObject(key: key) { out.append((cid, key, data)) }
-                }
+            }
+        } else if let s3 = isOwner(cid) ? ownerS3() : mailboxClient(), let s3keys = try? await s3.listKeys(prefix: prefix) {
+            for key in s3keys where !seenContains(key) {
+                if let data = try? await s3.getObject(key: key) { out.append((cid, key, data)) }
             }
         }
         return out
     }
+
+    /// Bounded concurrent map, results in input order — see `BoundedFanOut.run`.
+    static func fanOut<I: Sendable, T: Sendable>(_ items: [I], limit: Int,
+                                                 _ op: @escaping @Sendable @MainActor (I) async -> T) async -> [T] {
+        await BoundedFanOut.run(items, limit: limit, op)
+    }
+}
+
+/// One unit of a concurrent mailbox pass: a circle and one of its relays (nil = S3 / pool path).
+struct MailboxPollUnit: Sendable {
+    let cid: String
+    let node: String?
+}
+
+/// Keys already brought in by ANY unit of the current pass, so a key mirrored on several relays is
+/// GET once rather than once per relay. Recorded only AFTER the bytes are in hand — a failed GET
+/// never suppresses a sibling relay's attempt. Pass-scoped (never persisted): this is not the
+/// seen-set, and it marks nothing seen.
+@MainActor
+final class MailboxPassClaims {
+    private var keys = Set<String>()
+    func has(_ cid: String, _ key: String) -> Bool { keys.contains(key) }
+    func add(_ cid: String, _ key: String) { keys.insert(key) }
 }
 
 // MARK: - Push hints (app-group hand-off from the NSE/push worker)

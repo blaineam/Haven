@@ -899,11 +899,13 @@ final class FeedStore: ObservableObject {
                 SwitchFlipMigration.accountLeafRetired = true   // record the flag so we stop retrying
             }
         }
-        // One-time badge compute at startup (kept OFF the per-refresh hot path): every DM's feed in
-        // one engine pass into the read model, then the watermark count. BEFORE refresh(), so the
-        // DM reads never contend with the rebuild refresh() starts.
-        await warmDMThreads()
+        // Paint the feed FIRST. The one-time DM warm (every DM's feed decoded in one engine pass into
+        // the read model, then the unread-badge count) used to be AWAITED before this — so the feed
+        // the user is looking at waited on decoding every conversation they have. refresh() queues
+        // its engine read now; the warm follows it on the engine, off the launch path (badges land a
+        // beat later, which nobody can see; the empty feed, everyone could).
         refresh()
+        Task { @MainActor [weak self] in await self?.warmDMThreads() }
         // Media-backup drain holds a UIApplication assertion. On a pocket cold launch (push /
         // BGAppRefresh) the wake path already runs one budgeted pass via slimBackgroundSync —
         // starting another here stacks assertions and keeps the process warm for the whole drain.
@@ -1659,6 +1661,21 @@ final class FeedStore: ObservableObject {
     private func deviceHints(for accountHex: String) -> [String] {
         contactDeviceHints[accountHex.lowercased()] ?? []
     }
+
+    /// Fresh evidence a peer is reachable NOW — a friend added or approved, a hello from them just
+    /// arrived: clear the iroh dial backoff on every id we would dial them on. The gate (2→30 min on
+    /// mobile) was armed while they were offline or not yet up, and nothing ever forgave it, so a
+    /// brand-new friend could sit out half an hour of "unreachable" after both sides were online.
+    func forgiveDials(accountHex: String, extra: [String] = []) {
+        guard let node else { return }
+        let acct = accountHex.lowercased()
+        var ids: Set<String> = [acct]
+        for d in deviceIdsCache[acct] ?? [] { ids.insert(d.lowercased()) }
+        for h in deviceHints(for: acct) { ids.insert(h.lowercased()) }
+        for e in extra { ids.insert(e.lowercased()) }
+        let mine: Set<String> = [myNodeHex.lowercased(), myDeviceNodeHex.lowercased()]
+        for id in ids where id.count == 64 && !mine.contains(id) { _ = node.forgiveDial(nodeHex: id) }
+    }
     /// My own device ids to ride an invite link (this device first) — what a scanner dials to
     /// reach me before holding my signed roster.
     func inviteDeviceIds() -> [String] {
@@ -1859,7 +1876,14 @@ final class FeedStore: ObservableObject {
         ContactsStore.shared.add(name: req.name, idHex: req.idHex, verificationHex: vhex)
         dialTargetsCache.removeAll()   // the new friend must be dialable now, not when the 10s cache expires
         ContactsStore.shared.setAuthoritativeName(idHex: req.idHex, req.name)
-        recordHeard(req.idHex)
+        // NOT recordHeard: the request usually came through the MAILBOX, which proves nothing about
+        // them being online — and marking them "warm" made the next sync pass skip the hello/roster
+        // to exactly the person we just approved (the 120s warm-keepalive skip). Instead: a fresh
+        // start on their dial gate, tight cadence, and their roster pull un-gated.
+        forgiveDials(accountHex: req.idHex)
+        bumpActivity()
+        pendingForcedHellos.insert("\(req.idHex.lowercased())|default")
+        SharedStore.clearRosterPullBackoff(req.idHex)
         persist(); await reloadCircles()
         if let hello = helloPayload(circleId: "default", circleName: "Your circle") {
             sendIroh(0, hello, to: req.idHex); nearbyBroadcast(0, hello)
@@ -1879,6 +1903,15 @@ final class FeedStore: ObservableObject {
         // If this approval answers a ticketed offline invite, park the grant on my relays so the
         // acceptor completes the friendship whenever they next come online.
         FriendInviteStore.shared.noteApproved(accountHex: req.idHex)
+        // Teach my relays the new member NOW (the 10-min enroll gate would leave them refused —
+        // 403 on every mailbox/media op — for up to ten minutes), tell them where my relays are
+        // (frame 19; the periodic re-announce is 10 min on a phone), and wake them: a friend who
+        // accepted and pocketed the phone otherwise learns of the approval on their next poll.
+        enrollMembers(circleId: "default", force: true)
+        reannounceOwnRelay()
+        PushManager.shared.wake(req.idHex.lowercased(), silent: true)
+        FriendInviteStore.shared.beginFirstContactFastPoll()
+        syncWithContacts(force: true)
         refresh()
     }
 
@@ -2905,6 +2938,9 @@ final class FeedStore: ObservableObject {
             try? await Task.sleep(nanoseconds: 3_000_000_000)   // let the new path settle
             pathChangeRebindPending = false
             RelayHealth.shared.resetBackoffs()
+            // Failures on the OLD path say nothing about the new one: re-open every iroh dial gate
+            // once (strike counts kept, so a genuinely dead peer goes straight back to its cooldown).
+            _ = self.node?.forgiveAllDials()
             SharedStore.clearAllHttpUrlBad()
             await rebindTransportForFabric(force: true)
             // The rebind re-announces + re-syncs; the uploader drains anything the wedged
@@ -5145,7 +5181,10 @@ final class FeedStore: ObservableObject {
         // path-discovery churn (the self-connect leak and the open_path_on_conn OOM). It took a Mac
         // to 28 GB. Hence: one pass at a time, a few contacts per pass, and a long per-contact
         // backoff so a permanently-unresolvable contact costs almost nothing.
-        if !rosterPullInFlight {
+        // No relay to ask yet (a brand-new friend's relays arrive with the grant / frame 19): skip
+        // WITHOUT recording an attempt — a pull that asked nobody used to burn the full 10-min
+        // backoff, so the roster that makes a new friend's devices dialable waited it out.
+        if !rosterPullInFlight, SharedStore.rosterPullHasCandidates() {
             let due = ContactsStore.shared.contacts
                 .map(\.idHex)
                 .filter { hex in (reads.deviceIds[hex.lowercased()] ?? [hex]).allSatisfy { $0.lowercased() == hex.lowercased() } }
@@ -5935,8 +5974,28 @@ final class FeedStore: ObservableObject {
                 }
             }
         }
-        let msgs = await SharedStore.pollMailbox(circleIds: ids)
-        guard !msgs.isEmpty else { return 0 }
+        // The circle on screen FIRST, ingested and painted on its own, then everything else. One
+        // monolithic pass made the visible feed wait for every DM/circle × relay (and every dead
+        // relay's timeouts) before a single envelope was ingested. Still ONE single-flight pull:
+        // the phases run back to back inside it, never overlapping.
+        let active = activeCircleId
+        let phases: [[String]] = ids.contains(active)
+            ? [[active], ids.filter { $0 != active }]
+            : [ids]
+        var total = 0
+        for phase in phases where !phase.isEmpty {
+            let msgs = await SharedStore.pollMailbox(circleIds: phase)
+            guard self.engine === engine else { return total }
+            guard !msgs.isEmpty else { continue }
+            total += await ingestMailboxBatch(msgs, engine: engine)
+            guard self.engine === engine else { return total }
+        }
+        return total
+    }
+
+    /// The ingest half of one `pullMailbox` phase: route hellos / relay announces, receive() the
+    /// content off-main, re-open circles a new key unlocked, paint, save, THEN mark seen.
+    @MainActor private func ingestMailboxBatch(_ msgs: [(String, String, Data)], engine: Engine) async -> Int {
         let me = myNodeHex.lowercased()
         // Control plane first: HELLOs, durable relay announces (__relay__), key commits / rosters,
         // then content. LIST order is a filesystem walk — without this sort a linked host buffers
@@ -6129,6 +6188,12 @@ final class FeedStore: ObservableObject {
                 HavenLog.relay("mailbox: parked re-open of \(cid.prefix(12)) after drain")
             }
         }
+        // Paint BEFORE the export: the feed read and the whole-engine export share the engine, and
+        // queuing the export first made every newly-arrived post wait out a full state
+        // serialization before it could appear. (Cache invalidation first, so the paint and the DM
+        // read model see the new envelopes.)
+        for cid in Set(ingested.map(\.circleId)) { invalidateMessagesCache(cid); invalidateSyncBundle(cid) }
+        if !ingested.isEmpty || !batch.unlockedCircles.isEmpty { refresh() }
         // Persist whenever we ran ANY receive: an envelope that only BUFFERED (event arrived before
         // its key commit / the sender's roster) mutated the now-durable pending_epoch buffer — if we
         // don't save the engine state here, a kill before the key arrives loses the buffered event.
@@ -6141,16 +6206,12 @@ final class FeedStore: ObservableObject {
         for k in batch.processedKeys { SharedStore.markSeenPublic(k) }
         if helloIngested { refresh(); syncWithContacts() }
         if relayIngested { objectWillChange.send() }   // Storage / circle relay chips re-read the store
-        guard !ingested.isEmpty else {
-            // Key-commit-only pass: still refresh so a recovering linked host paints newly unlocked
-            // history as the next poll drains re-queued events.
-            if !batch.unlockedCircles.isEmpty { refresh() }
-            return 0
-        }
+        // (A key-commit-only pass already refreshed above, so a recovering linked host paints newly
+        // unlocked history as the next poll drains re-queued events.)
+        guard !ingested.isEmpty else { return 0 }
         bumpActivity()   // a message arrived → keep sync tight while the conversation is live
-        // Drop stale feed reads before badge/notify — a cold messages() per envelope was the
-        // beachball: N × feed() on main while utility workers still held the engine mutex.
-        for cid in Set(ingested.map(\.circleId)) { invalidateMessagesCache(cid); invalidateSyncBundle(cid) }
+        // (Stale feed reads were dropped above, before the paint — a cold messages() per envelope
+        // was the beachball: N × feed() on main while utility workers still held the engine mutex.)
         // Batch fan-out: one Task for many envelopes (same shape as own-device catch-up).
         liveDeliverManyToMyDevices(1, ingested.map { eventPayload($0.circleId, $0.envelope) })
         // Multipeer siblings that share no good internet path still need a hop — sealed, so only
@@ -6178,7 +6239,7 @@ final class FeedStore: ObservableObject {
             // requestMissingDMMedia here — that would cold-call feed() on main right after invalidate).
             scheduleCircleSideEffects(item.circleId)
         }
-        refresh(); requestMissingMedia()
+        requestMissingMedia()   // (the paint already ran, ahead of the state export)
         return ingested.count
     }
 
@@ -6303,15 +6364,25 @@ final class FeedStore: ObservableObject {
                 await MainActor.run { [weak self] in self?.adoptDeviceIds([nodeHex.lowercased(): learned]) }
             }
             else { targets = [nodeHex] }
-            // Invite-link dial hints bridge the roster bootstrap: until this contact's signed
-            // roster lands, their account id resolves to no node — the hint is the only real id.
-            for h in hints where !targets.contains(where: { $0.lowercased() == h }) { targets.append(h) }
-            var anyOk = false
-            var lastErr: String?
-            for t in targets {
-                do { try await node.sendToNode(nodeIdHex: t, payload: f); anyOk = true }
-                catch { lastErr = error.localizedDescription }
+            // Best-first, and without the dead account id when invite hints exist (`DialOrder`).
+            targets = DialOrder.targets(account: nodeHex, resolved: targets, hints: hints)
+            // Every target CONCURRENTLY. Serially, a new friend's dead account id (which never
+            // resolves under per-device transport) sat first and burned a ~30s connect timeout —
+            // and then its 2-min dial gate — before the invite-hint device id that actually
+            // answers was even tried. Each target is a distinct device, so each still gets the frame.
+            let results: [String?] = await withTaskGroup(of: String?.self) { group in
+                for t in targets {
+                    group.addTask {
+                        do { try await node.sendToNode(nodeIdHex: t, payload: f); return nil }
+                        catch { return error.localizedDescription }
+                    }
+                }
+                var acc: [String?] = []
+                for await r in group { acc.append(r) }
+                return acc
             }
+            let anyOk = results.contains { $0 == nil }
+            let lastErr: String? = results.compactMap { $0 }.last
             // ONLY WRITE ON CHANGE. @Published fires objectWillChange on EVERY assignment — even
             // nil over nil — and this runs on every iroh send: hellos, call frames, event fan-out.
             // Each write invalidated every view observing FeedStore, which is every PostCard on
@@ -7366,10 +7437,12 @@ final class FeedStore: ObservableObject {
     /// Tell every relay serving `circleId` who its members are, so a peer the operator never listed
     /// in the relay link is still served. Best-effort: a relay that refuses (we aren't served there
     /// ourselves) or predates the verb simply keeps its existing set.
-    func enrollMembers(circleId: String) {
+    func enrollMembers(circleId: String, force: Bool = false) {
         guard engine != nil else { return }
         let nowMs = now()
-        if let last = lastEnrollMs[circleId], nowMs &- last < 600_000 { return }
+        // `force`: a member was just added (approval) — the set DID change, so the gate that assumes
+        // it rarely does must not hold the new friend out for up to ten minutes.
+        if !force, let last = lastEnrollMs[circleId], nowMs &- last < 600_000 { return }
         let relays = RelayMailboxStore.shared.relays(forCircle: circleId)
             .filter { !$0.hasPrefix("s3:") && $0.count == 64 }
         guard !relays.isEmpty else { return }
@@ -9570,7 +9643,15 @@ final class FeedStore: ObservableObject {
             return (false, "engine-add-failed")   // transient — leave the slot for the next poll
         }
         dialTargetsCache.removeAll()   // a just-handshaked member must be dialable now, not in 10s
-        recordHeard(idHex)
+        // "Heard" only when the hello came over a LIVE lane. A mailbox hello can be minutes old and
+        // says nothing about reachability — recording it made the next sync pass treat the peer as
+        // warm and skip the hello/roster that completes the handshake on their side.
+        if viaNearby || senderDevice != nil { recordHeard(idHex) }
+        // Fresh reachability evidence (a live-lane hello, or a brand-new member): clear their dial
+        // backoff. Not for every old mailbox hello from a known member — that is no evidence at all.
+        if senderDevice != nil || !reads.engineKnows {
+            forgiveDials(accountHex: idHex, extra: senderDevice.map { [$0] } ?? [])
+        }
         persist(); await reloadCircles()
         if let card = reads.card, !card.name.isEmpty {
             ContactsStore.shared.setCard(idHex: idHex, name: card.name, bio: card.bio, link: card.link,

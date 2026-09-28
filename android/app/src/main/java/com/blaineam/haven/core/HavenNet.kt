@@ -12,11 +12,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -700,6 +705,7 @@ object HavenNet : InboundListener {
                 withContext(Dispatchers.Main) { started.value = true }
                 Log.i(TAG, "node started: ${node?.nodeIdHex()}")
                 publishAccountDevices()   // account id -> my device ids, so contacts can dial me relay-free
+                watchNetworkPath()        // path change → re-open iroh dial gates once
                 // Matrix QA: dump our public identity so Scripts/qa-exchange-bundles.sh can seed iOS,
                 // and ingest qa-peer-bundle.bin if the driver staged a sim peer (HTTP-mailbox stub path
                 // where HELLO cannot dial). Without mutual addContactBundle reverse media never opens.
@@ -736,6 +742,30 @@ object HavenNet : InboundListener {
             }
         }
         startMailboxLoop()
+    }
+
+    /** Network path changed (Wi-Fi ↔ cellular, new network): failures on the OLD path say nothing
+     *  about the new one, so re-open every iroh dial gate once (strike counts kept — a genuinely dead
+     *  peer goes straight back to its cooldown) and poll now. iOS `noteNetworkPathChanged` parity. */
+    @Volatile private var lastNetworkHandle = 0L
+    private var pathWatchRegistered = false
+    private fun watchNetworkPath() {
+        if (pathWatchRegistered) return
+        pathWatchRegistered = true
+        val cm = appContext.getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        runCatching {
+            cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    val h = network.networkHandle
+                    val prev = lastNetworkHandle
+                    lastNetworkHandle = h
+                    if (prev == 0L || prev == h) return   // the initial report, or the same network
+                    val reopened = runCatching { node?.forgiveAllDials() }.getOrNull()
+                    Log.i(TAG, "network path changed — re-opened ${reopened ?: 0u} dial gate(s)")
+                    pollMailboxNow()
+                }
+            })
+        }.onFailure { Log.w(TAG, "network path watch unavailable", it) }
     }
 
     // Adaptive sync cadence (device-heat control). The loop keeps a cheap 10s heartbeat, but the
@@ -961,6 +991,7 @@ object HavenNet : InboundListener {
     /** Append the ticket to an invite link (after the `?d=` hints, before the `#` fragment). */
     private fun friendInviteEmbed(link: String): String {
         val t = friendInviteLinkValue() ?: return link
+        beginFirstContactFastPoll(180_000)   // the link is being shown: someone may accept any second
         val hash = link.indexOf('#').let { if (it < 0) link.length else it }
         val sep = if (link.substring(0, hash).contains('?')) "&" else "?"
         return link.substring(0, hash) + sep + "t=" + t + link.substring(hash)
@@ -985,7 +1016,77 @@ object HavenNet : InboundListener {
         acceptedInvites.add(AcceptedInvite(text, inviteNow(), dropLanded = false, granted = false))
         saveInvites()
         Log.i(TAG, "friend-invite: accepted ticket (relays=${t.relays.size})")
+        // Poll the inviter's relays from the START, in the default circle (where their hello, key
+        // commit and first posts land) — waiting for the grant, or their frame-19 announce, left a
+        // new friend's content sitting on a relay nobody here was reading. Light adoption only: the
+        // full adoptRelay (backfill + announce to every circle) still runs at grant time.
+        adoptInviteRelaysLight(t.relays)
+        val inviter = bytesToHex(t.accountId)
+        clearRosterPullBackoff(inviter)
+        forgiveDials(inviter, t.deviceHints.map { bytesToHex(it) })
+        beginFirstContactFastPoll()
         scope.launch { friendInviteTick() }
+        pollMailboxNow()
+    }
+
+    /** Associate ticket relays with the DEFAULT circle (and record entries) without the heavyweight
+     *  adoptRelay backfill. Never resurrects a relay the user deleted. */
+    private fun adoptInviteRelaysLight(relays: List<String>) {
+        var changed = false
+        val list = relayNodes.getOrPut(DEFAULT_CIRCLE) { mutableListOf() }
+        for (raw in relays) {
+            val hex = raw.trim().lowercase()
+            if (hex.length != 64 || relayForgottenAtMs(hex) > 0L) continue
+            ensureRelayEntry(hex, activate = true)
+            if (!list.contains(hex)) { list.add(hex); changed = true }
+        }
+        if (changed) {
+            saveRelayNodes()
+            clearRosterPullBackoff(null)   // a new relay may hold the rosters we couldn't find
+        }
+    }
+
+    // ---- First-contact fast poll -------------------------------------------------------------
+    // While a handshake is in flight (ticket accepted awaiting its grant, drop just opened, request
+    // just approved, link just shown) poll every ~7s for a couple of minutes instead of the 30-90s
+    // adaptive cadence: each leg of the offline handshake is a relay round trip the OTHER side only
+    // sees on its next poll. Bounded: the window only extends on a new handshake event.
+    @Volatile private var fastPollUntilMs = 0L
+    @Volatile private var fastPollJob: Job? = null
+    fun beginFirstContactFastPoll(windowMs: Long = 120_000) {
+        if (HavenOffline.enabled) return
+        fastPollUntilMs = maxOf(fastPollUntilMs, System.currentTimeMillis() + windowMs)
+        if (fastPollJob?.isActive == true) return
+        Log.i(TAG, "friend-invite: first-contact fast poll on (${windowMs / 1000}s)")
+        fastPollJob = scope.launch {
+            while (System.currentTimeMillis() < fastPollUntilMs) {
+                delay(7_000)
+                pollMailboxNow()                       // coalesces with an in-flight poll
+                runCatching { friendInviteTick() }     // single-flight; the handshake legs themselves
+            }
+        }
+    }
+
+    /** Run [op] over [items] with at most [limit] in flight; results in INPUT order. One dead relay's
+     *  timeout then overlaps the others instead of delaying every relay behind it. */
+    private suspend fun <I, T> boundedFanOut(items: List<I>, limit: Int = 6, op: suspend (I) -> T): List<T> =
+        coroutineScope {
+            val sem = Semaphore(maxOf(1, limit))
+            items.map { item -> async { sem.withPermit { op(item) } } }.awaitAll()
+        }
+
+    /** Fresh evidence a peer is reachable NOW (friend added / approved, a hello from them): clear the
+     *  iroh dial backoff on every id we'd dial them on (iOS `forgiveDials` parity). */
+    private fun forgiveDials(accountHex: String, extra: List<String> = emptyList()) {
+        val n = node ?: return
+        val acct = accountHex.lowercase()
+        val ids = LinkedHashSet<String>()
+        ids.add(acct)
+        runCatching { social.deviceNodeIdsFor(acct) }.getOrNull()?.forEach { ids.add(it.lowercase()) }
+        deviceHintsFor(acct).forEach { ids.add(it.lowercase()) }
+        extra.forEach { ids.add(it.lowercase()) }
+        val mine = setOf(accountNodeHex.lowercase(), n.nodeIdHex().lowercase())
+        for (id in ids) if (id.length == 64 && id !in mine) runCatching { n.forgiveDial(id) }
     }
 
     /** One pass of every pending invite duty — sync bucket; cheap no-op when idle. Single-flight. */
@@ -1009,15 +1110,17 @@ object HavenNet : InboundListener {
             val expires = t.issuedAt + uniffi.haven_ffi.friendInviteDefaultTtlSecs()
             val key = runCatching { uniffi.haven_ffi.friendInviteDropKey(t) }.getOrNull() ?: continue
             val blob = runCatching { uniffi.haven_ffi.friendInviteBuildDrop(t, expires, hello) }.getOrNull() ?: continue
-            var landed = false
-            for (relay in t.relays) {
-                val c = relayClientFor(relay) ?: continue
-                if (runCatching { c.put(key, blob) }.isSuccess) {
-                    landed = true
-                    Log.i(TAG, "friend-invite: drop landed on ${relay.take(8)}")
+            val landed = boundedFanOut(t.relays) { relay ->
+                val c = relayClientFor(relay) ?: return@boundedFanOut false
+                runCatching { c.put(key, blob) }.isSuccess.also {
+                    if (it) Log.i(TAG, "friend-invite: drop landed on ${relay.take(8)}")
                 }
+            }.any { it }
+            if (landed) {
+                a.dropLanded = true; saveInvites()
+                // Wake the inviter (silent): their next poll opens the drop and shows the prompt now.
+                pushWake(bytesToHex(t.accountId), null, null, silent = true)
             }
-            if (landed) { a.dropLanded = true; saveInvites() }
         }
     }
 
@@ -1025,10 +1128,12 @@ object HavenNet : InboundListener {
         for (a in acceptedInvites.filter { it.dropLanded && !it.granted }) {
             val t = runCatching { uniffi.haven_ffi.friendTicketParse(a.ticket) }.getOrNull() ?: continue
             val key = runCatching { uniffi.haven_ffi.friendInviteGrantKey(t) }.getOrNull() ?: continue
-            for (relay in t.relays) {
-                val c = relayClientFor(relay) ?: continue
-                val blob = runCatching { c.get(key) }.getOrNull() ?: continue
-                if (blob.isEmpty()) continue
+            val fetched = boundedFanOut(t.relays) { relay ->
+                val c = relayClientFor(relay) ?: return@boundedFanOut null
+                runCatching { c.get(key) }.getOrNull()
+            }
+            for (blob in fetched) {
+                if (blob == null || blob.isEmpty()) continue
                 val hello = runCatching {
                     uniffi.haven_ffi.friendInviteOpenGrant(t, blob, inviteNow().toULong())
                 }.getOrNull() ?: continue
@@ -1037,7 +1142,13 @@ object HavenNet : InboundListener {
                 for (r in t.relays) runCatching { adoptRelay(r, setDefault = false) }
                 a.granted = true
                 saveInvites()
+                val inviter = bytesToHex(t.accountId)
+                clearRosterPullBackoff(inviter)
+                forgiveDials(inviter)
+                bumpActivity()
+                beginFirstContactFastPoll()
                 runCatching { syncWithContacts() }
+                pollMailboxNow()
                 break
             }
         }
@@ -1051,10 +1162,11 @@ object HavenNet : InboundListener {
         val prefix = "haven/invite/$myAcct/"
         val keys = mutableSetOf<String>()
         runCatching { relayHost?.localList(prefix)?.let { keys.addAll(it) } }
-        for (relay in allActiveRelayHexes().filter { !it.startsWith("s3:") }) {
-            val c = relayClientFor(relay) ?: continue
-            runCatching { c.list(prefix) }.getOrNull()?.let { keys.addAll(it) }
-        }
+        val relays = allActiveRelayHexes().filter { !it.startsWith("s3:") }
+        boundedFanOut(relays) { relay ->
+            val c = relayClientFor(relay) ?: return@boundedFanOut null
+            runCatching { c.list(prefix) }.getOrNull()
+        }.forEach { it?.let { l -> keys.addAll(l) } }
         if (keys.isEmpty()) return
         for (iss in pending) {
             val t = runCatching { uniffi.haven_ffi.friendTicketParse(iss.ticket) }.getOrNull() ?: continue
@@ -1062,11 +1174,10 @@ object HavenNet : InboundListener {
             if (dropKey !in keys) continue
             var blob: ByteArray? = runCatching { relayHost?.localGet(dropKey) }.getOrNull()
             if (blob == null) {
-                for (relay in allActiveRelayHexes().filter { !it.startsWith("s3:") }) {
-                    val c = relayClientFor(relay) ?: continue
-                    val b = runCatching { c.get(key = dropKey) }.getOrNull()
-                    if (b != null && b.isNotEmpty()) { blob = b; break }
-                }
+                blob = boundedFanOut(relays) { relay ->
+                    val c = relayClientFor(relay) ?: return@boundedFanOut null
+                    runCatching { c.get(key = dropKey) }.getOrNull()?.takeIf { it.isNotEmpty() }
+                }.firstOrNull { it != null }
             }
             val body = blob ?: continue
             val hello = runCatching {
@@ -1076,6 +1187,7 @@ object HavenNet : InboundListener {
             val alreadyContact = acceptor.isNotEmpty() && contacts.any { it.idHex.equals(acceptor, ignoreCase = true) }
             if (iss.acceptorHex != acceptor) { iss.acceptorHex = acceptor; saveInvites() }
             Log.i(TAG, "friend-invite: acceptance drop opened (from ${acceptor.take(8)}) — surfacing prompt")
+            beginFirstContactFastPoll()   // the acceptor is likely still looking at their screen
             handleHello(hello, viaNearby = false, senderDevice = null)
             // Mutual-add race: we had already added them — approval is implicit; grant now.
             if (alreadyContact && acceptor.isNotEmpty()) friendInviteNoteApproved(acceptor)
@@ -1095,14 +1207,16 @@ object HavenNet : InboundListener {
             val key = runCatching { uniffi.haven_ffi.friendInviteGrantKey(t) }.getOrNull() ?: continue
             val blob = runCatching { uniffi.haven_ffi.friendInviteBuildGrant(t, expires, hello) }.getOrNull() ?: continue
             var landed = runCatching { relayHost?.localPut(key, blob) == true }.getOrDefault(false)
-            for (relay in allActiveRelayHexes().filter { !it.startsWith("s3:") }) {
-                val c = relayClientFor(relay) ?: continue
-                if (runCatching { c.put(key, blob) }.isSuccess) landed = true
+            val puts = boundedFanOut(allActiveRelayHexes().filter { !it.startsWith("s3:") }) { relay ->
+                val c = relayClientFor(relay) ?: return@boundedFanOut false
+                runCatching { c.put(key, blob) }.isSuccess
             }
+            if (puts.any { it }) landed = true
             if (landed) {
                 iss.consumedAt = inviteNow()
                 saveInvites()
                 Log.i(TAG, "friend-invite: grant parked — ticket consumed")
+                pushWake(hex, null, null, silent = true)   // the acceptor's grant poll completes it now
             }
         }
     }
@@ -1824,6 +1938,11 @@ object HavenNet : InboundListener {
         if (senderDevice != null && senderDevice.length == 64 && !senderDevice.equals(idHex, ignoreCase = true)) {
             recordDeviceHints(idHex, listOf(senderDevice))
         }
+        // A LIVE-lane hello (or a brand-new contact's) is fresh evidence they're reachable: drop any
+        // dial backoff armed while they weren't. An old mailbox hello from a known contact is not.
+        if (senderDevice != null || contacts.none { it.idHex.equals(idHex, ignoreCase = true) }) {
+            forgiveDials(idHex, listOfNotNull(senderDevice))
+        }
         val actualVerify = runCatching { social.bundleVerificationHex(hello.bundle) }.getOrNull()
             ?: return HelloOutcome(true, "malformed")
         val name = runCatching { social.verifyProfile(hello.bundle, hello.signedProfile) }.getOrNull() ?: "Someone"
@@ -2310,6 +2429,8 @@ object HavenNet : InboundListener {
         // Ticketed invite: park a sealed acceptance on THEIR relays too, so this works even if
         // they're offline for days — the live hello below still wins when both are online.
         friendInviteExtract(trimmed)?.let { friendInviteAccept(it) }
+        forgiveDials(info.idHex)   // a deliberate add: dial them now, not after an old backoff
+        bumpActivity()
         sendHello(DEFAULT_CIRCLE, info.idHex)
         return true
     }
@@ -2425,6 +2546,17 @@ object HavenNet : InboundListener {
         // If this approval answers a ticketed offline invite, park the grant on my relays so the
         // acceptor completes the friendship whenever they next come online.
         scope.launch { friendInviteNoteApproved(req.idHex) }
+        // iOS parity: tight cadence, a fresh dial gate, the relays taught the new member NOW (the
+        // 10-min enroll gate otherwise refuses them), my relay re-announced, their roster pull
+        // un-gated, a silent wake, and a short fast-poll window while the handshake completes.
+        bumpActivity()
+        forgiveDials(req.idHex)
+        clearRosterPullBackoff(req.idHex)
+        lastEnrollMs.clear()
+        runCatching { enrollCircleMembers() }
+        runCatching { reannounceOwnRelay() }
+        pushWake(req.idHex.lowercase(), null, null, silent = true)
+        beginFirstContactFastPoll()
     }
 
     fun dismiss(req: PendingRequest) { pending.removeAll { it.idHex == req.idHex } }
@@ -2948,7 +3080,13 @@ object HavenNet : InboundListener {
                 runCatching { social.deviceNodeIdsFor(hex) }.getOrDefault(emptyList())
                     .any { !it.equals(hex, ignoreCase = true) }
             }
-            val candidates = contacts.map { it.idHex }.filter { rosterPullDue(it) }
+            // No relay to ask (and no hosted store): skip WITHOUT recording attempts — a pass that
+            // asked nobody used to burn each contact's full 10-min backoff (a new friend's relays
+            // only arrive with the grant / frame 19).
+            val hasCandidates = relayHost != null ||
+                allRelays().any { !it.startsWith("s3:") }
+            val candidates = if (!hasCandidates) emptyList()
+                else contacts.map { it.idHex }.filter { rosterPullDue(it) }
             val due = (candidates.filterNot(resolvable) + candidates.filter(resolvable))
                 .take(ROSTER_PULL_PER_PASS)
             if (due.isNotEmpty()) {
@@ -3287,6 +3425,14 @@ object HavenNet : InboundListener {
     private fun rosterPullDue(accountHex: String): Boolean {
         val last = synchronized(rosterPullAt) { rosterPullAt[accountHex.lowercase()] } ?: return true
         return System.currentTimeMillis() - last > ROSTER_PULL_BACKOFF_MS
+    }
+
+    /** Forget the pull backoff for one contact (or all, null): a relay was just adopted, a friend
+     *  approved, or a grant arrived — new reason to expect the roster is fetchable now. */
+    private fun clearRosterPullBackoff(accountHex: String?) {
+        synchronized(rosterPullAt) {
+            if (accountHex == null) rosterPullAt.clear() else rosterPullAt.remove(accountHex.lowercase())
+        }
     }
 
     private fun noteRosterPullAttempt(accountHex: String) {
@@ -8314,12 +8460,15 @@ object HavenNet : InboundListener {
     private suspend fun sendFrameAwait(type: Int, payload: ByteArray, toNodeHex: String) {
         val n = node ?: return
         val frame = Wire.frame(type, payload)
-        val targets = LinkedHashSet(
-            runCatching { social.deviceNodeIdsFor(toNodeHex) }
-                .getOrNull()?.takeIf { it.isNotEmpty() } ?: listOf(toNodeHex)
-        )
-        targets.addAll(deviceHintsFor(toNodeHex))
-        for (t in targets) runCatching { n.sendToNode(t, frame) }
+        val targets = dialTargetsFor(toNodeHex)
+        coroutineScope { targets.map { t -> async { runCatching { n.sendToNode(t, frame) } } }.awaitAll() }
+    }
+
+    /** Transport dial set for one account (or device) id, best-first — see [DialOrder]. */
+    private fun dialTargetsFor(toNodeHex: String): List<String> {
+        val resolved = runCatching { social.deviceNodeIdsFor(toNodeHex) }
+            .getOrNull()?.takeIf { it.isNotEmpty() } ?: listOf(toNodeHex)
+        return DialOrder.targets(toNodeHex, resolved, deviceHintsFor(toNodeHex))
     }
 
     private fun sendFrame(type: Int, payload: ByteArray, toNodeHex: String) {
@@ -8332,21 +8481,19 @@ object HavenNet : InboundListener {
             // an unexpanded send (calls' accept/ICE, media requests) silently reaches nobody.
             // deviceNodeIdsFor is identity for an unknown/device-id input, so pre-expanded callers
             // (dialTargets) stay correct.
-            val targets = LinkedHashSet(
-                runCatching { social.deviceNodeIdsFor(toNodeHex) }
-                    .getOrNull()?.takeIf { it.isNotEmpty() } ?: listOf(toNodeHex)
-            )
             // Invite-link dial hints bridge the roster bootstrap: until this contact's signed
-            // roster lands, their account id resolves to no node — the hint is the only real id.
-            targets.addAll(deviceHintsFor(toNodeHex))
-            var lastErr: String? = null
-            var anyOk = false
-            for (t in targets) {
-                runCatching { n.sendToNode(t, frame) }
-                    .onSuccess { anyOk = true }
-                    .onFailure { lastErr = it.message }
+            // roster lands, their account id resolves to no node — the hint is the only real id,
+            // so it goes FIRST and the dead account id is dropped ([DialOrder]).
+            val targets = dialTargetsFor(toNodeHex)
+            // Every target CONCURRENTLY: serially, a dead account id's ~30s connect timeout (and its
+            // dial-gate strike) ran before the device id that actually answers was even tried.
+            val results = coroutineScope {
+                targets.map { t -> async { runCatching { n.sendToNode(t, frame) } } }.awaitAll()
             }
-            if (!anyOk) Log.d(TAG, "send type=$type to ${toNodeHex.take(8)} failed: $lastErr")
+            if (results.none { it.isSuccess }) {
+                val lastErr = results.lastOrNull { it.isFailure }?.exceptionOrNull()?.message
+                Log.d(TAG, "send type=$type to ${toNodeHex.take(8)} failed: $lastErr")
+            }
         }
     }
 

@@ -825,7 +825,8 @@
     <string name="composer_audience_everyone_count">Everyone in %1$s · %2$s</string>
     <string name="composer_one_person">1 person</string>
     <string name="composer_n_people">%1$d people</string>
-    <string name="composer_placeholder_named">Share with everyone in %1$s…</string>
+    <string name="composer_placeholder">Post to everyone…</string>
+    <string name="circle_reply_placeholder_generic">Reply to everyone…</string>
     <string name="composer_post_button">Post</string>
     <string name="composer_post_cd_named">Post to everyone in %1$s</string>
     <string name="composer_audience_cd">Posting to %1$s. Opens options, including sending privately to one person</string>

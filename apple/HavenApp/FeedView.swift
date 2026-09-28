@@ -789,7 +789,7 @@ struct FeedView: View {
                     .fixedSize()
                     #endif
 
-                    TextField("Share with everyone in \(ComposerAudience.shortName(store.activeCircleTitle))…", text: $compose, axis: .vertical)
+                    TextField("Post to everyone…", text: $compose, axis: .vertical)   // the chip above names the circle
                         .accessibilityIdentifier("composeField")
                         .focused($composeFocused)
                         .textFieldStyle(.plain)   // drop the macOS system focus ring/border — matches iOS
@@ -1216,7 +1216,7 @@ struct PostCommentField: View {
                 .menuStyle(.borderlessButton).fixedSize()
                 #endif
                 // Replies are read by the whole circle, not just the author — the placeholder says so.
-                TextField("Reply to everyone in \(ComposerAudience.shortName(FeedStore.shared.activeCircleTitle))…",
+                TextField(ComposerAudience.replyPlaceholder(FeedStore.shared.activeCircleTitle),
                           text: $text, axis: .vertical)
                     .lineLimit(1...5)
                     .textFieldStyle(.plain)   // drop the macOS system focus ring — matches iOS

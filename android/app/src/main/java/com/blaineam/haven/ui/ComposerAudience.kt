@@ -112,17 +112,17 @@ fun ComposerAudienceChip(circleName: String, count: Int, onSendPrivately: () -> 
     Box {
         Row(
             Modifier.clip(CircleShape)
-                .background(HavenTheme.card.copy(alpha = 0.7f))
+                .background(HavenTheme.card)   // opaque: readable over any photo, light or dark
                 .border(1.dp, HavenTheme.cardBorder, CircleShape)
                 .clickable { menu = true }
                 .padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
                 .semantics { contentDescription = a11y },
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Filled.Group, null, tint = HavenTheme.textSecondary, modifier = Modifier.size(16.dp))
+            Icon(Icons.Filled.Group, null, tint = HavenTheme.pink, modifier = Modifier.size(16.dp))
             Spacer(Modifier.size(5.dp))
             Text(audienceSummary(ComposerAudience.shortName(circleName), count),
-                color = HavenTheme.textSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                color = HavenTheme.textPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             Icon(Icons.Filled.ArrowDropDown, null, tint = HavenTheme.textSecondary, modifier = Modifier.size(18.dp))
         }

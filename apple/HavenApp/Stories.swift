@@ -188,6 +188,13 @@ struct StoryViewer: View {
             progress += 0.05 / slideDuration
             if progress >= 1 { next() }
         }
+        // "Message" on a profile peeked from here switches to the Messages tab — close the story
+        // viewer too, or the conversation opens hidden underneath this full-screen cover.
+        .onReceive(DeepLinkRouter.shared.$requestedTab) { tab in
+            guard tab == "messages", profilePeer != nil else { return }
+            profilePeer = nil
+            dismiss()
+        }
         .sheet(item: $profilePeer, onDismiss: { paused = false; player?.play() }) { peer in
             NavigationStack { UserProfileView(authorHex: peer.hex, name: peer.name) }
         }

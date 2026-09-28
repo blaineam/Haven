@@ -26,6 +26,13 @@ enum ComposerAudience {
         }.count
     }
 
+    /// Reply placeholder: names the circle when it fits, else the plain "Reply to everyone…".
+    static func replyPlaceholder(_ circle: String) -> String {
+        circle.count <= 14
+            ? String(localized: "Reply to everyone in \(circle)…")
+            : String(localized: "Reply to everyone…")
+    }
+
     static func peopleText(_ n: Int) -> String {
         n == 1 ? String(localized: "1 person") : String(localized: "\(n) people")
     }
@@ -75,18 +82,23 @@ struct ComposerAudienceChip: View {
                 }
             }
         } label: {
+            // Solid enough to read over a photo in light AND dark: an opaque-ish material (not the
+            // see-through glass), label-colored text, and the accent only on the icon.
             HStack(spacing: 5) {
-                Image(systemName: "person.3.fill").font(.caption2)
+                Image(systemName: "person.3.fill").font(.caption2).foregroundStyle(HavenTheme.pink)
                 Text(ComposerAudience.summary(circle: ComposerAudience.shortName(circleName), count: count))
                     .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.primary.opacity(0.85))
                     .lineLimit(1)
                 Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Color.primary.opacity(0.6))
             }
-            .foregroundStyle(.secondary)
             .padding(.horizontal, 10).padding(.vertical, 5)
-            .havenGlass(in: Capsule())
+            .background(.regularMaterial, in: Capsule())
+            .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
             .contentShape(Capsule())
         }
+        .tint(.primary)   // a Menu label otherwise takes the accent tint (pink-on-photo, unreadable)
         .menuIndicator(.hidden)
         #if os(macOS)
         .menuStyle(.borderlessButton)   // just the glass capsule — no popup-button bezel around it

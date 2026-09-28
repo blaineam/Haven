@@ -449,7 +449,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = draft, onValueChange = { draft = it },
-                    placeholder = { Text(stringResource(R.string.composer_placeholder_named, ComposerAudience.shortName(audienceName))) },
+                    placeholder = { Text(stringResource(R.string.composer_placeholder)) },   // the chip above names the circle
                     modifier = Modifier.weight(1f), shape = RoundedCornerShape(22.dp), maxLines = 4,
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
                 )
@@ -2774,10 +2774,13 @@ fun PostCard(
             }
             Spacer(Modifier.size(4.dp))
             // Replies are read by the whole circle, not just the author — the placeholder says so.
-            val replyAudience = remember(circleId) { ComposerAudience.shortName(HavenNet.circleName(circleId)) }
+            // Names the circle when it fits; a long name falls back to the plain "Reply to everyone…".
+            val replyAudience = remember(circleId) { HavenNet.circleName(circleId) }
             OutlinedTextField(
                 value = commentDraft, onValueChange = { commentDraft = it },
-                placeholder = { Text(stringResource(R.string.circle_reply_placeholder_named, replyAudience), fontSize = 13.sp) },
+                placeholder = { Text(
+                    if (replyAudience.length <= 14) stringResource(R.string.circle_reply_placeholder_named, replyAudience)
+                    else stringResource(R.string.circle_reply_placeholder_generic), fontSize = 13.sp, maxLines = 1) },
                 modifier = Modifier.weight(1f), shape = RoundedCornerShape(18.dp), maxLines = 5,
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),

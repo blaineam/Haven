@@ -703,7 +703,8 @@
     <string name="composer_audience_everyone_count">Tutti in %1$s · %2$s</string>
     <string name="composer_one_person">1 persona</string>
     <string name="composer_n_people">%1$d persone</string>
-    <string name="composer_placeholder_named">Condividi con tutti in %1$s…</string>
+    <string name="composer_placeholder">Pubblica per tutti…</string>
+    <string name="circle_reply_placeholder_generic">Rispondi a tutti…</string>
     <string name="composer_post_button">Pubblica</string>
     <string name="composer_post_cd_named">Pubblica per tutti in %1$s</string>
     <string name="composer_audience_cd">Pubblicazione per: %1$s. Apre le opzioni, tra cui l\'invio in privato a una persona</string>

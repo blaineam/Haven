@@ -709,7 +709,8 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="composer_audience_everyone_count">Todos en %1$s · %2$s</string>
     <string name="composer_one_person">1 persona</string>
     <string name="composer_n_people">%1$d personas</string>
-    <string name="composer_placeholder_named">Comparte con todos en %1$s…</string>
+    <string name="composer_placeholder">Publica para todos…</string>
+    <string name="circle_reply_placeholder_generic">Responde a todos…</string>
     <string name="composer_post_button">Publicar</string>
     <string name="composer_post_cd_named">Publicar para todos en %1$s</string>
     <string name="composer_audience_cd">Publicando para: %1$s. Abre opciones, como enviar en privado a una persona</string>

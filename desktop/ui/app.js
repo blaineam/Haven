@@ -1311,7 +1311,7 @@ async function renderFeed() {
 
   const composer = buildComposer(
     (body, music, muteVideo, retentionSecs) => invoke("post", { circleId: state.activeCircle, body, media: withThumbMarkers(state.attachments), music, muteVideo, retentionSecs }),
-    t("share_with_everyone_in", Audience.shortName(state.activeCircleName)),
+    t("post_to_everyone_ph"),   // the audience chip above names the circle
     {
       circleId: state.activeCircle,
       floating: true,
@@ -1682,7 +1682,7 @@ function buildComposer(onPost, placeholder = t("share_something"), opts = {}) {
   // The audience chip — its menu is the always-there door to a private message.
   let audienceRow = null;
   if (aud) {
-    const chip = el("button", { class: "audience-chip glass",
+    const chip = el("button", { class: "audience-chip",
       title: Audience.summary(aud.name, aud.count),
       "aria-label": t("posting_to", Audience.summary(aud.name, aud.count)) },
       icon("person.2.fill"),
@@ -3541,7 +3541,7 @@ function postCard(it, circleId, reports = []) {
   // Reply row: paperclip + pill field + circular pink send, straight from macOS `commentField`.
   // Replies are read by the whole circle, not just the author — the placeholder says so.
   const replyCircle = circleId === state.activeCircle ? state.activeCircleName : circleDisplayName(circleId);
-  const cin = el("input", { placeholder: t("reply_to_everyone_in", Audience.shortName(replyCircle)), onkeydown: (e) => { if (e.key === "Enter") sendComment(); } });
+  const cin = el("input", { placeholder: (replyCircle || "").length <= 14 ? t("reply_to_everyone_in", replyCircle) : t("reply_to_everyone"), onkeydown: (e) => { if (e.key === "Enter") sendComment(); } });
   const sendComment = async () => {
     const b = cin.value.trim();
     if (!b) return;

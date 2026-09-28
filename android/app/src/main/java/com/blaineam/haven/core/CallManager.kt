@@ -83,6 +83,11 @@ object CallManager {
     private var screenSurfaceHelper: SurfaceTextureHelper? = null
     private var screenVideoSource: VideoSource? = null
     private var screenTrack: VideoTrack? = null   // the shared "screen0" track added to every peer
+    /** Consent granted, waiting for the mediaProjection foreground promotion to land. */
+    private var screenShareStarting = false
+    private var screenCaptureSize: Pair<Int, Int>? = null
+    /** Re-sizes the capture when the device rotates (the virtual display does not follow). */
+    private var screenDisplayListener: android.hardware.display.DisplayManager.DisplayListener? = null
 
     private var sessionId: String = ""
 
@@ -231,7 +236,11 @@ object CallManager {
 
     private fun ensureFactory(): PeerConnectionFactory =
         factory ?: PeerConnectionFactory.builder()
-            .setVideoEncoderFactory(DefaultVideoEncoderFactory(eglBase.eglBaseContext, true, true))
+            // HW H.264 High + VP8/VP9/AV1 (software fallback built in). If the HW H.264 encoder
+            // refuses to initialise, libwebrtc switches the sender to the next negotiated codec.
+            // The wrapper only LOGS which encoder each sender got, for field diagnosis.
+            .setVideoEncoderFactory(LoggingEncoderFactory(
+                DefaultVideoEncoderFactory(eglBase.eglBaseContext, true, true)))
             .setVideoDecoderFactory(DefaultVideoDecoderFactory(eglBase.eglBaseContext))
             .createPeerConnectionFactory().also { factory = it }
 
@@ -816,7 +825,16 @@ object CallManager {
             onRemoteScreen = { track -> remoteScreen[peer] = track },
             onRemoteScreenEnded = { remoteScreen[peer] = null },
             onIceState = { s -> onPeerIceState(peer, s) },
-        )
+            // Apple parity (CallManager.swift `c.polite = myHex > peer`): the larger hex yields.
+            polite = myHex > peer,
+        ).also { conn ->
+            // Joined while I'm already sharing: the screen rides this peer's first negotiation
+            // (no immediate offer — that would collide with the initial one).
+            screenTrack?.let {
+                Log.i(ScreenSharePolicy.LOG_TAG, "peer ${peer.take(8)} joined mid-share — attaching screen track")
+                conn.addScreenTrack(it, renegotiate = false)
+            }
+        }
     }
 
     /**
@@ -961,7 +979,8 @@ object CallManager {
             remote = peer,
             sessionId = sessionId,
             me = myHex,
-            localVideoTrack = localVideo,
+            // While sharing, the relay carries the SCREEN (the thing the user chose to show).
+            localVideoTrack = screenTrack ?: localVideo,
             eglBase = eglBase,
             factory = ensureFactory(),
         )
@@ -1170,48 +1189,147 @@ object CallManager {
     fun switchCamera() { if (!screenShare.value) capturer?.switchCamera(null) }
 
     /**
-     * Begin sharing the screen as a SECOND video track ("screen0"), added alongside the camera — not a
-     * swap. The remote renders it in its own aspect-fit tile (matching the iOS protocol), and the camera
-     * keeps streaming. Adding the track renegotiates each peer (the sharer offers, the peer answers).
+     * Begin sharing the screen as a SECOND video track ("screen0", stream "screen"), added alongside
+     * the camera — not a swap. The remote renders it in its own aspect-fit tile (matching the iOS
+     * protocol), and the camera keeps streaming. Adding the track renegotiates each peer (the sharer
+     * offers, the peer answers).
      *
      * [resultCode]/[data] come from the system MediaProjection consent dialog (launched by the UI).
+     * Capture only starts once the mediaProjection foreground promotion has actually landed — see
+     * [ConnectionService.startForProjection] for why that ordering is the whole bug on Android 14+.
      */
     fun startScreenShare(resultCode: Int, data: android.content.Intent) {
-        if (screenShare.value) return
+        if (screenShare.value || screenShareStarting) return
+        if (sessionId.isEmpty()) return
+        screenShareStarting = true
+        val session = sessionId
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        Log.i(ScreenSharePolicy.LOG_TAG, "consent ok (result=$resultCode, sdk=${android.os.Build.VERSION.SDK_INT}) — " +
+            "promoting FGS to mediaProjection")
+        ConnectionService.startForProjection(appContext) { ready ->
+            screenShareStarting = false
+            val waited = android.os.SystemClock.elapsedRealtime() - t0
+            Log.i(ScreenSharePolicy.LOG_TAG, "FGS mediaProjection ready=$ready after ${waited}ms")
+            if (sessionId != session || screenShare.value) {
+                Log.i(ScreenSharePolicy.LOG_TAG, "call ended/changed while promoting — not capturing")
+                ConnectionService.stopProjection(appContext)
+                return@startForProjection
+            }
+            beginScreenCapture(data)
+        }
+    }
+
+    private fun beginScreenCapture(data: android.content.Intent) {
         runCatching {
-            // Android 14+: a mediaProjection-typed foreground service must be live before capture.
-            ConnectionService.startForProjection(appContext)
             val f = ensureFactory()
+            val (dw, dh) = displaySize()
+            val (w, h) = ScreenSharePolicy.captureSize(dw, dh)
+            Log.i(ScreenSharePolicy.LOG_TAG, "display ${dw}x$dh -> capture ${w}x$h @${ScreenSharePolicy.FPS}fps")
             val src = f.createVideoSource(true)   // isScreencast=true tunes the encoder for screen content
             screenVideoSource = src
             val helper = SurfaceTextureHelper.create("ScreenCapture", eglBase.eglBaseContext)
             screenSurfaceHelper = helper
             val cap = org.webrtc.ScreenCapturerAndroid(data, object : android.media.projection.MediaProjection.Callback() {
                 override fun onStop() {
-                    android.os.Handler(android.os.Looper.getMainLooper()).post { stopScreenShare() }
+                    Log.i(ScreenSharePolicy.LOG_TAG, "MediaProjection stopped by the system/user")
+                    mainHandler.post { stopScreenShare() }
                 }
             })
             screenCapturer = cap
             cap.initialize(helper, appContext, src.capturerObserver)
-            val dm = appContext.resources.displayMetrics
-            cap.startCapture(dm.widthPixels, dm.heightPixels, 15)
+            cap.startCapture(w, h, ScreenSharePolicy.FPS)
+            screenCaptureSize = w to h
             val track = f.createVideoTrack(WebRTCPeer.SCREEN_TRACK_ID, src)
             screenTrack = track
+            Log.i(ScreenSharePolicy.LOG_TAG, "capture started; adding screen track to ${peers.size} peer(s)")
             peers.values.forEach { runCatching { it.addScreenTrack(track) } }
+            // A relayed (hairpin) call has no second video lane: ship the screen instead of the
+            // camera while sharing, like the WebRTC path's promoted screen tile.
+            if (CallMediaBridge.anyRelaying()) CallMediaBridge.setLocalVideoTrack(track, eglBase)
+            watchRotation()
             screenShare.value = true
-        }.onFailure { Log.w(TAG, "screen share start failed", it) }
+            // Proof of life for the field log: a projection that granted but never produces frames
+            // shows up here as 0, distinguishing "capture dead" from "encode/transport dead".
+            mainHandler.postDelayed({
+                (screenCapturer as? org.webrtc.ScreenCapturerAndroid)?.let {
+                    Log.i(ScreenSharePolicy.LOG_TAG, "frames captured after 3s: ${it.numCapturedFrames}")
+                }
+            }, 3_000)
+        }.onFailure {
+            Log.e(ScreenSharePolicy.LOG_TAG, "screen share start failed", it)
+            releaseScreenCapture()
+            ConnectionService.stopProjection(appContext)
+        }
     }
 
-    /** Stop screen sharing: remove the screen track from every peer (renegotiate) and tear it down. */
-    fun stopScreenShare() {
-        if (!screenShare.value && screenTrack == null) return
-        screenShare.value = false
-        peers.values.forEach { runCatching { it.removeScreenTrack() } }
+    /** The default display's current size in pixels, oriented as the user holds it now. */
+    private fun displaySize(): Pair<Int, Int> {
+        val display = runCatching {
+            appContext.getSystemService(android.hardware.display.DisplayManager::class.java)
+                ?.getDisplay(android.view.Display.DEFAULT_DISPLAY)
+        }.getOrNull()
+        val mode = display?.mode
+        if (mode != null && mode.physicalWidth > 0 && mode.physicalHeight > 0) {
+            // Mode sizes are in the display's NATURAL orientation; swap when rotated a quarter turn.
+            val quarter = display.rotation == android.view.Surface.ROTATION_90 ||
+                display.rotation == android.view.Surface.ROTATION_270
+            val natW = mode.physicalWidth; val natH = mode.physicalHeight
+            return if (quarter) natH to natW else natW to natH
+        }
+        val dm = appContext.resources.displayMetrics
+        return dm.widthPixels to dm.heightPixels
+    }
+
+    /** Resize the capture on rotation so a landscape screen is not squeezed into a portrait frame. */
+    private fun watchRotation() {
+        val dmgr = appContext.getSystemService(android.hardware.display.DisplayManager::class.java) ?: return
+        val l = object : android.hardware.display.DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) {}
+            override fun onDisplayRemoved(displayId: Int) {}
+            override fun onDisplayChanged(displayId: Int) {
+                if (displayId != android.view.Display.DEFAULT_DISPLAY) return
+                val cap = screenCapturer as? org.webrtc.ScreenCapturerAndroid ?: return
+                val (dw, dh) = displaySize()
+                val size = ScreenSharePolicy.captureSize(dw, dh)
+                if (size == screenCaptureSize) return
+                Log.i(ScreenSharePolicy.LOG_TAG, "display now ${dw}x$dh -> capture ${size.first}x${size.second}")
+                screenCaptureSize = size
+                runCatching { cap.changeCaptureFormat(size.first, size.second, ScreenSharePolicy.FPS) }
+                    .onFailure { Log.w(ScreenSharePolicy.LOG_TAG, "capture resize failed", it) }
+            }
+        }
+        dmgr.registerDisplayListener(l, mainHandler)
+        screenDisplayListener = l
+    }
+
+    /** Release every screen-capture object. Safe to call repeatedly. */
+    private fun releaseScreenCapture() {
+        screenDisplayListener?.let { l ->
+            runCatching {
+                appContext.getSystemService(android.hardware.display.DisplayManager::class.java)
+                    ?.unregisterDisplayListener(l)
+            }
+        }
+        screenDisplayListener = null
+        screenCaptureSize = null
         runCatching { screenCapturer?.stopCapture() }
         runCatching { screenCapturer?.dispose() }; screenCapturer = null
         runCatching { screenSurfaceHelper?.dispose() }; screenSurfaceHelper = null
         runCatching { screenTrack?.dispose() }; screenTrack = null
         runCatching { screenVideoSource?.dispose() }; screenVideoSource = null
+    }
+
+    /** Stop screen sharing: remove the screen track from every peer (renegotiate) and tear it down. */
+    fun stopScreenShare() {
+        if (!screenShare.value && screenTrack == null) return
+        Log.i(ScreenSharePolicy.LOG_TAG, "stopping screen share")
+        screenShare.value = false
+        peers.values.forEach { runCatching { it.removeScreenTrack() } }
+        // Hand the relay back to the camera BEFORE the screen track is disposed under its sink.
+        if (CallMediaBridge.anyRelaying()) CallMediaBridge.setLocalVideoTrack(localVideo, eglBase)
+        releaseScreenCapture()
+        // Drop only the mediaProjection type; the call keeps its own (microphone) service.
+        ConnectionService.stopProjection(appContext)
     }
 
     fun toggleScreenShare(resultCode: Int, data: android.content.Intent) {
@@ -1241,11 +1359,8 @@ object CallManager {
         runCatching { CallHairpin.closeAll() }
         hairpinPeers.clear()
         peers.values.forEach { it.close() }; peers.clear()
-        runCatching { screenCapturer?.stopCapture() }
-        runCatching { screenCapturer?.dispose() }; screenCapturer = null
-        runCatching { screenSurfaceHelper?.dispose() }; screenSurfaceHelper = null
-        runCatching { screenTrack?.dispose() }; screenTrack = null
-        runCatching { screenVideoSource?.dispose() }; screenVideoSource = null
+        releaseScreenCapture()
+        screenShareStarting = false
         screenShare.value = false
         runCatching { capturer?.stopCapture() }
         capturing = false   // teardown releases the camera; the next call opens a fresh session
@@ -1268,4 +1383,24 @@ object CallManager {
         ringing.value = false; connecting.value = false; inCall.value = false; minimized.value = false
         peerName.value = ""
     }
+}
+
+/** Pass-through encoder factory that logs which implementation each video sender got — the one
+ *  fact a field report of "the far end never sees my screen" needs and logcat never showed. */
+private class LoggingEncoderFactory(private val inner: org.webrtc.VideoEncoderFactory) : org.webrtc.VideoEncoderFactory {
+    override fun createEncoder(info: org.webrtc.VideoCodecInfo): org.webrtc.VideoEncoder? {
+        val enc = inner.createEncoder(info)
+        Log.i(ScreenSharePolicy.LOG_TAG, "encoder for ${info.name} ${info.params}: " +
+            (enc?.let { e ->
+                // Native-wrapped encoders (software VP8/VP9, the HW→SW fallback) throw from the
+                // Java-side accessors — the class name is what identifies them.
+                val name = runCatching { e.implementationName }.getOrDefault(e.javaClass.simpleName)
+                val hw = runCatching { e.isHardwareEncoder.toString() }.getOrDefault("?")
+                "$name hw=$hw"
+            } ?: "NONE"))
+        return enc
+    }
+    override fun getSupportedCodecs(): Array<org.webrtc.VideoCodecInfo> = inner.supportedCodecs
+    override fun getImplementations(): Array<org.webrtc.VideoCodecInfo> = inner.implementations
+    override fun getEncoderSelector(): org.webrtc.VideoEncoderFactory.VideoEncoderSelector? = inner.encoderSelector
 }

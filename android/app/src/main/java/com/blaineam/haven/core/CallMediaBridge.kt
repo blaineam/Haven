@@ -169,6 +169,20 @@ object CallMediaBridge {
         localVideoTrack?.let { attachLocalVideo(it, eglBase) }
     }
 
+    /**
+     * Point the relay's outgoing video at a different local track — the screen-share track while
+     * sharing, the camera again after. The encoder is rebuilt at the new track's first frame (size
+     * change), so the far end gets a fresh keyframe with the new SPS/PPS. No-op when not relaying.
+     */
+    @Synchronized
+    fun setLocalVideoTrack(track: VideoTrack?, eglBase: EglBase) {
+        if (activePeers.isEmpty()) return
+        if (track != null && track === localTrack) return
+        Log.i(TAG, "hairpin media: outgoing video -> ${track?.id() ?: "none"}")
+        detachLocalVideo()
+        track?.let { attachLocalVideo(it, eglBase) }
+    }
+
     /** Stop relaying to [remote] (its ICE recovered, or the peer left). */
     @Synchronized
     fun deactivate(remote: String) {

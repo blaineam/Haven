@@ -28,7 +28,9 @@ class ConnectionService : Service() {
         // Screen-sharing in a call needs the foreground service to carry the mediaProjection type
         // (Android 14+ requires it before MediaProjection can capture). We add it to the running
         // data-sync service while a share is active.
-        val projection = intent?.getBooleanExtra(EXTRA_PROJECTION, false) == true
+        // Sticky like the mic: any unrelated restart during a share must keep the projection type,
+        // or Android stops the MediaProjection out from under the capture.
+        val projection = projectionWanted || intent?.getBooleanExtra(EXTRA_PROJECTION, false) == true
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
@@ -43,7 +45,12 @@ class ConnectionService : Service() {
             } else {
                 startForeground(NOTIF_ID, notification())
             }
+            if (projection) projectionReady(true)
         } catch (e: Exception) {
+            if (projection) {
+                Log.w(ScreenSharePolicy.LOG_TAG, "mediaProjection FGS promotion refused: ${e.javaClass.simpleName}: ${e.message}")
+                projectionReady(false)
+            }
             // Android 15 caps a dataSync FGS at ~6h/day; once exhausted, startForeground throws
             // ForegroundServiceStartNotAllowedException. Don't crash — keep the node running as a plain
             // background service; the WorkManager periodic sync still catches up every ~15 min.
@@ -146,6 +153,8 @@ class ConnectionService : Service() {
 
         /** Drop the mic type when the call ends — holding it idle is a standing privacy indicator. */
         fun endCall(ctx: Context) {
+            projectionWanted = false
+            projectionCallback = null
             if (!micWanted) return
             micWanted = false
             // Only re-assert the plain service if the user actually wants it running; otherwise a
@@ -154,15 +163,65 @@ class ConnectionService : Service() {
             else stop(ctx)
         }
 
-        /** (Re)start the foreground service with the mediaProjection type added — call right before
-         *  starting a screen-share capture so Android 14+ permits MediaProjection. */
-        fun startForProjection(ctx: Context) {
+        /** True while a screen share holds the projection type. Sticky — see onStartCommand. */
+        @Volatile private var projectionWanted = false
+
+        /** Waiting for [onStartCommand] to finish the mediaProjection promotion. Main thread only. */
+        private var projectionCallback: ((Boolean) -> Unit)? = null
+        private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        private val projectionTimeout = Runnable { projectionReady(false) }
+        /** onStartCommand runs on the main thread, but it is QUEUED behind whatever posted the
+         *  start — normally it lands within a frame or two. Past this, give up waiting. */
+        private const val PROJECTION_READY_TIMEOUT_MS = 3_000L
+
+        private fun projectionReady(ok: Boolean) {
+            mainHandler.removeCallbacks(projectionTimeout)
+            val cb = projectionCallback ?: return
+            projectionCallback = null
+            if (!ok && !projectionWanted) return
+            cb(ok)
+        }
+
+        /**
+         * (Re)start the foreground service with the mediaProjection type added, and call [onReady]
+         * (on the main thread) once `startForeground(…MEDIA_PROJECTION)` has actually RUN.
+         *
+         * Android 14+ throws a SecurityException from `getMediaProjection` unless a service of that
+         * type is already in the foreground — and `startForegroundService` only QUEUES the start:
+         * `onStartCommand` runs later on the main thread, i.e. only after the caller returns. The old
+         * fire-and-continue version therefore started capture before the promotion every time,
+         * swallowed the SecurityException, and burned the single-use consent token: the share
+         * silently never started. [onReady] gets `false` if the promotion was refused or timed
+         * out; the caller may still try (pre-14 does not need it).
+         */
+        fun startForProjection(ctx: Context, onReady: (Boolean) -> Unit) {
+            projectionWanted = true
+            projectionCallback?.invoke(false)   // a stale waiter never hangs
+            projectionCallback = onReady
+            mainHandler.removeCallbacks(projectionTimeout)
+            mainHandler.postDelayed(projectionTimeout, PROJECTION_READY_TIMEOUT_MS)
             // Same guard as [start]: a refused promotion must not crash a live call.
             runCatching {
                 ContextCompat.startForegroundService(
                     ctx, Intent(ctx, ConnectionService::class.java).putExtra(EXTRA_PROJECTION, true))
             }.onFailure {
                 android.util.Log.w("ConnectionService", "projection service start refused: ${it.message}")
+                mainHandler.post { projectionReady(false) }
+            }
+        }
+
+        /** Drop the mediaProjection type when the share ends, keeping the call's own service. */
+        fun stopProjection(ctx: Context) {
+            if (!projectionWanted) return
+            projectionWanted = false
+            mainHandler.removeCallbacks(projectionTimeout)
+            projectionCallback = null
+            if (micWanted || ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).getBoolean(KEY, false)) {
+                runCatching {
+                    ContextCompat.startForegroundService(ctx, Intent(ctx, ConnectionService::class.java))
+                }
+            } else {
+                stop(ctx)
             }
         }
 

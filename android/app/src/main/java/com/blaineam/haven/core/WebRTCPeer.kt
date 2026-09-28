@@ -33,18 +33,35 @@ class WebRTCPeer(
     /** ICE lifecycle for this peer. Drives the hairpin media relay: `FAILED` means WebRTC could not
      *  pair us, and on Android that used to be the end of the call — nothing watched this at all. */
     private val onIceState: (PeerConnection.IceConnectionState) -> Unit = {},
+    /** Perfect-negotiation politeness (Apple parity: the LARGER hex is polite). On glare the polite
+     *  side rolls its own offer back and answers; the impolite side ignores the colliding offer. */
+    private val polite: Boolean = false,
 ) {
     private var screenSender: org.webrtc.RtpSender? = null
 
-    /** Route an incoming video track: the second video track (`screen0`) is a screen share; the rest
-     *  is the camera. Same id contract iOS uses, so the platforms interop. */
-    private fun routeRemote(t: VideoTrack) {
-        if (t.id() == SCREEN_TRACK_ID) onRemoteScreen(t) else onRemoteVideo(t)
+    /** Receivers currently routed to the screen tile, so a removal clears the right slot. */
+    private val screenReceivers = HashSet<String>()
+
+    /** Route an incoming video track by its STREAM id (see [ScreenSharePolicy.isScreenTrack]); the
+     *  track id is only a fallback. Same contract Apple uses, so the platforms interop. */
+    private fun routeRemote(receiver: RtpReceiver, t: VideoTrack, streamIds: List<String>) {
+        val screen = ScreenSharePolicy.isScreenTrack(t.id(), streamIds)
+        Log.i(ScreenSharePolicy.LOG_TAG, "${peerHex.take(8)} remote video receiver=${receiver.id()} " +
+            "track=${t.id()} streams=$streamIds -> ${if (screen) "SCREEN" else "camera"}")
+        synchronized(screenReceivers) {
+            if (screen) screenReceivers.add(receiver.id()) else screenReceivers.remove(receiver.id())
+        }
+        if (screen) onRemoteScreen(t) else onRemoteVideo(t)
     }
     private val pendingRemote = ArrayList<IceCandidate>()
     /** Answer that arrived before setLocalDescription(offer) finished — apply once local is set. */
-    private var pendingAnswerSdp: String? = null
-    private var localOfferSet = false
+    @Volatile private var pendingAnswerSdp: String? = null
+    @Volatile private var localOfferSet = false
+    /** An offer is being created/applied right now (perfect negotiation, Apple parity). */
+    @Volatile private var isMakingOffer = false
+    /** A renegotiation was asked for while one was already in flight (or signaling wasn't stable);
+     *  it runs as soon as signaling returns to STABLE instead of being lost. */
+    @Volatile private var renegotiationPending = false
     var remoteSet = false; private set
 
     private val pc: PeerConnection? = factory.createPeerConnection(
@@ -54,16 +71,19 @@ class WebRTCPeer(
         },
         object : PeerConnection.Observer {
             override fun onIceCandidate(c: IceCandidate) = onLocalIce(c.sdp, c.sdpMLineIndex, c.sdpMid)
-            override fun onTrack(transceiver: org.webrtc.RtpTransceiver) {
-                (transceiver.receiver.track() as? VideoTrack)?.let { routeRemote(it) }
-            }
+            // Unified Plan fires BOTH onTrack and onAddTrack for every newly-receiving transceiver.
+            // Route once, from onAddTrack — it is the one that carries the stream ids.
+            override fun onTrack(transceiver: org.webrtc.RtpTransceiver) {}
             override fun onAddTrack(receiver: RtpReceiver, streams: Array<out MediaStream>) {
-                (receiver.track() as? VideoTrack)?.let { routeRemote(it) }
+                val t = receiver.track() as? VideoTrack ?: return
+                routeRemote(receiver, t, streams.map { it.id })
             }
             override fun onRemoveTrack(receiver: RtpReceiver) {
                 // Mid-call the only track ever removed is the peer's screen share (camera/audio stay),
                 // so a removal clears the remote screen tile (no stuck last frame).
-                if ((receiver.track() as? VideoTrack)?.id() == SCREEN_TRACK_ID || receiver.track() == null) {
+                val wasScreen = synchronized(screenReceivers) { screenReceivers.remove(receiver.id()) }
+                if (wasScreen || (receiver.track() as? VideoTrack)?.id() == SCREEN_TRACK_ID || receiver.track() == null) {
+                    Log.i(ScreenSharePolicy.LOG_TAG, "${peerHex.take(8)} remote screen ended (receiver=${receiver.id()})")
                     onRemoteScreenEnded()
                 }
             }
@@ -89,28 +109,73 @@ class WebRTCPeer(
         localVideo?.let { pc?.addTrack(it, streamIds) }
     }
 
-    /** Add my screen-share track to this peer and renegotiate (the sharer offers; the peer answers). */
-    fun addScreenTrack(track: VideoTrack) {
+    /**
+     * Add my screen-share track to this peer (stream id [ScreenSharePolicy.STREAM_ID], Apple parity)
+     * and cap its sender. With [renegotiate] the sharer offers right away; without it (a peer that
+     * joined mid-share) the track rides the next negotiation — the initial offer if we are the
+     * offerer, or a follow-up offer right after we answer theirs.
+     */
+    fun addScreenTrack(track: VideoTrack, renegotiate: Boolean = true) {
         val pc = pc ?: return
         if (screenSender != null) return
-        screenSender = pc.addTrack(track, listOf("screen"))
-        makeOffer()   // renegotiate to announce the new m-line
+        val sender = pc.addTrack(track, listOf(ScreenSharePolicy.STREAM_ID)) ?: run {
+            Log.w(ScreenSharePolicy.LOG_TAG, "${peerHex.take(8)} addTrack(screen) returned no sender")
+            return
+        }
+        screenSender = sender
+        tuneScreenSender(sender)
+        if (renegotiate) makeOffer() else renegotiationPending = true
+    }
+
+    /**
+     * Cap the screen sender like Apple does (2.5 Mbps, BALANCED degradation) and hold it to the
+     * capture rate. Uncapped, a screencast source keeps full resolution and lets the encoder
+     * starve the camera and audio on the same connection.
+     */
+    private fun tuneScreenSender(sender: org.webrtc.RtpSender) {
+        runCatching {
+            val p = sender.parameters
+            p.degradationPreference = org.webrtc.RtpParameters.DegradationPreference.BALANCED
+            p.encodings.forEach {
+                it.maxBitrateBps = ScreenSharePolicy.MAX_BITRATE_BPS
+                it.maxFramerate = ScreenSharePolicy.FPS
+            }
+            val ok = sender.setParameters(p)
+            Log.i(ScreenSharePolicy.LOG_TAG, "${peerHex.take(8)} screen sender params ok=$ok " +
+                "encodings=${p.encodings.size} maxBitrate=${ScreenSharePolicy.MAX_BITRATE_BPS}")
+        }.onFailure { Log.w(ScreenSharePolicy.LOG_TAG, "${peerHex.take(8)} screen sender params failed", it) }
     }
 
     /** Remove my screen-share track and renegotiate (the m-line goes inactive on the peer). */
     fun removeScreenTrack() {
         val pc = pc ?: return
-        screenSender?.let { runCatching { pc.removeTrack(it) } }
+        val sender = screenSender ?: return
+        runCatching { pc.removeTrack(sender) }
         screenSender = null
         makeOffer()
     }
 
     fun makeOffer() {
         val pc = pc ?: return
+        // Never start an offer on top of one still being created, or while we are mid-ANSWER
+        // (HAVE_REMOTE_OFFER): both fail setLocalDescription or orphan an answer. Remember it and
+        // run it once signaling is STABLE again. Re-offering from HAVE_LOCAL_OFFER stays allowed —
+        // it is legal, and the ACCEPT retransmits rely on it to recover a lost first offer.
+        val state = pc.signalingState()
+        if (isMakingOffer || (state != PeerConnection.SignalingState.STABLE &&
+                state != PeerConnection.SignalingState.HAVE_LOCAL_OFFER)) {
+            renegotiationPending = true
+            Log.d(TAG, "$peerHex offer deferred (making=$isMakingOffer state=$state)")
+            return
+        }
+        renegotiationPending = false
+        isMakingOffer = true
+        localOfferSet = false
         pc.createOffer(object : SimpleSdp() {
             override fun onCreateSuccess(sdp: SessionDescription) {
                 pc.setLocalDescription(object : SimpleSdp() {
                     override fun onSetSuccess() {
+                        isMakingOffer = false
                         localOfferSet = true
                         onLocalSdp("offer", sdp.description)
                         // Peer may have answered before our local offer finished applying.
@@ -119,19 +184,62 @@ class WebRTCPeer(
                             applyRemoteAnswer(ans)
                         }
                     }
+                    override fun onSetFailure(error: String?) {
+                        isMakingOffer = false
+                        renegotiationPending = true
+                        Log.w(TAG, "$peerHex local offer set fail: $error")
+                    }
                 }, sdp)
+            }
+            override fun onCreateFailure(error: String?) {
+                isMakingOffer = false
+                Log.w(TAG, "$peerHex offer create fail: $error")
             }
         }, mediaConstraints())
     }
 
+    /** Signaling just returned to STABLE — run a renegotiation that was asked for meanwhile. */
+    private fun renegotiateIfPending() {
+        if (renegotiationPending) {
+            Log.d(TAG, "$peerHex running deferred renegotiation")
+            makeOffer()
+        }
+    }
+
     fun onRemoteOffer(sdp: String) {
         val pc = pc ?: return
+        // Glare: both sides offered at once. Impolite keeps its own offer; polite rolls back and
+        // answers theirs, then re-offers whatever it had wanted to announce (Apple parity).
+        val collision = isMakingOffer || pc.signalingState() != PeerConnection.SignalingState.STABLE
+        if (collision && !polite) {
+            Log.d(TAG, "$peerHex ignoring colliding offer (impolite, state=${pc.signalingState()})")
+            return
+        }
+        if (collision) {
+            Log.d(TAG, "$peerHex glare — rolling back local offer (polite)")
+            pc.setLocalDescription(object : SimpleSdp() {
+                override fun onSetSuccess() {
+                    isMakingOffer = false
+                    localOfferSet = false
+                    pendingAnswerSdp = null
+                    renegotiationPending = true
+                    applyRemoteOffer(pc, sdp)
+                }
+            }, SessionDescription(SessionDescription.Type.ROLLBACK, ""))
+        } else {
+            applyRemoteOffer(pc, sdp)
+        }
+    }
+
+    private fun applyRemoteOffer(pc: PeerConnection, sdp: String) {
         pc.setRemoteDescription(object : SimpleSdp() {
             override fun onSetSuccess() {
                 remoteSet = true; flushCandidates()
                 pc.createAnswer(object : SimpleSdp() {
                     override fun onCreateSuccess(answer: SessionDescription) {
-                        pc.setLocalDescription(SimpleSdp(), answer)
+                        pc.setLocalDescription(object : SimpleSdp() {
+                            override fun onSetSuccess() { renegotiateIfPending() }
+                        }, answer)
                         onLocalSdp("answer", answer.description)
                     }
                 }, mediaConstraints())
@@ -140,7 +248,10 @@ class WebRTCPeer(
     }
 
     fun onRemoteAnswer(sdp: String) {
-        if (!localOfferSet) {
+        // Only an answer racing OUR in-flight offer is queued; with no offer in flight it is a
+        // stale redelivery and applyRemoteAnswer's state check drops it (queuing it would pair it
+        // with the NEXT offer).
+        if (!localOfferSet && isMakingOffer) {
             // Answer raced ahead of setLocalDescription(offer) → "Called in wrong state: stable".
             pendingAnswerSdp = sdp
             Log.d(TAG, "$peerHex queuing remote answer until local offer is set")
@@ -159,7 +270,7 @@ class WebRTCPeer(
             return
         }
         pc?.setRemoteDescription(object : SimpleSdp() {
-            override fun onSetSuccess() { remoteSet = true; flushCandidates() }
+            override fun onSetSuccess() { remoteSet = true; flushCandidates(); renegotiateIfPending() }
             override fun onSetFailure(error: String?) {
                 Log.w(TAG, "$peerHex answer set fail: $error")
             }
@@ -221,6 +332,6 @@ class WebRTCPeer(
     companion object {
         private const val TAG = "WebRTCPeer"
         /** Track id for the screen-share video track — matches iOS `WebRTCCall.screenTrackId`. */
-        const val SCREEN_TRACK_ID = "screen0"
+        const val SCREEN_TRACK_ID = ScreenSharePolicy.TRACK_ID
     }
 }

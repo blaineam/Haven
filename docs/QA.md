@@ -511,8 +511,10 @@ swap — so a slow `feed` behind a `selfsync: N roster wire(s) took … ms` line
 shorten, not a slow disk. A heartbeat that parks also parks the next command behind it (one
 driver thread), so a step that "took 30 s" on desktop should be read against these lines first.
 The engine lock names its own long holds on every platform — `engine lock held 1840 ms by
-…/haven-ffi/src/lib.rs:7091` (call site of the `lock()`), threshold one second — so a slow `feed`
-phase can be matched to the exact engine call that held it.
+…/haven-ffi/src/lib.rs:7091 (on-CPU 12 ms)` (call site of the `lock()`), threshold one second — so a slow `feed`
+phase can be matched to the exact engine call that held it. The `on-CPU` figure (Unix) is the holder
+thread's own CPU time across the hold: close to the wall figure means work under the lock worth
+moving off it; far below it means the holder was descheduled — an overloaded host, not the code.
 
 The desktop leg is a DEBUG build (the QA driver only exists there), but its Rust core and crypto
 crates are compiled optimized (`[profile.dev.package.*]` overrides in `desktop/src-tauri/Cargo.toml`):

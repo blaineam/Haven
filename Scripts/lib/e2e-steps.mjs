@@ -157,13 +157,48 @@ export function persistExportAllowance(burstMs) {
   return Math.floor(Math.max(0, burstMs) / 2500) + 2;
 }
 
-/** The local latency a `react` op reported, under whichever name the driver used. */
+/**
+ * The local latency the last `react` op reported (`react_latency`, Apple): ms from the tap to the
+ * feed publishing it. `publishedMs: -1` means nothing published within 5 s — that is a failure, so
+ * it reads as Infinity rather than as a fast -1. null when no react has been measured.
+ */
 export function reactLatency(dump) {
-  const p = dump?.perf || {};
-  for (const v of [p.lastReactLocalMs, p.reactLocalMs, p.lastReactMs, dump?.react_latency_ms]) {
-    if (typeof v === 'number') return v;
-  }
+  const r = dump?.react_latency || {};
+  if (typeof r.publishedMs === 'number') return r.publishedMs < 0 ? Infinity : r.publishedMs;
+  if (typeof r.engineAppliedMs === 'number') return r.engineAppliedMs;
   return null;
+}
+
+// ── progress (docs/QA.md "Progress fields") ────────────────────────────────────────────────
+
+/** Is a `got` series monotonically non-decreasing? */
+export function nonDecreasing(series) {
+  for (let i = 1; i < series.length; i++) if (series[i] < series[i - 1]) return false;
+  return true;
+}
+
+/**
+ * Fold one dump's progress fields into a per-ref record for the refs we watch:
+ * rec[ref] = {got: [..], total, lanes: Set, present, gaveUpWhileReceiving}.
+ */
+export function recordProgress(rec, dump, refs, presentOf) {
+  const gaveUp = new Set(dump?.media_gave_up || []);
+  for (const ref of refs) {
+    const r = (rec[ref] ??= { got: [], total: 0, lanes: [], present: false, gaveUpWhileReceiving: false, gaveUp: false });
+    const t = (dump?.media_transfers || []).find((x) => x.ref === ref);
+    if (t) {
+      r.got.push(num(t.got));
+      r.total = Math.max(r.total, num(t.total));
+      if (!r.lanes.includes(t.lane)) r.lanes.push(t.lane);
+    }
+    if (gaveUp.has(ref)) {
+      r.gaveUp = true;
+      // Given up while the series was still climbing = the placeholder lied mid-transfer.
+      if (r.got.length >= 2 && r.got[r.got.length - 1] > r.got[r.got.length - 2]) r.gaveUpWhileReceiving = true;
+    }
+    if (presentOf(ref)) r.present = true;
+  }
+  return rec;
 }
 
 // ── launch ──────────────────────────────────────────────────────────────────────────────────

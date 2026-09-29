@@ -9247,6 +9247,9 @@ object HavenNet : InboundListener {
             .put("media_transfers", transfers)
             .put("media_wanted_count", wantedMedia.count)
             .put("media_received_count", SyncMetrics.mediaIn.intValue)
+            // Refs a placeholder shows as given up ("No longer available") — the e2e `progress`
+            // step asserts a transfer that is still receiving bytes never lands here.
+            .put("media_gave_up", org.json.JSONArray(unavailableMedia.toList().sorted()))
             .put("history_handoff", JSONObject()
                 .put("role", "none").put("state", "idle").put("done", 0).put("total", 0)
                 .put("media_done", 0).put("media_total", 0))

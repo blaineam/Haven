@@ -4025,6 +4025,9 @@ final class FeedStore: ObservableObject {
             "media_transfers": transfers,
             "media_wanted_count": wantedMedia.count,
             "media_received_count": SyncMetrics.shared.nbMediaIn,
+            // Refs a placeholder shows as given up ("No longer available") — the e2e `progress`
+            // step asserts a transfer that is still receiving bytes never lands here.
+            "media_gave_up": unavailableMedia.sorted(),
             "history_handoff": [
                 "role": role, "state": hState, "done": h.done, "total": h.total,
                 "media_done": h.mediaDone, "media_total": h.mediaTotal,
@@ -4155,8 +4158,8 @@ final class FeedStore: ObservableObject {
             // Relay-first media counters + the heavy-work gate (e2e step `relayfirst`, docs/QA.md).
             "relay_first": QaMediaStats.snapshot(ownPosts: ownPosts),
             "heavy_work": QaMediaStats.heavyWork(),
-            // Own-post media still owed to a relay (the sync badge's honest input).
-            "pending_user_uploads": ownPosts.reduce(0) { n, p in n + p.refs.filter { MediaBackupQueue.shared.hasPending($0) }.count },
+            // Own-post media blobs still owed to a relay (sync_badge.pending_user_uploads counts EVENTS).
+            "pending_media_uploads": ownPosts.reduce(0) { n, p in n + p.refs.filter { MediaBackupQueue.shared.hasPending($0) }.count },
             // Launch timing since process start (e2e step `launch`).
             "launch": QaLaunch.snapshot(),
             // Friendship state (e2e step `newfriend`): who we know, who is waiting on approval,

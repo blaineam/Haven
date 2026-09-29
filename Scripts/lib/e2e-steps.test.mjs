@@ -4,6 +4,7 @@ import {
   num, delta, parseUiNodes, findNode, center, CONSENT, isConsentSurface, fgsTypes, holdsMediaProjection,
   auditShareLog, longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields,
   persistExportAllowance, reactLatency, ingestedFirst, feedNotGatedOnDmWarm, PERF_FIELDS,
+  nonDecreasing, recordProgress,
 } from './e2e-steps.mjs';
 
 test('num / delta treat missing and junk as zero', () => {
@@ -109,8 +110,10 @@ test('perf fields: absent section / partial section are reported by name', () =>
   assert.equal(persistExportAllowance(0), 2);
   assert.equal(persistExportAllowance(10_000), 6);
   assert.equal(persistExportAllowance(-5), 2);
-  assert.equal(reactLatency({ perf: { lastReactLocalMs: 42 } }), 42);
-  assert.equal(reactLatency({ react_latency_ms: 7 }), 7);
+  assert.equal(reactLatency({ react_latency: { engineAppliedMs: 3.5, publishedMs: 42 } }), 42);
+  assert.equal(reactLatency({ react_latency: { engineAppliedMs: 3.5, publishedMs: -1 } }), Infinity);
+  assert.equal(reactLatency({ react_latency: { engineAppliedMs: 7 } }), 7);
+  assert.equal(reactLatency({ react_latency: {} }), null);
   assert.equal(reactLatency({}), null);
 });
 
@@ -123,4 +126,26 @@ test('launch: active circle ingested first, and the feed paint not gated on the 
   assert.ok(feedNotGatedOnDmWarm({ first_feed_rendered_ms: 800, dm_warmup_done_ms: null }));
   assert.ok(!feedNotGatedOnDmWarm({ first_feed_rendered_ms: 1300, dm_warmup_done_ms: 1200 }));
   assert.ok(!feedNotGatedOnDmWarm({ first_feed_rendered_ms: null }));
+});
+
+test('progress: monotonic got series and give-up detection per watched ref', () => {
+  assert.ok(nonDecreasing([0, 3, 3, 10]));
+  assert.ok(!nonDecreasing([0, 5, 4]));
+  assert.ok(nonDecreasing([]));
+  const rec = {};
+  const present = new Set();
+  const has = (r) => present.has(r);
+  recordProgress(rec, { media_transfers: [{ ref: 'v', got: 1, total: 10, lane: 'relay' }] }, ['v', 'p'], has);
+  recordProgress(rec, { media_transfers: [{ ref: 'v', got: 4, total: 10, lane: 'relay' }] }, ['v', 'p'], has);
+  present.add('v');
+  recordProgress(rec, { media_transfers: [] }, ['v', 'p'], has);
+  assert.deepEqual(rec.v.got, [1, 4]);
+  assert.equal(rec.v.total, 10);
+  assert.deepEqual(rec.v.lanes, ['relay']);
+  assert.ok(rec.v.present && !rec.v.gaveUp);
+  assert.deepEqual(rec.p.got, []);
+  const bad = {};
+  recordProgress(bad, { media_transfers: [{ ref: 'x', got: 2, total: 9, lane: 'peer' }] }, ['x'], () => false);
+  recordProgress(bad, { media_transfers: [{ ref: 'x', got: 5, total: 9, lane: 'peer' }], media_gave_up: ['x'] }, ['x'], () => false);
+  assert.ok(bad.x.gaveUp && bad.x.gaveUpWhileReceiving);
 });

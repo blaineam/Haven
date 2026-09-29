@@ -27,7 +27,7 @@ import { ChannelFreshness, judgeDump, fmtDuration, FRESHNESS_DEFAULTS } from './
 import {
   num, delta, parseUiNodes, findNode, center, CONSENT, isConsentSurface, holdsMediaProjection, auditShareLog,
   longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields, persistExportAllowance,
-  reactLatency, ingestedFirst, feedNotGatedOnDmWarm,
+  reactLatency, ingestedFirst, feedNotGatedOnDmWarm, nonDecreasing, recordProgress,
 } from './lib/e2e-steps.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -41,7 +41,7 @@ const RUN_NONCE = Date.now();   // per-run fixture salt — see the satellite la
 const REPORT = [];
 const PERF = [];
 const HISTORY = join(ROOT, 'build', 'e2e-history.jsonl');
-const STEPS = (process.env.E2E_STEPS || 'newfriend,profile,circle,post,story,file,music,dm,relayfirst,audience,call,screenshare,callgate,react,comment,media,satellite,launch,responsive,invite_offline').split(',');
+const STEPS = (process.env.E2E_STEPS || 'newfriend,profile,circle,post,story,file,music,dm,relayfirst,progress,audience,call,screenshare,callgate,react,comment,media,satellite,launch,responsive,invite_offline').split(',');
 
 // Convergence budgets (ms). Generous but bounded; tune via env.
 // One active-cadence mailbox poll is ~30-45s; a budget must cover a full poll plus
@@ -82,8 +82,9 @@ const BUDGET = {
 };
 /** How long the newfriend step holds the inviter's approval (so pre-enrollment 403s happen). */
 const NF_HOLD_MS = +(process.env.E2E_NF_HOLD_MS || 20_000);
-/** Release gate: the responsiveness fields MUST be in the dump (absent = FAIL, not SKIPPED). */
-const REQUIRE_PERF = process.env.E2E_REQUIRE_PERF === '1';
+/** The responsiveness fields MUST be in the dump (absent = FAIL). E2E_REQUIRE_PERF=0 downgrades a
+ *  missing field to SKIPPED for a build that predates them; the soren suite pins it to 1. */
+const REQUIRE_PERF = process.env.E2E_REQUIRE_PERF !== '0';
 
 function stamp() { return new Date().toISOString().replace(/[:T]/g, '-').slice(0, 16); }
 function log(m) { const s = `[e2e ${new Date().toISOString().slice(11, 19)}] ${m}`; console.log(s); appendFileSync(join(OUT, 'run.log'), s + '\n'); }
@@ -926,7 +927,7 @@ async function main() {
     // Short settle on purpose: the upload-honesty check below wants to SEE the video pending.
     await op(ios, { op: 'post', body: tagV, media: 'video', circle_id: shared,
       video_path: ios.stage(distinctVideo('relayfirst'), 'qa-relayfirst.mp4') }, 1500);
-    const pendingSeen = await converge(ios, (j) => num(j.pending_user_uploads) > 0, 20_000);
+    const pendingSeen = await converge(ios, (j) => num(j.pending_media_uploads) > 0, 20_000);
     const pj = await freshDump(ios);
     const queued = delta(rf(before.ios), rf(pj), 'authored_refs_enqueued');
     // A local relay can swallow a small clip before the first dump; the enqueue counter is then the
@@ -934,7 +935,7 @@ async function main() {
     score('relayfirst: authored uploads went through the pending (sync badge) state',
       pendingSeen >= 0 || queued > 0, `pending seen=${pendingSeen >= 0} authored_refs_enqueued Δ=${queued}`);
     gate('relayfirst: pending uploads drain once the relay holds them', 'ios',
-      await converge(ios, (j) => num(j.pending_user_uploads) === 0, BUDGET.mediaBlob), BUDGET.mediaBlob);
+      await converge(ios, (j) => num(j.pending_media_uploads) === 0, BUDGET.mediaBlob), BUDGET.mediaBlob);
 
     const receivers = legs.filter((n) => n !== 'ios');
     await convergeAll(receivers, mediaPresent(tagP), BUDGET.mediaBlob, 'relayfirst: photo present');
@@ -1232,8 +1233,93 @@ async function main() {
     gate('callgate: hangup lifts the call gate', 'ios',
       await convergeSince(ios, (j) => liftedFrom(j.heavy_work, 'haven-call'), BUDGET.gateLift, tEnd), BUDGET.gateLift);
     gate('callgate: deferred uploads drain after hangup', 'ios',
-      await convergeSince(ios, (j) => num(j.pending_user_uploads) === 0, BUDGET.mediaBlob, tEnd), BUDGET.mediaBlob);
+      await convergeSince(ios, (j) => num(j.pending_media_uploads) === 0, BUDGET.mediaBlob, tEnd), BUDGET.mediaBlob);
     await convergeAll(['ios', 'stub'], callOver, BUDGET.text, 'callgate: call ended');
+  }
+
+  // ── progress: the honest-progress fields move the way the UI claims ────────────────────────────
+  //
+  // docs/QA.md "Progress fields". A posts a video: A's sync pill must actually show the send
+  // (syncing with ≥1 pending, or a flush_total ≥ 1, at SOME sample — it can be brief on a local
+  // relay) and settle to synced/0. Every receiver's transfer for those refs climbs monotonically,
+  // lands, is counted received ONCE, and is never shown as given up while bytes were still coming.
+  async function stepProgress() {
+    const shared = await ensureSharedCircle();
+    if (!shared || !B) { score('progress (needs a circle shared with B)', false); return; }
+    const ios = devices.ios;
+    const receivers = ['stub', 'android'].filter((n) => devices[n]);
+    const before = await snap(['ios', ...receivers]);
+    for (const n of ['ios', ...receivers]) {
+      if (!before[n]?.sync_badge || typeof before[n]?.media_received_count !== 'number') {
+        score(`progress: progress fields present [${n}]`, false, 'no sync_badge / media_received_count in the dump');
+        return;
+      }
+    }
+    const tag = `${MARKER}_Progress_Video`;
+    // Make the shared circle A's active one first (the pill reports the ACTIVE circle).
+    await op(ios, { op: 'post', body: `${MARKER}_Progress_Seed`, circle_id: shared }, 2000);
+    await op(ios, { op: 'post', body: tag, media: 'video', circle_id: shared,
+      video_path: ios.stage(distinctVideo('progress'), 'qa-progress.mp4') }, 500);
+    // A's pill: sample fast until synced again.
+    let sawSending = false, badges = [];
+    const tA = Date.now();
+    while (Date.now() - tA < BUDGET.mediaBlob) {
+      const j = await freshDump(ios);
+      const b = j?.sync_badge || {};
+      badges.push(`${b.state}:${b.pending_user_uploads}:${b.flush_done}/${b.flush_total}`);
+      if ((b.state === 'syncing' || b.state === 'retrying') && (num(b.pending_user_uploads) >= 1 || num(b.flush_total) >= 1)) sawSending = true;
+      if (num(b.flush_total) >= 1) sawSending = true;
+      if (sawSending && b.state === 'synced' && num(b.pending_user_uploads) === 0 && j.posts?.some((p) => p.body === tag)) break;
+      await sleep(500);
+    }
+    const last = (await freshDump(ios))?.sync_badge || {};
+    score('progress: A\'s sync pill showed the send (syncing, ≥1 pending or flush_total ≥ 1)', sawSending, badges.slice(0, 12).join(' '));
+    score('progress: A\'s sync pill settles to synced / 0 pending', last.state === 'synced' && num(last.pending_user_uploads) === 0,
+      JSON.stringify(last));
+
+    const post = ((await freshDump(ios))?.posts || []).find((p) => p.body === tag);
+    const refs = [...(post?.media_refs || [])];
+    if (!refs.length) { score('progress: video post refs known', false); return; }
+    // Receivers: sample their transfers until the post's media is present.
+    await Promise.all(receivers.map(async (n) => {
+      const dev = devices[n];
+      const rec = {};
+      const t0 = Date.now();
+      let j = null;
+      while (Date.now() - t0 < budgetFor(dev, BUDGET.mediaBlob)) {
+        j = await freshDump(dev);
+        const p = (j?.posts || []).find((x) => x.body === tag);
+        const present = (ref) => { const i = (p?.media_refs || []).indexOf(ref); return i >= 0 && Boolean(p.media_present?.[i]); };
+        recordProgress(rec, j, refs, present);
+        if (refs.every((r) => rec[r].present)) break;
+        await sleep(800);
+      }
+      const done = refs.every((r) => rec[r]?.present);
+      gate(`progress: video present [${n}]`, n, done ? Date.now() - t0 : -1, BUDGET.mediaBlob);
+      for (const r of refs) {
+        const x = rec[r] || { got: [] };
+        score(`progress: transfer never goes backwards [${n} ${r.slice(0, 10)}]`, nonDecreasing(x.got),
+          `got=${JSON.stringify(x.got.slice(-12))} total=${x.total} lanes=${x.lanes}`);
+        score(`progress: never shown as given up while bytes were arriving [${n} ${r.slice(0, 10)}]`, !x.gaveUpWhileReceiving && !(x.gaveUp && x.present),
+          `gaveUp=${x.gaveUp} present=${x.present}`);
+      }
+      // Counted received exactly once: the counter moves by at most the post's blobs and does not
+      // move again afterwards (a late double count is the bug this looks for).
+      await sleep(10_000);
+      const after1 = await freshDump(dev);
+      await sleep(8_000);
+      const after2 = await freshDump(dev);
+      const dRecv = num(after1?.media_received_count) - num(before[n]?.media_received_count);
+      const blobs = refs.length + (post?.media_markers || []).length;
+      score(`progress: received counted once per blob [${n}]`, dRecv >= 1 && dRecv <= blobs + 2,
+        `Δmedia_received_count=${dRecv} blobs(refs+companions)=${blobs}`);
+      score(`progress: no late double count [${n}]`, num(after2?.media_received_count) === num(after1?.media_received_count),
+        `${after1?.media_received_count} → ${after2?.media_received_count}`);
+      score(`progress: refs left media_transfers once landed [${n}]`,
+        !(after2?.media_transfers || []).some((t) => refs.includes(t.ref)), JSON.stringify(after2?.media_transfers || []));
+      gate(`progress: media_wanted_count back to its pre-step value [${n}]`, n,
+        await converge(dev, (x) => num(x.media_wanted_count) <= num(before[n]?.media_wanted_count), 60_000), 60_000);
+    }));
   }
 
   // ── audience: "Send privately instead" stays private ──────────────────────────────────────────
@@ -1394,7 +1480,7 @@ async function main() {
   // Warm the fleet before ANY timed content assertion (see warmUp above). Satellite counts: it is
   // the most timing-sensitive step in the suite, so running it on a cold fleet measures the fleet
   // coming up rather than the feature.
-  if (['post', 'satellite', 'relayfirst', 'audience', 'callgate', 'launch', 'responsive'].some((x) => STEPS.includes(x))) await warmUp();
+  if (['post', 'satellite', 'relayfirst', 'progress', 'audience', 'callgate', 'launch', 'responsive'].some((x) => STEPS.includes(x))) await warmUp();
 
   // 3. posts: text + photo + video (author iOS; friend authors one from stub)
   if (STEPS.includes('post')) {
@@ -1499,6 +1585,7 @@ async function main() {
   // assertions stay on the ios↔stub pair (sim/emulator media quirks make them flaky elsewhere;
   // state asserts run on every pair).
   if (STEPS.includes('relayfirst')) await stepRelayFirst();
+  if (STEPS.includes('progress')) await stepProgress();
   if (STEPS.includes('audience')) await stepAudience();
 
   if (STEPS.includes('call') && B) {

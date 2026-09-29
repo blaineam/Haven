@@ -631,6 +631,45 @@ enum SharedStore {
     // file-vs-dir collision that fails the manifest write. "<ref>.p" is a distinct name → no collision.
     private static func chunkKey(_ ref: String, _ i: Int) -> String { "haven/media/\(ref).p/\(i)" }
 
+    // MARK: - Media scope (core blobstore `media_scope_key`)
+    //
+    // A media ref names no circle, so relay mesh replication used to copy every blob to every sibling
+    // relay — a private circle's or a DM's ciphertext landed on a friend's relay that only shares some
+    // OTHER circle with us. Before a blob goes to a relay we PUT a content-free marker
+    // "haven/media/<ref>.c/<circle>" there; the relay then replicates the ref only to relays that serve
+    // that circle. A relay that doesn't serve the circle refuses the marker (403): it is then no
+    // destination for this circle's media. Blob keys are unchanged, so every reader, restore and
+    // relay-first path — and older clients/relays — are unaffected.
+    private static func scopeKey(_ ref: String, _ circleId: String) -> String { "haven/media/\(ref).c/\(circleId)" }
+    private static let scopeBody = Data("1".utf8)
+    /// "<node>|<circle>" → until: that relay refused to scope media into that circle.
+    private static var scopeRefusedUntil: [String: Date] = [:]
+    private static func scopeRefused(_ node: String, _ circleId: String) -> Bool {
+        (scopeRefusedUntil["\(node)|\(circleId)"] ?? .distantPast) > Date()
+    }
+    /// A relay refused this circle's scope marker. One of the circle's OWN relays is enrollment lag
+    /// (the usual refusal path: roster heal + retry); any other relay simply doesn't serve the circle,
+    /// so it is skipped as a media destination for it (re-checked after 30 min).
+    private static func noteScopeRefused(_ node: String, _ circleId: String, ref: String) {
+        if relayNodes(circleId).contains(node) { noteRefused(node, "media scope", ref: ref); return }
+        if scopeRefusedUntil.count > 4096 { scopeRefusedUntil.removeAll() }
+        scopeRefusedUntil["\(node)|\(circleId)"] = Date().addingTimeInterval(1800)
+        HavenLog.sync("relay \(node.prefix(8)) doesn't serve \(circleId.prefix(12)) — not a media destination for it")
+    }
+    private enum ScopeResult { case scoped, refused, unreachable }
+    /// Scope `ref` to `circleId` on a relay's HTTP interface; the first base that answers decides.
+    private static func scopeOverHttp(_ ref: String, _ circleId: String,
+                                      urls: [String], token: String) async -> ScopeResult {
+        for base in urls where !httpUrlBad(base) {
+            switch await httpPut(base, token, scopeKey(ref, circleId), scopeBody) {
+            case .success: return .scoped
+            case .failure(is RelayForbidden): return .refused
+            case .failure: markHttpUrlBad(base)
+            }
+        }
+        return .unreachable
+    }
+
     // MARK: - Chunked media transfer (large-blob fix)
     //
     // A relay/S3 blob is capped at MAX_BLOB = 256 MB (core/haven-net blobstore). Large videos
@@ -803,7 +842,10 @@ enum SharedStore {
         // relayNodes already preferLiveRelays; append other known relays the same way.
         let nodes = relayNodes(circleId).filter { !$0.hasPrefix("s3:") }
         var extra: [String] = []
-        for r in RelayMailboxStore.shared.allRelays() where !r.hasPrefix("s3:") && !nodes.contains(r) {
+        // …except a relay that refused this circle's scope marker: it doesn't serve the circle and
+        // must hold none of its media (see `scopeKey`).
+        for r in RelayMailboxStore.shared.allRelays() where !r.hasPrefix("s3:") && !nodes.contains(r)
+            && !scopeRefused(r, circleId) {
             extra.append(r)
         }
         return nodes + preferLiveRelays(extra)
@@ -871,6 +913,7 @@ enum SharedStore {
         var ownRelayNeeds = false
         let ownNode = RelayHost.shared.serving ? RelayHost.shared.nodeId.lowercased() : ""
         if !ownNode.isEmpty, dests.contains(where: { $0.lowercased() == ownNode }) {
+            _ = RelayHost.shared.localPut(scopeKey(ref, circleId), scopeBody)   // scope before the blob
             if RelayHost.shared.localHas(key(ref)) {
                 MediaBackupLedger.mark(ownNode, ref)
             } else {
@@ -878,8 +921,15 @@ enum SharedStore {
             }
         }
         for node in dests where node.lowercased() != ownNode && RelayEnrollment.mayAttempt(node) {
-            guard let http = RelayMailboxStore.shared.httpInterface(node),
-                  let base = http.urls.first(where: { !httpUrlBad($0) }) else { continue }
+            guard let http = RelayMailboxStore.shared.httpInterface(node) else { continue }
+            // Scope first: a relay that doesn't serve this circle gets none of its media, and one
+            // that already holds the blob (a reshare) learns it belongs to this circle too.
+            switch await scopeOverHttp(ref, circleId, urls: http.urls, token: http.token) {
+            case .scoped: break
+            case .refused: noteScopeRefused(node, circleId, ref: ref); continue
+            case .unreachable: continue
+            }
+            guard let base = http.urls.first(where: { !httpUrlBad($0) }) else { continue }
             switch await httpGet(base, http.token, key(ref)) {
             case .success(let blob):
                 if let blob {
@@ -1005,6 +1055,9 @@ enum SharedStore {
             guard RelayEnrollment.mayAttempt(node) else { MediaBackupBackoff.notePendingEnrollment(ref); continue }
             // Our OWN hosted relay: the local store answers instantly (no dial).
             if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+                // Scope first (our own store: no gate) — so our relay never offers this ref to a
+                // sibling of another circle, including when it already holds it (a reshare).
+                _ = RelayHost.shared.localPut(scopeKey(ref, circleId), scopeBody)
                 // localHas, NOT localGet != nil: this only asks "is it already there?", and localGet
                 // reads the WHOLE blob to answer it — a full media file, hundreds of MB for a video,
                 // pulled into memory on the MAIN ACTOR (RelayHost is @MainActor). The 2-minute media
@@ -1033,7 +1086,17 @@ enum SharedStore {
             }
             // Plain-HTTP interface first (the reliable cross-NAT path). A reachable relay that
             // answers is authoritative — the iroh path serves the SAME store, so don't also dial.
+            var scoped = false
             if let http = RelayMailboxStore.shared.httpInterface(node) {
+                // Scope the ref on this relay BEFORE anything else (probe hit or upload). A refusal
+                // means the relay doesn't serve this circle: it gets none of the circle's media.
+                switch await scopeOverHttp(ref, circleId, urls: http.urls, token: http.token) {
+                case .scoped: scoped = true
+                case .refused: noteScopeRefused(node, circleId, ref: ref); continue
+                case .unreachable: break   // no HTTP door answered — the dial below scopes + probes
+                }
+            }
+            if scoped, let http = RelayMailboxStore.shared.httpInterface(node) {
                 // Recovery: don't probe — queue an overwrite to the first good base and move on.
                 if force {
                     if let base = http.urls.first(where: { !httpUrlBad($0) }) {
@@ -1082,6 +1145,15 @@ enum SharedStore {
             guard let c = await RelayClients.client(node) else {
                 HavenLog.sync("backup probe SKIP ref=\(ref) relay=\(node.prefix(8)) — unreachable/backing off (no http, no dial)")
                 continue
+            }
+            if !scoped {
+                // No HTTP door took the marker: scope over the dial (same store, same gate).
+                do { try await c.put(key: scopeKey(ref, circleId), data: scopeBody) }
+                catch {
+                    if RelayEnrollment.isForbidden(error) { noteScopeRefused(node, circleId, ref: ref) }
+                    else { RelayHealth.shared.recordFailure(node) }
+                    continue
+                }
             }
             if force {
                 uploads.append((node, .dial(c)))

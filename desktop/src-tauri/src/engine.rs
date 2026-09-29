@@ -8675,6 +8675,39 @@ impl Engine {
     fn media_chunk_key(reference: &str, i: usize) -> String {
         format!("haven/media/{reference}.p/{i}")
     }
+    // Scope marker (core `blobstore::media_scope_key`): PUT to a relay BEFORE the blob, it scopes the
+    // ref to the circle it was posted in, so relay mesh replication carries it only to relays that
+    // serve that circle — never to a friend's relay that merely shares some OTHER circle with us. A
+    // relay that doesn't serve the circle refuses the marker (403) and is then no destination for this
+    // circle's media. Blob keys are unchanged, so readers (and older clients/relays) are unaffected.
+    fn media_scope_key(reference: &str, circle_id: &str) -> String {
+        haven_net::blobstore::media_scope_key(reference, circle_id)
+    }
+
+    /// "<node>|<circle>" → until-ms: that relay refused to scope media into that circle.
+    fn scope_refusals() -> &'static StdMutex<HashMap<String, u64>> {
+        static REFUSED: std::sync::OnceLock<StdMutex<HashMap<String, u64>>> = std::sync::OnceLock::new();
+        REFUSED.get_or_init(|| StdMutex::new(HashMap::new()))
+    }
+    fn scope_refused(node_hex: &str, circle_id: &str) -> bool {
+        Self::scope_refusals().lock().get(&format!("{node_hex}|{circle_id}")).is_some_and(|until| *until > now_ms())
+    }
+    /// A relay refused this circle's scope marker. One of the circle's OWN relays is enrollment lag
+    /// (heal + retry like any refusal); any other relay simply doesn't serve the circle, so it is no
+    /// media destination for it (re-checked after 30 min).
+    fn note_scope_refused(&self, node_hex: &str, circle_id: &str, own: bool) {
+        if own {
+            self.note_refused(node_hex, "media scope");
+            return;
+        }
+        let mut m = Self::scope_refusals().lock();
+        if m.len() > 4096 {
+            m.clear();
+        }
+        m.insert(format!("{node_hex}|{circle_id}"), now_ms() + 30 * 60_000);
+        log::info!("relay {} doesn't serve {} — not a media destination for it",
+                   &node_hex[..8.min(node_hex.len())], short(circle_id));
+    }
 
     // ---- Chunked media transfer (large-blob fix) -----------------------------------------------
     // A relay/S3 blob is capped at MAX_BLOB = 256 MB (core/haven-net). Large sealed videos (600 MB+)
@@ -9330,14 +9363,36 @@ impl Engine {
         }
         let mut http_uploads: Vec<(String, String, String)> = vec![]; // (node, base url, token)
         let mut dial_uploads: Vec<(String, Arc<RelayClient>)> = vec![];
+        let scope_key = Self::media_scope_key(reference, circle_id);
+        let circle_relays = self.relays_for(circle_id);
         for node_hex in self.media_dests(circle_id) {
             if node_hex.starts_with("s3:") { continue; }
+            let own_relay = circle_relays.contains(&node_hex);
+            // A relay that refused this circle's scope holds none of its media.
+            if !own_relay && Self::scope_refused(&node_hex, circle_id) { continue; }
             if !force && self.media_backed_up_has(&node_hex, reference) { landed = true; continue; }
             // Relay HTTP interface — a reachable relay is authoritative (the iroh path serves the
             // SAME store): hit → ledger, 404 → upload over HTTP; only unreachable falls to the dial.
             // Bind out of the lock FIRST so the MutexGuard is dropped before any `.await` below.
             let http_iface = self.relay_http_reachable(&node_hex);
-            if let Some((urls, token)) = http_iface {
+            let mut scoped = false;
+            if let Some((urls, token)) = &http_iface {
+                // Scope the ref on this relay BEFORE anything else (a probe hit — e.g. a reshare into
+                // this circle — or an upload). A refusal: this relay doesn't serve the circle.
+                let mut refused = false;
+                for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
+                    match self.http_put(base, token, &scope_key, haven_net::blobstore::MEDIA_SCOPE_BODY.to_vec()).await {
+                        Ok(()) => { scoped = true; break; }
+                        Err(RelayErr::Forbidden) => { refused = true; break; }
+                        Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
+                    }
+                }
+                if refused {
+                    self.note_scope_refused(&node_hex, circle_id, own_relay);
+                    continue;
+                }
+            }
+            if let (true, Some((urls, token))) = (scoped, http_iface) {
                 if force {
                     // Overwrite over the first good HTTP base without asking whether it's held.
                     if let Some(base) = urls.iter().find(|u| !self.http_url_bad(u)) {
@@ -9383,6 +9438,17 @@ impl Engine {
             }
             // iroh fallback — relay_client_for honors the backoff window (None = skip, no read).
             if let Some(client) = self.relay_client_for(&node_hex).await {
+                if !scoped {
+                    // No HTTP door took the marker: scope over the dial (same store, same gate).
+                    if let Err(e) = client.put(scope_key.clone(), haven_net::blobstore::MEDIA_SCOPE_BODY.to_vec()).await {
+                        if e.to_string().to_lowercase().contains("forbidden") {
+                            self.note_scope_refused(&node_hex, circle_id, own_relay);
+                        } else {
+                            self.mark_relay_fail(&node_hex);
+                        }
+                        continue;
+                    }
+                }
                 if force {
                     dial_uploads.push((node_hex.clone(), client));
                 } else {

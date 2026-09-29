@@ -947,7 +947,12 @@ final class FeedStore: ObservableObject {
         // its engine read now; the warm follows it on the engine, off the launch path (badges land a
         // beat later, which nobody can see; the empty feed, everyone could).
         refresh()
-        Task { @MainActor [weak self] in await self?.warmDMThreads(); QaLaunch.mark("dm_warmup_done") }
+        // `dm_warmup_done` marks a warm that DID something. With no DM threads it returns at once —
+        // stamping that instant made "the feed did not wait on the warm" a coin-flip between two
+        // unrelated main-actor hops (e2e `launch`: feed 2386 ms vs a no-op "warm" at 2384 ms).
+        Task { @MainActor [weak self] in
+            if await self?.warmDMThreads() == true { QaLaunch.mark("dm_warmup_done") }
+        }
         // Media-backup drain holds a UIApplication assertion. On a pocket cold launch (push /
         // BGAppRefresh) the wake path already runs one budgeted pass via slimBackgroundSync —
         // starting another here stacks assertions and keeps the process warm for the whole drain.
@@ -2068,10 +2073,12 @@ final class FeedStore: ObservableObject {
     }
     /// Every DM's feed in one pass — the startup badge compute, and what makes the Messages tab
     /// paint with previews on its first open.
-    private func warmDMThreads() async {
-        guard let engine else { return }
+    /// True when there was something to warm (at least one DM thread was decoded).
+    @discardableResult
+    private func warmDMThreads() async -> Bool {
+        guard let engine else { return false }
         let dms = circles.filter { $0.id.hasPrefix("dm:") }.map(\.id)
-        guard !dms.isEmpty else { recomputeUnreadDMs(); return }
+        guard !dms.isEmpty else { recomputeUnreadDMs(); return false }
         var retention: [String: UInt64?] = [:]
         for cid in dms { retention[cid] = CircleSettingsStore.shared.retentionSecs(cid) }
         let nowMs = now()
@@ -2080,9 +2087,10 @@ final class FeedStore: ObservableObject {
             for cid in dms { out[cid] = s.feed(circleId: cid, nowMs: nowMs, viewerRetentionSecs: retention[cid] ?? nil) }
             return out
         }
-        guard self.engine === engine else { return }
+        guard self.engine === engine else { return false }
         for (cid, items) in feeds { storeMessages(cid, items, readAt: nowMs) }
         recomputeUnreadDMs()
+        return true
     }
     /// Is the social engine up? Lookups answer "no such post" indistinguishably from "engine still
     /// booting", so anything that reports absence to the user has to wait for this first.

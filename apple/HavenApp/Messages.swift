@@ -363,6 +363,7 @@ struct DMContactPicker: View {
                         }
                         .contentShape(Rectangle())
                     }
+                    .accessibilityIdentifier("dmPickerRow")
                     .listRowBackground(Color.clear)
                 }
                 .scrollContentBackground(.hidden)
@@ -374,6 +375,7 @@ struct DMContactPicker: View {
                 ToolbarItem(placement: .havenConfirmTrailing) {
                     Button(selected.count > 1 ? "Start group" : "Start") { start() }
                         .fontWeight(.semibold).havenToolbarPill(tint: HavenTheme.pink).disabled(selected.isEmpty)
+                        .accessibilityIdentifier("dmPickerStart")
                 }
             }
         }
@@ -1045,6 +1047,7 @@ struct DMThreadView: View {
                 .fixedSize()
                 #endif
                 TextField(secret ? "Secret message…" : "Message…", text: $text, axis: .vertical)
+                    .accessibilityIdentifier("dmComposeField")
                     .focused($focused)
                     .textFieldStyle(.plain)   // drop macOS's default field border (was doubling with the glass)
                     .padding(.horizontal, 14).padding(.vertical, 10)

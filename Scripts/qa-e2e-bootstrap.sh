@@ -286,6 +286,24 @@ if command -v adb >/dev/null 2>&1; then
     if [[ "$booted" != "1" ]]; then
       log "WARN: android emulator never finished booting — android leg skipped"
     else
+    # The AVD must have a REAL network, not just the adb-reverse mailbox lane. airplane_mode_on
+    # persists in the AVD's userdata, and a haven_phone left in airplane mode still passes every
+    # mailbox step (127.0.0.1:8674 rides adb) while iroh has no route and no DNS: its direct dial
+    # to the stub fails "No addressing information available", so android→stub call invites
+    # never ring (an idle Apple callee only takes invites over iroh/push, never the __live__ HTTP
+    # lane) and the call matrix read as a WebRTC regression. Restore it and say so.
+    if [[ "$(adb shell settings get global airplane_mode_on 2>/dev/null | tr -d '\r')" == "1" ]]; then
+      log "android emulator was in AIRPLANE MODE — disabling it (iroh/DNS/calls need a real network)"
+      adb shell cmd connectivity airplane-mode disable >/dev/null 2>&1 || true
+    fi
+    adb shell svc wifi enable >/dev/null 2>&1 || true
+    adb shell svc data enable >/dev/null 2>&1 || true
+    net_ok=0
+    for i in $(seq 1 20); do
+      adb shell dumpsys connectivity 2>/dev/null | grep -q "Active default network: [0-9]" && { net_ok=1; break; }
+      sleep 1
+    done
+    [[ "$net_ok" == "1" ]] || log "WARN: android emulator has NO default network — iroh dials and android calls will fail"
     # gradle splits per ABI — universal covers every emulator arch.
     APK="$ROOT/android/app/build/outputs/apk/debug/app-universal-debug.apk"
     [[ -f "$APK" ]] || APK="$ROOT/android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk"

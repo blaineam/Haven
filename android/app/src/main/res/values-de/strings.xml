@@ -243,6 +243,9 @@
     <string name="circle_sync_activity_title">Sync-Aktivität</string>
     <string name="circle_syncing_items">Synchronisiere %1$d Item%2$s…</string>
     <string name="circle_up_to_date">Auf dem neuesten Stand</string>
+    <string name="sync_badge_sending">Sende %1$d von %2$d</string>
+    <string name="sync_badge_retrying">Neuer Versuch (%1$d ausstehend)</string>
+    <string name="sync_badge_synced">Synchronisiert</string>
     <string name="circle_media_sent">%1$d Medien gesendet</string>
     <string name="circle_media_received">%1$d Medien empfangen</string>
     <string name="circle_media_waiting">%1$d Medien warten</string>

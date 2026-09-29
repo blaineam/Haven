@@ -52,6 +52,9 @@ final class HistoryHandoff: ObservableObject {
             case received
             /// This device is uploading history for another of my devices.
             case sending
+            /// Asked, and no device has answered for `noAnswerMs`. Android can't serve a handoff yet,
+            /// and an older Haven build doesn't know the request — waiting forever helped nobody.
+            case noAnswer
         }
         var phase: Phase = .idle
         /// Events received (target) or sent (source) so far.
@@ -59,6 +62,7 @@ final class HistoryHandoff: ObservableObject {
         /// Total events expected; 0 = not known yet.
         var total = 0
         /// Photos/videos (and their companions) received / known so far — the target's media count.
+        /// On the source: sent (streamed directly or put on the relay) / named by the pages so far.
         var mediaDone = 0
         var mediaTotal = 0
         /// One bar for both: posts and media weigh the same per item.
@@ -75,7 +79,11 @@ final class HistoryHandoff: ObservableObject {
     /// stays well under a second on a phone and doesn't park the UI behind the engine mutex.
     static let pageEvents: UInt32 = 120
 
+    /// No manifest this long after asking → `.noAnswer` (with Retry / dismiss) instead of waiting forever.
+    static let noAnswerMs: UInt64 = 120_000
+
     private init() {
+        rebuildPendingMediaRefs(want)
         refreshStatus()
         #if os(iOS)
         let nc = NotificationCenter.default
@@ -105,9 +113,10 @@ final class HistoryHandoff: ObservableObject {
 
     /// Called when this device served history work — including a direct media ask from my other
     /// device DURING a handoff (FeedStore's media-request handler).
-    func noteSending() {
+    func noteSending(ref: String? = nil) {
         guard !serves.isEmpty else { return }   // a normal own-device media ask isn't a handoff
         lastSendingAt = HistoryHandoffWire.nowMs()
+        if let ref { noteSourceMediaSent(ref) }
         refreshActive()
         startDriver()
     }
@@ -170,17 +179,29 @@ final class HistoryHandoff: ObservableObject {
     /// Rebuild `status` from the persisted state (both roles).
     private func refreshStatus() {
         var st = Status()
+        let allServes = serves
         if let w = want, w.account == AccountStore.currentNodeHex() {
-            st.phase = w.run == nil ? .waitingForSource : .receiving
+            if w.run == nil {
+                let now = HistoryHandoffWire.nowMs()
+                st.phase = now >= w.at && now &- w.at > Self.noAnswerMs ? .noAnswer : .waitingForSource
+            } else {
+                st.phase = .receiving
+            }
             st.done = w.receivedEvents
             st.total = w.totalEvents
-            st.mediaDone = w.mediaDone
+            // + what landed since the pull last wrote `want` (it holds its own copy until it returns).
+            st.mediaDone = w.mediaDone + liveLanded.count
             st.mediaTotal = w.mediaTotal
-        } else if let s = serves.values.first(where: { !$0.complete }) {
+        } else if let s = allServes.values.first(where: { !$0.complete }) ?? allServes.values.first {
+            // Posts from the run's counters; media from what the pages named vs. what went out. Once the
+            // posts are across this still counts media up, instead of an indeterminate bar with no numbers.
             st.phase = .sending
             st.done = s.servedEvents
             st.total = s.totalEvents
-        } else if !serves.isEmpty || needsPending || HistoryHandoffWire.nowMs() &- lastSendingAt < 120_000 {
+            let m = sourceMedia(for: s)
+            st.mediaDone = m.sent.count
+            st.mediaTotal = m.refs.count
+        } else if needsPending || HistoryHandoffWire.nowMs() &- lastSendingAt < 120_000 {
             st.phase = .sending   // posts are across; media is still going until the target says done
         } else if receivedBanner {
             st.phase = .received
@@ -190,7 +211,71 @@ final class HistoryHandoff: ObservableObject {
 
     /// The "all your history is here" banner, until dismissed.
     private var receivedBanner = false
-    func dismissReceived() { receivedBanner = false; refreshStatus() }
+    /// Dismiss the banner: the "your history is here" card, or — when nobody answered — the request
+    /// itself (Settings ▸ Devices can ask again).
+    func dismissReceived() {
+        receivedBanner = false
+        if status.phase == .noAnswer {
+            HavenLog.sync("history handoff: request dismissed after no answer")
+            want = nil
+        }
+        refreshStatus()
+    }
+    /// Ask again after `.noAnswer` — re-publishes the request and waits another `noAnswerMs`.
+    func retryRequest() { requestHistory(reason: "retry after no answer") }
+
+    // MARK: - Live progress
+
+    /// Refs still pending in the persisted `want` (rebuilt whenever it is written).
+    private var pendingMediaRefs = Set<String>()
+    /// Pending refs whose bytes landed since `want` was last written. A pull holds its own copy of
+    /// `want` and only writes it back when it returns, so direct arrivals used to show up a whole
+    /// driver tick late; counted here (and published ~4 Hz) the bar moves per item. Never
+    /// double-counted: the next write drops every ref it has already counted.
+    private var liveLanded = Set<String>()
+    private var liveRefreshScheduled = false
+
+    /// FeedStore: `ref`'s bytes just landed, by any lane.
+    func noteMediaLanded(_ ref: String) {
+        guard pendingMediaRefs.contains(ref), liveLanded.insert(ref).inserted else { return }
+        guard !liveRefreshScheduled else { return }
+        liveRefreshScheduled = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard let self else { return }
+            self.liveRefreshScheduled = false
+            self.refreshStatus()
+        }
+    }
+
+    private func rebuildPendingMediaRefs(_ w: Want?) {
+        pendingMediaRefs = Set(w?.mediaQueue.flatMap { $0.pending.map(\.ref) } ?? [])
+        liveLanded.formIntersection(pendingMediaRefs)
+    }
+
+    /// Source-side media progress for one run, in memory: every blob the run's pages named, and those
+    /// sent so far (streamed directly this session, or put on the relay). Loaded from `RunMedia` once
+    /// per run, then kept current as pages go out.
+    private var sourceMediaCache: (key: String, refs: Set<String>, sent: Set<String>)?
+    private func sourceMedia(for s: Serve) -> (refs: Set<String>, sent: Set<String>) {
+        let key = "\(s.device)|\(s.run)"
+        if let c = sourceMediaCache, c.key == key { return (c.refs, c.sent) }
+        let rm = Self.loadRunMedia(device: s.device, run: s.run)
+        let refs = Set(rm.pageMedia.values.flatMap(\.refs))
+        let sent = Set(rm.uploaded.keys).intersection(refs)
+        sourceMediaCache = (key, refs, sent)
+        return (refs, sent)
+    }
+    private func noteSourcePage(_ run: Serve, refs: [String]) {
+        guard var c = sourceMediaCache, c.key == "\(run.device)|\(run.run)" else { return }
+        c.refs.formUnion(refs)
+        sourceMediaCache = c
+    }
+    private func noteSourceMediaSent(_ ref: String) {
+        guard var c = sourceMediaCache, c.refs.contains(ref), c.sent.insert(ref).inserted else { return }
+        sourceMediaCache = c
+        refreshStatus()
+    }
 
     // MARK: - Target (the new device)
 
@@ -250,6 +335,7 @@ final class HistoryHandoff: ObservableObject {
             } else {
                 UserDefaults.standard.removeObject(forKey: Self.wantKey)
             }
+            rebuildPendingMediaRefs(newValue)
             refreshStatus()
         }
     }
@@ -792,6 +878,7 @@ final class HistoryHandoff: ObservableObject {
                     var rm = Self.loadRunMedia(device: run.device, run: run.run)
                     rm.pageMedia[String(run.pages)] = RunMedia.PageMedia(circle: cid, refs: media.map(\.ref))
                     Self.saveRunMedia(rm, device: run.device, run: run.run)
+                    noteSourcePage(run, refs: media.map(\.ref))
                 }
                 run.pages += 1
                 run.servedEvents += Int(page.events)
@@ -826,6 +913,7 @@ final class HistoryHandoff: ObservableObject {
         var rm = Self.loadRunMedia(device: run.device, run: run.run)
         rm.pageMedia[String(run.pages)] = RunMedia.PageMedia(circle: cid, refs: media.map(\.ref))
         Self.saveRunMedia(rm, device: run.device, run: run.run)
+        noteSourcePage(run, refs: media.map(\.ref))
         run.pages += 1
         run.keptSent = true
         serves[run.device] = run
@@ -876,7 +964,7 @@ final class HistoryHandoff: ObservableObject {
                 ready.append(.init(ref: ref, chunks: chunks))
                 Self.saveRunMedia(rm, device: run.device, run: run.run)
                 did = true
-                noteSending()
+                noteSending(ref: ref)
                 // Progressive: the target starts downloading while the rest of the page goes up.
                 if let partial = try? JSONEncoder().encode(HistoryHandoffWire.MediaReady(items: ready, complete: false)) {
                     _ = await SelfSyncCoordinator.shared.accountLanePut(
@@ -931,6 +1019,7 @@ final class HistoryHandoff: ObservableObject {
         want = nil
         receivedBanner = false
         UserDefaults.standard.removeObject(forKey: Self.serveKey)
+        sourceMediaCache = nil
         refreshStatus()
     }
 }

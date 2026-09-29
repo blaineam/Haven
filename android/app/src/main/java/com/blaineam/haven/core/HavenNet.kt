@@ -4121,19 +4121,33 @@ object HavenNet : InboundListener {
         // backoff, ~10 min worst case; attempts are idempotent (content-addressed keys +
         // per-(relay,key) seen skip). Desktop/iOS parity.
         scope.launch {
-            var delaySecs = 5L
-            while (true) {
-                var ok = true
-                for (head in runCatching { social.exportEpochHead(circleId) }.getOrDefault(emptyList())) {
-                    ok = uploadEvent(circleId, head) && ok
+            // The composer pill counts this event until it lands (or live retries give up) — see
+            // [authoredUploads]. Epoch heads ride along but are upkeep, not the user's content.
+            uploadStarted(circleId)
+            var landed = false
+            var failedOnce = false
+            try {
+                var delaySecs = 5L
+                while (true) {
+                    var ok = true
+                    for (head in runCatching { social.exportEpochHead(circleId) }.getOrDefault(emptyList())) {
+                        ok = uploadEvent(circleId, head) && ok
+                    }
+                    ok = uploadEvent(circleId, env) && ok
+                    if (ok || delaySecs > 300) {
+                        if (!ok) Log.i(TAG, "uploadEvent: giving up live retries for an authored event in ${circleId.take(16)} — daily backfill will carry it")
+                        landed = ok
+                        break
+                    }
+                    // Failed once = "Retrying" until it lands (or gives up) — through the retry attempts
+                    // too, so the pill doesn't flicker back to "Sending" for each one.
+                    if (!failedOnce) { failedOnce = true; uploadRetrying(circleId, true) }
+                    kotlinx.coroutines.delay(delaySecs * 1000)
+                    delaySecs *= 3
                 }
-                ok = uploadEvent(circleId, env) && ok
-                if (ok || delaySecs > 300) {
-                    if (!ok) Log.i(TAG, "uploadEvent: giving up live retries for an authored event in ${circleId.take(16)} — daily backfill will carry it")
-                    break
-                }
-                kotlinx.coroutines.delay(delaySecs * 1000)
-                delaySecs *= 3
+            } finally {
+                if (failedOnce) uploadRetrying(circleId, false)
+                uploadFinished(circleId, landed)
             }
         }
         // Push leg (Apple PushManager.wake/syncSelf parity): the blind worker forwards a banner
@@ -6011,9 +6025,12 @@ object HavenNet : InboundListener {
                             // only works while the author happens to be online — which is exactly how
                             // media a few days old became permanently unreachable while fresh media
                             // (author still around) looked fine.
-                            val got = (fetchMediaFromRelay(job.circleId, job.ref) ||
-                                (healForbiddenRelays() && fetchMediaFromRelay(job.circleId, job.ref))) &&
-                                acceptFetchedBlob(job.ref, job.circleId)
+                            restoreInFlight.add(job.ref)
+                            val got = try {
+                                (fetchMediaFromRelay(job.circleId, job.ref) ||
+                                    (healForbiddenRelays() && fetchMediaFromRelay(job.circleId, job.ref))) &&
+                                    acceptFetchedBlob(job.ref, job.circleId)
+                            } finally { restoreInFlight.remove(job.ref) }
                             if (got) {
                                 mediaArrived(job.ref)
                                 withContext(Dispatchers.Main) { feedVersion.value++ }
@@ -6438,6 +6455,90 @@ object HavenNet : InboundListener {
             mediaRestoreProgress.remove(ref)
         }
         synchronized(fastReq) { fastReq.remove(ref) }
+        synchronized(transferWatch) { transferWatch.remove(ref) }
+        restoreMark.remove(ref)
+        // "Received" counts EVERY lane (relay restore, peer stream), once per ref — a relay copy and
+        // a peer stream can race to land the same blob. It used to count peer reassemblies only.
+        val first = synchronized(countedArrivals) {
+            if (countedArrivals.size > 20_000) countedArrivals.clear()
+            countedArrivals.add(ref)
+        }
+        if (first) scope.launch(Dispatchers.Main) { SyncMetrics.incIn() }
+        if (wantedMedia.arrived(ref)) SyncMetrics.setPending(wantedMedia.count)
+    }
+
+    // ---- Honest transfer progress (see SyncProgress.kt) -----------------------------------------
+
+    /** Refs the missing-media sweep wants and doesn't hold — "media waiting" (persistent across sweeps). */
+    private val wantedMedia = MediaWantedSet()
+    @Volatile private var lastWantedPruneMs = 0L
+    /** Refs already counted into "received" (see [mediaArrived]). */
+    private val countedArrivals = HashSet<String>()
+    /** Relay reassembly chunks landed per ref — the watchdog's view of relay progress. */
+    private val restoreMark = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    /** Relay restores in flight: they report nothing until a chunk lands, so a watchdog must not
+     *  time out underneath one. */
+    private val restoreInFlight = java.util.Collections.synchronizedSet(HashSet<String>())
+    /** Visible downloads under a no-progress watchdog: ref → (watch, mark unavailable on stall). */
+    private val transferWatch = HashMap<String, Pair<TransferStallWatch, Boolean>>()
+    @Volatile private var transferWatchRunning = false
+    /** Last time a peer chunk published i/n for a ref — per-chunk Main launches coalesced to ~10 Hz. */
+    private val chunkProgressAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun transferProgressMark(ref: String): Int =
+        (synchronized(incomingLock) { incomingMedia[ref]?.got?.size } ?: 0) + (restoreMark[ref] ?: 0)
+
+    /** Keep [ref]'s spinner up until bytes land or none have for [TransferStallWatch.NO_PROGRESS_MS]. */
+    private fun watchTransfer(ref: String, markUnavailableOnStall: Boolean) {
+        synchronized(transferWatch) {
+            val cur = transferWatch[ref]
+            if (cur != null) {
+                if (markUnavailableOnStall && !cur.second) transferWatch[ref] = cur.first to true
+                return
+            }
+            transferWatch[ref] = TransferStallWatch(transferProgressMark(ref), System.currentTimeMillis()) to markUnavailableOnStall
+            if (transferWatchRunning) return
+            transferWatchRunning = true
+        }
+        scope.launch {
+            while (true) {
+                delay(5_000)
+                if (!checkTransferWatches()) break
+            }
+        }
+    }
+
+    /** One watchdog pass. False (and the loop ends) when nothing is left to watch. */
+    private fun checkTransferWatches(): Boolean {
+        val now = System.currentTimeMillis()
+        val stalled = ArrayList<Pair<String, Boolean>>()
+        val arrived = ArrayList<String>()
+        val more = synchronized(transferWatch) {
+            val it = transferWatch.entries.iterator()
+            while (it.hasNext()) {
+                val (ref, e) = it.next().let { en -> en.key to en.value }
+                if (LocalMedia.has(ref)) { it.remove(); arrived.add(ref); continue }
+                if (e.first.observe(transferProgressMark(ref), now, busy = restoreInFlight.contains(ref))) {
+                    it.remove(); stalled.add(ref to e.second)
+                }
+            }
+            if (transferWatch.isEmpty()) transferWatchRunning = false
+            transferWatch.isNotEmpty()
+        }
+        if (arrived.isNotEmpty() || stalled.isNotEmpty()) scope.launch(Dispatchers.Main) {
+            for (ref in arrived) downloadingMedia.remove(ref)
+            for ((ref, markUnavailable) in stalled) {
+                Log.i("MediaSync", "fetch ${ref.take(10)}: no bytes for ${TransferStallWatch.NO_PROGRESS_MS / 1000}s — download stopped")
+                downloadingMedia.remove(ref)
+                mediaRestoreProgress.remove(ref)
+                // Relays answered and none holds it yet: that is "Waiting for sender…", not gone.
+                if (markUnavailable && !waitingForSenderMedia.contains(ref) && !LocalMedia.has(ref)) {
+                    if (!unavailableMedia.contains(ref)) unavailableMedia.add(ref)
+                    wantedMedia.gaveUp(ref); SyncMetrics.setPending(wantedMedia.count)
+                }
+            }
+        }
+        return more
     }
 
     /** Relays answered and none holds it — an honest different truth from "downloading" (we
@@ -6455,18 +6556,24 @@ object HavenNet : InboundListener {
             mediaRestoreProgress[ref] = done to total
             if (!downloadingMedia.contains(ref)) downloadingMedia.add(ref)   // a chunked pull IS a download
         }
+        // …and something must take that spinner down again if the bytes stop coming.
+        watchTransfer(ref, markUnavailableOnStall = false)
     }
 
+    /** Drop [ref]'s i/n. The SPINNER is not this function's to lower: bytes arriving
+     *  ([mediaArrived]) or the no-progress watchdog do that — a reassembly that stalls on one relay
+     *  may be about to resume on the next, or a direct transfer may be carrying it. */
     private fun clearRestoreProgress(ref: String) {
+        restoreMark.remove(ref)
         scope.launch(Dispatchers.Main) {
             mediaRestoreProgress.remove(ref)
-            downloadingMedia.remove(ref)
         }
     }
 
     /** User tapped "Download" on a placeholder for a blob we deliberately evicted: clear the eviction
      *  (so the normal missing-media path may fetch it), request it now (relay restore + a direct peer
-     *  ask), and surface a spinner. If it hasn't arrived in ~45s, mark it unavailable. */
+     *  ask), and surface a spinner. If no bytes arrive for ~45s, mark it unavailable (unless the relays
+     *  said the sender hasn't uploaded it yet — that stays "Waiting for sender…"). */
     /** When each ref was last requested because it came on screen — see [requestMediaOnView]. */
     private val viewRequestedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
@@ -6587,11 +6694,9 @@ object HavenNet : InboundListener {
         }
         if (circleId != null) enqueueRestore(circleId, ref) { ask() }   // relay-first (mailbox → HTTP → S3 → iroh)
         else ask()
-        scope.launch {
-            kotlinx.coroutines.delay(45_000)
-            downloadingMedia.remove(ref)
-            if (!LocalMedia.has(ref)) { if (!unavailableMedia.contains(ref)) unavailableMedia.add(ref) }
-        }
+        // Down when the bytes land, or after ~45s with NO new bytes by any lane — not on a fixed
+        // timer that fired mid-transfer and called a still-arriving photo "No longer available".
+        watchTransfer(ref, markUnavailableOnStall = true)
     }
 
     // ---- Missing-media fetch lanes (fresh vs old; Apple FeedStore parity) -----------------------
@@ -6707,7 +6812,15 @@ object HavenNet : InboundListener {
                 }
             }
         }
-        SyncMetrics.setPending(missing.size)   // media refs still missing locally (iOS nbMediaPending)
+        // "Media waiting" = the persistent wanted-set (iOS parity), minus what has been given up on
+        // ("No longer available") until a retry clears that.
+        val unavailableNow = unavailableMedia.toSet()
+        wantedMedia.discover(missing.keys.filter { it !in unavailableNow })
+        if (nowMs - lastWantedPruneMs > 30_000) {
+            lastWantedPruneMs = nowMs
+            wantedMedia.prune { it !in missing && (LocalMedia.has(it) || EvictedMediaStore.contains(it) || it in unavailableNow) }
+        }
+        SyncMetrics.setPending(wantedMedia.count)
         synchronized(smallMediaRefs) {
             if (smallMediaRefs.size > 5000) smallMediaRefs.clear()
             smallMediaRefs.addAll(thumbs.keys)
@@ -8068,13 +8181,14 @@ object HavenNet : InboundListener {
         for (i in have until count) {
             val chunk = getChunk(i)
             if (chunk == null || !LocalMedia.appendSealedPart(part, chunk)) {
-                // KEEP the partial + sidecar — the next attempt resumes from `have`.
-                clearRestoreProgress(ref)
+                // KEEP the partial + sidecar — the next attempt resumes from `have`. The i/n stays
+                // too (those chunks ARE held); the watchdog lowers the spinner if nothing follows.
                 android.util.Log.i("MediaSync", "reassemble ref=$ref STALLED at chunk $i/$count — partial kept for resume")
                 return false
             }
             have = i + 1
             saveRestorePart(ref, count, have, fp)
+            restoreMark[ref] = have
             noteRestoreProgress(ref, have, count)   // honest i/n for the placeholder
         }
         clearRestoreProgress(ref)
@@ -8442,14 +8556,26 @@ object HavenNet : InboundListener {
                 true
             }
         }
-        if (!complete) return
+        if (!complete) {
+            // Direct chunks drive the same i/n as a relay restore — coalesced to ~10 Hz, since every
+            // publish is a Main hop — and keep the spinner up exactly while they keep coming.
+            val now = System.currentTimeMillis()
+            val last = chunkProgressAt[ref] ?: 0L
+            if (now - last >= 100) {
+                chunkProgressAt[ref] = now
+                val got = synchronized(incomingLock) { entry.got.size }
+                noteRestoreProgress(ref, got, total)
+            }
+            return
+        }
+        chunkProgressAt.remove(ref)
         // Whether the adopt succeeds or rejects the bytes on a digest mismatch, this reassembly is
         // over: on rejection the part file is already gone, so leaving the record behind would
         // resurrect a bitmap whose bytes no longer exist and stall the ref forever.
         val ok = LocalMedia.adoptPlainPart(DEFAULT_CIRCLE, ref, entry.part)
         ReassemblyStore.clear(ref)
-        if (!ok) return
-        SyncMetrics.incIn()   // a media item was fully received + stored (iOS nbMediaIn += 1)
+        if (!ok) { clearRestoreProgress(ref); return }
+        mediaArrived(ref)   // clears the spinner/i-of-n and counts it received (once per ref)
         scope.launch(Dispatchers.Main) { feedVersion.value++ }
         // "Save others' posts to Photos" — per-circle override (received media stores under the
         // default circle), falling back to the app-wide default.
@@ -9027,17 +9153,96 @@ object HavenNet : InboundListener {
     /** The relay node hexes that hold a given circle's mailbox (iOS RelayMailboxStore.relays(forCircle:)). */
     fun relaysForCircle(circleId: String): List<String> = relaysFor(circleId)
 
-    /** How reachable a circle's posts are right now, for the composer's green/yellow/red light. */
-    enum class SyncStatus { SYNCED, SYNCING, LOCAL }
+    /** What the composer pill says for [circleId] — derived from the REAL pending authored uploads
+     *  ([authoredUploads]), not from connectivity alone. (The old SyncStatus could only ever answer
+     *  SYNCED or LOCAL, so its "Syncing" branch was unreachable.) */
+    fun syncBadge(circleId: String, p: UploadProgress = authoredUploads.value): SyncBadgeState =
+        SyncBadgeState.derive(p, circleId, hostsRelay = false,
+            hasRelay = relaysForCircle(circleId).isNotEmpty(),
+            nearbyConnected = NearbyTransport.hasConnectedPeers(), online = internetActive.value)
 
-    /** SYNCED = a relay holds it for offline members, or a nearby member is connected right now.
-     *  SYNCING = the nearby mesh is up but no peer is connected yet. LOCAL = device-only (no relay,
-     *  no mesh) — the post won't leave this device until one comes online. */
-    fun syncStatus(circleId: String): SyncStatus = when {
-        NearbyTransport.hasConnectedPeers() -> SyncStatus.SYNCED        // a member is right here
-        relaysForCircle(circleId).isNotEmpty() -> SyncStatus.SYNCED     // a relay holds it for offline members
-        internetActive.value -> SyncStatus.SYNCED                       // online: best-effort iroh delivery, no nag
-        else -> SyncStatus.LOCAL                                        // offline + no relay/peer = device-only
+    // ---- Authored-upload progress (the composer pill's source) ----------------------------------
+    private val uploadLock = Any()
+    private val upPending = HashMap<String, Int>()
+    private val upRetrying = HashMap<String, Int>()
+    private val upTotal = HashMap<String, Int>()
+    private val upDone = HashMap<String, Int>()
+    /** Compose-observable snapshot; only the pill reads it. */
+    val authoredUploads = mutableStateOf(UploadProgress())
+
+    private fun uploadStarted(circleId: String) {
+        synchronized(uploadLock) {
+            upPending.merge(circleId, 1, Int::plus)
+            upTotal.merge(circleId, 1, Int::plus)
+        }
+        publishUploadProgress()
+    }
+    private fun uploadRetrying(circleId: String, on: Boolean) {
+        synchronized(uploadLock) {
+            val n = (upRetrying[circleId] ?: 0) + if (on) 1 else -1
+            if (n > 0) upRetrying[circleId] = n else upRetrying.remove(circleId)
+        }
+        publishUploadProgress()
+    }
+    private fun uploadFinished(circleId: String, landed: Boolean) {
+        synchronized(uploadLock) {
+            val n = (upPending[circleId] ?: 1) - 1
+            if (landed) upDone.merge(circleId, 1, Int::plus)
+            if (n > 0) upPending[circleId] = n else {
+                // The burst is over: the next post starts a fresh "Sending 1 of 1".
+                upPending.remove(circleId); upTotal.remove(circleId); upDone.remove(circleId)
+            }
+        }
+        publishUploadProgress()
+    }
+    /** The honest-progress UI's state for the QA dump (schema: docs/QA.md ▸ "Progress fields"),
+     *  field-for-field with the Apple dump. Android has no history-handoff source or target yet, so
+     *  `history_handoff` always reads role "none". */
+    fun qaProgressJson(): JSONObject {
+        val circle = activeCircle.value
+        val p = authoredUploads.value
+        val state = when (syncBadge(circle, p)) {
+            SyncBadgeState.Synced -> "synced"
+            is SyncBadgeState.Sending -> "syncing"
+            is SyncBadgeState.Retrying -> "retrying"
+            SyncBadgeState.Local -> "local"
+        }
+        val transfers = org.json.JSONArray()
+        val downloading = downloadingMedia.toSet()
+        for (ref in (downloading + waitingForSenderMedia.toSet()).sorted()) {
+            val peer = synchronized(incomingLock) { incomingMedia[ref]?.let { it.got.size to it.total } }
+            val relay = mediaRestoreProgress[ref]
+            val row = JSONObject().put("ref", ref)
+            when {
+                peer != null -> row.put("got", peer.first).put("total", peer.second).put("lane", "peer")
+                ref in downloading -> row.put("got", relay?.first ?: 0).put("total", relay?.second ?: 0).put("lane", "relay")
+                else -> row.put("got", 0).put("total", 0).put("lane", "waitingForUpload")
+            }
+            transfers.put(row)
+        }
+        return JSONObject()
+            .put("sync_badge", JSONObject()
+                .put("circle", circle)
+                .put("state", state)
+                .put("pending_user_uploads", p.pending(circle))
+                .put("flush_done", p.sessionDoneByCircle[circle] ?: 0)
+                .put("flush_total", p.sessionTotalByCircle[circle] ?: 0))
+            .put("media_transfers", transfers)
+            .put("media_wanted_count", wantedMedia.count)
+            .put("media_received_count", SyncMetrics.mediaIn.intValue)
+            .put("history_handoff", JSONObject()
+                .put("role", "none").put("state", "idle").put("done", 0).put("total", 0)
+                .put("media_done", 0).put("media_total", 0))
+    }
+
+    /** Snapshot taken ON Main at publish time, so the last publish always carries the latest counts. */
+    private fun publishUploadProgress() {
+        scope.launch(Dispatchers.Main) {
+            val p = synchronized(uploadLock) {
+                UploadProgress(HashMap(upPending), HashMap(upRetrying), HashMap(upTotal), HashMap(upDone))
+            }
+            if (authoredUploads.value != p) authoredUploads.value = p
+        }
     }
 
     /** Add a relay node to a circle's redundant set + persist (additive, never replaces). Used by self-sync. */

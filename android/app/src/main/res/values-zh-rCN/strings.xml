@@ -243,6 +243,9 @@
     <string name="circle_sync_activity_title">同步活动</string>
     <string name="circle_syncing_items">正在同步 %1$d 个项目%2$s…</string>
     <string name="circle_up_to_date">已是最新</string>
+    <string name="sync_badge_sending">正在发送 %1$d/%2$d</string>
+    <string name="sync_badge_retrying">正在重试（%1$d 项等待中）</string>
+    <string name="sync_badge_synced">已同步</string>
     <string name="circle_media_sent">已发送 %1$d 个媒体文件</string>
     <string name="circle_media_received">已接收 %1$d 个媒体文件</string>
     <string name="circle_media_waiting">%1$d 个媒体文件等待中</string>

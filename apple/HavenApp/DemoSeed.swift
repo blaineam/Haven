@@ -33,6 +33,7 @@ enum DemoScene: String {
     case story       // full-screen story viewer
     case identity    // the identity switcher / backup sheet
     case call        // an in-progress group call overlay
+    case transfer    // UI test: a media placeholder fed simulated peer chunks (QATransferScene)
 }
 
 enum DemoEnv {

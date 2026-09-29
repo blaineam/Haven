@@ -228,6 +228,38 @@ Every op (and `{"op":"dump"}`) refreshes `qa-dump.json` next to the drop file
  "profile":{"name":"…"},"circles":[{"id":"…","name":"…","members":["…"]}]}
 ```
 
+#### Progress fields
+
+The honest-progress UI (composer sync pill, media placeholders, sync detail counters, history
+handoff banner) is in the dump too, with the same names on Apple and Android, so a cross-device run
+can assert that progress actually moves rather than that a spinner existed:
+
+```json
+{"sync_badge":{"circle":"…","state":"synced|syncing|retrying|local",
+               "pending_user_uploads":0,"flush_done":0,"flush_total":0},
+ "media_transfers":[{"ref":"…","got":12,"total":40,"lane":"relay|peer|waitingForUpload"}],
+ "media_wanted_count":0,"media_received_count":0,
+ "history_handoff":{"role":"none|target|source",
+                    "state":"idle|waiting|receiving|received|noAnswer|sending",
+                    "done":0,"total":0,"media_done":0,"media_total":0}}
+```
+
+- `sync_badge` is the pill for the **active** circle. `pending_user_uploads` counts authored events
+  (posts, comments, reactions, messages) still headed for a mailbox — epoch-head upkeep is never
+  counted, so a fresh launch reads `synced`/0. `flush_done`/`flush_total` are this upload pass
+  (Apple) or this upload burst (Android) for that circle; `syncing` covers both "queued" and
+  "Sending i of n".
+- `media_transfers` lists every ref a placeholder is showing progress or a wait for. `peer` = direct
+  chunks (`got`/`total` in 32 KB chunks), `relay` = a relay restore (`got`/`total` in relay chunks,
+  0/0 for a single-blob fetch), `waitingForUpload` = relays answered without it (the placeholder's
+  "Waiting for sender…"). A transfer drops out when its bytes land or after 45 s with no new bytes.
+- `media_wanted_count` is "media waiting" (a persistent set: joins on discovery, leaves on arrival
+  or give-up). `media_received_count` counts blobs that landed this session by any lane, once each.
+- `history_handoff`: `target` = this device is pulling its history (`media_done` = received),
+  `source` = sending it (`media_done` = streamed directly or put on the relay, `media_total` = named
+  by the pages so far). `noAnswer` = asked and nobody answered for 2 min (the banner offers Retry).
+  Android has no handoff yet and always reports `role: "none"`.
+
 Liveness and timing on the desktop leg: every dump carries `dump_seq` (strictly increasing per
 successful write — the orchestrator warns when it sticks, which means the driver, not delivery),
 and the driver logs any op or 5 s heartbeat dump slower than the orchestrator's poll to

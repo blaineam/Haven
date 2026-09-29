@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 #if canImport(UIKit)
 import UIKit
 #else
@@ -11,10 +12,15 @@ import AppKit
 /// that still doesn't make it is retried on the next launch / background refresh. Uploads are
 /// idempotent (content-addressed mailbox keys), so retries are always safe.
 @MainActor
-final class BackgroundUploader {
+final class BackgroundUploader: ObservableObject {
     static let shared = BackgroundUploader()
 
-    fileprivate struct Pending: Codable, Sendable { let circleId: String; let env: Data }
+    /// `maintenance` = not something the user authored (an epoch head re-published on launch). Still
+    /// uploaded, never counted in `progress`. Optional so a queue persisted by an older build decodes.
+    fileprivate struct Pending: Codable, Sendable {
+        let circleId: String; let env: Data; var maintenance: Bool? = nil
+        var isUser: Bool { maintenance != true }
+    }
     private let key = "haven.pendingUploads"
     private let maxQueued = 200
     private var queue: [Pending]
@@ -33,8 +39,30 @@ final class BackgroundUploader {
     private var backoffSecs: UInt64 = 3
     private let backoffCapSecs: UInt64 = 120
 
+    /// What the composer's sync pill reads (see `SyncBadgeState`). Published only when it changes, and
+    /// only the pill observes this object — never the feed.
+    @Published private(set) var progress = UploadProgress()
+    private var passTotal: [String: Int] = [:]
+    private var passDone: [String: Int] = [:]
+    /// The last pass left items behind and a backoff timer owns the next attempt.
+    private var lastPassFailed = false
+
+    private func publishProgress() {
+        var p = UploadProgress()
+        for item in queue where item.isUser { p.pendingByCircle[item.circleId, default: 0] += 1 }
+        p.flushing = flushing
+        p.flushTotalByCircle = flushing ? passTotal : [:]
+        p.flushDoneByCircle = flushing ? passDone : [:]
+        // Stays set through the retry pass itself: flipping to "Sending 0 of 1" for every attempt and
+        // back to "Retrying" between them read as noise. A pass that lands everything clears it.
+        p.backingOff = lastPassFailed && !p.pendingByCircle.isEmpty
+        if p != progress { progress = p }
+    }
+
     private init() {
-        if let list = UploadQueuePersister.load() {
+        if Self.qaSimulated {
+            queue = []   // scripted UI-test runs start clean and never touch the real persisted queue
+        } else if let list = UploadQueuePersister.load() {
             queue = list
         } else if let data = UserDefaults.standard.data(forKey: key),
                   let list = try? JSONDecoder().decode([Pending].self, from: data) {
@@ -51,6 +79,7 @@ final class BackgroundUploader {
             UserDefaults.standard.removeObject(forKey: legacyKey)
         }
         if !queue.isEmpty { save() }   // seed the file so the next launch skips legacy
+        publishProgress()   // a restored queue is real pending work — the pill says so from launch
     }
 
     /// Whether any authored event for this circle is still waiting to reach the relay mailbox (drives
@@ -68,11 +97,13 @@ final class BackgroundUploader {
     /// and the relay copy is best-effort + retried silently).
     var isFlushing: Bool { flushing }
 
-    /// Queue an authored event for mailbox upload and kick off a flush.
-    func enqueue(circleId: String, env: Data) {
-        queue.append(Pending(circleId: circleId, env: env))
+    /// Queue an authored event for mailbox upload and kick off a flush. `maintenance` marks upkeep the
+    /// user didn't author (epoch heads) so it never shows as "Syncing" in the composer.
+    func enqueue(circleId: String, env: Data, maintenance: Bool = false) {
+        queue.append(Pending(circleId: circleId, env: env, maintenance: maintenance ? true : nil))
         if queue.count > maxQueued { queue.removeFirst(queue.count - maxQueued) }
         save()
+        publishProgress()
         backoffSecs = 3   // fresh user action: retry eagerly again even if we'd backed off
         if flushing {
             enqueuedWhileFlushing = true   // the running pass re-arms on exit; the guard would eat this Task
@@ -97,10 +128,17 @@ final class BackgroundUploader {
         // HAVEN_NO_NET: authoring still queues (and the queue is persisted, so nothing is lost —
         // a later online run delivers it), but a flush that cannot reach a relay would just
         // re-arm `scheduleRetry` every few seconds for the length of a UI-test run.
-        guard !HavenNet.offline else { return }
+        guard !HavenNet.offline || Self.qaSimulated else { return }
         guard !flushing, !queue.isEmpty else { return }
         flushing = true
-        defer { flushing = false }
+        passTotal = [:]; passDone = [:]
+        for item in queue where item.isUser { passTotal[item.circleId, default: 0] += 1 }
+        publishProgress()
+        defer {
+            flushing = false
+            passTotal = [:]; passDone = [:]
+            publishProgress()
+        }
 
         // iOS suspends the app shortly after backgrounding; a background-task assertion keeps the
         // upload alive long enough to finish. macOS apps aren't suspended this way — no-op there.
@@ -130,8 +168,13 @@ final class BackgroundUploader {
                 break
             }
             #endif
-            let ok = await SharedStore.uploadEvent(circleId: item.circleId, env: item.env)
+            let ok = Self.qaSimulated ? await Self.qaUpload()
+                : await SharedStore.uploadEvent(circleId: item.circleId, env: item.env)
             if !ok { stillPending.append(item) }
+            if ok, item.isUser {
+                passDone[item.circleId, default: 0] += 1
+                publishProgress()
+            }
         }
         // Keep anything that failed, plus anything newly enqueued while we were uploading.
         let newlyAdded = queue.count > work.count ? Array(queue.suffix(queue.count - work.count)) : []
@@ -140,6 +183,7 @@ final class BackgroundUploader {
 
         // Re-arm. This is what turns one-shot best-effort into "keeps trying until it's in the
         // relay": mid-pass arrivals go again immediately; failures go again on capped backoff.
+        lastPassFailed = !stillPending.isEmpty
         let hadMidPassArrivals = enqueuedWhileFlushing || !newlyAdded.isEmpty
         enqueuedWhileFlushing = false
         if hadMidPassArrivals && !queue.isEmpty {
@@ -161,6 +205,25 @@ final class BackgroundUploader {
         }
     }
 
+    // MARK: - UI-test hook
+
+    /// `HAVEN_QA_UPLOADS` (DEBUG + HAVEN_DEMO only): drive the REAL queue / progress / backoff machine
+    /// with scripted outcomes instead of a relay, so HavenUITests can assert the sync pill.
+    ///   ok   — every upload lands after ~2.5s (slow enough for a UI test to watch it)
+    ///   fail — every upload fails (the pass ends in backoff → "Retrying")
+    static var qaSimulated: Bool {
+        #if DEBUG
+        return DemoEnv.isDemo && qaUploadMode != nil
+        #else
+        return false
+        #endif
+    }
+    private static let qaUploadMode = ProcessInfo.processInfo.environment["HAVEN_QA_UPLOADS"]
+    private static func qaUpload() async -> Bool {
+        try? await Task.sleep(nanoseconds: 2_500_000_000)
+        return qaUploadMode == "ok"
+    }
+
     /// Persist the queue — debounced, encoded and written OFF the main actor.
     ///
     /// This used to be `UserDefaults.standard.set(encode(queue))` inline: writing a
@@ -173,7 +236,7 @@ final class BackgroundUploader {
     /// queue is best-effort + idempotent by design (content-addressed keys, and the
     /// post already reached online members directly).
     private func save() {
-        guard !savePending else { return }
+        guard !savePending, !Self.qaSimulated else { return }
         savePending = true
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 100_000_000)

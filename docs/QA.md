@@ -208,8 +208,10 @@ their own relay interoperate without colliding:
 
 Circles: C_S (A+B, shared), C_A (A only), C_B (B only), C_R (A+B, used only for the removal check).
 Each CLI relay gets its own data dir under `OUT/relays/`, its own `HAVEN_RELAY_SEED` (random per
-run), its own token, `--no-tunnel --no-derp --no-turn --no-proxy`, `--peer` = the other CLI relay,
-and binds **loopback only** on an internal port (`E2E_MR_PORT_BASE`+10000; default 18684/18685/18686)
+run), its own token and `--no-tunnel --no-derp --no-turn --no-proxy`. There is deliberately **no
+`--peer`** between them — friends don't hand-configure each other's relay ids; siblings are taught
+by the members (B's in-app host teaches every relay of a shared circle about the others) and that
+path is what the mesh checks exercise. Each binds **loopback only** on an internal port (`E2E_MR_PORT_BASE`+10000; default 18684/18685/18686)
 behind the **counting proxy** `Scripts/qa-relay-proxy.mjs`, whose public ports (8684 R_A, 8685
 R_C, 8686 R_A after its move, control 8689) are what clients are told via `--http-url`. The step
 refuses to start if any of those ports is already listening, never uses 8674/8675/3340/3478 (the
@@ -226,8 +228,9 @@ from a relay dying mid-flight.
 What it asserts (every timing lands in `build/e2e-history.jsonl`):
 
 1. **Separation** — every relay has its own node id, token and port; A's C_A posts land on R_A,
-   B's C_B posts on R_B, C_S on R_A + R_C + R_B (dual-write or mesh); C_B never on R_A/R_C and C_A
-   never on R_C (store dirs are read directly); every client's `relay_stats` rows are **correctly
+   B's C_B posts on R_B, C_S on R_A + R_C + R_B (dual-write or mesh); no MAILBOX of C_B on R_A/R_C
+   and none of C_A on R_C (store dirs are read directly). Media refs name no circle, so where a
+   private photo's ciphertext ends up is logged, not scored; every client's `relay_stats` rows are **correctly
    attributed** (each relay's token fingerprint and ports, nothing crossed) and A's list still holds
    R_B after R_A's announce. **Collision sub-check:** a second relay pointed at R_A's internal port —
    on `0.0.0.0` and on `127.0.0.1` — must exit non-zero naming the port. (Darwin lets a
@@ -241,8 +244,9 @@ What it asserts (every timing lands in `build/e2e-history.jsonl`):
    (control) but gets 403 writing or listing `haven/self/<B>/…` on R_B (`relay_probe`, signed by the
    app's own signer). Removing B from C_R must turn B's LIST of C_R on R_A into 403 within
    `E2E_MR_BUDGET_REVOKE`.
-4. **Mesh** — a fresh sentinel key planted on R_C crosses to R_A; one back-dated past the TTL never
-   does; R_A and R_C converge on the same C_S event set; each relay's C_S event count holds still
+4. **Mesh** — a fresh sentinel key planted in C_S on R_C crosses to R_A once a member has taught
+   them to each other (`E2E_MR_BUDGET_MESH_HOST`, the host teaches on its ≥5-min mesh tick); one
+   back-dated past the TTL never does; R_A and R_C converge on the same C_S event set; each relay's C_S event count holds still
    over a quiet window (`E2E_MR_QUIET_MS`); no client shows a duplicate post. Finally R_C restarts
    with the **QA GC clock** (below) and a real sweep deletes its idle keys; for two mesh cycles no
    swept key may sit on R_C older than the TTL (a sibling handing back an expired key).
@@ -283,6 +287,31 @@ too, per circle), `add_relay` `{"relay": <node hex | interface JSON>, "circle_id
 The counters are the client's HTTP outcomes per base URL, summed over the relay's CURRENT urls (so
 after a move they count the new door only); `reachable` = a successful op within 2 min. The token
 itself is never in the dump.
+
+Product bugs this step found (fixed with regression tests unless noted):
+
+- **Silent port collision** — Darwin let a loopback-bound and a wildcard-bound relay share a port;
+  `httprelay::serve` now refuses the overlap (`overlapping_port_is_refused_not_split`).
+- **Siblings were global** — a relay that shared ONE circle with us replicated every circle and DM
+  mailbox we host. Siblings are now per circle, listings are filtered per circle, the mesh pull
+  skips mailboxes it doesn't serve, and member-taught siblings are honoured on the serving side
+  (before, two headless relays never meshed without `--peer`) — `blobstore` unit test +
+  `tests/relay_enroll.rs::a_taught_sibling_replicates_that_circle_and_only_that_circle`.
+- **"Stop hosting" didn't stop** — the path proxy outlived its handle and old keep-alive
+  connections kept being served (`tests/relay_host_stop.rs`). The in-app host toggle still came
+  back on an ephemeral port in the run that found this; re-check after the fix.
+- **A rotated relay token was never re-learned** — a 401 was folded into "not a member", the roster
+  re-publish can't fix it, and the interface self-heal only ran for BAD urls. Apple + Android now
+  fetch the relay's self-published interface over iroh on a 401 (desktop: not yet).
+- **Removing a member did not revoke them on a relay** — learned grants only ever unioned (and
+  a CLI relay re-applies its link roster on every restart), so a removed member kept LIST/GET on
+  the circle's mailbox. The circle's CREATOR now states the whole set after a removal (ENROLL with
+  a `!replace` first line, `RelayClient.enrollMembersReplace`; Apple + Android call it from
+  `removeFromCircle`); the relay accepts it only from a peer speaking for the account the owned
+  (`c1…`) circle id binds, records the dropped ids as revoked (persisted, re-applied after every
+  roster re-authorize), and refuses to let an ordinary member's stale ENROLL re-add them
+  (`tests/relay_enroll.rs::the_creator_removing_a_member_revokes_them_on_the_relay`). Not yet:
+  desktop doesn't send it, and an in-app host's own store still unions its learned grants.
 
 `E2E_STEPS=multirelay` runs it alone (it creates the shared circle itself).
 

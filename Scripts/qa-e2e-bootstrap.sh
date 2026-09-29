@@ -388,7 +388,17 @@ if command -v adb >/dev/null 2>&1; then
     printf '{"op":"wire_relay","hex":"%s","urls":["http://10.0.2.2:8674","http://127.0.0.1:8674"],"token":"%s"}' "$NODE" "$TOKEN" >/tmp/and-wire.json
     adb push /tmp/and-wire.json /sdcard/Download/qa-cmd.json >/dev/null 2>&1 || true
     adb shell am start -a android.intent.action.VIEW -d "haven://qa" >/dev/null 2>&1 || true
-    sleep 4
+    # Wait for the driver to CONSUME the drop (it deletes it on apply). A cold emulator's first
+    # launch can take well over the old fixed 4s to bring the engine up, and the harness's very
+    # first {"op":"dump"} then OVERWROTE the unconsumed wire_relay — the leg ran the whole suite
+    # with no relay at all (relay_stats [], warm-up "never") while every other leg was fine.
+    for i in $(seq 1 60); do
+      adb shell ls /sdcard/Download/qa-cmd.json >/dev/null 2>&1 || break
+      [[ $((i % 10)) == 0 ]] && adb shell am start -a android.intent.action.VIEW -d "haven://qa" >/dev/null 2>&1
+      sleep 1
+    done
+    adb shell ls /sdcard/Download/qa-cmd.json >/dev/null 2>&1 && log "WARN: android never consumed wire_relay — this leg has NO relay"
+    sleep 2
     ANDROID_HEXES="$OUT/android-hexes.txt"
     adb pull /sdcard/Download/qa-device-hex.txt "$ANDROID_HEXES" >/dev/null 2>&1 || true
     if [[ -s "$ANDROID_HEXES" ]]; then

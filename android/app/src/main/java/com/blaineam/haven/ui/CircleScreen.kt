@@ -116,6 +116,7 @@ import com.blaineam.haven.core.LocalMedia
 import com.blaineam.haven.core.ProfileStore
 import com.blaineam.haven.core.PendingRequest
 import com.blaineam.haven.core.SyncMetrics
+import com.blaineam.haven.core.SyncBadgeState
 import com.blaineam.haven.core.loadAndDownscale
 import com.blaineam.haven.core.nowMs
 import kotlinx.coroutines.launch
@@ -1960,40 +1961,35 @@ private fun ConnectionDot() {
     }
 }
 
-/** A small yellow/red pill by the composer: can this circle's posts actually reach others right now?
- *  Yellow = still syncing (mesh searching); red = device-only. When everything is SYNCED the pill
- *  collapses to nothing so it doesn't pad out the composer (iOS SyncStatusBadge parity). Tapping it
- *  opens a compact bottom sheet with the live sent / received / waiting counters. Polls every 2.5s. */
+/** A small pill by the composer: are this circle's posts actually getting out? Derived from the REAL
+ *  pending authored uploads (HavenNet.authoredUploads): "Sending 2 of 5" while they go, "Retrying (N
+ *  waiting)" during backoff, red when offline with nowhere to deliver. A burst that completes says
+ *  "Synced" for a moment, then the pill folds away (iOS SyncStatusBadge parity). Event-driven — it
+ *  recomposes when the upload counts or connectivity change, not on a 2.5s poll. Tapping it opens
+ *  the live sent / received / waiting counters. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SyncStatusBadge(circleId: String) {
-    var status by remember(circleId) { mutableStateOf(HavenNet.syncStatus(circleId)) }
+    val progress by HavenNet.authoredUploads
+    val online by HavenNet.internetActive
+    val peers = SyncMetrics.nearbyPeers.intValue
+    val status = remember(circleId, progress, online, peers) { HavenNet.syncBadge(circleId, progress) }
     var showDetail by remember { mutableStateOf(false) }
-    LaunchedEffect(circleId) {
-        while (true) {
-            status = HavenNet.syncStatus(circleId)
-            kotlinx.coroutines.delay(2500)
+    var justSynced by remember(circleId) { mutableStateOf(false) }
+    var previous by remember(circleId) { mutableStateOf(status) }
+    LaunchedEffect(status) {
+        val was = previous
+        previous = status
+        // Any newer state cancels a running flash, so decide afresh every time.
+        justSynced = status == SyncBadgeState.Synced && was != SyncBadgeState.Synced && was != SyncBadgeState.Local
+        if (justSynced) {
+            kotlinx.coroutines.delay(2000)
+            justSynced = false
         }
     }
     // Only surface the pill when there's something to know. Collapse to nothing when fully synced.
-    val (color, label) = when (status) {
-        HavenNet.SyncStatus.SYNCED -> return
-        HavenNet.SyncStatus.SYNCING -> Color(0xFFF59E0B) to stringResource(R.string.circle_syncing_label)
-        HavenNet.SyncStatus.LOCAL -> Color(0xFFEF4444) to stringResource(R.string.circle_device_only)
-    }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .padding(horizontal = 6.dp)
-            .clip(RoundedCornerShape(50))
-            .clickable { showDetail = true }
-            .background(HavenTheme.card)
-            .padding(horizontal = 9.dp, vertical = 4.dp),
-    ) {
-        Box(Modifier.size(8.dp).clip(CircleShape).background(color))
-        Spacer(Modifier.size(5.dp))
-        Text(label, color = HavenTheme.textSecondary, fontSize = 11.sp)
-    }
+    if (status == SyncBadgeState.Synced && !justSynced) return
+    SyncBadgePill(status) { showDetail = true }
     if (showDetail) {
         ModalBottomSheet(
             onDismissRequest = { showDetail = false },

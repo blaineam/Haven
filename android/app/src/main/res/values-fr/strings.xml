@@ -244,6 +244,9 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="circle_sync_activity_title">Activité de synchronisation</string>
     <string name="circle_syncing_items">Synchronisation de %1$d élément%2$s…</string>
     <string name="circle_up_to_date">À jour</string>
+    <string name="sync_badge_sending">Envoi de %1$d sur %2$d</string>
+    <string name="sync_badge_retrying">Nouvelle tentative (%1$d en attente)</string>
+    <string name="sync_badge_synced">Synchronisé</string>
     <string name="circle_media_sent">%1$d médias envoyés</string>
     <string name="circle_media_received">%1$d médias reçus</string>
     <string name="circle_media_waiting">%1$d médias en attente</string>

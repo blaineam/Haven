@@ -465,6 +465,11 @@ object QaDriver {
         o.put("delivery", runCatching { JSONObject(social.diagDeliveryJson()) }.getOrNull())
         // Fork forensics — session-only chain, dump is the only window (see desktop twin).
         o.put("tree_chain", runCatching { org.json.JSONArray(social.debugTreeChainJson()) }.getOrNull())
+        // The honest-progress UI (sync pill, media transfers, wanted/received, history handoff) —
+        // same field names as the Apple dump; schema in docs/QA.md ▸ "Progress fields".
+        runCatching { HavenNet.qaProgressJson() }.getOrNull()?.let { prog ->
+            for (k in prog.keys()) o.put(k, prog.get(k))
+        }
 
         // App-owned file in Download/ (allowed on scoped storage); tmp+rename keeps reads whole.
         val tmp = File(downloads, dumpFile.name + ".tmp")

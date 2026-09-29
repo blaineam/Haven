@@ -58,6 +58,10 @@ object QaDriver {
      *  file caught mid-`adb push` gets a second read instead of being discarded half-written. */
     @Volatile private var badDropSig: String? = null
 
+    /** Bumped by the `screen_share` op; CallUI's InCall observes it and opens the SAME
+     *  MediaProjection consent prompt its share button does. */
+    val screenShareAsk = androidx.compose.runtime.mutableIntStateOf(0)
+
     private val cmdFile get() = File(downloads, "qa-cmd.json")
     private val dumpFile get() = File(downloads, "qa-dump-${BuildConfig.APPLICATION_ID}.json")
 
@@ -240,6 +244,17 @@ object QaDriver {
             // Android in the fleet is API 35 — without this it is exercised by nothing.
             "call_route_legacy" -> CallManager.qaForceLegacyRoute = cmd.optBoolean("on", true)
             "call_end" -> CallManager.hangup()
+            // Screen share through the REAL consent path: on=true asks CallUI to launch the system
+            // MediaProjection prompt (the harness drives the dialog with uiautomator); on=false is
+            // the stop button.
+            "screen_share" -> {
+                if (cmd.optBoolean("on", true)) handler.post { screenShareAsk.intValue++ }
+                else handler.post { CallManager.stopScreenShare() }
+            }
+            // Force HeavyWorkPolicy's suspendHeavyIO (as a call / Battery Saver / heat would) so the
+            // e2e can prove the serve gate without a real call. {"suspend":false} lifts it.
+            "heavy_work_override" ->
+                HeavyWorkMonitor.qaOverride(cmd.optBoolean("suspend", true), cmd.optString("reason"))
             "story" -> {
                 val caption = cmd.optString("caption").ifEmpty { body }
                 val storyCircle = explicit ?: DEFAULT_CIRCLE
@@ -412,12 +427,14 @@ object QaDriver {
 
         val posts = JSONArray()
         val circles = JSONArray()
+        val ownPosts = ArrayList<Pair<String, List<String>>>()   // relay_first upload-before-broadcast check
         for (c in all.filter { !it.id.startsWith("dm:") }) {
             val feed = runCatching {
                 social.feed(c.id, nowMs(), CircleSettings.retentionSecs(c.id))
             }.getOrDefault(emptyList())
             for (item in feed) {
                 if (item.unsent) continue
+                if (item.isMe) ownPosts += item.id to realRefs(item.media)
                 posts.put(postRow(item, c.id))
             }
             circles.put(JSONObject()
@@ -464,6 +481,31 @@ object QaDriver {
             // cannot be told apart from "this device has no earpiece" — which is every emulator.
             .put("audio_devices", runCatching { CallManager.qaAudioDevices }.getOrDefault("?")))
         o.put("circles", circles)
+        // Relay-first media counters + the heavy-work gate (e2e `relayfirst` / `callgate`).
+        val relayFirst = QaStats.relayFirst(ownPosts)
+        o.put("relay_first", relayFirst)
+        o.put("heavy_work", relayFirst.optJSONObject("heavy_work"))
+        o.put("launch", QaStats.launch())
+        o.put("relay_backoff", JSONObject()
+            .put("pending_enrollment", JSONArray(runCatching { HavenNet.qaPendingEnrollment }.getOrDefault(emptyList())))
+            .put("pending_enrollment_refusals", QaStats.count("pending_enrollment_refusals")))
+        o.put("contacts", JSONArray(HavenNet.contacts.map { JSONObject().put("hex", it.idHex).put("name", it.name) }))
+        // Screen share (e2e `screenshare`): lifecycle, consent, FGS ordering, capture, sender, encoder.
+        val fgsAt = QaStats.shareFgsReadyAtMs; val capAt = QaStats.shareCaptureStartAtMs
+        o.put("screen_share", JSONObject()
+            .put("state", runCatching { CallManager.qaScreenShareState }.getOrDefault("?"))
+            .put("consent_result", QaStats.shareConsent)
+            .put("consent_attempts", QaStats.shareConsentAttempts)
+            .put("attempts", QaStats.shareAttempts)
+            .put("fgs_ready", QaStats.shareFgsReady ?: JSONObject.NULL)
+            .put("fgs_ready_ms", QaStats.shareFgsWaitMs)
+            .put("fgs_ready_before_capture", QaStats.shareFgsReady == true && fgsAt > 0 && capAt > 0 && fgsAt <= capAt)
+            .put("capture_w", QaStats.shareCaptureW)
+            .put("capture_h", QaStats.shareCaptureH)
+            .put("frames_captured", runCatching { CallManager.qaScreenFramesCaptured }.getOrDefault(0))
+            .put("sender_params_ok", QaStats.shareSenderParamsOk ?: JSONObject.NULL)
+            .put("encoders", JSONArray(QaStats.encoders()))
+            .put("start_error", QaStats.shareStartError))
         // What the engine is HOLDING BACK. A short feed alone cannot distinguish "never arrived"
         // from "arrived and could not be opened", and those have opposite fixes — this leg once
         // read as a delivery failure while sitting on 8 parked envelopes.

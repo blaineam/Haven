@@ -1678,6 +1678,8 @@ final class CallManager: NSObject, ObservableObject {
     /// queue, so the snapshot reports the previous sample and kicks a refresh for the next one —
     /// the E2E suite polls to convergence anyway.
     private var qaInbound: [String: (audio: Int, video: Int, frames: Int)] = [:]
+    /// Per peer: remote video track id → inbound stats (refreshed per dump, one dump behind).
+    private var qaTrackStats: [String: [String: [String: Any]]] = [:]
 
     /// Call state for the QA dump. Reports BYTES RECEIVED, not just connection state: a call that
     /// shows "connected" on both sides while carrying no audio is exactly the failure this has to
@@ -1692,6 +1694,22 @@ final class CallManager: NSObject, ObservableObject {
             conn.call.inboundMedia { [weak self] audio, video, frames in
                 Task { @MainActor in self?.qaInbound[hex] = (audio, video, frames) }
             }
+            conn.call.inboundVideoTracks { [weak self] stats in
+                Task { @MainActor in self?.qaTrackStats[hex] = stats }
+            }
+        }
+        // The camera and screen SLOTS per peer (what the UI renders), each joined to its inbound
+        // stats. A screen share that lands in the camera slot shows up as a missing `screen` and a
+        // camera whose stream_ids contain "screen".
+        var remoteTracks: [String: [String: Any]] = [:]
+        for hex in Set(remoteVideoTracks.keys).union(remoteScreenTracks.keys) {
+            func slot(_ t: RTCVideoTrack?) -> Any {
+                guard let t else { return NSNull() }
+                var row: [String: Any] = qaTrackStats[hex]?[t.trackId] ?? ["frames_decoded": 0, "width": 0, "height": 0, "stream_ids": []]
+                row["track_id"] = t.trackId
+                return row
+            }
+            remoteTracks[hex] = ["camera": slot(remoteVideoTracks[hex]), "screen": slot(remoteScreenTracks[hex])]
         }
         var audioTotal = 0, videoTotal = 0, framesTotal = 0
         var perPeer: [String: [String: Int]] = [:]
@@ -1713,6 +1731,7 @@ final class CallManager: NSObject, ObservableObject {
             "inbound_video_bytes": videoTotal,
             "inbound_video_frames": framesTotal,
             "peers": perPeer,
+            "remote_tracks": remoteTracks,
         ]
     }
     #endif

@@ -1997,9 +1997,29 @@ final class RelayHealth: ObservableObject {
             h.lastSuccessMs = 0   // no longer proven alive after repeated failure
         }
         byNode[nodeHex] = h
+        #if DEBUG
+        qaPeakBackoffMs = max(qaPeakBackoffMs, backoff)
+        #endif
         objectWillChange.send()
     }
     func forget(_ nodeHex: String) { byNode[nodeHex] = nil; objectWillChange.send() }
+
+    #if DEBUG
+    /// Longest backoff window assigned since launch (or the last `qaResetPeak`) — the e2e `newfriend`
+    /// step asserts a relay the acceptor is not enrolled on yet is never parked in long backoff.
+    private(set) var qaPeakBackoffMs: UInt64 = 0
+    func qaResetPeak() { qaPeakBackoffMs = 0 }
+    /// Per-relay backoff state for qa-dump.json (`relay_backoff`).
+    func qaSnapshot() -> [String: Any] {
+        let now = nowMs()
+        let relays: [[String: Any]] = byNode.map { node, h in
+            ["relay": node, "fails": Int(h.fails), "backoff_until_ms": h.nextRetryMs,
+             "backoff_remaining_ms": h.nextRetryMs > now ? h.nextRetryMs - now : 0,
+             "reason": h.fails > 0 ? "failure" : ""]
+        }
+        return ["relays": relays, "peak_backoff_ms": qaPeakBackoffMs]
+    }
+    #endif
 
     /// Zero every backoff window (keep proof-of-life stamps). For a NETWORK PATH CHANGE: the
     /// failures that grew these windows were failures of the OLD path — carrying a 5-minute

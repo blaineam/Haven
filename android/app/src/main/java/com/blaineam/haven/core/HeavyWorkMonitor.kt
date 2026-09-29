@@ -67,7 +67,7 @@ object HeavyWorkMonitor {
     }
 
     private fun sample(): HeavyWorkPolicy.Conditions {
-        val ctx = appContext ?: return HeavyWorkPolicy.Conditions(havenCall = CallManager.callInProgress)
+        val ctx = appContext ?: return HeavyWorkPolicy.Conditions(havenCall = CallManager.callInProgress, forced = qaForced)
         val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager
         val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         val heat = when (runCatching { pm?.currentThermalStatus }.getOrNull()) {
@@ -88,7 +88,16 @@ object HeavyWorkMonitor {
             systemCall = systemCall,
             heat = heat,
             powerSave = runCatching { pm?.isPowerSaveMode }.getOrNull() == true,
+            forced = if (com.blaineam.haven.BuildConfig.DEBUG) qaForced else "",
         )
+    }
+
+    /** `heavy_work_override` qa op (DEBUG): force suspendHeavyIO with this reason; "" lifts it. */
+    @Volatile private var qaForced = ""
+    fun qaOverride(suspend: Boolean, reason: String) {
+        if (!com.blaineam.haven.BuildConfig.DEBUG) return
+        qaForced = if (suspend) reason.ifEmpty { "qa" } else ""
+        refresh()
     }
 
     /** Re-sample now (cheap: a few system-service getters). Returns the fresh conditions. */

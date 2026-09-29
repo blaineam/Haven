@@ -150,6 +150,8 @@ export default {
       args: ['Scripts/qa-e2e-full.mjs'],
       description: 'Full cross-device E2E (iOS+Android+macStub+Tauri) with perf gates',
       tags: ['e2e', 'relay', 'perf'],
+      // The release gate: the `responsive` step's perf fields must be present (absent = FAIL).
+      env: { E2E_REQUIRE_PERF: '1' },
     },
 
     // ── The e2e harness's OWN unit tests. Only one piece of that harness can invent a failure
@@ -160,8 +162,8 @@ export default {
     'qa-harness': {
       type: 'cmd',
       cmd: 'node',
-      args: ['--test', 'Scripts/lib/dump-freshness.test.mjs'],
-      description: 'e2e harness unit tests (dump-channel freshness decision)',
+      args: ['--test', 'Scripts/lib/dump-freshness.test.mjs', 'Scripts/lib/e2e-steps.test.mjs'],
+      description: 'e2e harness unit tests (dump-channel freshness + step decisions)',
       tags: ['e2e'],
     },
 

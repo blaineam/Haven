@@ -1202,6 +1202,7 @@ object CallManager {
         if (screenShare.value || screenShareStarting) return
         if (sessionId.isEmpty()) return
         screenShareStarting = true
+        QaStats.resetShare()
         val session = sessionId
         val t0 = android.os.SystemClock.elapsedRealtime()
         Log.i(ScreenSharePolicy.LOG_TAG, "consent ok (result=$resultCode, sdk=${android.os.Build.VERSION.SDK_INT}) — " +
@@ -1209,6 +1210,8 @@ object CallManager {
         ConnectionService.startForProjection(appContext) { ready ->
             screenShareStarting = false
             val waited = android.os.SystemClock.elapsedRealtime() - t0
+            QaStats.shareFgsReady = ready; QaStats.shareFgsWaitMs = waited
+            QaStats.shareFgsReadyAtMs = System.currentTimeMillis()
             Log.i(ScreenSharePolicy.LOG_TAG, "FGS mediaProjection ready=$ready after ${waited}ms")
             if (sessionId != session || screenShare.value) {
                 Log.i(ScreenSharePolicy.LOG_TAG, "call ended/changed while promoting — not capturing")
@@ -1238,6 +1241,8 @@ object CallManager {
             screenCapturer = cap
             cap.initialize(helper, appContext, src.capturerObserver)
             cap.startCapture(w, h, ScreenSharePolicy.FPS)
+            QaStats.shareCaptureStartAtMs = System.currentTimeMillis()
+            QaStats.shareCaptureW = w; QaStats.shareCaptureH = h
             screenCaptureSize = w to h
             val track = f.createVideoTrack(WebRTCPeer.SCREEN_TRACK_ID, src)
             screenTrack = track
@@ -1257,6 +1262,7 @@ object CallManager {
             }, 3_000)
         }.onFailure {
             Log.e(ScreenSharePolicy.LOG_TAG, "screen share start failed", it)
+            QaStats.shareStartError = it.toString().take(200)
             releaseScreenCapture()
             ConnectionService.stopProjection(appContext)
         }
@@ -1318,6 +1324,12 @@ object CallManager {
         runCatching { screenTrack?.dispose() }; screenTrack = null
         runCatching { screenVideoSource?.dispose() }; screenVideoSource = null
     }
+
+    /** QA dump: share lifecycle state and frames the capturer has produced (DEBUG qa driver only). */
+    val qaScreenShareState: String
+        get() = when { screenShare.value -> "sharing"; screenShareStarting -> "starting"; else -> "idle" }
+    val qaScreenFramesCaptured: Int
+        get() = ((screenCapturer as? org.webrtc.ScreenCapturerAndroid)?.numCapturedFrames ?: 0L).toInt()
 
     /** Stop screen sharing: remove the screen track from every peer (renegotiate) and tear it down. */
     fun stopScreenShare() {
@@ -1397,7 +1409,7 @@ private class LoggingEncoderFactory(private val inner: org.webrtc.VideoEncoderFa
                 val name = runCatching { e.implementationName }.getOrDefault(e.javaClass.simpleName)
                 val hw = runCatching { e.isHardwareEncoder.toString() }.getOrDefault("?")
                 "$name hw=$hw"
-            } ?: "NONE"))
+            } ?: "NONE").also { QaStats.noteEncoder("${info.name}: $it") })
         return enc
     }
     override fun getSupportedCodecs(): Array<org.webrtc.VideoCodecInfo> = inner.supportedCodecs

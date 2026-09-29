@@ -486,6 +486,11 @@ enum RelayEnrollment {
         for r in relays where r.count == 64 { policy.noteAdopted(r, nowMs: nowMs()) }
     }
     static func isTracked(_ relay: String) -> Bool { policy.isTracked(relay) }
+    /// Relays still inside their pending-enrollment window (DEBUG qa dump, `relay_backoff`).
+    static func pendingRelays() -> [String] {
+        let now = nowMs()
+        return policy.adoptedAtMs.keys.filter { policy.isPending($0, nowMs: now) }.sorted()
+    }
     static func anyPending() -> Bool { policy.anyPending(nowMs: nowMs()) }
 
     /// Error text from the iroh relay lane for a membership refusal (the HTTP lane has its own type).
@@ -501,6 +506,7 @@ enum RelayEnrollment {
     @discardableResult
     static func absorbRefusal(_ relay: String, ref: String? = nil) -> Bool {
         guard case .retrySoon = policy.onFailure(relay: relay, forbidden: true, nowMs: nowMs()) else { return false }
+        QaMediaStats.bump("pending_enrollment_refusals")
         if let ref { MediaBackupBackoff.notePendingEnrollment(ref) }
         scheduleRetry()
         return true

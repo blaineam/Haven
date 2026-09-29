@@ -51,8 +51,20 @@ final class HeavyWorkMonitor: NSObject {
         #endif
         c.heat = HeavyWorkPolicy.Heat(ProcessInfo.processInfo.thermalState)
         c.lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
+        #if DEBUG
+        c.forced = qaForcedReason
+        #endif
         return c
     }
+
+    #if DEBUG
+    /// `heavy_work_override` qa op: force `suspendHeavyIO` with this reason ("" lifts it).
+    private var qaForcedReason = ""
+    func qaOverride(suspend: Bool, reason: String) {
+        qaForcedReason = suspend ? (reason.isEmpty ? "qa" : reason) : ""
+        refresh()
+    }
+    #endif
 
     /// Re-sample now. Cheap; call on any event that might change the answer (call start/end).
     func refresh() {
@@ -76,3 +88,4 @@ extension HeavyWorkMonitor: CXCallObserverDelegate {
     }
 }
 #endif
+

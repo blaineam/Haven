@@ -919,7 +919,7 @@ final class FeedStore: ObservableObject {
         // its engine read now; the warm follows it on the engine, off the launch path (badges land a
         // beat later, which nobody can see; the empty feed, everyone could).
         refresh()
-        Task { @MainActor [weak self] in await self?.warmDMThreads() }
+        Task { @MainActor [weak self] in await self?.warmDMThreads(); QaLaunch.mark("dm_warmup_done") }
         // Media-backup drain holds a UIApplication assertion. On a pocket cold launch (push /
         // BGAppRefresh) the wake path already runs one budgeted pass via slimBackgroundSync —
         // starting another here stacks assertions and keeps the process warm for the whole drain.
@@ -3668,6 +3668,29 @@ final class FeedStore: ObservableObject {
             HavenLog.net("matrix-qa v2 approve_connections: approved \(reqs.count)")
             qaWriteDump()
             return
+        case "relay_backoff_reset":
+            // QA: start a fresh peak-backoff window (the newfriend step measures its own span).
+            RelayHealth.shared.qaResetPeak()
+            qaWriteDump()
+            return
+        case "heavy_work_override":
+            // QA: force HeavyWorkPolicy's suspendHeavyIO (as a call / Low Power Mode / heat would)
+            // so the e2e can prove the serve gate without a real call. {"suspend":false} lifts it.
+            let suspend = (obj["suspend"] as? Bool) ?? true
+            HeavyWorkMonitor.shared.qaOverride(suspend: suspend, reason: str("reason"))
+            qaWriteDump()
+            return
+        case "media_ask":
+            // QA: send a DIRECT peer ask (frame 3/33) for `ref`, bypassing the relay-first requester
+            // path — the only way to make a friend's serve gate decide something on demand.
+            let ref = str("ref")
+            if !ref.isEmpty {
+                let me = myNodeHex
+                var payload = Data(me.utf8); payload.append(Data(ref.utf8))
+                askForMedia(ref: ref, myHex: me, plain: payload)
+            }
+            qaWriteDump()
+            return
         case "link_constraint":
             // QA: force the link constraint so the satellite path can be exercised off a satellite.
             // `Ultra` is otherwise unreachable in a simulator — see LowDataMonitor.debugForce.
@@ -4002,11 +4025,34 @@ final class FeedStore: ObservableObject {
             "media_transfers": transfers,
             "media_wanted_count": wantedMedia.count,
             "media_received_count": SyncMetrics.shared.nbMediaIn,
+            // Refs a placeholder shows as given up ("No longer available") — the e2e `progress`
+            // step asserts a transfer that is still receiving bytes never lands here.
+            "media_gave_up": unavailableMedia.sorted(),
             "history_handoff": [
                 "role": role, "state": hState, "done": h.done, "total": h.total,
                 "media_done": h.mediaDone, "media_total": h.mediaTotal,
             ] as [String: Any],
         ]
+    }
+
+    /// Per-relay backoff (RelayHealth) annotated with the pending-enrollment state: a ticket relay
+    /// that refuses us before the inviter enrolls us is on a flat short retry, reported as
+    /// `reason: "pendingEnrollment"` — the newfriend step asserts it never escalates to a long window.
+    private func qaRelayBackoff() -> [String: Any] {
+        var out = RelayHealth.shared.qaSnapshot()
+        let pending = RelayEnrollment.pendingRelays()
+        var relays = (out["relays"] as? [[String: Any]]) ?? []
+        for i in relays.indices where pending.contains(((relays[i]["relay"] as? String) ?? "").lowercased()) {
+            relays[i]["reason"] = "pendingEnrollment"
+        }
+        for r in pending where !relays.contains(where: { (($0["relay"] as? String) ?? "").lowercased() == r }) {
+            relays.append(["relay": r, "fails": 0, "backoff_until_ms": 0, "backoff_remaining_ms": 0,
+                           "reason": "pendingEnrollment"])
+        }
+        out["relays"] = relays
+        out["pending_enrollment"] = pending
+        out["pending_enrollment_refusals"] = QaMediaStats.count("pending_enrollment_refusals")
+        return out
     }
 
     private func qaWriteDumpFile(_ snapshot: [QaCircleSnapshot], accountHex: String, tsMs: UInt64,
@@ -4021,6 +4067,7 @@ final class FeedStore: ObservableObject {
         var posts: [(ts: UInt64, row: [String: Any])] = []
         var dms: [String: [[String: Any]]] = [:]
         var circles: [[String: Any]] = []
+        var ownPosts: [(id: String, refs: [String])] = []   // relay_first upload-before-broadcast check
         for snap in snapshot {
             circles.append(["id": snap.circle.id, "name": snap.circle.name, "members": snap.members])
             if snap.circle.id.hasPrefix("dm:") {
@@ -4061,6 +4108,7 @@ final class FeedStore: ObservableObject {
                     // post's media_present at [true, false, true] forever — the E2E video-blob
                     // gate failed even after the blob demonstrably landed on the relay.
                     let real = item.media.filter { !MediaStore.isSynthetic($0) }
+                    if item.isMe { ownPosts.append((item.id, real)) }
                     posts.append((item.createdAt, [
                         "id": item.id,
                         "body": item.body,
@@ -4107,6 +4155,20 @@ final class FeedStore: ObservableObject {
             // works — the field failure was both sides connected with zero audio either way — so QA
             // asserts on bytes actually received (CallManager.qaMediaSnapshot, refreshed per dump).
             "call": CallManager.shared.qaSnapshot(),
+            // Relay-first media counters + the heavy-work gate (e2e step `relayfirst`, docs/QA.md).
+            "relay_first": QaMediaStats.snapshot(ownPosts: ownPosts),
+            "heavy_work": QaMediaStats.heavyWork(),
+            // Own-post media blobs still owed to a relay (sync_badge.pending_user_uploads counts EVENTS).
+            "pending_media_uploads": ownPosts.reduce(0) { n, p in n + p.refs.filter { MediaBackupQueue.shared.hasPending($0) }.count },
+            // Launch timing since process start (e2e step `launch`).
+            "launch": QaLaunch.snapshot(),
+            // Friendship state (e2e step `newfriend`): who we know, who is waiting on approval,
+            // which circles have a relay/mailbox, and each relay's backoff window.
+            "contacts": ContactsStore.shared.contacts.map { ["hex": $0.idHex, "name": $0.name] },
+            "pending_connections": ConnectionsStore.shared.pending.map { $0.idHex },
+            "circle_relays": Dictionary(circles.map { ($0["id"] as? String ?? "", SharedStore.hasMailbox($0["id"] as? String ?? "")) },
+                                        uniquingKeysWith: { a, _ in a }),
+            "relay_backoff": qaRelayBackoff(),
             // Liveness: strictly increasing while the driver is healthy. The orchestrator watches it
             // to tell a FROZEN dump apart from a device that genuinely received nothing — they are
             // indistinguishable from the file alone, and they need opposite fixes.
@@ -4292,6 +4354,7 @@ final class FeedStore: ObservableObject {
                 if self.items != deduped { self.items = deduped }
                 self.itemsFingerprint = read.filteredFP   // after the assignment (its didSet clears it)
             }
+            if !self.items.isEmpty { QaLaunch.mark("first_feed_rendered") }
             if self.hiddenInActiveCircle != hiddenHere { self.hiddenInActiveCircle = hiddenHere }
             // First refresh that produced anything: repair an account that was imported into
             // twice, without being asked. Guarded to once per launch, and a no-op when there is
@@ -4631,6 +4694,7 @@ final class FeedStore: ObservableObject {
     /// backlog), thumbs first, then posters, then content — so the placeholder-feeding bytes land
     /// before the big blobs start.
     private func enqueueAuthoredMedia(_ media: [String], circleId: String, engine: Engine) {
+        QaMediaStats.authoredEnqueued(media)   // upload-before-broadcast evidence (DEBUG qa dump)
         // PREVIEWS FIRST, and explicitly — `uploadOrder` can only rank refs that are IN `media`, and
         // the bare preview ref never is: a post lists the `preview:` MARKER and not the companion.
         // So the preview was never enqueued for upload at all, and the one blob that must cross a
@@ -5831,6 +5895,7 @@ final class FeedStore: ObservableObject {
     private func broadcastEvent(_ circleId: String, _ authored: Authored, silent: Bool = false,
                                 banner: PushBanner? = nil) {
         bumpActivity()   // I just posted/messaged → keep sync tight
+        QaMediaStats.broadcast(eventId: authored.eventId)
         invalidateMessagesCache(circleId)   // own send must not wait for the next ingest to re-read
         invalidateSyncBundle(circleId)      // the cached history bundle no longer has this event
         let env = authored.env
@@ -6216,6 +6281,8 @@ final class FeedStore: ObservableObject {
         // monolithic pass made the visible feed wait for every DM/circle × relay (and every dead
         // relay's timeouts) before a single envelope was ingested. Still ONE single-flight pull:
         // the phases run back to back inside it, never overlapping.
+        let passStart = Date()
+        defer { QaLaunch.once("first_mailbox_pass", Int(Date().timeIntervalSince(passStart) * 1000)); QaLaunch.mark("first_mailbox_pass_done") }
         let active = activeCircleId
         let phases: [[String]] = ids.contains(active)
             ? [[active], ids.filter { $0 != active }]
@@ -6225,6 +6292,7 @@ final class FeedStore: ObservableObject {
             let msgs = await SharedStore.pollMailbox(circleIds: phase)
             guard self.engine === engine else { return total }
             guard !msgs.isEmpty else { continue }
+            QaLaunch.ingested(circles: Set(msgs.filter { !$0.1.contains("/__") }.map(\.0)))
             total += await ingestMailboxBatch(msgs, engine: engine)
             guard self.engine === engine else { return total }
         }
@@ -8655,6 +8723,7 @@ final class FeedStore: ObservableObject {
             defer { self.relayRestoreInFlight.remove(ref) }
             if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, engine: engine) {
                 await MediaStore.shared.storeAsync(ref, data); mediaArrived(ref); MediaFetchBackoff.clear(ref)
+                QaMediaStats.bump("received_via_relay")
                 autoSaveReceived(ref)   // media-only: MediaArrivals re-renders the tiles, no feed rebuild
             } else if !MediaStore.shared.has(ref), self.mayDirectAsk(ref, circleHasRelay: true) {
                 self.askForMedia(ref: ref, myHex: myHex, plain: payload)
@@ -8899,6 +8968,7 @@ final class FeedStore: ObservableObject {
         // or the stored copy can't be fetched, fall back to asking an online author/peer directly.
         func fetch(_ ref: String, circleId: String) {
             mediaReqCircle[ref] = circleId
+            if !smallMediaRefs.contains(ref) { QaMediaStats.bump("missing_media_fetches") }
             var payload = Data(myHex.utf8)          // 64-byte requester id
             payload.append(Data(ref.utf8))
             let directAsk = { self.askForMedia(ref: ref, myHex: myHex, plain: payload) }
@@ -8921,6 +8991,7 @@ final class FeedStore: ObservableObject {
                     if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, engine: engine) {
                         HavenLog.relay("MEDIA-FETCH ok ref=\(ref.prefix(10)) bytes=\(data.count) via=relay")
                         await MediaStore.shared.storeAsync(ref, data); self.mediaArrived(ref)
+                        QaMediaStats.bump("received_via_relay")
                         MediaFetchBackoff.clear(ref); self.fastReq[ref] = nil
                         self.autoSaveReceived(ref)
                     // A relay REFUSED us rather than lacking the blob: publish our device roster to it
@@ -8931,6 +9002,7 @@ final class FeedStore: ObservableObject {
                               let data = await SharedStore.restore(ref: ref, circleIds: circleIds, engine: engine) {
                         HavenLog.relay("MEDIA-FETCH ok ref=\(ref.prefix(10)) bytes=\(data.count) via=relay (after roster publish)")
                         await MediaStore.shared.storeAsync(ref, data); self.mediaArrived(ref)
+                        QaMediaStats.bump("received_via_relay")
                         MediaFetchBackoff.clear(ref); self.fastReq[ref] = nil
                         self.autoSaveReceived(ref)
                     } else if self.mayDirectAsk(ref, circleHasRelay: true) {
@@ -9096,6 +9168,7 @@ final class FeedStore: ObservableObject {
         let cid = mediaReqCircle[ref] ?? ""
         guard !cid.isEmpty, SharedStore.hasMailbox(cid), noteRelayHint(ref: ref, to: requesterHex) else { return }
         HavenLog.net("media REQ ref=\(ref.prefix(12)) — volunteer, not holding it: hinting \(requesterHex.prefix(8)) at the relay")
+        QaMediaStats.bump("relay_hints_sent")
         sendMediaAvailable(ref: ref, circleId: cid, postId: "", to: requesterHex)
     }
 
@@ -9134,6 +9207,7 @@ final class FeedStore: ObservableObject {
     /// never during a call, in Low Power Mode, or warm. `serve` runs only for a `.stream` verdict.
     private func relayFirstServe(ref: String, requesterHex: String, serve: @escaping @MainActor () -> Void) {
         let own = requesterHex == myNodeHex
+        if !own { QaMediaStats.bump("media_requests_from_friends") }
         let decide: @MainActor (String?) -> Void = { [weak self] cid in
             guard let self else { return }
             let ownRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
@@ -9156,13 +9230,16 @@ final class FeedStore: ObservableObject {
                 HavenLog.net("media REQ ref=\(ref.prefix(12)) from=\(requesterHex.prefix(8)) — on a relay: hinting instead of streaming")
                 self.reverifyBackupAfterDirectAsk(ref)
                 self.sendMediaAvailable(ref: ref, circleId: cid, postId: "", to: requesterHex)
+                QaMediaStats.bump("relay_hints_sent")
             case .hintWhenUploaded:
                 guard self.noteRelayHint(ref: ref, to: requesterHex) else { return }
                 HavenLog.net("media REQ ref=\(ref.prefix(12)) from=\(requesterHex.prefix(8)) — our relay upload is pending: finishing it first")
                 self.hintOnUpload[ref, default: [:]][requesterHex] = cid ?? ""
                 if self.hintOnUpload.count > 500 { self.hintOnUpload.removeAll() }
                 MediaBackupQueue.shared.promote(ref)
+                QaMediaStats.bump("relay_hints_deferred")
             case .decline(let why):
+                QaMediaStats.declined(why)
                 HavenLog.net("media REQ ref=\(ref.prefix(12)) from=\(requesterHex.prefix(8)) — not serving: \(why)")
             }
         }
@@ -9177,12 +9254,14 @@ final class FeedStore: ObservableObject {
     /// `MediaBackupQueue` confirmed `ref` on a relay: answer everyone who asked us for it while the
     /// upload was pending (frame 32 → they pull it from the relay now).
     func mediaBackupLanded(ref: String, circleId: String) {
+        QaMediaStats.bump("relay_uploads_landed")
         guard let waiting = hintOnUpload.removeValue(forKey: ref) else { return }
         for (requester, cid) in waiting {
             let circle = cid.isEmpty ? circleId : cid
             if requester == myNodeHex { continue }   // own devices re-ask on their own lane
             HavenLog.net("media ref=\(ref.prefix(12)) landed on a relay — telling \(requester.prefix(8))")
             sendMediaAvailable(ref: ref, circleId: circle, postId: "", to: requester)
+            QaMediaStats.bump("relay_hints_sent")
         }
     }
 
@@ -9529,6 +9608,7 @@ final class FeedStore: ObservableObject {
         // BACKGROUND queue. This loop streams thousands of chunks; running it on the main actor (as it did)
         // made the whole UI lag while syncing. It needs no engine, so it's safe off-main.
         if requesterHex == myNodeHex, let ownKey = Self.ownMediaKey() {
+            QaMediaStats.bump("served_direct_own")
             // NearbyTransport is not Sendable; broadcast/backlog APIs are used from this exclusive
             // utility queue only for the duration of the serve (same process, serialized by us).
             nonisolated(unsafe) let mesh = nearby
@@ -9603,6 +9683,7 @@ final class FeedStore: ObservableObject {
         // FRIEND path: per-recipient KEM seal needs the engine — one `run` per chunk on the engine
         // actor (it used to seal every chunk on the main actor, the whole transfer long).
         nonisolated(unsafe) let mesh = nearby
+        QaMediaStats.bump("served_direct_friend")
         Task.detached(priority: .utility) { [weak self] in
             defer {
                 try? handle.close()
@@ -9639,6 +9720,7 @@ final class FeedStore: ObservableObject {
                     HavenLog.net("media serve ref=\(ref.prefix(12)) → \(requesterHex.prefix(8)): rate-limit give-up at chunk \(index)/\(total)")
                     break
                 }
+                QaMediaStats.bump("served_direct_friend_bytes", chunk.count)
                 if let node {
                     if irohInFlight.count >= irohWindow { await irohInFlight.removeFirst().value }
                     irohInFlight.append(Task.detached { try? await node.sendToNode(nodeIdHex: requesterHex, payload: out) })
@@ -9782,7 +9864,7 @@ final class FeedStore: ObservableObject {
             // The media views re-render via `MediaArrivals` (adoptAsync notes it) — no feed rebuild.
             let adopted = await MediaStore.shared.adoptAsync(ref, from: temp)
             guard let self else { return }
-            if adopted { self.mediaArrived(ref) } else { self.clearRestoreProgress(ref) }
+            if adopted { self.mediaArrived(ref); QaMediaStats.bump("received_via_direct") } else { self.clearRestoreProgress(ref) }
             self.autoSaveReceived(ref)
             // DURABILITY: this blob just arrived peer-to-peer, which means the relay didn't have it (or
             // we'd have restored it from there). Re-mirror it to the circle's relay so it survives the

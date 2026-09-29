@@ -185,6 +185,8 @@ fun CircleScreen(onAddFriend: () -> Unit) {
         }
     }
     val items: List<FeedItemFfi> = if (feedRead.first == active) feedRead.second else emptyList()
+    // DEBUG qa dump (e2e `launch` step): the first composition that has feed items to show.
+    if (items.isNotEmpty()) androidx.compose.runtime.SideEffect { com.blaineam.haven.core.QaStats.mark("first_feed_rendered") }
     val storyGroups = remember(items) { groupStories(items) }
     // Stories live in the tray, not the list. Unsent posts are gone too — a "Message unsent" tombstone
     // in the feed is clutter, not information (PostCard still renders it for a deep link / comment sheet).

@@ -24,10 +24,13 @@ object HeavyWorkPolicy {
         val heat: Heat = Heat.NOMINAL,
         /** Battery Saver. */
         val powerSave: Boolean = false,
+        /** A forced suspension and its reason ("" = none) — only the DEBUG `heavy_work_override`
+         *  qa op sets it, so the e2e suite can exercise the gate without a real call. */
+        val forced: String = "",
     ) {
         /** Stop every deferrable heavy transfer: peer serving, backfill, full-size prefetch, handoff. */
         val suspendHeavyIO: Boolean
-            get() = havenCall || systemCall || heat >= Heat.SERIOUS || powerSave
+            get() = havenCall || systemCall || heat >= Heat.SERIOUS || powerSave || forced.isNotEmpty()
 
         /** Streaming to a FRIEND additionally needs a fully cool device — at FAIR the relay upload
          *  gets the budget, not peer serving. */
@@ -42,6 +45,7 @@ object HeavyWorkPolicy {
                 if (systemCall) add("system-call")
                 if (heat >= Heat.FAIR) add("thermal=${heat.name.lowercase()}")
                 if (powerSave) add("power-save")
+                if (forced.isNotEmpty()) add("forced=$forced")
             }.joinToString(",")
     }
 

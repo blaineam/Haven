@@ -218,8 +218,21 @@ private fun InCall() {
     val projectionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { result ->
         val data = result.data
+        val granted = result.resultCode == android.app.Activity.RESULT_OK && data != null
+        com.blaineam.haven.core.QaStats.shareConsent = if (granted) "granted" else "denied(${result.resultCode})"
         if (result.resultCode == android.app.Activity.RESULT_OK && data != null) {
             CallManager.startScreenShare(result.resultCode, data)
+        }
+    }
+    // DEBUG qa `screen_share` op: open the SAME consent prompt the share button does, so the e2e
+    // suite drives the real MediaProjection consent + foreground-service path (never a stub).
+    val qaShareAsk by com.blaineam.haven.core.QaDriver.screenShareAsk
+    androidx.compose.runtime.LaunchedEffect(qaShareAsk) {
+        if (qaShareAsk > 0 && !CallManager.screenShare.value) {
+            val mpm = context.getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE)
+                as android.media.projection.MediaProjectionManager
+            com.blaineam.haven.core.QaStats.shareConsentAttempts++
+            projectionLauncher.launch(mpm.createScreenCaptureIntent())
         }
     }
 
@@ -309,6 +322,7 @@ private fun InCall() {
                     else {
                         val mpm = context.getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE)
                             as android.media.projection.MediaProjectionManager
+                        com.blaineam.haven.core.QaStats.shareConsentAttempts++
                         projectionLauncher.launch(mpm.createScreenCaptureIntent())
                     }
                 }

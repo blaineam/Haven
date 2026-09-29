@@ -16,6 +16,17 @@ AND_PKG="${HAVEN_AND_PKG:-com.blaineam.haven}"
 
 log() { echo "[e2e-boot] $*"; }
 
+# E2E_PREFRIEND=0 (set by qa-e2e-full.mjs when the `newfriend` step runs): A and B start as
+# STRANGERS. No contact bundles are exchanged and A's devices are NOT pre-authorized on B's relay,
+# so the step can measure a genuinely fresh friendship through the real invite → accept → approve
+# path, including the acceptor's pre-enrollment 403s. The members file is still written; the harness
+# authorizes it itself once the step is done, restoring the baseline every later step expects.
+PREFRIEND="${E2E_PREFRIEND:-1}"
+authorize() {
+  if [[ "$PREFRIEND" == "0" ]]; then log "E2E_PREFRIEND=0 — not pre-authorizing $(grep -c . "$1" || true) member(s) (the harness does it after newfriend)"; return 0; fi
+  "$ROOT/Scripts/qa-e2e-authorize.sh" "$1"
+}
+
 
 # A HERMETIC FLEET IS THE DEFAULT. Every leg's QA state is wiped: identities re-mint, bundles
 # re-exchange, and no stale seen-set, contact, circle or blob from a prior run can leak in.
@@ -125,7 +136,7 @@ SIMCTL_CHILD_HAVEN_SKIP_ONBOARDING=1 xcrun simctl launch "$SIM" "$IOS_BUNDLE" >/
 # what makes A↔B contacts (circle invites + DMs need it, mailbox auth alone doesn't).
 STUB_AS_PRE="$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support"
 APP_DATA_PRE="$(xcrun simctl get_app_container "$SIM" "$IOS_BUNDLE" data 2>/dev/null || true)"
-if [[ -n "$APP_DATA_PRE" ]]; then
+if [[ -n "$APP_DATA_PRE" && "$PREFRIEND" != "0" ]]; then
   IOS_AS_PRE="$APP_DATA_PRE/Library/Application Support"
   for i in $(seq 1 20); do [[ -s "$IOS_AS_PRE/qa-my-bundle.bin" ]] && break; sleep 1; done
   if [[ -s "$IOS_AS_PRE/qa-my-bundle.bin" ]]; then
@@ -176,7 +187,13 @@ fi
 export HAVEN_STUB_NODE="$NODE" HAVEN_STUB_TOKEN="$TOKEN"
 
 # ── 3. Wire sim (+ android if present) at the stub ────────────────────────────
-HAVEN_IOS_UDID="$SIM" "$ROOT/Scripts/qa-wire-stub-clients.sh" 2>&1 | tail -5 || true
+# Under E2E_PREFRIEND=0 the iOS leg must NOT know B's relay yet: the newfriend step has it adopt the
+# relay from B's invite ticket, which is the only way the pending-enrollment path is exercised.
+if [[ "$PREFRIEND" == "0" ]]; then
+  log "E2E_PREFRIEND=0 — iOS not wired to the stub relay (adopted from the invite ticket instead)"
+else
+  HAVEN_IOS_UDID="$SIM" "$ROOT/Scripts/qa-wire-stub-clients.sh" 2>&1 | tail -5 || true
+fi
 SIMCTL_CHILD_HAVEN_SKIP_ONBOARDING=1 xcrun simctl launch "$SIM" "$IOS_BUNDLE" >/dev/null 2>&1 || true
 sleep 5
 
@@ -195,7 +212,7 @@ hexline() { [[ -s "$1" ]] && printf '%s\n' "$(tr -d ' \r\n' <"$1")"; }
 { hexline "$AS/qa-account-hex.txt"; hexline "$AS/qa-device-hex.txt"; hexline "$AS/qa-selfsync-device-hex.txt"; } \
   | grep -E '^[0-9a-f]{64}$' | sort -u >"$MEMBERS" || true
 [[ -s "$MEMBERS" ]] || { echo "error: no member hexes dumped by the iOS app (DEBUG build required)"; exit 1; }
-"$ROOT/Scripts/qa-e2e-authorize.sh" "$MEMBERS"
+authorize "$MEMBERS"
 
 # ── 5. Tauri as linked device of A ────────────────────────────────────────────
 pkill -f 'target/debug/haven-desktop' 2>/dev/null || true; sleep 1
@@ -240,7 +257,7 @@ for i in $(seq 1 30); do [[ -s "$DATA_DIR/qa-device-hex.txt" ]] && break; sleep 
 { cat "$MEMBERS"; hexline "$DATA_DIR/qa-device-hex.txt"; hexline "$DATA_DIR/qa-account-hex.txt"; } \
   | grep -E '^[0-9a-f]{64}$' | sort -u >"$MEMBERS.next" || true
 [[ -s "$MEMBERS.next" ]] && mv "$MEMBERS.next" "$MEMBERS"
-"$ROOT/Scripts/qa-e2e-authorize.sh" "$MEMBERS"
+authorize "$MEMBERS"
 
 # ── 6. Android emulator as linked device of A (best-effort leg) ───────────────
 if command -v adb >/dev/null 2>&1; then
@@ -346,7 +363,7 @@ if command -v adb >/dev/null 2>&1; then
     if [[ -s "$ANDROID_HEXES" ]]; then
       { cat "$MEMBERS"; tr -d ' \r' <"$ANDROID_HEXES"; echo; } | grep -E '^[0-9a-f]{64}$' | sort -u >"$MEMBERS.next" || true
       [[ -s "$MEMBERS.next" ]] && mv "$MEMBERS.next" "$MEMBERS"
-      "$ROOT/Scripts/qa-e2e-authorize.sh" "$MEMBERS"
+      authorize "$MEMBERS"
     else
       log "WARN: android device hex not dumped — android puts may be REFUSED"
     fi
@@ -357,7 +374,9 @@ if command -v adb >/dev/null 2>&1; then
 fi
 
 # ── 7. Give iOS the stub's bundle (B → A) and relaunch so it ingests ──────────
-if [[ -s "$STUB_AS/qa-my-bundle.bin" ]]; then
+if [[ "$PREFRIEND" == "0" ]]; then
+  log "E2E_PREFRIEND=0 — A and B left as strangers for the newfriend step"
+elif [[ -s "$STUB_AS/qa-my-bundle.bin" ]]; then
   cp "$STUB_AS/qa-my-bundle.bin" "$AS/qa-peer-bundle.bin"
   cp "$STUB_AS/qa-my-name.txt" "$AS/qa-peer-name.txt" 2>/dev/null || printf 'FleetB' >"$AS/qa-peer-name.txt"
   xcrun simctl terminate "$SIM" "$IOS_BUNDLE" 2>/dev/null || true

@@ -954,22 +954,18 @@ final class RelayHost: ObservableObject {
         // members are just the host) so every client gets HTTP REFUSED forever — posts/media never
         // land for multi-device or cross-user. Union extra hexes from Application Support so the
         // driver can authorize iOS/Android/Tauri accounts (and their device ids) for the mailbox.
-        let qaExtra = Self.qaAuthorizeMembers()
-        for (cid, members) in FeedStore.shared.circleMemberships() {
-            var m = members
-            for h in qaExtra where !m.contains(h) { m.append(h) }
-            let relays = RelayMailboxStore.shared.relays(forCircle: cid)
-            handle.authorizeCircle(circleId: cid, members: m, relays: relays)
-        }
-        // Stub may have zero circles in its social engine — still authorize "default" for QA.
-        if Bundle.main.bundleIdentifier?.contains("qa.stub") == true {
-            var m = qaExtra
-            let me = AccountStore.currentNodeHex()
-            if !me.isEmpty, !m.contains(me) { m.append(me) }
-            if !m.isEmpty {
-                handle.authorizeCircle(circleId: "default", members: m, relays: [nodeId].filter { !$0.isEmpty })
-                HavenLog.relay("stub authorize default members=\(m.count)")
-            }
+        // The stub may have zero circles in its social engine — it still serves "default" for QA.
+        // ONE authorize per circle (it replaces the set): the stub's old second "default" pass
+        // carried only the allow-list and evicted the friend it had just approved.
+        let isStub = Bundle.main.bundleIdentifier?.contains("qa.stub") == true
+        let grants = RelayAuthPlan.grants(
+            memberships: FeedStore.shared.circleMemberships(),
+            relaysFor: { RelayMailboxStore.shared.relays(forCircle: $0) },
+            qaExtra: Self.qaAuthorizeMembers(), isQaStub: isStub,
+            me: AccountStore.currentNodeHex(), ownRelay: nodeId)
+        for g in grants {
+            handle.authorizeCircle(circleId: g.circleId, members: g.members, relays: g.relays)
+            if isStub, g.circleId == "default" { HavenLog.relay("stub authorize default members=\(g.members.count)") }
         }
     }
 
@@ -1924,12 +1920,7 @@ final class RelayMailboxStore: ObservableObject {
         let before = relays(forCircle: "default")
         adoptBootstrapRelays(hexes)
         for h in hexes where !isForgotten(h) { add(circleId: "default", nodeHex: h) }
-        let after = relays(forCircle: "default")
-        // Newly adopted ticket relays refuse our writes until the inviter enrolls us — expected,
-        // so their 403s must not trip the long backoffs (see `PendingEnrollment`).
-        let added = after.filter { h in !before.contains(where: { $0.caseInsensitiveCompare(h) == .orderedSame }) }
-        RelayEnrollment.noteAdopted(added)
-        return after != before
+        return relays(forCircle: "default") != before
     }
 
     /// Every distinct ACTIVE relay across all circles — for mesh sync / the active transport set.

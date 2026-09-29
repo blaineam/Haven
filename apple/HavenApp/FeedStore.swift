@@ -1922,6 +1922,11 @@ final class FeedStore: ObservableObject {
         // (frame 19; the periodic re-announce is 10 min on a phone), and wake them: a friend who
         // accepted and pocketed the phone otherwise learns of the approval on their next poll.
         enrollMembers(circleId: "default", force: true)
+        // …and the relay I HOST in-process: `enrollMembers` never reaches it (RelayClients refuses
+        // to dial our own node), and its allow-list otherwise refreshed only on the next sync tick
+        // — the inviter IS the relay host in the plain invite topology, so the new friend's first
+        // writes kept bouncing 403 in the meantime. `reloadCircles` above refilled the members.
+        RelayHost.shared.authorizeMembership()
         reannounceOwnRelay()
         PushManager.shared.wake(req.idHex.lowercased(), silent: true)
         FriendInviteStore.shared.beginFirstContactFastPoll()

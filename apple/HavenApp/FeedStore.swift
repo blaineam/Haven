@@ -7429,6 +7429,33 @@ final class FeedStore: ObservableObject {
         }
     }
 
+    /// Re-drive uploads deferred by a friend-invite relay's pending-enrollment 403s. `full: false`
+    /// (the short-gap timer) only re-runs the media queue and the event uploader for what already
+    /// failed; `full: true` (grant / announce / first successful write) also re-offers my media and
+    /// my envelopes for every circle served by `relays` — content that landed on some OTHER relay
+    /// is otherwise never retried on the one that refused it. Per-(relay, key) upload marks make
+    /// the re-offer a no-op wherever it already landed.
+    func retryPendingEnrollmentUploads(relays: [String], full: Bool) {
+        guard let engine else { return }
+        let released = MediaBackupBackoff.releasePendingEnrollment()
+        if released > 0 { HavenLog.sync("media-backup: \(released) ref(s) released for pending-enrollment retry") }
+        MediaBackupQueue.shared.drainPersisted(engine: engine)
+        Task { await BackgroundUploader.shared.flush() }
+        guard full, !relays.isEmpty else { return }
+        let wanted = Set(relays.map { $0.lowercased() })
+        let cids = circles.map(\.id).filter { cid in
+            RelayMailboxStore.shared.relays(forCircle: cid).contains { wanted.contains($0.lowercased()) }
+        }
+        guard !cids.isEmpty else { return }
+        backfillMailboxMedia(circleIds: cids)
+        Task.detached(priority: .utility) {
+            for cid in cids {
+                let envs = await engine.run { $0.exportMyEnvelopes(circleId: cid) }
+                for env in envs { _ = await SharedStore.uploadEvent(circleId: cid, env: env) }
+            }
+        }
+    }
+
     /// Last member-enroll per circle — the set changes rarely, so once per 10 min is plenty.
     private var lastEnrollMs: [String: UInt64] = [:]
 
@@ -7590,6 +7617,9 @@ final class FeedStore: ObservableObject {
         // the UI (adoptRelayNode → self-sync `relay-readd`, LWW), never from an announce. So: drop the
         // announce entirely for a forgotten relay, and never re-add it below.
         if RelayMailboxStore.shared.isForgotten(lower) { return }
+        // The inviter announcing a relay we're still pending on = we're a member now; retry what it
+        // refused instead of waiting out a backoff (no-op for any relay not pending enrollment).
+        RelayEnrollment.triggerNow(relays: [lower], reason: "relay announce")
         // NEVER let an announce tell us about our OWN running relay. The live front door is
         // authoritative; an announce blob is only ever a stale photograph of it.
         //

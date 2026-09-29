@@ -333,6 +333,9 @@ final class FriendInviteStore: ObservableObject {
                 // (epoch keys, history, relay entries).
                 await FeedStore.shared.ingestInviteHello(hello)
                 RelayMailboxStore.shared.adoptFriendInviteRelays(t.relays)   // idempotent (also at accept)
+                // The inviter approved (and enrolled us on their relays): retry whatever their
+                // relays refused while we were pending, now rather than on a backoff.
+                RelayEnrollment.triggerNow(relays: t.relays, reason: "grant")
                 if accepted.indices.contains(i) { accepted[i].granted = true }
                 save()
                 // The friendship is real now: un-gate their roster pull and dials, and keep polling
@@ -465,5 +468,79 @@ final class FriendInviteStore: ObservableObject {
             i += 2
         }
         return out
+    }
+}
+
+/// App-side holder of `PendingEnrollment` (see ReachPolicy.swift): which friend-invite relays are
+/// still expected to refuse us, the short retry driver while they do, and the immediate re-drive
+/// when the grant / an announce / a first successful write says enrollment has landed.
+@MainActor
+enum RelayEnrollment {
+    private static var policy = PendingEnrollment()
+    private static var retryTask: Task<Void, Never>?
+    private static var lastTriggerMs: UInt64 = 0
+
+    private static func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
+
+    static func noteAdopted(_ relays: [String]) {
+        for r in relays where r.count == 64 { policy.noteAdopted(r, nowMs: nowMs()) }
+    }
+    static func isTracked(_ relay: String) -> Bool { policy.isTracked(relay) }
+    static func anyPending() -> Bool { policy.anyPending(nowMs: nowMs()) }
+
+    /// Error text from the iroh relay lane for a membership refusal (the HTTP lane has its own type).
+    nonisolated static func isForbidden(_ error: Error) -> Bool {
+        if error is SharedStore.RelayForbidden { return true }
+        let s = String(describing: error).lowercased()
+        return s.contains("forbidden") || s.contains("refused")
+    }
+
+    /// A refusal from `relay`. Returns TRUE when it is the expected pending-enrollment 403 — the
+    /// caller must then skip every long backoff (relay health, media stall); a short flat retry is
+    /// scheduled here instead, and `ref`'s media backoff becomes the same short gap.
+    @discardableResult
+    static func absorbRefusal(_ relay: String, ref: String? = nil) -> Bool {
+        guard case .retrySoon = policy.onFailure(relay: relay, forbidden: true, nowMs: nowMs()) else { return false }
+        if let ref { MediaBackupBackoff.notePendingEnrollment(ref) }
+        scheduleRetry()
+        return true
+    }
+
+    /// An authorized write succeeded on `relay`: enrollment has landed. Re-drive everything that
+    /// was deferred for it (a post that landed ELSEWHERE is never retried here on its own).
+    static func confirm(_ relay: String) {
+        guard policy.confirm(relay) else { return }
+        HavenLog.relay("relay \(relay.prefix(8)) enrollment confirmed — re-driving deferred uploads")
+        FeedStore.shared.retryPendingEnrollmentUploads(relays: [relay.lowercased()], full: true)
+    }
+
+    /// The grant arrived / the inviter announced the relay: enrollment is (about to be) in place.
+    /// Re-open the pending window for relays still unconfirmed and retry now, then once more
+    /// shortly after (the inviter's enroll call may land a beat after its grant).
+    static func triggerNow(relays: [String], reason: String) {
+        let tracked = relays.map { $0.lowercased() }.filter { policy.isTracked($0) }
+        guard !tracked.isEmpty else { return }
+        let now = nowMs()
+        for r in tracked { policy.refresh(r, nowMs: now) }
+        guard now &- lastTriggerMs > 10_000 else { return }   // announces repeat — don't stampede
+        lastTriggerMs = now
+        HavenLog.relay("pending-enrollment retry (\(reason)) relays=\(tracked.count)")
+        FeedStore.shared.retryPendingEnrollmentUploads(relays: tracked, full: true)
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            FeedStore.shared.retryPendingEnrollmentUploads(relays: tracked, full: true)
+        }
+    }
+
+    /// The flat short-gap driver: while any relay is pending and something was refused, retry the
+    /// deferred media + queued events every `retryGapMs` — never escalating, never past the window.
+    private static func scheduleRetry() {
+        guard retryTask == nil else { return }
+        retryTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: PendingEnrollment.retryGapMs * 1_000_000)
+            retryTask = nil
+            guard anyPending() else { return }
+            FeedStore.shared.retryPendingEnrollmentUploads(relays: [], full: false)
+        }
     }
 }

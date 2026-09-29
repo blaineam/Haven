@@ -59,3 +59,49 @@ enum DialOrder {
         return out
     }
 }
+
+/// Relays adopted from a friend-invite ticket answer 403 to our uploads until the inviter approves
+/// us and enrolls our ids there. That refusal is EXPECTED and short-lived, so it must not feed the
+/// long backoffs built for dead or hostile relays (media 2 min → 1 h, relay stand-down, uploader
+/// doubling) — the new friend's first photos would wait out the longest of them. While a relay is
+/// "pending enrollment" (adopted from a ticket, not yet confirmed by a successful authorized write,
+/// within `windowMs` of adoption) a 403 from it means "retry soon", and nothing else.
+struct PendingEnrollment {
+    static let windowMs: UInt64 = 300_000     // treat 403 as "not yet" for ~5 min after adoption
+    static let retryGapMs: UInt64 = 12_000    // …retrying on this short, FLAT gap (no escalation)
+
+    enum Decision: Equatable {
+        case retrySoon(afterMs: UInt64)   // pending enrollment: no strike, no long backoff
+        case backOff                      // the ordinary path (outage, or a genuine refusal)
+    }
+
+    private(set) var adoptedAtMs: [String: UInt64] = [:]
+
+    /// A ticket relay was newly adopted (or its window re-opened by a grant / announce).
+    mutating func noteAdopted(_ relay: String, nowMs: UInt64) {
+        adoptedAtMs[relay.lowercased()] = nowMs
+        if adoptedAtMs.count > 64 { adoptedAtMs = adoptedAtMs.filter { nowMs &- $0.value < Self.windowMs } }
+    }
+    /// Re-open the window only for a relay we are still waiting on (not one already confirmed).
+    mutating func refresh(_ relay: String, nowMs: UInt64) {
+        if adoptedAtMs[relay.lowercased()] != nil { adoptedAtMs[relay.lowercased()] = nowMs }
+    }
+    /// An authorized write succeeded there — we are enrolled; 403s are ordinary again.
+    /// Returns whether the relay WAS being tracked (the caller then re-drives what it deferred).
+    @discardableResult
+    mutating func confirm(_ relay: String) -> Bool {
+        adoptedAtMs.removeValue(forKey: relay.lowercased()) != nil
+    }
+    func isTracked(_ relay: String) -> Bool { adoptedAtMs[relay.lowercased()] != nil }
+    func isPending(_ relay: String, nowMs: UInt64) -> Bool {
+        guard let at = adoptedAtMs[relay.lowercased()], nowMs >= at else { return false }
+        return nowMs - at < Self.windowMs
+    }
+    func anyPending(nowMs: UInt64) -> Bool { adoptedAtMs.keys.contains { isPending($0, nowMs: nowMs) } }
+
+    /// How to treat a failed op against `relay`. Only a REFUSAL from a still-pending relay is
+    /// special; an outage (no answer) is not evidence of anything enrollment will fix.
+    func onFailure(relay: String, forbidden: Bool, nowMs: UInt64) -> Decision {
+        forbidden && isPending(relay, nowMs: nowMs) ? .retrySoon(afterMs: Self.retryGapMs) : .backOff
+    }
+}

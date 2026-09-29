@@ -363,7 +363,7 @@ function makeDesktop() {
     stage: (src, name) => { const p = join(DESK_DATA, name); writeFileSync(p, readFileSync(src)); return p; },
     skew: () => 0,                        // same machine, same clock
     wipe: () => wipeLocalQaFiles(DESK_DATA),
-    diagnose: () => [procLine('haven-desktop', hostProcAlive('target/debug/haven-desktop')),
+    diagnose: () => [procLine('haven-desktop', hostProcAlive('target/qa/haven-desktop')),
                      ...localDumpDiag(join(DESK_DATA, 'qa-dump.json'))],
   };
 }

@@ -16,7 +16,7 @@ TOKEN="${HAVEN_STUB_TOKEN:-8e17157a4fd8f6eeef1c3accdd9fc1de}"
 # personal daily-driver identity at the legacy root is never overwritten.
 DATA_DIR="${HAVEN_DESKTOP_DATA:-$HOME/Library/Application Support/Haven/qa-matrix}"
 DATA_BASE="${HAVEN_DESKTOP_BASE:-$HOME/Library/Application Support/Haven}"
-DESK="${HAVEN_DESKTOP_BIN:-$ROOT/desktop/src-tauri/target/debug/haven-desktop}"
+DESK="${HAVEN_DESKTOP_BIN:-$ROOT/desktop/src-tauri/target/qa/haven-desktop}"
 
 log() { echo "[linked] $*"; echo "$*" >>"$OUT/run.log"; }
 pass=0; fail=0
@@ -201,11 +201,11 @@ rm -f "$DATA_DIR/haven_social_state.bin" "$DATA_DIR/mailbox-seen.txt" \
       "$DATA_DIR/selfsync-state.bin" "$DATA_DIR/qa-device-hex.txt" "$DATA_DIR/qa-account-hex.txt" 2>/dev/null || true
 
 # Kill prior desktop
-pkill -f 'target/debug/haven-desktop' 2>/dev/null || true
+pkill -f 'target/qa/haven-desktop' 2>/dev/null || true
 sleep 1
 if [[ ! -x "$DESK" ]]; then
   log "building haven-desktop…"
-  (cd "$ROOT/desktop/src-tauri" && cargo build -q 2>>"$OUT/tauri-build.log") || true
+  (cd "$ROOT/desktop/src-tauri" && cargo build -q --profile qa --bin haven-desktop 2>>"$OUT/tauri-build.log") || true
 fi
 [[ -x "$DESK" ]] || { echo "error: no $DESK"; exit 1; }
 

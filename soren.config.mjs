@@ -131,9 +131,11 @@ export default {
     'desktop-build': {
       type: 'cmd',
       cmd: 'cargo',
-      args: ['build', '--bin', 'haven-desktop'],
+      // The `qa` profile (optimized, wraps on overflow like release, keeps the debug-only QA hooks)
+      // — the exact binary the e2e fleet runs, so this build is not wasted and the gate checks it.
+      args: ['build', '--profile', 'qa', '--bin', 'haven-desktop'],
       cwd: 'desktop/src-tauri',
-      description: 'Tauri desktop binary actually links (haven-desktop)',
+      description: 'Tauri desktop binary actually links (haven-desktop, qa profile)',
     },
 
     // ── Full cross-device E2E: iOS sim + Android emu + macOS HavenStub (relay

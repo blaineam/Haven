@@ -87,6 +87,9 @@ jobs:
           - target: arm-unknown-linux-musleabihf   # Pi Zero / Pi 1
             deb: false
     runs-on: ubuntu-latest
+    env:
+      # `haven-relay version` reports this — the self-updater compares it to the release tag.
+      HAVEN_RELAY_BUILD_VERSION: ${{ needs.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -148,6 +151,8 @@ jobs:
       matrix:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
     runs-on: macos-latest
+    env:
+      HAVEN_RELAY_BUILD_VERSION: ${{ needs.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -188,6 +193,8 @@ jobs:
       matrix:
         target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
     runs-on: windows-latest
+    env:
+      HAVEN_RELAY_BUILD_VERSION: ${{ needs.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -217,14 +224,46 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [build, macos, windows]
+    needs: [meta, build, macos, windows]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
+      # The signer builds from this checkout (its trusted-key list must match the relay's).
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      # ── Relay release signatures ────────────────────────────────────────────────────────
+      # Self-updating relays install ONLY binaries carrying a valid Ed25519 signature (over the
+      # file's SHA-256 + asset name + version) from a key compiled into the relay. Fail CLOSED: no
+      # secret → no release, so an unsigned (un-updatable) relay can never ship. The signer also
+      # refuses a key the relay doesn't trust, and every .sig is re-verified before upload.
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Sign relay binaries (fails closed without RELAY_SIGNING_KEY)
+        env:
+          RELAY_SIGNING_KEY: ${{ secrets.RELAY_SIGNING_KEY }}
+          FULL_VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELAY_SIGNING_KEY:-}" ]; then
+            echo "::error::RELAY_SIGNING_KEY secret is not set — refusing to publish unsigned relay" \
+                 "binaries (self-updating relays would never install them). See docs/RELAY-AND-DEPLOY.md."
+            exit 1
+          fi
+          cargo build --release --locked --manifest-path core/Cargo.toml -p haven-relay-sign
+          signer=core/target/release/haven-relay-sign
+          bins=()
+          for f in dist/haven-relay-*; do
+            case "$f" in *.sig) continue ;; esac
+            bins+=("$f")
+          done
+          if [ "${#bins[@]}" -eq 0 ]; then
+            echo "::error::no haven-relay-<target> binaries found in dist/ to sign"
+            exit 1
+          fi
+          "$signer" sign --version "$FULL_VERSION" "${bins[@]}"
+          "$signer" verify --version "$FULL_VERSION" "${bins[@]}"
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:

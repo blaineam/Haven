@@ -56,7 +56,16 @@ final class BackgroundUploader: ObservableObject {
         // Stays set through the retry pass itself: flipping to "Sending 0 of 1" for every attempt and
         // back to "Retrying" between them read as noise. A pass that lands everything clears it.
         p.backingOff = lastPassFailed && !p.pendingByCircle.isEmpty
+        p.mediaPendingByCircle = authoredMediaPending
         if p != progress { progress = p }
+    }
+    /// Fresh-post media still headed for a relay, per circle — reported by `MediaBackupQueue`, which
+    /// owns those uploads; folded in here so the pill has ONE source of truth.
+    private var authoredMediaPending: [String: Int] = [:]
+    func setAuthoredMediaPending(_ byCircle: [String: Int]) {
+        guard byCircle != authoredMediaPending else { return }
+        authoredMediaPending = byCircle
+        publishProgress()
     }
 
     private init() {

@@ -20,8 +20,16 @@ data class UploadProgress(
     val retryingByCircle: Map<String, Int> = emptyMap(),
     val sessionTotalByCircle: Map<String, Int> = emptyMap(),
     val sessionDoneByCircle: Map<String, Int> = emptyMap(),
+    /** Media blobs of just-authored posts still headed for a relay, per circle. The event lands in
+     *  well under a second; the photo or video is what takes time. Apple parity. */
+    val mediaPendingByCircle: Map<String, Int> = emptyMap(),
 ) {
+    /** Authored EVENTS still waiting for a mailbox. */
     fun pending(circleId: String) = pendingByCircle[circleId] ?: 0
+    /** Authored media blobs still waiting for a relay. */
+    fun mediaPending(circleId: String) = mediaPendingByCircle[circleId] ?: 0
+    /** Everything of yours the pill is waiting on. */
+    fun totalPending(circleId: String) = pending(circleId) + mediaPending(circleId)
 }
 
 /** What the composer pill says for one circle. */
@@ -35,7 +43,7 @@ sealed class SyncBadgeState {
         fun derive(p: UploadProgress, circleId: String, hostsRelay: Boolean, hasRelay: Boolean,
                    nearbyConnected: Boolean, online: Boolean): SyncBadgeState {
             if (hostsRelay) return Synced
-            val pending = p.pending(circleId)
+            val pending = p.totalPending(circleId)
             // No relay: posts go best-effort straight to whoever's reachable — nothing to track.
             if (!hasRelay || pending == 0) {
                 return if (hasRelay || nearbyConnected || online) Synced else Local
@@ -48,6 +56,53 @@ sealed class SyncBadgeState {
             return Sending(done, total)
         }
     }
+
+    /** The QA dump's word for the state (docs/QA.md "Progress fields"). */
+    val dumpState: String
+        get() = when (this) {
+            Synced -> "synced"
+            is Sending -> "syncing"
+            is Retrying -> "retrying"
+            Local -> "local"
+        }
+
+    /** Finer than [dumpState]. */
+    val detail: String
+        get() = when (this) {
+            Synced -> "synced"
+            is Sending -> "sending $done/$total"
+            is Retrying -> "retrying $pending"
+            Local -> "local"
+        }
+}
+
+/**
+ * Bounded log of the pill's transitions (QA dump `sync_badge_history`, Apple parity). A small
+ * post's upload starts and finishes between two harness samples; recording every change where it
+ * happens makes "synced → syncing → synced" provable instead of a race.
+ */
+class SyncBadgeHistory {
+    data class Entry(val circle: String, val state: String, val detail: String, val pending: Int, val atMs: Long)
+
+    private val entries = ArrayList<Entry>()
+
+    @Synchronized fun entries(): List<Entry> = entries.toList()
+
+    /** Append when what the pill shows changed (same circle, state, detail and count = no entry). */
+    @Synchronized fun record(circle: String, badge: SyncBadgeState, pending: Int, atMs: Long) {
+        val e = Entry(circle, badge.dumpState, badge.detail, pending, atMs)
+        val last = entries.lastOrNull()
+        if (last != null && last.copy(atMs = e.atMs) == e) return
+        entries += e
+        while (entries.size > CAP) entries.removeAt(0)
+    }
+
+    fun toJson(): org.json.JSONArray = org.json.JSONArray().apply {
+        for (e in entries()) put(org.json.JSONObject().put("circle", e.circle).put("state", e.state)
+            .put("detail", e.detail).put("pending", e.pending).put("atMs", e.atMs))
+    }
+
+    companion object { const val CAP = 20 }
 }
 
 /**

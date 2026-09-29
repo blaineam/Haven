@@ -97,4 +97,29 @@ class SyncProgressTest {
         s.discover((0 until MediaWantedSet.CAP + 50).map { "r$it" })
         assertEquals(MediaWantedSet.CAP, s.count)
     }
+
+    /** The event lands in under a second; the video it names is what takes time — the pill must
+     *  keep saying so while the just-posted media is headed for the relay. Apple parity. */
+    @Test fun authored_media_keeps_the_pill_syncing() {
+        assertEquals(SyncBadgeState.Sending(0, 2), derive(UploadProgress(mediaPendingByCircle = mapOf(c to 2))))
+        val both = UploadProgress(pendingByCircle = mapOf(c to 1), mediaPendingByCircle = mapOf(c to 2))
+        assertEquals(3, both.totalPending(c))
+        assertEquals(SyncBadgeState.Sending(0, 3), derive(both))
+        assertEquals(SyncBadgeState.Synced, derive(UploadProgress(mediaPendingByCircle = mapOf("other" to 4))))
+    }
+
+    @Test fun history_records_each_change_once_and_is_bounded() {
+        val h = SyncBadgeHistory()
+        h.record(c, SyncBadgeState.Synced, 0, 1)
+        h.record(c, SyncBadgeState.Synced, 0, 2)
+        h.record(c, SyncBadgeState.Sending(0, 1), 1, 3)
+        h.record(c, SyncBadgeState.Synced, 0, 4)
+        assertEquals(listOf("synced", "syncing", "synced"), h.entries().map { it.state })
+        assertEquals(listOf(1L, 3L, 4L), h.entries().map { it.atMs })
+        for (i in 0 until SyncBadgeHistory.CAP * 3) {
+            h.record(c, if (i % 2 == 0) SyncBadgeState.Synced else SyncBadgeState.Sending(0, 1), i % 2, 10L + i)
+        }
+        assertEquals(SyncBadgeHistory.CAP, h.entries().size)
+        assertEquals(10L + SyncBadgeHistory.CAP * 3 - 1, h.entries().last().atMs)
+    }
 }

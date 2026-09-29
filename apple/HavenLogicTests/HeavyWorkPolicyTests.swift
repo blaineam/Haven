@@ -122,4 +122,13 @@ final class HeavyWorkPolicyTests: XCTestCase {
                        "warm → keep uploading to the relay")
         XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, C(heat: .critical)), .init(priority: 0, backfill: 0))
     }
+
+    /// The QA attribution of a direct friend serve names its cause (e2e `relayfirst`).
+    func testStreamReasonNamesWhyNoHintAnsweredIt() {
+        XCTAssertEqual(HeavyWorkPolicy.streamReason(friend(onRelay: true, relay: false), circleKnown: false), "circle-unresolved")
+        XCTAssertEqual(HeavyWorkPolicy.streamReason(friend(relay: false), circleKnown: true), "circle-has-no-relay")
+        XCTAssertEqual(HeavyWorkPolicy.streamReason(friend(onRelay: true, hints: HeavyWorkPolicy.maxRelayHints), circleKnown: true),
+                       "hints-exhausted")
+        XCTAssertEqual(HeavyWorkPolicy.streamReason(friend(), circleKnown: true), "not-on-relay-nor-queued")
+    }
 }

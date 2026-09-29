@@ -118,6 +118,18 @@ enum HeavyWorkPolicy {
         return c.peerServingAllowedForFriends ? .stream : .decline("friend-serving-off(\(c.reason.isEmpty ? "relay-first" : c.reason))")
     }
 
+    /// Why a friend's ask ended in `.stream` rather than a hint — QA attribution only (the e2e
+    /// `relayfirst` step names the cause of any direct serve). `circleKnown`: the ref resolved to
+    /// a circle at all (an unresolved ref reads as "no relay" to `decideServe`).
+    static func streamReason(_ r: ServeRequest, circleKnown: Bool) -> String {
+        if r.isOwnDevice { return "own-device" }
+        if !circleKnown { return "circle-unresolved" }
+        if !r.circleHasRelay { return "circle-has-no-relay" }
+        if r.hintsAlreadySent >= maxRelayHints { return "hints-exhausted" }
+        if !r.onRelay && !r.uploadPending { return "not-on-relay-nor-queued" }
+        return "other"
+    }
+
     // MARK: - Requester side
 
     /// How long a FRESH ref waits on the relay before anyone is asked directly. The author's upload

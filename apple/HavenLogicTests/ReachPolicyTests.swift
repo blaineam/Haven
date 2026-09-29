@@ -200,3 +200,24 @@ final class RelayAuthPlanTests: XCTestCase {
                            .init(circleId: "c1", members: [me], relays: [])])
     }
 }
+
+/// Which circle a launch reopens and pulls first (ReachPolicy.swift `LaunchOrder`).
+final class LaunchOrderTests: XCTestCase {
+    func testRelaunchReopensTheRememberedCircle() {
+        let ids = ["default", "c1", "dm:a-b"]
+        XCTAssertEqual(LaunchOrder.restoredActiveCircle(saved: "c1", current: "default", circleIds: ids, isDeleted: { _ in false }), "c1")
+        XCTAssertEqual(LaunchOrder.restoredActiveCircle(saved: nil, current: "default", circleIds: ids, isDeleted: { _ in false }), "default")
+        XCTAssertEqual(LaunchOrder.restoredActiveCircle(saved: "gone", current: "default", circleIds: ids, isDeleted: { _ in false }), "default",
+                       "a circle we left is not reopened")
+        XCTAssertEqual(LaunchOrder.restoredActiveCircle(saved: "c1", current: "default", circleIds: ids, isDeleted: { $0 == "c1" }), "default",
+                       "a deleted circle is not reopened")
+        XCTAssertEqual(LaunchOrder.restoredActiveCircle(saved: "dm:a-b", current: "default", circleIds: ids, isDeleted: { _ in false }), "default",
+                       "a DM thread is not the feed")
+    }
+
+    func testTheActiveCircleIsItsOwnFirstMailboxPhase() {
+        XCTAssertEqual(LaunchOrder.mailboxPhases(["default", "c1", "c2"], active: "c1"), [["c1"], ["default", "c2"]])
+        XCTAssertEqual(LaunchOrder.mailboxPhases(["c1"], active: "c1"), [["c1"]])
+        XCTAssertEqual(LaunchOrder.mailboxPhases(["default", "c2"], active: "c1"), [["default", "c2"]])
+    }
+}

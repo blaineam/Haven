@@ -90,6 +90,17 @@ object HeavyWorkPolicy {
         else ServeDecision.Decline("friend-serving-off(${c.reason.ifEmpty { "relay-first" }})")
     }
 
+    /** Why a friend's ask ended in [ServeDecision.Stream] rather than a hint — QA attribution only
+     *  (the e2e `relayfirst` step names the cause of any direct serve). Apple `streamReason` parity. */
+    fun streamReason(r: ServeRequest, circleKnown: Boolean): String = when {
+        r.isOwnDevice -> "own-device"
+        !circleKnown -> "circle-unresolved"
+        !r.circleHasRelay -> "circle-has-no-relay"
+        r.hintsAlreadySent >= MAX_RELAY_HINTS -> "hints-exhausted"
+        !r.onRelay && !r.uploadPending -> "not-on-relay-nor-queued"
+        else -> "other"
+    }
+
     /** May a relay miss fall through to a direct peer ask? Small companions (thumb/poster/preview,
      *  ≤32 KB) always may; a FRESH ref in a circle with a relay waits [FRESH_RELAY_PATIENCE_MS]. */
     fun mayDirectAskAfterRelayMiss(

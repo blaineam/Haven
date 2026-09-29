@@ -22,6 +22,25 @@ object MediaVariants {
         return rest.substring(0, i) to rest.substring(i + 1)
     }
 
+    /**
+     * What [ref] is to [media]: "thumb" / "preview" / "poster" / "original" when it is a companion,
+     * "content" when it is listed bare and is no companion, null when the list does not carry it.
+     *
+     * Thumbs and previews are named ONLY inside their markers — `media.contains(ref)` never finds
+     * them — so the relay-first serve found no circle for them, assumed no relay, and streamed them
+     * to friends peer-to-peer while the relay held them. Apple `MediaVariants.role` parity.
+     */
+    fun role(ref: String, media: List<String>): String? {
+        if (ref.isEmpty()) return null
+        for (m in media) {
+            if (parseThumb(m)?.second == ref) return "thumb"
+            if (parsePreview(m)?.second == ref) return "preview"
+            if (parsePoster(m)?.second == ref) return "poster"
+            if (parseOriginal(m)?.second == ref) return "original"
+        }
+        return if (ref in media) "content" else null
+    }
+
     /** Thumb companion for a content ref, if the post/DM declared one. */
     fun thumbFor(content: String, media: List<String>): String? =
         media.mapNotNull { parseThumb(it) }.firstOrNull { it.first == content }?.second

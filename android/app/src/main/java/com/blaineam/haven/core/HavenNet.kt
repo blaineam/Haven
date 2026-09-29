@@ -3678,10 +3678,9 @@ object HavenNet : InboundListener {
      *  before the big blobs start. Apple FeedStore.enqueueAuthoredMedia parity. */
     private fun enqueueAuthoredMedia(circleId: String, media: List<String>) {
         QaStats.authoredEnqueued(media)   // upload-before-broadcast evidence (DEBUG qa dump)
-        for (ref in MediaVariants.allPreviews(media) + MediaVariants.allThumbs(media) +
-            MediaVariants.uploadOrder(media)) {
-            enqueueBackup(circleId, ref, priority = true)
-        }
+        val refs = MediaVariants.allPreviews(media) + MediaVariants.allThumbs(media) + MediaVariants.uploadOrder(media)
+        authoredMediaQueued(circleId, refs)
+        for (ref in refs) enqueueBackup(circleId, ref, priority = true)
     }
 
     /** Author a post in a circle and broadcast the sealed event to its members. */
@@ -3857,6 +3856,7 @@ object HavenNet : InboundListener {
         // A media-only reply (a photo or a voice note with no text) is valid — iOS allows it too.
         if (body.isBlank() && media.isEmpty()) return
         val env = runCatching { social.comment(circleId, postId, body, media, nowMs()) }.getOrNull() ?: return
+        authoredMediaQueued(circleId, media)
         media.forEach { enqueueBackup(circleId, it, priority = true) }   // before the broadcast; a fresh reply's media beats backfill
         afterAuthor(circleId, env, PushBanner.forComment(body, circleId, circleName(circleId), postId))
     }
@@ -6190,6 +6190,15 @@ object HavenNet : InboundListener {
         synchronized(pendingBackupsLock) {
             if (pendingBackups.remove(pbKey(ref, cid))) savePendingBackupsLocked()
         }
+        authoredMediaLanded(ref, cid)
+    }
+
+    /** The circle a persisted (queued / in-flight) relay upload of [ref] is headed for. */
+    private fun pendingBackupCircle(ref: String): String? {
+        ensurePendingBackups()
+        return synchronized(pendingBackupsLock) {
+            pendingBackups.firstOrNull { it.substringBeforeLast('|') == ref }?.substringAfterLast('|')
+        }
     }
 
     /** Whether a specific blob is still waiting to reach a relay — drives the per-post upload indicator. */
@@ -8424,16 +8433,30 @@ object HavenNet : InboundListener {
         true
     }
 
+    /** ref → what it is to its post (QA attribution of direct serves, `relay_first`). */
+    private val serveRoleCache = object : LinkedHashMap<String, String>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 1000
+    }
+
+    /** The circle whose feed carries [ref] — COMPANIONS included ([MediaVariants.role]): a thumb or
+     *  preview is named only inside its marker, and a serve that finds no circle assumes no relay and
+     *  streams. Falls back to the circle a queued relay upload of [ref] is headed for. */
     private fun circleOfRef(ref: String): String? {
         synchronized(serveCircleCache) { serveCircleCache[ref] }?.let { return it }
+        var role: String? = null
         val found = runCatching {
             social.circles().firstOrNull { c ->
                 social.feed(c.id, nowMs(), null).any { item ->
-                    item.media.contains(ref) || item.comments.any { it.media.contains(ref) }
+                    role = MediaVariants.role(ref, item.media)
+                        ?: item.comments.firstNotNullOfOrNull { MediaVariants.role(ref, it.media) }
+                    role != null
                 }
             }?.id
-        }.getOrNull() ?: return null
-        synchronized(serveCircleCache) { serveCircleCache[ref] = found }
+        }.getOrNull() ?: pendingBackupCircle(ref) ?: return null
+        synchronized(serveCircleCache) {
+            serveCircleCache[ref] = found
+            role?.let { serveRoleCache[ref] = it }
+        }
         return found
     }
 
@@ -8466,7 +8489,13 @@ object HavenNet : InboundListener {
                 circleHasRelay = cid?.let { relaysFor(it).isNotEmpty() } ?: false,
                 hintsAlreadySent = relayHintCount(ref, requester),
             )
-            when (val verdict = HeavyWorkPolicy.decideServe(req, cond)) {
+            val verdict = HeavyWorkPolicy.decideServe(req, cond)
+            if (verdict is HeavyWorkPolicy.ServeDecision.Stream && !own && BuildConfig.DEBUG) {
+                // WHICH blobs still stream to friends, and why — so a red `relayfirst` names its cause.
+                val role = synchronized(serveCircleCache) { serveRoleCache[ref] } ?: if (cid == null) "unresolved" else "cached"
+                QaStats.directServe(ref, role, HeavyWorkPolicy.streamReason(req, circleKnown = cid != null))
+            }
+            when (verdict) {
                 is HeavyWorkPolicy.ServeDecision.Stream -> {
                     // They came to US for bytes we believe are backed up — so no relay served them.
                     // That is a signal about our own backup copy (see reverifyBackupAfterDirectAsk).
@@ -9341,12 +9370,7 @@ object HavenNet : InboundListener {
     fun qaProgressJson(): JSONObject {
         val circle = activeCircle.value
         val p = authoredUploads.value
-        val state = when (syncBadge(circle, p)) {
-            SyncBadgeState.Synced -> "synced"
-            is SyncBadgeState.Sending -> "syncing"
-            is SyncBadgeState.Retrying -> "retrying"
-            SyncBadgeState.Local -> "local"
-        }
+        val state = syncBadge(circle, p).dumpState
         val transfers = org.json.JSONArray()
         val downloading = downloadingMedia.toSet()
         for (ref in (downloading + waitingForSenderMedia.toSet()).sorted()) {
@@ -9365,8 +9389,11 @@ object HavenNet : InboundListener {
                 .put("circle", circle)
                 .put("state", state)
                 .put("pending_user_uploads", p.pending(circle))
+                .put("pending_media", p.mediaPending(circle))
                 .put("flush_done", p.sessionDoneByCircle[circle] ?: 0)
                 .put("flush_total", p.sessionTotalByCircle[circle] ?: 0))
+            // Every change of what the pill showed, newest last (≤ 20) — Apple parity.
+            .put("sync_badge_history", badgeHistory.toJson())
             .put("media_transfers", transfers)
             .put("media_wanted_count", wantedMedia.count)
             .put("media_received_count", SyncMetrics.mediaIn.intValue)
@@ -9379,13 +9406,45 @@ object HavenNet : InboundListener {
     }
 
     /** Snapshot taken ON Main at publish time, so the last publish always carries the latest counts. */
+    /** Media blobs of posts/replies just authored, still headed for a relay: circle → refs. The
+     *  event lands in well under a second; the photo or video is what takes time, and a pill that
+     *  ignored it said "Synced" while the video was still uploading. Apple parity (in memory: a
+     *  relaunch's leftover backfill is not something the user is watching). */
+    private val authoredMediaByCircle = HashMap<String, MutableSet<String>>()
+    private fun authoredMediaQueued(circleId: String, refs: List<String>) {
+        val real = refs.filterNot { LocalMedia.isSynthetic(it) }
+        if (real.isEmpty()) return
+        synchronized(uploadLock) { authoredMediaByCircle.getOrPut(circleId) { LinkedHashSet() }.addAll(real) }
+        publishUploadProgress()
+    }
+    private fun authoredMediaLanded(ref: String, circleId: String) {
+        val changed = synchronized(uploadLock) {
+            val set = authoredMediaByCircle[circleId] ?: return
+            val removed = set.remove(ref)
+            if (set.isEmpty()) authoredMediaByCircle.remove(circleId)
+            removed
+        }
+        if (changed) publishUploadProgress()
+    }
+
+    private val badgeHistory = SyncBadgeHistory()
+
     private fun publishUploadProgress() {
         scope.launch(Dispatchers.Main) {
             val p = synchronized(uploadLock) {
-                UploadProgress(HashMap(upPending), HashMap(upRetrying), HashMap(upTotal), HashMap(upDone))
+                UploadProgress(HashMap(upPending), HashMap(upRetrying), HashMap(upTotal), HashMap(upDone),
+                    authoredMediaByCircle.mapValues { it.value.size })
             }
-            if (authoredUploads.value != p) authoredUploads.value = p
+            if (authoredUploads.value != p) {
+                authoredUploads.value = p
+                if (BuildConfig.DEBUG) recordSyncBadge(activeCircle.value, p)
+            }
         }
+    }
+
+    /** One pill change into the QA transition log (`sync_badge_history`). */
+    private fun recordSyncBadge(circle: String, p: UploadProgress) {
+        badgeHistory.record(circle, syncBadge(circle, p), p.totalPending(circle), System.currentTimeMillis())
     }
 
     /** Add a relay node to a circle's redundant set + persist (additive, never replaces). Used by self-sync. */

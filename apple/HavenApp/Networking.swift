@@ -21,7 +21,11 @@ actor StatePersister {
     /// `destination` is asked AFTER the export: an identity switch can retire this engine while
     /// it runs, and its state then belongs on that identity's shelf, not in the live file the next
     /// identity imports (nil = drop).
-    func persist(engine: Engine, to destination: @Sendable () async -> URL?) async {
+    /// True when the engine's state as of this call is on disk afterwards — written now, or already
+    /// written by an earlier export (nothing changed since). False = dropped (retired engine) or the
+    /// write failed; callers that order work after the save (seen-marks) must then not do it.
+    @discardableResult
+    func persist(engine: Engine, reason: String = "", to destination: @Sendable () async -> URL?) async -> Bool {
         // exportState() holds the engine mutex for 100s of ms on a large account — it runs on the
         // engine actor like every other call, so it can't race a mailbox receive / feed rebuild storm.
         //
@@ -29,14 +33,16 @@ actor StatePersister {
         // reached disk (the mailbox drain persists after EVERY pass, most of which change nothing):
         // the whole-state clone under the mutex is the expensive part, and it would write the same
         // bytes again.
-        guard let (data, generation) = await engine.exportIfChanged() else { return }
-        HavenPerf.shared.notePersistExport()
-        guard let url = await destination() else { return }
+        guard let (data, generation) = await engine.exportIfChanged() else { return true }
+        HavenPerf.shared.notePersistExport(reason: reason)
+        guard let url = await destination() else { return false }
         do {
             try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
             await engine.markPersisted(generation)
+            return true
         } catch {
             // Left dirty: the next persist exports again.
+            return false
         }
     }
 }

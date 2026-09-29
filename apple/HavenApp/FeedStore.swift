@@ -138,7 +138,16 @@ final class FeedStore: ObservableObject {
             // deep link, create/upgrade) since it hangs off the property itself.
             AudioCoordinator.shared.stop()
             AudioCoordinator.shared.centeredPostId = nil
+            // Remembered per account, so a relaunch opens (and pulls FIRST) the circle you were in —
+            // it always came back on "default", and launch ingest ordered the circles accordingly.
+            // Android has kept `activeCircle` in prefs all along.
+            if !cachedAccountHex.isEmpty, !DemoEnv.isDemo {
+                UserDefaults.standard.set(activeCircleId, forKey: Self.activeCircleKey(cachedAccountHex))
+            }
         }
+    }
+    nonisolated static func activeCircleKey(_ accountHex: String) -> String {
+        "haven.activeCircleId.\(accountHex.lowercased().prefix(16))"
     }
     static let shared = FeedStore()
 
@@ -184,6 +193,7 @@ final class FeedStore: ObservableObject {
         circleMembersCache.removeAll(); deviceIdsCache.removeAll(); dialTargetsCache.removeAll()
         messagesCache.removeAll(); messagesStale.removeAll()
         sensitiveCache.removeAll(); reportsCache.removeAll()
+        RosterEcho.shared.withLock { $0 = RosterEcho() }   // a new engine has seen no roster yet
         ownDeviceHexCache = (0, [])
     }
     /// A circle's members from the read model. A miss answers `[]` and schedules the read.
@@ -501,6 +511,17 @@ final class FeedStore: ObservableObject {
         // The three that were missing from the census — the 1101x capture attributed only 3 of them.
         watch($activeCircleId, "activeCircleId"); watch($nodeError, "nodeError")
         watch($publishedPostCount, "publishedPostCount")
+        // The pill's transitions as they happen (QA `sync_badge_history`). Both publishers fire in
+        // willSet, so the NEW value is the one passed in — never re-read the property here.
+        BackgroundUploader.shared.$progress.dropFirst().sink { [weak self] p in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.recordSyncBadge(circle: self.activeCircleId, progress: p)
+            }
+        }.store(in: &propSinks)
+        $activeCircleId.dropFirst().sink { [weak self] cid in
+            MainActor.assumeIsolated { self?.recordSyncBadge(circle: cid, progress: BackgroundUploader.shared.progress) }
+        }.store(in: &propSinks)
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.willChangeCount > 0 else { return }
@@ -900,6 +921,14 @@ final class FeedStore: ObservableObject {
             // `warmCircleMembersCache` used to read on main), and apply what the pass changed.
             applyCirclesRead(CirclesRead(circles: snapshot.circles, members: snapshot.members,
                                          healed: snapshot.healedSuperseded, activeSuccessor: snapshot.activeSuccessor))
+            // Reopen the circle this account was in, BEFORE the first mailbox pass reads
+            // `activeCircleId` to decide which circle it pulls and paints first.
+            if !DemoEnv.isDemo, !snapshot.accountHex.isEmpty {
+                activeCircleId = LaunchOrder.restoredActiveCircle(
+                    saved: UserDefaults.standard.string(forKey: Self.activeCircleKey(snapshot.accountHex)),
+                    current: activeCircleId, circleIds: circles.map(\.id),
+                    isDeleted: { CircleDeletionStore.isDeleted($0) })
+            }
             adoptDeviceIds(snapshot.deviceIds)
             scheduleDMIntruderPurge()   // clean DM membership, as every circles read does (off-main)
             if snapshot.createdDefaultCircle || snapshot.healedRemovals > 0 { persist() }
@@ -919,7 +948,12 @@ final class FeedStore: ObservableObject {
         // its engine read now; the warm follows it on the engine, off the launch path (badges land a
         // beat later, which nobody can see; the empty feed, everyone could).
         refresh()
-        Task { @MainActor [weak self] in await self?.warmDMThreads(); QaLaunch.mark("dm_warmup_done") }
+        // `dm_warmup_done` marks a warm that DID something. With no DM threads it returns at once —
+        // stamping that instant made "the feed did not wait on the warm" a coin-flip between two
+        // unrelated main-actor hops (e2e `launch`: feed 2386 ms vs a no-op "warm" at 2384 ms).
+        Task { @MainActor [weak self] in
+            if await self?.warmDMThreads() == true { QaLaunch.mark("dm_warmup_done") }
+        }
         // Media-backup drain holds a UIApplication assertion. On a pocket cold launch (push /
         // BGAppRefresh) the wake path already runs one budgeted pass via slimBackgroundSync —
         // starting another here stacks assertions and keeps the process warm for the whole drain.
@@ -2050,10 +2084,12 @@ final class FeedStore: ObservableObject {
     }
     /// Every DM's feed in one pass — the startup badge compute, and what makes the Messages tab
     /// paint with previews on its first open.
-    private func warmDMThreads() async {
-        guard let engine else { return }
+    /// True when there was something to warm (at least one DM thread was decoded).
+    @discardableResult
+    private func warmDMThreads() async -> Bool {
+        guard let engine else { return false }
         let dms = circles.filter { $0.id.hasPrefix("dm:") }.map(\.id)
-        guard !dms.isEmpty else { recomputeUnreadDMs(); return }
+        guard !dms.isEmpty else { recomputeUnreadDMs(); return false }
         var retention: [String: UInt64?] = [:]
         for cid in dms { retention[cid] = CircleSettingsStore.shared.retentionSecs(cid) }
         let nowMs = now()
@@ -2062,9 +2098,10 @@ final class FeedStore: ObservableObject {
             for cid in dms { out[cid] = s.feed(circleId: cid, nowMs: nowMs, viewerRetentionSecs: retention[cid] ?? nil) }
             return out
         }
-        guard self.engine === engine else { return }
+        guard self.engine === engine else { return false }
         for (cid, items) in feeds { storeMessages(cid, items, readAt: nowMs) }
         recomputeUnreadDMs()
+        return true
     }
     /// Is the social engine up? Lookups answer "no such post" indistinguishably from "engine still
     /// booting", so anything that reports absence to the user has to wait for this first.
@@ -2843,35 +2880,71 @@ final class FeedStore: ObservableObject {
     /// calls (default-circle bootstrap, superseded-circle heal, removal reconcile, crypto switches)
     /// into ONE export 2.5s later moves that hold past the launch reads, and a post/ingest burst
     /// writes once instead of per call. Background entry and identity teardown flush immediately
-    /// (`flushPersistIfPending`); the mailbox drain keeps an immediate `persistNow()` so the
-    /// seen-marks-after-export ordering it documents still holds.
+    /// (`flushPersistIfPending`).
+    ///
+    /// The mailbox drain used to bypass this with an immediate `persistNow()` after EVERY pass — so a
+    /// burst of friends' posts (one pass per push / announce / poll) exported the whole engine once
+    /// per pass: 36 exports in a 40 s burst on the e2e fleet. It now joins the debounced export and
+    /// orders its seen-marks after it through `persist(then:)` — the invariant "marked seen ⇒ its
+    /// event is on disk" is unchanged, the export is shared.
     private var persistDebouncePending = false
-    private func persist() {
-        guard !DemoEnv.isDemo, engine != nil, !persistDebouncePending else { return }
+    /// Work that must run strictly AFTER the next export reaches disk (the mailbox seen-marks).
+    /// `true` = the state that existed when it was queued is on disk; `false` = it was not written.
+    private var afterPersist: [@MainActor (Bool) -> Void] = []
+    /// What asked for the pending export (QA: `perf.persistReasons`).
+    private var persistReason = ""
+    private func persist(_ why: String = #function, line: Int = #line) {
+        guard !DemoEnv.isDemo, engine != nil else { return }
+        if persistReason.isEmpty { persistReason = "\(why):\(line)" }
+        guard !persistDebouncePending else { return }
         persistDebouncePending = true
+        persistDebounceToken &+= 1
+        let token = persistDebounceToken
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 2_500_000_000)
-            guard let self, self.persistDebouncePending else { return }   // satisfied by a persistNow() meanwhile
-            self.persistDebouncePending = false
+            // Satisfied by a persistNow() meanwhile — or re-armed after one, by a newer timer that
+            // owns the next export (this one firing early would cut its window short).
+            guard let self, self.persistDebouncePending, self.persistDebounceToken == token else { return }
             self.persistNow()
         }
     }
-    /// Export right now (still off-main). Callers that must ORDER something after the export —
-    /// the mailbox drain's seen-marks — use this directly.
-    private func persistNow() {
-        guard !DemoEnv.isDemo, let engine else { return }
+    private var persistDebounceToken: UInt64 = 0
+    /// `persist()`, then `after` once that export is on disk (or known unnecessary / impossible).
+    private func persist(then after: @escaping @MainActor (Bool) -> Void, _ why: String = #function, line: Int = #line) {
+        guard !DemoEnv.isDemo, engine != nil else { after(false); return }
+        afterPersist.append(after)
+        persist(why, line: line)
+    }
+    /// Seen-marks currently riding `afterNextPersist` (reset by every export).
+    private var deferredMarkKeys = 0
+    private static let maxDeferredMarkKeys = 64
+    /// Run `after` once the NEXT export — whoever asks for it — is on disk, without asking for one.
+    private func afterNextPersist(_ after: @escaping @MainActor (Bool) -> Void) {
+        guard !DemoEnv.isDemo, engine != nil else { after(false); return }
+        afterPersist.append(after)
+    }
+    /// Export right now (still off-main). Satisfies a pending debounce and everything waiting on it.
+    private func persistNow(_ why: String = #function, line: Int = #line) {
+        let waiting = afterPersist
+        afterPersist.removeAll()
+        deferredMarkKeys = 0
+        let reason = persistReason.isEmpty ? "\(why):\(line)" : persistReason
+        persistReason = ""
         persistDebouncePending = false   // a pending debounce is satisfied by this export
+        guard !DemoEnv.isDemo, let engine else { for f in waiting { f(false) }; return }
         // exportState() serializes the WHOLE engine (100s of ms on a large account) and the atomic
         // write hits disk — both used to run on the main actor after every post/ingest burst and
         // froze the UI. The actor serializes writers so an older export can never clobber a newer one.
         let destination: @Sendable () async -> URL? = { [weak self] in await self?.persistDestination(for: engine) }
         Task.detached(priority: .utility) {
-            await StatePersister.shared.persist(engine: engine, to: destination)
+            let saved = await StatePersister.shared.persist(engine: engine, reason: reason, to: destination)
+            guard !waiting.isEmpty else { return }
+            await MainActor.run { for f in waiting { f(saved) } }
         }
     }
     /// Backgrounding / identity teardown: a debounced export must not outlive the process or the engine.
     private func flushPersistIfPending() {
-        guard persistDebouncePending else { return }
+        guard persistDebouncePending || !afterPersist.isEmpty else { return }
         persistNow()
     }
 
@@ -4053,13 +4126,7 @@ final class FeedStore: ObservableObject {
         let circle = activeCircleId
         let badge = syncStatus(circleId: circle)
         let up = BackgroundUploader.shared.progress
-        let state: String
-        switch badge {
-        case .synced: state = "synced"
-        case .sending, .queued: state = "syncing"
-        case .retrying: state = "retrying"
-        case .deviceOnly: state = "local"
-        }
+        let state = badge.dumpState
         let t = MediaTransferState.shared
         var transfers: [[String: Any]] = []
         for ref in t.downloading.union(t.waitingForSender).sorted() {
@@ -4088,9 +4155,16 @@ final class FeedStore: ObservableObject {
                 "circle": circle,
                 "state": state,
                 "pending_user_uploads": up.pending(circle),
+                "pending_media": up.mediaPending(circle),
                 "flush_done": up.flushDoneByCircle[circle] ?? 0,
                 "flush_total": up.flushTotalByCircle[circle] ?? 0,
             ] as [String: Any],
+            // Every change of what the pill showed, newest last (≤ 20) — the `progress` step asserts
+            // the synced → syncing → synced sequence from this rather than hoping to sample it.
+            "sync_badge_history": syncBadgeHistory.entries.map {
+                ["circle": $0.circle, "state": $0.state, "detail": $0.detail,
+                 "pending": $0.pending, "atMs": $0.atMs] as [String: Any]
+            },
             "media_transfers": transfers,
             "media_wanted_count": wantedMedia.count,
             "media_received_count": SyncMetrics.shared.nbMediaIn,
@@ -4592,14 +4666,24 @@ final class FeedStore: ObservableObject {
 
     /// Delivery status for a circle, for the composer's sync pill — derived from the upload queue's
     /// REAL pending user items (see `SyncBadgeState.derive`), not from "is any pass running".
+    /// Filled only in DEBUG (the sinks in `init`); read by the QA dump.
+    private var syncBadgeHistory = SyncBadgeHistory()
+    private func recordSyncBadge(circle: String, progress: UploadProgress) {
+        syncBadgeHistory.record(circle: circle, syncStatus(circleId: circle, progress: progress),
+                                pending: progress.totalPending(circle), atMs: now())
+    }
+
     func syncStatus(circleId: String) -> SyncBadgeState {
+        syncStatus(circleId: circleId, progress: BackgroundUploader.shared.progress)
+    }
+    private func syncStatus(circleId: String, progress: UploadProgress) -> SyncBadgeState {
         let relays = RelayMailboxStore.shared.relays(forCircle: circleId)
         // If THIS device HOSTS a relay serving this circle, the mailbox is literally on this machine —
         // you're the relay, so you're synced. (Don't sit on "Syncing…" trying to client-connect to your
         // own in-process relay, which is exactly why the relay-hosting Mac showed perpetual yellow.)
         let hosts = RelayHost.shared.serving && !RelayHost.shared.nodeId.isEmpty
             && relays.contains(RelayHost.shared.nodeId)
-        return SyncBadgeState.derive(progress: BackgroundUploader.shared.progress, circleId: circleId,
+        return SyncBadgeState.derive(progress: progress, circleId: circleId,
                                      // The UI-test upload script stands in for a relay (demo seeds none).
                                      hostsRelay: hosts, hasRelay: !relays.isEmpty || BackgroundUploader.qaSimulated,
                                      nearbyConnected: nearby?.hasConnectedPeers == true,
@@ -5957,6 +6041,39 @@ final class FeedStore: ObservableObject {
         }
     }
 
+    /// What one `receive` did. `quietRoster`: a byte-identical REPEAT of a device roster that landed
+    /// no events — handled exactly like an applied envelope (fan-out, activity, refresh: the fleet's
+    /// cadence and delivery timing lean on those) EXCEPT that it owes no engine export.
+    enum ReceiveOutcome: Equatable, Sendable {
+        case none, changed, quietRoster
+        var applied: Bool { self != .none }
+    }
+
+    /// `receive`, telling a roster repeat apart from a change.
+    ///
+    /// The core's `receive` reports a device roster (tag 0x04) as applied whenever it VERIFIES —
+    /// including a roster it already holds. Every hello reply carries the sender's roster verbatim,
+    /// so an idle fleet re-delivered the same rosters every ~30 s and each one exported the whole
+    /// engine (the e2e idle window's steady exports, attributed via `perf.recentApplied`).
+    ///
+    /// A repeat (`RosterEcho`) still goes through `receive` — every roster receipt replays the
+    /// engine's parked-event and tree-commit buffers, and delivery relies on that — and it is a real
+    /// change when that replay landed events (a circle's event count grew). Otherwise it is
+    /// `quietRoster`. Skipping repeats outright, or treating them as not-applied, measurably slowed
+    /// delivery across the fleet (receivers relaxed their poll cadence, Android's first feed after a
+    /// relaunch waited 8 s to forever), so only the export is withheld.
+    nonisolated static func receiveOutcome(_ s: HavenSocial, circleId: String, envelope: Data) -> ReceiveOutcome {
+        guard envelope.first == 0x04, RosterEcho.shared.withLock({ $0.isRepeat(envelope) }) else {
+            let ok = (try? s.receive(circleId: circleId, envelope: envelope)) == true
+            if !ok, envelope.first == 0x04 { RosterEcho.shared.withLock { $0.forget(envelope) } }   // refused: retry a later copy
+            return ok ? .changed : .none
+        }
+        let cids = s.circles().map(\.id)
+        let before = cids.reduce(UInt64(0)) { $0 &+ s.historyEventCount(circleId: $1) }
+        guard (try? s.receive(circleId: circleId, envelope: envelope)) == true else { return .none }
+        return cids.reduce(UInt64(0)) { $0 &+ s.historyEventCount(circleId: $1) } != before ? .changed : .quietRoster
+    }
+
     private func eventPayload(_ circleId: String, _ env: Data) -> Data {
         var p = Data(); lpAppend(&p, Data(circleId.utf8)); p.append(env); return p
     }
@@ -6182,12 +6299,13 @@ final class FeedStore: ObservableObject {
     /// contract as pullMailbox's content path, for a tiny batch.
     private func ingestHintedEnvelopes(_ batch: [(cid: String, key: String, env: Data)]) async {
         guard let engine else { return }
-        let ingested: [(cid: String, key: String, env: Data)] = await engine.run { s in
-            batch.filter { (try? s.receive(circleId: $0.cid, envelope: $0.env)) == true }
+        let results: [(item: (cid: String, key: String, env: Data), outcome: ReceiveOutcome)] = await engine.run { s in
+            batch.map { ($0, FeedStore.receiveOutcome(s, circleId: $0.cid, envelope: $0.env)) }
         }
+        let ingested = results.filter { $0.outcome.applied }.map(\.item)
         guard self.engine === engine, !ingested.isEmpty else { return }
         for item in ingested { SharedStore.markSeenPublic(item.key) }
-        persist()
+        if results.contains(where: { $0.outcome == .changed }) { persist() }
         bumpActivity()
         for item in ingested {
             invalidateMessagesCache(item.cid)
@@ -6296,7 +6414,11 @@ final class FeedStore: ObservableObject {
                 // actually enters the polled list; otherwise its mailbox is never pulled and the linked
                 // device shows the circle but none of its posts.
                 self.invalidateMessagesCache()   // a merge can add circles, members and events
-                self.persist(); await self.reloadCircles(); self.refresh()
+                // Only a merge that reached the ENGINE owes an engine export (profile, pins, read
+                // marks and contacts save in their own stores) — a sibling reading a post was an
+                // export on this device every time.
+                if SelfSyncCoordinator.shared.lastSyncTouchedEngine { self.persist() }
+                await self.reloadCircles(); self.refresh()
                 // Pull that circle's history from its relay now (it has structure but no posts yet),
                 // and push my own already-posted content up so my other device can pull it too.
                 let synced = self.circles.map(\.id)
@@ -6360,11 +6482,9 @@ final class FeedStore: ObservableObject {
         let passStart = Date()
         defer { QaLaunch.once("first_mailbox_pass", Int(Date().timeIntervalSince(passStart) * 1000)); QaLaunch.mark("first_mailbox_pass_done") }
         let active = activeCircleId
-        let phases: [[String]] = ids.contains(active)
-            ? [[active], ids.filter { $0 != active }]
-            : [ids]
+        let phases = LaunchOrder.mailboxPhases(ids, active: active)
         var total = 0
-        for phase in phases where !phase.isEmpty {
+        for phase in phases {
             let msgs = await SharedStore.pollMailbox(circleIds: phase)
             guard self.engine === engine else { return total }
             guard !msgs.isEmpty else { continue }
@@ -6459,7 +6579,8 @@ final class FeedStore: ObservableObject {
         let batch: (ingested: [(circleId: String, envelope: Data)],
                     controlKeys: [String: [String]],
                     unlockedCircles: Set<String>,
-                    processedKeys: [String]) = await Task.detached(priority: .utility) {
+                    processedKeys: [String],
+                    realChange: Bool) = await Task.detached(priority: .utility) {
             // SLICED, with real suspension points between engine holds. One monolithic
             // engine pass re-acquired the (barging, unfair) engine mutex back-to-back
             // for the whole backlog, so any main-thread social.* touch during the drain —
@@ -6473,19 +6594,23 @@ final class FeedStore: ObservableObject {
             var controlKeys: [String: [String]] = [:]
             var unlocked = Set<String>()
             var processed: [String] = []
+            var anyRealChange = false
             var sliceStart = 0
             while sliceStart < content.count {
                 let slice = Array(content[sliceStart..<min(sliceStart + 6, content.count)])
                 if sliceStart > 0 { try? await Task.sleep(nanoseconds: 3_000_000) }
                 sliceStart += 6
-                let part: ([(String, Data)], [String: [String]], Set<String>, [String])
+                let part: ([(String, Data)], [String: [String]], Set<String>, [String], Bool)
                 part = await engine.run { s in
+                var realChange = false
                 var changed: [(String, Data)] = []
                 var controlKeys: [String: [String]] = [:]
                 var unlocked = Set<String>()
                 var processed: [String] = []
                 for (cid, key, env) in slice {
-                    let applied = (try? s.receive(circleId: cid, envelope: env)) == true
+                    let outcome = FeedStore.receiveOutcome(s, circleId: cid, envelope: env)
+                    let applied = outcome.applied
+                    if outcome == .changed { realChange = true }
                     // Every processed envelope is marked seen — `false` means "duplicate" or
                     // "buffered until its key/roster arrives" and the pending buffer is durable,
                     // so the mailbox copy is redundant either way (marking only on `true` melted
@@ -6507,14 +6632,15 @@ final class FeedStore: ObservableObject {
                         }
                     }
                 }
-                return (changed, controlKeys, unlocked, processed)
+                return (changed, controlKeys, unlocked, processed, realChange)
                 }
+                if part.4 { anyRealChange = true }
                 changed += part.0
                 for (k, v) in part.1 { controlKeys[k, default: []] += v }
                 unlocked.formUnion(part.2)
                 processed += part.3
             }
-            return (changed, controlKeys, unlocked, processed)
+            return (changed, controlKeys, unlocked, processed, anyRealChange)
         }.value
         guard self.engine === engine else { return 0 }
         let ingested = batch.ingested
@@ -6579,13 +6705,51 @@ final class FeedStore: ObservableObject {
         // Persist whenever we ran ANY receive: an envelope that only BUFFERED (event arrived before
         // its key commit / the sender's roster) mutated the now-durable pending_epoch buffer — if we
         // don't save the engine state here, a kill before the key arrives loses the buffered event.
-        persistNow()   // immediate, not debounced: the seen-marks below are ordered after this export
+        //
         // Seen-marks STRICTLY AFTER the engine state that contains their events is on disk. Kill
         // before persist(): nothing marked, everything re-fetched, receive() is idempotent. Kill
         // after persist() before marks: events safe, keys re-fetched once and marked as duplicates.
         // Either way nothing is ever both "seen" and absent from the engine — the invariant whose
         // violation blacked out all content while pushes kept arriving.
-        for k in batch.processedKeys { SharedStore.markSeenPublic(k) }
+        //
+        // The export is the DEBOUNCED one (a burst of passes shares it). Until it lands the keys are
+        // held in-process as "ingested, awaiting persist" so the next poll does not re-fetch them;
+        // that hold is memory only, so a kill still re-fetches exactly as before.
+        //
+        // A pass that ran no receive() — a 204, a hello (handleHello saves what it changes itself),
+        // a relay announce — has nothing to save: persisting after it was an export per idle poll.
+        let processed = batch.processedKeys
+        #if DEBUG
+        for (cid, env) in ingested {
+            HavenPerf.shared.noteApplied("mailbox c=\(cid.prefix(10)) tag=\(env.first.map { String(format: "%02x", $0) } ?? "--") of \(processed.count) processed")
+        }
+        if ingested.isEmpty, !processed.isEmpty {
+            HavenPerf.shared.noteApplied("mailbox NONE applied of \(processed.count): \(processed.prefix(2).map { String($0.suffix(40)) })")
+        }
+        #endif
+        //
+        // A pass where NOTHING applied (duplicates — a sibling or a hello reply re-uploading history
+        // under fresh keys — or events only buffered until their key/roster lands) does not ask for
+        // an export of its own: its marks ride the next one that happens anyway (new content, the
+        // background flush, teardown). Until then the keys are held in memory, so a kill re-fetches
+        // them — the invariant is the same, only the forced export per idle poll is gone.
+        if !processed.isEmpty {
+            SharedStore.holdAwaitingPersist(processed)
+            let marks: @MainActor (Bool) -> Void = { saved in
+                if saved { for k in processed { SharedStore.markSeenPublic(k) } }
+                SharedStore.releaseAwaitingPersist(processed)
+            }
+            // Bounded: past `maxDeferredMarkKeys` deferred keys the pass asks for the export after
+            // all, so a kill that skips the background flush re-fetches at most that many.
+            // (Roster repeats count as applied for everything else, but owe no export.)
+            if !batch.realChange, batch.unlockedCircles.isEmpty,
+               deferredMarkKeys + processed.count <= Self.maxDeferredMarkKeys {
+                deferredMarkKeys += processed.count
+                afterNextPersist(marks)
+            } else {
+                persist(then: marks)
+            }
+        }
         if helloIngested { refresh(); syncWithContacts() }
         if relayIngested { objectWillChange.send() }   // Storage / circle relay chips re-read the store
         // (A key-commit-only pass already refreshed above, so a recovering linked host paints newly
@@ -7131,9 +7295,15 @@ final class FeedStore: ObservableObject {
             guard self.engine === engine else { return nil }
             try? await Task.sleep(nanoseconds: 3_000_000)
         }
+        // This export satisfies a pending debounce — and whatever was waiting on it.
         persistDebouncePending = false
+        persistReason = ""
+        let waiting = afterPersist
+        afterPersist.removeAll()
+        deferredMarkKeys = 0
         let destination: @Sendable () async -> URL? = { [weak self] in await self?.persistDestination(for: engine) }
-        await StatePersister.shared.persist(engine: engine, to: destination)
+        let saved = await StatePersister.shared.persist(engine: engine, reason: "\(#function):\(#line)", to: destination)
+        for f in waiting { f(saved) }
         if applied > 0 { refresh(); scheduleCircleSideEffects(circleId) }
         // Every page carries the source's device roster. Refresh the read model's own-device list so
         // the handoff's DIRECT media asks (live delivery to my other devices) can find the source —
@@ -9308,6 +9478,13 @@ final class FeedStore: ObservableObject {
                 circleHasRelay: cid.map { SharedStore.hasMailbox($0) } ?? false,
                 hintsAlreadySent: self.relayHintCount(ref: ref, requester: requesterHex))
             let verdict = HeavyWorkPolicy.decideServe(req, HeavyWorkMonitor.current)
+            #if DEBUG
+            if verdict == .stream, !own {
+                // WHICH blobs still stream to friends, and why — so a red `relayfirst` names its cause.
+                QaMediaStats.directServe(ref: ref, role: self.serveRefRole[ref]?.rawValue ?? (cid == nil ? "unresolved" : "cached"),
+                                         why: HeavyWorkPolicy.streamReason(req, circleKnown: cid != nil))
+            }
+            #endif
             switch verdict {
             case .stream:
                 // They came to US for bytes we believe are backed up — so a relay didn't serve them.
@@ -9447,18 +9624,36 @@ final class FeedStore: ObservableObject {
         // Result type spelled out: the closure used to be the function's own `return`, so it
         // inherited `String?` from the signature. Binding it to a local drops that context and
         // Swift infers `String` from the `return cid` above, which the `return nil` then fails.
-        let found: String? = await engine.run { s -> String? in
+        // Companion-aware: a thumb or preview is named only inside its `thumb:`/`preview:` marker,
+        // so a plain `media.contains(ref)` never found one — and a serve that finds no circle
+        // assumes no relay and streams the blob peer-to-peer (MediaVariants.role).
+        let found: (cid: String, role: MediaVariants.Role)? = await engine.run(readOnly: true) { s -> (cid: String, role: MediaVariants.Role)? in
             for cid in cids {
                 for item in s.feed(circleId: cid, nowMs: nowMs, viewerRetentionSecs: nil) {
-                    if item.media.contains(ref) { return cid }
-                    if item.comments.contains(where: { $0.media.contains(ref) }) { return cid }
+                    if let r = MediaVariants.role(of: ref, in: item.media) { return (cid, r) }
+                    for c in item.comments {
+                        if let r = MediaVariants.role(of: ref, in: c.media) { return (cid, r) }
+                    }
                 }
             }
             return nil
         }
-        if let found { mediaReqCircle[ref] = found }
-        return found
+        if let found {
+            mediaReqCircle[ref] = found.cid
+            serveRefRole[ref] = found.role
+            if serveRefRole.count > 2000 { serveRefRole.removeAll() }
+            return found.cid
+        }
+        // Not in any feed we can read (yet) — but if our own relay upload of it is queued, THAT
+        // job knows the circle the blob is headed for.
+        if let cid = MediaBackupQueue.shared.circleId(forPending: ref) {
+            mediaReqCircle[ref] = cid
+            return cid
+        }
+        return nil
     }
+    /// What each served ref is to its post (QA attribution of direct serves — `relay_first`).
+    private var serveRefRole: [String: MediaVariants.Role] = [:]
 
     /// Frame 33 — a RESUME request: `[requesterHex 64][u16 refLen][ref][u32 total][bitmap]`.
     ///
@@ -10027,16 +10222,19 @@ final class FeedStore: ObservableObject {
             let name: String?           // the verified profile name
             let vhex: String?           // BLAKE3 verification hex of the bundle
             let card: ProfileCardFfi?   // the verified business card (nil when the blob is empty / bad)
+            let inCircle: Bool          // this circle exists and already lists them (a re-handshake)
         }
         let removedContact = ContactsStore.shared.isContactRemoved(idHex)
-        let reads: HelloReads = await engine.run { s in
+        let reads: HelloReads = await engine.run(readOnly: true) { s in
             HelloReads(account: s.accountForDevice(deviceHex: idHex)?.lowercased(),
                        engineKnows: !removedContact && s.circles().contains { c in
                            s.contactNodeIds(circleId: c.id).contains { $0.lowercased() == idHex.lowercased() }
                        },
                        name: s.verifyProfile(bundle: bundle, blob: profileBlob),
                        vhex: try? s.bundleVerificationHex(bundle: bundle),
-                       card: profileBlob.isEmpty ? nil : s.verifyProfileCard(bundle: bundle, blob: profileBlob))
+                       card: profileBlob.isEmpty ? nil : s.verifyProfileCard(bundle: bundle, blob: profileBlob),
+                       inCircle: s.circles().contains { $0.id == circleId }
+                           && s.contactNodeIds(circleId: circleId).contains { $0.lowercased() == idHex.lowercased() })
         }
         guard self.engine === engine else { return (false, "engine-replaced") }
         // A hello carrying a DEVICE bundle of an account we ALREADY know is not a new person. A linked
@@ -10134,7 +10332,10 @@ final class FeedStore: ObservableObject {
         if circleId != "default", CircleDeletionStore.isDeleted(circleId) { return (true, "circle-deleted") }
         // Ensure the circle exists on our side, then add the sender to it (the WRITE pass).
         let isNewCircle = circleId != "default" && !circles.contains { $0.id == circleId }
-        let added: Bool = await engine.run { s in
+        // A re-handshake (the circle exists and already lists them) changes nothing in the engine:
+        // createCircle and addContactBundle are both no-ops for it. Skipping the call also skips the
+        // persist below — every live hello from a friend used to export the whole engine.
+        let added: Bool = reads.inCircle ? true : await engine.run { s in
             s.createCircle(id: circleId, name: circleName)
             return (try? s.addContactBundle(circleId: circleId, bundle: bundle)) != nil
         }
@@ -10161,7 +10362,8 @@ final class FeedStore: ObservableObject {
         if senderDevice != nil || !reads.engineKnows {
             forgiveDials(accountHex: idHex, extra: senderDevice.map { [$0] } ?? [])
         }
-        persist(); await reloadCircles()
+        if !reads.inCircle { persist() }
+        await reloadCircles()
         if let card = reads.card, !card.name.isEmpty {
             ContactsStore.shared.setCard(idHex: idHex, name: card.name, bio: card.bio, link: card.link,
                                          avatar: card.avatar, emoji: card.emoji)
@@ -10243,11 +10445,14 @@ final class FeedStore: ObservableObject {
         // receive() verifies + decrypts — real CPU per frame, and event frames arrive in BURSTS
         // during a sync. Do the crypto off-main; hop back only for the (already-coalesced) applies.
         Task { @MainActor [weak self] in
-            let ok = await engine.run { s in
-                (try? s.receive(circleId: circleId, envelope: envelope)) == true
+            let outcome = await engine.run { s in
+                Self.receiveOutcome(s, circleId: circleId, envelope: envelope)
             }
-            guard ok else { return }
+            guard outcome.applied else { return }
             guard let self, self.engine === engine else { return }
+            #if DEBUG
+            HavenPerf.shared.noteApplied("live c=\(circleId.prefix(10)) tag=\(envelope.first.map { String(format: "%02x", $0) } ?? "--") from=\(senderDevice?.prefix(8) ?? "?") own=\(fromOwnDevice) nearby=\(viaNearby)")
+            #endif
             // FAN OUT to my other devices. A sender dials the device ids its copy of my roster
             // resolves — often just one — so a DM delivered straight to my Mac never reached my
             // iPhone, which was left waiting on a mailbox poll (and got nothing at all if the
@@ -10271,7 +10476,8 @@ final class FeedStore: ObservableObject {
             if circleId.hasPrefix("dm:"), let partner = self.dmPartnerHex(circleId) { self.recordHeard(partner) }
             self.invalidateMessagesCache(circleId)
             self.invalidateSyncBundle(circleId)
-            self.schedulePersist()             // coalesced — a sync burst writes once, not per event
+            // coalesced — a sync burst writes once, not per event; a roster repeat owes no export
+            if outcome == .changed { self.schedulePersist() }
             self.scheduleRefresh()             // coalesced feed rebuild
             self.scheduleRequestMissingMedia() // coalesced media pull (scans the whole feed)
             self.scheduleCircleSideEffects(circleId)  // notify + badge + DM media, coalesced off-main

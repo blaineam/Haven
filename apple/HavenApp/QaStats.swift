@@ -15,7 +15,25 @@ enum QaMediaStats {
     /// ref → sequence number of its FIRST authored enqueue; event id → sequence of its broadcast.
     nonisolated(unsafe) private static var enqueuedAt: [String: UInt64] = [:]
     nonisolated(unsafe) private static var broadcastAt: [String: UInt64] = [:]
+    /// Friend asks that ended in a direct STREAM: by what the ref is (content/thumb/preview/poster/
+    /// original/unresolved) and by why no hint answered it, plus the last few for the e2e log.
+    nonisolated(unsafe) private static var directByRole: [String: Int] = [:]
+    nonisolated(unsafe) private static var directByWhy: [String: Int] = [:]
+    nonisolated(unsafe) private static var directRecent: [[String: Any]] = []
     #endif
+
+    /// A friend's ask is about to be answered with a direct stream (relayFirstServe `.stream`).
+    static func directServe(ref: String, role: String, why: String) {
+        #if DEBUG
+        lock.lock()
+        directByRole[role, default: 0] += 1
+        directByWhy[why, default: 0] += 1
+        directRecent.append(["ref": String(ref.prefix(16)), "role": role, "why": why,
+                             "at_ms": Int(Date().timeIntervalSince1970 * 1000)])
+        if directRecent.count > 20 { directRecent.removeFirst(directRecent.count - 20) }
+        lock.unlock()
+        #endif
+    }
 
     /// Add `n` to counter `key` (served_direct_friend, relay_hints_sent, received_via_relay, …).
     static func bump(_ key: String, _ n: Int = 1) {
@@ -81,6 +99,9 @@ enum QaMediaStats {
         out["authored_media_posts_checked"] = checked
         out["broadcast_before_enqueue"] = early
         out["heavy_work"] = heavyWork()
+        out["served_direct_friend_by_role"] = directByRole
+        out["served_direct_friend_by_why"] = directByWhy
+        out["served_direct_friend_recent"] = directRecent
         return out
     }
 

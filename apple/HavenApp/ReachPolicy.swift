@@ -191,3 +191,24 @@ enum RelayAuthPlan {
         return out
     }
 }
+
+/// Which circle a launch opens and pulls first. The mailbox pass takes the ACTIVE circle as a phase
+/// of its own, ingested and painted before any other — which only helps if "active" is the circle
+/// the user was in. It was not remembered across launches, so every relaunch came back on
+/// "default" and pulled that first (e2e `launch`: default 2353 ms, the circle on screen 2699 ms).
+enum LaunchOrder {
+    /// The circle to reopen: the one remembered for this account, when it still exists. DM threads
+    /// and deleted circles keep whatever is active already.
+    static func restoredActiveCircle(saved: String?, current: String, circleIds: [String],
+                                     isDeleted: (String) -> Bool) -> String {
+        guard let saved, !saved.isEmpty, saved != current, !saved.hasPrefix("dm:"),
+              circleIds.contains(saved), !isDeleted(saved) else { return current }
+        return saved
+    }
+
+    /// The mailbox pass's phases: the active circle alone first, then everything else.
+    static func mailboxPhases(_ ids: [String], active: String) -> [[String]] {
+        guard ids.contains(active) else { return [ids] }
+        return [[active], ids.filter { $0 != active }].filter { !$0.isEmpty }
+    }
+}

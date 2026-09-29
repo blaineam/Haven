@@ -216,4 +216,23 @@ extension MediaVariantsTests {
         XCTAssertTrue(companions.contains("img_prev"))
         XCTAssertTrue(companions.contains(MediaVariants.previewMarker(content: "img_photo", preview: "img_prev")))
     }
+
+    /// The relay-first serve resolves a requested blob to its circle through this. Thumbs and
+    /// previews are named ONLY inside their markers — `media.contains` missed them, the serve found
+    /// no circle, and streamed them to friends peer-to-peer while the relay held them.
+    func testRoleResolvesCompanionsNamedOnlyInsideMarkers() {
+        let media = MediaVariants.composeVideoMedia(poster: "img_poster", optimized: "vid_opt", original: "vid_orig")
+            + [MediaVariants.thumbMarker(content: "img_photo", thumb: "img_thumb"),
+               MediaVariants.previewMarker(content: "img_photo", preview: "img_prev"), "img_photo"]
+        XCTAssertEqual(MediaVariants.role(of: "img_thumb", in: media), .thumb)
+        XCTAssertEqual(MediaVariants.role(of: "img_prev", in: media), .preview)
+        XCTAssertEqual(MediaVariants.role(of: "img_poster", in: media), .poster)
+        XCTAssertEqual(MediaVariants.role(of: "vid_orig", in: media), .original)
+        XCTAssertEqual(MediaVariants.role(of: "vid_opt", in: media), .content)
+        XCTAssertEqual(MediaVariants.role(of: "img_photo", in: media), .content)
+        XCTAssertNil(MediaVariants.role(of: "img_elsewhere", in: media))
+        XCTAssertNil(MediaVariants.role(of: "", in: media))
+        // A marker's CONTENT half is not a companion of anything: the parent resolves as content.
+        XCTAssertFalse(media.contains("img_thumb"), "precondition: the thumb is never listed bare")
+    }
 }

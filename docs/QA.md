@@ -340,18 +340,35 @@ Product bugs this step found (fixed with regression tests unless noted):
 
 DEBUG builds of all four clients accept a one-shot JSON drop file and answer
 with a dump. Paths: iOS/macStub `Application Support/qa-cmd.json` (+
-`haven://qa` deep link to poke iOS); Android `/sdcard/Download/qa-cmd.json`
-(+ `am start -d haven://qa`); desktop `<data-dir>/qa-cmd.json` (file watcher).
+`haven://qa` deep link to poke iOS); Android `files/qa/qa-cmd.json` in the
+app's INTERNAL data dir (+ `am start -d haven://qa`); desktop
+`<data-dir>/qa-cmd.json` (file watcher).
 
-Android scoped storage: adb-pushed files in `/sdcard/Download` are shell-owned,
-so the DEBUG build declares `MANAGE_EXTERNAL_STORAGE` (debug manifest overlay
-only) and the harness grants it — `adb shell appops set com.blaineam.haven
-MANAGE_EXTERNAL_STORAGE allow` (qa-e2e-bootstrap.sh does this on install).
-`/data/local/tmp/<name>` is accepted as a fallback for every staged input. The
-Android driver also adopts `/sdcard/Download/qa-seed.txt` at startup when the
-install has no identity yet (never over an onboarded/seedless one), and dumps
-its account + device hexes to `/sdcard/Download/qa-device-hex.txt` for the
-stub-authorization step.
+Android channel = the app's internal `filesDir/qa/` (`/data/user/0/<pkg>/files/qa/`),
+reached through `run-as` (the DEBUG build is debuggable) — **never shared
+storage**. It used to be `/sdcard/Download`, where MediaProvider owns a row per
+file; after reinstalls (owner UID change) or over long runs those rows rotted,
+every dump rename failed (`MediaProvider: Database update failed while renaming
+…qa-dump….json.tmp`) and the harness read frozen dumps while the app was healthy.
+Now:
+
+* **read**: `adb exec-out run-as <pkg> cat files/qa/qa-dump-<pkg>.json`
+* **write**: `adb push <file> /data/local/tmp/<unique>` then
+  `adb shell "run-as <pkg> sh -c 'mkdir -p files/qa && cat /data/local/tmp/<unique> > files/qa/<name>.tmp && mv files/qa/<name>.tmp files/qa/<name>'"`
+  (run-as can read /data/local/tmp on the fleet AVD even though the app process
+  cannot; the `mv` makes the drop atomic). Fixture media is staged the same way
+  and handed to ops as `/data/user/0/<pkg>/files/qa/<name>`.
+* **pending**: `run-as <pkg> test -f files/qa/qa-cmd.json` — the driver deletes
+  the drop on consume, so the harness waits for that before the next command.
+* The driver writes everything (dump, device hex) as tmp + rename in the same dir.
+
+The driver also adopts `files/qa/qa-seed.txt` at startup when the install has no
+identity yet (never over an onboarded/seedless one), and dumps its account +
+device hexes to `files/qa/qa-device-hex.txt` for the stub-authorization step.
+`filesDir/<name>` and `/data/local/tmp/<name>` stay accepted as fallbacks for
+staged inputs (older matrix scripts). The bootstrap empties `files/qa/` on every
+install (`run-as <pkg> rm -rf files/qa`) and sweeps any `/sdcard/Download/qa-*`
+leftovers of the old channel.
 
 ```json
 {"op":"post|story|dm|react|comment|profile|circle_create|circle_invite|file|music_post|dump|mark_read|link_constraint
@@ -414,7 +431,7 @@ instead of leaving a communication device pinned for the next call. DEBUG-only, 
 
 
 Every op (and `{"op":"dump"}`) refreshes `qa-dump.json` next to the drop file
-(Android: `/sdcard/Download/qa-dump-<pkg>.json`):
+(Android: `files/qa/qa-dump-<pkg>.json` in the app's internal data dir):
 
 ```json
 {"device":"ios","account_hex":"…","ts_ms":0,
@@ -536,6 +553,10 @@ product.** That has cost two investigations:
   scored as **7× perf regressions**, then as **"never"**, and a shipped codec bump was nearly
   convicted of a regression that did not exist.
 * **2026-09-02** — the same signature again, while the real bug was somewhere else entirely.
+* **2026-09-29** — it killed several release-QA runs in one day (`android dump channel is
+  delivering` RED / `no qa-dump.json` mid-run). The Android channel was then moved OFF shared
+  storage entirely, into the app's internal `files/qa/` via `run-as` (see "qa-cmd v2" above), so no
+  MediaProvider row sits in the path any more. The check below stays as the guard for every leg.
 
 So `Scripts/qa-e2e-full.mjs` now checks, on **every** read, that the dump it got back was
 *regenerated after the command that asked for it*. The decision itself lives in
@@ -584,9 +605,9 @@ STALE DUMP CHANNEL — android
   behaviour. Left alone it reads as "never converged" on content the device may already hold.
   process:    com.blaineam.haven is RUNNING (pid 22317)
   foreground: mResumedActivity: ActivityRecord{… com.blaineam.haven/.MainActivity …}
-  dump file:  /sdcard/Download/qa-dump-com.blaineam.haven.json
+  dump file:  files/qa/qa-dump-com.blaineam.haven.json
               41231 B, owner u0_a191, mtime 4m14s ago
-  logcat:     3 x "MediaProvider: Database update failed while renaming" in the last 4000 lines — THIS IS THE KNOWN CAUSE.
+  logcat:     1 HavenQA failure line(s); last: … HavenQA: qa-dump write failed: …
   RECOVERY (one shot): wiping android's qa drop files …
 ```
 
@@ -595,12 +616,11 @@ The `process:` line is asked first because it is the answer most often, and it w
 writing the dump.` The mac stub had exited during an iOS↔stub call, and without this the run would
 have spent its remaining half hour scoring a dead process as delivery failures. On Android the
 `foreground:` line answers the second-most-common cause — `QaDriver` polls the drop file only
-between `onResume` and `onPause`, so a backgrounded activity is a dead channel with nothing to do
-with MediaStore.
+between `onResume` and `onPause`, so a backgrounded activity is a dead channel.
 
 **The one-shot recovery.** Because the cure is known and cheap, the harness tries it before
-complaining: it wipes that leg's qa drop files — exactly what `qa-e2e-bootstrap.sh` does around
-every install, so MediaStore mints fresh rows owned by the current install — and asks for up to
+complaining: it wipes that leg's qa drop files — as `qa-e2e-bootstrap.sh` does around every
+install — and asks for up to
 eight re-dumps. If the channel comes back it logs `RECOVERED after N re-dump attempt(s)` and the run
 continues (treat that leg's earlier latencies with suspicion). One attempt per leg per run: a
 channel that goes stale *again* is not papered over.
@@ -613,10 +633,9 @@ channel that goes stale *again* is not papered over.
 2. On Android, check the app is **foregrounded** (the `foreground:` line): `QaDriver` polls the
    drop file only while it is (`onResume`/`onPause`), so a backgrounded activity is a dead channel
    too.
-3. If the `MediaProvider` lines are in the output, the reinstall orphaned the provider row —
-   `adb shell rm -f /sdcard/Download/qa-dump-com.blaineam.haven.json*` is the cure, and the wipe
-   above has already tried it. A wipe that *cannot* remove the file prints `WIPE PROBLEM:` and is
-   itself the diagnosis.
+3. On Android, read the `logcat:` line — the driver logs every failed dump write / op under the
+   `HavenQA` tag. A wipe that *cannot* remove the file prints `WIPE PROBLEM:` and is itself the
+   diagnosis.
 4. On the host legs, `tauri.log` / the Apple diagnostic channel already name a failed dump write
    (`dump is now STALE`).
 

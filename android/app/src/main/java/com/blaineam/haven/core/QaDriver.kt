@@ -15,9 +15,9 @@ import uniffi.haven_ffi.LinkConstraint
  * qa-cmd v2 — the Android leg of the cross-platform QA driver contract (docs/QA.md).
  * DEBUG builds only; every entry point below is a no-op in release.
  *
- * Consumes a one-shot `/sdcard/Download/qa-cmd.json` drop file (deleted after one consume) on
+ * Consumes a one-shot `files/qa/qa-cmd.json` drop file (deleted after one consume) on
  * (a) a 1.5s poll while the app is foregrounded and (b) the `haven://qa` deep link, then answers
- * with `/sdcard/Download/qa-dump-<applicationId>.json` — refreshed after every op and on
+ * with `files/qa/qa-dump-<applicationId>.json` — refreshed after every op and on
  * `{"op":"dump"}`. Ops call the SAME HavenNet paths the UI uses (post / postStory / sendDm /
  * react / comment / ProfileStore.save + syncWithContacts / createCircle / addToCircle /
  * storeFile / markThreadRead), so a green E2E run exercises real author paths, not a test lane.
@@ -26,23 +26,26 @@ import uniffi.haven_ffi.LinkConstraint
  * mailbox now; `dump` only marks the user active (see [apply]).
  *
  * Fleet plumbing (Scripts/qa-e2e-bootstrap.sh):
- *  - `/sdcard/Download/qa-seed.txt` (`haven-seed:…`) is adopted at startup IF this install has no
+ *  - `files/qa/qa-seed.txt` (`haven-seed:…`) is adopted at startup IF this install has no
  *    identity yet — the same restore path Onboarding uses — so the emulator joins the fleet
  *    account. An onboarded (or seedless) install is NEVER overwritten.
- *  - `/sdcard/Download/qa-device-hex.txt` gets the account + device transport hexes at startup so
+ *  - `files/qa/qa-device-hex.txt` gets the account + device transport hexes at startup so
  *    the harness can authorize this device on the HavenStub relay (HTTP signs as the device id).
  *
- * Scoped storage: on API 30+ the app owns the files it creates in Download/, but the adb-staged
- * inputs (qa-cmd.json, qa-seed.txt, fixture media) belong to the shell — the DEBUG manifest adds
- * MANAGE_EXTERNAL_STORAGE and the harness grants it via
- * `adb shell appops set com.blaineam.haven MANAGE_EXTERNAL_STORAGE allow`. `/data/local/tmp/<name>`
- * is accepted as a fallback for every staged input (the older matrix scripts' convention).
+ * THE CHANNEL LIVES IN THE APP'S INTERNAL `filesDir/qa/` — never shared storage. It used to be
+ * `/sdcard/Download`, where MediaProvider owns a row per file: after a reinstall (owner UID change)
+ * or over a long run those rows rotted, every dump rename failed ("MediaProvider: Database update
+ * failed while renaming"), and the harness read a frozen dump while the app was healthy. The
+ * debuggable build lets the harness reach filesDir with `run-as`: it reads with
+ * `adb exec-out run-as <pkg> cat files/qa/…` and writes by pushing to /data/local/tmp and
+ * run-as-copying into `files/qa/<name>.tmp` + `mv` (atomic — the driver never sees half a file).
+ * Every file the driver writes is tmp + rename in the same dir. `filesDir/<name>` and
+ * `/data/local/tmp/<name>` stay accepted as fallbacks for staged inputs (older matrix scripts).
  */
 object QaDriver {
     private const val TAG = "HavenQA"
     private const val POLL_MS = 1_500L
 
-    private val downloads = File("/sdcard/Download")
     private val fallbackDir = File("/data/local/tmp")
 
     private lateinit var appContext: Context
@@ -62,8 +65,9 @@ object QaDriver {
      *  MediaProjection consent prompt its share button does. */
     val screenShareAsk = androidx.compose.runtime.mutableIntStateOf(0)
 
-    private val cmdFile get() = File(downloads, "qa-cmd.json")
-    private val dumpFile get() = File(downloads, "qa-dump-${BuildConfig.APPLICATION_ID}.json")
+    /** The whole harness channel: `filesDir/qa/` (see the class doc for why not /sdcard). */
+    private fun qaDir(context: Context): File = File(context.filesDir, "qa").apply { mkdirs() }
+    private val dumpFile get() = File(qaDir(appContext), "qa-dump-${BuildConfig.APPLICATION_ID}.json")
 
     // ---- startup ---------------------------------------------------------------------------
 
@@ -76,11 +80,10 @@ object QaDriver {
      */
     fun adoptSeedIfPresent(context: Context) {
         if (!BuildConfig.DEBUG) return
-        // filesDir first (the app can always read it; harness run-as-stages the seed there
-        // because /sdcard grants aren't live at first boot and SELinux blocks /data/local/tmp);
-        // fall back to the shell-staged locations. Uses the passed context — this runs before
-        // start() sets appContext.
-        val f = listOf(File(context.filesDir, "qa-seed.txt"), File(downloads, "qa-seed.txt"), File(fallbackDir, "qa-seed.txt"))
+        // filesDir/qa (the harness run-as-stages the seed there — the app can always read its own
+        // filesDir, and SELinux blocks app reads of /data/local/tmp on modern images); the older
+        // locations stay as fallbacks. Uses the passed context — runs before start() sets appContext.
+        val f = listOf(File(qaDir(context), "qa-seed.txt"), File(context.filesDir, "qa-seed.txt"), File(fallbackDir, "qa-seed.txt"))
             .firstOrNull { runCatching { it.isFile && it.length() > 0 }.getOrDefault(false) } ?: return
         val profile = ProfileStore.get(context)
         if (profile.onboarded) return                               // identity in use — never overwrite
@@ -389,15 +392,12 @@ object QaDriver {
         return out
     }
 
-    /** An adb-staged input by name: Download/ first, /data/local/tmp/ as the fallback. */
+    /** An adb-staged input by name: filesDir/qa/ first, then filesDir/ and /data/local/tmp/ (the
+     *  older matrix scripts' conventions). Only a finished file is ever seen: the harness stages as
+     *  `<name>.tmp` and renames. */
     private fun staged(name: String): File? {
-        // The app can ALWAYS read its own filesDir; /sdcard needs a MANAGE_EXTERNAL_STORAGE
-        // grant that may not be live at first boot, and SELinux blocks app reads of
-        // /data/local/tmp on modern emulators — so a run-as-staged copy under filesDir is
-        // the only path that reliably works for the boot-time seed. Prefer it.
-        val filesCopy = if (::appContext.isInitialized) File(appContext.filesDir, name) else null
-        return listOf(filesCopy, File(downloads, name), File(fallbackDir, name))
-            .filterNotNull()
+        if (!::appContext.isInitialized) return null
+        return listOf(File(qaDir(appContext), name), File(appContext.filesDir, name), File(fallbackDir, name))
             .firstOrNull { runCatching { it.isFile && it.length() > 0 }.getOrDefault(false) }
     }
 
@@ -418,7 +418,7 @@ object QaDriver {
             val account = HavenNet.accountNodeHex
             val device = runCatching { HavenNet.engine.myDeviceNodeHex() }.getOrDefault("")
             val lines = listOf(account, device).filter { it.length == 64 }.joinToString("\n")
-            File(downloads, "qa-device-hex.txt").writeText(lines + "\n")
+            writeAtomically(File(qaDir(appContext), "qa-device-hex.txt"), lines + "\n")
             Log.i(TAG, "qa-device-hex written account=${account.take(12)} device=${device.take(12)}")
         }.onFailure { Log.w(TAG, "qa-device-hex write failed: ${it.message}") }
         runCatching { writeDump() }   // a startup dump so the orchestrator's sanity check has one
@@ -536,10 +536,15 @@ object QaDriver {
             for (k in prog.keys()) o.put(k, prog.get(k))
         }
 
-        // App-owned file in Download/ (allowed on scoped storage); tmp+rename keeps reads whole.
-        val tmp = File(downloads, dumpFile.name + ".tmp")
-        tmp.writeText(o.toString())
-        if (!tmp.renameTo(dumpFile)) { dumpFile.writeText(o.toString()); tmp.delete() }
+        writeAtomically(dumpFile, o.toString())
+    }
+
+    /** tmp + rename in the SAME internal dir — a reader (`run-as cat`) sees the old file or the new
+     *  one, never half of one. No MediaProvider in the path, so the rename cannot be refused. */
+    private fun writeAtomically(dest: File, text: String) {
+        val tmp = File(dest.parentFile, dest.name + ".tmp")
+        tmp.writeText(text)
+        if (!tmp.renameTo(dest)) { dest.writeText(text); tmp.delete() }
     }
 
     private fun postRow(item: uniffi.haven_ffi.FeedItemFfi, circleId: String): JSONObject {

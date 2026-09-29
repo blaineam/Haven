@@ -483,7 +483,8 @@ async fn handle_conn(
                 // A HAS hit refreshes the entry's liveness stamp (mailbox GC) — local_touch
                 // returns the keys it did NOT find, so an empty result is a hit. Also avoids
                 // local_get reading the whole blob just to answer an existence check.
-                let hit = local_touch(root, &[key]).is_empty();
+                let ttl = auth.lock().map(|a| a.mailbox_ttl()).unwrap_or(None);
+                let hit = local_touch(root, &[key], ttl).is_empty();
                 head_respond(&mut w, if hit { 200 } else { 404 }, keep_alive).await?;
             }
             Route::Put(_) => {
@@ -593,7 +594,8 @@ async fn handle_conn(
                     .filter(|k| !blob_forbidden(auth, &peer, VERB_TOUCH, k))
                     .map(|k| k.to_string())
                     .collect();
-                let misses = local_touch(root, &keys);
+                let ttl = auth.lock().map(|a| a.mailbox_ttl()).unwrap_or(None);
+                let misses = local_touch(root, &keys, ttl);
                 respond(&mut w, 200, "OK", keep_alive, misses.join("\n").as_bytes()).await?;
             }
             Route::Bad => respond(&mut w, 404, "no route", keep_alive, b"").await?,

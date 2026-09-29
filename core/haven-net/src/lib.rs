@@ -338,9 +338,15 @@ impl Node {
     pub fn enable_relay_with_retention(&self, root: std::path::PathBuf, retention: blobstore::Retention) {
         let mut g = lock(&self.relay);
         if g.is_none() {
+            let mut auth = blobstore::RelayAuth::default();
+            // TOUCH / HAS must not revive a mailbox entry this relay's GC already considers dead.
+            auth.set_mailbox_ttl(Some(blobstore::MailboxExpiry {
+                ttl: retention.mailbox_ttl,
+                grace: retention.gc_grace,
+            }));
             *g = Some(RelayCfg {
                 root: root.clone(),
-                auth: Arc::new(Mutex::new(blobstore::RelayAuth::default())),
+                auth: Arc::new(Mutex::new(auth)),
                 http: None,
                 retention,
             });
@@ -505,10 +511,12 @@ impl Node {
     /// store does NOT hold so the caller re-PUTs them; all keys back if not hosting (caller treats
     /// that like an unreachable relay and skips).
     pub fn relay_local_touch(&self, keys: &[String]) -> Vec<String> {
-        let Some(root) = lock(&self.relay).as_ref().map(|c| c.root.clone()) else {
+        let Some((root, expiry)) =
+            lock(&self.relay).as_ref().map(|c| (c.root.clone(), lock(&c.auth).mailbox_ttl()))
+        else {
             return keys.to_vec();
         };
-        blobstore::local_touch(&root, keys)
+        blobstore::local_touch(&root, keys, expiry)
     }
 
     /// Mesh anti-entropy: pull every sealed blob a SIBLING relay holds that our in-process relay lacks,

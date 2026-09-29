@@ -75,7 +75,27 @@ struct PendingEnrollment {
         case backOff                      // the ordinary path (outage, or a genuine refusal)
     }
 
+    /// Which relays to treat as PENDING ENROLLMENT when a friend-invite ticket is accepted: every
+    /// ticket relay — not only the ones this call newly added (one already known, e.g. from an
+    /// earlier scan or a sibling device's sync, refuses us just the same until the inviter enrolls
+    /// us) — plus the inviter's own node id when it is one of our relays (a host's relay id is its
+    /// node id, and it answers with the same membership gate).
+    static func relaysToTrack(ticketRelays: [String], inviterHex: String, knownRelays: [String]) -> [String] {
+        let known = Set(knownRelays.map { $0.lowercased() })
+        var out: [String] = []
+        for h in ticketRelays.map({ $0.lowercased() }) where h.count == 64 && !out.contains(h) { out.append(h) }
+        let inviter = inviterHex.lowercased()
+        if inviter.count == 64, known.contains(inviter), !out.contains(inviter) { out.append(inviter) }
+        return out
+    }
+
     private(set) var adoptedAtMs: [String: UInt64] = [:]
+    /// Per-relay "don't touch it again before" after a pending-enrollment refusal. The flat gap has
+    /// to be a property of the RELAY, not of one retry loop: the uploader, the media queue, the
+    /// hello fan-out, the mailbox poll and every grant/announce re-drive each re-hit the same
+    /// refusing relay on their own clocks (×every HTTP URL, ×the iroh fallback) — ~9,000 refusals
+    /// in 9 minutes on the e2e fleet with "a flat 12s retry" nominally in force.
+    private(set) var holdUntilMs: [String: UInt64] = [:]
 
     /// A ticket relay was newly adopted (or its window re-opened by a grant / announce).
     mutating func noteAdopted(_ relay: String, nowMs: UInt64) {
@@ -86,11 +106,17 @@ struct PendingEnrollment {
     mutating func refresh(_ relay: String, nowMs: UInt64) {
         if adoptedAtMs[relay.lowercased()] != nil { adoptedAtMs[relay.lowercased()] = nowMs }
     }
+    /// Enrollment is (about to be) in place — the grant / an announce: lift the hold so the
+    /// re-drive that follows actually reaches the relay instead of skipping it.
+    mutating func releaseHold(_ relay: String) {
+        holdUntilMs.removeValue(forKey: relay.lowercased())
+    }
     /// An authorized write succeeded there — we are enrolled; 403s are ordinary again.
     /// Returns whether the relay WAS being tracked (the caller then re-drives what it deferred).
     @discardableResult
     mutating func confirm(_ relay: String) -> Bool {
-        adoptedAtMs.removeValue(forKey: relay.lowercased()) != nil
+        holdUntilMs.removeValue(forKey: relay.lowercased())
+        return adoptedAtMs.removeValue(forKey: relay.lowercased()) != nil
     }
     func isTracked(_ relay: String) -> Bool { adoptedAtMs[relay.lowercased()] != nil }
     func isPending(_ relay: String, nowMs: UInt64) -> Bool {
@@ -103,6 +129,66 @@ struct PendingEnrollment {
     /// special; an outage (no answer) is not evidence of anything enrollment will fix.
     func onFailure(relay: String, forbidden: Bool, nowMs: UInt64) -> Decision {
         forbidden && isPending(relay, nowMs: nowMs) ? .retrySoon(afterMs: Self.retryGapMs) : .backOff
+    }
+
+    /// A refusal from `relay` was observed: same decision as `onFailure(forbidden: true)`, and a
+    /// pending relay is then HELD for `retryGapMs` — every loop skips it until the gap elapses (or
+    /// the grant / an announce / a successful write lifts it). A refusal inside an existing hold
+    /// (a request already in flight) does not push the hold out.
+    @discardableResult
+    mutating func noteRefusal(_ relay: String, nowMs: UInt64) -> Decision {
+        let d = onFailure(relay: relay, forbidden: true, nowMs: nowMs)
+        if case .retrySoon(let gap) = d, mayAttempt(relay, nowMs: nowMs) {
+            holdUntilMs[relay.lowercased()] = nowMs + gap
+        }
+        return d
+    }
+
+    /// May a loop touch `relay` now? False only while a pending-enrollment hold is running; any
+    /// relay that is not pending enrollment is always allowed (ordinary health rules apply).
+    func mayAttempt(_ relay: String, nowMs: UInt64) -> Bool {
+        guard let until = holdUntilMs[relay.lowercased()] else { return true }
+        return nowMs >= until || !isPending(relay, nowMs: nowMs)
+    }
+}
+
+/// What the in-process relay is told to serve, per circle (`RelayHost.authorizeMembership`).
+/// `authorize` REPLACES a circle's member set, so every circle must be authorized exactly once,
+/// with everything that belongs in it. The matrix QA stub used to authorize "default" a SECOND
+/// time with only the driver's allow-list — wiping the friend it had just approved from its own
+/// relay, so the new friend's writes stayed 403 until the harness patched the list by hand.
+enum RelayAuthPlan {
+    struct Grant: Equatable {
+        let circleId: String
+        let members: [String]
+        let relays: [String]
+    }
+
+    /// - memberships: (circleId, member + device hexes) from the social graph.
+    /// - qaExtra: DEBUG matrix allow-list hexes (empty in release), unioned into every circle.
+    /// - isQaStub: the relay-only QA stub, which also serves "default" when its graph has none.
+    static func grants(memberships: [(String, [String])], relaysFor: (String) -> [String],
+                       qaExtra: [String], isQaStub: Bool, me: String, ownRelay: String) -> [Grant] {
+        func union(_ a: [String], _ b: [String]) -> [String] {
+            var out = a
+            for h in b where !h.isEmpty && !out.contains(h) { out.append(h) }
+            return out
+        }
+        var out: [Grant] = []
+        for (cid, members) in memberships where !out.contains(where: { $0.circleId == cid }) {
+            var m = union(members, qaExtra)
+            var relays = relaysFor(cid)
+            if isQaStub, cid == "default" {
+                m = union(m, [me])
+                relays = union(relays, [ownRelay])
+            }
+            out.append(Grant(circleId: cid, members: m, relays: relays))
+        }
+        if isQaStub, !out.contains(where: { $0.circleId == "default" }) {
+            let m = union(qaExtra, [me])
+            if !m.isEmpty { out.append(Grant(circleId: "default", members: m, relays: union([], [ownRelay]))) }
+        }
+        return out
     }
 }
 

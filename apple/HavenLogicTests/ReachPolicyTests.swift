@@ -123,8 +123,86 @@ final class PendingEnrollmentTests: XCTestCase {
         XCTAssertFalse(p.isTracked(other))
     }
 
-    // MARK: LaunchOrder
+    /// The flat gap is per RELAY: after one refusal every loop skips it until the gap elapses —
+    /// the e2e fleet saw ~9,000 refusals in 9 minutes from loops that each retried on their own.
+    func testRefusalHoldsRelayForTheFlatGap() {
+        var p = PendingEnrollment()
+        p.noteAdopted(relay, nowMs: t0)
+        XCTAssertTrue(p.mayAttempt(relay, nowMs: t0 + 1_000))
+        XCTAssertEqual(p.noteRefusal(relay, nowMs: t0 + 1_000), .retrySoon(afterMs: PendingEnrollment.retryGapMs))
+        XCTAssertFalse(p.mayAttempt(relay.uppercased(), nowMs: t0 + 1_001))
+        XCTAssertFalse(p.mayAttempt(relay, nowMs: t0 + 1_000 + PendingEnrollment.retryGapMs - 1))
+        // A refusal from a request already in flight must not push the hold out.
+        p.noteRefusal(relay, nowMs: t0 + 5_000)
+        XCTAssertTrue(p.mayAttempt(relay, nowMs: t0 + 1_000 + PendingEnrollment.retryGapMs))
+    }
 
+    func testGrantOrSuccessLiftsTheHold() {
+        var p = PendingEnrollment()
+        p.noteAdopted(relay, nowMs: t0)
+        p.noteRefusal(relay, nowMs: t0)
+        p.releaseHold(relay)
+        XCTAssertTrue(p.mayAttempt(relay, nowMs: t0 + 1), "grant/announce re-drive must reach the relay")
+        p.noteRefusal(relay, nowMs: t0 + 2)
+        XCTAssertTrue(p.confirm(relay))
+        XCTAssertTrue(p.mayAttempt(relay, nowMs: t0 + 3), "enrolled — ordinary rules again")
+    }
+
+    func testOnlyPendingRelaysAreEverHeld() {
+        var p = PendingEnrollment()
+        XCTAssertEqual(p.noteRefusal(relay, nowMs: t0), .backOff, "never adopted from a ticket")
+        XCTAssertTrue(p.mayAttempt(relay, nowMs: t0 + 1))
+        p.noteAdopted(relay, nowMs: t0)
+        p.noteRefusal(relay, nowMs: t0 + 1)
+        // Past the pending window the hold no longer applies (ordinary health rules take over).
+        XCTAssertTrue(p.mayAttempt(relay, nowMs: t0 + PendingEnrollment.windowMs))
+    }
+
+    func testTicketTracksEveryTicketRelayAndTheInvitersOwnRelay() {
+        let inviter = String(repeating: "e", count: 64)
+        let known = [relay, inviter.uppercased(), String(repeating: "f", count: 64)]
+        XCTAssertEqual(PendingEnrollment.relaysToTrack(ticketRelays: [relay.uppercased(), relay, "short"],
+                                                       inviterHex: inviter, knownRelays: known),
+                       [relay, inviter], "already-known ticket relay still tracked; inviter's node is one of our relays")
+        XCTAssertEqual(PendingEnrollment.relaysToTrack(ticketRelays: [relay], inviterHex: inviter, knownRelays: [relay]),
+                       [relay], "the inviter's id is tracked only when we actually use it as a relay")
+    }
+}
+
+final class RelayAuthPlanTests: XCTestCase {
+    let me = String(repeating: "b", count: 64)
+    let own = String(repeating: "0", count: 64)
+    let friend = String(repeating: "a", count: 64)
+    let friendDevice = String(repeating: "d", count: 64)
+    let qa = String(repeating: "9", count: 64)
+
+    /// The stub's approval regression: "default" is authorized ONCE, carrying the friend it just
+    /// approved AND the QA allow-list — never re-authorized with the allow-list alone.
+    func testStubDefaultKeepsApprovedFriend() {
+        let g = RelayAuthPlan.grants(memberships: [("default", [me, friend, friendDevice])],
+                                     relaysFor: { _ in [own] }, qaExtra: [qa], isQaStub: true, me: me, ownRelay: own)
+        XCTAssertEqual(g.filter { $0.circleId == "default" }.count, 1)
+        XCTAssertEqual(Set(g[0].members), Set([me, friend, friendDevice, qa]))
+        XCTAssertEqual(g[0].relays, [own])
+    }
+
+    func testStubWithNoCirclesStillServesDefault() {
+        let g = RelayAuthPlan.grants(memberships: [], relaysFor: { _ in [] }, qaExtra: [qa],
+                                     isQaStub: true, me: me, ownRelay: own)
+        XCTAssertEqual(g, [.init(circleId: "default", members: [qa, me], relays: [own])])
+    }
+
+    func testRegularHostAuthorizesTheGraphOnly() {
+        let g = RelayAuthPlan.grants(memberships: [("default", [me, friend]), ("c1", [me])],
+                                     relaysFor: { $0 == "default" ? [own] : [] }, qaExtra: [],
+                                     isQaStub: false, me: me, ownRelay: own)
+        XCTAssertEqual(g, [.init(circleId: "default", members: [me, friend], relays: [own]),
+                           .init(circleId: "c1", members: [me], relays: [])])
+    }
+}
+
+/// Which circle a launch reopens and pulls first (ReachPolicy.swift `LaunchOrder`).
+final class LaunchOrderTests: XCTestCase {
     func testRelaunchReopensTheRememberedCircle() {
         let ids = ["default", "c1", "dm:a-b"]
         XCTAssertEqual(LaunchOrder.restoredActiveCircle(saved: "c1", current: "default", circleIds: ids, isDeleted: { _ in false }), "c1")

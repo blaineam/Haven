@@ -58,10 +58,23 @@ if [[ "${E2E_FRESH:-1}" != "0" ]]; then
   pkill -f 'target/debug/haven-desktop' 2>/dev/null || true
   sleep 1
   rm -rf "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support"/{haven-relay-store,haven-media,haven-feed.json,haven-mailbox-seen.txt,haven-selfsync.bin,qa-*} 2>/dev/null || true
+  # The authorize list is ALSO read from subdirs and the isolated stub HOME (qa-e2e-authorize.sh
+  # writes all five paths); the `qa-*` glob above only reached the top-level one. The fleet seed
+  # is stable across runs, so a stale list from the previous run pre-authorized A on B's relay and
+  # `newfriend` never saw a single pre-enrollment 403 ("adopted … (pending enrollment) — []").
+  for p in "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support"/{HavenStub,com.blaineam.kith.qa.stub}/qa-authorize-members.txt \
+           "/tmp/haven-mac-stub-home/Library/Application Support"/{,HavenStub/}qa-authorize-members.txt; do
+    rm -f "$p" 2>/dev/null || true
+  done
   # PREFERENCES too. The companion maps (haven.media.previewCompanions / thumbCompanions) live here,
   # not in Application Support, so a "hermetic" wipe left them behind — and a pairing naming a blob
   # the wipe had just deleted then suppressed re-minting on every subsequent run. The stub shipped
   # posts with no preview marker for three consecutive runs because of it.
+  # Through cfprefsd FIRST, by the container plist's PATH: the bare domain name addresses
+  # ~/Library/Preferences (not the sandbox container), and a plain `rm` under a warm cfprefsd cache
+  # is undone the next time the stub launches — the stub came back up still knowing A as a contact
+  # ("A and B start as strangers — already contacts") with its old relay directory.
+  defaults delete "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Preferences/com.blaineam.kith.qa.stub" 2>/dev/null || true
   rm -f "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Preferences/com.blaineam.kith.qa.stub.plist" 2>/dev/null || true
   defaults delete com.blaineam.kith.qa.stub 2>/dev/null || true
   rm -rf "$DATA_DIR" 2>/dev/null || true
@@ -286,6 +299,24 @@ if command -v adb >/dev/null 2>&1; then
     if [[ "$booted" != "1" ]]; then
       log "WARN: android emulator never finished booting — android leg skipped"
     else
+    # The AVD must have a REAL network, not just the adb-reverse mailbox lane. airplane_mode_on
+    # persists in the AVD's userdata, and a haven_phone left in airplane mode still passes every
+    # mailbox step (127.0.0.1:8674 rides adb) while iroh has no route and no DNS: its direct dial
+    # to the stub fails "No addressing information available", so android→stub call invites
+    # never ring (an idle Apple callee only takes invites over iroh/push, never the __live__ HTTP
+    # lane) and the call matrix read as a WebRTC regression. Restore it and say so.
+    if [[ "$(adb shell settings get global airplane_mode_on 2>/dev/null | tr -d '\r')" == "1" ]]; then
+      log "android emulator was in AIRPLANE MODE — disabling it (iroh/DNS/calls need a real network)"
+      adb shell cmd connectivity airplane-mode disable >/dev/null 2>&1 || true
+    fi
+    adb shell svc wifi enable >/dev/null 2>&1 || true
+    adb shell svc data enable >/dev/null 2>&1 || true
+    net_ok=0
+    for i in $(seq 1 20); do
+      adb shell dumpsys connectivity 2>/dev/null | grep -q "Active default network: [0-9]" && { net_ok=1; break; }
+      sleep 1
+    done
+    [[ "$net_ok" == "1" ]] || log "WARN: android emulator has NO default network — iroh dials and android calls will fail"
     # gradle splits per ABI — universal covers every emulator arch.
     APK="$ROOT/android/app/build/outputs/apk/debug/app-universal-debug.apk"
     [[ -f "$APK" ]] || APK="$ROOT/android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk"

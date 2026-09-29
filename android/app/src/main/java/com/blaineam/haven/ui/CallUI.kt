@@ -214,26 +214,14 @@ private fun InCall() {
     var showAddPeople by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
     if (showAddPeople) AddToCallPicker(onDismiss = { showAddPeople = false })
-    // System MediaProjection consent → start the screen capture on approval.
-    val projectionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { result ->
-        val data = result.data
-        val granted = result.resultCode == android.app.Activity.RESULT_OK && data != null
-        com.blaineam.haven.core.QaStats.shareConsent = if (granted) "granted" else "denied(${result.resultCode})"
-        if (result.resultCode == android.app.Activity.RESULT_OK && data != null) {
-            CallManager.startScreenShare(result.resultCode, data)
-        }
-    }
+    // System MediaProjection consent → start the screen capture on approval. The prompt runs in
+    // its own task (ScreenShareConsentActivity) so a single-app share of Haven itself survives
+    // MainActivity's singleTask relaunch.
     // DEBUG qa `screen_share` op: open the SAME consent prompt the share button does, so the e2e
     // suite drives the real MediaProjection consent + foreground-service path (never a stub).
     val qaShareAsk by com.blaineam.haven.core.QaDriver.screenShareAsk
     androidx.compose.runtime.LaunchedEffect(qaShareAsk) {
-        if (qaShareAsk > 0 && !CallManager.screenShare.value) {
-            val mpm = context.getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE)
-                as android.media.projection.MediaProjectionManager
-            com.blaineam.haven.core.QaStats.shareConsentAttempts++
-            projectionLauncher.launch(mpm.createScreenCaptureIntent())
-        }
+        if (qaShareAsk > 0 && !CallManager.screenShare.value) ScreenShareConsentActivity.launch(context)
     }
 
     // A peer sharing their screen takes over the main view (aspect-fit, whole screen visible).
@@ -319,12 +307,7 @@ private fun InCall() {
                 RoundButton(if (sharing) Icons.AutoMirrored.Filled.StopScreenShare else Icons.AutoMirrored.Filled.ScreenShare,
                     if (sharing) Color.White else CallChip, stringResource(R.string.call_share_screen)) {
                     if (sharing) CallManager.stopScreenShare()
-                    else {
-                        val mpm = context.getSystemService(android.content.Context.MEDIA_PROJECTION_SERVICE)
-                            as android.media.projection.MediaProjectionManager
-                        com.blaineam.haven.core.QaStats.shareConsentAttempts++
-                        projectionLauncher.launch(mpm.createScreenCaptureIntent())
-                    }
+                    else ScreenShareConsentActivity.launch(context)
                 }
                 RoundButton(Icons.Filled.PersonAdd, CallChip, stringResource(R.string.call_add_people),
                     enabled = CallManager.addableContacts().isNotEmpty()) { showAddPeople = true }

@@ -23,6 +23,9 @@ final class HavenPerf: @unchecked Sendable {
         var persistReasons: [String: Int] = [:]
         /// State-changing engine calls ("<function>:<line>") — what makes the next persist export.
         var dirtiedBy: [String: Int] = [:]
+        /// The last few inbound envelopes that CHANGED the engine (and so owe a save): where they
+        /// came from. An export while nothing is being posted traces back to one of these.
+        var recentApplied: [String] = []
     }
     private static let userWaitWindow = 512
     private let state = OSAllocatedUnfairLock(initialState: State())
@@ -55,6 +58,14 @@ final class HavenPerf: @unchecked Sendable {
             if !reason.isEmpty, s.persistReasons.count < 200 || s.persistReasons[reason] != nil {
                 s.persistReasons[reason, default: 0] += 1
             }
+        }
+    }
+    /// An inbound envelope changed the engine (DEBUG attribution for idle exports).
+    func noteApplied(_ what: String) {
+        let t = UInt64(Date().timeIntervalSince1970 * 1000)
+        state.withLock { s in
+            s.recentApplied.append("\(t) \(what)")
+            if s.recentApplied.count > 30 { s.recentApplied.removeFirst(s.recentApplied.count - 30) }
         }
     }
     /// An engine call not marked `readOnly` ran (DEBUG attribution for idle exports).
@@ -90,6 +101,7 @@ final class HavenPerf: @unchecked Sendable {
             "mediaStoreOnMainCount": s.mediaStoreOnMainCount,
             "heldRefSetSize": heldRefSetSize,
             "persistReasons": s.persistReasons,
+            "recentApplied": s.recentApplied,
             // The top state-changing engine callers: a persist that exports while nothing the user
             // can see changed traces back to one of these.
             "engineDirtiedBy": Dictionary(uniqueKeysWithValues:

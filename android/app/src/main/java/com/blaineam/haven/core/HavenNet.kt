@@ -2321,7 +2321,7 @@ object HavenNet : InboundListener {
             val l = s.lowercase()
             l == mineAcct || l == mineDev || myOtherDeviceTargets().any { it == l }
         } ?: false
-        val changed = runCatching { social.receive(ev.circleId, ev.envelope) }.getOrDefault(false)
+        val changed = receiveChanged(ev.circleId, ev.envelope)
         if (changed) {
             // FAN OUT to my other devices. A sender dials the device ids ITS copy of my roster
             // resolves — often just one — so a DM delivered straight to my tablet never reached my
@@ -5635,7 +5635,7 @@ object HavenNet : InboundListener {
         val newlyIngested = ArrayList<Pair<String, ByteArray>>()
         fun ingestMailboxEnv(circleId: String, env: ByteArray): Boolean {
             receiveRan = true
-            if (!runCatching { social.receive(circleId, env) }.getOrDefault(false)) return false
+            if (!receiveChanged(circleId, env)) return false
             newlyIngested.add(circleId to env)
             notifyInbound(circleId)
             return true
@@ -8766,6 +8766,24 @@ object HavenNet : InboundListener {
                 Log.d(TAG, "send type=$type to ${toNodeHex.take(8)} failed: $lastErr")
             }
         }
+    }
+
+    /**
+     * `receive`, answering "did this CHANGE anything?" for a device roster too (Apple
+     * `FeedStore.receiveChanged` parity). The core reports a roster envelope (tag 0x04) as applied
+     * whenever it verifies — an ALREADY-CURRENT one included — and every hello reply carries the
+     * sender's roster, so an idle fleet re-applied the same rosters every ~30 s: a whole-state
+     * persist, a fan-out to my other devices (which re-applied and re-fanned it) and a self-sync
+     * push each time. A roster goes through `ingestRosterWireStatus` (-1 refused / 0 current /
+     * 1 stored); only a stored one also takes the circle arm (tree commits parked on it).
+     */
+    private fun receiveChanged(circleId: String, env: ByteArray): Boolean {
+        if (env.isNotEmpty() && env[0] == 0x04.toByte()) {
+            if (runCatching { social.ingestRosterWireStatus(env) }.getOrDefault((-1).toByte()) <= 0) return false
+            runCatching { social.receive(circleId, env) }
+            return true
+        }
+        return runCatching { social.receive(circleId, env) }.getOrDefault(false)
     }
 
     // ---- Persistence ---------------------------------------------------------------------

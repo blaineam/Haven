@@ -1480,7 +1480,7 @@ async function main() {
     // persistReasons / engineDirtiedBy (Apple): what asked for each export and which engine calls
     // made it non-empty — the attribution a red here needs.
     score(`responsive: no persist exports while idle (${BUDGET.idle / 1000}s)`, c1 === c0,
-      `${c0} → ${c1} reasons=${JSON.stringify(idlePerf.persistReasons || {})} dirtiedBy=${JSON.stringify(idlePerf.engineDirtiedBy || {})}`);
+      `${c0} → ${c1} reasons=${JSON.stringify(idlePerf.persistReasons || {})} recentApplied=${JSON.stringify((idlePerf.recentApplied || []).slice(-12))} dirtiedBy=${JSON.stringify(idlePerf.engineDirtiedBy || {})}`);
   }
 
   // 0. newfriend runs FIRST: A and B are strangers until it makes them friends (E2E_PREFRIEND=0).

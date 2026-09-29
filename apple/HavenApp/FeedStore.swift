@@ -5960,6 +5960,24 @@ final class FeedStore: ObservableObject {
         }
     }
 
+    /// `receive`, answering "did this CHANGE anything?" for a device roster too.
+    ///
+    /// The core's `receive` reports a device roster (tag 0x04) as applied whenever it VERIFIES —
+    /// including a roster it already holds (`RosterIngest::AlreadyCurrent.known()` is true). Every
+    /// hello reply carries the sender's roster, so an idle fleet re-delivered the same rosters every
+    /// ~30 s, and each read as a new event: a whole-state export, a fan-out to every other device
+    /// of mine (which re-applied and re-fanned it) and a silent self-sync push — forever. A roster
+    /// goes through `ingestRosterWireStatus` (-1 refused / 0 already current / 1 stored) instead,
+    /// and only a stored one also takes the circle arm (which drains tree commits parked on it).
+    nonisolated static func receiveChanged(_ s: HavenSocial, circleId: String, envelope: Data) -> Bool {
+        if envelope.first == 0x04 {
+            guard s.ingestRosterWireStatus(wire: envelope) > 0 else { return false }
+            _ = try? s.receive(circleId: circleId, envelope: envelope)
+            return true
+        }
+        return (try? s.receive(circleId: circleId, envelope: envelope)) == true
+    }
+
     private func eventPayload(_ circleId: String, _ env: Data) -> Data {
         var p = Data(); lpAppend(&p, Data(circleId.utf8)); p.append(env); return p
     }
@@ -6186,7 +6204,7 @@ final class FeedStore: ObservableObject {
     private func ingestHintedEnvelopes(_ batch: [(cid: String, key: String, env: Data)]) async {
         guard let engine else { return }
         let ingested: [(cid: String, key: String, env: Data)] = await engine.run { s in
-            batch.filter { (try? s.receive(circleId: $0.cid, envelope: $0.env)) == true }
+            batch.filter { FeedStore.receiveChanged(s, circleId: $0.cid, envelope: $0.env) }
         }
         guard self.engine === engine, !ingested.isEmpty else { return }
         for item in ingested { SharedStore.markSeenPublic(item.key) }
@@ -6486,7 +6504,7 @@ final class FeedStore: ObservableObject {
                 var unlocked = Set<String>()
                 var processed: [String] = []
                 for (cid, key, env) in slice {
-                    let applied = (try? s.receive(circleId: cid, envelope: env)) == true
+                    let applied = FeedStore.receiveChanged(s, circleId: cid, envelope: env)
                     // Every processed envelope is marked seen — `false` means "duplicate" or
                     // "buffered until its key/roster arrives" and the pending buffer is durable,
                     // so the mailbox copy is redundant either way (marking only on `true` melted
@@ -6594,6 +6612,14 @@ final class FeedStore: ObservableObject {
         // A pass that ran no receive() — a 204, a held hello re-offered each poll — has nothing to
         // save: persisting after it was an export per idle poll.
         let processed = batch.processedKeys
+        #if DEBUG
+        for (cid, env) in ingested {
+            HavenPerf.shared.noteApplied("mailbox c=\(cid.prefix(10)) tag=\(env.first.map { String(format: "%02x", $0) } ?? "--") of \(processed.count) processed")
+        }
+        if ingested.isEmpty, !processed.isEmpty {
+            HavenPerf.shared.noteApplied("mailbox NONE applied of \(processed.count): \(processed.prefix(2).map { String($0.suffix(40)) })")
+        }
+        #endif
         if !processed.isEmpty || helloIngested {
             SharedStore.holdAwaitingPersist(processed)
             persist(then: { saved in
@@ -10283,10 +10309,13 @@ final class FeedStore: ObservableObject {
         // during a sync. Do the crypto off-main; hop back only for the (already-coalesced) applies.
         Task { @MainActor [weak self] in
             let ok = await engine.run { s in
-                (try? s.receive(circleId: circleId, envelope: envelope)) == true
+                Self.receiveChanged(s, circleId: circleId, envelope: envelope)
             }
             guard ok else { return }
             guard let self, self.engine === engine else { return }
+            #if DEBUG
+            HavenPerf.shared.noteApplied("live c=\(circleId.prefix(10)) tag=\(envelope.first.map { String(format: "%02x", $0) } ?? "--") from=\(senderDevice?.prefix(8) ?? "?") own=\(fromOwnDevice) nearby=\(viaNearby)")
+            #endif
             // FAN OUT to my other devices. A sender dials the device ids its copy of my roster
             // resolves — often just one — so a DM delivered straight to my Mac never reached my
             // iPhone, which was left waiting on a mailbox poll (and got nothing at all if the

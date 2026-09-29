@@ -1467,7 +1467,13 @@ async function main() {
     perfGate('responsive: react local latency, worst of 5 [ios]', 'ios', rl.length === 5 ? Math.max(...rl) : -1, BUDGET.react);
     const allow = persistExportAllowance(burstMs);
     score(`responsive: persist exports during the burst ≤ ${allow}`, num(perf.persistExportCount) <= allow, `count=${perf.persistExportCount}`);
-    const c0 = num(perf.persistExportCount);
+    // IDLE starts once the WHOLE burst has landed, not just its texts: the photo and the two videos
+    // (posts from a slow desktop leg especially) used to arrive inside the "idle" window, and each
+    // one is a genuine state change that must be saved.
+    const burstMedia = [`${MARKER}_Burst_V1`, `${MARKER}_Burst_Photo`, `${MARKER}_Burst_V2`];
+    await converge(ios, (j) => burstMedia.every((t) => hasPost(t)(j)), BUDGET.mediaBlob);
+    await sleep(3000);   // one debounce window: the save for that last arrival is not "idle"
+    const c0 = num((await freshDump(ios))?.perf?.persistExportCount);
     await sleep(BUDGET.idle);
     const idlePerf = (await freshDump(ios))?.perf || {};
     const c1 = num(idlePerf.persistExportCount);

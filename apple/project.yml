@@ -441,6 +441,8 @@ targets:
       - path: HavenApp/SyncProgress.swift
       # Byte-identical device-roster re-deliveries (receive() reports a known roster as applied).
       - path: HavenApp/RosterEcho.swift
+      # Call ringback/ringtone start off the main actor. AVFoundation only.
+      - path: HavenApp/CallTones.swift
       - path: Shared/SharedNotificationPrivacy.swift
       - path: HavenLogicTests
     settings:

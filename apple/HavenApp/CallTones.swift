@@ -3,35 +3,130 @@ import AVFoundation
 
 /// A gentle, synthesized "dialing" loop played while a call is ringing the other side — no audio
 /// asset needed. Stops the moment the call connects (or ends). Works for 1:1 and group dialing.
+///
+/// Every AVAudioPlayer call runs on `CallToneDriver`'s serial queue, never on the main actor:
+/// `prepareToPlay()`/`play()` block until the output device starts, and a device that won't start
+/// (a disconnected virtual/remote-desktop output, a Bluetooth route mid-handoff, a wedged
+/// coreaudiod) holds them ~15 s EACH. On main that froze the caller for 30 s inside
+/// `beginOutgoing` — the invites went out 30 s late, the ~30 s invite give-up then hung up before
+/// the answer landed — and froze the callee 15 s inside `accept` before its answer was sent.
 @MainActor
 final class CallTones {
     static let shared = CallTones()
-    private var player: AVAudioPlayer?
+    private let driver: CallToneDriver
+    /// Main-side mirror of "a tone is playing or starting", so a second start is a no-op (as before).
+    private var sounding = false
 
-    func startRingback() {
-        guard player == nil, let data = Self.ringbackWAV() else { return }
-        player = try? AVAudioPlayer(data: data)
-        player?.numberOfLoops = -1
-        player?.volume = 0.45
-        player?.prepareToPlay()
-        player?.play()
+    init(makePlayer: @escaping @Sendable (Data, Float) -> CallTonePlayer? = AVCallTonePlayer.make) {
+        driver = CallToneDriver(makePlayer: makePlayer)
     }
+
+    func startRingback() { start(.ringback) }
 
     /// A more insistent looping "incoming call" ringtone, used on Mac (no CallKit system ring).
     /// Distinct cadence from the dialing ringback so the two are never confused.
-    func startRingtone() {
-        guard player == nil, let data = Self.ringtoneWAV() else { return }
-        player = try? AVAudioPlayer(data: data)
-        player?.numberOfLoops = -1
-        player?.volume = 0.7
-        player?.prepareToPlay()
-        player?.play()
+    func startRingtone() { start(.ringtone) }
+
+    func stop() {
+        sounding = false
+        driver.stop()
+    }
+
+    private func start(_ tone: CallTone) {
+        guard !sounding else { return }
+        sounding = true
+        driver.start(tone)
+    }
+}
+
+/// A looping tone player. `play()` may block for seconds on a device that won't start — it is only
+/// ever called on `CallToneDriver`'s queue.
+protocol CallTonePlayer: AnyObject {
+    func play()
+    func stop()
+}
+
+final class AVCallTonePlayer: CallTonePlayer {
+    private let player: AVAudioPlayer
+
+    private init(player: AVAudioPlayer) { self.player = player }
+
+    @Sendable static func make(wav: Data, volume: Float) -> CallTonePlayer? {
+        guard let p = try? AVAudioPlayer(data: wav) else { return nil }
+        p.numberOfLoops = -1
+        p.volume = volume
+        return AVCallTonePlayer(player: p)
+    }
+
+    func play() {
+        player.prepareToPlay()
+        player.play()
+    }
+
+    func stop() { player.stop() }
+}
+
+/// Serializes tone starts/stops off the main thread. A stop issued while a start is still blocked
+/// in `play()` wins: the start sees its generation superseded and silences the player on return.
+final class CallToneDriver: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "com.blaineam.haven.calltones", qos: .userInitiated)
+    private let makePlayer: @Sendable (Data, Float) -> CallTonePlayer?
+    private let lock = NSLock()
+    private var generation: UInt64 = 0     // guarded by `lock`; bumped by every start and stop
+    private var player: CallTonePlayer?    // confined to `queue`
+
+    init(makePlayer: @escaping @Sendable (Data, Float) -> CallTonePlayer?) {
+        self.makePlayer = makePlayer
+    }
+
+    func start(_ tone: CallTone) {
+        let gen = bump()
+        queue.async { [self] in
+            guard isCurrent(gen) else { return }
+            player?.stop()
+            player = nil
+            guard let wav = tone.wav, let p = makePlayer(wav, tone.volume) else { return }
+            player = p
+            p.play()
+            if !isCurrent(gen) {
+                p.stop()
+                if player === p { player = nil }
+            }
+        }
     }
 
     func stop() {
-        player?.stop()
-        player = nil
+        _ = bump()
+        queue.async { [self] in
+            player?.stop()
+            player = nil
+        }
     }
+
+    /// Blocks until every start/stop queued so far has run. Tests only.
+    func drain() { queue.sync {} }
+
+    private func bump() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        generation &+= 1
+        return generation
+    }
+
+    private func isCurrent(_ gen: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return generation == gen
+    }
+}
+
+enum CallTone: Sendable {
+    case ringback, ringtone
+
+    var volume: Float { self == .ringback ? 0.45 : 0.7 }
+
+    /// Rendered once, lazily, on the driver's queue (static lets are thread-safe).
+    var wav: Data? { self == .ringback ? Self.ringbackData : Self.ringtoneData }
+    private static let ringbackData: Data? = ringbackWAV()
+    private static let ringtoneData: Data? = ringtoneWAV()
 
     /// Synthesize a warm, looping two-note arpeggio (a friendlier take on a ringback cadence),
     /// rendered to an in-memory 16-bit PCM WAV so AVAudioPlayer can loop it seamlessly.

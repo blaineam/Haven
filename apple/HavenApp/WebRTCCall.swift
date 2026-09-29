@@ -58,6 +58,8 @@ final class WebRTCCall: NSObject {
     var onRemoteVideoTrackEnded: ((_ isScreen: Bool) -> Void)?
     /// Receiver ids currently routed as a screen share. Touched from WebRTC's signaling thread.
     private var screenReceiverIds = Set<String>()
+    /// Remote video track id → the stream ids it was announced under (QA dump only).
+    private var qaStreamIds: [String: [String]] = [:]
     private let screenReceiverLock = NSLock()
     var onStateChange: ((RTCIceConnectionState) -> Void)?
     /// Fires once the remote description is actually applied — only then is it safe to add the
@@ -280,6 +282,27 @@ final class WebRTCCall: NSObject {
     /// track presence. The field failure was a call both sides showed as "connected", with tracks
     /// attached, that carried no audio in either direction and never showed the remote video. Only
     /// inbound-rtp byte counters can tell those apart, so this is what QA asserts on.
+    #if DEBUG
+    /// Per remote video track (inbound-rtp `trackIdentifier`): frames decoded + current frame size,
+    /// plus the stream ids the receiver was announced under — the e2e `screenshare` step's evidence
+    /// that a screen share arrived as its OWN track and never overwrote the camera slot.
+    func inboundVideoTracks(_ completion: @escaping ([String: [String: Any]]) -> Void) {
+        screenReceiverLock.lock(); let streams = qaStreamIds; screenReceiverLock.unlock()
+        pc.statistics { report in
+            var out: [String: [String: Any]] = [:]
+            for (_, stat) in report.statistics where stat.type == "inbound-rtp" {
+                guard stat.values["kind"] as? String == "video",
+                      let tid = stat.values["trackIdentifier"] as? String else { continue }
+                out[tid] = ["frames_decoded": (stat.values["framesDecoded"] as? NSNumber)?.intValue ?? 0,
+                            "width": (stat.values["frameWidth"] as? NSNumber)?.intValue ?? 0,
+                            "height": (stat.values["frameHeight"] as? NSNumber)?.intValue ?? 0,
+                            "stream_ids": streams[tid] ?? []]
+            }
+            completion(out)
+        }
+    }
+    #endif
+
     func inboundMedia(_ completion: @escaping (_ audioBytes: Int, _ videoBytes: Int, _ videoFrames: Int) -> Void) {
         pc.statistics { report in
             var audio = 0, video = 0, frames = 0
@@ -522,6 +545,7 @@ extension WebRTCCall: RTCPeerConnectionDelegate {
         screenReceiverLock.lock()
         if isScreen { screenReceiverIds.insert(rtpReceiver.receiverId) }
         else { screenReceiverIds.remove(rtpReceiver.receiverId) }
+        qaStreamIds[track.trackId] = streamIds
         screenReceiverLock.unlock()
         onRemoteVideoTrack?(track, isScreen)
     }

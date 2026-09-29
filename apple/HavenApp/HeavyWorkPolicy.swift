@@ -36,11 +36,14 @@ enum HeavyWorkPolicy {
         var heat: Heat = .nominal
         /// iOS Low Power Mode / macOS low-power mode.
         var lowPower = false
+        /// A forced suspension and its reason ("" = none). Only the DEBUG `heavy_work_override` qa op
+        /// sets it — the e2e suite's way to exercise the gate without a real call or a hot phone.
+        var forced = ""
 
         /// Stop every deferrable heavy transfer: peer media serving, backfill uploads, non-thumbnail
         /// media prefetch, history handoff, heavy self-sync. A call's audio/video pipeline already
         /// owns the SoC and the radio; this phone's battery budget says no; or it is hot.
-        var suspendHeavyIO: Bool { havenCall || systemCall || heat >= .serious || lowPower }
+        var suspendHeavyIO: Bool { havenCall || systemCall || heat >= .serious || lowPower || !forced.isEmpty }
 
         /// Streaming a blob to a FRIEND is the most expensive thing Haven does per byte (a KEM seal
         /// per chunk). Only when nothing above applies AND the device is fully cool — at .fair the
@@ -57,6 +60,7 @@ enum HeavyWorkPolicy {
             if systemCall { r.append("system-call") }
             if heat >= .fair { r.append("thermal=\(heat)") }
             if lowPower { r.append("low-power") }
+            if !forced.isEmpty { r.append("forced=\(forced)") }
             return r.joined(separator: ",")
         }
     }

@@ -1824,9 +1824,21 @@ async function main() {
     const misplaced = misplacedCircles(keysNow, { ra: [cB], rc: [cA, cB] });
     score('multirelay: no circle\'s mailbox on a relay nobody configured for it', misplaced.length === 0,
       misplaced.length ? JSON.stringify(misplaced) : `R_A circles=${[...mailboxCircles(keysNow.ra)].length} R_C=${[...mailboxCircles(keysNow.rc)].length}`);
-    // Media refs name no circle, so a sibling that replicates media cannot tell whose it is — the
-    // namespace is shared BY DESIGN and only reported here (ciphertext either way).
-    log(`multirelay: media placement (informational) — B's private photo on R_A=${holdsMedia(keysNow.ra, refs.bPriv)} R_C=${holdsMedia(keysNow.rc, refs.bPriv)}; A's private photo on R_C=${holdsMedia(keysNow.rc, refs.aPriv)}`);
+    // Media scope (docs/RELAY-AND-DEPLOY.md ▸ Media scope): uploaders scope each ref to its circle,
+    // so neither a client's upload nor mesh replication may put a private circle's media — blob,
+    // windows or scope marker — on a FRIEND's relay: B's private photo on A's R_A, A's on B's R_B or
+    // R_C. (B's private photo MAY sit on R_C: B operates it and B's relay link authorizes every one of
+    // B's circles, so R_C serves C_B even though B's client only adopted it for C_S.) Checked here,
+    // after the shared circle has meshed onto every relay (mesh passes HAVE run), and again after the
+    // mesh section below.
+    const mediaMisplaced = (k) => [
+      ...(refs.bPriv && holdsMedia(k.ra, refs.bPriv) ? ['B private photo on R_A'] : []),
+      ...(refs.aPriv && holdsMedia(k.rc, refs.aPriv) ? ['A private photo on R_C'] : []),
+      ...(refs.aPriv && holdsMedia(k.rb, refs.aPriv) ? ['A private photo on R_B'] : []),
+    ];
+    const mediaMis = mediaMisplaced(keysNow);
+    score('multirelay: no private circle\'s media on a friend\'s relay that doesn\'t serve it', mediaMis.length === 0,
+      mediaMis.length ? mediaMis.join('; ') : 'B\'s private photo not on R_A; A\'s on neither R_B nor R_C');
 
     // Every client's relay list carries every relay it knows, each with ITS OWN token + URLs.
     const truth = {
@@ -1948,6 +1960,11 @@ async function main() {
     const diff = keyDiff(liveEvents(storeKeys.ra()), liveEvents(storeKeys.rc()));
     gate('multirelay: mesh — R_A and R_C hold the same C_S events', 'rc', meshed, MRB.mesh);
     if (meshed < 0) log(`multirelay: C_S only on R_A ${diff.onlyA.length}, only on R_C ${diff.onlyB.length}`);
+    {
+      const later = mediaMisplaced({ ra: storeKeys.ra(), rc: storeKeys.rc(), rb: storeKeys.rb() });
+      score('multirelay: still no private circle\'s media on a friend\'s relay (after the mesh checks)',
+        later.length === 0, later.join('; '));
+    }
     // LIST counts hold still over a quiet window (a re-seal that mints new keys would grow them).
     // A relay may still be catching up (a key its sibling already had arrives late) — that is mesh
     // convergence. What must never happen is a key that existed on NO relay when the window opened:

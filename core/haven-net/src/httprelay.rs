@@ -83,7 +83,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::blobstore::{
-    blob_forbidden, local_get, local_list, local_put, local_touch, record_devroster, safe_path,
+    blob_forbidden, listing_retain, local_get, local_list, local_put, local_touch, record_devroster, safe_path,
     verify_devroster_put, DevrosterPut, RelayAuth, DEVROSTER_PREFIX, VERB_GET, VERB_HAS, VERB_LIST,
     VERB_PUT, VERB_TOUCH,
 };
@@ -544,7 +544,7 @@ async fn handle_conn(
                 // circles it replicates (see `RelayAuth::listing_visible`).
                 {
                     let a = auth.lock().unwrap();
-                    keys.retain(|k| a.listing_visible(&peer, k));
+                    listing_retain(root, &a, &peer, &mut keys, |k| k.as_str());
                 }
                 keys.sort();
                 let body = keys.join("\n");

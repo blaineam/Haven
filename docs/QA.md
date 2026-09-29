@@ -235,8 +235,11 @@ What it asserts (every timing lands in `build/e2e-history.jsonl`):
 
 1. **Separation** — every relay has its own node id, token and port; A's C_A posts land on R_A,
    B's C_B posts on R_B, C_S on R_A + R_C + R_B (dual-write or mesh); no MAILBOX of C_B on R_A/R_C
-   and none of C_A on R_C (store dirs are read directly). Media refs name no circle, so where a
-   private photo's ciphertext ends up is logged, not scored; every client's `relay_stats` rows are **correctly
+   and none of C_A on R_C (store dirs are read directly). **Media scope:** no blob, window or scope
+   marker of B's private photo on R_A and none of A's private photo on R_B/R_C — scored once the shared
+   circle has meshed everywhere and again after the mesh checks (docs/RELAY-AND-DEPLOY.md ▸ Media
+   scope). B's private photo may sit on R_C: B's relay link authorizes all of B's circles, so R_C
+   serves C_B; every client's `relay_stats` rows are **correctly
    attributed** (each relay's token fingerprint and ports, nothing crossed) and A's list still holds
    R_B after R_A's announce. **Collision sub-check:** a second relay pointed at R_A's internal port —
    on `0.0.0.0` and on `127.0.0.1` — must exit non-zero naming the port. (Darwin lets a

@@ -136,6 +136,104 @@ const MAX_TOUCH_BODY: u64 = 256 * 1024;
 pub(crate) const MAILBOX_PREFIX: &str = "haven/mailbox/";
 /// The namespace operator-chosen media retention applies to.
 pub(crate) const MEDIA_PREFIX: &str = "haven/media/";
+
+// ---- media scope markers -------------------------------------------------------------------
+//
+// A media ref names no circle, so before these markers a sibling relay that shared ONE circle with
+// us replicated ALL of our media — a private circle's or a DM's ciphertext landed on a friend's
+// relay that serves neither. The uploader now writes `haven/media/<ref>.c/<circle>` (a tiny,
+// content-free marker) to each relay BEFORE the blob; it scopes the ref to that circle. A ref may
+// carry several markers (the same media shared into more than one circle). Mesh replication then
+// treats a scoped ref exactly like a mailbox of its circle(s): listed to, and pulled by, only the
+// relays that serve one of them. A ref WITHOUT markers (written by an older client) keeps the old
+// behavior — it replicates to every sibling — because refusing it would strand media for old
+// clients whose only path to a friend is the mesh. The marker sits UNDER the media namespace, so
+// older relays store it under the same auth + retention as media and older clients never see it
+// (nobody lists media). See docs/RELAY-AND-DEPLOY.md ▸ "Media scope".
+
+/// The directory suffix that holds a ref's scope markers (`<ref>.c/<circle>`), next to the chunk
+/// directory `<ref>.p/`.
+const MEDIA_SCOPE_DIR_SUFFIX: &str = ".c";
+/// The body of a scope marker. Content-free: the KEY is the information.
+pub const MEDIA_SCOPE_BODY: &[u8] = b"1";
+
+/// The scope marker key that says media `reference` belongs to `circle`.
+pub fn media_scope_key(reference: &str, circle: &str) -> String {
+    format!("{MEDIA_PREFIX}{reference}{MEDIA_SCOPE_DIR_SUFFIX}/{circle}")
+}
+
+/// `(ref, circle)` of a scope marker key (`haven/media/<ref>.c/<circle>`), else None.
+fn media_scope_marker(key: &str) -> Option<(&str, &str)> {
+    let rest = key.strip_prefix(MEDIA_PREFIX)?;
+    let (head, circle) = rest.rsplit_once('/')?;
+    let r = head.strip_suffix(MEDIA_SCOPE_DIR_SUFFIX)?;
+    (!r.is_empty() && !circle.is_empty()).then_some((r, circle))
+}
+
+/// The ref a media key belongs to: the blob itself (`haven/media/<ref>`), one of its chunk windows
+/// (`<ref>.p/<i>`) or one of its scope markers (`<ref>.c/<circle>`). None outside the namespace.
+fn media_ref(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix(MEDIA_PREFIX)?;
+    if let Some((head, _)) = rest.rsplit_once('/') {
+        if let Some(r) = head.strip_suffix(".p").or_else(|| head.strip_suffix(MEDIA_SCOPE_DIR_SUFFIX)) {
+            return (!r.is_empty()).then_some(r);
+        }
+    }
+    (!rest.is_empty()).then_some(rest)
+}
+
+/// The circle a key NAMES: a mailbox's circle, or the circle of a media scope marker. Every
+/// per-circle gate (member/sibling reads and writes, listings, the mesh pull) keys off this.
+fn key_circle(key: &str) -> Option<&str> {
+    mailbox_circle(key).or_else(|| media_scope_marker(key).map(|(_, c)| c))
+}
+
+/// The circles this store has scoped media `reference` to (its local markers).
+pub(crate) fn local_media_scopes(root: &Path, reference: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Ok(dir) = safe_path(root, &format!("{MEDIA_PREFIX}{reference}{MEDIA_SCOPE_DIR_SUFFIX}")) {
+        collect_keys(root, &dir, &mut keys);
+    }
+    keys.iter().filter_map(|k| media_scope_marker(k).map(|(_, c)| c.to_string())).collect()
+}
+
+/// ref → circles, from the scope markers in a peer's inventory.
+fn peer_media_scopes(peer_keys: &[(String, u64)]) -> HashMap<&str, Vec<&str>> {
+    let mut out: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (k, _) in peer_keys {
+        if let Some((r, c)) = media_scope_marker(k) {
+            out.entry(r).or_default().push(c);
+        }
+    }
+    out
+}
+
+/// Is `path` (on disk) a media scope marker? Its parent directory is `<ref>.c`.
+fn is_scope_marker_path(path: &Path) -> bool {
+    path.parent()
+        .and_then(|d| d.file_name())
+        .map(|n| n.to_string_lossy().ends_with(MEDIA_SCOPE_DIR_SUFFIX))
+        .unwrap_or(false)
+}
+
+/// Drop from a listing everything `peer` may not see: keys that name a circle (mailboxes, scope
+/// markers) per [`RelayAuth::listing_visible`], and media blobs/windows whose ref is scoped to
+/// circles `peer` neither belongs to nor replicates. Unscoped (legacy) media stays visible.
+pub(crate) fn listing_retain<T>(root: &Path, a: &RelayAuth, peer: &str, items: &mut Vec<T>, key: impl Fn(&T) -> &str) {
+    let mut scopes: HashMap<String, Vec<String>> = HashMap::new();
+    items.retain(|it| {
+        let k = key(it);
+        if !a.listing_visible(peer, k) {
+            return false;
+        }
+        if media_scope_marker(k).is_some() {
+            return true; // judged by its circle above
+        }
+        let Some(r) = media_ref(k) else { return true };
+        let sc = scopes.entry(r.to_string()).or_insert_with(|| local_media_scopes(root, r));
+        sc.is_empty() || sc.iter().any(|c| a.circle_visible(peer, c))
+    });
+}
 /// A mailbox entry idle (no PUT / HAS hit / TOUCH) longer than this is garbage-collected.
 /// Clients refresh their live refs daily, so 30 days tolerates a month of total inactivity.
 pub const MAILBOX_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
@@ -312,6 +410,8 @@ pub(crate) fn keys_to_pull(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let peer_scopes = peer_media_scopes(peer_keys);
+    let mut local_scopes: HashMap<&str, Vec<String>> = HashMap::new();
     let mut out = Vec::new();
     for (key, age) in peer_keys {
         if out.len() >= MAX_SYNC_PULL {
@@ -320,9 +420,20 @@ pub(crate) fn keys_to_pull(
         if *age >= mailbox_ttl && key.starts_with(MAILBOX_PREFIX) {
             continue; // expired on the peer's clock → never resurrect
         }
-        if let Some(c) = mailbox_circle(key) {
+        if let Some(c) = key_circle(key) {
             if !serves_circle(c) {
-                continue; // a mailbox we don't serve is not ours to hold (an older sibling may still offer it)
+                // A mailbox (or media scope marker) of a circle we don't serve is not ours to hold
+                // (an older sibling may still offer it).
+                continue;
+            }
+        } else if let Some(r) = media_ref(key) {
+            // Media scoped to circles (markers on the peer or here): only if we serve one of them.
+            // Unscoped media — written by an older client — replicates as it always did.
+            let local = local_scopes.entry(r).or_insert_with(|| local_media_scopes(root, r));
+            let peer = peer_scopes.get(r).map(|v| v.as_slice()).unwrap_or(&[]);
+            let scoped = !local.is_empty() || !peer.is_empty();
+            if scoped && !local.iter().any(|c| serves_circle(c)) && !peer.iter().any(|c| serves_circle(c)) {
+                continue;
             }
         }
         if key.starts_with(MEDIA_PREFIX) {
@@ -531,12 +642,22 @@ impl RelayAuth {
     /// rule `blob_forbidden` applies to DM keys); everything else is decided by the prefix gate the
     /// LIST already passed. Applied to every LIST/AGES answer, so a broad listing a sibling is
     /// allowed to request carries only the circles it replicates.
+    /// Media scope markers name a circle too and follow the same rule (see [`listing_retain`] for
+    /// the media blobs they scope, which need the store to judge).
     pub(crate) fn listing_visible(&self, peer: &str, key: &str) -> bool {
-        match mailbox_circle(key) {
-            Some(c) if c.starts_with("dm:") => self.is_known(peer) || self.is_sibling_for(peer, c),
-            Some(c) => self.is_member_of(c, peer) || self.is_sibling_for(peer, c),
+        match key_circle(key) {
+            Some(c) => self.circle_visible(peer, c),
             None => true,
         }
+    }
+
+    /// May `peer` see content of `circle` in a listing (member or sibling for it; a DM circle also
+    /// to anyone this relay serves)?
+    pub(crate) fn circle_visible(&self, peer: &str, circle: &str) -> bool {
+        if circle.starts_with("dm:") {
+            return self.is_known(peer) || self.is_sibling_for(peer, circle);
+        }
+        self.is_member_of(circle, peer) || self.is_sibling_for(peer, circle)
     }
 
     /// Does this relay serve `circle` at all (the mesh PULL filter: never replicate a mailbox we
@@ -946,7 +1067,7 @@ pub fn gc_sweep_with(root: &Path, retention: &Retention, grace: std::time::Durat
     if marker_past_grace(&root.join(".haven-gc-enabled"), grace) {
         if let Ok(mailbox_root) = safe_path(root, MAILBOX_PREFIX) {
             let mut freed = 0u64; // mailbox bytes aren't reported; media accounting only
-            sweep_dir(&mailbox_root, retention.mailbox_ttl.as_secs(), &mut stats.mailbox_deleted, &mut freed);
+            sweep_dir(&mailbox_root, retention.mailbox_ttl.as_secs(), &mut stats.mailbox_deleted, &mut freed, &|_| false);
         }
     }
 
@@ -959,7 +1080,9 @@ pub fn gc_sweep_with(root: &Path, retention: &Retention, grace: std::time::Durat
         // Age first: same idle clock as the mailbox (PUT / HAS hit / TOUCH refresh mtime),
         // so live media a member still references keeps getting its clock reset.
         if let Some(max_age) = retention.media_max_age {
-            sweep_dir(&media_root, max_age.as_secs(), &mut stats.media_deleted_age, &mut stats.media_bytes_freed);
+            // Scope markers live exactly as long as their blob (below) — aging one out on its own
+            // would leave a live blob unscoped, i.e. replicating to every sibling.
+            sweep_dir(&media_root, max_age.as_secs(), &mut stats.media_deleted_age, &mut stats.media_bytes_freed, &is_scope_marker_path);
         }
         // Then size: evict oldest-first until under the cap. Applying age before size means
         // the size pass sees the already-thinned store — the "least space wins" order.
@@ -968,6 +1091,7 @@ pub fn gc_sweep_with(root: &Path, retention: &Retention, grace: std::time::Durat
             stats.media_deleted_size = n;
             stats.media_bytes_freed += freed;
         }
+        prune_orphan_scope_markers(&media_root);
     }
     stats.media_bytes_total = media_files(&media_root).iter().map(|(_, _, len)| len).sum();
     stats
@@ -987,14 +1111,15 @@ fn marker_past_grace(marker: &Path, grace: std::time::Duration) -> bool {
 }
 
 /// Recursive TTL sweep under `dir`; removes directories that end up empty (best-effort).
-fn sweep_dir(dir: &Path, ttl_secs: u64, deleted: &mut usize, bytes_freed: &mut u64) {
+/// Files `keep` claims are left alone.
+fn sweep_dir(dir: &Path, ttl_secs: u64, deleted: &mut usize, bytes_freed: &mut u64, keep: &dyn Fn(&Path) -> bool) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            sweep_dir(&path, ttl_secs, deleted, bytes_freed);
+            sweep_dir(&path, ttl_secs, deleted, bytes_freed, keep);
             let _ = std::fs::remove_dir(&path); // only succeeds if now empty
-        } else if path.is_file() {
+        } else if path.is_file() && !keep(&path) {
             let is_part = path.extension().map(|e| e == "part").unwrap_or(false);
             let age = idle_age_secs(&path);
             // Abandoned temp writes go after an hour; real entries after the TTL.
@@ -1019,7 +1144,11 @@ fn media_files(media_root: &Path) -> Vec<(PathBuf, u64, u64)> {
             let path = entry.path();
             if path.is_dir() {
                 walk(&path, out);
-            } else if path.is_file() && path.extension().map(|e| e != "part").unwrap_or(true) {
+            } else if path.is_file()
+                && path.extension().map(|e| e != "part").unwrap_or(true)
+                && !is_scope_marker_path(&path)
+            {
+                // Scope markers are not media: never evicted on their own, never counted.
                 let Ok(meta) = std::fs::metadata(&path) else { continue };
                 let mtime = meta
                     .modified()
@@ -1067,6 +1196,38 @@ fn evict_media_to_cap(root: &Path, media_root: &Path, cap: u64) -> (usize, u64) 
     }
     prune_empty_dirs(media_root);
     (deleted, freed)
+}
+
+/// Delete scope markers whose blob is gone (swept or evicted), once they are an hour idle — an
+/// uploader writes the marker BEFORE the blob, so a fresh marker without one is an upload in flight.
+fn prune_orphan_scope_markers(media_root: &Path) {
+    fn walk(dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            match name.strip_suffix(MEDIA_SCOPE_DIR_SUFFIX) {
+                Some(base) if !base.is_empty() => {
+                    if path.with_file_name(base).is_file() {
+                        continue;
+                    }
+                    let Ok(markers) = std::fs::read_dir(&path) else { continue };
+                    for m in markers.flatten() {
+                        let mp = m.path();
+                        if mp.is_file() && idle_age_secs(&mp) > 3600 {
+                            let _ = std::fs::remove_file(&mp);
+                        }
+                    }
+                    let _ = std::fs::remove_dir(&path); // only succeeds if now empty
+                }
+                _ => walk(&path),
+            }
+        }
+    }
+    walk(media_root);
 }
 
 /// Remove now-empty directories under `dir` (best-effort, like the TTL sweep does).
@@ -1285,9 +1446,12 @@ pub(crate) async fn pull_missing_from_peer(
     // Prefer mailbox keys first so event history converges before multi‑MB media.
     const MAX_MESH_PULLS_PER_PASS: usize = 24;
     let mut want = keys_to_pull(root, &peer_keys, retention, serves_circle);
+    let peer_scopes = peer_media_scopes(&peer_keys);
     want.sort_by(|a, b| {
         let rank = |k: &str| {
-            if k.starts_with("haven/mailbox/") {
+            if k.starts_with("haven/mailbox/") || media_scope_marker(k).is_some() {
+                // Scope markers ride with the mailboxes: a media blob that lands here WITHOUT its
+                // marker would look unscoped (legacy) and be offered to every sibling of ours.
                 0
             } else if k.starts_with("haven/media/") {
                 // Chunk WINDOWS before MANIFESTS. These are unrelated keys to this loop, and
@@ -1334,6 +1498,16 @@ pub(crate) async fn pull_missing_from_peer(
             });
             if !complete {
                 continue;
+            }
+        }
+        // Scoped media: record its (served) scope HERE before the blob can be listed from here —
+        // the per-pass cap may have left the peer's marker for a later pass, and until it lands the
+        // blob would pass for legacy, unscoped media that replicates to every sibling of ours.
+        if media_scope_marker(&key).is_none() {
+            if let Some(r) = media_ref(&key) {
+                for c in peer_scopes.get(r).into_iter().flatten().filter(|c| serves_circle(c)) {
+                    let _ = local_put(root, &media_scope_key(r, c), MEDIA_SCOPE_BODY);
+                }
             }
         }
         if let Some(parent) = local.parent() {
@@ -1974,7 +2148,7 @@ pub(crate) fn blob_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8,
         // by `listing_visible`), the namespaces that name no circle, and the mailboxes of the
         // circles it is a sibling FOR. A mailbox of any other circle is judged exactly as for
         // anyone else below — which for a relay is "no".
-        match mailbox_circle(key) {
+        match key_circle(key) {
             Some(c) if !a.is_sibling_for(peer, c) => {}
             _ => return false,
         }
@@ -2045,7 +2219,11 @@ pub(crate) fn blob_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8,
     if (verb == VERB_LIST || verb == VERB_AGES || verb == VERB_TOUCH) && is_broad_prefix(key) {
         return true; // a non-relay may not enumerate (or keep-alive) across circles
     }
-    if let Some(circle) = mailbox_circle(key) {
+    // A media scope marker (`haven/media/<ref>.c/<circle>`) is gated like its circle's mailbox: only
+    // a member may say "this ref belongs to my circle" (so nobody can widen where someone else's
+    // media replicates), and a relay that doesn't serve the circle refuses it — which is how an
+    // uploader learns that relay is not a destination for that circle's media.
+    if let Some(circle) = key_circle(key) {
         // DM mailboxes (`dm:<a>-<b>[-<c>…]`) are keyed by their PARTICIPANTS' account ids and are never
         // registered via authorize() on a SHARED/default relay whose host isn't a DM participant — so
         // `members.get("dm:…")` is None and every DM op returns ERR forbidden, silently breaking offline
@@ -2319,7 +2497,7 @@ pub(crate) async fn handle_request(
             }
             {
                 let a = auth.lock().unwrap();
-                keys.retain(|k| a.listing_visible(&peer, k));
+                listing_retain(&root, &a, &peer, &mut keys, |k| k.as_str());
             }
             keys.sort();
             let body = keys.join("\n");
@@ -2334,7 +2512,7 @@ pub(crate) async fn handle_request(
                 if safe_path(&root, &key).is_ok() { local_list_ages(&root, &key) } else { Vec::new() };
             {
                 let a = auth.lock().unwrap();
-                pairs.retain(|(k, _)| a.listing_visible(&peer, k));
+                listing_retain(&root, &a, &peer, &mut pairs, |(k, _)| k.as_str());
             }
             pairs.sort();
             let body = pairs
@@ -3469,6 +3647,201 @@ mod tests {
         auth.lock().unwrap().deauthorize("shared");
         assert!(blob_forbidden(&auth, &a_relay, VERB_GET, &shared_key));
         assert!(blob_forbidden(&auth, &a_relay, VERB_AGES, "haven"), "no longer a sibling for anything");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- media scope markers ----------------------------------------------------------------
+
+    #[test]
+    fn media_scope_keys_parse() {
+        let k = media_scope_key("img_1", "fam");
+        assert_eq!(k, "haven/media/img_1.c/fam");
+        assert_eq!(media_scope_marker(&k), Some(("img_1", "fam")));
+        assert_eq!(key_circle(&k), Some("fam"));
+        let dm = media_scope_key("img_1", "dm:aa-bb");
+        assert_eq!(key_circle(&dm), Some("dm:aa-bb"));
+        assert_eq!(media_ref(&k), Some("img_1"));
+        assert_eq!(media_ref("haven/media/img_1"), Some("img_1"));
+        assert_eq!(media_ref("haven/media/img_1.p/3"), Some("img_1"));
+        assert_eq!(media_ref("haven/mailbox/fam/x"), None);
+        assert_eq!(media_scope_marker("haven/media/img_1"), None);
+        assert_eq!(media_scope_marker("haven/media/img_1.p/0"), None);
+        assert_eq!(key_circle("haven/media/img_1.p/0"), None, "a chunk window names no circle");
+    }
+
+    /// B's relay serves B's private circle and the circle B shares with A; A's relay is a sibling for
+    /// the shared circle only. Media scoped to the private circle never reaches A's relay — not in
+    /// a listing, not through a pull from an older sibling that lists everything — while shared,
+    /// reshared (scoped to both) and legacy (unscoped) media still replicate.
+    #[test]
+    fn a_sibling_never_replicates_media_scoped_to_a_circle_it_does_not_serve() {
+        let (b, a_relay, a) = ("bb".repeat(32), "aa".repeat(32), "a1".repeat(32));
+        let mut auth = RelayAuth::default();
+        auth.authorize("private", vec![b.clone()], vec![]);
+        auth.authorize("shared", vec![b.clone(), a.clone()], vec![a_relay.clone()]);
+        let auth = Arc::new(Mutex::new(auth));
+
+        let dir = std::env::temp_dir().join(format!("haven-media-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let put = |k: &str, body: &[u8]| local_put(&dir, k, body).unwrap();
+        // Private (chunked), shared, reshared into both, and a legacy ref with no marker at all.
+        put(&media_scope_key("priv", "private"), MEDIA_SCOPE_BODY);
+        put("haven/media/priv.p/0", b"w0");
+        put("haven/media/priv", b"manifest");
+        put(&media_scope_key("shr", "shared"), MEDIA_SCOPE_BODY);
+        put("haven/media/shr", b"s");
+        put(&media_scope_key("both", "private"), MEDIA_SCOPE_BODY);
+        put(&media_scope_key("both", "shared"), MEDIA_SCOPE_BODY);
+        put("haven/media/both", b"r");
+        put("haven/media/legacy", b"l");
+
+        // Serving side: A's relay's broad listing.
+        let mut listed = local_list(&dir, "haven");
+        listing_retain(&dir, &auth.lock().unwrap(), &a_relay, &mut listed, |k| k.as_str());
+        listed.sort();
+        assert_eq!(
+            listed,
+            vec![
+                "haven/media/both".to_string(),
+                "haven/media/both.c/shared".to_string(),
+                "haven/media/legacy".to_string(),
+                "haven/media/shr".to_string(),
+                "haven/media/shr.c/shared".to_string(),
+            ],
+            "nothing of the private circle, not even its marker on a reshared ref"
+        );
+        // B (a member of both) sees all of it.
+        let mut b_view = local_list(&dir, "haven");
+        let n = b_view.len();
+        listing_retain(&dir, &auth.lock().unwrap(), &b, &mut b_view, |k| k.as_str());
+        assert_eq!(b_view.len(), n);
+        // A sibling may not read another circle's marker; only members may write one.
+        assert!(blob_forbidden(&auth, &a_relay, VERB_GET, &media_scope_key("priv", "private")));
+        assert!(!blob_forbidden(&auth, &a_relay, VERB_GET, &media_scope_key("shr", "shared")));
+        assert!(!blob_forbidden(&auth, &b, VERB_PUT, &media_scope_key("x", "private")));
+        assert!(
+            blob_forbidden(&auth, &a, VERB_PUT, &media_scope_key("x", "private")),
+            "A (served here, but not in B's private circle) cannot scope media into it — that refusal \
+             is how an uploader learns this relay is no destination for that circle"
+        );
+        assert!(!blob_forbidden(&auth, &a, VERB_PUT, &media_scope_key("x", "shared")));
+        assert!(!blob_forbidden(&auth, &a, VERB_PUT, "haven/media/x"), "blob writes are unchanged");
+
+        // Pull side: an OLDER sibling lists everything, markers included; A's relay (serving only
+        // the shared circle) must take none of the private media.
+        let a_dir = std::env::temp_dir().join(format!("haven-media-scope-a-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&a_dir);
+        std::fs::create_dir_all(&a_dir).unwrap();
+        // A ref A's relay already knows to be private (its marker is local) but the peer lists bare.
+        local_put(&a_dir, &media_scope_key("known_priv", "private"), MEDIA_SCOPE_BODY).unwrap();
+        let mut peer: Vec<(String, u64)> = local_list(&dir, "haven").into_iter().map(|k| (k, 5)).collect();
+        peer.push(("haven/media/known_priv".to_string(), 5));
+        let serves = |c: &str| c == "shared";
+        let mut want: Vec<String> =
+            keys_to_pull(&a_dir, &peer, &Retention::default(), &serves).into_iter().map(|(k, _)| k).collect();
+        want.sort();
+        assert_eq!(
+            want,
+            vec![
+                "haven/media/both".to_string(),
+                "haven/media/both.c/shared".to_string(),
+                "haven/media/legacy".to_string(),
+                "haven/media/shr".to_string(),
+                "haven/media/shr.c/shared".to_string(),
+            ]
+        );
+        // The private circle's own relay pulls it all (it serves that circle).
+        let serves_both = |c: &str| c == "shared" || c == "private";
+        let empty = std::env::temp_dir().join(format!("haven-media-scope-b2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(keys_to_pull(&empty, &peer, &Retention::default(), &serves_both).len(), peer.len());
+        for d in [&dir, &a_dir, &empty] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// Over the wire: A's relay mesh-pulls from B's relay (iroh AGES + GET, the real pull loop) and
+    /// ends up with the shared, reshared and legacy media — each scoped ref WITH its shared marker —
+    /// and nothing of B's private circle.
+    #[tokio::test]
+    async fn mesh_pull_between_relays_honors_media_scope() {
+        let b = haven_p2p::identity::Identity::generate();
+        let rb = haven_p2p::identity::Identity::generate();
+        let ra = haven_p2p::identity::Identity::generate();
+        let hex = |id: &haven_p2p::identity::Identity| -> String {
+            id.public().node_id_bytes().iter().map(|x| format!("{x:02x}")).collect()
+        };
+        let b_dir = std::env::temp_dir().join(format!("haven-scope-wire-b-{}", std::process::id()));
+        let a_dir = std::env::temp_dir().join(format!("haven-scope-wire-a-{}", std::process::id()));
+        for d in [&b_dir, &a_dir] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let server = BlobServer::spawn(rb.node_secret_bytes(), b_dir.clone()).await.unwrap();
+        server.authorize("private", vec![hex(&b)], vec![]);
+        server.authorize("shared", vec![hex(&b)], vec![hex(&ra)]);
+        let addr = server.local_dial_addr().await.unwrap();
+        let bc = BlobClient::connect_addr(b.node_secret_bytes(), addr.clone()).await.unwrap();
+        // The uploader's order: marker first, then the blob.
+        for (r, circles) in [("priv", &["private"][..]), ("shr", &["shared"][..]), ("both", &["private", "shared"][..])] {
+            for c in circles {
+                bc.put(&media_scope_key(r, c), MEDIA_SCOPE_BODY).await.unwrap();
+            }
+            bc.put(&format!("haven/media/{r}"), r.as_bytes()).await.unwrap();
+        }
+        bc.put("haven/media/legacy", b"l").await.unwrap();
+
+        let ac = BlobClient::connect_addr(ra.node_secret_bytes(), addr).await.unwrap();
+        let serves = |c: &str| c == "shared";
+        let pulled = pull_missing_from_peer(&a_dir, &ac, &Retention::default(), &serves).await;
+        let mut held = local_list(&a_dir, "haven");
+        held.sort();
+        assert_eq!(
+            held,
+            vec![
+                "haven/media/both".to_string(),
+                "haven/media/both.c/shared".to_string(),
+                "haven/media/legacy".to_string(),
+                "haven/media/shr".to_string(),
+                "haven/media/shr.c/shared".to_string(),
+            ]
+        );
+        assert_eq!(pulled, 5);
+        assert!(ac.get("haven/media/priv.c/private").await.is_err(), "another circle's marker is out of reach");
+        for d in [&b_dir, &a_dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// Scope markers live as long as their blob: the media age sweep and the size cap never take
+    /// one on its own (a live blob left without its marker would replicate to every sibling), and
+    /// once the blob is gone its idle markers go too.
+    #[test]
+    fn media_retention_keeps_scope_markers_with_their_blob() {
+        let day = 24 * 3600;
+        let dir = retention_store(
+            "media-scope-gc",
+            &[
+                ("haven/media/live", b"xxxx", 1 * day),
+                ("haven/media/live.c/fam", MEDIA_SCOPE_BODY, 30 * day), // ancient marker, live blob
+                ("haven/media/gone.c/fam", MEDIA_SCOPE_BODY, 30 * day), // orphan → pruned
+                ("haven/media/uploading.c/fam", MEDIA_SCOPE_BODY, 0),   // blob not here YET → kept
+            ],
+        );
+        let ret = Retention { media_max_age: Some(std::time::Duration::from_secs(7 * day)), ..Retention::default() };
+        let stats = gc_sweep_with(&dir, &ret, GC_GRACE);
+        assert_eq!(stats.media_deleted_age, 0, "no marker is aged out on its own");
+        assert!(local_has(&dir, "haven/media/live.c/fam"));
+        assert!(!local_has(&dir, "haven/media/gone.c/fam"), "an orphaned marker is pruned");
+        assert!(local_has(&dir, "haven/media/uploading.c/fam"), "an upload in flight keeps its marker");
+        assert_eq!(stats.media_bytes_total, 4, "markers are not counted as media");
+        // The size cap evicts blobs only; the evicted blob's marker is then an orphan.
+        let ret = Retention { media_max_bytes: Some(1), ..Retention::default() };
+        let stats = gc_sweep_with(&dir, &ret, GC_GRACE);
+        assert_eq!(stats.media_deleted_size, 1);
+        assert!(!local_has(&dir, "haven/media/live"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

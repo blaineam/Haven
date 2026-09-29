@@ -5925,6 +5925,23 @@ object HavenNet : InboundListener {
     // a disk relay maps each key segment to a directory, so "<ref>/<i>" would force "<ref>" to be both a
     // manifest FILE and a chunk DIRECTORY (a collision that fails the manifest write). "<ref>.p" is distinct.
     private fun mediaChunkKey(ref: String, i: Int) = "haven/media/$ref.p/$i"
+    // Scope marker (core blobstore `media_scope_key`): written to a relay BEFORE the blob, it scopes
+    // the ref to the circle it was posted in, so relay mesh replication carries it only to relays that
+    // serve that circle — never to a friend's relay that merely shares some OTHER circle with us. A
+    // relay that doesn't serve the circle refuses the marker (403); it is then no destination for this
+    // circle's media. Blob keys are unchanged, so readers (and older clients/relays) are unaffected.
+    private fun mediaScopeKey(ref: String, circleId: String) = "haven/media/$ref.c/$circleId"
+    private val mediaScopeBody = "1".toByteArray()
+    /** "<node>|<circle>" -> until-ms: this relay refused to scope media into this circle (it doesn't
+     *  serve it), so it is skipped as an upload destination for the circle for a while. */
+    private val scopeRefusedUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private fun scopeRefused(nodeHex: String, circleId: String): Boolean =
+        (scopeRefusedUntil["$nodeHex|$circleId"] ?: 0L) > System.currentTimeMillis()
+    private fun noteScopeRefused(nodeHex: String, circleId: String, own: Boolean) {
+        if (own) { noteRefused(nodeHex, "media scope"); return }   // one of the circle's own relays: enrollment lag
+        scopeRefusedUntil["$nodeHex|$circleId"] = System.currentTimeMillis() + 30 * 60_000L
+        Log.i("MediaSync", "relay ${nodeHex.take(8)} doesn't serve ${circleId.take(12)} — not a media destination for it")
+    }
 
     // ---- Chunked media transfer (large-blob fix) -----------------------------------------------
     // A relay/S3 blob is capped at MAX_BLOB = 256 MB (core/haven-net). Large sealed videos (600 MB+)
@@ -7575,9 +7592,13 @@ object HavenNet : InboundListener {
     private suspend fun uploadMediaOnce(circleId: String, ref: String, force: Boolean = false,
                                         reseal: Boolean = false): Boolean {
         // Skip entirely if every destination already has this blob (before the expensive rawSealed read).
-        val dests = mediaRelaysFor(circleId)
+        // Only relays that serve this circle: a relay that refused the circle's scope marker holds
+        // none of its media (see mediaScopeKey).
+        val circleRelays = relaysFor(circleId).toSet()
+        val dests = mediaRelaysFor(circleId).filter { it in circleRelays || !scopeRefused(it, circleId) }
         if (!force && dests.isNotEmpty() && dests.all { isBackedUp(it, ref) }) return true
         val key = mediaKey(ref)
+        val scopeKey = mediaScopeKey(ref, circleId)
         val hostedHex = runCatching { relayHost?.nodeIdHex() }.getOrNull()
         var landed = false   // a destination holds it (probe hit) or accepted it (upload)
 
@@ -7613,6 +7634,9 @@ object HavenNet : InboundListener {
             }
             // Our OWN hosted relay: the local store answers instantly (never dial/HTTP ourselves).
             if (hostedHex != null && nodeHex == hostedHex) {
+                // Scope first (our own store: no gate) — our relay must not offer this ref to siblings
+                // of other circles, including when it already holds it (a reshare into this circle).
+                relayHost?.localPut(scopeKey, mediaScopeBody)
                 // COMPLETE, not merely present — see holdsCompleteBlob. localHas answers the chunk
                 // probes from the store index rather than reading an 8 MB window per question.
                 val head = if (force) null else relayHost?.localGet(key)
@@ -7627,8 +7651,24 @@ object HavenNet : InboundListener {
             // Relay HTTP interface — a reachable relay is authoritative (the iroh path serves the
             // SAME store): hit → ledger, 404 → upload over HTTP; only unreachable falls to the dial.
             val entry = relayEntries[nodeHex]
+            var scopedOverHttp = false
             if (entry != null) {
-                if (force) {
+                // Scope the ref on this relay BEFORE anything else (probe hit or upload). A refusal
+                // means the relay doesn't serve this circle: it gets none of the circle's media.
+                var scopeSettled = false
+                var scopeRefusedHere = false
+                for (base in httpUrlsFor(entry)) {
+                    val sr = relayHttpPut(base, entry.httpToken, scopeKey, mediaScopeBody)
+                    if (sr.exceptionOrNull() is RelayForbidden) { scopeRefusedHere = true; break }
+                    if (sr.isFailure) { markHttpUrlBad(base); continue }
+                    scopeSettled = true
+                    break
+                }
+                if (scopeRefusedHere) { noteScopeRefused(nodeHex, circleId, nodeHex in circleRelays); continue }
+                scopedOverHttp = scopeSettled
+                if (!scopeSettled) {
+                    // No HTTP door answered: the iroh dial below (same store) scopes and probes instead.
+                } else if (force) {
                     // Overwrite over the HTTP interface without asking whether it's held; a mid-upload
                     // failure below falls back to the iroh dial (same store).
                     if (httpUrlsFor(entry).isNotEmpty()) { uploadHttp.add(nodeHex to entry); continue }
@@ -7659,6 +7699,15 @@ object HavenNet : InboundListener {
                 }
             }
             val client = relayClientFor(nodeHex) ?: continue   // honors backoff — skip WITHOUT reading
+            if (!scopedOverHttp) {
+                // No HTTP door took it, so the marker goes over the dial (same gate, same meaning).
+                val sr = runCatching { client.put(scopeKey, mediaScopeBody) }
+                if (sr.isFailure) {
+                    if (isForbiddenError(sr.exceptionOrNull())) noteScopeRefused(nodeHex, circleId, nodeHex in circleRelays)
+                    else relayFailed(nodeHex)
+                    continue
+                }
+            }
             if (force) { uploadDial.add(nodeHex to client); continue }
             runCatching {
                 if (client.has(key)) {

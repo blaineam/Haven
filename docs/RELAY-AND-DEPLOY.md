@@ -75,6 +75,27 @@ relay). The pieces:
    the desktop engine auto-syncs its hosted relay from every adopted sibling (health-aware, so a
    down peer is skipped). Every official client can be a full mesh node, not just the CLI.
 
+### Media scope — a sibling holds only the media of circles it serves (implemented)
+
+Siblings are scoped per circle (a friend's relay that shares ONE circle with us replicates only that
+circle's mailbox), but a media ref names no circle, so media used to replicate to every sibling.
+
+1. **Marker, not a new layout.** Before uploading `haven/media/<ref>` to a relay, the uploader PUTs a
+   content-free marker `haven/media/<ref>.c/<circle>` (same circle id the mailbox key carries). The
+   blob keys are unchanged, so every reader, restore, history handoff and frame-32 relay-first hint
+   works as before, and old clients/relays read, write and store both as ordinary media.
+2. **Gate.** A marker is gated like its circle's mailbox: only a member may write it (a relay that
+   doesn't serve the circle answers 403 — the uploader then skips that relay for this circle's media,
+   no heal/backoff), and only the circle's members/siblings may list or read it.
+3. **Mesh.** A LIST/AGES answer hides a ref whose markers name no circle the caller may see; the puller
+   takes a scoped ref only if it serves one of its circles (markers read from the peer's inventory
+   AND its own store, so an older sibling that lists everything can't fill it either), pulls markers
+   first and writes the served ones before the blob. A reshared ref carries one marker per circle and
+   replicates to each circle's relays.
+4. **Legacy.** A ref with no marker (an old client's upload) replicates as before — refusing it would
+   strand old clients' media; it stops as those clients update. Retention keeps a marker as long as
+   its blob and prunes orphans (idle > 1h).
+
 ### Learning circles after the link — the ENROLL op (implemented)
 
 A relay used to read its circle list **once**, from the link the operator pasted, and never change

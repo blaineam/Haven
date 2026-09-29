@@ -5335,7 +5335,24 @@ struct EngineLock<T> {
 struct EngineGuard<'a, T> {
     guard: std::sync::MutexGuard<'a, T>,
     taken: std::time::Instant,
+    taken_cpu: Option<std::time::Duration>,
     site: &'static std::panic::Location<'static>,
+}
+
+/// This thread's consumed CPU time (`None` where the platform has no per-thread clock). A long hold
+/// with little CPU under it is a holder that was descheduled — host contention — not work to move
+/// off the lock; the watchdog prints both so a log line says which.
+#[cfg(unix)]
+fn thread_cpu_time() -> Option<std::time::Duration> {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: `ts` is a valid, writable timespec; the call only writes into it.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    (rc == 0).then(|| std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
+}
+
+#[cfg(not(unix))]
+fn thread_cpu_time() -> Option<std::time::Duration> {
+    None
 }
 
 impl<T> EngineLock<T> {
@@ -5347,7 +5364,7 @@ impl<T> EngineLock<T> {
     fn lock(&self) -> Result<EngineGuard<'_, T>, std::sync::PoisonError<std::sync::MutexGuard<'_, T>>> {
         let site = std::panic::Location::caller();
         let guard = self.inner.lock()?;
-        Ok(EngineGuard { guard, taken: std::time::Instant::now(), site })
+        Ok(EngineGuard { guard, taken: std::time::Instant::now(), taken_cpu: thread_cpu_time(), site })
     }
 }
 
@@ -5397,12 +5414,17 @@ impl<T> Drop for EngineGuard<'_, T> {
         #[cfg(test)]
         TOTAL_ENGINE_HOLD_NANOS.with(|c| c.set(c.get() + held.as_nanos() as u64));
         if held >= ENGINE_HOLD_WARN {
+            let cpu = match (self.taken_cpu, thread_cpu_time()) {
+                (Some(a), Some(b)) => format!(" (on-CPU {} ms)", b.saturating_sub(a).as_millis()),
+                _ => String::new(),
+            };
             tracing::warn!(
                 target: "haven_ffi::engine_lock",
-                "engine lock held {} ms by {}:{}",
+                "engine lock held {} ms by {}:{}{}",
                 held.as_millis(),
                 self.site.file(),
-                self.site.line()
+                self.site.line(),
+                cpu
             );
         }
     }
@@ -7763,6 +7785,28 @@ impl HavenSocial {
     }
 }
 
+/// Names the envelope kind behind a long `receive_locked` hold (the lock watchdog only knows the site).
+struct SlowApply {
+    at: std::time::Instant,
+    tag: u8,
+    len: usize,
+}
+
+impl Drop for SlowApply {
+    fn drop(&mut self) {
+        let held = self.at.elapsed();
+        if held >= ENGINE_HOLD_WARN {
+            tracing::warn!(
+                target: "haven_ffi::engine_lock",
+                "slow receive apply: tag 0x{:02x}, {} bytes, {} ms under the engine lock",
+                self.tag,
+                self.len,
+                held.as_millis()
+            );
+        }
+    }
+}
+
 /// What [`HavenSocial::epoch_sync_bundle_paged`] takes from under the engine lock: every piece of
 /// state its bundle needs, with the signing/sealing still to do.
 struct BundlePlan {
@@ -8215,6 +8259,8 @@ impl HavenSocial {
         pre_parsed: Option<ParsedEpoch>,
     ) -> Option<Result<bool, HavenError>> {
         let mut st = self.state.lock().unwrap();
+        // Declared after the guard, so it drops first: times the hold, not the wait for the lock.
+        let _slow = SlowApply { at: std::time::Instant::now(), tag: envelope[0], len: envelope.len() };
         let idx = st.circles.iter().position(|c| c.id == circle_id)?;
         Some(match envelope[0] {
             TAG_KEY_COMMIT => receive_key_commit(&mut st, idx, &envelope[1..]),

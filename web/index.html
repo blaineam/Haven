@@ -19,7 +19,7 @@
 <link rel="canonical" href="https://wemiller.com/apps/haven/" />
 <link rel="stylesheet" href="styles.css?v=2dbb73f0" />
 <style>
-  /* Haven's front page, set like a magazine: one promise, four stories, one
+  /* Haven's front page, set like a magazine: one promise, five stories, one
      beat of trust, a short FAQ, one download. The shared styles.css still
      draws the nav, the footer and the invite card; everything below is this
      page's own, prefixed hv- so it can't collide with the other pages. */
@@ -69,6 +69,8 @@
   .hv-figure { margin: 0 auto; width: min(72vw, 340px); max-width: 100%; text-align: center; }
   .hv-figure.is-laptop { width: min(92vw, 640px); }
   .hv-figure img { display: block; width: 100%; height: auto; filter: var(--hv-shadow); }
+  /* A story with no picture: the copy alone, centred on the page. */
+  .hv-chapter.is-solo .hv-copy { max-width: 40rem; text-align: center; }
   .hv-figure figcaption { font-size: 0.88rem; line-height: 1.45; color: var(--hv-quiet); margin-top: 1.1rem; }
 
   /* ---- Trust ---------------------------------------------------------- */
@@ -186,7 +188,7 @@
   <p data-i18n="the-keys-that-lock.b09221">The keys that lock your moments live on your phone, not on a server. Even we can't read them.</p>
 </section>
 
-<!-- Four stories: one idea, one headline, two sentences at most, one device. -->
+<!-- Five stories: one idea, one headline, two sentences at most, one device (the last has no picture). -->
 <main id="main">
   <section class="hv-chapter" id="stories">
     <div class="hv-spread">
@@ -251,6 +253,14 @@
       </figure>
     </div>
   </section>
+
+  <section class="hv-chapter is-solo" id="light">
+    <div class="hv-copy" data-reveal>
+      <p class="hv-eyebrow"><span class="hv-num">05</span><span data-i18n="light-on-your-phone.651252">Light on your phone</span></p>
+      <h2 class="hv-display" data-i18n="your-relay-does-the.b36975">Your relay does the heavy lifting</h2>
+      <p class="hv-lede" data-i18n="photos-and-videos-go.38ee06">Photos and videos go up to your circle's relay once, and friends fetch them from there. Your phone stays cool, and steps aside while you're on a call.</p>
+    </div>
+  </section>
 </main>
 
 <!-- Trust: one beat. -->
@@ -281,9 +291,17 @@
       <summary data-i18n="do-i-need-an.635bf7">Do I need an account?</summary>
       <p class="hv-faq-answer" data-i18n="no-there-s-no.b4b629">No. There's no sign-up, no email and no phone number. Your identity is a set of keys on your own device, and you bring your people in with an invite link.</p>
     </details>
+    <details class="hv-faq-item" id="audience">
+      <summary data-i18n="who-sees-my-post.a39a54">Who sees my post?</summary>
+      <p class="hv-faq-answer" data-i18n="everyone-in-the-circle.b3c63a">Everyone in the circle you post to, and no one else. Before you post, Haven shows exactly who it reaches: the circle's name and how many people are in it. The first time you post in a circle, it asks you to confirm, and replies are labeled as visible to that same circle. To reach just one person, choose “Send privately instead”, or tap Message on their profile or in the member list. That starts a private conversation only the two of you can read.</p>
+    </details>
     <details class="hv-faq-item">
       <summary data-i18n="what-is-a-relay.77fc09">What is a relay, and do I need one?</summary>
       <p class="hv-faq-answer" data-i18n-html="a-relay-holds-your.163472">A relay holds your circle's sealed messages while friends are offline, and it can't read them. Any Haven app can be one: turn on “Be your circle's relay” in Settings on a device you leave running, or <a href="relay/">run a standalone relay</a>.</p>
+    </details>
+    <details class="hv-faq-item" id="relay-media">
+      <summary data-i18n="why-does-haven-use.11e199">Why does Haven use my relay for photos and videos?</summary>
+      <p class="hv-faq-answer" data-i18n="because-it-s-kinder.2efe93">Because it's kinder to your phone. Photos and videos are big, and sending a copy to each friend one by one makes a phone hot and drains its battery. When your circle has a relay, Haven uploads each one to it once, sealed end to end so the relay can't open it, and friends fetch it from there, even when your phone is offline. If your circle has no relay, friends still get media straight from your device; Haven just holds big transfers while you're on a call, or while your device is hot or saving power, and picks them up again later.</p>
     </details>
     <details class="hv-faq-item">
       <summary data-i18n="can-a-relay-see.c39d6e">Can a relay see my IP address?</summary>

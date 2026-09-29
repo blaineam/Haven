@@ -72,6 +72,7 @@
   "operating-costs.d2d6be": "Operating costs",
   "peer-to-peer-your.f5dd51": "<b>Peer-to-peer</b> — your devices talk directly to each other instead of through a company's servers.",
   "photos-and-videos-quietly.7da4db": "Photos and videos quietly carry hidden data — where they were taken, on what device. Before anything leaves your phone, Haven <b>strips that out</b>, so a shared beach photo doesn't hand over your home address. And every file is fingerprinted, so a relay can't secretly swap one picture for another without your app noticing.",
+  "photos-and-videos-work.d13f33": "<b>Photos and videos work a little differently.</b> Since Haven 2.0, when your circle has a relay, each photo and video goes up to it once and friends fetch it from there, so your phone isn't sending a copy to every friend. It stays cooler and easier on the battery, and Haven pauses big transfers while you're on a call or your device is hot or saving power.",
   "plain-language-glossary.7883aa": "Plain-language glossary",
   "post-from-your-phone.b7419a": "Post from your phone and it's there on your iPad. Your circles, profile and conversations line up across the devices you own, and your friends never notice which one you're on — you're just you. You can move your identity to a new device with a quick transfer code or QR, never through a server.",
   "post-quantum-extra-future.b3ebbd": "<b>Post-quantum</b> — extra-future-proof encryption that even a future quantum computer can't crack, defending against \"save it now, decrypt it later\" attacks.",

@@ -9,6 +9,7 @@
   "a-relay-holds-your.163472": "Un relay custodisce i messaggi sigillati della tua cerchia mentre gli amici sono offline, e non può leggerli. Qualsiasi app Haven può esserlo: attiva «Fai da relay per la tua cerchia» nelle Impostazioni di un dispositivo che resta acceso, oppure <a href=\"relay/\">avvia un relay autonomo</a>.",
   "also-on.f4c9f3": "Anche su",
   "android.1928f9": "Android",
+  "because-it-s-kinder.2efe93": "Perché è più gentile con il tuo telefono. Foto e video sono pesanti, e inviarne una copia a ogni amico, uno alla volta, scalda il telefono e scarica la batteria. Se la tua cerchia ha un relay, Haven carica ogni foto e video una sola volta, sigillati end-to-end così che il relay non possa aprirli, e gli amici li scaricano da lì, anche quando il tuo telefono è offline. Se la tua cerchia non ha un relay, gli amici ricevono comunque i contenuti direttamente dal tuo dispositivo; Haven mette solo in attesa i trasferimenti pesanti mentre sei in chiamata o quando il dispositivo è caldo o in risparmio energetico, e li riprende più tardi.",
   "briefly-while-it-moves.745a46": "Per un attimo, mentre sposta i tuoi dati, come qualsiasi servizio internet. Non lo registra né lo conserva mai, e non c’è alcun nome a cui collegarlo. Per nascondere del tutto il tuo IP, usa Haven dietro la tua VPN o gestisci un tuo relay.",
   "bring-your-own-storage.31e6d3": "Porta il tuo storage",
   "calls.0a19b7": "Chiamate",
@@ -27,6 +28,7 @@
   "end-to-end-encrypted.7f5a65": "Crittografia end-to-end",
   "every-platform.97f0d9": "Tutte le piattaforme",
   "every-screen.5e0121": "Ogni schermo",
+  "everyone-in-the-circle.b3c63a": "Tutti nella cerchia in cui pubblichi, e nessun altro. Prima di pubblicare, Haven mostra esattamente chi raggiungerai: il nome della cerchia e quante persone ne fanno parte. La prima volta che pubblichi in una cerchia ti chiede conferma, e le risposte sono segnate come visibili a quella stessa cerchia. Per raggiungere una sola persona, scegli «Invia invece in privato» oppure tocca Messaggio sul suo profilo o nell’elenco dei membri. Si apre una conversazione privata che potete leggere solo voi due.",
   "faq.03688b": "FAQ",
   "features.fc338f": "Funzioni",
   "get-haven.1a671e": "Scarica Haven",
@@ -39,6 +41,7 @@
   "is-haven-available-in.73a7d5": "Haven è disponibile nell’Unione europea?",
   "is-haven-really-free.b022c1": "Haven è davvero gratuito?",
   "learn-more.824d76": "Scopri di più",
+  "light-on-your-phone.651252": "Leggero per il telefono",
   "linux.83ad85": "Linux",
   "made-with-care-for.6c5857": "Fatto con cura per le persone che ami. Haven non conserva chiavi né copie dei tuoi contenuti — la tua cerchia è solo tua.",
   "messages.f1702b": "Messaggi",
@@ -50,6 +53,7 @@
   "open-source-agpl-3.ee4fd0": "Open source · AGPL-3.0",
   "operating-costs.d2d6be": "Costi di gestione",
   "peer-to-peer-no.b65316": "Peer-to-peer · Senza pubblicità",
+  "photos-and-videos-go.38ee06": "Foto e video vengono caricati una volta sul relay della tua cerchia e gli amici li scaricano da lì. Il telefono resta fresco e si fa da parte mentre sei in chiamata.",
   "photos-stories-messages-and.5a148f": "Foto, storie, messaggi e chiamate con le persone a cui vuoi bene. Crittografato end-to-end, peer-to-peer e gratuito, senza nessuno nel mezzo.",
   "posts-stories.207a10": "Post e storie",
   "privacy-in-plain-words.d20122": "La privacy, in parole semplici",
@@ -73,7 +77,10 @@
   "voice-and-video-calls.72f829": "Chiamate vocali e video per tutta la tua cerchia, con condivisione dello schermo integrata. Crittografate end-to-end, come tutto il resto.",
   "we-never-hold-your.5cba82": "<span class=\"h-grad\">Non deteniamo mai</span> le tue chiavi.",
   "what-is-a-relay.77fc09": "Cos’è un relay, e mi serve?",
+  "who-sees-my-post.a39a54": "Chi vede il mio post?",
+  "why-does-haven-use.11e199": "Perché Haven usa il mio relay per foto e video?",
   "windows.26d9c2": "Windows",
   "yes-in-every-eu.d93f01": "Sì, in tutti i paesi dell’UE tranne la Francia, dove le app che usano la crittografia richiedono una dichiarazione governativa a parte. Il codice sorgente è aperto a tutti su GitHub.",
-  "yes-on-every-platform.565327": "Sì, su ogni piattaforma: niente pubblicità, niente tracciamento, niente abbonamenti né acquisti in-app. Haven non gestisce server propri, quindi non c’è nulla da farti pagare. Lo sviluppo è finanziato da chi sceglie di <a href=\"https://wemiller.com/support/\" target=\"_blank\" rel=\"noopener\">sostenerlo</a>."
+  "yes-on-every-platform.565327": "Sì, su ogni piattaforma: niente pubblicità, niente tracciamento, niente abbonamenti né acquisti in-app. Haven non gestisce server propri, quindi non c’è nulla da farti pagare. Lo sviluppo è finanziato da chi sceglie di <a href=\"https://wemiller.com/support/\" target=\"_blank\" rel=\"noopener\">sostenerlo</a>.",
+  "your-relay-does-the.b36975": "Il tuo relay fa il lavoro pesante"
 }

@@ -66,6 +66,7 @@
       <div class="platforms" style="justify-content:center">
         <a class="pill" href="#circles" data-i18n="circles.947d11">Circles</a>
         <a class="pill" href="#posts" data-i18n="posts-feed.3a1ff7">Posts &amp; feed</a>
+        <a class="pill" href="#audience" data-i18n="who-sees-your-post.78df04">Who sees your post</a>
         <a class="pill" href="#stories" data-i18n="stories-camera.851fa5">Stories &amp; camera</a>
         <a class="pill" href="#messages" data-i18n="direct-group-dms.e8e176">Direct &amp; group DMs</a>
         <a class="pill" href="#calls" data-i18n="voice-video-calls.0a4fe1">Voice &amp; video calls</a>
@@ -74,6 +75,8 @@
         <a class="pill" href="#nearby" data-i18n="nearby.f1536c">Nearby</a>
         <a class="pill" href="#lock" data-i18n="face-id-locks.96affc">Face ID locks</a>
         <a class="pill" href="#devices" data-i18n="multi-device.c2d460">Multi-device</a>
+        <a class="pill" href="#relay-media" data-i18n="relay-first-media.f33cfc">Relay-first media</a>
+        <a class="pill" href="#speed" data-i18n="speed-sync.0fd987">Speed &amp; sync</a>
         <a class="pill" href="#serverless" data-i18n="no-central-server.6cba5f">No central server</a>
       </div>
     </div>
@@ -132,6 +135,24 @@
                   themselves signed events, so history stays tamper-evident. Media is content-addressed
                   with BLAKE3 and chunked into 512&nbsp;KB sealed pieces, so the same photo is never
                   stored or sent twice.</p>
+              </div>
+            </details>
+          </div>
+        </article>
+
+        <!-- Who sees your post (2.0) -->
+        <article class="card wrow reveal" id="audience">
+          <div class="num" aria-hidden="true">👀</div>
+          <div>
+            <h3 data-i18n-html="who-sees-your-post.ff805d">Who sees your post <span class="badge ok">New in 2.0</span></h3>
+            <p data-i18n="before-you-post-haven.281aa6">
+              Before you post, Haven shows exactly who it will reach: the circle's name and how many people are in it, right in the composer and on the Post button. The first time you post in a circle, it checks with you once. Replies are labeled as visible to the circle, and when something is meant for one person, “Send privately instead” turns it into a private message. Profiles and member lists have a Message button too.
+            </p>
+            <p class="why" data-i18n-html="why-it-matters-sharing.7c5756"><b>Why it matters:</b> sharing should never surprise you. You always know whether you're talking to the whole circle or to one person.</p>
+            <details class="tech">
+              <summary><span class="tag-tech" data-i18n="how-this-works.b895a8">How this works</span><span class="chev">›</span></summary>
+              <div class="tbody">
+                <p data-i18n="the-audience-line-comes.69200d">The audience line comes from the circle's member list, the same people the post is sealed to, so what you see matches who can open it. A private message is its own two-person conversation with its own keys; nothing in it is visible to the circle.</p>
               </div>
             </details>
           </div>
@@ -359,6 +380,42 @@
                   (older devices keep working the whole time). One honest limit remains: a fully
                   compromised <em>primary</em> device is still a full compromise — the answer there is
                   rolling a new identity. See the seed-drop design doc.</p>
+              </div>
+            </details>
+          </div>
+        </article>
+
+        <!-- Relay-first media (2.0) -->
+        <article class="card wrow reveal" id="relay-media">
+          <div class="num" aria-hidden="true">🪶</div>
+          <div>
+            <h3 data-i18n-html="your-relay-does-the.6610c9">Your relay does the heavy lifting <span class="badge ok">New in 2.0</span></h3>
+            <p data-i18n="when-your-circle-has.3678af">
+              When your circle has a relay, photos and videos go up to it once, and friends fetch them from there. Your phone no longer streams a copy to every friend, so it stays cooler and your battery lasts longer. Haven also stays out of the way: during a call, or when your device is hot or in Low Power Mode (Battery Saver on Android), big background transfers pause and pick up again later.
+            </p>
+            <p class="why" data-i18n-html="why-it-matters-the.95cea0"><b>Why it matters:</b> the phone in your pocket shouldn't have to work like a server. The relay is built to stay on, so your phone gets to be a phone.</p>
+            <details class="tech">
+              <summary><span class="tag-tech" data-i18n="how-this-works.b895a8">How this works</span><span class="chev">›</span></summary>
+              <div class="tbody">
+                <p data-i18n="media-is-sealed-on.abcb73">Media is sealed on your device before it's uploaded, so the relay only ever stores ciphertext it can't open. When a friend asks your device for a file that's already on the relay, Haven points them there instead of sending it; if it's still uploading, that upload jumps the queue and they're pointed to it as soon as it lands. Your device serves friends directly only when the circle has no relay, and only while it's cool and not on a call. New posts also jump ahead of older backfill, so fresh photos arrive first.</p>
+              </div>
+            </details>
+          </div>
+        </article>
+
+        <!-- Speed & honest sync (2.0) -->
+        <article class="card wrow reveal" id="speed">
+          <div class="num" aria-hidden="true">⚡</div>
+          <div>
+            <h3 data-i18n-html="faster-smoother-and-honest.096aee">Faster, smoother, and honest about sync <span class="badge ok">New in 2.0</span></h3>
+            <p data-i18n="new-friends-connect-and.e67c15">
+              New friends connect and see each other's posts in seconds instead of minutes. Haven opens faster, with your feed on screen first while your circles are checked in parallel. Scrolling is smoother, taps respond right away, and screen sharing on calls is more reliable. While things sync, you see real counts of what's sending and receiving and progress that actually moves, never a spinner that vanishes halfway through a download.
+            </p>
+            <p class="why" data-i18n-html="why-it-matters-private.6c86eb"><b>Why it matters:</b> private shouldn't mean slow. And when something is still on its way, you deserve to know.</p>
+            <details class="tech">
+              <summary><span class="tag-tech" data-i18n="how-this-works.b895a8">How this works</span><span class="chev">›</span></summary>
+              <div class="tbody">
+                <p data-i18n="launch-draws-the-feed.81be77">Launch draws the feed from what's already on your device, then checks every circle at once instead of one after another. Photo and video processing runs off the main thread, so decoding media never holds up a scroll or a tap.</p>
               </div>
             </details>
           </div>

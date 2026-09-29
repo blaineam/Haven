@@ -9,6 +9,7 @@
   "a-relay-holds-your.163472": "A relay holds your circle's sealed messages while friends are offline, and it can't read them. Any Haven app can be one: turn on “Be your circle's relay” in Settings on a device you leave running, or <a href=\"relay/\">run a standalone relay</a>.",
   "also-on.f4c9f3": "Also on",
   "android.1928f9": "Android",
+  "because-it-s-kinder.2efe93": "Because it's kinder to your phone. Photos and videos are big, and sending a copy to each friend one by one makes a phone hot and drains its battery. When your circle has a relay, Haven uploads each one to it once, sealed end to end so the relay can't open it, and friends fetch it from there, even when your phone is offline. If your circle has no relay, friends still get media straight from your device; Haven just holds big transfers while you're on a call, or while your device is hot or saving power, and picks them up again later.",
   "briefly-while-it-moves.745a46": "Briefly, while it moves your bytes, as any internet service would. It never logs or stores it, and there's no name to tie it to. To hide your IP entirely, run Haven behind your own VPN or host your own relay.",
   "bring-your-own-storage.31e6d3": "Bring your own storage",
   "calls.0a19b7": "Calls",
@@ -27,6 +28,7 @@
   "end-to-end-encrypted.7f5a65": "End-to-end encrypted",
   "every-platform.97f0d9": "Every platform",
   "every-screen.5e0121": "Every screen",
+  "everyone-in-the-circle.b3c63a": "Everyone in the circle you post to, and no one else. Before you post, Haven shows exactly who it reaches: the circle's name and how many people are in it. The first time you post in a circle, it asks you to confirm, and replies are labeled as visible to that same circle. To reach just one person, choose “Send privately instead”, or tap Message on their profile or in the member list. That starts a private conversation only the two of you can read.",
   "faq.03688b": "FAQ",
   "features.fc338f": "Features",
   "get-haven.1a671e": "Get Haven",
@@ -39,6 +41,7 @@
   "is-haven-available-in.73a7d5": "Is Haven available in the European Union?",
   "is-haven-really-free.b022c1": "Is Haven really free?",
   "learn-more.824d76": "Learn more",
+  "light-on-your-phone.651252": "Light on your phone",
   "linux.83ad85": "Linux",
   "made-with-care-for.6c5857": "Made with care for the people you love. Haven holds no keys and keeps no copy of your content — your circle is yours alone.",
   "messages.f1702b": "Messages",
@@ -50,6 +53,7 @@
   "open-source-agpl-3.ee4fd0": "Open source · AGPL-3.0",
   "operating-costs.d2d6be": "Operating costs",
   "peer-to-peer-no.b65316": "Peer-to-peer · No ads",
+  "photos-and-videos-go.38ee06": "Photos and videos go up to your circle's relay once, and friends fetch them from there. Your phone stays cool, and steps aside while you're on a call.",
   "photos-stories-messages-and.5a148f": "Photos, stories, messages and calls with the people you love. End-to-end encrypted, peer to peer, and free, with no one in the middle.",
   "posts-stories.207a10": "Posts & stories",
   "privacy-in-plain-words.d20122": "Privacy, in plain words",
@@ -73,7 +77,10 @@
   "voice-and-video-calls.72f829": "Voice and video calls for your whole circle, with screen sharing built in. End-to-end encrypted, like everything else.",
   "we-never-hold-your.5cba82": "<span class=\"h-grad\">We never</span> hold your keys.",
   "what-is-a-relay.77fc09": "What is a relay, and do I need one?",
+  "who-sees-my-post.a39a54": "Who sees my post?",
+  "why-does-haven-use.11e199": "Why does Haven use my relay for photos and videos?",
   "windows.26d9c2": "Windows",
   "yes-in-every-eu.d93f01": "Yes, in every EU country except France, where apps that use encryption need a separate government declaration. The source code is open to everyone on GitHub.",
-  "yes-on-every-platform.565327": "Yes, on every platform: no ads, no tracking, no subscription and no in-app purchases. Haven runs no servers of its own, so there's nothing to bill you for. Development is funded by people who choose to <a href=\"https://wemiller.com/support/\" target=\"_blank\" rel=\"noopener\">support it</a>."
+  "yes-on-every-platform.565327": "Yes, on every platform: no ads, no tracking, no subscription and no in-app purchases. Haven runs no servers of its own, so there's nothing to bill you for. Development is funded by people who choose to <a href=\"https://wemiller.com/support/\" target=\"_blank\" rel=\"noopener\">support it</a>.",
+  "your-relay-does-the.b36975": "Your relay does the heavy lifting"
 }

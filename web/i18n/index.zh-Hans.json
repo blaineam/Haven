@@ -9,6 +9,7 @@
   "a-relay-holds-your.163472": "中继会在朋友离线时替你的圈子保管加密封存的消息，而且它读不了这些消息。任何一个 Haven App 都可以当中继：在一台常开的设备上，打开设置里的“成为圈子的中继”，或者<a href=\"relay/\">运行一个独立中继</a>。",
   "also-on.f4c9f3": "也可用于",
   "android.1928f9": "Android",
+  "because-it-s-kinder.2efe93": "因为这样对手机更友好。照片和视频体积很大，逐一给每位朋友发送副本会让手机发烫、电量飞快下降。如果你的圈子有 Relay，Haven 会把每张照片和每段视频只上传一次到 Relay，并经过端到端封装，Relay 无法打开；朋友们从那里获取，即使你的手机离线也没关系。如果你的圈子没有 Relay，朋友们仍会直接从你的设备获取媒体；只是在你通话时、设备发热或处于省电状态时，Haven 会暂缓大型传输，稍后再继续。",
   "briefly-while-it-moves.745a46": "会短暂看到：在转发你的数据时，就像任何互联网服务一样。它从不记录或存储 IP，也没有名字可以对应。想完全隐藏 IP，可以在自己的 VPN 后使用 Haven，或自建中继。",
   "bring-your-own-storage.31e6d3": "自带存储",
   "calls.0a19b7": "通话",
@@ -27,6 +28,7 @@
   "end-to-end-encrypted.7f5a65": "端到端加密",
   "every-platform.97f0d9": "所有平台",
   "every-screen.5e0121": "每块屏幕",
+  "everyone-in-the-circle.b3c63a": "你发布到的那个圈子里的所有人，除此之外没有任何人。发布前，Haven 会准确显示帖子的受众：圈子的名称以及其中有多少人。第一次在某个圈子发布时，它会请你确认一次；回复也会标明对同一个圈子可见。如果只想发给一个人，请选择“改为私下发送”，或在对方的个人资料或成员列表中点按“消息”。这样会开始一段只有你们两人能读的私密对话。",
   "faq.03688b": "常见问题",
   "features.fc338f": "功能",
   "get-haven.1a671e": "获取 Haven",
@@ -39,6 +41,7 @@
   "is-haven-available-in.73a7d5": "Haven 在欧盟可以使用吗？",
   "is-haven-really-free.b022c1": "Haven 真的免费吗？",
   "learn-more.824d76": "了解更多",
+  "light-on-your-phone.651252": "手机更轻松",
   "linux.83ad85": "Linux",
   "made-with-care-for.6c5857": "用心打造，献给你所爱的人。Haven 不保存任何密钥，也不留存你内容的副本——你的圈子只属于你。",
   "messages.f1702b": "消息",
@@ -50,6 +53,7 @@
   "open-source-agpl-3.ee4fd0": "开源 · AGPL-3.0",
   "operating-costs.d2d6be": "运营成本",
   "peer-to-peer-no.b65316": "点对点 · 无广告",
+  "photos-and-videos-go.38ee06": "照片和视频只需上传一次到圈子的 Relay，朋友们从那里获取。手机不再发烫，通话时也会主动让路。",
   "photos-stories-messages-and.5a148f": "与你所爱的人分享照片、故事、消息和通话。端到端加密、点对点、免费，中间没有任何人。",
   "posts-stories.207a10": "帖子与故事",
   "privacy-in-plain-words.d20122": "隐私，用大白话讲",
@@ -73,7 +77,10 @@
   "voice-and-video-calls.72f829": "为整个圈子提供语音和视频通话，内置屏幕共享。和其他一切一样，端到端加密。",
   "we-never-hold-your.5cba82": "<span class=\"h-grad\">我们绝不</span>持有你的密钥。",
   "what-is-a-relay.77fc09": "什么是中继？我需要吗？",
+  "who-sees-my-post.a39a54": "谁能看到我的帖子？",
+  "why-does-haven-use.11e199": "为什么 Haven 用我的 Relay 传照片和视频？",
   "windows.26d9c2": "Windows",
   "yes-in-every-eu.d93f01": "可以，在除法国以外的所有欧盟国家都可以。在法国，使用加密技术的 App 需要另行向政府申报。源代码在 GitHub 上向所有人开放。",
-  "yes-on-every-platform.565327": "是的，所有平台都免费：没有广告、没有追踪、没有订阅，也没有 App 内购买。Haven 不运行自己的服务器，所以没什么可向你收费的。开发经费来自愿意<a href=\"https://wemiller.com/support/\" target=\"_blank\" rel=\"noopener\">支持它</a>的人。"
+  "yes-on-every-platform.565327": "是的，所有平台都免费：没有广告、没有追踪、没有订阅，也没有 App 内购买。Haven 不运行自己的服务器，所以没什么可向你收费的。开发经费来自愿意<a href=\"https://wemiller.com/support/\" target=\"_blank\" rel=\"noopener\">支持它</a>的人。",
+  "your-relay-does-the.b36975": "重活交给 Relay"
 }

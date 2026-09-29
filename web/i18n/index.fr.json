@@ -9,6 +9,7 @@
   "a-relay-holds-your.163472": "Un relay garde les messages scellés de votre cercle pendant que vos proches sont hors ligne, sans pouvoir les lire. N’importe quelle app Haven peut en être un : activez « Être le relay de votre cercle » dans les réglages d’un appareil qui reste allumé, ou <a href=\"relay/\">lancez un relay autonome</a>.",
   "also-on.f4c9f3": "Aussi sur",
   "android.1928f9": "Android",
+  "because-it-s-kinder.2efe93": "Parce que c’est plus doux pour votre téléphone. Les photos et vidéos sont lourdes, et en envoyer une copie à chaque ami, un par un, fait chauffer le téléphone et vide la batterie. Si votre cercle a un relay, Haven y envoie chaque photo et vidéo une seule fois, scellée de bout en bout pour que le relay ne puisse pas l’ouvrir, et vos amis la récupèrent là-bas, même quand votre téléphone est hors ligne. Si votre cercle n’a pas de relay, vos amis reçoivent toujours les médias directement depuis votre appareil ; Haven met simplement les gros transferts en attente pendant vos appels, ou quand votre appareil chauffe ou économise son énergie, puis les reprend.",
   "briefly-while-it-moves.745a46": "Brièvement, pendant qu’il achemine vos données, comme n’importe quel service internet. Il ne la journalise ni ne la stocke jamais, et il n’a aucun nom à y associer. Pour masquer entièrement votre IP, utilisez Haven derrière votre propre VPN ou hébergez votre propre relay.",
   "bring-your-own-storage.31e6d3": "Apportez votre propre stockage",
   "calls.0a19b7": "Appels",
@@ -27,6 +28,7 @@
   "end-to-end-encrypted.7f5a65": "Chiffré de bout en bout",
   "every-platform.97f0d9": "Toutes les plateformes",
   "every-screen.5e0121": "Tous les écrans",
+  "everyone-in-the-circle.b3c63a": "Tout le monde dans le cercle où vous publiez, et personne d’autre. Avant que vous publiiez, Haven indique exactement qui la publication atteindra : le nom du cercle et le nombre de personnes qui en font partie. La première fois que vous publiez dans un cercle, il vous demande de confirmer, et les réponses sont signalées comme visibles par ce même cercle. Pour ne toucher qu’une personne, choisissez « Envoyer plutôt en privé » ou touchez Message sur son profil ou dans la liste des membres. Cela ouvre une conversation privée que vous seuls pouvez lire.",
   "faq.03688b": "FAQ",
   "features.fc338f": "Fonctionnalités",
   "get-haven.1a671e": "Obtenir Haven",
@@ -39,6 +41,7 @@
   "is-haven-available-in.73a7d5": "Haven est-il disponible dans l’Union européenne ?",
   "is-haven-really-free.b022c1": "Haven est-il vraiment gratuit ?",
   "learn-more.824d76": "En savoir plus",
+  "light-on-your-phone.651252": "Léger pour votre téléphone",
   "linux.83ad85": "Linux",
   "made-with-care-for.6c5857": "Conçu avec soin pour celles et ceux qui vous sont chers. Haven ne détient aucune clé et ne conserve aucune copie de vos contenus — votre cercle n'appartient qu'à vous.",
   "messages.f1702b": "Messages",
@@ -50,6 +53,7 @@
   "open-source-agpl-3.ee4fd0": "Open source · AGPL-3.0",
   "operating-costs.d2d6be": "Frais de fonctionnement",
   "peer-to-peer-no.b65316": "Pair-à-pair · Sans publicité",
+  "photos-and-videos-go.38ee06": "Photos et vidéos partent une seule fois vers le relay de votre cercle, et vos amis les y récupèrent. Votre téléphone reste frais et se fait discret pendant vos appels.",
   "photos-stories-messages-and.5a148f": "Photos, stories, messages et appels avec les gens que vous aimez. Chiffré de bout en bout, en pair-à-pair et gratuit, sans personne au milieu.",
   "posts-stories.207a10": "Publications et stories",
   "privacy-in-plain-words.d20122": "La confidentialité, en clair",
@@ -73,7 +77,10 @@
   "voice-and-video-calls.72f829": "Appels audio et vidéo pour tout votre cercle, avec partage d’écran intégré. Chiffrés de bout en bout, comme tout le reste.",
   "we-never-hold-your.5cba82": "<span class=\"h-grad\">Nous ne détenons jamais</span> vos clés.",
   "what-is-a-relay.77fc09": "Qu’est-ce qu’un relay, et en ai-je besoin ?",
+  "who-sees-my-post.a39a54": "Qui voit ma publication ?",
+  "why-does-haven-use.11e199": "Pourquoi Haven utilise-t-il mon relay pour les photos et vidéos ?",
   "windows.26d9c2": "Windows",
   "yes-in-every-eu.d93f01": "Oui, dans tous les pays de l’UE sauf la France, où les apps qui utilisent le chiffrement exigent une déclaration administrative distincte. Le code source est ouvert à tous sur GitHub.",
-  "yes-on-every-platform.565327": "Oui, sur toutes les plateformes : pas de pub, pas de pistage, pas d’abonnement ni d’achats intégrés. Haven n’a pas de serveurs à lui, il n’y a donc rien à vous facturer. Le développement est financé par celles et ceux qui choisissent de le <a href=\"https://wemiller.com/support/\" target=\"_blank\" rel=\"noopener\">soutenir</a>."
+  "yes-on-every-platform.565327": "Oui, sur toutes les plateformes : pas de pub, pas de pistage, pas d’abonnement ni d’achats intégrés. Haven n’a pas de serveurs à lui, il n’y a donc rien à vous facturer. Le développement est financé par celles et ceux qui choisissent de le <a href=\"https://wemiller.com/support/\" target=\"_blank\" rel=\"noopener\">soutenir</a>.",
+  "your-relay-does-the.b36975": "Votre relay fait le gros du travail"
 }

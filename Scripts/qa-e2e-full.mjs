@@ -1870,7 +1870,8 @@ async function main() {
     const probe = async (port, method, key, auth) => {
       const path = method === 'LIST' ? `/l/${key}` : `/k/${key}`;
       try {
-        const r = await fetch(`http://127.0.0.1:${port}${path}`, { method: method === 'LIST' ? 'GET' : method, headers: auth ? { Authorization: auth } : {} });
+        const r = await fetch(`http://127.0.0.1:${port}${path}`, { method: method === 'LIST' ? 'GET' : method, headers: auth ? { Authorization: auth } : {},
+          signal: AbortSignal.timeout(10_000) });
         return r.status;
       } catch (e) { return `ERR ${e.cause?.code || e.message}`; }
     };
@@ -1980,10 +1981,23 @@ async function main() {
     await op(stub, { op: 'host_relay', on: false }, 3000);
     const rbOff = await converge(stub, (j) => j.hosted_relay?.serving === false, 20_000);
     score('multirelay: R_B taken offline (B\'s host toggle)', rbOff >= 0);
-    // "Stop hosting" must actually stop: nothing may still answer on the old port.
-    const offProbe = await probe(RB.port, 'GET', 'haven/media/x', null);
-    score(`multirelay: nothing answers on R_B's port once hosting is off (:${RB.port})`, typeof offProbe === 'string',
-      `unsigned GET → ${offProbe}`);
+    // "Stop hosting" must actually stop: within ~2 s the old port REFUSES connections. An answer
+    // (401) is a relay still serving; a hang is a listener nobody accepts on — both are the leak
+    // (members' warm iroh blob connections used to keep the Mac host's :8674 alive until the next
+    // fabric rebind, `relay_host_stop.rs`).
+    let offProbe;
+    const tOffProbe = Date.now();
+    do {
+      offProbe = await probe(RB.port, 'GET', 'haven/media/x', null);
+      if (offProbe === 'ERR ECONNREFUSED') break;
+      await sleep(250);
+    } while (Date.now() - tOffProbe < 2_500);
+    score(`multirelay: nothing answers on R_B's port once hosting is off (:${RB.port})`, offProbe === 'ERR ECONNREFUSED',
+      `unsigned GET → ${offProbe} after ${((Date.now() - tOffProbe) / 1000).toFixed(1)}s`);
+    if (offProbe !== 'ERR ECONNREFUSED') {
+      const pid = String(shOk('pgrep', ['-f', 'HavenStub\\.app']) || '').trim().split('\n')[0];
+      if (pid) log(`multirelay: stub listeners with hosting OFF:\n${shOk('lsof', ['-nP', '-a', '-p', pid, '-iTCP', '-sTCP:LISTEN']) || '(lsof failed)'}`);
+    }
     const offBody = tag('WhileRBOff');
     let tOff = Date.now();
     await op(ios, { op: 'post', body: offBody, circle_id: cS }, 1500);

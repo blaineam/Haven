@@ -78,7 +78,8 @@ impl<T, E: std::fmt::Debug> IntoAnyhow<T> for std::result::Result<T, E> {
 /// Optional in-process relay (blob mailbox) attached to THIS node's endpoint. Hosting a relay used to
 /// spin up a SECOND iroh node in the same process, which made iroh's per-remote path manager churn
 /// unboundedly (tens-of-GB leak). Now ONE endpoint serves both the social ALPN and the blob ALPN.
-#[derive(Clone)]
+/// Deliberately NOT `Clone`: `http` owns the HTTP interface's listener, and every extra owner is a
+/// "stopped" relay that keeps serving (see `accept_loop`). Copy out the fields you need instead.
 struct RelayCfg {
     root: std::path::PathBuf,
     auth: Arc<Mutex<blobstore::RelayAuth>>,
@@ -959,12 +960,28 @@ async fn accept_loop(
             // Dispatch by negotiated ALPN: the blob mailbox vs social messaging — ONE endpoint, two
             // protocols, so the relay needs no second iroh node.
             if conn.alpn() == blobstore::BLOB_ALPN {
-                let Some(cfg) = lock(&relay).clone() else { return }; // relay not hosted here → ignore
+                // Read the relay config PER REQUEST, and only the store half of it. This used to clone
+                // the whole `RelayCfg` once per connection and hold it for the connection's life —
+                // including the `Arc` that owns the HTTP interface — so every member with a warm blob
+                // connection kept a "stopped" relay's :8674 listening and serving, and kept this
+                // connection reading the store, until the connection happened to die (on the Mac
+                // host: the next fabric rebind; e2e `multirelay`, B's host toggle). A relay that is
+                // disabled mid-connection now closes it on the next request.
+                let store = |relay: &Arc<Mutex<Option<RelayCfg>>>| {
+                    lock(relay).as_ref().map(|c| (c.root.clone(), c.auth.clone()))
+                };
+                if store(&relay).is_none() {
+                    return; // relay not hosted here → ignore
+                }
                 let peer = hex(conn.remote_id().as_bytes());
                 loop {
                     match conn.accept_bi().await {
                         Ok((send, recv)) => {
-                            let (root, peer, auth) = (cfg.root.clone(), peer.clone(), cfg.auth.clone());
+                            let Some((root, auth)) = store(&relay) else {
+                                conn.close(0u32.into(), b"relay stopped");
+                                break;
+                            };
+                            let peer = peer.clone();
                             tokio::spawn(async move {
                                 let _ = blobstore::handle_request(root, peer, auth, send, recv).await;
                             });

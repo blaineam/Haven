@@ -18,13 +18,18 @@
 //!   haven-relay link [--data DIR]    # print the saved circle link + QR (paste into the app)
 //!   haven-relay make-link --circle fam --member <hex> [--member <hex> …]   # operator helper
 //!   haven-relay id [--data DIR]      # print this relay's node id (for the app's storage config)
+//!   haven-relay update [--check|--now|--status] [--channel stable|rc]   # signed self-update
+//!   haven-relay health [--data DIR]  # exit 0 if the running relay's last self-check passed
 
 mod config;
 mod derp;
+mod diskguard;
+mod health;
 mod link;
 mod qr;
 mod runner;
 mod service;
+mod update;
 
 use anyhow::{anyhow, Result};
 
@@ -38,6 +43,8 @@ fn main() -> Result<()> {
         Some("link") => print_link(&args[2..]),
         Some("make-link") => make_link(&args[2..]),
         Some("id") => print_id(&args[2..]),
+        Some("update") => update::cli(&args[2..]),
+        Some("health") => health::cli(&args[2..]),
         Some("service") => match args.get(2).map(String::as_str) {
             // Pass through any `run` flags (esp. `--data <custom storage path>`) so the auto-start
             // command matches how the operator runs it.
@@ -54,7 +61,8 @@ fn main() -> Result<()> {
         // the one circle its link granted, pre-1.1.2) looks like "my media isn't on any relay", not
         // like an out-of-date binary. Both spellings, because `--version` is what everyone tries.
         Some("version") | Some("-V") | Some("--version") => {
-            println!("haven-relay {}", env!("CARGO_PKG_VERSION"));
+            // `haven-relay <version>` on one line — the updater and the Docker entrypoint parse it.
+            println!("haven-relay {}", update::VERSION);
             Ok(())
         }
         Some("-h") | Some("--help") | None => {
@@ -82,6 +90,8 @@ fn print_help() {
          haven-relay link                         reprint the saved link + QR for the app\n  \
          haven-relay id                           print this relay's node id\n  \
          haven-relay version                      print the relay version (are you up to date?)\n  \
+         haven-relay update [--check|--now]       check for / install a signed update now\n  \
+         haven-relay health                       exit 0 if the running relay is healthy\n  \
          haven-relay service install              auto-start on login/reboot (systemd/launchd/Task)\n  \
          haven-relay service uninstall            remove the auto-start\n  \
          haven-relay make-link --circle <tag> --member <hex> …   (operator helper)\n\n\
@@ -127,6 +137,12 @@ fn print_help() {
          --mailbox-ttl-days N      override the 30-day mailbox event TTL\n  \
          With both media limits set, whichever rule frees more space wins. Sweeps run hourly;\n  \
          the first media sweep waits 48h after limits are first enabled.\n\n\
+         SELF-MAINTENANCE (defaults shown):\n  \
+         --auto-update stable      off | stable | rc — signed updates from GitHub Releases\n  \
+                                   (env HAVEN_RELAY_UPDATE_CHANNEL). Installs only where it can\n  \
+                                   restart safely (Docker, systemd, launchd); else notify-only.\n  \
+         --update-interval-hours 6 hours between checks (+ random jitter)\n  \
+         --min-free 1G             disk guard: refuse new uploads below this much free space (0 = off)\n\n\
          COMMON FLAGS:  --data DIR  --s3-port PORT  --rclone PATH  --rclone-config FILE\n\n\
          The relay never holds any key that can read your circle's content. It forwards\n\
          sealed frames and serves sealed blobs it cannot open. No logs are written.\n"
@@ -136,12 +152,40 @@ fn print_help() {
 /// Run the relay (synchronous wrapper around the async runner). On a fresh data dir this
 /// also prints the link/QR to paste into the app.
 fn run(args: &[String]) -> Result<()> {
+    // FIRST, before anything a bad release could trip over: is this binary a fresh update on
+    // probation? (Counts the start; rolls back + exits for the supervisor after repeated failures.)
+    let probation = update::startup(std::path::Path::new(&gate_data_dir(args)));
     let cfg = config::Config::from_args(args)?;
     // Show the paste-into-the-app link/QR every run — it's the whole point and harmless
     // to reprint (it's public routing data, not a secret).
     qr::print_link_qr(&cfg.link.to_uri());
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(runner::run(cfg))
+    let restart = rt.block_on(runner::run(cfg, probation))?;
+    // Shut the runtime down (bounded) before exiting, so nothing half-written is left behind.
+    rt.shutdown_timeout(std::time::Duration::from_secs(10));
+    if restart {
+        std::process::exit(update::install::EXIT_RESTART);
+    }
+    Ok(())
+}
+
+/// The data dir `run` will use, resolved WITHOUT the full config parse (the probation gate must
+/// run even if a new release can't parse its config): `--data`, else a `--config` file's
+/// `data_dir`, else the default.
+fn gate_data_dir(args: &[String]) -> String {
+    if let Some(d) = arg_value(args, "--data") {
+        return d;
+    }
+    if let Some(path) = arg_value(args, "--config") {
+        if let Some(d) = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v.get("data_dir").and_then(|d| d.as_str()).map(str::to_string))
+        {
+            return d;
+        }
+    }
+    config::default_data_dir()
 }
 
 /// Print the saved circle link + QR (so a user can re-add the relay in the app any time).

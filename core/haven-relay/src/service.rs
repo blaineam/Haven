@@ -121,7 +121,15 @@ fn linux_install(exe: &std::path::Path, extra: &[String], linked: bool) -> Resul
         Ok(())
     } else {
         // No systemd → crontab @reboot.
-        let line = format!("@reboot {} >/dev/null 2>&1", run_cmdline(exe, extra));
+        // No service manager: a tiny restart loop, so the relay comes back after it exits — which
+        // is also what lets a signed self-update restart into the new binary (HAVEN_RELAY_SUPERVISED
+        // tells the updater something will bring it back; without it the relay only notifies).
+        // Replace any older @reboot line first, so an upgrade never leaves TWO relays starting.
+        let line = format!(
+            "@reboot HAVEN_RELAY_SUPERVISED=1 sh -c 'while :; do {}; sleep 5; done' >/dev/null 2>&1",
+            run_cmdline(exe, extra)
+        );
+        let _ = crontab_remove("haven-relay");
         crontab_add(&line)?;
         println!("✓ Added a crontab @reboot entry — the relay starts on every reboot.");
         Ok(())

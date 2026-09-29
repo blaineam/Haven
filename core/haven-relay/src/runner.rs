@@ -21,7 +21,10 @@ impl Drop for RcloneChild {
     }
 }
 
-pub async fn run(cfg: Config) -> Result<()> {
+/// Run the relay until Ctrl-C / SIGTERM (→ `Ok(false)`) or until the updater asks for a restart
+/// (→ `Ok(true)`: the caller exits with `EXIT_RESTART` so the supervisor starts the new binary).
+/// `probation`: this binary is a fresh update whose first healthy self-check commits it.
+pub async fn run(cfg: Config, probation: bool) -> Result<bool> {
     let id = Identity::from_seed(&cfg.seed);
     let my_hex = hex32(&id.public().node_id_bytes());
 
@@ -65,6 +68,9 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut turn_public: Vec<String> = cfg.turn_urls.clone();
     let mut turn_user = haven_net::DEFAULT_TURN_USER.to_string();
     let mut turn_pass = cfg.turn_token.clone();
+    // What the self health check probes (filled in as each piece comes up).
+    let mut health_http: Option<SocketAddr> = None;
+    let mut health_store: Option<std::path::PathBuf> = None;
 
     match &cfg.backend {
         StoreBackend::Local => {
@@ -76,6 +82,9 @@ pub async fn run(cfg: Config) -> Result<()> {
             let store = cfg.data_dir.join("store");
             let node = relay.node();
             node.enable_relay_with_retention(store.clone(), cfg.retention);
+            health_store = Some(store.clone());
+            // Self-maintenance: refuse new uploads before the disk fills (GC keeps running).
+            crate::diskguard::spawn(store.clone(), cfg.maintenance.min_free_bytes);
             println!(
                 "✓ media store live — local-disk blob mailbox at {} over Haven Net (haven/blob/1, shared endpoint).",
                 store.display()
@@ -184,6 +193,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     .await
                     .map_err(|e| anyhow!("start http blob interface: {e}"))?;
                 println!("✓ http media interface live on {bind} (port {port}).");
+                health_http = crate::health::local_http_addr(bind, port);
 
                 // Haven fabric: embed iroh-relay BEFORE the public front door so a single-origin
                 // path router can front media + DERP on one cloudflared process.
@@ -639,12 +649,45 @@ pub async fn run(cfg: Config) -> Result<()> {
     println!("  The relay only ever moves ciphertext. Stop with Ctrl-C.");
     println!("═══════════════════════════════════════════════════════════════\n");
 
-    // Idle until Ctrl-C; the relay's accept/forward loops run in the background.
-    // Tunnel Drop kills cloudflared on exit.
+    // Self health check (feeds `haven-relay health` + the post-update probation) and the
+    // signed auto-updater. Both only ever print this relay's own state/version events.
+    {
+        let probe = crate::health::Probe { http_addr: health_http, node: Some(relay.node()), store: health_store };
+        let data_dir = cfg.data_dir.clone();
+        crate::health::spawn(probe, cfg.data_dir.clone(), move || {
+            if probation {
+                crate::update::confirm_healthy(&data_dir);
+            }
+        });
+        crate::update::spawn_loop(cfg.data_dir.clone(), cfg.maintenance.update_channel, cfg.maintenance.update_interval);
+    }
+
+    // Idle until Ctrl-C / SIGTERM (docker stop, systemctl stop) or an update restart; the relay's
+    // accept/forward loops run in the background. Returning drops the guards, so cloudflared /
+    // rclone children are stopped cleanly instead of orphaned.
     let _ = (&relay, &_quick_tunnel, &_derp_tunnel, &_derp_guard, &_turn_guard);
-    tokio::signal::ctrl_c().await.ok();
-    println!("▸ shutting down.");
-    Ok(())
+    let restart = tokio::select! {
+        _ = tokio::signal::ctrl_c() => false,
+        _ = sigterm() => false,
+        _ = crate::update::restart_requested() => true,
+    };
+    println!("{}", if restart { "▸ restarting into the update." } else { "▸ shutting down." });
+    Ok(restart)
+}
+
+#[cfg(unix)]
+async fn sigterm() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut s) => {
+            s.recv().await;
+        }
+        Err(_) => std::future::pending::<()>().await,
+    }
+}
+
+#[cfg(not(unix))]
+async fn sigterm() {
+    std::future::pending::<()>().await
 }
 
 /// This machine's primary LAN IPv4 (UDP-connect trick — no packet is actually sent).

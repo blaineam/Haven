@@ -24,9 +24,19 @@ actor StatePersister {
     func persist(engine: Engine, to destination: @Sendable () async -> URL?) async {
         // exportState() holds the engine mutex for 100s of ms on a large account — it runs on the
         // engine actor like every other call, so it can't race a mailbox receive / feed rebuild storm.
-        let data = await engine.run { $0.exportState() }
+        //
+        // Skipped outright when no state-changing engine call ran since the last export that
+        // reached disk (the mailbox drain persists after EVERY pass, most of which change nothing):
+        // the whole-state clone under the mutex is the expensive part, and it would write the same
+        // bytes again.
+        guard let (data, generation) = await engine.exportIfChanged() else { return }
+        HavenPerf.shared.notePersistExport()
         guard let url = await destination() else { return }
-        try? data.write(to: url,
-                        options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        do {
+            try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            await engine.markPersisted(generation)
+        } catch {
+            // Left dirty: the next persist exports again.
+        }
     }
 }

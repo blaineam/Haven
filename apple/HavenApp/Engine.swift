@@ -28,16 +28,50 @@ import Foundation
 /// out and assign it on the main actor; the `HavenSocial` reference itself must never leave the
 /// closure. Two engine instances only ever exist during `reconfigure` / seedless adoption, when a
 /// dying engine's in-flight passes are dropped by the `self.engine === engine` guards.
-actor Engine {
-    private let core: HavenSocial
+///
+/// (It was a plain actor; it is now a thin class over `LanedExecutor`, the same one-at-a-time actor
+/// with a user lane in front of the background one. "Every call executes on the actor" still holds.)
+final class Engine: @unchecked Sendable {
+    // Everything here is a `let`, and the one mutable thing — the engine handle — is only ever
+    // touched inside `lanes`, an actor. That is what `@unchecked Sendable` is vouching for.
+    private let lanes: LanedExecutor<HavenSocial>
 
-    init(_ core: HavenSocial) { self.core = core }
+    init(_ core: HavenSocial) {
+        lanes = LanedExecutor(core, onUserWait: { HavenPerf.shared.noteEngineUserWait(ms: $0) })
+    }
 
-    /// Run `body` against the engine, on this actor (never the main thread). `caller` / `line`
+    /// Run `body` against the engine, on the lanes' actor (never the main thread). `caller` / `line`
     /// default to the CALL SITE, so the DEBUG hold log names the operation that held the engine —
     /// the lock HOLDER behind a stall, not just the waiter. Anything over 300 ms lands in
     /// Caches/HavenStalls.log as `[EngineHold] …` next to the stall it caused.
-    func run<T>(caller: String = #function, line: Int = #line, _ body: (HavenSocial) throws -> T) rethrows -> T {
+    ///
+    /// `lane`: `.userInitiated` for something the user just did and is watching for (it jumps any
+    /// QUEUED background call — see `LanedExecutor` for the ordering rules); everything else stays
+    /// on the default `.background` lane, FIFO with its peers exactly as before.
+    /// `readOnly`: the call cannot change persisted state, so it does not dirty the next persist.
+    /// Only mark calls that are plainly reads — an unmarked call merely costs one export.
+    func run<T>(lane: EngineLane = .background, readOnly: Bool = false,
+                caller: String = #function, line: Int = #line,
+                _ body: (HavenSocial) throws -> T) async rethrows -> T {
+        try await lanes.run(lane: lane, readOnly: readOnly) { core in
+            try Self.instrumented(caller: caller, line: line) { try body(core) }
+        }
+    }
+
+    /// `exportState()` — but only when some non-read-only call ran since the last
+    /// `markPersisted`. Returns the bytes and the generation they capture.
+    func exportIfChanged(caller: String = #function, line: Int = #line) async -> (data: Data, generation: UInt64)? {
+        guard let r = await lanes.runIfDirty({ core in
+            Self.instrumented(caller: caller, line: line) { core.exportState() }
+        }) else { return nil }
+        return (r.value, r.generation)
+    }
+    /// See `LanedExecutor.currentGeneration`.
+    func mutationGeneration() async -> UInt64 { await lanes.currentGeneration() }
+    /// The export captured at `generation` is on disk.
+    func markPersisted(_ generation: UInt64) async { await lanes.markPersisted(generation) }
+
+    private static func instrumented<T>(caller: String, line: Int, _ body: () throws -> T) rethrows -> T {
         EngineTripwire.check(caller: caller, line: line)
         #if DEBUG
         let t0 = CFAbsoluteTimeGetCurrent()
@@ -46,21 +80,24 @@ actor Engine {
             if held > 0.3 { EngineHoldLog.note("[EngineHold] \(caller) (line \(line)) held \(Int(held * 1000))ms") }
         }
         #endif
-        return try body(core)
+        return try body()
     }
 
     /// The one engine-adjacent call that is not a `HavenSocial` method: the transport node's
     /// account→device directory publish takes the engine handle as an argument (it reads our roster
-    /// under the engine lock on the Rust side). It runs here so the handle never leaves the actor.
+    /// under the engine lock on the Rust side). It runs on the lanes' actor so the handle never
+    /// leaves it.
     func publishAccountDevices(via node: HavenNode) async throws -> [String] {
-        EngineTripwire.check(caller: #function, line: #line)
-        return try await node.publishAccountDevices(social: core)
+        try await lanes.withCore { core in
+            EngineTripwire.check(caller: #function, line: #line)
+            return try await node.publishAccountDevices(social: core)
+        }
     }
 }
 
 /// DEBUG-only: the assertion that no engine call ever runs on the main thread.
 ///
-/// `Engine.run` is an actor method, so a main-actor caller can only reach it through `await`,
+/// `Engine.run` executes on an actor (`LanedExecutor`), so a main-actor caller can only reach it through `await`,
 /// and the Swift runtime never runs a default actor's job on the main thread (the main executor
 /// cannot give up its thread to another actor). This check turns that runtime contract into a
 /// crash with a name on it, so a regression shows up in the first QA launch rather than as a

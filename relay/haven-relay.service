@@ -10,6 +10,11 @@
 # First-time only, attach to your circle once (saves the link), then start the service:
 #   haven-relay run --link <code>           # Ctrl-C after it says "saved"
 #
+# Self-updating: under this unit the relay installs signed updates over ~/.local/bin/haven-relay
+# (atomic rename, previous kept as haven-relay.prev) and exits with code 75; Restart=always brings
+# it back on the new binary, which is rolled back automatically if it fails its health check.
+# Channel: add `--auto-update rc|off` to ExecStart (default stable).
+#
 [Unit]
 Description=Haven relay (always-on circle mailbox, ciphertext only)
 After=network-online.target
@@ -18,6 +23,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/haven-relay run
+# ALWAYS (not on-failure): a self-update restart exits with code 75 and must come back.
 Restart=always
 RestartSec=5
 

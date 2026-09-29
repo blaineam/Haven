@@ -1,6 +1,11 @@
 #!/bin/sh
 # On the FIRST run, attach to your circle from HAVEN_RELAY_LINK (saved into /data). On every
 # later run the saved link is reused and HAVEN_RELAY_LINK is IGNORED — see the long note below.
+#
+# This script is also the relay's SUPERVISOR (see the bottom): it keeps cloudflared up, restarts
+# the relay when it exits, runs a newer signed self-update from the data volume when there is one
+# (so updates survive container recreation), and rolls a crashing update back — no Docker restart
+# needed for any of it.
 set -eu
 
 export PATH="/usr/local/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
@@ -24,7 +29,14 @@ cleanup() {
     wait "$CF_PID" 2>/dev/null || true
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+STOP=0
+RELAY_PID=""
+on_signal() {
+  STOP=1
+  if [ -n "${RELAY_PID:-}" ]; then kill -TERM "$RELAY_PID" 2>/dev/null || true; fi
+}
+trap on_signal INT TERM
 
 if command -v cloudflared >/dev/null 2>&1; then
   echo "▸ cloudflared: $(command -v cloudflared) ($(cloudflared version 2>/dev/null | head -1 || echo present))"
@@ -134,27 +146,113 @@ fi
 
 SAVED_LINK="$HAVEN_RELAY_DIR/link.json"
 
+# ── Which link (if any) the FIRST start passes ───────────────────────────────
+LINK_ONCE=""
 if [ -n "${HAVEN_RELAY_LINK:-}" ] && [ -f "$SAVED_LINK" ] && [ "${HAVEN_RELAY_LINK_FORCE:-0}" != "1" ]; then
   echo "▸ HAVEN_RELAY_LINK is set, but this relay already has a saved link ($SAVED_LINK)."
   echo "  IGNORING the environment link and keeping the saved one."
-  # Don't use exec — cloudflared child must outlive the shell; run in foreground and wait.
-  haven-relay run "$@" &
-  RELAY_PID=$!
-  wait "$RELAY_PID"
-  exit $?
-fi
-
-if [ -n "${HAVEN_RELAY_LINK:-}" ]; then
+elif [ -n "${HAVEN_RELAY_LINK:-}" ]; then
   if [ -f "$SAVED_LINK" ]; then
     echo "▸ HAVEN_RELAY_LINK_FORCE=1 — OVERWRITING the saved link with the one from the environment."
   fi
-  haven-relay run --link "$HAVEN_RELAY_LINK" "$@" &
-  RELAY_PID=$!
-  wait "$RELAY_PID"
-  exit $?
+  LINK_ONCE="$HAVEN_RELAY_LINK"
 fi
 
-haven-relay run "$@" &
-RELAY_PID=$!
-wait "$RELAY_PID"
-exit $?
+# ── Self-update wiring ───────────────────────────────────────────────────────
+# The relay installs verified updates into the DATA VOLUME ($HAVEN_RELAY_DIR/update/bin), never
+# into the image, so they persist across `docker compose up`/recreate. This loop runs that binary
+# while it is newer than the image's own (a rebuilt, newer image always wins).
+IMAGE_BIN="${HAVEN_RELAY_IMAGE_BIN:-$(command -v haven-relay || echo /usr/local/bin/haven-relay)}"
+VOL_BIN="$HAVEN_RELAY_DIR/update/bin/haven-relay"
+export HAVEN_RELAY_UPDATE_INSTALL="${HAVEN_RELAY_UPDATE_INSTALL:-volume}"
+export HAVEN_RELAY_SUPERVISED=1
+if [ -z "${HAVEN_RELAY_UPDATE_CHANNEL:-}" ]; then
+  # Default: follow stable releases — except an image built FROM SOURCE (testing a branch), which
+  # would otherwise be replaced by the next release. Set the channel explicitly to override.
+  if [ -f /etc/haven-relay-source-build ]; then
+    HAVEN_RELAY_UPDATE_CHANNEL=off
+  else
+    HAVEN_RELAY_UPDATE_CHANNEL=stable
+  fi
+fi
+export HAVEN_RELAY_UPDATE_CHANNEL
+EXIT_RESTART=75
+
+pick_bin() {
+  if [ -x "$VOL_BIN" ]; then
+    sel="$("$IMAGE_BIN" update --pick-bin "$VOL_BIN" --data "$HAVEN_RELAY_DIR" 2>/dev/null || true)"
+    if [ -n "$sel" ] && [ -x "$sel" ]; then
+      echo "$sel"
+      return
+    fi
+  fi
+  echo "$IMAGE_BIN"
+}
+
+# Interruptible sleep (a trapped TERM must not wait out the whole back-off).
+nap() {
+  sleep "$1" &
+  wait $! 2>/dev/null || true
+}
+
+# ── Supervisor loop ──────────────────────────────────────────────────────────
+# Not `exec`: cloudflared (started above) must outlive relay restarts — which also keeps a free
+# trycloudflare hostname STABLE across self-updates.
+fast_fails=0
+while :; do
+  BIN="$(pick_bin)"
+  if [ "$BIN" != "$IMAGE_BIN" ]; then
+    echo "▸ running self-updated $("$BIN" version 2>/dev/null || echo haven-relay) from the data volume"
+  fi
+  started="$(date +%s)"
+  if [ -n "$LINK_ONCE" ]; then
+    "$BIN" run --link "$LINK_ONCE" "$@" &
+  else
+    "$BIN" run "$@" &
+  fi
+  RELAY_PID=$!
+  # Only the first start carries --link: it is saved to $SAVED_LINK by then.
+  LINK_ONCE=""
+  code=0
+  wait "$RELAY_PID" || code=$?
+  # A trapped signal interrupts `wait` early — keep reaping until the relay has really exited.
+  while kill -0 "$RELAY_PID" 2>/dev/null; do
+    code=0
+    wait "$RELAY_PID" || code=$?
+  done
+  RELAY_PID=""
+  if [ "$STOP" = 1 ]; then
+    exit 0
+  fi
+  if [ "$code" = "$EXIT_RESTART" ]; then
+    echo "▸ relay restarting (update installed or rolled back)…"
+    fast_fails=0
+    continue
+  fi
+  ran=$(( $(date +%s) - started ))
+  if [ "$ran" -lt 60 ]; then
+    fast_fails=$((fast_fails + 1))
+  else
+    fast_fails=0
+  fi
+  # Safety net under the relay's own probation logic: a self-updated binary that keeps dying
+  # right after start is rolled back (and marked bad) so the previous/image binary runs again.
+  if [ "$BIN" != "$IMAGE_BIN" ] && [ "$fast_fails" -ge 3 ]; then
+    echo "✗ self-updated relay exited $fast_fails times in a row (last code $code) — rolling back."
+    "$IMAGE_BIN" update --rollback --data "$HAVEN_RELAY_DIR" || rm -f "$VOL_BIN"
+    fast_fails=0
+    continue
+  fi
+  delay=5
+  i=1
+  while [ "$i" -lt "$fast_fails" ] && [ "$delay" -lt 60 ]; do
+    delay=$((delay * 2))
+    i=$((i + 1))
+  done
+  [ "$delay" -gt 60 ] && delay=60
+  echo "⚠ relay exited (code $code) — restarting in ${delay}s."
+  nap "$delay"
+  if [ "$STOP" = 1 ]; then
+    exit 0
+  fi
+done

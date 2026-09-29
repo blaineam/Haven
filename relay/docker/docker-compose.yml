@@ -33,7 +33,16 @@ services:
         HAVEN_RELAY_REF: ${HAVEN_RELAY_REF:-main}
     image: haven-relay:local
     container_name: haven-relay
+    # The entrypoint already supervises the relay (restarts, self-updates, rollback); this covers
+    # the container itself — reboots of the NAS, Docker daemon restarts.
     restart: unless-stopped
+    # Same check as the image's HEALTHCHECK, spelled out so it's visible (and tweakable) here.
+    healthcheck:
+      test: ["CMD", "haven-relay", "health"]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
     environment:
       # FIRST run only. Once a link is saved in /data this value is IGNORED (the entrypoint says so
       # in the log). It used to be re-applied on every start, which silently reverted a relay you
@@ -48,6 +57,19 @@ services:
       # re-adopt the relay. Without it the id comes from /data/identity.json and lives only as long
       # as that volume. Put HAVEN_RELAY_SEED=… in your .env next to this file.
       HAVEN_RELAY_SEED: ${HAVEN_RELAY_SEED:-}
+      # ── Self-update / self-maintenance ─────────────────────────────────────
+      # Build this image ONCE; after that the relay keeps itself current: it checks GitHub
+      # Releases every ~6h (anonymous GET — no node id, no telemetry), verifies the Ed25519
+      # release signature, installs into the data volume, restarts into it, and rolls back +
+      # blacklists any update that fails its health check. Your node id is never touched.
+      #   stable (default) — releases only     rc — also release candidates     off — never
+      # (An image built FROM SOURCE defaults to off.)
+      HAVEN_RELAY_UPDATE_CHANNEL: ${HAVEN_RELAY_UPDATE_CHANNEL:-}
+      # Hours between checks (1–336, default 6; a random jitter is always added).
+      HAVEN_RELAY_UPDATE_INTERVAL_HOURS: ${HAVEN_RELAY_UPDATE_INTERVAL_HOURS:-}
+      # Disk guard: stop accepting new uploads when the data volume has less than this free
+      # (default 1G; small mailbox writes continue until 1/4 of it; 0 disables). GC keeps running.
+      HAVEN_RELAY_MIN_FREE: ${HAVEN_RELAY_MIN_FREE:-}
       # ── Public media front door ────────────────────────────────────────────
       # DEFAULT (leave both unset): image ships cloudflared and auto-starts a free
       # Cloudflare Quick Tunnel (*.trycloudflare.com). Hostname changes on restart;

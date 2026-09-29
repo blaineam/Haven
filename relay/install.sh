@@ -135,6 +135,11 @@ install_relay() {
   echo
   echo "  • Restart manually any time:   haven-relay run $DATA_ARG"
   echo "  • Remove the auto-start:       haven-relay service uninstall"
+  echo
+  echo "Updates are automatic: the relay checks GitHub Releases every ~6h, verifies the"
+  echo "release signature, replaces $PREFIX/haven-relay and restarts itself (rolled back if"
+  echo "the new version isn't healthy). Opt out: add --auto-update off to the service's run"
+  echo "command; follow release candidates with --auto-update rc; check now: haven-relay update"
   if [ "${RESTART_HINT:-0}" = 1 ]; then
     echo
     echo "  ⚠ UPGRADE: the new binary is installed but the OLD one is still running."

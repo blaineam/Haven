@@ -157,10 +157,52 @@ unreleased `main` still shows the last version bump — trust the ref you passed
 > short on either, build the image on a desktop and `docker save` / `docker load` it across. Set
 > `HAVEN_RELAY_SOURCE=0` to go back to the plain release download, which needs no toolchain at all.
 
-## Updating
+## Updating — automatic after one rebuild
 
-There is no published image to `docker compose pull` — the image is built locally from a release
-binary, so an update means **rebuilding**:
+**The relay updates itself.** Build the image once from this folder; from then on the relay checks
+GitHub Releases every ~6 h (an anonymous GET — no node id, no telemetry), verifies each new
+binary's **Ed25519 release signature** (bound to its SHA-256, asset name and version), installs it
+into the **data volume** (`/data/update/bin/haven-relay`, so it survives `docker compose up`,
+recreation and NAS reboots) and restarts into it. The entrypoint is a small supervisor: it keeps
+cloudflared running (your free trycloudflare hostname doesn't even change), restarts the relay on
+exit, runs the volume binary while it is newer than the image's, and **rolls back** an update that
+crashes or fails its health check — that version is never retried. Your node id is never touched.
+
+```sh
+docker compose exec haven-relay haven-relay update --status   # last good / on probation / bad
+docker compose exec haven-relay haven-relay update            # is there a newer release?
+docker compose exec haven-relay haven-relay update --now      # install now, then:
+docker compose restart
+docker compose ps                                             # (healthy) = HEALTHCHECK passing
+```
+
+Channel (`.env`): `HAVEN_RELAY_UPDATE_CHANNEL=stable` (default) · `rc` (release candidates too) ·
+`off`. An image built from source (`HAVEN_RELAY_SOURCE=1`) defaults to `off`. If you pin
+`HAVEN_RELAY_VERSION`, also set the channel to `off`. More knobs: `HAVEN_RELAY_UPDATE_INTERVAL_HOURS`
+(default 6) and `HAVEN_RELAY_MIN_FREE` (disk guard, default `1G`) — see
+[`../README.md`](../README.md#automatic-updates-signed-and-self-maintenance).
+
+### Upgrading an EXISTING NAS install to the self-updating setup (one time)
+
+An image built from an older copy of this folder has neither the supervisor nor the updater, so
+rebuild it **once** — after a release that includes auto-update is published:
+
+```sh
+# on the NAS, in the folder with docker-compose.yml:
+#   1. replace Dockerfile, entrypoint.sh and docker-compose.yml with the versions from this folder
+#      (keep your .env — it holds your link / seed / URLs)
+docker compose build --no-cache
+docker compose up -d
+docker compose exec haven-relay haven-relay version          # the new release
+docker compose exec haven-relay haven-relay update --status
+```
+
+The `haven-relay-data` volume (identity, link, sealed store) carries over untouched, so the node id
+is the same and nobody has to re-adopt the relay. That's the last manual rebuild: future releases
+arrive on their own. (Rebuilding later is still fine — a newer image always wins over an older
+self-update in the volume.)
+
+Manual rebuild, if you ever want one:
 
 ```sh
 docker compose build --no-cache      # re-fetches the newest haven-relay release

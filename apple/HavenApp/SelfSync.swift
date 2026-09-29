@@ -571,6 +571,23 @@ final class SelfSyncCoordinator {
     /// open+merge crypto (the transports expose no etag, so the GET itself can't be skipped).
     private var peerKeysCache: [String: (at: Date, keys: [String])] = [:]
     private var peerSlotDigest: [String: String] = [:]
+    /// The last `sync` merged a change into a namespace that applies to the ENGINE (circles, their
+    /// deletions / member severances, device rosters). Everything else a merge brings — profile,
+    /// pins, read watermarks, contacts, relays — lives in its own store and saves itself, so a
+    /// whole-engine export after it wrote the same engine bytes again.
+    private(set) var lastSyncTouchedEngine = false
+    /// Key prefixes whose records `applyLocal` turns into engine calls.
+    nonisolated static let engineKeyPrefixes = ["circle:", "circle-deleted:", "circle-recreated:",
+                                                "circle-removed:", "circle-readd:", "removal:", "roster:"]
+    /// Did the live records under `engineKeyPrefixes` differ between two states?
+    nonisolated static func engineRecordsDiffer(_ a: [SelfSyncEntry], _ b: [SelfSyncEntry]) -> Bool {
+        func pick(_ es: [SelfSyncEntry]) -> [String: Data] {
+            var m: [String: Data] = [:]
+            for e in es where engineKeyPrefixes.contains(where: { e.key.hasPrefix($0) }) { m[e.key] = e.value }
+            return m
+        }
+        return pick(a) != pick(b)
+    }
     private let peerKeysTTL: TimeInterval = 600
 
     private func transportId(_ t: Transport) -> String {
@@ -670,6 +687,8 @@ final class SelfSyncCoordinator {
         }
 
         let changed = base.toBytes() != preMerge
+        lastSyncTouchedEngine = changed && Self.engineRecordsDiffer(
+            (try? AccountStateHandle.fromBytes(bytes: preMerge))?.entries() ?? [], base.entries())
 
         // 4. Apply the converged state locally + persist the new base.
         await applyLocal(base, engine: engine, reads: reads)

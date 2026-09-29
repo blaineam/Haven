@@ -6317,7 +6317,11 @@ final class FeedStore: ObservableObject {
                 // actually enters the polled list; otherwise its mailbox is never pulled and the linked
                 // device shows the circle but none of its posts.
                 self.invalidateMessagesCache()   // a merge can add circles, members and events
-                self.persist(); await self.reloadCircles(); self.refresh()
+                // Only a merge that reached the ENGINE owes an engine export (profile, pins, read
+                // marks and contacts save in their own stores) — a sibling reading a post was an
+                // export on this device every time.
+                if SelfSyncCoordinator.shared.lastSyncTouchedEngine { self.persist() }
+                await self.reloadCircles(); self.refresh()
                 // Pull that circle's history from its relay now (it has structure but no posts yet),
                 // and push my own already-posted content up so my other device can pull it too.
                 let synced = self.circles.map(\.id)
@@ -6609,8 +6613,8 @@ final class FeedStore: ObservableObject {
         // held in-process as "ingested, awaiting persist" so the next poll does not re-fetch them;
         // that hold is memory only, so a kill still re-fetches exactly as before.
         //
-        // A pass that ran no receive() — a 204, a held hello re-offered each poll — has nothing to
-        // save: persisting after it was an export per idle poll.
+        // A pass that ran no receive() — a 204, a hello (handleHello saves what it changes itself),
+        // a relay announce — has nothing to save: persisting after it was an export per idle poll.
         let processed = batch.processedKeys
         #if DEBUG
         for (cid, env) in ingested {
@@ -6620,7 +6624,7 @@ final class FeedStore: ObservableObject {
             HavenPerf.shared.noteApplied("mailbox NONE applied of \(processed.count): \(processed.prefix(2).map { String($0.suffix(40)) })")
         }
         #endif
-        if !processed.isEmpty || helloIngested {
+        if !processed.isEmpty {
             SharedStore.holdAwaitingPersist(processed)
             persist(then: { saved in
                 if saved { for k in processed { SharedStore.markSeenPublic(k) } }

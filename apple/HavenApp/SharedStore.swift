@@ -1897,6 +1897,7 @@ enum SharedStore {
             let respDigest = http?.value(forHTTPHeaderField: "X-Haven-List-Digest")
             let code = http?.statusCode ?? 0
             qaCount(base, (200...299).contains(code) ? "listOk" : (code == 401 || code == 403) ? "listRefused" : "listFail")
+            if code == 401 { noteUnverified(base) }
             switch code {
             case 204:
                 return .success((keys: nil, digest: respDigest))   // nothing new — skip the GETs
@@ -1951,7 +1952,10 @@ enum SharedStore {
             switch (resp as? HTTPURLResponse)?.statusCode ?? 0 {
             case 200...299: qaCount(base, "getOk"); return .success(data)
             case 404: qaCount(base, "getMiss"); return .success(nil)
-            case 401, 403: qaCount(base, "getRefused"); return .failure(RelayForbidden())
+            case 401, 403:
+                qaCount(base, "getRefused")
+                if (resp as? HTTPURLResponse)?.statusCode == 401 { noteUnverified(base) }
+                return .failure(RelayForbidden())
             default: qaCount(base, "getFail"); return .failure(URLError(.badServerResponse))
             }
         } catch { qaCount(base, "getFail"); return .failure(error) }
@@ -1979,10 +1983,28 @@ enum SharedStore {
             let (_, resp) = try await URLSession.shared.upload(for: req, from: body)
             switch (resp as? HTTPURLResponse)?.statusCode ?? 0 {
             case 200...299: qaCount(base, "putOk"); return .success(())
-            case 401, 403: qaCount(base, "putRefused"); return .failure(RelayForbidden())
+            case 401, 403:
+                qaCount(base, "putRefused")
+                if (resp as? HTTPURLResponse)?.statusCode == 401 { noteUnverified(base) }
+                return .failure(RelayForbidden())
             default: qaCount(base, "putFail"); return .failure(URLError(.badServerResponse))
             }
         } catch { qaCount(base, "putFail"); return .failure(error) }
+    }
+
+    /// The relay could not VERIFY our request (401) — as opposed to verifying it and refusing us as a
+    /// non-member (403). The usual cause is a token we no longer share: the operator rotated the
+    /// relay's `http_token` (or reinstalled it), our signatures fold in the old one, and every
+    /// request is unverifiable. A roster re-publish (the 403 remedy) cannot fix that, and nothing
+    /// else ever re-learned the token — the mailbox LIST path returns on a refusal before its iroh
+    /// fallback, and the interface self-heal only fired for URLs marked BAD, which a 401 never marks.
+    /// So the relay stayed refused forever (e2e `multirelay`, token rotation). Ask the relay for its
+    /// self-published interface over iroh — which is not token-gated — and adopt the new token.
+    /// `refreshRelayInterfaceIfNeeded` rate-limits to one fetch per relay per 5 minutes.
+    private static func noteUnverified(_ base: String) {
+        guard let node = RelayMailboxStore.shared.entries.values
+            .first(where: { ($0.httpUrls ?? []).contains(base) })?.hex else { return }
+        FeedStore.shared.refreshRelayInterfaceIfNeeded(node, force: true)
     }
 
     // MARK: - QA (DEBUG): per-relay HTTP outcomes + a signed probe (e2e step `multirelay`)

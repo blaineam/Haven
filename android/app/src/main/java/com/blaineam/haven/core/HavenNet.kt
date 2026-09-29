@@ -7070,7 +7070,11 @@ object HavenNet : InboundListener {
             when (c.responseCode) {
                 in 200..299 -> c.inputStream.use { it.readBytes() }.also { qaCountHttp(base, "getOk") }
                 404 -> null.also { qaCountHttp(base, "getMiss") }
-                401, 403 -> { qaCountHttp(base, "getRefused"); throw RelayForbidden() }
+                401, 403 -> {
+                    qaCountHttp(base, "getRefused")
+                    if (c.responseCode == 401) noteUnverified(base)
+                    throw RelayForbidden()
+                }
                 else -> { qaCountHttp(base, "getFail"); throw java.io.IOException("http ${c.responseCode}") }
             }
         } catch (e: java.io.IOException) {
@@ -7119,6 +7123,7 @@ object HavenNet : InboundListener {
             val respDigest = c.getHeaderField("X-Haven-List-Digest")?.trim()?.takeIf { it.isNotEmpty() }
             val code = c.responseCode
             qaCountHttp(base, if (code in 200..299) "listOk" else if (code == 401 || code == 403) "listRefused" else "listFail")
+            if (code == 401) noteUnverified(base)
             when (code) {
                 204 -> null to respDigest   // nothing new — skip the GETs
                 in 200..299 -> {
@@ -7330,13 +7335,31 @@ object HavenNet : InboundListener {
             val code = c.responseCode
             when {
                 code in 200..299 -> qaCountHttp(base, "putOk")
-                code == 401 || code == 403 -> { qaCountHttp(base, "putRefused"); throw RelayForbidden() }
+                code == 401 || code == 403 -> {
+                    qaCountHttp(base, "putRefused")
+                    if (code == 401) noteUnverified(base)
+                    throw RelayForbidden()
+                }
                 else -> { qaCountHttp(base, "putFail"); throw java.io.IOException("relay PUT HTTP $code") }
             }
         } catch (e: java.io.IOException) {
             if (e !is RelayForbidden && e.message?.startsWith("relay PUT HTTP") != true) qaCountHttp(base, "putFail")
             throw e
         } finally { c.disconnect() }
+    }
+
+    /**
+     * The relay could not VERIFY our request (401) — unlike a 403, where it verified us and refused
+     * a non-member. The usual cause is a token we no longer share: the operator rotated the relay's
+     * `http_token`, our signatures fold in the old one, and every request is unverifiable. A roster
+     * re-publish (the 403 remedy) cannot fix that, and nothing else re-learned the token — so the
+     * relay stayed refused forever (e2e `multirelay`, token rotation). Fetch the relay's
+     * self-published interface over iroh (not token-gated) and adopt it; the fetch is rate-limited
+     * to once per relay per 5 minutes. iOS `SharedStore.noteUnverified` parity.
+     */
+    private fun noteUnverified(base: String) {
+        val hex = relayEntries.values.firstOrNull { base in it.httpUrls }?.hex ?: return
+        refreshRelayInterfaceIfNeeded(hex, force = true)
     }
 
     // ---- QA (DEBUG): per-relay HTTP outcomes (qa dump `relay_stats`, e2e step `multirelay`) ------

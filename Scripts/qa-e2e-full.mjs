@@ -197,6 +197,7 @@ function makeIos(udid) {
       catch (e) { log(`WARN ios qaWrite failed (${e.code || e.message}) — this leg will read RED`); }
     },
     poke: () => shOk('xcrun', ['simctl', 'openurl', udid, 'haven://qa?x=1']),
+    pending: () => existsSync(join(dir(), 'qa-cmd.json')),
     dump: () => readJson(join(dir(), 'qa-dump.json')),
     stage: (src, name) => { const p = join(dir(), name); writeFileSync(p, readFileSync(src)); return p; },
     // Stale-channel plumbing — see the FRESH block near the top.
@@ -327,6 +328,7 @@ function makeStub() {
     label: 'mac-stub',
     qaWrite: (cmd) => writeFileSync(join(as, 'qa-cmd.json'), JSON.stringify(cmd)),
     poke: () => {},                       // stub polls the drop file
+    pending: () => existsSync(join(as, 'qa-cmd.json')),
     dump: () => readJson(join(as, 'qa-dump.json')),
     stage: (src, name) => { const p = join(as, name); writeFileSync(p, readFileSync(src)); return p; },
     skew: () => 0,                        // same machine, same clock
@@ -341,6 +343,7 @@ function makeDesktop() {
     label: 'desktop',
     qaWrite: (cmd) => writeFileSync(join(DESK_DATA, 'qa-cmd.json'), JSON.stringify(cmd)),
     poke: () => {},                       // desktop watches the file
+    pending: () => existsSync(join(DESK_DATA, 'qa-cmd.json')),
     dump: () => readJson(join(DESK_DATA, 'qa-dump.json')),
     stage: (src, name) => { const p = join(DESK_DATA, name); writeFileSync(p, readFileSync(src)); return p; },
     skew: () => 0,                        // same machine, same clock
@@ -429,8 +432,19 @@ function assertAndroidCommandChannel() {
   return false;
 }
 
+// There is ONE drop file per leg, so a command that has not been consumed yet is overwritten by the
+// next one — the stub and desktop poll every 1.5 s, and a 300 ms settle followed by a converge's
+// {"op":"dump"} silently replaced an `approve_connections` (the newfriend step's first run: B never
+// approved, and every later assertion measured that). Host legs wait until the driver has taken
+// the file (it deletes it on consume) before the settle starts.
 async function op(dev, cmd, settleMs = 4000) {
-  dev.qaWrite(cmd); dev.poke(); await sleep(settleMs);
+  dev.qaWrite(cmd); dev.poke();
+  if (dev.pending) {
+    const t0 = Date.now();
+    while (dev.pending() && Date.now() - t0 < 10_000) await sleep(150);
+    if (dev.pending()) log(`WARN ${dev.label}: op '${cmd.op}' still unconsumed after 10s`);
+  }
+  await sleep(settleMs);
 }
 
 async function freshDump(dev) {

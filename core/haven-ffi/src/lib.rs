@@ -4645,20 +4645,24 @@ impl<T> std::ops::DerefMut for EngineGuard<'_, T> {
     }
 }
 
-/// Nanoseconds the most recently released engine guard was held for, PER THREAD.
-///
-/// Test-only. Lets a test assert the SHAPE of a call — that a reduce runs with
-/// the lock released — instead of asserting a wall-clock threshold that would
-/// mean different things on different machines.
-///
-/// Thread-local, not a global: `cargo test` runs the suite in one process with
-/// many threads, so a global is written by every other test's guard too. As a
-/// global this reported 26.3 ms held for an 8.6 ms call — someone else's hold,
-/// read as ours. A guard is always dropped on the thread that took it, so
-/// per-thread is both correct and immune to the neighbours.
+// Nanoseconds the most recently released engine guard was held for, PER THREAD.
+//
+// Test-only. Lets a test assert the SHAPE of a call — that a reduce runs with
+// the lock released — instead of asserting a wall-clock threshold that would
+// mean different things on different machines.
+//
+// Thread-local, not a global: `cargo test` runs the suite in one process with
+// many threads, so a global is written by every other test's guard too. As a
+// global this reported 26.3 ms held for an 8.6 ms call — someone else's hold,
+// read as ours. A guard is always dropped on the thread that took it, so
+// per-thread is both correct and immune to the neighbours.
 #[cfg(test)]
 thread_local! {
     static LAST_ENGINE_HOLD_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    // The LONGEST hold released on this thread since it was last reset to 0 — for calls that
+    // take the lock more than once (a snapshot scope, then a short write-back scope), where the
+    // last guard alone would under-report.
+    static MAX_ENGINE_HOLD_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 impl<T> Drop for EngineGuard<'_, T> {
@@ -4666,6 +4670,8 @@ impl<T> Drop for EngineGuard<'_, T> {
         let held = self.taken.elapsed();
         #[cfg(test)]
         LAST_ENGINE_HOLD_NANOS.with(|c| c.set(held.as_nanos() as u64));
+        #[cfg(test)]
+        MAX_ENGINE_HOLD_NANOS.with(|c| c.set(c.get().max(held.as_nanos() as u64)));
         if held >= ENGINE_HOLD_WARN {
             tracing::warn!(
                 target: "haven_ffi::engine_lock",
@@ -6447,30 +6453,33 @@ impl HavenSocial {
     /// Seal a media blob to one contact (hybrid KEM → AES-256-GCM). The recipient
     /// opens it with `open_media`. Layout: [32 eph_x_pub][u32 pq_len][pq_ct][ciphertext].
     pub fn seal_media(&self, recipient_node_hex: String, data: Vec<u8>) -> Result<Vec<u8>, HavenError> {
-        let st = self.state.lock().unwrap();
-        // OWN account is a valid recipient — own-device media sync (a linked Mac/phone) seals media to the
-        // account so any of the user's own devices (sharing the seed) can open it. The member-list lookup
-        // alone failed here, since you aren't a member of your own circle, which silently broke ALL
-        // own-device media transfer (the seal threw → the chunk send loop bailed before broadcasting).
-        let recipient: HavenId = if hex(&st.me().node_id_bytes()) == recipient_node_hex {
-            st.me().clone()
-        } else if let Some(m) = st
-            .circles
-            .iter()
-            .flat_map(|c| c.members.iter())
-            .find(|m| hex(&m.node_id_bytes()) == recipient_node_hex)
-            .cloned()
-        {
-            m
-        } else {
-            // C7: media requests arrive from DEVICE transports, so the recipient hex may be a device id,
-            // not an account id. Resolve it against the known verified device bundles (mine + contacts');
-            // otherwise a seedless requester — whose only id IS a device id — could never open the chunks.
-            st.device_lists
-                .values()
-                .flat_map(|cd| cd.authorized_bundles())
-                .find(|b| hex(&b.node_id_bytes()) == recipient_node_hex)
-                .ok_or_else(|| HavenError::Invalid { msg: "unknown recipient".into() })?
+        // Only the recipient lookup needs the engine; the KEM + AEAD over the blob run unlocked.
+        let recipient: HavenId = {
+            let st = self.state.lock().unwrap();
+            // OWN account is a valid recipient — own-device media sync (a linked Mac/phone) seals media to the
+            // account so any of the user's own devices (sharing the seed) can open it. The member-list lookup
+            // alone failed here, since you aren't a member of your own circle, which silently broke ALL
+            // own-device media transfer (the seal threw → the chunk send loop bailed before broadcasting).
+            if hex(&st.me().node_id_bytes()) == recipient_node_hex {
+                st.me().clone()
+            } else if let Some(m) = st
+                .circles
+                .iter()
+                .flat_map(|c| c.members.iter())
+                .find(|m| hex(&m.node_id_bytes()) == recipient_node_hex)
+                .cloned()
+            {
+                m
+            } else {
+                // C7: media requests arrive from DEVICE transports, so the recipient hex may be a device id,
+                // not an account id. Resolve it against the known verified device bundles (mine + contacts');
+                // otherwise a seedless requester — whose only id IS a device id — could never open the chunks.
+                st.device_lists
+                    .values()
+                    .flat_map(|cd| cd.authorized_bundles())
+                    .find(|b| hex(&b.node_id_bytes()) == recipient_node_hex)
+                    .ok_or_else(|| HavenError::Invalid { msg: "unknown recipient".into() })?
+            }
         };
         let (enc, key) =
             encapsulate_to(&recipient).map_err(|e| HavenError::Invalid { msg: format!("{e}") })?;
@@ -6793,13 +6802,19 @@ impl HavenSocial {
         accounts.extend(st.circles[idx].members.iter().cloned());
         let recipients = recipients_with_devices(&accounts, &st.device_lists);
         let group = Group::new(circle_id, recipients);
+        let epoch_key = st.circles[idx].current_key();
+        let signer_seed = signer_of(&st, under_device).secret_seed();
+        drop(st);
+        // Lock released: the seal encrypts the whole blob. `Identity` is not `Clone`; its seed
+        // rebuilds it exactly (`from_seed` is its only constructor).
+        let signer = Identity::from_seed(&signer_seed);
         // Wrap the content key to the recipient list AND to the circle EPOCH. The list keeps a
         // friend whose epoch keys have not converged working exactly as before; the epoch entry is
         // what finally lets a member who joined AFTER this blob was sealed open it, which the list
         // alone can never do because content-addressed media is never re-sealed.
-        let sealed = match st.circles[idx].current_key() {
-            Some(key) => seal_bytes_with_epoch(signer_of(&st, under_device), &group, &key, &data),
-            None => seal_bytes(signer_of(&st, under_device), &group, &data),
+        let sealed = match epoch_key {
+            Some(key) => seal_bytes_with_epoch(&signer, &group, &key, &data),
+            None => seal_bytes(&signer, &group, &data),
         };
         sealed
             .map(|env| env.to_bytes())
@@ -6818,20 +6833,25 @@ impl HavenSocial {
     pub fn seal_circle_media_file(&self, circle_id: String, in_path: String, out_path: String) -> bool {
         let Ok(data) = std::fs::read(&in_path) else { return false };
         let sealed: Option<Vec<u8>> = (|| {
-            let st = self.state.lock().unwrap();
-            let idx = st.circles.iter().position(|c| c.id == circle_id)?;
-            // Account-signed + dual-sealed, mirroring `seal_circle_media` (see the rationale there):
-            // media must stay openable by any authorized reader, not gated on holding a device roster.
-            let under_device = st.me_secret.is_none();
-            let mut accounts = vec![st.me().clone()];
-            accounts.extend(st.circles[idx].members.iter().cloned());
-            let recipients = recipients_with_devices(&accounts, &st.device_lists);
-            let group = Group::new(circle_id.clone(), recipients);
+            let (signer_seed, group, epoch_key) = {
+                let st = self.state.lock().unwrap();
+                let idx = st.circles.iter().position(|c| c.id == circle_id)?;
+                // Account-signed + dual-sealed, mirroring `seal_circle_media` (see the rationale there):
+                // media must stay openable by any authorized reader, not gated on holding a device roster.
+                let under_device = st.me_secret.is_none();
+                let mut accounts = vec![st.me().clone()];
+                accounts.extend(st.circles[idx].members.iter().cloned());
+                let recipients = recipients_with_devices(&accounts, &st.device_lists);
+                let group = Group::new(circle_id.clone(), recipients);
+                (signer_of(&st, under_device).secret_seed(), group, st.circles[idx].current_key())
+            };
+            // Lock released: sealing a large video must not park every other engine call.
+            let signer = Identity::from_seed(&signer_seed);
             // Dual-wrapped, as in `seal_circle_media` — this is the variant used for large media and
             // for every repair re-seal.
-            match st.circles[idx].current_key() {
-                Some(key) => seal_bytes_with_epoch(signer_of(&st, under_device), &group, &key, &data),
-                None => seal_bytes(signer_of(&st, under_device), &group, &data),
+            match epoch_key {
+                Some(key) => seal_bytes_with_epoch(&signer, &group, &key, &data),
+                None => seal_bytes(&signer, &group, &data),
             }
             .ok()
             .map(|env| env.to_bytes())
@@ -6886,34 +6906,34 @@ have_seed={} have_device={} members={}",
     }
 
     pub fn open_circle_media(&self, circle_id: String, sealed: Vec<u8>) -> Option<Vec<u8>> {
-        let st = self.state.lock().unwrap();
         let env = SealedEnvelope::from_bytes(&sealed).ok()?;
-        let sender_hex = env.sender_hex();
-        let me_hex = hex(&st.me().node_id_bytes());
-        let idx = st.circles.iter().position(|c| c.id == circle_id)?;
-        // EPOCH entry first. It needs no sender resolution and no place on the recipient list, so it
-        // is the path that works for a member who joined after this blob was sealed — and for one
-        // whose device roster cannot resolve the sealer, which otherwise fails below at the `?`.
-        let mut epoch_keys: Vec<[u8; 32]> = Vec::new();
-        if let Some(k) = st.circles[idx].current_key() { epoch_keys.push(k); }
-        epoch_keys.extend(st.circles[idx].my_epoch_keys.values().copied());
-        for k in &epoch_keys {
-            if let Some(p) = open_bytes_with_epoch(k, &env) { return Some(p); }
-        }
-        // C6: the sender may be a member's ACCOUNT, mine, or an authorized DEVICE (seed-drop signs media
-        // under the device in a fully-capable circle). Resolve a device sender via the verified roster.
-        let sender_pub = if sender_hex == me_hex {
-            st.me().clone()
-        } else if let Some(m) =
-            st.circles[idx].members.iter().find(|m| hex(&m.node_id_bytes()) == sender_hex)
-        {
-            m.clone()
-        } else {
-            authorized_device_and_account(&st, idx, &sender_hex).map(|(bundle, _)| bundle)?
+        // Snapshot the keys under the lock; decrypt the (possibly large) blob with it released.
+        let keys = {
+            let st = self.state.lock().unwrap();
+            let sender_hex = env.sender_hex();
+            let me_hex = hex(&st.me().node_id_bytes());
+            let idx = st.circles.iter().position(|c| c.id == circle_id)?;
+            // EPOCH entry first. It needs no sender resolution and no place on the recipient list, so it
+            // is the path that works for a member who joined after this blob was sealed — and for one
+            // whose device roster cannot resolve the sealer, which otherwise fails below at the `?`.
+            let mut epoch_keys: Vec<[u8; 32]> = Vec::new();
+            if let Some(k) = st.circles[idx].current_key() { epoch_keys.push(k); }
+            epoch_keys.extend(st.circles[idx].my_epoch_keys.values().copied());
+            // C6: the sender may be a member's ACCOUNT, mine, or an authorized DEVICE (seed-drop signs media
+            // under the device in a fully-capable circle). Resolve a device sender via the verified roster.
+            // Unresolvable ⇒ only the epoch entry can open it (an empty sender list).
+            let sender_pub = if sender_hex == me_hex {
+                Some(st.me().clone())
+            } else if let Some(m) =
+                st.circles[idx].members.iter().find(|m| hex(&m.node_id_bytes()) == sender_hex)
+            {
+                Some(m.clone())
+            } else {
+                authorized_device_and_account(&st, idx, &sender_hex).map(|(bundle, _)| bundle)
+            };
+            MediaOpenKeys::snapshot(&st, epoch_keys, sender_pub.into_iter().collect())
         };
-        // Dual-open: device key (Option 1), then account key (legacy). Seedless: account arm absent.
-        st.device.as_ref().and_then(|d| open_bytes(d, &sender_pub, &env).ok())
-            .or_else(|| st.me_secret.as_ref().and_then(|m| open_bytes(m, &sender_pub, &env).ok()))
+        keys.open(&env)
     }
 
     /// [`Self::open_circle_media`] that ALSO returns who sealed the blob (the envelope's verified
@@ -6936,45 +6956,43 @@ have_seed={} have_device={} members={}",
     pub fn open_circle_media_file(&self, circle_id: String, sealed_path: String, out_path: String) -> bool {
         let Ok(sealed) = std::fs::read(&sealed_path) else { return false };
         let plaintext: Option<Vec<u8>> = (|| {
-            let st = self.state.lock().unwrap();
             let env = SealedEnvelope::from_bytes(&sealed).ok()?;
-            // EPOCH entry first, across every circle's keys — see `open_circle_media`.
-            for c in st.circles.iter() {
-                let mut ks: Vec<[u8; 32]> = Vec::new();
-                if let Some(k) = c.current_key() { ks.push(k); }
-                ks.extend(c.my_epoch_keys.values().copied());
-                for k in &ks {
-                    if let Some(p) = open_bytes_with_epoch(k, &env) { return Some(p); }
+            // Snapshot the keys under the lock; the decrypt — hundreds of MB for a video — runs with
+            // it released, so a large file never parks every other engine call behind it.
+            let keys = {
+                let st = self.state.lock().unwrap();
+                // EPOCH entry first, across every circle's keys — see `open_circle_media`.
+                let mut epoch_keys: Vec<[u8; 32]> = Vec::new();
+                for c in st.circles.iter() {
+                    if let Some(k) = c.current_key() { epoch_keys.push(k); }
+                    epoch_keys.extend(c.my_epoch_keys.values().copied());
                 }
-            }
-            let sender_hex = env.sender_hex();
-            let me_hex = hex(&st.me().node_id_bytes());
-            // The circle the media is tagged to (passed) first, then any other circle we're in.
-            let ordered = std::iter::once(circle_id.as_str())
-                .chain(st.circles.iter().map(|c| c.id.as_str()).filter(|id| *id != circle_id));
-            for cid in ordered {
-                let Some(cidx) = st.circles.iter().position(|c| c.id == cid) else { continue };
-                // C6: account sender (member/me) or an authorized DEVICE sender (fully-capable circle).
-                let sender_pub = if sender_hex == me_hex {
-                    st.me().clone()
-                } else if let Some(m) =
-                    st.circles[cidx].members.iter().find(|m| hex(&m.node_id_bytes()) == sender_hex)
-                {
-                    m.clone()
-                } else {
-                    match authorized_device_and_account(&st, cidx, &sender_hex) {
-                        Some((bundle, _)) => bundle,
-                        None => continue,
-                    }
-                };
-                // Dual-open device then account (seedless: account arm absent).
-                if let Some(p) = st.device.as_ref().and_then(|d| open_bytes(d, &sender_pub, &env).ok())
-                    .or_else(|| st.me_secret.as_ref().and_then(|m| open_bytes(m, &sender_pub, &env).ok()))
-                {
-                    return Some(p);
+                let sender_hex = env.sender_hex();
+                let me_hex = hex(&st.me().node_id_bytes());
+                // The circle the media is tagged to (passed) first, then any other circle we're in.
+                let ordered = std::iter::once(circle_id.as_str())
+                    .chain(st.circles.iter().map(|c| c.id.as_str()).filter(|id| *id != circle_id));
+                let mut senders: Vec<HavenId> = Vec::new();
+                for cid in ordered {
+                    let Some(cidx) = st.circles.iter().position(|c| c.id == cid) else { continue };
+                    // C6: account sender (member/me) or an authorized DEVICE sender (fully-capable circle).
+                    let sender_pub = if sender_hex == me_hex {
+                        st.me().clone()
+                    } else if let Some(m) =
+                        st.circles[cidx].members.iter().find(|m| hex(&m.node_id_bytes()) == sender_hex)
+                    {
+                        m.clone()
+                    } else {
+                        match authorized_device_and_account(&st, cidx, &sender_hex) {
+                            Some((bundle, _)) => bundle,
+                            None => continue,
+                        }
+                    };
+                    senders.push(sender_pub);
                 }
-            }
-            None
+                MediaOpenKeys::snapshot(&st, epoch_keys, senders)
+            };
+            keys.open(&env)
         })();
         drop(sealed); // free the sealed bytes before writing the (equally large) plaintext
         let Some(plaintext) = plaintext else { return false };
@@ -7101,193 +7119,199 @@ impl HavenSocial {
     pub(crate) fn epoch_sync_bundle_paged(
         &self, circle_id: &str, mine_only: bool, limit: u32, head_only: bool, before_ms: u64,
     ) -> (Vec<Vec<u8>>, u64, u32, Vec<String>) {
-        let mut st = self.state.lock().unwrap();
-        let me_hex = hex(&st.me().node_id_bytes());
-        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return (vec![], 0, 0, vec![]) };
-        // SENDER-expired content must never ride another bundle: a lapsed `retention_secs` is the
-        // author's promise to the whole circle, so it purges here even if the app never calls
-        // `purge_expired`. Viewer/circle retention is deliberately NOT applied — this path has no
-        // viewer input, and a display preference must not destroy data it never promised to
-        // delete. Wall clock is how `rotate_if_stale` keys its window too; the core has no
-        // injected clock on this path.
-        //
-        // 48h RE-SEAL GRACE: the purge is evaluated against (now − 48h), NOT now. This path runs
-        // on every epoch-head export — i.e. on the author's very next post and every launch — so
-        // an exact-deadline purge deleted a 24h STORY from the author's engine the moment its
-        // window lapsed, before the daily full-history backfill could ever re-deliver it to a
-        // receiver that stalled (commit lag, offline). Display still hides expired content at the
-        // exact deadline everywhere (`build_feed` is_expired + the app-driven purge_expired), so
-        // the promise the viewer sees is unchanged — the grace only keeps the bytes exportable
-        // long enough for late receivers to reconcile history.
-        let grace_ms: u64 = 48 * 60 * 60 * 1000;
-        purge_expired_from_circle(
-            &mut st.circles[idx], None, None,
-            now_secs().saturating_mul(1000).saturating_sub(grace_ms),
-        );
-        // TreeKEM tree wires (genesis commit + Welcomes for the creator; cached Remove commits) go on
-        // the bundle regardless of the keying decision — a receiver needs them to build the tree AND
-        // (M3) to derive the content epoch. Built BEFORE the flip decision so the tree exists when we
-        // compute it. Plus my join ack (§7.2) and a re-broadcast of the verified admin grants (§4.3).
-        // A FULL bundle (mine-only, unlimited, not head-only) is the one place a rotation is safe —
-        // it re-seals my whole history under the new epoch in the same batch. Both the legacy
-        // `rotate_if_stale` and the M5 PCS leaf-Update cadence gate on exactly this predicate.
-        let full_bundle = !head_only && mine_only && limit == 0;
-        let shadow_wires = shadow_emit_bundle(&mut st, idx, full_bundle);
-        let join_wire = keying_emit_join(&mut st, idx);
-        let admin_wires: Vec<Vec<u8>> =
-            st.circles[idx].admin_grants.iter().map(|g| tagged(TAG_ADMIN_GRANT, g)).collect();
-        // Upgrade offers ride the legacy circle's lane so its members see them. Only re-broadcast the
-        // ones I authored: relaying someone else's would lend it my circulation, and an offer is a
-        // claim to be judged, not a fact to spread.
-        let my_acct = st.me().node_id_bytes();
-        let upgrade_wires: Vec<Vec<u8>> = st.circles[idx]
-            .upgrade_offers
-            .iter()
-            .filter(|w| CircleUpgrade::from_bytes(w).map(|u| u.creator == my_acct).unwrap_or(false))
-            .map(|u| tagged(TAG_CIRCLE_UPGRADE, u))
-            .collect();
-        // THE KEYING FLIP / PARK DECISION (§4.5/§7.3), recomputed every bundle from verified state.
-        // `Some(content_epoch)` ⇒ the circle is flipped: content seals under the tree-derived key and
-        // the legacy KeyCommit STOPS. `None` ⇒ shadow or parked ⇒ legacy KeyCommit + sender-keys epoch.
-        let mls_live = mls_refresh_keying(&mut st, idx);
-        // PERIODIC forward-secrecy rotation (audit C2) — the trigger for `rotate_if_stale`. This is the
-        // only safe place for it: a full bundle (`sync_envelopes` on the P2P path, `export_my_envelopes`
-        // on the relay backfill) emits the new key commit AND re-seals my entire history under it in the
-        // same batch, so no peer is ever left with an event whose key it can't obtain. Both are reached
-        // by every client on a schedule, so no platform timer is needed and no client can forget to
-        // rotate. head-only/limited bundles must NOT rotate — they'd publish an epoch without the
-        // re-seal and strand relay-only readers until the next backfill. When the tree is LIVE, legacy
-        // rotation is gated OFF (the tree drives the epoch); content keys come from `mls_live` instead.
-        let (epoch, key) = match mls_live {
-            Some(content_epoch) => {
-                let key = st.circles[idx]
-                    .my_epoch_keys
-                    .get(&content_epoch)
-                    .copied()
-                    .expect("mls_refresh_keying populated my content key");
-                (content_epoch, key)
-            }
-            None => {
-                if full_bundle {
-                    st.circles[idx].rotate_if_stale();
-                } else {
-                    st.circles[idx].ensure_epoch();
+        // TWO PHASES. Everything that reads or mutates engine state (the sender-retention purge,
+        // keying/rotation, the cached key commit, the page pick) runs under the lock; the per-event
+        // SEALING — a deterministic AEAD + a hybrid Ed25519 + ML-DSA signature each, i.e. nearly
+        // all of the cost — runs on a snapshot with the lock RELEASED, the shape `feed` uses.
+        // Measured at 2,000 events: 555 ms, 100% of it under the one lock every other engine call
+        // needs (21 s on a loaded desktop — a call ring timed out waiting behind a history
+        // backfill). Sealing is a pure function of (signer, circle, epoch, key, event), so the
+        // bytes are identical to sealing under the lock (`bundle_reference` pins that).
+        let (mut out, tail, events, epoch, key, compact, signer_seed) = {
+            let mut st = self.state.lock().unwrap();
+            let me_hex = hex(&st.me().node_id_bytes());
+            let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return (vec![], 0, 0, vec![]) };
+            // SENDER-expired content must never ride another bundle: a lapsed `retention_secs` is the
+            // author's promise to the whole circle, so it purges here even if the app never calls
+            // `purge_expired`. Viewer/circle retention is deliberately NOT applied — this path has no
+            // viewer input, and a display preference must not destroy data it never promised to
+            // delete. Wall clock is how `rotate_if_stale` keys its window too; the core has no
+            // injected clock on this path.
+            //
+            // 48h RE-SEAL GRACE: the purge is evaluated against (now − 48h), NOT now. This path runs
+            // on every epoch-head export — i.e. on the author's very next post and every launch — so
+            // an exact-deadline purge deleted a 24h STORY from the author's engine the moment its
+            // window lapsed, before the daily full-history backfill could ever re-deliver it to a
+            // receiver that stalled (commit lag, offline). Display still hides expired content at the
+            // exact deadline everywhere (`build_feed` is_expired + the app-driven purge_expired), so
+            // the promise the viewer sees is unchanged — the grace only keeps the bytes exportable
+            // long enough for late receivers to reconcile history.
+            let grace_ms: u64 = 48 * 60 * 60 * 1000;
+            purge_expired_from_circle(
+                &mut st.circles[idx], None, None,
+                now_secs().saturating_mul(1000).saturating_sub(grace_ms),
+            );
+            // TreeKEM tree wires (genesis commit + Welcomes for the creator; cached Remove commits) go on
+            // the bundle regardless of the keying decision — a receiver needs them to build the tree AND
+            // (M3) to derive the content epoch. Built BEFORE the flip decision so the tree exists when we
+            // compute it. Plus my join ack (§7.2) and a re-broadcast of the verified admin grants (§4.3).
+            // A FULL bundle (mine-only, unlimited, not head-only) is the one place a rotation is safe —
+            // it re-seals my whole history under the new epoch in the same batch. Both the legacy
+            // `rotate_if_stale` and the M5 PCS leaf-Update cadence gate on exactly this predicate.
+            let full_bundle = !head_only && mine_only && limit == 0;
+            let shadow_wires = shadow_emit_bundle(&mut st, idx, full_bundle);
+            let join_wire = keying_emit_join(&mut st, idx);
+            let admin_wires: Vec<Vec<u8>> =
+                st.circles[idx].admin_grants.iter().map(|g| tagged(TAG_ADMIN_GRANT, g)).collect();
+            // Upgrade offers ride the legacy circle's lane so its members see them. Only re-broadcast the
+            // ones I authored: relaying someone else's would lend it my circulation, and an offer is a
+            // claim to be judged, not a fact to spread.
+            let my_acct = st.me().node_id_bytes();
+            let upgrade_wires: Vec<Vec<u8>> = st.circles[idx]
+                .upgrade_offers
+                .iter()
+                .filter(|w| CircleUpgrade::from_bytes(w).map(|u| u.creator == my_acct).unwrap_or(false))
+                .map(|u| tagged(TAG_CIRCLE_UPGRADE, u))
+                .collect();
+            // THE KEYING FLIP / PARK DECISION (§4.5/§7.3), recomputed every bundle from verified state.
+            // `Some(content_epoch)` ⇒ the circle is flipped: content seals under the tree-derived key and
+            // the legacy KeyCommit STOPS. `None` ⇒ shadow or parked ⇒ legacy KeyCommit + sender-keys epoch.
+            let mls_live = mls_refresh_keying(&mut st, idx);
+            // PERIODIC forward-secrecy rotation (audit C2) — the trigger for `rotate_if_stale`. This is the
+            // only safe place for it: a full bundle (`sync_envelopes` on the P2P path, `export_my_envelopes`
+            // on the relay backfill) emits the new key commit AND re-seals my entire history under it in the
+            // same batch, so no peer is ever left with an event whose key it can't obtain. Both are reached
+            // by every client on a schedule, so no platform timer is needed and no client can forget to
+            // rotate. head-only/limited bundles must NOT rotate — they'd publish an epoch without the
+            // re-seal and strand relay-only readers until the next backfill. When the tree is LIVE, legacy
+            // rotation is gated OFF (the tree drives the epoch); content keys come from `mls_live` instead.
+            let (epoch, key) = match mls_live {
+                Some(content_epoch) => {
+                    let key = st.circles[idx]
+                        .my_epoch_keys
+                        .get(&content_epoch)
+                        .copied()
+                        .expect("mls_refresh_keying populated my content key");
+                    (content_epoch, key)
                 }
-                let e = st.circles[idx].my_epoch;
-                let Some(k) = st.circles[idx].current_key() else { return (vec![], 0, 0, vec![]) };
-                (e, k)
+                None => {
+                    if full_bundle {
+                        st.circles[idx].rotate_if_stale();
+                    } else {
+                        st.circles[idx].ensure_epoch();
+                    }
+                    let e = st.circles[idx].my_epoch;
+                    let Some(k) = st.circles[idx].current_key() else { return (vec![], 0, 0, vec![]) };
+                    (e, k)
+                }
+            };
+            let secret = st.circles[idx].my_circle_secret;
+            let mut accounts = vec![st.me().clone()];
+            accounts.extend(st.circles[idx].members.iter().cloned());
+            // Expand each account member to its AUTHORIZED devices (mine + each contact's), so the circle's
+            // key commit seals to every trusted device and NEVER a revoked one. Members whose device roster
+            // we haven't learned fall back to their account key — pre-multidevice peers keep working.
+            // Seed-drop S5 GATE: when retirement is ON *and* every member is affirmatively capable, the bare
+            // per-member account key is dropped (seal to device bundles only), cutting off a revoked device
+            // even from a seed-holding member. Default (retire=false) is byte-identical to the ungated call.
+            let members = recipients_with_devices_gated(
+                &accounts,
+                &st.device_lists,
+                &st.seed_drop_capable,
+                st.retire_account_key,
+            );
+            // Seed-drop S3: author the commit + events under this DEVICE's key (`signer_of`) — BUT only once the
+            // whole circle is affirmatively seed-drop-capable. This is the backwards-compat gate: a device-signed
+            // envelope's sender is the device, which a pre-S1 peer can't chain to the account, so it would be
+            // unreadable there (SEED-DROP-DESIGN §8/§4.2). Until every member advertises the S1 verifier (and we
+            // hold their rosters), keep signing as the ACCOUNT — a fully-capable circle has no such peer. The S5
+            // retirement gate above is a further, separately-flipped step on top of this. Seedless devices (no
+            // account seed) can only reach this once their circle is capable, which is exactly the S4 precondition.
+            let author_under_device = st.device.is_some()
+                && circle_fully_seed_drop_capable(&accounts, &st.device_lists, &st.seed_drop_capable);
+            let mut out: Vec<Vec<u8>> = Vec::new();
+            // Share my OWN device roster so peers seal their content to all my devices (and never a revoked
+            // one). Idempotent: a same-version roster is ignored on the receiver, so this can't rotation-storm.
+            // A3: a primary re-signs its wire; a seedless device emits the primary-signed wire it holds VERBATIM
+            // (trailer intact) — it cannot re-mint it.
+            if let Some(wire) = st.own_roster_wire() {
+                out.push(wire);
             }
-        };
-        let secret = st.circles[idx].my_circle_secret;
-        let mut accounts = vec![st.me().clone()];
-        accounts.extend(st.circles[idx].members.iter().cloned());
-        // Expand each account member to its AUTHORIZED devices (mine + each contact's), so the circle's
-        // key commit seals to every trusted device and NEVER a revoked one. Members whose device roster
-        // we haven't learned fall back to their account key — pre-multidevice peers keep working.
-        // Seed-drop S5 GATE: when retirement is ON *and* every member is affirmatively capable, the bare
-        // per-member account key is dropped (seal to device bundles only), cutting off a revoked device
-        // even from a seed-holding member. Default (retire=false) is byte-identical to the ungated call.
-        let members = recipients_with_devices_gated(
-            &accounts,
-            &st.device_lists,
-            &st.seed_drop_capable,
-            st.retire_account_key,
-        );
-        // Seed-drop S3: author the commit + events under this DEVICE's key (`signer_of`) — BUT only once the
-        // whole circle is affirmatively seed-drop-capable. This is the backwards-compat gate: a device-signed
-        // envelope's sender is the device, which a pre-S1 peer can't chain to the account, so it would be
-        // unreadable there (SEED-DROP-DESIGN §8/§4.2). Until every member advertises the S1 verifier (and we
-        // hold their rosters), keep signing as the ACCOUNT — a fully-capable circle has no such peer. The S5
-        // retirement gate above is a further, separately-flipped step on top of this. Seedless devices (no
-        // account seed) can only reach this once their circle is capable, which is exactly the S4 precondition.
-        let author_under_device = st.device.is_some()
-            && circle_fully_seed_drop_capable(&accounts, &st.device_lists, &st.seed_drop_capable);
-        let mut out: Vec<Vec<u8>> = Vec::new();
-        // Share my OWN device roster so peers seal their content to all my devices (and never a revoked
-        // one). Idempotent: a same-version roster is ignored on the receiver, so this can't rotation-storm.
-        // A3: a primary re-signs its wire; a seedless device emits the primary-signed wire it holds VERBATIM
-        // (trailer intact) — it cannot re-mint it.
-        if let Some(wire) = st.own_roster_wire() {
-            out.push(wire);
-        }
-        // Key commit: the hybrid KEM is random, so a re-seal for the SAME context yields new bytes
-        // and the content-addressed mailbox would accumulate a copy per backfill. Reuse the cached
-        // sealed commit while (epoch, key, secret, recipient devices) are unchanged.
-        let commit_ctx: [u8; 32] = {
-            let mut h = blake3::Hasher::new();
-            h.update(b"haven-commit-ctx-v1");
-            h.update(&epoch.to_le_bytes());
-            h.update(&key);
-            h.update(&secret);
-            // The signer is part of the context: adopting a device key changes who signs the commit, so a
-            // cached account-signed commit must not be reused after `use_device_identity`.
-            h.update(&signer_of(&st, author_under_device).public().node_id_bytes());
-            let mut ids: Vec<[u8; 32]> = members.iter().map(|m| m.node_id_bytes()).collect();
-            ids.sort_unstable();
-            for id in &ids {
-                h.update(id);
-            }
-            *h.finalize().as_bytes()
-        };
-        // §4.5: when the tree is LIVE the KeyCommit STOPS — the commit IS the key distribution, and
-        // content keys come from the tree. When shadow/parked, emit the KeyCommit exactly as today.
-        if mls_live.is_none() {
-            match &st.circles[idx].cached_commit {
-                Some((ctx, bytes)) if *ctx == commit_ctx => out.push(bytes.clone()),
-                _ => {
-                    if let Ok(commit) = seal_key_commit(signer_of(&st, author_under_device), &members, circle_id, epoch, &key, &secret) {
-                        let bytes = tagged(TAG_KEY_COMMIT, &commit.to_bytes());
-                        st.circles[idx].cached_commit = Some((commit_ctx, bytes.clone()));
-                        out.push(bytes);
+            // Key commit: the hybrid KEM is random, so a re-seal for the SAME context yields new bytes
+            // and the content-addressed mailbox would accumulate a copy per backfill. Reuse the cached
+            // sealed commit while (epoch, key, secret, recipient devices) are unchanged.
+            let commit_ctx: [u8; 32] = {
+                let mut h = blake3::Hasher::new();
+                h.update(b"haven-commit-ctx-v1");
+                h.update(&epoch.to_le_bytes());
+                h.update(&key);
+                h.update(&secret);
+                // The signer is part of the context: adopting a device key changes who signs the commit, so a
+                // cached account-signed commit must not be reused after `use_device_identity`.
+                h.update(&signer_of(&st, author_under_device).public().node_id_bytes());
+                let mut ids: Vec<[u8; 32]> = members.iter().map(|m| m.node_id_bytes()).collect();
+                ids.sort_unstable();
+                for id in &ids {
+                    h.update(id);
+                }
+                *h.finalize().as_bytes()
+            };
+            // §4.5: when the tree is LIVE the KeyCommit STOPS — the commit IS the key distribution, and
+            // content keys come from the tree. When shadow/parked, emit the KeyCommit exactly as today.
+            if mls_live.is_none() {
+                match &st.circles[idx].cached_commit {
+                    Some((ctx, bytes)) if *ctx == commit_ctx => out.push(bytes.clone()),
+                    _ => {
+                        if let Ok(commit) = seal_key_commit(signer_of(&st, author_under_device), &members, circle_id, epoch, &key, &secret) {
+                            let bytes = tagged(TAG_KEY_COMMIT, &commit.to_bytes());
+                            st.circles[idx].cached_commit = Some((commit_ctx, bytes.clone()));
+                            out.push(bytes);
+                        }
                     }
                 }
             }
-        }
-        // The tree wires + join ack + admin grants ride EVERY bundle (incl. head-only) so relay-only
-        // readers and late joiners converge on the tree and the §7.2 gate; strictly additive.
-        let append_tree = |out: &mut Vec<Vec<u8>>| {
-            for w in &shadow_wires {
-                out.push(w.clone());
+            // The tree wires + join ack + admin grants ride EVERY bundle (incl. head-only) so relay-only
+            // readers and late joiners converge on the tree and the §7.2 gate; strictly additive.
+            let mut tail: Vec<Vec<u8>> = shadow_wires;
+            tail.extend(join_wire);
+            tail.extend(admin_wires);
+            tail.extend(upgrade_wires);
+            if head_only {
+                out.extend(tail);
+                return (out, 0, 0, vec![]); // roster + current key commit (or the tree) — no event re-seals
             }
-            if let Some(j) = &join_wire {
-                out.push(j.clone());
+            let mut picked: Vec<&Event> = st.circles[idx]
+                .events
+                .iter()
+                .filter(|e| !mine_only || e.author == me_hex)
+                // The paging cursor. Strictly older, so a receiver can pass the created_at of the
+                // oldest post it holds and never be handed that same post back forever.
+                .filter(|e| before_ms == 0 || e.created_at < before_ms)
+                .collect();
+            if limit > 0 {
+                // "The most recent N" by TIME, not by position: the events vector is in arrival order
+                // (imports and catch-up append), so a positional tail could skip older-but-late events
+                // forever once the cursor moved past them. And the cut is extended over a timestamp tie:
+                // the next page is strictly older than this page's oldest, so splitting a tie would drop
+                // its other half for good.
+                picked.sort_by_key(|e| e.created_at);
+                let n = limit as usize;
+                if picked.len() > n {
+                    let cut = picked[picked.len() - n].created_at;
+                    let start = picked.partition_point(|e| e.created_at < cut);
+                    picked = picked.split_off(start);
+                }
             }
-            for w in &admin_wires {
-                out.push(w.clone());
-            }
-            for w in &upgrade_wires {
-                out.push(w.clone());
-            }
+            let events: Vec<Event> = picked.into_iter().cloned().collect();
+            let compact = circle_is_compact_wire_capable(&st, idx);
+            // `Identity` is not `Clone` (it holds the secret keys); its seed rebuilds it exactly —
+            // `from_seed` is the only way one is ever constructed.
+            let signer_seed = signer_of(&st, author_under_device).secret_seed();
+            (out, tail, events, epoch, key, compact, signer_seed)
         };
-        if head_only {
-            append_tree(&mut out);
-            return (out, 0, 0, vec![]); // roster + current key commit (or the tree) — no event re-seals
-        }
-        let mut picked: Vec<&Event> = st.circles[idx]
-            .events
-            .iter()
-            .filter(|e| !mine_only || e.author == me_hex)
-            // The paging cursor. Strictly older, so a receiver can pass the created_at of the
-            // oldest post it holds and never be handed that same post back forever.
-            .filter(|e| before_ms == 0 || e.created_at < before_ms)
-            .collect();
-        if limit > 0 {
-            // "The most recent N" by TIME, not by position: the events vector is in arrival order
-            // (imports and catch-up append), so a positional tail could skip older-but-late events
-            // forever once the cursor moved past them. And the cut is extended over a timestamp tie:
-            // the next page is strictly older than this page's oldest, so splitting a tie would drop
-            // its other half for good.
-            picked.sort_by_key(|e| e.created_at);
-            let n = limit as usize;
-            if picked.len() > n {
-                let cut = picked[picked.len() - n].created_at;
-                let start = picked.partition_point(|e| e.created_at < cut);
-                picked = picked.split_off(start);
-            }
-        }
-        let oldest = picked.iter().map(|e| e.created_at).min().unwrap_or(0);
-        let count = picked.len() as u32;
-        let events: Vec<Event> = picked.into_iter().cloned().collect();
+        // ── Lock released: nothing below touches engine state. ──
+        let oldest = events.iter().map(|e| e.created_at).min().unwrap_or(0);
+        let count = events.len() as u32;
         let mut media: Vec<String> = Vec::new();
         {
             for e in &events {
@@ -7300,15 +7324,18 @@ impl HavenSocial {
                 }
             }
         }
-        let compact = circle_is_compact_wire_capable(&st, idx);
-        for e in &events {
-            if let Ok(env) = seal_event_in_epoch(signer_of(&st, author_under_device), circle_id, epoch, &key, e) {
-                out.push(tagged(TAG_EPOCH_EVENT, &env.to_bytes_gated(compact)));
+        if !events.is_empty() {
+            let signer = Identity::from_seed(&signer_seed);
+            out.reserve(events.len() + tail.len());
+            for e in &events {
+                if let Ok(env) = seal_event_in_epoch(&signer, circle_id, epoch, &key, e) {
+                    out.push(tagged(TAG_EPOCH_EVENT, &env.to_bytes_gated(compact)));
+                }
             }
         }
         // Tree wires + join ack + admin grants (built up front). In M2/parked they ride ALONGSIDE the
         // KeyCommit (shadow); when LIVE they ARE the key distribution (§4.5). Additive either way.
-        append_tree(&mut out);
+        out.extend(tail);
         (out, oldest, count, media)
     }
 
@@ -7944,6 +7971,48 @@ fn restore_roster(st: &mut NetState, account_bundle: &[u8], list_bytes: &[u8], c
     st.device_lists.insert(acct_id, ContactDevices { list, credentials });
 }
 
+/// What opening a circle-sealed blob needs, copied out from under the engine lock so the decrypt
+/// itself — the whole blob, up to hundreds of MB for a video — runs with the lock released.
+/// `Identity` is not `Clone`; its seed rebuilds it exactly (`from_seed` is its only constructor),
+/// and only when the epoch entry fails — the same order the locked version tried them in.
+struct MediaOpenKeys {
+    /// Epoch keys to try on the envelope's epoch entry, in order.
+    epoch_keys: Vec<[u8; 32]>,
+    /// Resolved sender bundles to try on the per-recipient (legacy) entry, in order.
+    senders: Vec<HavenId>,
+    device_seed: Option<[u8; 32]>,
+    account_seed: Option<[u8; 32]>,
+}
+
+impl MediaOpenKeys {
+    fn snapshot(st: &NetState, epoch_keys: Vec<[u8; 32]>, senders: Vec<HavenId>) -> Self {
+        Self {
+            epoch_keys,
+            device_seed: st.device.as_ref().map(|d| d.secret_seed()),
+            account_seed: st.me_secret.as_ref().map(|m| m.secret_seed()),
+            senders,
+        }
+    }
+
+    fn open(&self, env: &SealedEnvelope) -> Option<Vec<u8>> {
+        for k in &self.epoch_keys {
+            if let Some(p) = open_bytes_with_epoch(k, env) {
+                return Some(p);
+            }
+        }
+        if self.senders.is_empty() {
+            return None;
+        }
+        let device = self.device_seed.map(|s| Identity::from_seed(&s));
+        let account = self.account_seed.map(|s| Identity::from_seed(&s));
+        // Dual-open: device key (Option 1), then account key (legacy). Seedless: account arm absent.
+        self.senders.iter().find_map(|sender_pub| {
+            device.as_ref().and_then(|d| open_bytes(d, sender_pub, env).ok())
+                .or_else(|| account.as_ref().and_then(|m| open_bytes(m, sender_pub, env).ok()))
+        })
+    }
+}
+
 /// The identity that signs outgoing commits + events (seed-drop S3). When `under_device` (an adopted device
 /// key AND a fully seed-drop-capable circle — computed by the caller), sign under the DEVICE key; a device
 /// signer is resolved back to its account by recipients via the verified roster, so authorship still binds
@@ -8089,6 +8158,9 @@ fn profile_signing_bytes(payload: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(test)]
+mod bundle_reference;
+
+#[cfg(test)]
 mod net_tests {
     use super::*;
 
@@ -8098,6 +8170,172 @@ mod net_tests {
         for env in from.sync_envelopes(cid.to_string()) {
             let _ = to.receive(cid.to_string(), env);
         }
+    }
+
+    // ── History / epoch-sync bundles vs. the engine lock ─────────────────────────────────────────
+
+    /// A circle with a realistic history: `n` posts (every third carrying media refs, some
+    /// comments), authored across several epochs, with two contacts so the key commit seals to
+    /// more than one recipient.
+    fn engine_with_history(n: u64) -> (Arc<HavenSocial>, String) {
+        let alice = HavenSocial::new([91u8; 32].to_vec()).unwrap();
+        let bob = HavenSocial::new([92u8; 32].to_vec()).unwrap();
+        let carol = HavenSocial::new([93u8; 32].to_vec()).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+        alice.add_contact_bundle(cid.clone(), carol.my_bundle()).unwrap();
+        let epochs = 4;
+        for i in 0..n {
+            if i > 0 && i % (n / epochs).max(1) == 0 {
+                alice.rotate_circle(cid.clone());
+            }
+            let media = if i % 3 == 0 { vec![format!("blob-{i:05}"), format!("thumb-{i:05}")] } else { vec![] };
+            alice
+                .post(cid.clone(), format!("post {i} {}", "x".repeat(120)), media, None, None, false, false, 1_000 + i)
+                .unwrap();
+        }
+        (alice, cid)
+    }
+
+    /// Wall time and the longest single engine-lock hold of one bundle build on this thread.
+    fn time_bundle(
+        s: &HavenSocial, cid: &str, mine_only: bool, limit: u32, head_only: bool, before_ms: u64,
+    ) -> (std::time::Duration, std::time::Duration, (Vec<Vec<u8>>, u64, u32, Vec<String>)) {
+        MAX_ENGINE_HOLD_NANOS.with(|c| c.set(0));
+        let t = std::time::Instant::now();
+        let r = s.epoch_sync_bundle_paged(cid, mine_only, limit, head_only, before_ms);
+        let total = t.elapsed();
+        let held = std::time::Duration::from_nanos(MAX_ENGINE_HOLD_NANOS.with(|c| c.get()));
+        (total, held, r)
+    }
+
+    /// Measurement, not an assertion: how long each bundle shape takes and how much of it holds the
+    /// engine lock. `cargo test -p haven_ffi --release bundle_lock_hold_benchmark -- --ignored --nocapture`
+    #[test]
+    #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
+    fn bundle_lock_hold_benchmark() {
+        let (alice, cid) = engine_with_history(2_000);
+        let _ = alice.epoch_sync_bundle_paged(&cid, true, 0, false, 0); // warm the commit cache
+        for (name, mine_only, limit, head_only) in [
+            ("full mine-only (sync_envelopes)", true, 0u32, false),
+            ("history page 200 (all members)", false, 200, false),
+            ("recent 500 (export_recent)", false, 500, false),
+            ("all members unlimited", false, 0, false),
+            ("head only", true, 0, true),
+        ] {
+            let (total, held, r) = time_bundle(&alice, &cid, mine_only, limit, head_only, 0);
+            eprintln!(
+                "BENCH {name:34} envelopes={:5} total={:>10.3?} max_lock_hold={:>10.3?} ({:.1}%)",
+                r.0.len(), total, held, 100.0 * held.as_secs_f64() / total.as_secs_f64().max(1e-9)
+            );
+        }
+    }
+
+    /// GOLDEN: the lock-released bundle builder emits exactly the bytes (and page metadata) of the
+    /// pre-refactor build that sealed under the lock (`bundle_reference`, kept verbatim). Mailbox
+    /// dedupe is content-addressed, so a single differing byte would re-upload whole histories.
+    #[test]
+    fn epoch_sync_bundles_are_byte_identical_to_the_locked_reference() {
+        let _clk = clock_guard(); // a leaked week of skew would rotate mid-comparison
+        let (alice, cid) = engine_with_history(240);
+        // A received event from a contact, so the all-members shapes forward a foreign author too.
+        let bob = HavenSocial::new([92u8; 32].to_vec()).unwrap();
+        bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+        bob.post(cid.clone(), "from bob".into(), vec!["bob-blob".into()], None, None, false, false, 1_100).unwrap();
+        sync(&bob, &alice, &cid);
+        // A device-adopted engine exercises the other signer arm of `signer_of`.
+        let (dev, dcid) = engine_with_history(40);
+        assert!(dev.use_device_identity([94u8; 32].to_vec()));
+
+        for (s, c) in [(&alice, &cid), (&dev, &dcid)] {
+            // Warm: the first full bundle may rotate a stale epoch and seal (randomized) a fresh key
+            // commit; after that both builders hit the same cached commit.
+            let _ = s.epoch_sync_bundle_paged(c, true, 0, false, 0);
+            for (mine_only, limit, head_only, before_ms) in [
+                (true, 0u32, false, 0u64),
+                (false, 0, false, 0),
+                (true, 50, false, 0),
+                (false, 60, false, 1_150),
+                (false, 1, false, 1_001),
+                (false, 10, false, 1), // empty page
+                (true, 0, true, 0),
+                (false, 25, true, 0),
+            ] {
+                let want = s.epoch_sync_bundle_paged_reference(c, mine_only, limit, head_only, before_ms);
+                let got = s.epoch_sync_bundle_paged(c, mine_only, limit, head_only, before_ms);
+                assert_eq!(
+                    got, want,
+                    "bundle drifted from the locked reference (mine_only={mine_only} limit={limit} \
+                     head_only={head_only} before_ms={before_ms})"
+                );
+            }
+        }
+    }
+
+    /// The bundle builders must seal (the expensive part: a hybrid Ed25519 + ML-DSA signature per
+    /// event) with the engine lock RELEASED. Held, a 2k-event history froze every other engine
+    /// call for the whole build — measured 21 s on a loaded desktop during a call ring, long
+    /// enough that the ring timed out before accept could take the lock. Ratio, not wall clock.
+    #[test]
+    fn epoch_sync_bundles_seal_outside_the_engine_lock() {
+        let _clk = clock_guard(); // a leaked week of skew would rotate mid-comparison
+        let (alice, cid) = engine_with_history(600);
+        let _ = alice.epoch_sync_bundle_paged(&cid, true, 0, false, 0);
+        for (mine_only, limit) in [(true, 0u32), (false, 300)] {
+            let mut best: Option<(std::time::Duration, std::time::Duration)> = None;
+            for _ in 0..3 {
+                let (total, held, r) = time_bundle(&alice, &cid, mine_only, limit, false, 0);
+                assert!(r.2 > 0, "test needs events to seal");
+                if best.map_or(true, |(bh, bt)| held.as_nanos() * bt.as_nanos() < bh.as_nanos() * total.as_nanos()) {
+                    best = Some((held, total));
+                }
+            }
+            let (held, total) = best.unwrap();
+            assert!(
+                held * 4 < total,
+                "bundle (mine_only={mine_only}, limit={limit}) held the engine lock {held:?} of its \
+                 {total:?} — event sealing must run with the lock released"
+            );
+        }
+    }
+
+    /// The user-visible property: while one thread builds a large bundle, another engine call
+    /// (here a dump-style read + `feed`) is not parked behind it for the whole build.
+    #[test]
+    fn other_engine_calls_proceed_while_a_large_bundle_builds() {
+        let _clk = clock_guard(); // a leaked week of skew would rotate mid-comparison
+        let (alice, cid) = engine_with_history(800);
+        let _ = alice.epoch_sync_bundle_paged(&cid, true, 0, false, 0);
+        let mut best_ratio = f64::MAX;
+        for _ in 0..3 {
+            let builder = {
+                let alice = alice.clone();
+                let cid = cid.clone();
+                std::thread::spawn(move || {
+                    let t = std::time::Instant::now();
+                    let r = alice.epoch_sync_bundle_paged(&cid, false, 0, false, 0);
+                    (t.elapsed(), r.2)
+                })
+            };
+            let mut worst = std::time::Duration::ZERO;
+            while !builder.is_finished() {
+                let t = std::time::Instant::now();
+                let _ = alice.my_node_hex();
+                let _ = alice.history_event_count(cid.clone());
+                worst = worst.max(t.elapsed());
+            }
+            let (build, events) = builder.join().unwrap();
+            assert!(events > 0);
+            best_ratio = best_ratio.min(worst.as_secs_f64() / build.as_secs_f64());
+        }
+        assert!(
+            best_ratio < 0.25,
+            "a concurrent engine call waited {:.0}% of a bundle build — the build must not hold the \
+             engine lock while it seals",
+            best_ratio * 100.0
+        );
+        // And the feed still renders promptly afterwards (sanity: state untouched by the build).
+        assert!(!alice.feed(cid, 10_000_000, None).is_empty());
     }
 
     /// `feed` must not hold the engine lock while it reduces.
@@ -11273,10 +11511,16 @@ mod net_tests {
     /// and re-entry needs a fresh, current-epoch Welcome.
     #[test]
     fn fs_bug_3_welcome_joiner_secret_retention_is_bounded() {
-        let (insts, cid) = mls_capable_fleet(&[[73u8; 32], [74u8; 32]], &[[83u8; 32], [84u8; 32]], 0);
+        // Setup runs with the clock held EXCLUSIVELY (a zero advance): a parallel clock-advancing
+        // test otherwise leaks a week of skew into flip_and_join's bundles, which fires the PCS
+        // Update early and reads back epoch 2 at the "epoch 1" assert (seen under a loaded suite).
+        let (insts, cid, e1, root1, js1) = with_clock_advanced(0, || {
+            let (insts, cid) = mls_capable_fleet(&[[73u8; 32], [74u8; 32]], &[[83u8; 32], [84u8; 32]], 0);
+            flip_and_join(&insts, &cid);
+            let (e1, root1, _i1, js1) = mls_capture_state(&insts[0], &cid);
+            (insts, cid, e1, root1, js1)
+        });
         let (a, b) = (&insts[0], &insts[1]);
-        flip_and_join(&insts, &cid);
-        let (e1, root1, _i1, js1) = mls_capture_state(a, &cid);
         assert_eq!(e1, 1);
 
         with_clock_advanced(ROTATE_INTERVAL_SECS + 1, || {

@@ -222,6 +222,11 @@ final class FriendInviteStore: ObservableObject {
         // key commit and first posts will land, and polling it from the start is what makes a new
         // friend's content appear in seconds instead of after their 10-min frame-19 re-announce.
         RelayMailboxStore.shared.adoptFriendInviteRelays(t.relays)
+        // …and expect them to refuse our writes until the inviter approves and enrolls us, so those
+        // 403s ride the short flat retry instead of the long backoffs (see `PendingEnrollment`).
+        RelayEnrollment.noteAdopted(PendingEnrollment.relaysToTrack(
+            ticketRelays: t.relays, inviterHex: Self.hexString(t.accountId),
+            knownRelays: RelayMailboxStore.shared.allRelays()))
         // Learn each relay's HTTP interface over iroh right away (the ticket carries node ids only;
         // the interface otherwise arrives with the inviter's frame-19 announce).
         for r in t.relays where r.count == 64 { FeedStore.shared.refreshRelayInterfaceIfNeeded(r) }
@@ -486,6 +491,10 @@ enum RelayEnrollment {
         for r in relays where r.count == 64 { policy.noteAdopted(r, nowMs: nowMs()) }
     }
     static func isTracked(_ relay: String) -> Bool { policy.isTracked(relay) }
+    /// False while `relay` is held after a pending-enrollment refusal — every relay loop checks
+    /// this and skips the relay (no request, no strike) until the flat gap elapses or enrollment
+    /// is signalled. Always true for a relay that isn't pending enrollment.
+    static func mayAttempt(_ relay: String) -> Bool { policy.mayAttempt(relay, nowMs: nowMs()) }
     /// Relays still inside their pending-enrollment window (DEBUG qa dump, `relay_backoff`).
     static func pendingRelays() -> [String] {
         let now = nowMs()
@@ -505,7 +514,7 @@ enum RelayEnrollment {
     /// scheduled here instead, and `ref`'s media backoff becomes the same short gap.
     @discardableResult
     static func absorbRefusal(_ relay: String, ref: String? = nil) -> Bool {
-        guard case .retrySoon = policy.onFailure(relay: relay, forbidden: true, nowMs: nowMs()) else { return false }
+        guard case .retrySoon = policy.noteRefusal(relay, nowMs: nowMs()) else { return false }
         QaMediaStats.bump("pending_enrollment_refusals")
         if let ref { MediaBackupBackoff.notePendingEnrollment(ref) }
         scheduleRetry()
@@ -530,6 +539,7 @@ enum RelayEnrollment {
         for r in tracked { policy.refresh(r, nowMs: now) }
         guard now &- lastTriggerMs > 10_000 else { return }   // announces repeat — don't stampede
         lastTriggerMs = now
+        for r in tracked { policy.releaseHold(r) }   // the re-drive below must reach the relay
         HavenLog.relay("pending-enrollment retry (\(reason)) relays=\(tracked.count)")
         FeedStore.shared.retryPendingEnrollmentUploads(relays: tracked, full: true)
         Task { @MainActor in

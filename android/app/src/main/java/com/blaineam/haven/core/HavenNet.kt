@@ -1022,6 +1022,13 @@ object HavenNet : InboundListener {
         // full adoptRelay (backfill + announce to every circle) still runs at grant time.
         adoptInviteRelaysLight(t.relays)
         val inviter = bytesToHex(t.accountId)
+        // …and expect them to refuse us until the inviter approves + enrolls us: every ticket relay
+        // (not only newly-added ones) and the inviter's own node when it is one of our relays.
+        val known = relayNodes.values.flatten() + listOf(defaultRelayHex)
+        synchronized(pendingEnrollment) {
+            val now = System.currentTimeMillis()
+            PendingEnrollment.relaysToTrack(t.relays, inviter, known).forEach { pendingEnrollment.noteAdopted(it, now) }
+        }
         clearRosterPullBackoff(inviter)
         forgiveDials(inviter, t.deviceHints.map { bytesToHex(it) })
         beginFirstContactFastPoll()
@@ -1038,11 +1045,7 @@ object HavenNet : InboundListener {
             val hex = raw.trim().lowercase()
             if (hex.length != 64 || relayForgottenAtMs(hex) > 0L) continue
             ensureRelayEntry(hex, activate = true)
-            if (!list.contains(hex)) {
-                list.add(hex); changed = true
-                // Refuses our writes until the inviter enrolls us — expected; see [PendingEnrollment].
-                synchronized(pendingEnrollment) { pendingEnrollment.noteAdopted(hex, System.currentTimeMillis()) }
-            }
+            if (!list.contains(hex)) { list.add(hex); changed = true }
         }
         if (changed) {
             saveRelayNodes()
@@ -2560,6 +2563,10 @@ object HavenNet : InboundListener {
         clearRosterPullBackoff(req.idHex)
         lastEnrollMs.clear()
         runCatching { enrollCircleMembers() }
+        // …and the relay I HOST in-process, which enrollCircleMembers never dials (our own node):
+        // otherwise its allow-list only caught up on the next membership refresh / sync tick and the
+        // new friend's first writes bounced 403 until then. iOS parity (approveConnectionNow).
+        runCatching { authorizeMembership() }
         runCatching { reannounceOwnRelay() }
         pushWake(req.idHex.lowercase(), null, null, silent = true)
         beginFirstContactFastPoll()
@@ -7180,8 +7187,13 @@ object HavenNet : InboundListener {
     }
 
     /** True while a relay is in refusal backoff — skip it rather than spending a request on a no. */
-    private fun relayStoodDown(nodeHex: String): Boolean =
-        (refusedUntilMs[nodeHex] ?: 0L) > System.currentTimeMillis()
+    private fun relayStoodDown(nodeHex: String): Boolean {
+        val now = System.currentTimeMillis()
+        if ((refusedUntilMs[nodeHex] ?: 0L) > now) return true
+        // A friend-invite relay still pending enrollment that just refused us: held for the short
+        // FLAT gap — every lane skips it (relaysFor) instead of re-asking on its own clock.
+        return !synchronized(pendingEnrollment) { pendingEnrollment.mayAttempt(nodeHex, now) }
+    }
 
     // ---- Pending enrollment (friend-invite relays that 403 until the inviter enrolls us) ----------
     private val pendingEnrollment = PendingEnrollment()
@@ -7198,7 +7210,7 @@ object HavenNet : InboundListener {
      *  then skip every long backoff. Schedules the short flat retry. */
     private fun absorbPendingRefusal(nodeHex: String): Boolean {
         val d = synchronized(pendingEnrollment) {
-            pendingEnrollment.onFailure(nodeHex, forbidden = true, nowMs = System.currentTimeMillis())
+            pendingEnrollment.noteRefusal(nodeHex, System.currentTimeMillis())   // holds it for the gap
         }
         if (d !is PendingEnrollment.Decision.RetrySoon) return false
         QaStats.bump("pending_enrollment_refusals")
@@ -7230,6 +7242,7 @@ object HavenNet : InboundListener {
         }
         if (tracked.isEmpty() || now - lastPendingTriggerMs < 10_000) return
         lastPendingTriggerMs = now
+        synchronized(pendingEnrollment) { tracked.forEach { pendingEnrollment.releaseHold(it) } }   // re-drive must reach it
         Log.i(TAG, "pending-enrollment retry ($reason) relays=${tracked.size}")
         synchronized(refusedStreak) { tracked.forEach { refusedStreak.remove(it); refusedUntilMs.remove(it) } }
         scope.launch {

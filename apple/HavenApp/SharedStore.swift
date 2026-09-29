@@ -864,7 +864,7 @@ enum SharedStore {
                 ownRelayNeeds = true
             }
         }
-        for node in dests where node.lowercased() != ownNode {
+        for node in dests where node.lowercased() != ownNode && RelayEnrollment.mayAttempt(node) {
             guard let http = RelayMailboxStore.shared.httpInterface(node),
                   let base = http.urls.first(where: { !httpUrlBad($0) }) else { continue }
             switch await httpGet(base, http.token, key(ref)) {
@@ -879,8 +879,7 @@ enum SharedStore {
                     missing.append((node, base, http.token))
                 }
             case .failure(is RelayForbidden):
-                noteRefused(node, "mirror probe")
-                RelayEnrollment.absorbRefusal(node, ref: ref)
+                noteRefused(node, "mirror probe", ref: ref)
             case .failure:
                 markHttpUrlBad(base)   // unreachable — not "absent"
             }
@@ -989,6 +988,8 @@ enum SharedStore {
 
         for node in destNodes {
             if !force && MediaBackupLedger.has(node, ref) { landed = true; continue }   // already confirmed
+            // Held after a pending-enrollment refusal: skip it this pass — no probe, no strike.
+            guard RelayEnrollment.mayAttempt(node) else { MediaBackupBackoff.notePendingEnrollment(ref); continue }
             // Our OWN hosted relay: the local store answers instantly (no dial).
             if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
                 // localHas, NOT localGet != nil: this only asks "is it already there?", and localGet
@@ -1028,6 +1029,7 @@ enum SharedStore {
                     }
                 }
                 var resolved = false
+                var refused = false
                 for base in http.urls where !httpUrlBad(base) {
                     switch await httpGet(base, http.token, key(ref)) {
                     case .success(let existing):
@@ -1051,14 +1053,17 @@ enum SharedStore {
                     case .failure(is RelayForbidden):
                         // Reachable and healthy — it just doesn't know us. Backing off here would
                         // strand our media on a relay that would happily store it once authorized.
-                        noteRefused(node, "media probe")
-                        RelayEnrollment.absorbRefusal(node, ref: ref)
+                        // Its other URLs and the iroh dial reach the SAME store behind the SAME
+                        // membership gate — asking again only multiplies the refusal (and a dial
+                        // in cooldown then took a relay-health strike for a relay that answered).
+                        noteRefused(node, "media probe", ref: ref)
+                        refused = true
                     case .failure:
                         markHttpUrlBad(base)
                     }
-                    if resolved { break }
+                    if resolved || refused { break }
                 }
-                if resolved { continue }
+                if resolved || refused { continue }
             }
             // iroh fallback — RelayClients honors RelayHealth backoff (nil = skip WITHOUT sealing).
             guard let c = await RelayClients.client(node) else {
@@ -1232,8 +1237,7 @@ enum SharedStore {
                     // applies: backing the URL off strands the blob on a relay that would store it, and
                     // the blob dial goes through the SAME membership gate, so it only repeats the
                     // refusal. Record it and let the heal + retry in `backup` publish our roster first.
-                    noteRefused(node, "media upload \(ref.prefix(10))")
-                    RelayEnrollment.absorbRefusal(node, ref: ref)
+                    noteRefused(node, "media upload \(ref.prefix(10))", ref: ref)
                     HavenLog.sync("backup http-put REFUSED ref=\(ref) relay=\(node.prefix(8)) — not an outage; roster publish pending")
                 } catch {
                     markHttpUrlBad(base)
@@ -1827,9 +1831,15 @@ enum SharedStore {
     private static var rosterNeeded: Set<String> = []
     private static var lastHeal = Date.distantPast
 
-    static func noteRefused(_ node: String, _ what: String) {
+    /// Every refusal lands here — so a relay still PENDING ENROLLMENT (a friend-invite relay the
+    /// inviter hasn't enrolled us on yet) is held for the flat retry gap whichever lane hit it
+    /// (`RelayEnrollment.absorbRefusal`); `ref` also moves that media ref onto the short gap.
+    /// Returns true for such an expected pending-enrollment refusal.
+    @discardableResult
+    static func noteRefused(_ node: String, _ what: String, ref: String? = nil) -> Bool {
         rosterNeeded.insert(node)
         HavenLog.relay("relay \(node.prefix(8)) REFUSED \(what) — not an outage; our device id isn't authorized there yet")
+        return RelayEnrollment.absorbRefusal(node, ref: ref)
     }
 
     /// Re-publish our device roster to every relay that refused us, so the next attempt is allowed.
@@ -2669,7 +2679,9 @@ enum SharedStore {
             // needed. Heads ride every post, so a missed relay converges on the next one.
             if unlanded.isEmpty { return true }
             var landed = false
-            for node in unlanded {
+            // A relay held after a pending-enrollment refusal is skipped (the queue retries it on
+            // the flat gap) instead of being asked again by every envelope of every pass.
+            for node in unlanded where RelayEnrollment.mayAttempt(node) {
                 // Our OWN hosted relay: store directly into the local mailbox (no iroh self-connection,
                 // which blows up iroh's path machinery) so offline members can still pull our posts.
                 if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
@@ -2681,6 +2693,7 @@ enum SharedStore {
                 // DERP) could hold media and rosters over HTTP while every post never left the phone.
                 if let http = RelayMailboxStore.shared.httpInterface(node) {
                     var done = false
+                    var refused = false
                     for base in http.urls where !httpUrlBad(base) {
                         switch await httpPut(base, http.token, key, env) {
                         case .success:
@@ -2691,15 +2704,17 @@ enum SharedStore {
                             markSeen("put:\(node)|\(key)")
                             landed = true; done = true
                         case .failure(is RelayForbidden):
+                            // Pending enrollment → held for the short flat retry (noteRefused). The
+                            // other URLs and the iroh dial hit the same gate: don't ask again.
                             noteRefused(node, "mailbox put")
-                            RelayEnrollment.absorbRefusal(node)   // pending enrollment → short retry
                             RelayHealth.shared.recordSuccess(node)
+                            refused = true
                         case .failure:
                             markHttpUrlBad(base)
                         }
-                        if done { break }
+                        if done || refused { break }
                     }
-                    if done { continue }
+                    if done || refused { continue }
                 }
                 guard let c = await RelayClients.client(node) else { continue }
                 if (try? await c.has(key: key)) == true { RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); markSeen("put:\(node)|\(key)"); landed = true; continue }
@@ -2852,7 +2867,7 @@ enum SharedStore {
             HavenLog.net("putHello drop: thermal skip to=\(toHex.prefix(8))")
             return
         }
-        for node in due {
+        for node in due where RelayEnrollment.mayAttempt(node) {
             if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
                 if RelayHost.shared.localPut(key, hello) {
                     HavenLog.relay("hello local-put OK to=\(toHex.prefix(8))")
@@ -2873,6 +2888,7 @@ enum SharedStore {
                     done = true
                 case .failure(is RelayForbidden):
                     noteRefused(node, "hello put")
+                    done = true   // its other URLs serve the same store behind the same gate
                 case .failure:
                     markHttpUrlBad(base)
                 }
@@ -3011,6 +3027,9 @@ enum SharedStore {
     private static func pollMailboxRelay(cid: String, node: String, myHelloIds: Set<String>,
                                          claims: MailboxPassClaims) async -> [(String, String, Data)] {
         var out: [(String, String, Data)] = []
+        // Held after a pending-enrollment refusal: it will refuse the LIST too — skip until the gap
+        // elapses or the grant / an announce lifts the hold.
+        guard RelayEnrollment.mayAttempt(node) else { return out }
         let prefix = "haven/mailbox/\(cid)/"
         // OUR OWN hosted relay: read the local store directly — we can't dial ourselves
         // (self-dial guard), so this is how the host ingests what a sibling device or a
@@ -3091,6 +3110,7 @@ enum SharedStore {
         // instead of a full key dump + N seen-set walks (the idle radio saver).
         if let http = RelayMailboxStore.shared.httpInterface(node) {
             var listedViaHttp = false
+            var refused = false
             let digestKey = "\(node)|\(cid)"
             for base in http.urls where !httpUrlBad(base) {
                 switch await httpListDelta(base, http.token, prefix, digest: mailboxListDigests[digestKey]) {
@@ -3156,14 +3176,16 @@ enum SharedStore {
                     }
                 case .failure(is RelayForbidden):
                     noteRefused(node, "mailbox list")
-                    // Reachable enough to refuse — not a dead endpoint.
+                    // Reachable enough to refuse — not a dead endpoint. Its other URLs and the
+                    // iroh LIST sit behind the same membership gate: don't ask again this pass.
                     RelayHealth.shared.recordSuccess(node)
+                    refused = true
                 case .failure:
                     markHttpUrlBad(base)
                 }
-                if listedViaHttp { break }
+                if listedViaHttp || refused { break }
             }
-            if listedViaHttp { return out }
+            if listedViaHttp || refused { return out }
         }
         guard let c = await RelayClients.client(node) else { return out }
         // list() now throws so a dead iroh dial isn't read as an empty mailbox;

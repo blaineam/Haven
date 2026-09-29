@@ -50,4 +50,43 @@ class PendingEnrollmentTest {
         p.refresh(other, t0)
         assertFalse(p.isTracked(other))
     }
+
+    @Test fun refusalHoldsRelayForTheFlatGap() {
+        val p = PendingEnrollment()
+        p.noteAdopted(relay, t0)
+        assertTrue(p.mayAttempt(relay, t0 + 1_000))
+        assertEquals(PendingEnrollment.Decision.RetrySoon(PendingEnrollment.RETRY_GAP_MS), p.noteRefusal(relay, t0 + 1_000))
+        assertFalse(p.mayAttempt(relay.uppercase(), t0 + 1_001))
+        assertFalse(p.mayAttempt(relay, t0 + 1_000 + PendingEnrollment.RETRY_GAP_MS - 1))
+        p.noteRefusal(relay, t0 + 5_000)   // in-flight refusal must not push the hold out
+        assertTrue(p.mayAttempt(relay, t0 + 1_000 + PendingEnrollment.RETRY_GAP_MS))
+    }
+
+    @Test fun grantOrSuccessLiftsTheHold() {
+        val p = PendingEnrollment()
+        p.noteAdopted(relay, t0)
+        p.noteRefusal(relay, t0)
+        p.releaseHold(relay)
+        assertTrue(p.mayAttempt(relay, t0 + 1))
+        p.noteRefusal(relay, t0 + 2)
+        assertTrue(p.confirm(relay))
+        assertTrue(p.mayAttempt(relay, t0 + 3))
+    }
+
+    @Test fun onlyPendingRelaysAreEverHeld() {
+        val p = PendingEnrollment()
+        assertEquals(PendingEnrollment.Decision.BackOff, p.noteRefusal(relay, t0))
+        assertTrue(p.mayAttempt(relay, t0 + 1))
+        p.noteAdopted(relay, t0)
+        p.noteRefusal(relay, t0 + 1)
+        assertTrue(p.mayAttempt(relay, t0 + PendingEnrollment.WINDOW_MS))
+    }
+
+    @Test fun ticketTracksEveryTicketRelayAndTheInvitersOwnRelay() {
+        val inviter = "e".repeat(64)
+        val known = listOf(relay, inviter.uppercase(), "f".repeat(64))
+        assertEquals(listOf(relay, inviter),
+            PendingEnrollment.relaysToTrack(listOf(relay.uppercase(), relay, "short"), inviter, known))
+        assertEquals(listOf(relay), PendingEnrollment.relaysToTrack(listOf(relay), inviter, listOf(relay)))
+    }
 }

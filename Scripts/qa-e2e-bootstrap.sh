@@ -58,10 +58,23 @@ if [[ "${E2E_FRESH:-1}" != "0" ]]; then
   pkill -f 'target/debug/haven-desktop' 2>/dev/null || true
   sleep 1
   rm -rf "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support"/{haven-relay-store,haven-media,haven-feed.json,haven-mailbox-seen.txt,haven-selfsync.bin,qa-*} 2>/dev/null || true
+  # The authorize list is ALSO read from subdirs and the isolated stub HOME (qa-e2e-authorize.sh
+  # writes all five paths); the `qa-*` glob above only reached the top-level one. The fleet seed
+  # is stable across runs, so a stale list from the previous run pre-authorized A on B's relay and
+  # `newfriend` never saw a single pre-enrollment 403 ("adopted … (pending enrollment) — []").
+  for p in "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support"/{HavenStub,com.blaineam.kith.qa.stub}/qa-authorize-members.txt \
+           "/tmp/haven-mac-stub-home/Library/Application Support"/{,HavenStub/}qa-authorize-members.txt; do
+    rm -f "$p" 2>/dev/null || true
+  done
   # PREFERENCES too. The companion maps (haven.media.previewCompanions / thumbCompanions) live here,
   # not in Application Support, so a "hermetic" wipe left them behind — and a pairing naming a blob
   # the wipe had just deleted then suppressed re-minting on every subsequent run. The stub shipped
   # posts with no preview marker for three consecutive runs because of it.
+  # Through cfprefsd FIRST, by the container plist's PATH: the bare domain name addresses
+  # ~/Library/Preferences (not the sandbox container), and a plain `rm` under a warm cfprefsd cache
+  # is undone the next time the stub launches — the stub came back up still knowing A as a contact
+  # ("A and B start as strangers — already contacts") with its old relay directory.
+  defaults delete "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Preferences/com.blaineam.kith.qa.stub" 2>/dev/null || true
   rm -f "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Preferences/com.blaineam.kith.qa.stub.plist" 2>/dev/null || true
   defaults delete com.blaineam.kith.qa.stub 2>/dev/null || true
   rm -rf "$DATA_DIR" 2>/dev/null || true

@@ -102,6 +102,45 @@ pub const BLOB_ALPN: &[u8] = b"haven/blob/1";
 /// Hard cap on a single blob (matches the social transport's 256 MiB ceiling).
 const MAX_BLOB: u64 = 256 * 1024 * 1024;
 
+// ── Disk guard ─────────────────────────────────────────────────────────────────────────────────
+//
+// A host (the headless `haven-relay`) watches free space under its store and, when it falls below
+// the operator's floor, caps the size of NEW writes it accepts — first to small control/mailbox
+// writes only, then (critically low) to nothing. Reads, TOUCH/HAS, LIST and the GC keep working
+// throughout, so members can still drain the mailbox and retention can free space; the cap lifts
+// as soon as space comes back. Keyed by store root so several stores in one process (and parallel
+// tests) never see each other's state. No entry = unlimited (every app-embedded relay).
+
+fn put_limits() -> &'static Mutex<HashMap<PathBuf, u64>> {
+    static L: std::sync::OnceLock<Mutex<HashMap<PathBuf, u64>>> = std::sync::OnceLock::new();
+    L.get_or_init(Default::default)
+}
+
+/// Cap new PUTs into the store at `root` to `limit` bytes (`Some(0)` refuses every PUT), or lift
+/// the cap (`None`).
+pub fn set_put_limit(root: &Path, limit: Option<u64>) {
+    let mut m = put_limits().lock().unwrap_or_else(|e| e.into_inner());
+    match limit {
+        Some(n) => {
+            m.insert(root.to_path_buf(), n);
+        }
+        None => {
+            m.remove(root);
+        }
+    }
+}
+
+/// May a PUT of `len` bytes land in the store at `root` right now?
+pub fn put_allowed(root: &Path, len: u64) -> bool {
+    let m = put_limits().lock().unwrap_or_else(|e| e.into_inner());
+    m.get(root).map(|cap| len <= *cap).unwrap_or(true)
+}
+
+/// Is the store at `root` under disk pressure (any cap in force)?
+pub fn under_disk_pressure(root: &Path) -> bool {
+    put_limits().lock().unwrap_or_else(|e| e.into_inner()).contains_key(root)
+}
+
 /// Bound how long ANY single blob-client op may block. Without this a relay that accepts the QUIC
 /// connection but then never replies hangs the `await` forever — so the caller's serial fan-out
 /// stalls on that one relay and never records a failure (so backoff never engages). One dead/hung
@@ -301,6 +340,8 @@ pub struct GcStats {
     pub media_bytes_freed: u64,
     /// Media store total AFTER the pass (only measured when a media limit is set).
     pub media_bytes_total: u64,
+    /// Abandoned `.part` temp files (> 1h) removed anywhere else in the store.
+    pub parts_deleted: usize,
 }
 
 /// Human-readable byte count for operator output ("1.5 GB", "512 MB", "980 B").
@@ -1071,6 +1112,12 @@ pub fn gc_sweep_with(root: &Path, retention: &Retention, grace: std::time::Durat
         }
     }
 
+    // --- abandoned temp writes anywhere in the store (not just the mailbox) ----------
+    // An interrupted PUT / mesh pull / roster write leaves `<key>.part`; the mailbox sweep above
+    // reaps its own, but media (without limits), self-sync and roster temps were kept forever —
+    // a slow disk leak on a long-lived relay. Same 1h age as the mailbox sweep uses.
+    stats.parts_deleted = sweep_stale_parts(root, 3600);
+
     // --- operator-chosen media retention (opt-in; absent limits = never touch media) --
     if !retention.media_limited() {
         return stats;
@@ -1095,6 +1142,29 @@ pub fn gc_sweep_with(root: &Path, retention: &Retention, grace: std::time::Durat
     }
     stats.media_bytes_total = media_files(&media_root).iter().map(|(_, _, len)| len).sum();
     stats
+}
+
+/// Delete `.part` temp files older than `max_age_secs` anywhere under `root`. Returns the count.
+pub fn sweep_stale_parts(root: &Path, max_age_secs: u64) -> usize {
+    fn walk(dir: &Path, max_age: u64, n: &mut usize) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                walk(&p, max_age, n);
+            } else if ft.is_file()
+                && p.extension().map(|x| x == "part").unwrap_or(false)
+                && idle_age_secs(&p) > max_age
+                && std::fs::remove_file(&p).is_ok()
+            {
+                *n += 1;
+            }
+        }
+    }
+    let mut n = 0;
+    walk(root, max_age_secs, &mut n);
+    n
 }
 
 /// True when `marker` exists and is older than `grace`. Creates it (and returns false) on
@@ -1428,6 +1498,11 @@ pub(crate) async fn pull_missing_from_peer(
     retention: &Retention,
     serves_circle: &(dyn Fn(&str) -> bool + Sync),
 ) -> usize {
+    // Disk guard: replicating a sibling's store is exactly the write a nearly-full disk can't take.
+    // The sibling still holds everything; the next tick after space frees up catches up.
+    if under_disk_pressure(root) {
+        return 0;
+    }
     // Age-aware inventory when the peer speaks AGES; a pre-GC peer only speaks LIST, so
     // everything it advertises counts as fresh (the old pull-everything behavior).
     let peer_keys = match client.list_ages(SYNC_PREFIX).await {
@@ -2322,6 +2397,12 @@ pub(crate) async fn handle_request(
                 let _ = send.finish();
                 return Ok(());
             }
+            if !put_allowed(&root, blen) {
+                // Disk guard: refused before the body is read, so a full disk costs nothing.
+                let _ = send.write_all(b"ERR insufficient storage").await;
+                let _ = send.finish();
+                return Ok(());
+            }
             let path = match safe_path(&root, &key) {
                 Ok(p) => p,
                 Err(_) => {
@@ -3211,6 +3292,33 @@ mod tests {
         );
         assert_eq!(misses, vec!["haven/mailbox/fam/gone".to_string()]);
         assert!(idle_age_secs(&path) < 60, "touch resets the liveness clock");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disk_guard_limits_are_per_store_and_stale_parts_are_swept_everywhere() {
+        let a = std::env::temp_dir().join(format!("dg-a-{}", std::process::id()));
+        let b = std::env::temp_dir().join(format!("dg-b-{}", std::process::id()));
+        assert!(put_allowed(&a, u64::MAX) && !under_disk_pressure(&a));
+        set_put_limit(&a, Some(100));
+        assert!(put_allowed(&a, 100) && !put_allowed(&a, 101) && under_disk_pressure(&a));
+        assert!(put_allowed(&b, u64::MAX), "another store is unaffected");
+        set_put_limit(&a, None);
+        assert!(put_allowed(&a, u64::MAX) && !under_disk_pressure(&a));
+
+        // Stale `.part` temps anywhere in the store go; fresh ones and real blobs stay.
+        let dir = std::env::temp_dir().join(format!("parts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let media = dir.join("haven/media");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::write(media.join("old.part"), b"x").unwrap();
+        std::fs::write(media.join("new.part"), b"x").unwrap();
+        std::fs::write(media.join("blob"), b"x").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        std::fs::File::options().write(true).open(media.join("old.part")).unwrap().set_modified(old).unwrap();
+        assert_eq!(sweep_stale_parts(&dir, 3600), 1);
+        assert!(!media.join("old.part").exists());
+        assert!(media.join("new.part").exists() && media.join("blob").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

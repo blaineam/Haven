@@ -83,7 +83,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::blobstore::{
-    blob_forbidden, listing_retain, local_get, local_list, local_put, local_touch, record_devroster, safe_path,
+    blob_forbidden, listing_retain, local_get, local_list, local_put, local_touch, put_allowed, record_devroster, safe_path,
     verify_devroster_put, DevrosterPut, RelayAuth, DEVROSTER_PREFIX, VERB_GET, VERB_HAS, VERB_LIST,
     VERB_PUT, VERB_TOUCH,
 };
@@ -261,6 +261,10 @@ pub async fn serve(root: PathBuf, bind: &str, token: String, auth: Arc<Mutex<Rel
     let root = Arc::new(root);
     // Replay window, shared across connections (a nonce burnt on one socket must be burnt on all).
     let nonces: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+    // Bounded memory: request bodies are buffered whole (they're signed as a unit), so cap the
+    // bytes in flight across ALL connections — a burst of large uploads queues instead of
+    // allocating without limit.
+    let budget = Arc::new(tokio::sync::Semaphore::new(BODY_BUDGET_MIB as usize));
     let handle = tokio::spawn(async move {
         // Connections are children of THIS task (a JoinSet it owns), so stopping the interface
         // stops them too. With a bare `tokio::spawn` per connection, every keep-alive connection a
@@ -270,10 +274,16 @@ pub async fn serve(root: PathBuf, bind: &str, token: String, auth: Arc<Mutex<Rel
         loop {
             while conns.try_join_next().is_some() {}
             let Ok((stream, _)) = listener.accept().await else { continue };
-            let (root, token, auth, nonces) = (root.clone(), token.clone(), auth.clone(), nonces.clone());
+            if conns.len() >= MAX_CONNS {
+                // Over the connection cap: refuse by closing (clients retry with backoff).
+                drop(stream);
+                continue;
+            }
+            let (root, token, auth, nonces, budget) =
+                (root.clone(), token.clone(), auth.clone(), nonces.clone(), budget.clone());
             conns.spawn(async move {
                 // Serial requests per connection (keep-alive); any parse error drops it.
-                let _ = handle_conn(stream, &root, &token, &auth, &nonces).await;
+                let _ = handle_conn(stream, &root, &token, &auth, &nonces, &budget).await;
             });
         }
     });
@@ -361,6 +371,7 @@ async fn handle_conn(
     token: &str,
     auth: &Arc<Mutex<RelayAuth>>,
     nonces: &Mutex<HashMap<String, u64>>,
+    budget: &tokio::sync::Semaphore,
 ) -> Result<()> {
     let (r, mut w) = stream.into_split();
     let mut r = BufReader::new(r);
@@ -441,8 +452,20 @@ async fn handle_conn(
             continue;
         };
 
+        // Disk guard (see `blobstore::set_put_limit`): the host is below its free-space floor.
+        // Refused before the body is read — and the connection closed rather than drained — so a
+        // full disk costs neither memory nor bandwidth. Clients treat 507 like any failed relay.
+        if matches!(route, Route::Put(_)) && !put_allowed(root, clen) {
+            respond(&mut w, 507, "insufficient storage", false, b"relay storage is nearly full\n").await?;
+            return Ok(());
+        }
+
         // Now that we know the sender is a member, take the body — and hold them to the digest
         // they signed, so the authorized head and the stored bytes are one indivisible request.
+        let _mem = budget
+            .acquire_many(body_permits(clen))
+            .await
+            .map_err(|_| anyhow!("http interface shutting down"))?;
         let mut body = vec![0u8; clen as usize];
         r.read_exact(&mut body).await?;
         if body_digest(&body) != digest {
@@ -681,6 +704,16 @@ async fn discard<R: tokio::io::AsyncRead + Unpin>(r: &mut BufReader<R>, mut n: u
     Ok(())
 }
 
+/// Most simultaneous connections the HTTP interface serves; more are closed on accept.
+const MAX_CONNS: usize = 1024;
+/// Request-body bytes buffered at once across all connections, in MiB (4 × a max-size blob).
+const BODY_BUDGET_MIB: u32 = 1024;
+
+/// Semaphore permits (1 MiB each, at least one) a body of `len` bytes holds while buffered.
+fn body_permits(len: u64) -> u32 {
+    (len.div_ceil(1 << 20)).clamp(1, BODY_BUDGET_MIB as u64) as u32
+}
+
 async fn respond<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, code: u16, reason: &str, keep_alive: bool, body: &[u8]) -> Result<()> {
     let conn = if keep_alive { "keep-alive" } else { "close" };
     let head = format!(
@@ -806,6 +839,61 @@ mod tests {
         let other_port = serve(root.clone(), "127.0.0.1:0", String::new(), auth).await.unwrap();
         assert_ne!(other_port.port(), free);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Disk guard: below the host's free-space floor, PUTs over the cap get 507 before the body is
+    /// read; small writes and reads keep working; lifting the cap restores normal service.
+    #[tokio::test]
+    async fn disk_guard_refuses_puts_with_507_and_recovers() {
+        use ed25519_dalek::SigningKey;
+        let dir = std::env::temp_dir().join(format!("httprelay-diskguard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sk = [5u8; 32];
+        let member = hex(SigningKey::from_bytes(&sk).verifying_key().as_bytes());
+        let auth = Arc::new(Mutex::new(RelayAuth::default()));
+        auth.lock().unwrap().authorize("fam", vec![member], vec![]);
+        let srv = serve(dir.clone(), "127.0.0.1:0", "tok".into(), auth).await.unwrap();
+        let base = format!("127.0.0.1:{}", srv.port());
+        let store = dir.clone();
+        tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            let put = |key: &str, body: &[u8]| {
+                let mut s = std::net::TcpStream::connect(&base).unwrap();
+                let h = auth_header(&sk, "tok", "PUT", key, body);
+                let head = format!(
+                    "PUT /k/{key} HTTP/1.1\r\nHost: x\r\nAuthorization: {h}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                s.write_all(head.as_bytes()).unwrap();
+                let _ = s.write_all(body);
+                let mut resp = Vec::new();
+                let _ = s.read_to_end(&mut resp);
+                String::from_utf8_lossy(&resp).into_owned()
+            };
+            let big = vec![1u8; 4096];
+            crate::blobstore::set_put_limit(&store, Some(1024));
+            assert!(put("haven/media/big", &big).starts_with("HTTP/1.1 507"), "over the cap → 507");
+            assert!(!store.join("haven/media/big").exists());
+            assert!(put("haven/mailbox/fam/small", b"tiny").starts_with("HTTP/1.1 200"), "small writes still land");
+            crate::blobstore::set_put_limit(&store, Some(0));
+            assert!(put("haven/mailbox/fam/small2", b"tiny").starts_with("HTTP/1.1 507"), "critical → nothing");
+            crate::blobstore::set_put_limit(&store, None);
+            assert!(put("haven/media/big", &big).starts_with("HTTP/1.1 200"), "recovered");
+        })
+        .await
+        .unwrap();
+        drop(srv);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn body_budget_permits() {
+        assert_eq!(body_permits(0), 1);
+        assert_eq!(body_permits(1), 1);
+        assert_eq!(body_permits(1 << 20), 1);
+        assert_eq!(body_permits((1 << 20) + 1), 2);
+        assert_eq!(body_permits(256 << 20), 256);
     }
 
     #[test]

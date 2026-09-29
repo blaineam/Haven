@@ -1038,7 +1038,11 @@ object HavenNet : InboundListener {
             val hex = raw.trim().lowercase()
             if (hex.length != 64 || relayForgottenAtMs(hex) > 0L) continue
             ensureRelayEntry(hex, activate = true)
-            if (!list.contains(hex)) { list.add(hex); changed = true }
+            if (!list.contains(hex)) {
+                list.add(hex); changed = true
+                // Refuses our writes until the inviter enrolls us — expected; see [PendingEnrollment].
+                synchronized(pendingEnrollment) { pendingEnrollment.noteAdopted(hex, System.currentTimeMillis()) }
+            }
         }
         if (changed) {
             saveRelayNodes()
@@ -1143,6 +1147,8 @@ object HavenNet : InboundListener {
                 a.granted = true
                 saveInvites()
                 val inviter = bytesToHex(t.accountId)
+                // The inviter approved and enrolled us on their relays: retry what they refused now.
+                triggerPendingEnrollment(t.relays, "grant")
                 clearRosterPullBackoff(inviter)
                 forgiveDials(inviter)
                 bumpActivity()
@@ -4444,6 +4450,9 @@ object HavenNet : InboundListener {
             o.optString("node", "").trim().lowercase()
         } else text.lowercase()
         if (nodeHex.length != 64) return
+        // Announced by a member = we're in; retry what a pending-enrollment relay refused (no-op
+        // for any relay not pending).
+        triggerPendingEnrollment(listOf(nodeHex), "relay announce")
         // A contact RE-ANNOUNCED a circle relay. Reactivating a deactivated/forgotten entry is allowed
         // ONLY when the announce comes from the relay's OWNER — the announced id is one of the sender's
         // own authorized device ids (their in-app relay; that's what lets your Mac's relay come back on
@@ -5425,6 +5434,7 @@ object HavenNet : InboundListener {
                     val r = relayHttpPut(base, entry.httpToken, key, env)
                     if (r.isSuccess) {
                         markRelayOk(nodeHex); landed = true; putOk = true
+                        confirmEnrollment(nodeHex)
                         markMailboxSeen("put:$nodeHex|$key")
                         withContext(Dispatchers.Main) { relayActive.value = true }
                         break
@@ -5441,10 +5451,15 @@ object HavenNet : InboundListener {
                     .onSuccess {
                         landed = true
                         markRelayOk(nodeHex)
+                        confirmEnrollment(nodeHex)
                         markMailboxSeen("put:$nodeHex|$key")
                         withContext(Dispatchers.Main) { relayActive.value = true }
                     }
-                    .onFailure { Log.d(TAG, "mailbox put failed ($nodeHex): ${it.message}"); relayFailed(nodeHex) }
+                    .onFailure {
+                        Log.d(TAG, "mailbox put failed ($nodeHex): ${it.message}")
+                        // The expected 403 of a relay pending enrollment is not an outage.
+                        if (!(isForbiddenError(it) && absorbPendingRefusal(nodeHex))) relayFailed(nodeHex)
+                    }
             }
         }
         if (landed) markMailboxSeen(key)
@@ -7023,6 +7038,13 @@ object HavenNet : InboundListener {
 
     private fun noteRefused(nodeHex: String, what: String) {
         synchronized(rosterNeeded) { rosterNeeded.add(nodeHex) }
+        // A friend-invite relay still PENDING ENROLLMENT refuses us by design until the inviter
+        // enrolls us: no streak, no stand-down (which would drop it from relaysFor for up to 10 min)
+        // — just a short flat retry.
+        if (absorbPendingRefusal(nodeHex)) {
+            Log.i(TAG, "relay ${nodeHex.take(8)} REFUSED $what — pending enrollment; retrying in ${PendingEnrollment.RETRY_GAP_MS / 1000}s")
+            return
+        }
         val streak = refusedStreak.merge(nodeHex, 1) { a, b -> a + b } ?: 1
         // The first few refusals are free: that is the window in which publishing our roster
         // genuinely fixes things, and backing off early would slow down the case that DOES heal.
@@ -7044,6 +7066,70 @@ object HavenNet : InboundListener {
     /** True while a relay is in refusal backoff — skip it rather than spending a request on a no. */
     private fun relayStoodDown(nodeHex: String): Boolean =
         (refusedUntilMs[nodeHex] ?: 0L) > System.currentTimeMillis()
+
+    // ---- Pending enrollment (friend-invite relays that 403 until the inviter enrolls us) ----------
+    private val pendingEnrollment = PendingEnrollment()
+    @Volatile private var pendingRetryJob: Job? = null
+    @Volatile private var lastPendingTriggerMs = 0L
+
+    private fun isForbiddenError(e: Throwable?): Boolean =
+        e is RelayForbidden || e?.message?.lowercase()?.let { it.contains("forbidden") || it.contains("refused") } == true
+
+    /** True when a refusal from [nodeHex] is the expected pending-enrollment 403 — the caller must
+     *  then skip every long backoff. Schedules the short flat retry. */
+    private fun absorbPendingRefusal(nodeHex: String): Boolean {
+        val d = synchronized(pendingEnrollment) {
+            pendingEnrollment.onFailure(nodeHex, forbidden = true, nowMs = System.currentTimeMillis())
+        }
+        if (d !is PendingEnrollment.Decision.RetrySoon) return false
+        if (pendingRetryJob?.isActive != true) {
+            pendingRetryJob = scope.launch {
+                delay(d.afterMs)
+                val still = synchronized(pendingEnrollment) { pendingEnrollment.anyPending(System.currentTimeMillis()) }
+                if (still) retryPendingEnrollmentUploads(emptyList(), full = false)
+            }
+        }
+        return true
+    }
+
+    /** An authorized write landed on [nodeHex]: enrolled. Re-drive what it had refused. */
+    private fun confirmEnrollment(nodeHex: String) {
+        val was = synchronized(pendingEnrollment) { pendingEnrollment.confirm(nodeHex) }
+        if (!was) return
+        Log.i(TAG, "relay ${nodeHex.take(8)} enrollment confirmed — re-driving deferred uploads")
+        scope.launch { retryPendingEnrollmentUploads(listOf(nodeHex.lowercase()), full = true) }
+    }
+
+    /** The grant arrived / the inviter announced the relay: retry now, and once more shortly after
+     *  (their enroll call may land a beat after the grant). Rate-limited — announces repeat. */
+    private fun triggerPendingEnrollment(relays: List<String>, reason: String) {
+        val now = System.currentTimeMillis()
+        val tracked = synchronized(pendingEnrollment) {
+            relays.map { it.lowercase() }.filter { pendingEnrollment.isTracked(it) }
+                .also { t -> t.forEach { pendingEnrollment.refresh(it, now) } }
+        }
+        if (tracked.isEmpty() || now - lastPendingTriggerMs < 10_000) return
+        lastPendingTriggerMs = now
+        Log.i(TAG, "pending-enrollment retry ($reason) relays=${tracked.size}")
+        synchronized(refusedStreak) { tracked.forEach { refusedStreak.remove(it); refusedUntilMs.remove(it) } }
+        scope.launch {
+            retryPendingEnrollmentUploads(tracked, full = true)
+            delay(15_000)
+            retryPendingEnrollmentUploads(tracked, full = true)
+        }
+    }
+
+    /** Re-drive uploads deferred by pending-enrollment refusals: persisted media backups always;
+     *  with [full], also re-offer my events + media for every circle served by [relays] (content
+     *  that landed on another relay is otherwise never retried on the one that refused it). */
+    private suspend fun retryPendingEnrollmentUploads(relays: List<String>, full: Boolean) {
+        runCatching { drainPersistedBackups() }
+        if (!full || relays.isEmpty()) return
+        val wanted = relays.map { it.lowercase() }.toSet()
+        for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {
+            if (relaysFor(c.id).any { it.lowercase() in wanted }) runCatching { backfillMailbox(c.id, eventsToo = true) }
+        }
+    }
 
     /** A relay answered us properly again — forget the refusal history entirely. */
     private fun noteRelayAccepted(nodeHex: String) {
@@ -7399,6 +7485,7 @@ object HavenNet : InboundListener {
             val r = httpUploadMedia(entry, nodeHex, ref, key, blob, chunked, fp, force)
             if (r.isSuccess) {
                 markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true
+                confirmEnrollment(nodeHex)
                 android.util.Log.i("MediaSync", "HTTP uploaded ref=$ref to ${nodeHex.take(8)}")
                 continue
             }
@@ -7426,8 +7513,8 @@ object HavenNet : InboundListener {
                     client.put(key, blob)
                 }
             }
-                .onSuccess { markRelayOk(nodeHex); markBackedUp(nodeHex, ref); landed = true }
-                .onFailure { relayFailed(nodeHex) }
+                .onSuccess { markRelayOk(nodeHex); markBackedUp(nodeHex, ref); landed = true; confirmEnrollment(nodeHex) }
+                .onFailure { if (!(isForbiddenError(it) && absorbPendingRefusal(nodeHex))) relayFailed(nodeHex) }
         }
         return landed
     }

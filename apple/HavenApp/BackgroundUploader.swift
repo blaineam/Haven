@@ -145,6 +145,12 @@ final class BackgroundUploader {
         if hadMidPassArrivals && !queue.isEmpty {
             backoffSecs = 3
             scheduleRetry(after: 0)
+        } else if !stillPending.isEmpty, RelayEnrollment.anyPending() {
+            // A friend-invite relay is still pending enrollment (403 until the inviter enrolls us):
+            // retry on the short FLAT gap, and don't grow the backoff over an expected refusal.
+            let gap = PendingEnrollment.retryGapMs / 1000
+            HavenLog.sync("uploader: \(stillPending.count) event(s) pending enrollment — retrying in \(gap)s")
+            scheduleRetry(after: gap)
         } else if !stillPending.isEmpty {
             HavenLog.sync("uploader: \(stillPending.count) event(s) still pending — retrying in \(backoffSecs)s")
             scheduleRetry(after: backoffSecs)

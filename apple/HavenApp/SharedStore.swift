@@ -549,6 +549,23 @@ enum MediaBackupBackoff {
     static func recordLanded(_ ref: String) {
         nextTry[ref] = nil
         fails[ref] = nil
+        refusedPendingEnrollment.remove(ref)
+    }
+
+    /// Refs whose last failure included a 403 from a relay still PENDING ENROLLMENT (a friend-invite
+    /// relay the inviter hasn't enrolled us on yet). Their stall takes a short flat gap and no strike
+    /// (`PendingEnrollment`) — a 2 min → 1 h backoff would hold a new friend's first photos for up
+    /// to an hour over a refusal that clears on its own in seconds.
+    private static var refusedPendingEnrollment = Set<String>()
+    private static var awaitingEnrollment = Set<String>()
+    static func notePendingEnrollment(_ ref: String) { refusedPendingEnrollment.insert(ref) }
+    /// Enrollment landed (or the short gap elapsed): make every deferred ref due NOW.
+    @discardableResult
+    static func releasePendingEnrollment() -> Int {
+        let refs = awaitingEnrollment
+        for r in refs { nextTry[r] = nil }
+        awaitingEnrollment.removeAll()
+        return refs.count
     }
 
     /// Two short gaps before the long ones, so a BLIP (a relay mid-restart, a moment of no route)
@@ -561,6 +578,11 @@ enum MediaBackupBackoff {
 
     /// The blob reached NO destination this pass — grow the retry gap.
     static func recordStalled(_ ref: String) {
+        if refusedPendingEnrollment.remove(ref) != nil {
+            nextTry[ref] = nowMs() + PendingEnrollment.retryGapMs   // flat, no strike
+            awaitingEnrollment.insert(ref)
+            return
+        }
         let n = (fails[ref] ?? 0) + 1
         fails[ref] = n
         let gap: UInt64
@@ -858,6 +880,7 @@ enum SharedStore {
                 }
             case .failure(is RelayForbidden):
                 noteRefused(node, "mirror probe")
+                RelayEnrollment.absorbRefusal(node, ref: ref)
             case .failure:
                 markHttpUrlBad(base)   // unreachable — not "absent"
             }
@@ -1029,6 +1052,7 @@ enum SharedStore {
                         // Reachable and healthy — it just doesn't know us. Backing off here would
                         // strand our media on a relay that would happily store it once authorized.
                         noteRefused(node, "media probe")
+                        RelayEnrollment.absorbRefusal(node, ref: ref)
                     case .failure:
                         markHttpUrlBad(base)
                     }
@@ -1069,7 +1093,10 @@ enum SharedStore {
                     }
                 } catch {
                     HavenLog.sync("backup probe SKIP ref=\(ref) relay=\(node.prefix(8)) — dial failed: \(error.localizedDescription)")
-                    RelayHealth.shared.recordFailure(node)
+                    // A pending-enrollment refusal is not an outage: no relay-health strike.
+                    if !(RelayEnrollment.isForbidden(error) && RelayEnrollment.absorbRefusal(node, ref: ref)) {
+                        RelayHealth.shared.recordFailure(node)
+                    }
                     continue
                 }
             }
@@ -1197,6 +1224,7 @@ enum SharedStore {
                         if case .failure(let e) = await httpPut(base, token, k, d) { throw e }
                     }
                     RelayMailboxStore.shared.markSeen(node)
+                    RelayEnrollment.confirm(node)
                     HavenLog.sync("backup http-put OK ref=\(ref) relay=\(node.prefix(8))")
                     MediaBackupLedger.mark(node, ref); landed = true
                 } catch is RelayForbidden {
@@ -1205,6 +1233,7 @@ enum SharedStore {
                     // the blob dial goes through the SAME membership gate, so it only repeats the
                     // refusal. Record it and let the heal + retry in `backup` publish our roster first.
                     noteRefused(node, "media upload \(ref.prefix(10))")
+                    RelayEnrollment.absorbRefusal(node, ref: ref)
                     HavenLog.sync("backup http-put REFUSED ref=\(ref) relay=\(node.prefix(8)) — not an outage; roster publish pending")
                 } catch {
                     markHttpUrlBad(base)
@@ -1218,11 +1247,14 @@ enum SharedStore {
                                                exists: { (try? await c.has(key: $0)) ?? false }) { try await c.put(key: $0, data: $1) }
                         RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
                         HavenLog.sync("backup blob-dial OK ref=\(ref) relay=\(node.prefix(8)) size=\(sealedSize) — cross-NAT blob path WORKS")
+                        RelayEnrollment.confirm(node)
                         MediaBackupLedger.mark(node, ref); landed = true
                     }
                     catch {
                         HavenLog.sync("backup blob-dial FAIL ref=\(ref) relay=\(node.prefix(8)) size=\(sealedSize): \(error.localizedDescription)")
-                        RelayHealth.shared.recordFailure(node)   // backoff still applies; the CLIENT is kept — see below
+                        if !(RelayEnrollment.isForbidden(error) && RelayEnrollment.absorbRefusal(node, ref: ref)) {
+                            RelayHealth.shared.recordFailure(node)   // backoff still applies; the CLIENT is kept — see below
+                        }
                     }
                 }
             case .dial(let c):
@@ -1233,11 +1265,14 @@ enum SharedStore {
                                            exists: { (try? await c.has(key: $0)) ?? false }) { try await c.put(key: $0, data: $1) }
                     RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
                     HavenLog.sync("backup blob-dial OK ref=\(ref) relay=\(node.prefix(8)) size=\(sealedSize) — cross-NAT blob path WORKS")
+                    RelayEnrollment.confirm(node)
                     MediaBackupLedger.mark(node, ref); landed = true
                 }
                 catch {
                     HavenLog.sync("backup blob-dial FAIL ref=\(ref) relay=\(node.prefix(8)) size=\(sealedSize): \(error.localizedDescription)")
-                    RelayHealth.shared.recordFailure(node)   // backoff still applies; the CLIENT is kept — see below
+                    if !(RelayEnrollment.isForbidden(error) && RelayEnrollment.absorbRefusal(node, ref: ref)) {
+                        RelayHealth.shared.recordFailure(node)   // backoff still applies; the CLIENT is kept — see below
+                    }
                 }
             }
         }
@@ -2632,10 +2667,12 @@ enum SharedStore {
                             RelayHealth.shared.recordSuccess(node)
                             RelayMailboxStore.shared.markSeen(node)
                             HavenLog.relay("mailbox http-put OK relay=\(node.prefix(8))")
+                            RelayEnrollment.confirm(node)
                             markSeen("put:\(node)|\(key)")
                             landed = true; done = true
                         case .failure(is RelayForbidden):
                             noteRefused(node, "mailbox put")
+                            RelayEnrollment.absorbRefusal(node)   // pending enrollment → short retry
                             RelayHealth.shared.recordSuccess(node)
                         case .failure:
                             markHttpUrlBad(base)
@@ -2649,9 +2686,16 @@ enum SharedStore {
                 do {
                     try await c.put(key: key, data: env)
                     RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node)
+                    RelayEnrollment.confirm(node)
                     markSeen("put:\(node)|\(key)"); landed = true
                 }
-                catch { RelayHealth.shared.recordFailure(node) }   // backoff applies; the CLIENT is kept (RelayClients.forget)
+                catch {
+                    // backoff applies; the CLIENT is kept (RelayClients.forget) — except for the
+                    // expected 403 of a relay still pending enrollment (short retry, no strike).
+                    if !(RelayEnrollment.isForbidden(error) && RelayEnrollment.absorbRefusal(node)) {
+                        RelayHealth.shared.recordFailure(node)
+                    }
+                }
             }
             if landed { markSeen(key); FeedStore.shared.markRelay(true); return true }
             FeedStore.shared.markRelay(false); return false

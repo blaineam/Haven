@@ -78,3 +78,48 @@ private final class InFlightProbe {
     func enter() { now += 1; peak = max(peak, now) }
     func leave() { now -= 1 }
 }
+
+final class PendingEnrollmentTests: XCTestCase {
+    let relay = String(repeating: "c", count: 64)
+    let t0: UInt64 = 1_000_000
+
+    func testRefusalFromFreshTicketRelayRetriesSoon() {
+        var p = PendingEnrollment()
+        p.noteAdopted(relay, nowMs: t0)
+        XCTAssertEqual(p.onFailure(relay: relay.uppercased(), forbidden: true, nowMs: t0 + 30_000),
+                       .retrySoon(afterMs: PendingEnrollment.retryGapMs))
+        XCTAssertLessThanOrEqual(PendingEnrollment.retryGapMs, 15_000)
+    }
+
+    func testOutageStillBacksOff() {
+        var p = PendingEnrollment()
+        p.noteAdopted(relay, nowMs: t0)
+        XCTAssertEqual(p.onFailure(relay: relay, forbidden: false, nowMs: t0 + 1_000), .backOff)
+    }
+
+    func testWindowExpiresToOrdinaryBackoff() {
+        var p = PendingEnrollment()
+        p.noteAdopted(relay, nowMs: t0)
+        XCTAssertEqual(p.onFailure(relay: relay, forbidden: true, nowMs: t0 + PendingEnrollment.windowMs), .backOff)
+        XCTAssertFalse(p.anyPending(nowMs: t0 + PendingEnrollment.windowMs))
+    }
+
+    func testConfirmedOrUnknownRelayBacksOff() {
+        var p = PendingEnrollment()
+        XCTAssertEqual(p.onFailure(relay: relay, forbidden: true, nowMs: t0), .backOff, "never adopted from a ticket")
+        p.noteAdopted(relay, nowMs: t0)
+        XCTAssertTrue(p.confirm(relay))
+        XCTAssertFalse(p.confirm(relay), "already confirmed")
+        XCTAssertEqual(p.onFailure(relay: relay, forbidden: true, nowMs: t0 + 1_000), .backOff)
+    }
+
+    func testGrantReopensWindowOnlyForTrackedRelay() {
+        var p = PendingEnrollment()
+        p.noteAdopted(relay, nowMs: t0)
+        p.refresh(relay, nowMs: t0 + 280_000)   // grant arrives late — window re-opens
+        XCTAssertTrue(p.isPending(relay, nowMs: t0 + 400_000))
+        let other = String(repeating: "d", count: 64)
+        p.refresh(other, nowMs: t0)             // never tracked → refresh does not start tracking
+        XCTAssertFalse(p.isTracked(other))
+    }
+}

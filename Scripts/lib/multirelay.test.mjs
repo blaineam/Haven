@@ -59,6 +59,12 @@ test('misplacedCircles names every forbidden circle a relay holds', () => {
   assert.deepEqual(misplacedCircles(keysByRelay, { rc: ['ca'] }), []);
 });
 
+test('freshMints: late mesh arrivals are not mints, new keys are', async () => {
+  const { freshMints } = await import('./multirelay.mjs');
+  assert.deepEqual(freshMints(['a', 'b', 'c'], ['a', 'c']), []);
+  assert.deepEqual(freshMints(['a', 'b'], ['a', 'b', 'x']), ['x']);
+});
+
 test('keyDiff + stableCounts', () => {
   assert.deepEqual(keyDiff(['a', 'b'], ['b', 'c']), { onlyA: ['a'], onlyB: ['c'] });
   assert.equal(stableCounts([5, 5, 5]).ok, true);

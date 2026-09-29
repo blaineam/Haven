@@ -33,7 +33,7 @@ import {
 import {
   portPlan, collisionVerdict, decodeComp, eventKeys, mailboxCircles, holdsMedia, misplacedCircles, keyDiff,
   stableCounts, tokenFingerprint, urlPort, attributionProblems, statsRow, statsCounter, knowsUrlPort, hitsBetween,
-  herdVerdict, strangerIdentity, strangerAuth, isolationVerdict, inflightMedia, resurrected,
+  herdVerdict, strangerIdentity, strangerAuth, isolationVerdict, inflightMedia, resurrected, freshMints,
 } from './lib/multirelay.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -1929,14 +1929,25 @@ async function main() {
     gate('multirelay: mesh — R_A and R_C hold the same C_S events', 'rc', meshed, MRB.mesh);
     if (meshed < 0) log(`multirelay: C_S only on R_A ${diff.onlyA.length}, only on R_C ${diff.onlyB.length}`);
     // LIST counts hold still over a quiet window (a re-seal that mints new keys would grow them).
+    // A relay may still be catching up (a key its sibling already had arrives late) — that is mesh
+    // convergence. What must never happen is a key that existed on NO relay when the window opened:
+    // an envelope minted again with nothing posted (the re-seal regrowth this guards against).
     const counts = { ra: [], rc: [], rb: [] };
+    const startUnion = [...new Set(Object.keys(counts).flatMap((n) => eventKeys(storeKeys[n](), cS)))];
+    const minted = new Set();
     for (let i = 0; i < 4; i++) {
-      for (const n of Object.keys(counts)) counts[n].push(eventKeys(storeKeys[n](), cS).length);
+      for (const n of Object.keys(counts)) {
+        const ev = eventKeys(storeKeys[n](), cS);
+        counts[n].push(ev.length);
+        for (const k of freshMints(startUnion, ev)) minted.add(`${n}:${k.slice(-12)}`);
+      }
       if (i < 3) await sleep(MRB.quiet / 3);
     }
     for (const n of Object.keys(counts)) {
       const v = stableCounts(counts[n]);
-      score(`multirelay: C_S event count stable across polls with nothing posted [${n}]`, v.ok, v.why);
+      const mine = [...minted].filter((m) => m.startsWith(`${n}:`));
+      score(`multirelay: no C_S envelope minted with nothing posted [${n}]`, mine.length === 0,
+        `${v.why}${mine.length ? ` — new: ${mine.join(' ')}` : ''}`);
     }
     for (const n of ['ios', ...readersOfA]) {
       const j = await freshDump(devices[n]);

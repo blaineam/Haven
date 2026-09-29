@@ -125,6 +125,13 @@ export function keyDiff(a, b) {
   return { onlyA: [...A].filter((k) => !B.has(k)).sort(), onlyB: [...B].filter((k) => !A.has(k)).sort() };
 }
 
+/** Keys in `sample` that existed on NO relay when the quiet window opened (`startUnion`): newly
+ *  MINTED envelopes. Mesh catch-up (a key another relay already had arriving late) is not one. */
+export function freshMints(startUnion, sample) {
+  const u = new Set(startUnion);
+  return sample.filter((k) => !u.has(k));
+}
+
 /** LIST stability: over a quiet window, a circle's event-key count may not GROW (a re-seal that
  *  mints a new key per pass is the regrowth this catches). Series of counts, oldest first. */
 export function stableCounts(series) {

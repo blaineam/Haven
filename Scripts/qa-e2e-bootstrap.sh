@@ -318,6 +318,21 @@ elif command -v adb >/dev/null 2>&1; then
       [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == "1" ]] && { booted=1; break; }
       sleep 3
     done
+    # A long-lived emulator can finish "booted" with core system services dead (seen: package
+    # manager gone — "Can't find service: package" — after rild/bluetooth aborts). Installs and the
+    # MediaStore dump channel then fail while the app itself looks healthy. Cold-reboot it once.
+    if [[ "$booted" == "1" ]] && ! adb shell pm path android >/dev/null 2>&1; then
+      log "android emulator is booted but its package manager is dead — cold-rebooting it"
+      adb emu kill >/dev/null 2>&1 || true
+      for i in $(seq 1 30); do [[ "$(adb get-state 2>/dev/null || true)" != "device" ]] && break; sleep 1; done
+      boot_haven_emulator
+      for i in $(seq 1 160); do [[ "$(adb get-state 2>/dev/null || true)" == "device" ]] && break; sleep 3; done
+      booted=0
+      for i in $(seq 1 100); do
+        [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == "1" ]] && { booted=1; break; }
+        sleep 3
+      done
+    fi
     if [[ "$booted" != "1" ]]; then
       log "WARN: android emulator never finished booting — android leg skipped"
     else

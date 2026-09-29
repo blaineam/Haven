@@ -39,9 +39,13 @@ for port in 8674 8675; do
   fi
 done
 
-# Emulator → host loopback for path proxy + media
-adb reverse tcp:8674 tcp:8674 >/dev/null
-adb reverse tcp:8675 tcp:8675 >/dev/null
+# Emulator → host loopback for path proxy + media. E2E_ANDROID=0: leave the emulator alone (a
+# wedged adbd hangs these with no timeout).
+ANDROID_ON="${E2E_ANDROID:-1}"
+if [[ "$ANDROID_ON" != "0" ]]; then
+  adb reverse tcp:8674 tcp:8674 >/dev/null
+  adb reverse tcp:8675 tcp:8675 >/dev/null
+fi
 
 IOS_MEDIA="http://127.0.0.1:8674"
 IOS_DERP="http://127.0.0.1:8675"
@@ -82,6 +86,7 @@ SIMCTL_CHILD_HAVEN_SKIP_ONBOARDING=1 xcrun simctl launch "$SIM" "$IOS_BUNDLE" >/
 echo "iOS relaunched"
 
 # ---- Android ----
+if [[ "$ANDROID_ON" == "0" ]]; then echo "Android skipped (E2E_ANDROID=0)"; exit 0; fi
 adb shell am force-stop "$AND_PKG" >/dev/null 2>&1 || true
 sleep 1
 adb shell "run-as $AND_PKG cat shared_prefs/haven.contacts.xml" > /tmp/and-contacts-before.xml 2>/dev/null || echo '<?xml version="1.0"?><map></map>' > /tmp/and-contacts-before.xml

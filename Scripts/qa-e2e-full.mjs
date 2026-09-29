@@ -849,7 +849,9 @@ async function main() {
   devices.ios = makeIos(udid);
   devices.stub = makeStub();
   devices.desktop = makeDesktop();
-  if (shOk('adb', ['get-state'])?.trim() === 'device') {
+  if (process.env.E2E_ANDROID === '0') {
+    log('android leg SKIPPED by E2E_ANDROID=0 (emulator untouched)');
+  } else if (shOk('adb', ['get-state'])?.trim() === 'device') {
     devices.android = makeAndroid();
     // Prove the command channel before anything depends on it — a leg that cannot be TOLD anything
     // reports its state cheerfully and ignores every instruction.

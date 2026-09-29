@@ -154,7 +154,10 @@ rewritten is named as a dead channel instead of being scored as a delivery failu
 it is the fix for a class of false result that has twice been misread as a product regression.
 
 Subsets + reuse: `E2E_STEPS=post,dm node Scripts/qa-e2e-full.mjs`,
-`E2E_BOOTSTRAP=skip` to reuse a hot fleet, `E2E_KILL=1` to tear down after.
+`E2E_BOOTSTRAP=skip` to reuse a hot fleet, `E2E_KILL=1` to tear down after. `E2E_ANDROID=0` leaves
+the emulator untouched and runs without the android leg (for a wedged shared emulator whose adbd
+no longer answers — the bootstrap's adb calls have no timeout; the harness's own are capped at
+`E2E_ADB_TIMEOUT_MS`, 60 s).
 
 Default step order: `newfriend,profile,circle,post,story,file,music,dm,relayfirst,progress,audience,call,
 screenshare,callgate,react,comment,media,satellite,launch,responsive,invite_offline,multirelay`. Steps that need
@@ -298,8 +301,11 @@ Product bugs this step found (fixed with regression tests unless noted):
   (before, two headless relays never meshed without `--peer`) — `blobstore` unit test +
   `tests/relay_enroll.rs::a_taught_sibling_replicates_that_circle_and_only_that_circle`.
 - **"Stop hosting" didn't stop** — the path proxy outlived its handle and old keep-alive
-  connections kept being served (`tests/relay_host_stop.rs`). The in-app host toggle still came
-  back on an ephemeral port in the run that found this; re-check after the fix.
+  connections kept being served (`tests/relay_host_stop.rs`; fixed). STILL OPEN: on the Mac host
+  the media listener (:8674) keeps answering after the toggle is switched off — until the next
+  fabric rebind restarts the messaging node — although `disable_relay` frees it in every Rust-level
+  test. The step scores it (`nothing answers on R_B's port once hosting is off`) and logs the stub's
+  listeners after the toggle.
 - **A rotated relay token was never re-learned** — a 401 was folded into "not a member", the roster
   re-publish can't fix it, and the interface self-heal only ran for BAD urls. Apple + Android now
   fetch the relay's self-published interface over iroh on a 401 (desktop: not yet).
@@ -309,9 +315,15 @@ Product bugs this step found (fixed with regression tests unless noted):
   a `!replace` first line, `RelayClient.enrollMembersReplace`; Apple + Android call it from
   `removeFromCircle`); the relay accepts it only from a peer speaking for the account the owned
   (`c1…`) circle id binds, records the dropped ids as revoked (persisted, re-applied after every
-  roster re-authorize), and refuses to let an ordinary member's stale ENROLL re-add them
+  roster re-authorize), and refuses to let an ordinary member's stale ENROLL re-add them. A revoked
+  id also stops being a SIBLING for the circle — an in-app host's relay id is its owner's device
+  id, so the first fix left the removed member in through the sibling door
   (`tests/relay_enroll.rs::the_creator_removing_a_member_revokes_them_on_the_relay`). Not yet:
-  desktop doesn't send it, and an in-app host's own store still unions its learned grants.
+  desktop doesn't send the replace.
+- **Desktop never authorized itself on a new CLI relay** (open, desktop only) — its mailbox PUTs to
+  R_A were refused (403) for the whole run and its devroster publish to R_A timed out over iroh, so
+  A's private-circle post never reached the Tauri leg. Before the sibling fix this was masked: the
+  desktop read C_A off B's relay, which had been mirroring it.
 
 `E2E_STEPS=multirelay` runs it alone (it creates the shared circle itself).
 

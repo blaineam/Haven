@@ -88,7 +88,7 @@ if [[ "${E2E_FRESH:-1}" != "0" ]]; then
     xcrun simctl terminate "$SIM_FRESH" "$IOS_BUNDLE" 2>/dev/null || true
     xcrun simctl uninstall "$SIM_FRESH" "$IOS_BUNDLE" 2>/dev/null || true
   fi
-  if command -v adb >/dev/null 2>&1 && [[ "$(adb get-state 2>/dev/null || true)" == "device" ]]; then
+  if [[ "${E2E_ANDROID:-1}" != "0" ]] && command -v adb >/dev/null 2>&1 && [[ "$(adb get-state 2>/dev/null || true)" == "device" ]]; then
     adb shell pm clear com.blaineam.haven >/dev/null 2>&1 || true
     adb shell rm -f /sdcard/Download/qa-seed.txt /sdcard/Download/qa-device-hex.txt "/sdcard/Download/qa-dump-$AND_PKG.json" 2>/dev/null || true
   fi
@@ -273,7 +273,11 @@ for i in $(seq 1 30); do [[ -s "$DATA_DIR/qa-device-hex.txt" ]] && break; sleep 
 authorize "$MEMBERS"
 
 # ── 6. Android emulator as linked device of A (best-effort leg) ───────────────
-if command -v adb >/dev/null 2>&1; then
+# E2E_ANDROID=0 leaves the emulator alone entirely (a wedged shared emulator — adbd not answering —
+# otherwise hangs this script on its first `adb shell`, since these calls carry no timeout).
+if [[ "${E2E_ANDROID:-1}" == "0" ]]; then
+  log "E2E_ANDROID=0 — android leg skipped (emulator untouched)"
+elif command -v adb >/dev/null 2>&1; then
   if [[ "$(adb get-state 2>/dev/null || true)" != "device" ]]; then
     EMU="$(ls "$HOME/.android/avd" 2>/dev/null | grep -m1 haven_phone || true)"
     if [[ -n "$EMU" ]]; then

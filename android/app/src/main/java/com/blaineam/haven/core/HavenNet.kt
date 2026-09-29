@@ -8354,6 +8354,7 @@ object HavenNet : InboundListener {
 
     private fun persist() {
         runCatching { stateFile.writeBytes(social.exportState()) }
+            .onSuccess { QaPerf.notePersistExport() }   // the QA dump's perf.persistExportCount
             .onFailure { Log.e(TAG, "persist failed", it) }
     }
 

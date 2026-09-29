@@ -149,6 +149,7 @@ final class MainThreadStallDetector: @unchecked Sendable {
                 self.outstandingSince = nil
                 self.reportedCurrentStall = false
                 self.lock.unlock()
+                HavenPerf.shared.noteMainStall(ms: waited * 1000)   // ≥100 ms only — the QA dump's `perf`
                 if waited > threshold {
                     self.emit("[MainStall] \(wasReported ? "recovered after" : "stalled") \(String(format: "%.2f", waited))s")
                 }

@@ -175,7 +175,7 @@ stub-authorization step.
 
 ```json
 {"op":"post|story|dm|react|comment|profile|circle_create|circle_invite|file|music_post|dump|mark_read|link_constraint
-      |call|call_accept|call_end|call_speaker|call_route_legacy",
+      |call|call_accept|call_end|call_speaker|call_route_legacy|perf_reset",
  "body":"…","media":"photo|video","photo_path":"…","video_path":"…","file_path":"…",
  "target_id":"<event id>","emoji":"❤️","dm_to":"<64hex>","name":"…","circle_id":"…",
  "music":{"title":"…","artist":"…"},"caption":"…","level":"normal|low|ultra|auto","on":true}
@@ -227,6 +227,34 @@ Every op (and `{"op":"dump"}`) refreshes `qa-dump.json` next to the drop file
  "dms":{"<peer-hex>":[{"id":"…","body":"…","media_present":[]}]},
  "profile":{"name":"…"},"circles":[{"id":"…","name":"…","members":["…"]}]}
 ```
+
+#### `perf` — responsiveness counters (Apple + Android DEBUG)
+
+Every dump carries a `perf` object so the e2e suite can hold responsiveness to account, not just
+delivery. **These names are a contract with the orchestrator — do not rename them.** Counters run
+from launch or from the last `{"op":"perf_reset"}`, which zeroes them.
+
+```json
+"perf":{"mainStallCount":0,"mainStallMaxMs":0,
+        "engineUserWaitP95Ms":0.0,"engineUserWaitMaxMs":0.0,
+        "persistExportCount":0,"lastPersistExportAtMs":0,
+        "refreshCount":0,"mediaStoreOnMainCount":0,"heldRefSetSize":0},
+"react_latency":{"engineAppliedMs":0.0,"publishedMs":0.0}
+```
+
+| key | meaning |
+|---|---|
+| `mainStallCount` / `mainStallMaxMs` | main-thread stalls ≥ 100 ms and the worst one. Apple: `MainThreadStallDetector` (100 ms main-queue ping). Android: a DEBUG main-`Looper` watchdog (same ping). |
+| `engineUserWaitP95Ms` / `engineUserWaitMaxMs` | how long **user-initiated** engine calls (post, react, comment, DM, the visible feed rebuild) waited for the engine — the priority lane's queue wait, over the last 512 calls. Apple only; Android reports `0`. |
+| `persistExportCount` / `lastPersistExportAtMs` | whole-state `exportState` runs that actually happened (a persist skipped because nothing changed does not count) and the wall-clock ms of the last one. |
+| `refreshCount` | feed rebuilds that completed and were applied. Apple only (Android reports `0`). |
+| `mediaStoreOnMainCount` | inbound-media hash / write / reassembly work that ran on the main thread. **Should stay 0** (the demo seed's synchronous import is the only expected source). Apple only. |
+| `heldRefSetSize` | media files the in-memory held-media index knows are on disk. Apple only. |
+
+`react_latency` is the last `react` op's local latency, measured on the reacting device: ms from the
+op starting (the tap) to the engine having applied and sealed the reaction (`engineAppliedMs`), and
+to the next feed rebuild publishing it (`publishedMs`, `-1` if none landed within 5 s). `{}` until a
+`react` runs, and after `perf_reset`. Apple only.
 
 Liveness and timing on the desktop leg: every dump carries `dump_seq` (strictly increasing per
 successful write — the orchestrator warns when it sticks, which means the driver, not delivery),

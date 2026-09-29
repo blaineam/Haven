@@ -97,16 +97,19 @@ object QaDriver {
     fun start(context: Context) {
         if (!BuildConfig.DEBUG) return
         appContext = context.applicationContext
+        QaPerf.startWatchdog()   // the dump's perf.mainStall* — DEBUG only
     }
 
     /** 1.5s drop-file poll — runs only while the app is foregrounded (MainActivity.onResume). */
     fun onResume() {
         if (!BuildConfig.DEBUG || polling) return
+        QaPerf.foreground = true
         polling = true
         handler.post(tick)
     }
 
     fun onPause() {
+        QaPerf.foreground = false
         polling = false
         handler.removeCallbacks(tick)
     }
@@ -299,6 +302,8 @@ object QaDriver {
                 else Log.w(TAG, "wire_relay: bad args hex=${hex.take(8)} urls=${urls.size}")
             }
             "dump" -> {}   // every branch refreshes the dump on the way out
+            // Zero the dump's `perf` counters so an e2e step measures only what follows.
+            "perf_reset" -> QaPerf.reset()
             else -> Log.w(TAG, "qa-cmd unknown op=$op")
         }
     }
@@ -465,6 +470,8 @@ object QaDriver {
         o.put("delivery", runCatching { JSONObject(social.diagDeliveryJson()) }.getOrNull())
         // Fork forensics — session-only chain, dump is the only window (see desktop twin).
         o.put("tree_chain", runCatching { org.json.JSONArray(social.debugTreeChainJson()) }.getOrNull())
+        // Responsiveness counters — names shared with Apple, a contract with the e2e (docs/QA.md).
+        o.put("perf", QaPerf.snapshot())
 
         // App-owned file in Download/ (allowed on scoped storage); tmp+rename keeps reads whole.
         val tmp = File(downloads, dumpFile.name + ".tmp")

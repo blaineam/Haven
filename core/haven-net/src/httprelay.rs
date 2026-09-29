@@ -262,10 +262,16 @@ pub async fn serve(root: PathBuf, bind: &str, token: String, auth: Arc<Mutex<Rel
     // Replay window, shared across connections (a nonce burnt on one socket must be burnt on all).
     let nonces: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
     let handle = tokio::spawn(async move {
+        // Connections are children of THIS task (a JoinSet it owns), so stopping the interface
+        // stops them too. With a bare `tokio::spawn` per connection, every keep-alive connection a
+        // member held open went on being served after "stop hosting" — the relay the user had
+        // turned off kept answering its old clients (e2e `multirelay`, B's host toggle).
+        let mut conns = tokio::task::JoinSet::new();
         loop {
+            while conns.try_join_next().is_some() {}
             let Ok((stream, _)) = listener.accept().await else { continue };
             let (root, token, auth, nonces) = (root.clone(), token.clone(), auth.clone(), nonces.clone());
-            tokio::spawn(async move {
+            conns.spawn(async move {
                 // Serial requests per connection (keep-alive); any parse error drops it.
                 let _ = handle_conn(stream, &root, &token, &auth, &nonces).await;
             });
@@ -779,6 +785,17 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let again = serve(root.clone(), &format!("127.0.0.1:{free}"), String::new(), auth.clone()).await.unwrap();
         assert_eq!(again.port(), free);
+        // The in-process restart (the app's host toggle): a client still holding a keep-alive
+        // connection to the stopped relay must not make the restart look like a collision.
+        let wild = std::net::TcpListener::bind("0.0.0.0:0").unwrap().local_addr().unwrap().port();
+        let first = serve(root.clone(), &format!("0.0.0.0:{wild}"), String::new(), auth.clone()).await.unwrap();
+        let idle_client = std::net::TcpStream::connect(("127.0.0.1", wild)).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(first);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let again = serve(root.clone(), &format!("0.0.0.0:{wild}"), String::new(), auth.clone()).await;
+        assert!(again.is_ok(), "host toggle off/on with a connected client: {:?}", again.err());
+        drop(idle_client);
         // Two relays on DIFFERENT ports coexist.
         let other_port = serve(root.clone(), "127.0.0.1:0", String::new(), auth).await.unwrap();
         assert_ne!(other_port.port(), free);

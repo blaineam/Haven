@@ -157,12 +157,18 @@ impl PathRouter {
             hairpin: Arc::new(HairpinHub::new()),
         });
         let task = tokio::spawn(async move {
+            // Connections live in a JoinSet owned by THIS task, so stopping the router (aborting
+            // this task) drops the set and aborts every in-flight connection with it. A bare
+            // `tokio::spawn` per connection outlived the router: proxied keep-alive connections and
+            // WebSocket hairpins kept flowing through a front door the host had turned off.
+            let mut conns = tokio::task::JoinSet::new();
             loop {
+                while conns.try_join_next().is_some() {}
                 let Ok((client, _)) = listener.accept().await else {
                     break;
                 };
                 let state = Arc::clone(&state);
-                tokio::spawn(async move {
+                conns.spawn(async move {
                     if let Err(_e) = handle_client(client, &state).await {
                         // Quiet by default — clients retry; avoid log spam on probe noise.
                     }
@@ -177,6 +183,16 @@ impl PathRouter {
 
     pub fn local_port(&self) -> u16 {
         self.local_addr.port()
+    }
+}
+
+/// Dropping a tokio `JoinHandle` DETACHES its task rather than stopping it, so without this a
+/// dropped router kept listening on its port forever: the Mac host's "stop hosting" left :8675
+/// bound, and the next start failed to bind it three times and came up with no path proxy at all
+/// (found by the e2e `multirelay` step toggling B's relay off and on).
+impl Drop for PathRouter {
+    fn drop(&mut self) {
+        self._task.abort();
     }
 }
 

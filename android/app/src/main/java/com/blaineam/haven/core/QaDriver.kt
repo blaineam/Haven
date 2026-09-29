@@ -486,6 +486,9 @@ object QaDriver {
         o.put("relay_first", relayFirst)
         o.put("heavy_work", relayFirst.optJSONObject("heavy_work"))
         o.put("launch", QaStats.launch())
+        o.put("relay_backoff", JSONObject()
+            .put("pending_enrollment", JSONArray(runCatching { HavenNet.qaPendingEnrollment }.getOrDefault(emptyList())))
+            .put("pending_enrollment_refusals", QaStats.count("pending_enrollment_refusals")))
         o.put("contacts", JSONArray(HavenNet.contacts.map { JSONObject().put("hex", it.idHex).put("name", it.name) }))
         // Screen share (e2e `screenshare`): lifecycle, consent, FGS ordering, capture, sender, encoder.
         val fgsAt = QaStats.shareFgsReadyAtMs; val capAt = QaStats.shareCaptureStartAtMs

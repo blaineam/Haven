@@ -39,6 +39,8 @@ class PendingEnrollment {
         return nowMs >= at && nowMs - at < WINDOW_MS
     }
     fun anyPending(nowMs: Long): Boolean = adoptedAtMs.keys.any { isPending(it, nowMs) }
+    /** Relays still inside their window, sorted (DEBUG qa dump). */
+    fun pendingRelays(nowMs: Long): List<String> = adoptedAtMs.keys.filter { isPending(it, nowMs) }.sorted()
 
     /** Only a REFUSAL from a still-pending relay is special; an outage is not enrollment's to fix. */
     fun onFailure(relay: String, forbidden: Boolean, nowMs: Long): Decision =

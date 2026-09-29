@@ -34,6 +34,7 @@ enum QaMediaStats {
     static func authoredEnqueued(_ refs: [String]) {
         #if DEBUG
         lock.lock(); seq += 1
+        counts["authored_refs_enqueued", default: 0] += refs.count
         for r in refs where enqueuedAt[r] == nil { enqueuedAt[r] = seq }
         if enqueuedAt.count > 5000 { enqueuedAt.removeAll() }
         lock.unlock()
@@ -52,6 +53,11 @@ enum QaMediaStats {
     }
 
     #if DEBUG
+    static func count(_ key: String) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return counts[key] ?? 0
+    }
+
     /// The dump's `relay_first` object. `ownPosts` = (event id, real media refs) of MY posts in the
     /// feed: each one broadcast this launch is checked — every ref must have been enqueued for the
     /// relay BEFORE the broadcast, or it counts toward `broadcast_before_enqueue` (must stay 0).

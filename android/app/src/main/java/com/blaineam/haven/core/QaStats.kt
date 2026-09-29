@@ -23,6 +23,8 @@ object QaStats {
         synchronized(lock) { counts[key] = (counts[key] ?: 0L) + n }
     }
 
+    fun count(key: String): Long = synchronized(lock) { counts[key] ?: 0L }
+
     fun declined(why: String) {
         if (!BuildConfig.DEBUG) return
         synchronized(lock) { counts["serve_declined"] = (counts["serve_declined"] ?: 0L) + 1; lastDecline = why }
@@ -32,6 +34,7 @@ object QaStats {
         if (!BuildConfig.DEBUG) return
         synchronized(lock) {
             seq++
+            counts["authored_refs_enqueued"] = (counts["authored_refs_enqueued"] ?: 0L) + refs.size
             for (r in refs) if (r !in enqueuedAt) enqueuedAt[r] = seq
             if (enqueuedAt.size > 5000) enqueuedAt.clear()
         }
@@ -59,7 +62,8 @@ object QaStats {
         val o = JSONObject()
         for (k in listOf("served_direct_friend", "served_direct_friend_bytes", "served_direct_own",
             "relay_hints_sent", "relay_hints_deferred", "received_via_relay", "received_via_direct",
-            "media_requests_from_friends", "serve_declined")) o.put(k, counts[k] ?: 0L)
+            "media_requests_from_friends", "serve_declined", "authored_refs_enqueued",
+            "pending_enrollment_refusals")) o.put(k, counts[k] ?: 0L)
         o.put("last_decline", lastDecline)
         o.put("authored_media_posts_checked", checked)
         o.put("broadcast_before_enqueue", early)

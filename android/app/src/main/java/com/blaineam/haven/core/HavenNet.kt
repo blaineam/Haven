@@ -7185,6 +7185,9 @@ object HavenNet : InboundListener {
 
     // ---- Pending enrollment (friend-invite relays that 403 until the inviter enrolls us) ----------
     private val pendingEnrollment = PendingEnrollment()
+    /** DEBUG qa dump (`relay_backoff`): ticket relays still expected to refuse us. */
+    val qaPendingEnrollment: List<String>
+        get() = synchronized(pendingEnrollment) { pendingEnrollment.pendingRelays(System.currentTimeMillis()) }
     @Volatile private var pendingRetryJob: Job? = null
     @Volatile private var lastPendingTriggerMs = 0L
 
@@ -7198,6 +7201,7 @@ object HavenNet : InboundListener {
             pendingEnrollment.onFailure(nodeHex, forbidden = true, nowMs = System.currentTimeMillis())
         }
         if (d !is PendingEnrollment.Decision.RetrySoon) return false
+        QaStats.bump("pending_enrollment_refusals")
         if (pendingRetryJob?.isActive != true) {
             pendingRetryJob = scope.launch {
                 delay(d.afterMs)

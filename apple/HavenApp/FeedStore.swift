@@ -4032,6 +4032,26 @@ final class FeedStore: ObservableObject {
         ]
     }
 
+    /// Per-relay backoff (RelayHealth) annotated with the pending-enrollment state: a ticket relay
+    /// that refuses us before the inviter enrolls us is on a flat short retry, reported as
+    /// `reason: "pendingEnrollment"` — the newfriend step asserts it never escalates to a long window.
+    private func qaRelayBackoff() -> [String: Any] {
+        var out = RelayHealth.shared.qaSnapshot()
+        let pending = RelayEnrollment.pendingRelays()
+        var relays = (out["relays"] as? [[String: Any]]) ?? []
+        for i in relays.indices where pending.contains(((relays[i]["relay"] as? String) ?? "").lowercased()) {
+            relays[i]["reason"] = "pendingEnrollment"
+        }
+        for r in pending where !relays.contains(where: { (($0["relay"] as? String) ?? "").lowercased() == r }) {
+            relays.append(["relay": r, "fails": 0, "backoff_until_ms": 0, "backoff_remaining_ms": 0,
+                           "reason": "pendingEnrollment"])
+        }
+        out["relays"] = relays
+        out["pending_enrollment"] = pending
+        out["pending_enrollment_refusals"] = QaMediaStats.count("pending_enrollment_refusals")
+        return out
+    }
+
     private func qaWriteDumpFile(_ snapshot: [QaCircleSnapshot], accountHex: String, tsMs: UInt64,
                                  delivery: String, treeChain: String) {
         guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
@@ -4145,7 +4165,7 @@ final class FeedStore: ObservableObject {
             "pending_connections": ConnectionsStore.shared.pending.map { $0.idHex },
             "circle_relays": Dictionary(circles.map { ($0["id"] as? String ?? "", SharedStore.hasMailbox($0["id"] as? String ?? "")) },
                                         uniquingKeysWith: { a, _ in a }),
-            "relay_backoff": RelayHealth.shared.qaSnapshot(),
+            "relay_backoff": qaRelayBackoff(),
             // Liveness: strictly increasing while the driver is healthy. The orchestrator watches it
             // to tell a FROZEN dump apart from a device that genuinely received nothing — they are
             // indistinguishable from the file alone, and they need opposite fixes.

@@ -17,12 +17,18 @@
 // Driver contract (DEBUG builds only — see docs/QA.md "qa-cmd v2"):
 //   drop {op,…} JSON at the platform's qa-cmd path, poke the app (deep link /
 //   broadcast), then read qa-dump.json back. Ops: post, story, dm, react, comment,
-//   profile, circle_create, circle_invite, file, music_post, dump, mark_read.
+//   profile, circle_create, circle_invite, file, music_post, dump, mark_read, plus the step-specific
+//   heavy_work_override, media_ask, relay_backoff_reset, screen_share, invite_link, connect_link.
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, rmSync, statSync } from 'node:fs';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ChannelFreshness, judgeDump, fmtDuration, FRESHNESS_DEFAULTS } from './lib/dump-freshness.mjs';
+import {
+  num, delta, parseUiNodes, findNode, center, CONSENT, isConsentSurface, holdsMediaProjection, auditShareLog,
+  longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields, persistExportAllowance,
+  reactLatency, ingestedFirst, feedNotGatedOnDmWarm,
+} from './lib/e2e-steps.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = process.env.QA_OUT || join(ROOT, 'build', `e2e-${stamp()}`);
@@ -35,7 +41,7 @@ const RUN_NONCE = Date.now();   // per-run fixture salt — see the satellite la
 const REPORT = [];
 const PERF = [];
 const HISTORY = join(ROOT, 'build', 'e2e-history.jsonl');
-const STEPS = (process.env.E2E_STEPS || 'profile,circle,post,story,file,music,dm,call,react,comment,media,satellite,invite_offline').split(',');
+const STEPS = (process.env.E2E_STEPS || 'newfriend,profile,circle,post,story,file,music,dm,relayfirst,audience,call,screenshare,callgate,react,comment,media,satellite,launch,responsive,invite_offline').split(',');
 
 // Convergence budgets (ms). Generous but bounded; tune via env.
 // One active-cadence mailbox poll is ~30-45s; a budget must cover a full poll plus
@@ -49,7 +55,35 @@ const BUDGET = {
   // PULL on their own >=2-min self-sync pass — in this push-less sim fleet that
   // pass is the floor. Real phones get the syncSelf push wake and beat this.
   settings: +(process.env.E2E_BUDGET_SETTINGS || 180_000),
+  // newfriend (measured from APPROVAL; the stub leg gets its usual 2x).
+  nfRequest: +(process.env.E2E_BUDGET_NF_REQUEST || 60_000),
+  nfFriend: +(process.env.E2E_BUDGET_NF_FRIEND || 20_000),
+  nfText: +(process.env.E2E_BUDGET_NF_TEXT || 20_000),
+  nfInviterText: +(process.env.E2E_BUDGET_NF_INVITER_TEXT || 30_000),
+  nfDm: +(process.env.E2E_BUDGET_NF_DM || 30_000),
+  nfMaxBackoff: +(process.env.E2E_NF_MAX_BACKOFF || 30_000),
+  // screenshare / callgate
+  shareFrame: +(process.env.E2E_BUDGET_SHARE_FRAME || 20_000),
+  gateClose: +(process.env.E2E_BUDGET_GATE_CLOSE || 10_000),
+  gateLift: +(process.env.E2E_BUDGET_GATE_LIFT || 5_000),
+  callGateWindow: +(process.env.E2E_CALLGATE_WINDOW || 15_000),
+  // launch
+  launchIos: +(process.env.E2E_BUDGET_LAUNCH_IOS || 5_000),
+  launchAndroid: +(process.env.E2E_BUDGET_LAUNCH_ANDROID || 8_000),
+  catchup: +(process.env.E2E_BUDGET_CATCHUP || 15_000),
+  mailboxPass: +(process.env.E2E_BUDGET_MAILBOX_PASS || 15_000),
+  launchSettle: +(process.env.E2E_LAUNCH_SETTLE || 5_000),
+  // responsive (fix/responsiveness `perf` fields)
+  stallMax: +(process.env.E2E_BUDGET_STALL_MAX || 250),
+  maxStalls: +(process.env.E2E_MAX_STALLS || 3),
+  engineP95: +(process.env.E2E_BUDGET_ENGINE_P95 || 300),
+  react: +(process.env.E2E_BUDGET_REACT || 500),
+  idle: +(process.env.E2E_IDLE_MS || 60_000),
 };
+/** How long the newfriend step holds the inviter's approval (so pre-enrollment 403s happen). */
+const NF_HOLD_MS = +(process.env.E2E_NF_HOLD_MS || 20_000);
+/** Release gate: the responsiveness fields MUST be in the dump (absent = FAIL, not SKIPPED). */
+const REQUIRE_PERF = process.env.E2E_REQUIRE_PERF === '1';
 
 function stamp() { return new Date().toISOString().replace(/[:T]/g, '-').slice(0, 16); }
 function log(m) { const s = `[e2e ${new Date().toISOString().slice(11, 19)}] ${m}`; console.log(s); appendFileSync(join(OUT, 'run.log'), s + '\n'); }
@@ -631,7 +665,11 @@ function bootstrap() {
   // E2E_BOOTSTRAP=skip lets a dev reuse a hot fleet.
   if (process.env.E2E_BOOTSTRAP === 'skip') { log('bootstrap skipped (E2E_BOOTSTRAP=skip)'); return; }
   const r = spawnSync('bash', [join(ROOT, 'Scripts/qa-e2e-bootstrap.sh')], {
-    encoding: 'utf8', env: { ...process.env, QA_OUT: OUT, E2E_RUN_PID: String(process.pid) }, stdio: 'inherit',
+    encoding: 'utf8', stdio: 'inherit',
+    // newfriend needs A and B to start as strangers (see stepNewFriend); every other run keeps the
+    // pre-exchanged friendship the rest of the suite was written against.
+    env: { ...process.env, QA_OUT: OUT, E2E_RUN_PID: String(process.pid),
+           E2E_PREFRIEND: STEPS.includes('newfriend') ? '0' : (process.env.E2E_PREFRIEND || '1') },
   });
   if (r.status !== 0) { console.error('bootstrap failed'); process.exit(1); }
 }
@@ -711,20 +749,15 @@ async function main() {
   const B = stubDump?.account_hex || process.env.HAVEN_STUB_ACCOUNT
     || (existsSync(stubHexPath) ? readFileSync(stubHexPath, 'utf8').trim() : '');
 
-  // 1. profile edit propagates across account A devices
-  if (STEPS.includes('profile')) {
-    const nick = `${MARKER}_Nick`;
-    await op(devices.ios, { op: 'profile', name: nick });
-    await convergeAll(fleet.filter((x) => x !== 'ios'), (j) => j.profile?.name === nick, BUDGET.settings, 'profile edit');
-  }
-
-  // 2. circle create + invite friend B
+  // 2. circle create + invite friend B. Also the shared circle every B-facing step needs, so a
+  //    targeted run (E2E_STEPS=relayfirst) gets one without naming `circle`.
   let circleId = null;
-  if (STEPS.includes('circle')) {
+  async function ensureSharedCircle() {
+    if (circleId) return circleId;
     const cname = `${MARKER}_Circle`;
     await op(devices.ios, { op: 'circle_create', name: cname });
     const mine = await freshDump(devices.ios);
-    circleId = mine?.circles?.find((c) => c.name === cname)?.id;
+    circleId = mine?.circles?.find((c) => c.name === cname)?.id || null;
     score('circle created on iOS', !!circleId);
     if (circleId && B) {
       await op(devices.ios, { op: 'circle_invite', circle_id: circleId, dm_to: B });
@@ -733,8 +766,619 @@ async function main() {
       perfGate('circle membership', 'stub', await converge(devices.stub,
         (j) => j.circles?.some((c) => c.name === cname), BUDGET.text * 2));
       await convergeAll(fleet.filter((x) => x !== 'ios'), (j) => j.circles?.some((c) => c.name === cname), BUDGET.settings, 'circle (own devices)');
+      // The invite can surface a connection request on A's other devices (see the approval passes).
+      await Promise.all(all.map((n) => op(devices[n], { op: 'approve_connections' }, 1500)));
+    }
+    return circleId;
+  }
+  // ── shared plumbing for the newer steps (relayfirst, newfriend, screenshare, callgate, audience,
+  //    launch, responsive). Pure decisions live in Scripts/lib/e2e-steps.mjs (unit-tested). ───────
+
+  const rf = (j) => j?.relay_first || {};
+  const knows = (j, hex) => (j?.contacts || []).some((c) => String(c.hex || '').toLowerCase() === String(hex || '').toLowerCase());
+  const mediaPresent = (body) => (j) => j.posts?.some((p) => p.body === body && p.media_present?.length && p.media_present.every(Boolean));
+  const hasPost = (body) => (j) => j.posts?.some((p) => p.body === body);
+  /** Fresh dumps of several legs at once (legs not in the fleet are skipped). */
+  const snap = async (names) => Object.fromEntries(await Promise.all(
+    names.filter((n) => devices[n]).map(async (n) => [n, await freshDump(devices[n])])));
+  /** Converge, but report the latency since `t0` (an earlier action) rather than since the poll began. */
+  const convergeSince = async (dev, pred, base, t0) => {
+    const ms = await converge(dev, pred, base);
+    return ms < 0 ? -1 : Date.now() - t0;
+  };
+  /** perfGate with an explicit budget — several of these legs converge concurrently, so the
+   *  "last converge's budget" default would be whichever finished last. */
+  const gate = (step, name, ms, base) => perfGate(step, name, ms, budgetFor(devices[name], base));
+  // Media refs are content-addressed: a fixture posted twice is the SAME blob, and a receiver that
+  // already holds it proves nothing about how it would have got it. Distinct pixels per use.
+  let photoSeq = 0;
+  const distinctPhoto = (tag) => {
+    const out = join(OUT, `${tag}.jpg`);
+    const w = 1180 - photoSeq * 13 - (RUN_NONCE % 13);
+    const h = 900 - photoSeq - (RUN_NONCE % 17);
+    photoSeq += 1;
+    execFileSync('sips', ['--resampleHeightWidth', String(h), String(w), PHOTO, '--out', out], { stdio: 'ignore' });
+    return out;
+  };
+  const distinctVideo = (tag) => {
+    const out = join(OUT, `${tag}.mp4`);
+    const box = 8 + (photoSeq++ % 40) + (RUN_NONCE % 23);
+    const r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', VIDEO, '-vf',
+      `drawbox=x=0:y=0:w=${box}:h=${box}:color=red@1:t=fill`, '-c:a', 'copy', out], { encoding: 'utf8' });
+    if (r.status === 0 && existsSync(out)) return out;
+    log(`WARN distinctVideo(${tag}): ffmpeg unavailable/failed — posting the shared fixture (${(r.stderr || '').trim().slice(0, 120)})`);
+    return VIDEO;
+  };
+  const inCall = (j) => j?.call?.in_call === true;
+  const callOver = (j) => j?.call != null && !(j.call.in_call || j.call.ringing);
+
+  // ── newfriend: a FRESH friendship through the real invite → accept → approve path ────────────
+  //
+  // Roles follow the only topology that exercises pre-enrollment: B (the stub) hosts the relay and
+  // INVITES; A (iOS) ACCEPTS, adopts B's relay from the ticket, and posts BEFORE B approves, so its
+  // writes to B's relay are refused (403, not enrolled yet). The bootstrap leaves A and B strangers
+  // (E2E_PREFRIEND=0) and does not pre-authorize A on the relay. Timings are measured from APPROVAL.
+  async function stepNewFriend() {
+    const ios = devices.ios, stub = devices.stub;
+    const [a0, b0] = await Promise.all([freshDump(ios), freshDump(stub)]);
+    const aHex = a0?.account_hex || '';
+    if (!aHex || !B) { score('newfriend: both identities known', false, `A=${aHex.slice(0, 8)} B=${String(B).slice(0, 8)}`); return; }
+    const strangers = !knows(a0, B) && !knows(b0, aHex);
+    score('newfriend: A and B start as strangers', strangers, strangers ? ''
+      : 'already contacts — the bootstrap prefriended them (E2E_PREFRIEND / E2E_BOOTSTRAP=skip); nothing fresh to measure');
+    if (!strangers) return;
+
+    await op(stub, { op: 'invite_link' }, 2000);
+    let link = '';
+    await converge(stub, (j) => (link = j.invite_link || '').includes('t='), 30_000);
+    score('newfriend: inviter minted a ticketed invite link', link.includes('t='));
+    if (!link.includes('t=')) return;
+
+    await op(ios, { op: 'relay_backoff_reset' }, 500);
+    const tAccept = Date.now();
+    await op(ios, { op: 'connect_link', uri: link }, 1500);
+    // Posted BEFORE approval — B's relay must refuse these until B enrolls A.
+    const preText = `${MARKER}_NF_PreText`, prePhoto = `${MARKER}_NF_PrePhoto`;
+    await op(ios, { op: 'post', body: preText, circle_id: 'default' }, 1500);
+    await op(ios, { op: 'post', body: prePhoto, media: 'photo', circle_id: 'default',
+      photo_path: ios.stage(distinctPhoto('nf-pre'), 'qa-nf-pre.jpg') }, 3000);
+    gate('newfriend: accept → request reaches the inviter', 'stub',
+      await convergeSince(stub, (j) => (j.pending_connections || []).includes(aHex) || knows(j, aHex), BUDGET.nfRequest, tAccept),
+      BUDGET.nfRequest);
+
+    const hold = Math.max(0, NF_HOLD_MS - (Date.now() - tAccept));
+    log(`newfriend: holding approval ${(hold / 1000).toFixed(0)}s so A's writes to B's relay hit pre-enrollment 403s`);
+    await sleep(hold);
+    const held = await freshDump(ios);
+    log(`newfriend: acceptor relay_backoff before approval: ${JSON.stringify(held?.relay_backoff || {})}`);
+    score('newfriend: acceptor adopted the inviter relay from the ticket (pending enrollment)',
+      (held?.relay_backoff?.pending_enrollment || []).length > 0, JSON.stringify(held?.relay_backoff?.pending_enrollment || []));
+
+    const tApprove = Date.now();
+    await op(stub, { op: 'approve_connections' }, 300);
+    const [fa, fb] = await Promise.all([
+      // The acceptor lists B as a contact from the moment it accepts; it is a FRIEND once the
+      // inviter's grant has come back.
+      convergeSince(ios, (j) => knows(j, B) && (j.friend_invites?.accepted || []).some((a) => a.granted), BUDGET.nfFriend, tApprove),
+      convergeSince(stub, (j) => knows(j, aHex) && !(j.pending_connections || []).includes(aHex), BUDGET.nfFriend, tApprove),
+    ]);
+    gate('newfriend: approval → friends [acceptor]', 'ios', fa, BUDGET.nfFriend);
+    gate('newfriend: approval → friends [inviter]', 'stub', fb, BUDGET.nfFriend);
+
+    // What A posted while it was still refused must arrive promptly after APPROVAL.
+    gate('newfriend: pre-approval text reaches the inviter (from approval)', 'stub',
+      await convergeSince(stub, hasPost(preText), BUDGET.nfText, tApprove), BUDGET.nfText);
+    gate('newfriend: pre-approval photo present on the inviter (from approval)', 'stub',
+      await convergeSince(stub, mediaPresent(prePhoto), BUDGET.mediaBlob, tApprove), BUDGET.mediaBlob);
+
+    // The inviter's first content reaches the acceptor — the path that used to take 10+ minutes
+    // (content sealed under a key commit the new member could not yet receive).
+    const invText = `${MARKER}_NF_InviterText`, invPhoto = `${MARKER}_NF_InviterPhoto`;
+    const tInv = Date.now();
+    await op(stub, { op: 'post', body: invText, circle_id: 'default' }, 500);
+    await op(stub, { op: 'post', body: invPhoto, media: 'photo', circle_id: 'default',
+      photo_path: stub.stage(distinctPhoto('nf-inviter'), 'qa-nf-inviter.jpg') }, 1500);
+    const txt = await convergeSince(ios, hasPost(invText), BUDGET.nfInviterText, tInv);
+    gate('newfriend: inviter\'s first text visible on the acceptor', 'ios', txt, BUDGET.nfInviterText);
+    log(`newfriend: accept → inviter text on acceptor = ${txt < 0 ? 'never' : ((Date.now() - tAccept) / 1000).toFixed(1) + 's'} (includes the ${NF_HOLD_MS / 1000}s approval hold)`);
+    gate('newfriend: inviter\'s first photo present on the acceptor', 'ios',
+      await convergeSince(ios, mediaPresent(invPhoto), BUDGET.mediaBlob, tInv), BUDGET.mediaBlob);
+
+    const dmBody = `${MARKER}_NF_DM`;
+    const tDm = Date.now();
+    await op(ios, { op: 'dm', dm_to: B, body: dmBody }, 1000);
+    gate('newfriend: acceptor\'s DM reaches the inviter', 'stub',
+      await convergeSince(stub, (j) => Object.values(j.dms || {}).flat().some((m) => m.body === dmBody), BUDGET.nfDm, tDm),
+      BUDGET.nfDm);
+
+    // The 403s must have been absorbed as pending enrollment, never parked in a long backoff.
+    const after = await freshDump(ios);
+    const rb = after?.relay_backoff || {};
+    log(`newfriend: acceptor relay_backoff after: ${JSON.stringify(rb)}`);
+    score('newfriend: pre-enrollment 403s happened and were absorbed as pendingEnrollment',
+      num(rb.pending_enrollment_refusals) > 0,
+      `refusals=${num(rb.pending_enrollment_refusals)} relays=${JSON.stringify((rb.relays || []).map((r) => ({ relay: String(r.relay).slice(0, 8), reason: r.reason, fails: r.fails })))}`);
+    PERF.push({ step: 'newfriend: acceptor peak relay backoff', device: 'ios', ms: num(rb.peak_backoff_ms), budget: BUDGET.nfMaxBackoff });
+    score(`newfriend: inviter relay never parked in long backoff (peak ${(num(rb.peak_backoff_ms) / 1000).toFixed(0)}s / ${BUDGET.nfMaxBackoff / 1000}s)`,
+      num(rb.peak_backoff_ms) <= BUDGET.nfMaxBackoff);
+  }
+
+  /** After newfriend: restore the baseline every later step was written against — every A device
+   *  authorized on B's relay (the bootstrap skipped it) and any pending request approved. */
+  function restoreFleetAfterNewFriend() {
+    const members = join(OUT, 'members.txt');
+    if (existsSync(members)) {
+      const r = spawnSync('bash', [join(ROOT, 'Scripts/qa-e2e-authorize.sh'), members], { encoding: 'utf8' });
+      log(`newfriend: authorized the fleet on B's relay (${(r.stdout || r.stderr || '').trim()})`);
+    } else log(`WARN newfriend: ${members} missing — A's devices were never authorized on B's relay`);
+  }
+
+  // ── relayfirst: the relay is the media path ───────────────────────────────────────────────────
+  async function stepRelayFirst() {
+    const shared = await ensureSharedCircle();
+    if (!shared || !B) { score('relayfirst (needs a circle shared with B)', false, 'circle creation failed or B unknown'); return; }
+    const ios = devices.ios;
+    const legs = all.filter((n) => devices[n]);
+    const before = await snap(legs);
+    const tagP = `${MARKER}_RF_Photo`, tagV = `${MARKER}_RF_Video`;
+    await op(ios, { op: 'post', body: tagP, media: 'photo', circle_id: shared,
+      photo_path: ios.stage(distinctPhoto('relayfirst'), 'qa-relayfirst.jpg') }, 3000);
+    // Short settle on purpose: the upload-honesty check below wants to SEE the video pending.
+    await op(ios, { op: 'post', body: tagV, media: 'video', circle_id: shared,
+      video_path: ios.stage(distinctVideo('relayfirst'), 'qa-relayfirst.mp4') }, 1500);
+    const pendingSeen = await converge(ios, (j) => num(j.pending_user_uploads) > 0, 20_000);
+    const pj = await freshDump(ios);
+    const queued = delta(rf(before.ios), rf(pj), 'authored_refs_enqueued');
+    // A local relay can swallow a small clip before the first dump; the enqueue counter is then the
+    // evidence the upload went through the pending state at all.
+    score('relayfirst: authored uploads went through the pending (sync badge) state',
+      pendingSeen >= 0 || queued > 0, `pending seen=${pendingSeen >= 0} authored_refs_enqueued Δ=${queued}`);
+    gate('relayfirst: pending uploads drain once the relay holds them', 'ios',
+      await converge(ios, (j) => num(j.pending_user_uploads) === 0, BUDGET.mediaBlob), BUDGET.mediaBlob);
+
+    const receivers = legs.filter((n) => n !== 'ios');
+    await convergeAll(receivers, mediaPresent(tagP), BUDGET.mediaBlob, 'relayfirst: photo present');
+    await convergeAll(receivers, mediaPresent(tagV), BUDGET.mediaBlob, 'relayfirst: video present');
+    const after = await snap(legs);
+    const d = (n, k) => delta(rf(before[n]), rf(after[n]), k);
+    const show = (n, ks) => ks.map((k) => `${k}Δ=${d(n, k)}`).join(' ');
+    score('relayfirst: B received via the relay', d('stub', 'received_via_relay') > 0, show('stub', ['received_via_relay', 'received_via_direct']));
+    score('relayfirst: B received nothing by direct peer stream', d('stub', 'received_via_direct') === 0, show('stub', ['received_via_direct']));
+    for (const n of fleet.filter((x) => devices[x])) {
+      score(`relayfirst: ${n} (account A) streamed nothing directly to friends`,
+        d(n, 'served_direct_friend') === 0 && d(n, 'served_direct_friend_bytes') === 0,
+        show(n, ['served_direct_friend', 'served_direct_friend_bytes', 'relay_hints_sent', 'media_requests_from_friends']));
+    }
+    score('relayfirst: authored media enqueued for the relay BEFORE the broadcast [ios]',
+      num(rf(after.ios).broadcast_before_enqueue) === 0 && num(rf(after.ios).authored_media_posts_checked) >= 2,
+      `broadcast_before_enqueue=${rf(after.ios).broadcast_before_enqueue} checked=${rf(after.ios).authored_media_posts_checked}`);
+
+    // THE GATE, forced: heavy-work suspended (as a call / Low Power Mode / heat would) → a friend's
+    // direct ask is declined, nothing streams; lifted → answered with a relay hint again.
+    const ref = (after.ios?.posts || []).find((p) => p.body === tagP)?.media_refs?.[0];
+    if (!ref) { score('relayfirst gate: photo ref known', false); return; }
+    const gated = ['ios', ...(devices.android ? ['android'] : [])];
+    await Promise.all(gated.map((n) => op(devices[n], { op: 'heavy_work_override', suspend: true, reason: 'qa' }, 1500)));
+    for (const n of gated) {
+      const ms = await converge(devices[n], (j) => suspendedFor(j.heavy_work, 'forced=qa'), 20_000);
+      score(`relayfirst gate: override closes the gate [${n}]`, ms >= 0, JSON.stringify((await freshDump(devices[n]))?.heavy_work));
+    }
+    const g0 = await snap(gated);
+    await op(devices.stub, { op: 'media_ask', ref }, 1500);
+    const asked = await converge(devices.ios, (j) => num(rf(j).media_requests_from_friends) > num(rf(g0.ios).media_requests_from_friends), 30_000);
+    await sleep(5000);
+    const g1 = await snap(gated);
+    for (const n of gated) {
+      const dd = (k) => delta(rf(g0[n]), rf(g1[n]), k);
+      if (dd('media_requests_from_friends') <= 0) {
+        if (n === 'ios') score('relayfirst gate: B\'s direct ask reached A [ios]', false, `asked=${asked}`);
+        else log(`NOTE relayfirst gate: B's ask did not reach ${n} — no decision to assert there`);
+        continue;
+      }
+      score(`relayfirst gate: suspended ${n} declined B's direct ask`,
+        dd('serve_declined') > 0 && String(rf(g1[n]).last_decline || '').includes('forced=qa'),
+        `declinedΔ=${dd('serve_declined')} last=${rf(g1[n]).last_decline}`);
+      score(`relayfirst gate: suspended ${n} streamed nothing and hinted nothing`,
+        dd('served_direct_friend_bytes') === 0 && dd('relay_hints_sent') === 0,
+        `bytesΔ=${dd('served_direct_friend_bytes')} hintsΔ=${dd('relay_hints_sent')}`);
+    }
+    await Promise.all(gated.map((n) => op(devices[n], { op: 'heavy_work_override', suspend: false }, 1500)));
+    for (const n of gated) {
+      const ms = await converge(devices[n], (j) => liftedFrom(j.heavy_work, 'forced=qa'), 20_000);
+      score(`relayfirst gate: override lifted [${n}]`, ms >= 0, JSON.stringify((await freshDump(devices[n]))?.heavy_work));
+    }
+    const l0 = await snap(['ios']);
+    await op(devices.stub, { op: 'media_ask', ref }, 1500);
+    await converge(devices.ios, (j) => num(rf(j).media_requests_from_friends) > num(rf(l0.ios).media_requests_from_friends), 30_000);
+    await sleep(5000);
+    const l1 = await snap(['ios']);
+    const ld = (k) => delta(rf(l0.ios), rf(l1.ios), k);
+    if (l1.ios?.heavy_work?.suspended) {
+      score('relayfirst gate: normal serving resumes after the lift [ios]', true,
+        `SKIPPED — the gate is still closed for ${l1.ios.heavy_work.reason} (the simulator mirrors the host's thermal state)`);
+    } else {
+      score('relayfirst gate: normal serving resumes after the lift — a relay hint, not a stream [ios]',
+        ld('relay_hints_sent') > 0 && ld('served_direct_friend_bytes') === 0,
+        `hintsΔ=${ld('relay_hints_sent')} bytesΔ=${ld('served_direct_friend_bytes')} declinedΔ=${ld('serve_declined')}`);
     }
   }
+
+  // ── screenshare: Android shares its screen in a call; the Apple peer routes it by stream id ────
+  //
+  // Android (account A) ↔ the stub (account B): the only cross-account pair the emulator can call
+  // (iOS and Android are the SAME account). The stub runs the Apple WebRTCCall/CallManager code the
+  // iPhone runs, so its dump proves the Apple-side routing fix. Consent is the REAL MediaProjection
+  // dialog, driven through uiautomator — never pre-granted with appops.
+  const adbText = (args) => String(shOk('adb', args) || '');
+  const uiNodes = () => {
+    if (shOk('adb', ['shell', 'uiautomator', 'dump', '/sdcard/haven-ui.xml']) === null) return [];
+    return parseUiNodes(adbText(['exec-out', 'cat', '/sdcard/haven-ui.xml']));
+  };
+  const tap = (node) => { const [x, y] = center(node); shOk('adb', ['shell', 'input', 'tap', String(x), String(y)]); };
+  /** Drive the consent surface: 'entire' | 'single' | 'cancel'. Returns {ok, why, seen}. */
+  async function driveConsent(choice, budgetMs = 25_000) {
+    const t0 = Date.now();
+    let picked = false, confirmed = false, sawSurface = false, opened = 0, seen = [];
+    const want = choice === 'entire' ? CONSENT.entire : CONSENT.single;
+    const other = choice === 'entire' ? CONSENT.single : CONSENT.entire;
+    while (Date.now() - t0 < budgetMs) {
+      const nodes = uiNodes();
+      seen = nodes.filter((n) => n.text || n.desc).map((n) => n.text || n.desc).slice(0, 25);
+      if (confirmed && choice === 'single') {
+        // "Next" on a single-app share opens an app picker: share Haven itself.
+        const app = findNode(nodes, /^Haven$/);
+        if (app) { tap(app); return { ok: true, why: 'picked Haven in the app chooser', seen }; }
+        await sleep(800); continue;
+      }
+      if (!isConsentSurface(nodes)) {
+        if (sawSurface) return { ok: confirmed || choice === 'cancel', why: 'consent surface closed', seen };
+        await sleep(800); continue;
+      }
+      sawSurface = true;
+      if (choice === 'cancel') {
+        const c = findNode(nodes, CONSENT.cancel);
+        if (c) { tap(c); await sleep(1000); return { ok: true, why: 'tapped cancel', seen }; }
+        await sleep(700); continue;
+      }
+      const w = findNode(nodes, want), o = findNode(nodes, other), confirm = findNode(nodes, CONSENT.confirm);
+      if (!picked) {
+        if (w && o) { tap(w); picked = true; await sleep(800); continue; }           // list open: choose ours
+        if (w) picked = true;                                                          // spinner already shows ours
+        else if (o) {                                                                  // spinner shows the other: open it
+          if (++opened > 2) return { ok: false, why: `no ${choice === 'single' ? 'single-app' : 'entire-screen'} option offered`, seen };
+          tap(o); await sleep(800); continue;
+        } else {                                                                       // no chooser at all (older dialog)
+          if (choice === 'single') return { ok: false, why: 'dialog offers no app chooser', seen };
+          picked = true;
+        }
+      }
+      if (confirm) {
+        tap(confirm); confirmed = true; await sleep(1500);
+        if (choice !== 'single') return { ok: true, why: `confirmed (${confirm.text})`, seen };
+        continue;
+      }
+      await sleep(700);
+    }
+    return { ok: false, why: sawSurface ? 'could not complete the consent surface' : 'consent surface never appeared', seen };
+  }
+  const projectionHeld = () => holdsMediaProjection(adbText(['shell', 'dumpsys', 'activity', 'services', AND_PKG]));
+  const androidAlive = () => adbText(['shell', 'pidof', AND_PKG]).trim().length > 0;
+
+  async function stepScreenShare() {
+    const and = devices.android, stub = devices.stub;
+    if (!and || !B) { score('screenshare (needs the android leg and B)', false, !and ? 'no android device' : 'B unknown'); return; }
+    shOk('adb', ['shell', 'appops', 'set', AND_PKG, 'PROJECT_MEDIA', 'default']);   // real consent only
+    shOk('adb', ['logcat', '-c']);
+    await op(and, { op: 'call', dm_to: B });
+    await converge(stub, (j) => j.call?.ringing || j.call?.in_call, BUDGET.text);
+    await op(stub, { op: 'call_accept' });
+    const live = await Promise.all([converge(and, inCall, BUDGET.mediaEvent), converge(stub, inCall, BUDGET.mediaEvent)]);
+    score('screenshare: android↔stub call is live', live.every((ms) => ms >= 0), JSON.stringify(live));
+    if (!live.every((ms) => ms >= 0)) { await op(and, { op: 'call_end' }, 6000); return; }
+    await sleep(4000);
+    const cam0 = remoteSlots((await freshDump(stub))?.call).find((s) => s.camera)?.camera || null;
+    log(`screenshare: stub camera slot before any share: ${JSON.stringify(cam0)}`);
+    const shareState = async () => (await freshDump(and))?.screen_share || {};
+    const noScreenOnStub = (j) => !sharedScreen(j?.call);
+    let granted = 0;
+
+    const ask = async () => { and.qaWrite({ op: 'screen_share', on: true }); and.poke(); await sleep(1500); };
+    const stop = async (label) => {
+      await op(and, { op: 'screen_share', on: false }, 2000);
+      gate(`screenshare: stop removes the screen track on the peer [${label}]`, 'stub',
+        await converge(stub, (j) => inCall(j) && noScreenOnStub(j), BUDGET.shareFrame), BUDGET.shareFrame);
+      const st = await shareState();
+      score(`screenshare: android back to idle after stop [${label}]`, st.state === 'idle', JSON.stringify(st));
+      score(`screenshare: no mediaProjection FGS type left after stop [${label}]`, !projectionHeld());
+      const j = await freshDump(stub);
+      score(`screenshare: camera slot still present on the peer after stop [${label}]`,
+        !cam0 || remoteSlots(j?.call).some((s) => s.camera), JSON.stringify(remoteSlots(j?.call)));
+    };
+    const assertSharing = async (label, t0) => {
+      granted++;
+      const st0 = await converge(and, (j) => j.screen_share?.state === 'sharing' && num(j.screen_share?.frames_captured) > 0, BUDGET.shareFrame);
+      const st = await shareState();
+      score(`screenshare: android captured frames [${label}]`, st0 >= 0, JSON.stringify(st));
+      score(`screenshare: FGS mediaProjection ready BEFORE capture [${label}]`, st.fgs_ready_before_capture === true,
+        `fgs_ready=${st.fgs_ready} wait=${st.fgs_ready_ms}ms`);
+      score(`screenshare: screen sender params applied [${label}]`, st.sender_params_ok === true, `encoders=${JSON.stringify(st.encoders)}`);
+      score(`screenshare: capture long side ≤ 1280 [${label}]`, longSide(st.capture_w, st.capture_h) > 0 && longSide(st.capture_w, st.capture_h) <= 1280,
+        `${st.capture_w}x${st.capture_h}`);
+      gate(`screenshare: share start → first frame decoded on the peer [${label}]`, 'stub',
+        await convergeSince(stub, (j) => num(sharedScreen(j?.call)?.screen?.frames_decoded) > 0, BUDGET.shareFrame, t0), BUDGET.shareFrame);
+      const s1 = sharedScreen((await freshDump(stub))?.call);
+      await sleep(5000);
+      const s2 = sharedScreen((await freshDump(stub))?.call);
+      score(`screenshare: peer's screen frames keep growing [${label}]`,
+        num(s2?.screen?.frames_decoded) > num(s1?.screen?.frames_decoded), `${s1?.screen?.frames_decoded} → ${s2?.screen?.frames_decoded}`);
+      score(`screenshare: routed by stream id "screen" [${label}]`, (s2?.screen?.stream_ids || []).includes('screen'), JSON.stringify(s2?.screen));
+      score(`screenshare: peer frame long side ≤ 1280 [${label}]`,
+        longSide(s2?.screen?.width, s2?.screen?.height) > 0 && longSide(s2?.screen?.width, s2?.screen?.height) <= 1280,
+        `${s2?.screen?.width}x${s2?.screen?.height}`);
+      score(`screenshare: camera slot is a distinct track, not overwritten [${label}]`,
+        !!s2?.camera ? s2.camera.track_id !== s2.screen?.track_id : !cam0,
+        `camera=${s2?.camera?.track_id} screen=${s2?.screen?.track_id} camera-before=${cam0?.track_id}`);
+    };
+
+    // (2) DENY — nothing is sent, the call and the camera are untouched, nothing is left running.
+    let st = await shareState();
+    await ask();
+    let drove = await driveConsent('cancel');
+    log(`screenshare deny: ${JSON.stringify(drove)}`);
+    score('screenshare [deny]: consent dialog shown and cancelled', drove.ok, `${drove.why} — ${JSON.stringify(drove.seen)}`);
+    await converge(and, (j) => String(j.screen_share?.consent_result || '').startsWith('denied'), 20_000);
+    st = await shareState();
+    score('screenshare [deny]: denial recorded, share idle', String(st.consent_result).startsWith('denied') && st.state === 'idle', JSON.stringify(st));
+    const dj = await freshDump(stub);
+    score('screenshare [deny]: no screen track reached the peer', inCall(dj) && noScreenOnStub(dj), JSON.stringify(remoteSlots(dj?.call)));
+    score('screenshare [deny]: call continues on android', inCall(await freshDump(and)));
+    score('screenshare [deny]: no mediaProjection FGS type left running', !projectionHeld());
+    score('screenshare [deny]: app did not crash', androidAlive());
+
+    // (1) GRANT "Entire screen".
+    const attempts0 = num(st.consent_attempts);
+    await ask();
+    drove = await driveConsent('entire');
+    let t0 = Date.now();   // consent confirmed = the share starts
+    log(`screenshare entire: ${JSON.stringify(drove)}`);
+    score('screenshare [entire]: consent granted through the real dialog', drove.ok, `${drove.why} — ${JSON.stringify(drove.seen)}`);
+    if (drove.ok) { await assertSharing('entire', t0); await stop('entire'); }
+
+    // (3) Share AGAIN — tokens are single-use, so a fresh consent must be asked for, and it works.
+    const mid = await shareState();
+    await ask();
+    drove = await driveConsent('entire');
+    t0 = Date.now();
+    const again = await shareState();
+    score('screenshare [again]: a FRESH consent was requested', num(again.consent_attempts) > num(mid.consent_attempts) && num(mid.consent_attempts) > attempts0,
+      `attempts ${attempts0} → ${mid.consent_attempts} → ${again.consent_attempts}`);
+    score('screenshare [again]: consent granted', drove.ok, `${drove.why} — ${JSON.stringify(drove.seen)}`);
+    if (drove.ok) { await assertSharing('again', t0); await stop('again'); }
+
+    // (4) GRANT "A single app" (Android 14+ chooser) — pick Haven itself.
+    await ask();
+    drove = await driveConsent('single');
+    t0 = Date.now();
+    log(`screenshare single-app: ${JSON.stringify(drove)}`);
+    if (!drove.ok && /no single-app option|no app chooser/.test(drove.why)) {
+      score('screenshare [single app]: chooser offers a single-app option', true, `SKIPPED — ${drove.why}`);
+      const c = findNode(uiNodes(), CONSENT.cancel); if (c) tap(c);
+    } else {
+      score('screenshare [single app]: consent granted for one app', drove.ok, `${drove.why} — ${JSON.stringify(drove.seen)}`);
+      shOk('adb', ['shell', 'am', 'start', '-n', `${AND_PKG}/.MainActivity`]);   // back to Haven (the shared app)
+      if (drove.ok) { await assertSharing('single app', t0); await stop('single app'); }
+    }
+
+    // Logcat: every granted capture came after its FGS promotion, and nothing failed.
+    const audit = auditShareLog(adbText(['logcat', '-d', '-s', 'HavenScreenShare:*']));
+    score('screenshare: logcat — FGS-ready before EVERY capture start', audit.ordered && audit.captures >= granted,
+      `captures=${audit.captures} granted=${granted}`);
+    score('screenshare: logcat — no "screen share start failed" / SecurityException', audit.failures.length === 0,
+      audit.failures.slice(0, 3).join(' | '));
+    score('screenshare: app alive at the end', androidAlive());
+    await op(and, { op: 'call_end' }, 6000);
+    await convergeAll(['android', 'stub'], callOver, BUDGET.text, 'screenshare: call ended');
+  }
+
+  // ── callgate: a REAL call closes the heavy-work gate ─────────────────────────────────────────
+  async function stepCallGate() {
+    const shared = await ensureSharedCircle();
+    if (!shared || !B) { score('callgate (needs a circle shared with B)', false); return; }
+    const ios = devices.ios, stub = devices.stub;
+    await op(ios, { op: 'call', dm_to: B });
+    await converge(stub, (j) => j.call?.ringing || j.call?.in_call, BUDGET.text);
+    await op(stub, { op: 'call_accept' });
+    const live = await Promise.all([converge(ios, inCall, BUDGET.mediaEvent), converge(stub, inCall, BUDGET.mediaEvent)]);
+    score('callgate: ios↔stub call is live', live.every((ms) => ms >= 0), JSON.stringify(live));
+    if (!live.every((ms) => ms >= 0)) { await op(ios, { op: 'call_end' }, 6000); return; }
+    gate('callgate: the call closes A\'s heavy-work gate', 'ios',
+      await converge(ios, (j) => suspendedFor(j.heavy_work, 'haven-call'), BUDGET.gateClose), BUDGET.gateClose);
+    const m0 = await snap(['ios', 'stub']);
+    log(`callgate: gate A=${JSON.stringify(m0.ios?.heavy_work)} B=${JSON.stringify(m0.stub?.heavy_work)}`);
+    if (devices.android) log('NOTE callgate: android is not in this call (it shares account A with iOS), so its own gate is not asserted here');
+
+    const tag = `${MARKER}_CG_Photo`;
+    const tPost = Date.now();
+    await op(ios, { op: 'post', body: tag, media: 'photo', circle_id: shared,
+      photo_path: ios.stage(distinctPhoto('callgate'), 'qa-callgate.jpg') }, 3000);
+    gate('callgate: B still receives A\'s fresh photo mid-call', 'stub',
+      await convergeSince(stub, mediaPresent(tag), BUDGET.mediaBlob, tPost), BUDGET.mediaBlob);
+    const ref = ((await freshDump(ios))?.posts || []).find((p) => p.body === tag)?.media_refs?.[0];
+    if (ref) {
+      await op(stub, { op: 'media_ask', ref }, 1500);
+      await converge(ios, (j) => num(rf(j).media_requests_from_friends) > num(rf(m0.ios).media_requests_from_friends), 30_000);
+    }
+    await sleep(BUDGET.callGateWindow);
+    const m1 = await snap(['ios', 'stub']);
+    const d = (n, k) => delta(rf(m0[n]), rf(m1[n]), k);
+    score('callgate: A streamed nothing directly to friends during the call',
+      d('ios', 'served_direct_friend') === 0 && d('ios', 'served_direct_friend_bytes') === 0,
+      `served Δ=${d('ios', 'served_direct_friend')} bytes Δ=${d('ios', 'served_direct_friend_bytes')}`);
+    score('callgate: A still uploaded its own fresh media to the relay', d('ios', 'relay_uploads_landed') > 0,
+      `relay_uploads_landed Δ=${d('ios', 'relay_uploads_landed')}`);
+    score('callgate: B got it via the relay, not a peer stream',
+      d('stub', 'received_via_relay') > 0 && d('stub', 'received_via_direct') === 0,
+      `via_relay Δ=${d('stub', 'received_via_relay')} via_direct Δ=${d('stub', 'received_via_direct')}`);
+    if (ref && d('ios', 'media_requests_from_friends') > 0) {
+      score('callgate: A declined B\'s direct ask because of the call',
+        d('ios', 'serve_declined') > 0 && String(rf(m1.ios).last_decline || '').includes('haven-call'),
+        `declined Δ=${d('ios', 'serve_declined')} last=${rf(m1.ios).last_decline}`);
+    } else score('callgate: B\'s direct ask reached A', false, `ref=${!!ref}`);
+    score('callgate: A\'s full-size missing-media fetches paused during the call', d('ios', 'missing_media_fetches') === 0,
+      `missing_media_fetches Δ=${d('ios', 'missing_media_fetches')}`);
+
+    await op(ios, { op: 'call_end' }, 1000);
+    const tEnd = Date.now();
+    gate('callgate: hangup lifts the call gate', 'ios',
+      await convergeSince(ios, (j) => liftedFrom(j.heavy_work, 'haven-call'), BUDGET.gateLift, tEnd), BUDGET.gateLift);
+    gate('callgate: deferred uploads drain after hangup', 'ios',
+      await convergeSince(ios, (j) => num(j.pending_user_uploads) === 0, BUDGET.mediaBlob, tEnd), BUDGET.mediaBlob);
+    await convergeAll(['ios', 'stub'], callOver, BUDGET.text, 'callgate: call ended');
+  }
+
+  // ── audience: "Send privately instead" stays private ──────────────────────────────────────────
+  async function stepAudience() {
+    const shared = await ensureSharedCircle();
+    if (!shared || !B) { score('audience (needs a circle shared with B)', false); return; }
+    const ios = devices.ios;
+    const aHex = (await freshDump(ios))?.account_hex || '';
+    const dmBody = `${MARKER}_Aud_Private`, circleBody = `${MARKER}_Aud_Circle`;
+    await op(ios, { op: 'dm', dm_to: B, body: dmBody }, 2000);
+    await op(ios, { op: 'post', body: circleBody, circle_id: shared }, 2000);
+    const inDm = (j) => Object.values(j.dms || {}).flat().some((m) => m.body === dmBody);
+    const inFeed = (j) => (j?.posts || []).some((p) => p.body === dmBody);
+    gate('audience: private message reaches B\'s DM thread', 'stub', await converge(devices.stub, inDm, BUDGET.text), BUDGET.text);
+    const bj = await freshDump(devices.stub);
+    score('audience: … in the thread keyed by A', (bj?.dms?.[aHex] || []).some((m) => m.body === dmBody),
+      `threads=${Object.keys(bj?.dms || {}).map((k) => k.slice(0, 8)).join(',')}`);
+    await convergeAll(all.filter((n) => n !== 'ios' && devices[n]), hasPost(circleBody), BUDGET.text, 'audience: circle post reaches every member device');
+    await sleep(8000);   // one more active poll for anything that would mis-file it
+    for (const n of all.filter((x) => devices[x])) {
+      const j = await freshDump(devices[n]);
+      score(`audience: private message never appears in a circle feed [${n}]`, !!j && !inFeed(j),
+        inFeed(j) ? `in circle ${(j.posts.find((p) => p.body === dmBody) || {}).circle}` : '');
+    }
+  }
+
+  // ── launch: cold start → first feed, and catch-up after being dead ─────────────────────────────
+  async function stepLaunch() {
+    const shared = await ensureSharedCircle();
+    const ios = devices.ios, stub = devices.stub;
+    if (!shared || !B) { score('launch (needs a circle shared with B)', false); return; }
+    // A content op switches the active circle — make the shared circle A's active one.
+    await op(ios, { op: 'post', body: `${MARKER}_Launch_Seed`, circle_id: shared }, 3000);
+    shOk('xcrun', ['simctl', 'terminate', IOS_UDID, IOS_BUNDLE]);
+    log('launch: iOS terminated — B and desktop post while it is dead');
+    const texts = [1, 2, 3].map((i) => `${MARKER}_Launch_T${i}`);
+    await op(stub, { op: 'post', body: texts[0], circle_id: shared }, 1500);                 // A's ACTIVE circle
+    await op(devices.desktop || stub, { op: 'post', body: texts[1], circle_id: 'default' }, 1500);
+    await op(stub, { op: 'post', body: texts[2], circle_id: 'default' }, 1500);
+    await op(stub, { op: 'post', body: `${MARKER}_Launch_Photo`, media: 'photo', circle_id: shared,
+      photo_path: stub.stage(distinctPhoto('launch'), 'qa-launch.jpg') }, 3000);
+    await sleep(BUDGET.launchSettle);   // let them reach the relay before A comes back
+    const tLaunch = Date.now();
+    shOk('xcrun', ['simctl', 'launch', IOS_UDID, IOS_BUNDLE]);
+    channelFor(ios).reset('ios relaunched by the launch step');
+    const fresh = (j) => num(j?.launch?.process_start_ms) >= tLaunch - 2000;
+    let L = null;
+    await converge(ios, (j) => { if (fresh(j)) L = j.launch; return fresh(j) && typeof j.launch?.first_feed_rendered_ms === 'number'; }, 60_000);
+    perfGate('launch: launch → first feed rendered [ios]', 'ios', typeof L?.first_feed_rendered_ms === 'number' ? L.first_feed_rendered_ms : -1, BUDGET.launchIos);
+    gate('launch: catch-up — all 3 texts present after relaunch [ios]', 'ios',
+      await convergeSince(ios, (j) => fresh(j) && texts.every((t) => hasPost(t)(j)), BUDGET.catchup, tLaunch), BUDGET.catchup);
+    const j = await freshDump(ios);
+    log(`launch: ios launch timings ${JSON.stringify(j?.launch)}`);
+    score('launch: the ACTIVE circle is ingested first', ingestedFirst(j?.launch?.circle_first_ingest_ms, shared),
+      JSON.stringify(j?.launch?.circle_first_ingest_ms));
+    score('launch: first feed paint does not wait on the DM warm-up', feedNotGatedOnDmWarm(j?.launch),
+      `feed=${j?.launch?.first_feed_rendered_ms} dmWarm=${j?.launch?.dm_warmup_done_ms}`);
+    if (typeof j?.launch?.first_mailbox_pass_ms === 'number') {
+      perfGate('launch: first mailbox pass duration [ios]', 'ios', j.launch.first_mailbox_pass_ms, BUDGET.mailboxPass);
+    } else score('launch: first mailbox pass recorded [ios]', false, 'no first_mailbox_pass_ms');
+    if (devices.android) {
+      shOk('adb', ['shell', 'am', 'force-stop', AND_PKG]);
+      const t = Date.now();
+      shOk('adb', ['shell', 'am', 'start', '-n', `${AND_PKG}/.MainActivity`]);
+      channelFor(devices.android).reset('android relaunched by the launch step');
+      await sleep(3000);
+      let LA = null;
+      await converge(devices.android, (x) => {
+        const ok = num(x?.launch?.process_start_ms) >= t - 2000 && typeof x.launch?.first_feed_rendered_ms === 'number';
+        if (ok) LA = x.launch; return ok;
+      }, 60_000);
+      perfGate('launch: launch → first feed rendered [android]', 'android',
+        typeof LA?.first_feed_rendered_ms === 'number' ? LA.first_feed_rendered_ms : -1, BUDGET.launchAndroid);
+    }
+  }
+
+  // ── responsive: a burst lands on A while A is used — the main thread stays free ───────────────
+  async function stepResponsive() {
+    const ios = devices.ios, stub = devices.stub;
+    const probe = await freshDump(ios);
+    const missing = missingPerfFields(probe?.perf);
+    if (missing.length) {
+      score(`responsive: perf dump fields present${REQUIRE_PERF ? '' : ' (SKIPPED — fix/responsiveness not on this build)'}`,
+        !REQUIRE_PERF, `missing: ${missing.join(', ')}`);
+      return;
+    }
+    const shared = await ensureSharedCircle();
+    if (!shared || !B) { score('responsive (needs a circle shared with B)', false); return; }
+    await op(ios, { op: 'perf_reset' }, 1500);
+    const target = (await freshDump(ios))?.posts?.find((p) => p.circle === shared)?.id;
+    const texts = Array.from({ length: 20 }, (_, i) => `${MARKER}_Burst_${i}`);
+    const v1 = stub.stage(distinctVideo('burst-1'), 'qa-burst-1.mp4');
+    const v2 = stub.stage(distinctVideo('burst-2'), 'qa-burst-2.mp4');
+    const desk = devices.desktop || stub;
+    const tBurst = Date.now();
+    const burst = (async () => {
+      await op(stub, { op: 'post', body: `${MARKER}_Burst_V1`, media: 'video', video_path: v1, circle_id: shared }, 1000);
+      for (let i = 0; i < 20; i++) await op(i % 2 ? desk : stub, { op: 'post', body: texts[i], circle_id: shared }, 300);
+      await op(desk, { op: 'post', body: `${MARKER}_Burst_Photo`, media: 'photo', circle_id: shared,
+        photo_path: desk.stage(distinctPhoto('burst'), 'qa-burst.jpg') }, 1000);
+      await op(stub, { op: 'post', body: `${MARKER}_Burst_V2`, media: 'video', video_path: v2, circle_id: shared }, 1000);
+    })();
+    const reacts = [];
+    for (let i = 0; i < 5; i++) {
+      const at = Date.now();
+      if (target) {
+        await op(ios, { op: 'react', target_id: target, emoji: ['❤️', '👍', '😂', '🎉', '🔥'][i] }, 500);
+        reacts.push(reactLatency(await freshDump(ios)));
+      }
+      await sleep(Math.max(0, 2000 - (Date.now() - at)));
+    }
+    await burst;
+    await converge(ios, (j) => texts.every((t) => hasPost(t)(j)), BUDGET.mediaBlob);
+    const burstMs = Date.now() - tBurst;
+    const perf = (await freshDump(ios))?.perf || {};
+    log(`responsive: burst ${(burstMs / 1000).toFixed(1)}s perf=${JSON.stringify(perf)} reacts=${JSON.stringify(reacts)}`);
+    score('responsive: no MediaStore work on the main thread', num(perf.mediaStoreOnMainCount) === 0, `count=${perf.mediaStoreOnMainCount}`);
+    perfGate('responsive: main-thread stall max [ios]', 'ios', num(perf.mainStallMaxMs), BUDGET.stallMax);
+    score(`responsive: main-thread stalls ≤ ${BUDGET.maxStalls}`, num(perf.mainStallCount) <= BUDGET.maxStalls, `count=${perf.mainStallCount}`);
+    perfGate('responsive: engine user-wait p95 [ios]', 'ios', num(perf.engineUserWaitP95Ms), BUDGET.engineP95);
+    const rl = reacts.filter((v) => typeof v === 'number');
+    perfGate('responsive: react local latency, worst of 5 [ios]', 'ios', rl.length === 5 ? Math.max(...rl) : -1, BUDGET.react);
+    const allow = persistExportAllowance(burstMs);
+    score(`responsive: persist exports during the burst ≤ ${allow}`, num(perf.persistExportCount) <= allow, `count=${perf.persistExportCount}`);
+    const c0 = num(perf.persistExportCount);
+    await sleep(BUDGET.idle);
+    const c1 = num((await freshDump(ios))?.perf?.persistExportCount);
+    score(`responsive: no persist exports while idle (${BUDGET.idle / 1000}s)`, c1 === c0, `${c0} → ${c1}`);
+  }
+
+  // 0. newfriend runs FIRST: A and B are strangers until it makes them friends (E2E_PREFRIEND=0).
+  if (STEPS.includes('newfriend')) {
+    await stepNewFriend();
+    restoreFleetAfterNewFriend();
+    await Promise.all(all.map((n) => op(devices[n], { op: 'approve_connections' }, 1500)));
+  }
+
+  // 1. profile edit propagates across account A devices
+  if (STEPS.includes('profile')) {
+    const nick = `${MARKER}_Nick`;
+    await op(devices.ios, { op: 'profile', name: nick });
+    await convergeAll(fleet.filter((x) => x !== 'ios'), (j) => j.profile?.name === nick, BUDGET.settings, 'profile edit');
+  }
+
+  if (STEPS.includes('circle')) await ensureSharedCircle();
 
   // Second approval pass: the circle invite above can surface a request that did not exist during
   // bootstrap.
@@ -750,7 +1394,7 @@ async function main() {
   // Warm the fleet before ANY timed content assertion (see warmUp above). Satellite counts: it is
   // the most timing-sensitive step in the suite, so running it on a cold fleet measures the fleet
   // coming up rather than the feature.
-  if (STEPS.includes('post') || STEPS.includes('satellite')) await warmUp();
+  if (['post', 'satellite', 'relayfirst', 'audience', 'callgate', 'launch', 'responsive'].some((x) => STEPS.includes(x))) await warmUp();
 
   // 3. posts: text + photo + video (author iOS; friend authors one from stub)
   if (STEPS.includes('post')) {
@@ -854,6 +1498,9 @@ async function main() {
   // live only on the ACCEPT (never on transport); hangup ends it EVERYWHERE. Audio-byte
   // assertions stay on the ios↔stub pair (sim/emulator media quirks make them flaky elsewhere;
   // state asserts run on every pair).
+  if (STEPS.includes('relayfirst')) await stepRelayFirst();
+  if (STEPS.includes('audience')) await stepAudience();
+
   if (STEPS.includes('call') && B) {
     const A_HEX = (await freshDump(devices.ios))?.account_hex || '';
     const callOps = {
@@ -1004,6 +1651,9 @@ async function main() {
       sEnd?.call != null && !sEnd.call.in_call && !sEnd.call.ringing, JSON.stringify(sEnd?.call));
   }
 
+
+  if (STEPS.includes('screenshare')) await stepScreenShare();
+  if (STEPS.includes('callgate')) await stepCallGate();
 
   // 8-9. reaction + comment from friend and from own second device on the same
   // shared-circle post (interactions only make sense where everyone sees the post).
@@ -1208,6 +1858,9 @@ async function main() {
       }
     }
   }
+
+  if (STEPS.includes('launch')) await stepLaunch();
+  if (STEPS.includes('responsive')) await stepResponsive();
 
   if (STEPS.includes('invite_offline')) {
     // Offline friend invites (docs/OFFLINE-FRIEND-INVITES.md): the acceptance must land while

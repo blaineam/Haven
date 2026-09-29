@@ -156,6 +156,40 @@ it is the fix for a class of false result that has twice been misread as a produ
 Subsets + reuse: `E2E_STEPS=post,dm node Scripts/qa-e2e-full.mjs`,
 `E2E_BOOTSTRAP=skip` to reuse a hot fleet, `E2E_KILL=1` to tear down after.
 
+Default step order: `newfriend,profile,circle,post,story,file,music,dm,relayfirst,audience,call,
+screenshare,callgate,react,comment,media,satellite,launch,responsive,invite_offline`. Steps that need
+the circle shared with B create it themselves, so `E2E_STEPS=relayfirst` works on its own.
+
+### Relay-first, new friends, screen share, call gate, audience, launch, responsiveness
+
+Pure decisions for these steps live in `Scripts/lib/e2e-steps.mjs` (unit-tested, soren `qa-harness`).
+Every budget below is env-tunable and every timing lands in `build/e2e-history.jsonl`.
+
+| Step | What it proves |
+|---|---|
+| `relayfirst` | iOS posts a distinct photo + video to the shared circle. Media present on every leg (blob budget); B's `received_via_relay` grew and `received_via_direct` did not; no account-A device streamed to a friend (`served_direct_friend(_bytes)` Δ 0); `broadcast_before_enqueue == 0` over ≥2 checked posts; `pending_user_uploads` went up (or `authored_refs_enqueued` grew) and drains to 0. **Gate sub-check:** `heavy_work_override` on iOS+Android → B's `media_ask` is declined (`last_decline` contains `forced=qa`), nothing streamed or hinted; lifted → the next ask gets a relay hint, still no stream. |
+| `newfriend` | Runs first; the bootstrap is told `E2E_PREFRIEND=0` (no bundle exchange, no relay pre-authorization, iOS not pre-wired to B's relay). B (relay host) mints a ticketed link, iOS accepts and posts text + photo BEFORE approval, B's approval is held `E2E_NF_HOLD_MS` (20s). From approval: friends on both sides (`E2E_BUDGET_NF_FRIEND` 20s), the pre-approval text (`_NF_TEXT` 20s) and photo (blob) reach B, B's first text (`_NF_INVITER_TEXT` 30s) and photo reach iOS, iOS's DM reaches B (`_NF_DM` 30s). The 403s must have been absorbed as `pendingEnrollment` (`relay_backoff.pending_enrollment_refusals > 0`) with `peak_backoff_ms ≤ E2E_NF_MAX_BACKOFF` (30s). Afterwards the harness authorizes `members.txt` on the stub, restoring the baseline. |
+| `screenshare` | Android calls the stub (the only cross-account pair the emulator has; the stub runs the same Apple WebRTC routing as iOS). REAL MediaProjection consent, driven with `uiautomator dump` + `input tap` (`PROJECT_MEDIA` appop reset to default first). Sub-cases: **deny** (no screen track on the peer, call + camera intact, no `mediaProjection` FGS type in `dumpsys activity services`, app alive); **entire screen** (Android FGS-ready before capture, sender params applied, frames captured, capture ≤1280; peer `call.remote_tracks[*].screen` routed by stream id `screen`, frames decoded > 0 and growing, ≤1280, camera slot a distinct track; stop removes it); **again** (a fresh consent is prompted — tokens are single-use — and works); **single app** (SKIPPED with the reason if the chooser has no such option). Logcat `HavenScreenShare`: FGS-ready before every capture, no `start failed`/SecurityException. Budget `E2E_BUDGET_SHARE_FRAME` (20s). |
+| `callgate` | A real iOS↔stub call closes iOS's heavy-work gate (`heavy_work.reason` contains `haven-call`, `_GATE_CLOSE` 10s). Mid-call iOS posts a photo: B still gets it via the relay, iOS's relay uploads still land, a direct `media_ask` from B is declined for the call, nothing streams, `missing_media_fetches` does not move (`E2E_CALLGATE_WINDOW` 15s). Hangup lifts the gate within `_GATE_LIFT` (5s) — asserted as "reason no longer contains `haven-call`", because the simulator's thermal state mirrors the host — and `pending_user_uploads` drains. |
+| `audience` | iOS DMs B and posts to the circle: the DM lands only in B's thread keyed by A and never in any circle feed on any leg; the circle post reaches every member device. |
+| `launch` | iOS terminated; B + desktop post 3 texts + 1 photo across the active and default circles; relaunch. `launch.first_feed_rendered_ms` (since process start) ≤ `E2E_BUDGET_LAUNCH_IOS` 5s, all 3 texts within `_CATCHUP` 15s of relaunch, the active circle's first ingest precedes the others, the feed paint does not wait on the DM warm, first mailbox pass ≤ `_MAILBOX_PASS`. Android force-stop/start: first feed ≤ `_LAUNCH_ANDROID` 8s. |
+| `responsive` | Needs the fix/responsiveness `perf` fields (`mainStallCount`, `mainStallMaxMs`, `engineUserWaitP95Ms`, …). Absent → SKIPPED, or FAIL when `E2E_REQUIRE_PERF=1` (set by the soren `e2e` suite — the release gate). `perf_reset`, then a burst from B + desktop (2 videos, 20 texts, 1 photo) while iOS reacts 5× at 2s spacing: no MediaStore work on main, stall max < 250 ms and ≤ 3 stalls, engine user-wait p95 < 300 ms, each react < 500 ms, persist exports ≤ burst/2.5s + 2, and none during 60s idle. |
+
+Dump fields behind them (DEBUG builds only, like the rest of the driver): `relay_first`
+(served_direct_friend/_bytes/_own, relay_hints_sent/_deferred, serve_declined + last_decline,
+received_via_relay/_direct, media_requests_from_friends, relay_uploads_landed, missing_media_fetches,
+authored_refs_enqueued, authored_media_posts_checked, broadcast_before_enqueue — Apple, Android,
+desktop), `heavy_work` {suspended, friend_serving, reason, forced} (Apple, Android),
+`pending_user_uploads`, `contacts`, `pending_connections`, `circle_relays`, `relay_backoff`
+{relays[{relay, fails, backoff_until_ms, reason}], peak_backoff_ms, pending_enrollment,
+pending_enrollment_refusals} (Apple; Android has the pending-enrollment half), `launch`
+{process_start_ms, first_feed_rendered_ms, dm_warmup_done_ms, first_mailbox_pass_ms,
+circle_first_ingest_ms} (Apple; Android first_feed_rendered_ms), `call.remote_tracks`
+{peer: {camera, screen: {track_id, stream_ids, frames_decoded, width, height}}} (Apple), and
+`screen_share` {state, consent_result, consent_attempts, attempts, fgs_ready, fgs_ready_ms,
+fgs_ready_before_capture, capture_w/h, frames_captured, sender_params_ok, encoders, start_error}
+(Android).
+
 ### qa-cmd v2 — the cross-platform QA driver contract
 
 DEBUG builds of all four clients accept a one-shot JSON drop file and answer
@@ -175,7 +209,8 @@ stub-authorization step.
 
 ```json
 {"op":"post|story|dm|react|comment|profile|circle_create|circle_invite|file|music_post|dump|mark_read|link_constraint
-      |call|call_accept|call_end|call_speaker|call_route_legacy|perf_reset",
+      |call|call_accept|call_end|call_speaker|call_route_legacy|perf_reset|heavy_work_override|media_ask
+      |relay_backoff_reset|screen_share",
  "body":"…","media":"photo|video","photo_path":"…","video_path":"…","file_path":"…",
  "target_id":"<event id>","emoji":"❤️","dm_to":"<64hex>","name":"…","circle_id":"…",
  "music":{"title":"…","artist":"…"},"caption":"…","level":"normal|low|ultra|auto","on":true}
@@ -188,6 +223,15 @@ and the user preference deliberately cannot escalate to it. Without this the pre
 unverified on the exact path it exists for. `"auto"` hands control back to the real path monitor.
 DEBUG-only on every client, so no release build can be pushed into a state the network is not in.
 Desktop accepts it too, and there it is the *only* way in — desktop has no path monitor at all.
+
+**`heavy_work_override`** (`{"suspend":true,"reason":"qa"}`, Apple + Android) forces
+`HeavyWorkPolicy`'s `suspendHeavyIO` exactly as a call / Low Power Mode / serious heat would —
+the only way to reach the thermal and power branches on a simulator. `{"suspend":false}` lifts it.
+**`media_ask`** (`{"ref":"…"}`, Apple) sends a DIRECT frame-3/33 ask that bypasses the requester's
+relay-first path, so a friend's serve gate can be made to decide on demand. **`relay_backoff_reset`**
+(Apple) starts a fresh `relay_backoff.peak_backoff_ms` window. **`screen_share`** (`{"on":true}`,
+Android) opens the SAME MediaProjection consent prompt the call UI's button does (the harness then
+drives the system dialog); `{"on":false}` is the stop button. All DEBUG-only.
 
 **`call_speaker`** (`"on"`, or omit it to toggle) flips the in-call speaker, and **`call_route_legacy`**
 (`"on"`) pins Android's routing to its pre-31 fallback. Both exist because in-call audio ROUTING is

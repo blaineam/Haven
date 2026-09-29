@@ -1174,6 +1174,18 @@ impl Prefs {
         Some((e.http_urls.clone(), e.http_token.clone()))
     }
 
+    /// Which relay announced `base` as one of its HTTP URLs? The HTTP primitives only see the base
+    /// URL; a 401 there must be pinned on the relay whose interface (token) went stale. Lowest hex
+    /// wins on the (misconfigured) chance two relays share a URL, so the answer is deterministic.
+    pub fn relay_hex_for_http_url(&self, base: &str) -> Option<String> {
+        let base = base.trim_end_matches('/');
+        self.relay_entries
+            .values()
+            .filter(|e| e.http_urls.iter().any(|u| u.trim_end_matches('/') == base))
+            .map(|e| e.hex.clone())
+            .min()
+    }
+
     /// Stamp a relay as just-seen (a successful op). Mirrors iOS `markSeen`.
     pub fn relay_mark_seen(&mut self, hex: &str) {
         if let Some(e) = self.relay_entries.get_mut(hex) {
@@ -1574,6 +1586,18 @@ mod tests {
         assert_eq!(ids.remove("aaaa"), None); // active is protected
         assert_eq!(ids.remove("bbbb"), Some("identities/bbbb".to_string()));
         assert!(ids.find("bbbb").is_none());
+    }
+
+    #[test]
+    fn relay_hex_for_http_url_names_the_announcing_relay() {
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        let mut p = Prefs::default();
+        p.set_relay_http(&a, vec!["http://127.0.0.1:8684".into()], "tokA".into());
+        p.set_relay_http(&b, vec!["http://10.0.0.2:8685/".into(), "https://b.example".into()], "tokB".into());
+        assert_eq!(p.relay_hex_for_http_url("http://127.0.0.1:8684"), Some(a.clone()));
+        assert_eq!(p.relay_hex_for_http_url("http://10.0.0.2:8685"), Some(b.clone()), "trailing slash ignored");
+        assert_eq!(p.relay_hex_for_http_url("https://b.example/"), Some(b));
+        assert_eq!(p.relay_hex_for_http_url("http://127.0.0.1:9999"), None);
     }
 
     #[test]

@@ -17,20 +17,39 @@ final class SensitiveContentScanner: ObservableObject {
 
     /// True only when the user has enabled "Sensitive Content Warning" system-wide. When off we do
     /// no analysis at all (zero cost, and we never blur).
+    ///
+    /// Answered from a cache when it has one. `analysisPolicy` is a SYNCHRONOUS XPC round trip to
+    /// the analysis service (a semaphore wait inside SensitiveContentAnalysis), and every media
+    /// tile's guard asked it on appear — measured as a 0.5 s main-thread stall on a feed scroll in
+    /// the simulator. The setting changes only in system Settings, so a value at most
+    /// `policyTTL` old is plenty.
     var isEnabled: Bool {
-        SCSensitivityAnalyzer().analysisPolicy != .disabled
+        if let cached = cachedEnabled, Date().timeIntervalSince(cachedAt) < Self.policyTTL { return cached }
+        let v = SCSensitivityAnalyzer().analysisPolicy != .disabled
+        cachedEnabled = v; cachedAt = Date()
+        return v
     }
+    /// `isEnabled` with the policy read (on a miss) done OFF the main actor.
+    func isEnabledAsync() async -> Bool {
+        if let cached = cachedEnabled, Date().timeIntervalSince(cachedAt) < Self.policyTTL { return cached }
+        let v = await Task.detached(priority: .utility) { SCSensitivityAnalyzer().analysisPolicy != .disabled }.value
+        cachedEnabled = v; cachedAt = Date()
+        return v
+    }
+    private var cachedEnabled: Bool?
+    private var cachedAt = Date.distantPast
+    private static let policyTTL: TimeInterval = 60
 
     /// Whether the media at `ref` is flagged sensitive. Cheap + cached; returns false when the
     /// feature is off, the media isn't loaded yet, or analysis fails.
     func isSensitive(ref: String) async -> Bool {
         if let cached = cache[ref] { return cached }
+        guard await isEnabledAsync() else { return false }
         let analyzer = SCSensitivityAnalyzer()
-        guard analyzer.analysisPolicy != .disabled,
-              let item = MediaStore.shared.item(ref),
-              let cg = item.image?.cgImage else { return false }
-        // Analyze the still (a video's `image` is its poster/first frame — the same thumbnail the
-        // tile shows). Keeps the path simple + identical for photos and videos.
+        // Analyze a downsampled still decoded OFF-main (a video's is its poster frame — the same
+        // thumbnail the tile shows). This used to take `item(ref).image?.cgImage`: the full-res
+        // original, decoded on the main thread just to be handed to the analyzer.
+        guard let cg = await MediaStore.shared.thumbnailAsync(ref, maxDimension: 1024)?.cgImage else { return false }
         var result = false
         do { result = try await analyzer.analyzeImage(cg).isSensitive }
         catch { result = false }   // never block content on an analyzer error
@@ -51,7 +70,10 @@ struct SensitiveContentGuard: ViewModifier {
     var cornerRadius: CGFloat = 10
 
     @ObservedObject private var scanner = SensitiveContentScanner.shared
-    @ObservedObject private var feed = FeedStore.shared
+    /// The federated flags change rarely; the store they live in publishes constantly. Observe
+    /// only the flag signal — one of these guards wraps every media tile on screen.
+    @ObservedObject private var flags = SensitiveFlagsSignal.shared
+    private var feed: FeedStore { FeedStore.shared }
     @State private var localSensitive = false
     @State private var revealed = false
 
@@ -82,7 +104,7 @@ struct SensitiveContentGuard: ViewModifier {
                 }
             }
             .task(id: ref) {
-                guard scan, scanner.isEnabled else { return }
+                guard scan, await scanner.isEnabledAsync() else { return }
                 if await scanner.isSensitive(ref: ref) {
                     localSensitive = true
                     // Tell the whole circle so members without SCA blur it too (deduped).

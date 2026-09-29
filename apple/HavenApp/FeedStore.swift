@@ -73,9 +73,18 @@ enum MediaFetchBackoff {
 /// engine (seal → open → feed) in `haven-p2p`. Posts can carry media + a song.
 @MainActor
 final class FeedStore: ObservableObject {
-    @Published private(set) var items: [FeedItemFfi] = []
-    @Published private(set) var unseenCircle = 0      // new circle posts since last viewed
-    @Published private(set) var unseenMessages = 0    // new DM messages since last viewed
+    @Published private(set) var items: [FeedItemFfi] = [] {
+        // The derived lists views read several times per body (and per row's onAppear) are built
+        // ONCE per assignment here, not re-filtered/re-grouped on every read.
+        didSet { rebuildDerivedFeedLists() }
+    }
+    // Mirrored into `FeedBadges` — the root view observes that, not this whole store.
+    @Published private(set) var unseenCircle = 0 {      // new circle posts since last viewed
+        didSet { FeedBadges.shared.setUnseenCircle(unseenCircle) }
+    }
+    @Published private(set) var unseenMessages = 0 {    // new DM messages since last viewed
+        didSet { FeedBadges.shared.setUnseenMessages(unseenMessages) }
+    }
     @Published private(set) var relayReachable = false  // the circle's relay accepted our last upload
     func markRelay(_ ok: Bool) { if relayReachable != ok { relayReachable = ok } }
     @Published private(set) var postTick = 0
@@ -110,7 +119,11 @@ final class FeedStore: ObservableObject {
     private(set) var lastSendError: String?
     /// Per-contact time we last received a valid frame from them — the basis for a
     /// truthful "Connected" (a live two-way link), not just "we hold their keys".
-    @Published private(set) var lastHeard: [String: Date] = [:]
+    ///
+    /// NOT @Published: a fresh stamp for a peer who is already "online" changes nothing anyone can
+    /// see, and every packet re-stamped it. `recordHeard` publishes only when a peer goes from not
+    /// connected to connected — the one transition the presence UI draws.
+    private(set) var lastHeard: [String: Date] = [:]
     /// The circles you belong to, and which one the feed is currently showing.
     @Published private(set) var circles: [CircleInfoFfi] = []
     /// Count of per-post-hidden items in the CURRENTLY SELECTED circle (the "Show hidden posts (N)"
@@ -118,6 +131,7 @@ final class FeedStore: ObservableObject {
     @Published private(set) var hiddenInActiveCircle = 0
     @Published var activeCircleId = "default" {
         didSet {
+            FeedBadges.shared.setActiveCircleId(activeCircleId)
             guard oldValue != activeCircleId else { return }
             // Leaving a circle stops any audio it was playing — a post's song or a video's sound must
             // not keep playing under the circle you just switched to. Covers every switch path (picker,
@@ -181,7 +195,7 @@ final class FeedStore: ObservableObject {
     private func scheduleMembersFill(_ circleId: String) {
         guard let engine, membersFillInFlight.insert(circleId).inserted else { return }
         Task { @MainActor [weak self] in
-            let m = await engine.run { $0.contactNodeIds(circleId: circleId) }
+            let m = await engine.run(readOnly: true) { $0.contactNodeIds(circleId: circleId) }
             guard let self else { return }
             self.membersFillInFlight.remove(circleId)
             guard self.engine === engine else { return }
@@ -220,7 +234,7 @@ final class FeedStore: ObservableObject {
         for m in circleMembersCache.values { for a in m { accounts.insert(a.lowercased()) } }
         let list = accounts.filter { !$0.isEmpty }
         Task { @MainActor [weak self] in
-            let ids: [String: [String]] = await engine.run { s in
+            let ids: [String: [String]] = await engine.run(readOnly: true) { s in
                 var out: [String: [String]] = [:]
                 for a in list { out[a] = s.deviceNodeIdsFor(accountHex: a) }
                 return out
@@ -478,7 +492,7 @@ final class FeedStore: ObservableObject {
         func watch<T>(_ pub: Published<T>.Publisher, _ name: String) {
             pub.dropFirst().sink { [weak self] _ in self?.pubBy[name, default: 0] += 1 }.store(in: &propSinks)
         }
-        watch($items, "items"); watch($lastHeard, "lastHeard"); watch($postTick, "postTick")
+        watch($items, "items"); watch($postTick, "postTick")
         watch($reactionTick, "reactionTick"); watch($online, "online"); watch($circles, "circles")
         watch($internetActive, "internetActive"); watch($nearbyActive, "nearbyActive")
         watch($relayReachable, "relayReachable"); watch($internetReady, "internetReady")
@@ -1930,7 +1944,9 @@ final class FeedStore: ObservableObject {
     /// held the lock. Now a circle's snapshot is replaced only by a pass: the ingest side effects
     /// store the fresh feed they read, and everything that changes a circle's events marks it stale
     /// (`invalidateMessagesCache`) so the next reader schedules the re-read.
-    private var messagesCache: [String: (at: UInt64, items: [FeedItemFfi])] = [:]
+    /// `fp`: a hash of `items` computed off-main by the pass that read them (nil if none was),
+    /// so an unchanged re-read is recognised without a deep element-by-element compare on main.
+    private var messagesCache: [String: (at: UInt64, items: [FeedItemFfi], fp: Int?)] = [:]
     private var messagesStale = Set<String>()
     private var messagesGeneration: [String: UInt64] = [:]
     private var messagesLoadInFlight = Set<String>()
@@ -1947,15 +1963,20 @@ final class FeedStore: ObservableObject {
     /// Store a freshly-read feed for a circle and publish when it changed. Bounded so many DM
     /// circles don't pin decoded feeds forever.
     private func storeMessages(_ circleId: String, _ items: [FeedItemFfi], readAt: UInt64, generation: UInt64? = nil,
-                               publish: Bool = true) {
+                               publish: Bool = true, fingerprint: Int? = nil) {
         if let generation, (messagesGeneration[circleId] ?? 0) != generation {
             // Invalidated while this read was in flight — keep the newer staleness, re-read.
             scheduleMessagesLoad(circleId)
         } else {
             messagesStale.remove(circleId)
         }
-        let changed = messagesCache[circleId]?.items != items
-        messagesCache[circleId] = (readAt, items)
+        let changed: Bool
+        if let fingerprint, let prior = messagesCache[circleId]?.fp {
+            changed = prior != fingerprint
+        } else {
+            changed = messagesCache[circleId]?.items != items
+        }
+        messagesCache[circleId] = (readAt, items, fingerprint)
         if messagesCache.count > 40 {
             let stale = messagesCache.filter { readAt &- $0.value.at > 30_000 && $0.key != circleId }.map(\.key)
             for k in stale { messagesCache.removeValue(forKey: k) }
@@ -1977,7 +1998,7 @@ final class FeedStore: ObservableObject {
         let nowMs = now()
         let gen = messagesGeneration[circleId] ?? 0
         Task { @MainActor [weak self] in
-            let items = await engine.run { $0.feed(circleId: circleId, nowMs: nowMs, viewerRetentionSecs: retention) }
+            let items = await engine.run(readOnly: true) { $0.feed(circleId: circleId, nowMs: nowMs, viewerRetentionSecs: retention) }
             guard let self else { return }
             self.messagesLoadInFlight.remove(circleId)
             guard self.engine === engine else { return }
@@ -3038,8 +3059,10 @@ final class FeedStore: ObservableObject {
         // CPU. Both recency consumers (`isConnected`, `recentlyHeard`) use a 120s window, and the disk
         // write is already debounced to 3s, so refreshing the in-memory stamp more than once every 2s
         // per peer buys nothing. Skip the write — and its publish — inside that window.
-        if let prev = lastHeard[idHex], now.timeIntervalSince(prev) < 2 { return }
+        let prev = lastHeard[idHex]
+        if let prev, now.timeIntervalSince(prev) < 2 { return }
         lastHeard[idHex] = now
+        if prev.map({ now.timeIntervalSince($0) >= 120 }) ?? true { objectWillChange.send() }   // just came online
         // Debounce the disk write. This used to serialize the WHOLE dict to UserDefaults on the main
         // thread on every call — and recordHeard fires per DM message during a sync burst. Coalesce to
         // one write per few seconds ("last seen" is coarse; sub-second precision on disk is pointless).
@@ -3054,6 +3077,7 @@ final class FeedStore: ObservableObject {
     private func loadLastHeard() {
         guard let raw = UserDefaults.standard.dictionary(forKey: lastHeardKey) as? [String: Double] else { return }
         lastHeard = raw.mapValues { Date(timeIntervalSince1970: $0) }
+        objectWillChange.send()   // `lastHeard` is not @Published (see its note)
     }
     func forceSync() {
         bumpActivity()
@@ -3162,6 +3186,8 @@ final class FeedStore: ObservableObject {
     private var matrixQaTimer: Timer?
     /// The ticketed invite link minted by the `invite_link` qa op (exposed via the dump).
     static var qaInviteLink: String = ""
+    /// The last `react` op's local latency (see the op); `[:]` until one ran / after `perf_reset`.
+    static var qaReactLatency: [String: Double] = [:]
     /// Successful dump writes, and when the last one landed. See `dump_seq` in the payload.
     nonisolated(unsafe) static var qaDumpSeq: Int = 0
     nonisolated(unsafe) static var qaLastDumpAt = Date.distantPast
@@ -3552,10 +3578,36 @@ final class FeedStore: ObservableObject {
             qaWriteDump()
             return
 
+        case "perf_reset":
+            // Zero the responsiveness counters (the dump's `perf`) so an e2e step measures only
+            // what happens after this point.
+            HavenPerf.shared.reset()
+            Self.qaReactLatency = [:]
+            qaWriteDump()
+            return
+
         case "react":
             let target = str("target_id"), emoji = str("emoji")
             if !target.isEmpty, !emoji.isEmpty, let cid = await qaFindCircleId(ofEvent: target) {
+                // Local end-to-end latency, the way a tap experiences it: the reaction path starts
+                // (tap) → the engine has applied + sealed it → a feed rebuild has published it.
+                let t0 = DispatchTime.now().uptimeNanoseconds
+                let refreshesBefore = HavenPerf.shared.refreshCountNow
                 await reactMessageNow(in: cid, target, emoji)   // the same reaction path the UI uses
+                let t1 = DispatchTime.now().uptimeNanoseconds
+                // `reactMessageNow` kicks a refresh; wait (bounded) for it to land.
+                let deadline = t1 + 5_000_000_000
+                while HavenPerf.shared.refreshCountNow == refreshesBefore,
+                      DispatchTime.now().uptimeNanoseconds < deadline {
+                    try? await Task.sleep(nanoseconds: 5_000_000)
+                }
+                let t2 = DispatchTime.now().uptimeNanoseconds
+                let published = HavenPerf.shared.refreshCountNow != refreshesBefore
+                Self.qaReactLatency = [
+                    "engineAppliedMs": Double(t1 - t0) / 1_000_000,
+                    "publishedMs": published ? Double(t2 - t0) / 1_000_000 : -1,
+                ]
+                HavenLog.net("matrix-qa v2 react latency engine=\(Int(Double(t1 - t0) / 1_000_000))ms published=\(published ? Int(Double(t2 - t0) / 1_000_000) : -1)ms")
             } else {
                 HavenLog.net("matrix-qa v2 react: target not found id=\(target.prefix(16))")
             }
@@ -3872,6 +3924,11 @@ final class FeedStore: ObservableObject {
             // Offline friend invites: the minted link (invite_link op) and both state lists, so
             // the e2e can assert drop-landed / consumed / granted across kills and relaunches.
             "invite_link": Self.qaInviteLink,
+            // Responsiveness counters (HavenPerf) — names are a contract with the e2e suite.
+            "perf": HavenPerf.shared.snapshot(heldRefSetSize: HeldMediaIndex.shared.count),
+            // The last `react` op: ms from the tap to engine-applied, and to the feed publishing it
+            // (-1 = no rebuild landed within 5 s).
+            "react_latency": Self.qaReactLatency,
             "friend_invites": [
                 "issued": FriendInviteStore.shared.issued.map {
                     ["consumed": $0.consumedAt != nil, "has_acceptor": !($0.acceptorHex ?? "").isEmpty]
@@ -3974,7 +4031,8 @@ final class FeedStore: ObservableObject {
             // One feed rebuild at a time (and not concurrent with mailbox receive / exportState). The
             // filter runs on the engine actor too — O(posts), and it keeps the whole rebuild off main.
             let read: (raw: [FeedItemFfi], filtered: [FeedItemFfi], members: [String], hiddenHere: Int,
-                       sensitive: Set<String>, reports: [String: [ReportFfi]]) = await engine.run { s in
+                       sensitive: Set<String>, reports: [String: [ReportFfi]],
+                       rawFP: Int, filteredFP: Int) = await engine.run(lane: .userInitiated, readOnly: true) { s in
                 let raw = s.feed(circleId: circleId, nowMs: nowMs, viewerRetentionSecs: retention)
                 let members = s.contactNodeIds(circleId: circleId)
                 // Hide posts from blocked people and from anyone no longer in this circle (removed
@@ -3994,16 +4052,23 @@ final class FeedStore: ObservableObject {
                 let hiddenHere = raw.reduce(into: 0) { if hidden.contains($1.id) { $0 += 1 } }   // hidden IN THIS circle
                 // The active circle's moderation signals ride the same pass: the sensitive-media set
                 // and the reports, so the cards paint with them instead of asking per row.
+                // Fingerprints for the "did anything change?" checks on main, computed here (off-main)
+                // so an unchanged pass — most of them — costs main two Int compares instead of two
+                // deep [FeedItemFfi] compares.
+                func fp(_ list: [FeedItemFfi]) -> Int { var h = Hasher(); h.combine(list); return h.finalize() }
                 return (raw, filtered, members, hiddenHere,
                         Set(s.sensitiveRefs(circleId: circleId)),
-                        Dictionary(grouping: s.reports(circleId: circleId), by: { $0.target }))
+                        Dictionary(grouping: s.reports(circleId: circleId), by: { $0.target }),
+                        fp(raw), fp(filtered))
             }
             let raw = read.raw, filtered = read.filtered, hiddenHere = read.hiddenHere
             guard let self, self.engine === engine, self.refreshGeneration == gen, self.activeCircleId == circleId else { return }
+            HavenPerf.shared.noteRefresh()
             self.adoptMembers([circleId: read.members], publish: false)   // `items` below publishes
             // Warm the messages snapshot for the active circle so chat/feed siblings skip a cold feed().
             // (`items` below is the publish for this pass.)
-            self.storeMessages(circleId, raw, readAt: nowMs, generation: messagesGen, publish: false)
+            self.storeMessages(circleId, raw, readAt: nowMs, generation: messagesGen, publish: false,
+                               fingerprint: read.rawFP)
             // Only republish when the content ACTUALLY changed. A refresh triggered incidentally during
             // a scroll (media backfill, a poster landing, a periodic tick) usually produces an identical
             // list; assigning it anyway re-diffs the LazyVStack and nudged the scroll offset — the
@@ -4020,12 +4085,18 @@ final class FeedStore: ObservableObject {
             //
             // Logged when it fires, because a duplicate id coming out of the engine's feed() is
             // itself a bug worth chasing upstream; this keeps the UI honest meanwhile.
-            var seenPostIds = Set<String>()
-            let deduped = filtered.filter { seenPostIds.insert($0.id).inserted }
-            if deduped.count != filtered.count {
-                HavenLog.sync("feed: DROPPED \(filtered.count - deduped.count) duplicate post id(s) of \(filtered.count)")
+            //
+            // The dedupe is a pure function of `filtered`, so the fingerprint of `filtered` decides
+            // whether anything changed without re-comparing every post on main.
+            if self.itemsFingerprint != read.filteredFP {
+                var seenPostIds = Set<String>()
+                let deduped = filtered.filter { seenPostIds.insert($0.id).inserted }
+                if deduped.count != filtered.count {
+                    HavenLog.sync("feed: DROPPED \(filtered.count - deduped.count) duplicate post id(s) of \(filtered.count)")
+                }
+                if self.items != deduped { self.items = deduped }
+                self.itemsFingerprint = read.filteredFP   // after the assignment (its didSet clears it)
             }
-            if self.items != deduped { self.items = deduped }
             if self.hiddenInActiveCircle != hiddenHere { self.hiddenInActiveCircle = hiddenHere }
             // First refresh that produced anything: repair an account that was imported into
             // twice, without being asked. Guarded to once per launch, and a no-op when there is
@@ -4033,9 +4104,12 @@ final class FeedStore: ObservableObject {
             self.sweepDuplicateImportsOnce()
             // A refresh may have ingested new SensitiveFlag / Report events: the active circle's
             // sets come from this pass; other circles re-read on their next ask.
+            let sensitiveChanged = self.sensitiveCache.contains { $0.key != circleId && !$0.value.isEmpty }
+                || (self.sensitiveCache[circleId] ?? []) != read.sensitive
             self.sensitiveCache.removeAll()
             self.reportsCache.removeAll()
             self.sensitiveCache[circleId] = read.sensitive
+            if sensitiveChanged { SensitiveFlagsSignal.shared.bump() }
             self.reportsCache[circleId] = read.reports
             SpotlightIndex.reindexAll()       // no-op unless the user enabled Spotlight indexing
             // NB: recomputeUnreadDMs() is NOT called here. It decodes a full feed per DM circle
@@ -4224,7 +4298,7 @@ final class FeedStore: ObservableObject {
     private func scheduleModerationFill(_ circleId: String) {
         guard let engine, moderationFillInFlight.insert(circleId).inserted else { return }
         Task { @MainActor [weak self] in
-            let (sensitive, reports): (Set<String>, [String: [ReportFfi]]) = await engine.run { s in
+            let (sensitive, reports): (Set<String>, [String: [ReportFfi]]) = await engine.run(readOnly: true) { s in
                 (Set(s.sensitiveRefs(circleId: circleId)), Dictionary(grouping: s.reports(circleId: circleId), by: { $0.target }))
             }
             guard let self else { return }
@@ -4233,7 +4307,7 @@ final class FeedStore: ObservableObject {
             let changed = self.sensitiveCache[circleId] != sensitive || self.reportsCache[circleId] == nil
             self.sensitiveCache[circleId] = sensitive
             self.reportsCache[circleId] = reports
-            if changed { self.objectWillChange.send() }
+            if changed { self.objectWillChange.send(); SensitiveFlagsSignal.shared.bump() }
         }
     }
 
@@ -4242,6 +4316,7 @@ final class FeedStore: ObservableObject {
     func flagSensitive(circleId: String, ref: String) {
         guard let engine, !sensitiveRefs(circleId: circleId).contains(ref) else { return }
         sensitiveCache[circleId, default: []].insert(ref)   // optimistic local (dedupes a second ask too)
+        SensitiveFlagsSignal.shared.bump()
         let ts = now()
         Task { @MainActor [weak self] in
             guard let self, let a = await self.authorEvent(engine, circleId: circleId, createdAt: nil, { s in
@@ -4394,7 +4469,8 @@ final class FeedStore: ObservableObject {
     }
     private func authorEvent(_ engine: Engine, circleId: String, createdAt: UInt64?,
                              _ seal: (HavenSocial) throws -> Data) async -> Authored? {
-        await engine.run { s -> Authored? in
+        // The user's own action (post, react, comment, DM, edit…): ahead of queued background work.
+        await engine.run(lane: .userInitiated) { s -> Authored? in
             guard let env = try? seal(s) else { return nil }
             let id = createdAt.flatMap { s.lastAuthoredEventId(circleId: circleId, createdAt: $0) }
             return Authored(env: env, eventId: id, members: s.contactNodeIds(circleId: circleId),
@@ -4661,24 +4737,36 @@ final class FeedStore: ObservableObject {
     }
 
     /// Stories in the active circle (full-screen, ephemeral), newest first.
-    var stories: [FeedItemFfi] { items.filter { $0.story && !$0.unsent && !$0.media.isEmpty } }
+    private(set) var stories: [FeedItemFfi] = []
 
     /// Stories grouped by author — each user's stories play together, oldest→newest,
     /// and the groups are ordered by who posted most recently.
-    var groupedStories: [(author: String, items: [FeedItemFfi])] {
-        Dictionary(grouping: stories) { $0.authorShort }
-            .map { (author: $0.key, items: $0.value.sorted { $0.createdAt < $1.createdAt }) }
-            .sorted { ($0.items.last?.createdAt ?? 0) > ($1.items.last?.createdAt ?? 0) }
-    }
+    private(set) var groupedStories: [(author: String, items: [FeedItemFfi])] = []
     /// All stories in grouped order (what the viewer pages through).
-    var groupedStoriesFlat: [FeedItemFfi] { groupedStories.flatMap { $0.items } }
+    private(set) var groupedStoriesFlat: [FeedItemFfi] = []
     /// The index in the flat list where a given group starts.
     func storyStartIndex(forGroup g: Int) -> Int {
         groupedStories.prefix(g).reduce(0) { $0 + $1.items.count }
     }
     /// The regular feed (stories live in the tray, not the main list). Unsent posts are gone —
     /// a "Message unsent" tombstone in the feed is clutter, not information.
-    var feedItems: [FeedItemFfi] { items.filter { !$0.story && !$0.unsent } }
+    private(set) var feedItems: [FeedItemFfi] = []
+    /// Hash of the filtered list `items` was last built from by `refresh` (nil after any other write).
+    private var itemsFingerprint: Int?
+
+    /// Rebuild `feedItems` / `stories` / `groupedStories(Flat)` from `items`. Runs on every `items`
+    /// assignment (and only then) — these were computed properties, each an O(posts) filter (the
+    /// story grouping a group + sort), evaluated several times per FeedView body and once more in
+    /// every row's onAppear.
+    private func rebuildDerivedFeedLists() {
+        itemsFingerprint = nil   // any assignment invalidates it; `refresh` re-stamps its own
+        feedItems = items.filter { !$0.story && !$0.unsent }
+        stories = items.filter { $0.story && !$0.unsent && !$0.media.isEmpty }
+        groupedStories = Dictionary(grouping: stories) { $0.authorShort }
+            .map { (author: $0.key, items: $0.value.sorted { $0.createdAt < $1.createdAt }) }
+            .sorted { ($0.items.last?.createdAt ?? 0) > ($1.items.last?.createdAt ?? 0) }
+        groupedStoriesFlat = groupedStories.flatMap { $0.items }
+    }
     /// Media on `postId` that has NOT arrived on this device yet, excluding the companions that are
     /// not meant to be shown on their own. Used to decide whether an interaction happened against an
     /// incomplete post.
@@ -5740,7 +5828,6 @@ final class FeedStore: ObservableObject {
         guard !items.isEmpty else { return }
         let known = circles.map(\.id)
         Task { @MainActor in
-            var adopted = false
             for item in items where !MediaStore.shared.has(item.ref) {
                 var cids = [item.circleId]
                 cids.append(contentsOf: known.filter { $0 != item.circleId })
@@ -5751,12 +5838,12 @@ final class FeedStore: ObservableObject {
                     return nil
                 }
                 guard let opened else { continue }
-                MediaStore.shared.store(item.ref, opened)
+                await MediaStore.shared.storeAsync(item.ref, opened)
                 mediaArrived(item.ref)
                 MediaFetchBackoff.clear(item.ref)
-                adopted = true
             }
-            if adopted { scheduleRefresh() }
+            // Media-only: `MediaArrivals` re-renders the tiles; the feed list itself is unchanged, so
+            // no feed rebuild.
         }
     }
 
@@ -6640,9 +6727,8 @@ final class FeedStore: ObservableObject {
         let out = MediaStore.shared.makeTempFile()
         let ok = await engine.run { $0.openCircleMediaFile(circleId: circleId, sealedPath: sealed.path, outPath: out.path) }
         guard ok else { try? FileManager.default.removeItem(at: out); return false }
-        let adopted = MediaStore.shared.adopt(ref, from: out)
-        if adopted { refresh() }
-        return adopted
+        // Media-only arrival: `MediaArrivals` re-renders the tiles; no feed rebuild needed.
+        return await MediaStore.shared.adoptAsync(ref, from: out)
     }
 
     /// The handoff's progress denominator: total events across these circles.
@@ -7739,6 +7825,11 @@ final class FeedStore: ObservableObject {
     /// per pass (an open attempt is real crypto over real bytes) and once per ref per launch, so the
     /// total cost is the size of the library rather than a rate.
     private var verifyHeldMediaInFlight = false
+    /// The last feed walk's refs, and the engine generation + circle list it was taken at.
+    private var verifyRefsCache: (gen: UInt64, circleIds: [String],
+                                  refs: [(cid: String, postId: String, authorShort: String, ref: String)])?
+    /// Held blobs larger than this are not probed (read whole to attempt an open).
+    nonisolated static let verifyHeldMediaMaxBytes = 32 * 1024 * 1024
     func verifyHeldMedia(limit: Int = 6) {
         guard let engine, !verifyHeldMediaInFlight else { return }
         // This walked `social.feed` for EVERY circle and ran up to `limit` media decrypts ON THE MAIN
@@ -7753,26 +7844,50 @@ final class FeedStore: ObservableObject {
         let nowMs = now()
         Task { @MainActor [weak self] in
             // 1. Every media ref in feed order (cheap strings; the per-pass bound is applied on main).
-            let refs: [(cid: String, postId: String, authorShort: String, ref: String)] = await engine.run { s in
-                var out: [(cid: String, postId: String, authorShort: String, ref: String)] = []
-                for cid in circleIds {
-                    for item in s.feed(circleId: cid, nowMs: nowMs, viewerRetentionSecs: nil) {
-                        for ref in item.media { out.append((cid, item.id, item.authorShort, ref)) }
+            //
+            // This pass runs every 2–5 s while the fast media timer is armed, and the walk decodes
+            // EVERY circle's feed under the engine lock. The list can only change when an engine
+            // call that mutates state has run, so reuse the last walk while the engine's mutation
+            // generation is unchanged (and the circle set with it).
+            let engineGen = await engine.mutationGeneration()
+            let refs: [(cid: String, postId: String, authorShort: String, ref: String)]
+            if let cached = self?.verifyRefsCache, cached.gen == engineGen, cached.circleIds == circleIds {
+                refs = cached.refs
+            } else {
+                refs = await engine.run(readOnly: true) { s in
+                    var out: [(cid: String, postId: String, authorShort: String, ref: String)] = []
+                    for cid in circleIds {
+                        for item in s.feed(circleId: cid, nowMs: nowMs, viewerRetentionSecs: nil) {
+                            for ref in item.media { out.append((cid, item.id, item.authorShort, ref)) }
+                        }
                     }
+                    return out
                 }
-                return out
+                self?.verifyRefsCache = (engineGen, circleIds, refs)
             }
-            // 2. The first `limit` unprobed, HELD refs, with their sealed bytes (main actor).
-            var picked: [(cid: String, postId: String, authorShort: String, ref: String, sealed: Data)] = []
-            for r in refs where picked.count < limit {
+            // 2. The first `limit` unprobed, HELD refs (main actor: an in-memory lookup), then their
+            //    bytes read OFF-main — a whole-file read on main per ref was a stall per video.
+            var candidates: [(cid: String, postId: String, authorShort: String, ref: String, url: URL)] = []
+            for r in refs where candidates.count < limit {
                 if MediaStore.isSynthetic(r.ref) || Self.mediaProbed.contains(r.ref) { continue }
-                guard MediaStore.shared.has(r.ref), let sealed = MediaStore.shared.rawBytes(r.ref) else { continue }
+                guard MediaStore.shared.has(r.ref), let url = MediaStore.shared.storagePath(for: r.ref) else { continue }
                 Self.mediaProbed.insert(r.ref)
-                picked.append((r.cid, r.postId, r.authorShort, r.ref, sealed))
+                candidates.append((r.cid, r.postId, r.authorShort, r.ref, url))
             }
+            let toRead = candidates
+            let picked: [(cid: String, postId: String, authorShort: String, ref: String, sealed: Data)] =
+                await Task.detached(priority: .utility) {
+                    toRead.compactMap { c in
+                        // Bounded: a multi-hundred-MB clip must not be pulled into RAM just to probe it.
+                        let size = (try? c.url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                        guard size > 0, size <= Self.verifyHeldMediaMaxBytes,
+                              let data = try? Data(contentsOf: c.url) else { return nil }
+                        return (c.cid, c.postId, c.authorShort, c.ref, data)
+                    }
+                }.value
             // 3. The actual crypto, off-main.
             let toOpen = picked
-            let unreadable: [(cid: String, postId: String, authorShort: String, ref: String)] = await engine.run { s in
+            let unreadable: [(cid: String, postId: String, authorShort: String, ref: String)] = await engine.run(readOnly: true) { s in
                 toOpen.filter { s.openCircleMedia(circleId: $0.cid, sealed: $0.sealed) == nil }
                       .map { ($0.cid, $0.postId, $0.authorShort, $0.ref) }
             }
@@ -8277,8 +8392,8 @@ final class FeedStore: ObservableObject {
         }
         Task { @MainActor in
             if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, engine: engine) {
-                MediaStore.shared.store(ref, data); mediaArrived(ref); MediaFetchBackoff.clear(ref)
-                autoSaveReceived(ref); scheduleRefresh()
+                await MediaStore.shared.storeAsync(ref, data); mediaArrived(ref); MediaFetchBackoff.clear(ref)
+                autoSaveReceived(ref)   // media-only: MediaArrivals re-renders the tiles, no feed rebuild
             } else if !MediaStore.shared.has(ref), self.mayDirectAsk(ref, circleHasRelay: true) {
                 self.askForMedia(ref: ref, myHex: myHex, plain: payload)
             }
@@ -8530,9 +8645,9 @@ final class FeedStore: ObservableObject {
                     defer { if !MediaStore.shared.has(ref) { self.downloadingMedia.remove(ref) } }
                     if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, engine: engine) {
                         HavenLog.relay("MEDIA-FETCH ok ref=\(ref.prefix(10)) bytes=\(data.count) via=relay")
-                        MediaStore.shared.store(ref, data); self.mediaArrived(ref)
+                        await MediaStore.shared.storeAsync(ref, data); self.mediaArrived(ref)
                         MediaFetchBackoff.clear(ref); self.fastReq[ref] = nil
-                        self.autoSaveReceived(ref); self.scheduleRefresh()
+                        self.autoSaveReceived(ref)
                     // A relay REFUSED us rather than lacking the blob: publish our device roster to it
                     // and try once more. Without this the fetch degrades to a peer ask that only works
                     // while the author happens to be online — which is exactly how media a few days old
@@ -8540,9 +8655,9 @@ final class FeedStore: ObservableObject {
                     } else if await SharedStore.healForbiddenRelays(engine: engine),
                               let data = await SharedStore.restore(ref: ref, circleIds: circleIds, engine: engine) {
                         HavenLog.relay("MEDIA-FETCH ok ref=\(ref.prefix(10)) bytes=\(data.count) via=relay (after roster publish)")
-                        MediaStore.shared.store(ref, data); self.mediaArrived(ref)
+                        await MediaStore.shared.storeAsync(ref, data); self.mediaArrived(ref)
                         MediaFetchBackoff.clear(ref); self.fastReq[ref] = nil
-                        self.autoSaveReceived(ref); self.scheduleRefresh()
+                        self.autoSaveReceived(ref)
                     } else if self.mayDirectAsk(ref, circleHasRelay: true) {
                         // Relay didn't have it (or unreachable) → ask a peer. NOT for a fresh ref:
                         // the author's upload is most likely still running, and asking now is what
@@ -9367,20 +9482,28 @@ final class FeedStore: ObservableObject {
         // Whether adopt succeeds or rejects the bytes on a digest mismatch, this reassembly is over:
         // on rejection it has already discarded the temp file, so leaving the record behind would
         // resurrect a bitmap whose bytes are gone and stall the ref forever.
-        MediaStore.shared.adopt(ref, from: entry.tempURL)
+        //
+        // The verify (a streaming SHA-256 over the whole file — seconds for a big video) and the move
+        // run off-main in `adoptAsync`; the bookkeeping that closes this reassembly stays synchronous
+        // so a late duplicate chunk cannot find a half-finished entry.
+        let temp = entry.tempURL
         ReassemblyStore.shared.clear(ref)
         SyncMetrics.shared.nbMediaIn += 1
-        autoSaveReceived(ref)
         incoming[ref] = nil
-        scheduleRefresh()   // re-render so the media appears (coalesced — many chunks complete in bursts)
-        // DURABILITY: this blob just arrived peer-to-peer, which means the relay didn't have it (or we'd
-        // have restored it from there). Re-mirror it to the circle's relay so it survives the author going
-        // offline or the relay evicting the author's copy — any online member repopulates it. Sealing uses
-        // the circle we requested it for. The backup ledger + probe make redundant re-mirrors a cheap no-op.
-        if let engine {
-            let circle = mediaReqCircle[ref] ?? activeCircleId
-            mediaReqCircle[ref] = nil
-            MediaBackupQueue.shared.enqueue(ref, circleId: circle, engine: engine)
+        let circle = mediaReqCircle[ref] ?? activeCircleId
+        mediaReqCircle[ref] = nil
+        Task { @MainActor [weak self] in
+            // The media views re-render via `MediaArrivals` (adoptAsync notes it) — no feed rebuild.
+            guard await MediaStore.shared.adoptAsync(ref, from: temp), let self else { return }
+            self.autoSaveReceived(ref)
+            // DURABILITY: this blob just arrived peer-to-peer, which means the relay didn't have it (or
+            // we'd have restored it from there). Re-mirror it to the circle's relay so it survives the
+            // author going offline or the relay evicting the author's copy — any online member
+            // repopulates it. Sealing uses the circle we requested it for. The backup ledger + probe
+            // make redundant re-mirrors a cheap no-op.
+            if let engine = self.engine {
+                MediaBackupQueue.shared.enqueue(ref, circleId: circle, engine: engine)
+            }
         }
     }
 

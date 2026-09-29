@@ -24,13 +24,51 @@ import UIKit
 // media page re-renders without the header, reactions and comments. That needs the shared @State to
 // move with it — which is now a contained problem, because it is all in one file.
 
+/// Observes the two signals a post's media reacts to — the centred-post coordinator and media
+/// arrivals — and hands `PostMediaView` plain values, so the (Equatable) media view re-renders only
+/// when ITS inputs change: its own centred state flipping, or media of THIS post landing. Before,
+/// every PostMediaView observed the coordinator directly and re-evaluated on every centre change
+/// anywhere in the feed, and had no arrival signal at all (it caught up on incidental publishes).
+struct PostMediaHost: View {
+    let item: FeedItemFfi
+    let onHeart: () -> Void
+    let onToggleMute: () -> Void
+    @Binding var zoomTarget: ZoomTarget?
+
+    @ObservedObject private var audio = AudioCoordinator.shared
+    @ObservedObject private var arrivals = MediaArrivals.shared
+    @Environment(\.havenFeedContainer) private var feedContainer
+    /// Bumped only when an arrival batch touches this post's media.
+    @State private var mediaGeneration: UInt64 = 0
+
+    var body: some View {
+        PostMediaView(item: item, onHeart: onHeart, onToggleMute: onToggleMute, zoomTarget: $zoomTarget,
+                      isActive: audio.centeredPostId == item.id && audio.centeredContainer == feedContainer,
+                      mediaGeneration: mediaGeneration)
+            .equatable()
+            .onChange(of: arrivals.generation) {
+                if !arrivals.lastBatch.isDisjoint(with: item.media) { mediaGeneration &+= 1 }
+            }
+    }
+}
+
+extension PostMediaView: Equatable {
+    /// Closures and the zoom binding are deliberately NOT compared — the same reasoning as
+    /// `PostCard`'s conformance: they are recreated on every parent render and act on the same
+    /// store and ids, so two views with equal inputs behave identically.
+    static func == (a: PostMediaView, b: PostMediaView) -> Bool {
+        a.item == b.item && a.isActive == b.isActive && a.mediaGeneration == b.mediaGeneration
+    }
+}
+
 struct PostMediaView: View {
     let item: FeedItemFfi
     let onHeart: () -> Void
     let onToggleMute: () -> Void
     @Binding var zoomTarget: ZoomTarget?
 
-    @ObservedObject var audio = AudioCoordinator.shared
+    /// Actions only (start/stop playback) — the reactive part arrives as `isActive` from the host.
+    var audio: AudioCoordinator { AudioCoordinator.shared }
     @Environment(\.havenFeedContainer) var feedContainer
     var feed: FeedStore { FeedStore.shared }
 
@@ -46,7 +84,12 @@ struct PostMediaView: View {
     /// post living in two live containers (your own video is in both the circle feed and your
     /// profile) had both copies claim to be active, and both built an AVPlayer for the same clip —
     /// two decode sessions playing over each other, only one of them known to the coordinator.
-    var isActive: Bool { audio.centeredPostId == item.id && audio.centeredContainer == feedContainer }
+    ///
+    /// Now computed by `PostMediaHost` and passed in, so this view is invalidated only when it flips.
+    let isActive: Bool
+    /// Changes when media of this post lands on disk (see `PostMediaHost`) — the re-check trigger
+    /// for every "is the file here yet?" decision in the body.
+    var mediaGeneration: UInt64 = 0
 
     // The media's own state, finally living with the media. On PostCard these forced the WHOLE card
     // to re-evaluate: paging a carousel, a width measurement landing, a data-saver tap.
@@ -60,7 +103,7 @@ struct PostMediaView: View {
         mediaView
             .onAppear { syncPlayback() }
             .onDisappear { teardownPlayers() }
-            .onChange(of: audio.centeredPostId) { syncPlayback() }
+            .onChange(of: isActive) { syncPlayback() }
             .onChange(of: currentPage) { if isActive { playVisibleVideo() } }
     }
 

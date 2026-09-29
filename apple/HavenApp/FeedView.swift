@@ -1748,6 +1748,8 @@ struct PostMasonryTile: View {
     let height: CGFloat
     @Binding var zoomTarget: ZoomTarget?
     @ObservedObject private var transfer = MediaTransferState.shared   // the download badge's source of truth
+    /// Re-check `hasLocalFile` when media lands — the tile swaps from placeholder to image then.
+    @ObservedObject private var arrivals = MediaArrivals.shared
 
     var body: some View { tile(ref, height: height) }
 
@@ -2359,7 +2361,7 @@ struct PostCard: View {
     /// reactions and comments along with it. The playback lifecycle hooks moved with it, because they
     /// belong to the thing that owns the players.
     private var postMedia: some View {
-        PostMediaView(item: item, onHeart: { heartIt() },
+        PostMediaHost(item: item, onHeart: { heartIt() },
                       onToggleMute: { togglePostMute() }, zoomTarget: $zoomTarget)
     }
 

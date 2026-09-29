@@ -25,7 +25,14 @@ struct StoryViewer: View {
     /// Observed so the Keep pill re-renders the moment it's toggled.
     @ObservedObject private var kept = KeptStoriesStore.shared
     @Environment(\.dismiss) private var dismiss
-    @State private var progress = 0.0
+    /// Slide progress as TIME, not a ticked counter: seconds banked before the current run, plus
+    /// the moment the current run started (nil while paused). The progress bar derives its fill
+    /// from these inside its own `TimelineView`, so the viewer's body — full-screen blur, caption
+    /// decode, media — no longer re-evaluates 20×/s the way the old 50 ms `Timer` tick made it.
+    @State private var elapsedBase: TimeInterval = 0
+    @State private var runStart: Date?
+    /// Bumped when media for the CURRENT story lands (poster under the spinner, the clip itself).
+    @State private var arrivalTick = 0
     @State private var player: AVPlayer?
     @State private var endObserver: Any?   // the loop observer's token — MUST be removed or the player leaks
     @State private var slideDuration = 5.0   // photos 5s; videos last their clip (≤15s)
@@ -37,7 +44,6 @@ struct StoryViewer: View {
     @State private var replyText = ""
     @State private var replySent = false
     @State private var waitingMedia: String?   // a story whose bytes are still downloading
-    @State private var retryCounter = 0
 
     /// The ref a story actually RENDERS.
     ///
@@ -60,7 +66,26 @@ struct StoryViewer: View {
     @State private var heldPaused = false            // press-and-hold pauses the timer + video
     @FocusState private var replyFocused: Bool
     @Environment(\.scenePhase) private var scenePhase
-    private let tick = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
+
+    /// Whether the slide clock should be running right now.
+    private var isRunning: Bool { !paused && !heldPaused && !replyFocused && waitingMedia == nil }
+
+    /// Start or stop the slide clock, banking the elapsed time on a stop.
+    private func setRunning(_ running: Bool) {
+        if running {
+            if runStart == nil { runStart = Date() }
+        } else if let start = runStart {
+            elapsedBase += Date().timeIntervalSince(start)
+            runStart = nil
+        }
+    }
+    /// A new slide (or a restart): the clock goes back to zero.
+    private func resetProgress() {
+        elapsedBase = 0
+        runStart = isRunning ? Date() : nil
+    }
+    /// What the auto-advance task is keyed on: any change re-arms it with the right remaining time.
+    private struct AdvanceKey: Equatable { let index: Int; let runStart: Date?; let duration: Double }
 
     struct StoryProfile: Identifiable { let id = UUID(); let hex: String; let name: String }
 
@@ -177,16 +202,32 @@ struct StoryViewer: View {
         .onReceive(CallManager.shared.objectWillChange) { _ in
             if CallManager.shared.callInProgress { player?.isMuted = true }
         }
-        .onReceive(tick) { _ in
-            // Waiting on media: re-check + re-request (~every 2s) until it arrives, then load.
-            if let ref = waitingMedia {
-                if MediaStore.shared.has(ref) { loadCurrent() }
-                else { retryCounter += 1; if retryCounter % 40 == 0 { FeedStore.shared.requestMedia(ref) } }
-                return
+        // The slide clock: runs while nothing holds it (see `isRunning`); the bar reads it itself.
+        .onChange(of: isRunning, initial: true) { _, running in setRunning(running) }
+        // Auto-advance exactly when the running slide's time is up — one sleep, not a 20 Hz poll.
+        .task(id: AdvanceKey(index: index, runStart: runStart, duration: slideDuration)) {
+            guard let start = runStart else { return }
+            let remaining = slideDuration - elapsedBase - Date().timeIntervalSince(start)
+            if remaining > 0 { try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000)) }
+            guard !Task.isCancelled, runStart == start else { return }
+            next()
+        }
+        // Waiting on media: load the moment it lands (`MediaArrivals`), re-requesting every ~2 s as
+        // before. This used to `stat` the file 20×/s from the tick while the spinner showed.
+        .onReceive(MediaArrivals.shared.$generation.dropFirst()) { _ in
+            guard stories.indices.contains(index) else { return }
+            let batch = MediaArrivals.shared.lastBatch
+            guard !batch.isDisjoint(with: stories[index].media) else { return }
+            arrivalTick &+= 1   // re-draw (the poster under the spinner may be what landed)
+            if let ref = waitingMedia, MediaStore.shared.has(ref) { loadCurrent() }
+        }
+        .task(id: waitingMedia) {
+            while let ref = waitingMedia, !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled, waitingMedia == ref else { return }
+                if MediaStore.shared.has(ref) { loadCurrent(); return }
+                FeedStore.shared.requestMedia(ref)
             }
-            guard !paused, !heldPaused, !replyFocused else { return }
-            progress += 0.05 / slideDuration
-            if progress >= 1 { next() }
         }
         // "Message" on a profile peeked from here switches to the Messages tab — close the story
         // viewer too, or the conversation opens hidden underneath this full-screen cover.
@@ -212,14 +253,17 @@ struct StoryViewer: View {
     }
 
     @ViewBuilder private func content(_ s: FeedItemFfi) -> some View {
+        // Read so a landing poster/clip (bumped in the arrival handler) re-evaluates the file checks.
+        let _ = arrivalTick
         if waitingMedia != nil {
             // Draw the poster under the spinner when we have it. A story's clip can take a while to
             // arrive — the poster is a fraction of the size and lands first — and a still with a
             // progress ring reads as "this is loading", where a black screen reads as "this is
             // broken". That was the report: stories stuck on a spinner that never finished.
             ZStack {
-                if let p = posterRef(s), let img = MediaStore.shared.item(p)?.image {
-                    Image(platformImage: img).resizable().scaledToFill()
+                // Downsampled + decoded off-main (FeedImage), not the full-res bitmap decoded at draw.
+                if let p = posterRef(s), MediaStore.shared.hasLocalFile(p) {
+                    FeedImage(ref: p, maxDimension: 1600, contentMode: .fill) { Color.clear }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .clipped()
                         .overlay(Color.black.opacity(0.35))
@@ -233,9 +277,11 @@ struct StoryViewer: View {
                 ZStack {
                     // Blurred fill backdrop so off-ratio media (landscape, etc.) sits in the standard
                     // story frame instead of leaving plain black bands. The still covers photo + video.
-                    if let ref = displayRef(s) ?? posterRef(s),
-                       let img = MediaStore.shared.item(ref)?.image ?? posterRef(s).flatMap({ MediaStore.shared.item($0)?.image }) {
-                        Image(platformImage: img).resizable().scaledToFill()
+                    //
+                    // A SMALL bitmap: it is blurred by 28 pt anyway, so the full-resolution decode it
+                    // used (on main, at first draw) bought nothing but the cost.
+                    if let ref = stillRef(s) {
+                        FeedImage(ref: ref, maxDimension: 256, contentMode: .fill) { Color.clear }
                             .frame(width: geo.size.width, height: geo.size.height)
                             .blur(radius: 28).overlay(Color.black.opacity(0.28))
                     }
@@ -281,11 +327,10 @@ struct StoryViewer: View {
                     Group {
                         if let player {
                             VideoSurface(player: player, fill: fills)
-                        } else if let ref = displayRef(s),
-                                  let img = MediaStore.shared.item(ref)?.image
-                                      ?? posterRef(s).flatMap({ MediaStore.shared.item($0)?.image }) {
-                            Image(platformImage: img).resizable()
-                                .aspectRatio(contentMode: fills ? .fill : .fit)
+                        } else if displayRef(s) != nil, let ref = stillRef(s) {
+                            // Screen-sized, decoded off-main — not the full-res original decoded on
+                            // main at first draw.
+                            FeedImage(ref: ref, maxDimension: 2048, contentMode: fills ? .fill : .fit) { missing }
                         } else {
                             missing
                         }
@@ -307,6 +352,13 @@ struct StoryViewer: View {
                 .clipped()
             }
         }
+    }
+
+    /// The ref to draw a STILL from: the story's own media if its bytes are here, else its poster.
+    private func stillRef(_ s: FeedItemFfi) -> String? {
+        if let r = displayRef(s), MediaStore.shared.hasLocalFile(r) { return r }
+        if let p = posterRef(s), MediaStore.shared.hasLocalFile(p) { return p }
+        return nil
     }
 
     private var downloading: some View {
@@ -408,8 +460,12 @@ struct StoryViewer: View {
                     GeometryReader { geo in
                         Capsule().fill(.white.opacity(0.3))
                             .overlay(alignment: .leading) {
-                                Capsule().fill(.white)
-                                    .frame(width: geo.size.width * (i < index ? 1 : (i == index ? progress : 0)))
+                                if i == index {
+                                    StoryProgressFill(width: geo.size.width, base: elapsedBase,
+                                                      runStart: runStart, duration: slideDuration)
+                                } else {
+                                    Capsule().fill(.white).frame(width: i < index ? geo.size.width : 0)
+                                }
                             }
                     }
                     .frame(height: 3)
@@ -745,7 +801,6 @@ struct StoryViewer: View {
         // actively re-request instead of hanging forever on a stale "Loading…".
         if let ref = displayRef(s), !MediaStore.shared.has(ref) {
             waitingMedia = ref
-            retryCounter = 0
             FeedStore.shared.requestMedia(ref)
             // Pull the poster too. It is orders of magnitude smaller than the clip, so it lands
             // almost immediately and gives the viewer something real to show meanwhile — the
@@ -835,11 +890,11 @@ struct StoryViewer: View {
     }
 
     private func next() {
-        progress = 0
+        resetProgress()
         if index + 1 < stories.count { index += 1; loadCurrent() } else { dismiss() }
     }
     private func prev() {
-        progress = 0
+        resetProgress()
         if index > 0 { index -= 1; loadCurrent() }
     }
 
@@ -851,7 +906,7 @@ struct StoryViewer: View {
     private func skipToNextUser() {
         let cur = author(index)
         if let nextStart = stories.indices.first(where: { $0 > index && stories[$0].authorShort != cur }) {
-            progress = 0; index = nextStart; loadCurrent()
+            resetProgress(); index = nextStart; loadCurrent()
         } else {
             dismiss()
         }
@@ -864,7 +919,7 @@ struct StoryViewer: View {
         var runStart = index
         while runStart > 0, stories[runStart - 1].authorShort == cur { runStart -= 1 }
         if index > runStart {
-            progress = 0; index = runStart; loadCurrent()   // partway in → restart this person
+            resetProgress(); index = runStart; loadCurrent()   // partway in → restart this person
             return
         }
         // Already at this person's first story → go to the previous person's first story.
@@ -872,6 +927,23 @@ struct StoryViewer: View {
         let prevAuthor = stories[runStart - 1].authorShort
         var prevStart = runStart - 1
         while prevStart > 0, stories[prevStart - 1].authorShort == prevAuthor { prevStart -= 1 }
-        progress = 0; index = prevStart; loadCurrent()
+        resetProgress(); index = prevStart; loadCurrent()
+    }
+}
+
+/// The current slide's progress fill. Its own view with its own `TimelineView`, so the per-frame
+/// redraw is this capsule — not the story viewer's body with its full-screen blur.
+private struct StoryProgressFill: View {
+    let width: CGFloat
+    let base: TimeInterval
+    let runStart: Date?
+    let duration: Double
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: nil, paused: runStart == nil)) { ctx in
+            let elapsed = base + (runStart.map { ctx.date.timeIntervalSince($0) } ?? 0)
+            let fraction = duration > 0 ? min(1, max(0, elapsed / duration)) : 0
+            Capsule().fill(.white).frame(width: width * fraction)
+        }
     }
 }

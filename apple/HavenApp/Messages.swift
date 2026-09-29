@@ -128,8 +128,11 @@ struct MessagesView: View {
     }
     /// Everything not pinned, most-recently-active first.
     private var unpinnedIds: [String] {
-        store.dmCircles.map(\.id).filter { !pins.isPinned($0) }
-            .sorted { lastActivity($0) > lastActivity($1) }
+        // Keys computed ONCE per id: `lastActivity` maps + maxes a whole thread, and calling it
+        // inside the comparator ran it O(n log n) times per render.
+        let ids = store.dmCircles.map(\.id).filter { !pins.isPinned($0) }
+        let activity = Dictionary(ids.map { ($0, lastActivity($0)) }, uniquingKeysWith: { a, _ in a })
+        return ids.sorted { (activity[$0] ?? 0) > (activity[$1] ?? 0) }
     }
 
     var body: some View {
@@ -752,10 +755,15 @@ struct DMThreadView: View {
         let isVid = MediaKind(ref: ref) == .video
         let hasFile = MediaStore.shared.hasLocalFile(ref)
         let posterRef = isVid ? MediaVariants.poster(for: ref, in: postMedia) : nil
-        let img = MediaStore.shared.item(ref)?.image
-            ?? posterRef.flatMap { MediaStore.shared.item($0)?.image }
-        if let img {
-            Image(platformImage: img).resizable().scaledToFill()
+        // A downsampled bitmap decoded OFF-main (FeedImage → thumbnailAsync). This drew
+        // `item(ref).image` — the full-resolution original, decoded on the main thread at first draw,
+        // for a 104 pt tile — once per attachment in every visible bubble.
+        let stillRef: String? = hasFile ? ref
+            : posterRef.flatMap { MediaStore.shared.hasLocalFile($0) ? $0 : nil }
+        if let stillRef {
+            FeedImage(ref: stillRef, maxDimension: max(maxW, maxH) * 3, contentMode: .fill) {
+                RoundedRectangle(cornerRadius: corner).fill(Color(.secondarySystemFill))
+            }
                 .frame(maxWidth: maxW, maxHeight: maxH)
                 .frame(width: maxW == 104 ? 104 : nil, height: maxH == 104 ? 104 : nil)
                 .clipShape(RoundedRectangle(cornerRadius: corner))

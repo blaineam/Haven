@@ -380,7 +380,11 @@ struct RootView: View {
     @StateObject private var accountStore = AccountStore()
     @ObservedObject private var profile = ProfileStore.shared
     @ObservedObject private var contacts = ContactsStore.shared
-    @ObservedObject private var feedStore = FeedStore.shared
+    /// The root reads three values from the feed store (two badges + the active circle). It observes
+    /// `FeedBadges`, which mirrors exactly those, instead of the whole store — every feed rebuild,
+    /// DM snapshot and members fill used to re-evaluate the entire tab scaffold.
+    @ObservedObject private var badges = FeedBadges.shared
+    private var feedStore: FeedStore { FeedStore.shared }
     @ObservedObject private var connections = ConnectionsStore.shared
     @ObservedObject private var linkPresenter = LinkPresenter.shared
     @ObservedObject private var deepLinks = DeepLinkRouter.shared
@@ -404,7 +408,7 @@ struct RootView: View {
 
     /// Blur when the app isn't frontmost and the active circle is biometric-locked.
     private var shouldPrivacyBlur: Bool {
-        scenePhase != .active && CircleSettingsStore.shared.biometricRequired(feedStore.activeCircleId)
+        scenePhase != .active && CircleSettingsStore.shared.biometricRequired(badges.activeCircleId)
     }
 
     var body: some View {
@@ -537,12 +541,12 @@ struct RootView: View {
                 .tabItem { Label("Circle", systemImage: "sparkles") }
                 // Pending circle-approval prompts surface on the Circle tab (that's where the
                 // banner lives), alongside unseen posts — NOT on You.
-                .badge(feedStore.unseenCircle + connections.pending.count)
+                .badge(badges.unseenCircle + connections.pending.count)
             NavigationStack { MessagesView(account: accountStore.account) }
                 .havenImportBanner { showImportSheet = true }
                 .tag("messages")
                 .tabItem { Label("Messages", systemImage: "bubble.left.and.bubble.right.fill") }
-                .badge(feedStore.unseenMessages)
+                .badge(badges.unseenMessages)
             YouView(
                 account: accountStore.account,
                 accountStore: accountStore,

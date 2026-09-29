@@ -31,8 +31,18 @@ struct UploadProgress: Equatable, Sendable {
     /// The last pass ended with user items still pending: they wait on a backoff timer (or are in the
     /// retry pass that timer started). Cleared by a pass that lands everything.
     var backingOff = false
+    /// Media blobs of posts you just authored still on their way to a relay, per circle
+    /// (`MediaBackupQueue`'s fresh-post lane). The event envelope is a few KB and lands in well under
+    /// a second; the photo or video it names is what actually takes time — a pill that ignored it
+    /// said "Synced" while your video was still uploading.
+    var mediaPendingByCircle: [String: Int] = [:]
 
+    /// Authored EVENTS still waiting for a mailbox.
     func pending(_ circleId: String) -> Int { pendingByCircle[circleId] ?? 0 }
+    /// Authored media blobs still waiting for a relay.
+    func mediaPending(_ circleId: String) -> Int { mediaPendingByCircle[circleId] ?? 0 }
+    /// Everything of yours the pill is waiting on.
+    func totalPending(_ circleId: String) -> Int { pending(circleId) + mediaPending(circleId) }
 }
 
 /// What the composer's sync pill says for one circle.
@@ -53,7 +63,7 @@ enum SyncBadgeState: Equatable, Sendable {
         // This device IS the circle's relay: the mailbox is on this machine.
         if hostsRelay { return .synced }
         if hasRelay {
-            let pending = p.pending(circleId)
+            let pending = p.totalPending(circleId)
             guard pending > 0 else { return .synced }
             // Can't reach any relay at all: the queue is real, but it is going nowhere until we're back.
             if !online && !nearbyConnected { return .deviceOnly }
@@ -66,6 +76,52 @@ enum SyncBadgeState: Equatable, Sendable {
         // No relay: posts go best-effort straight to whoever's reachable — there is no upload to track.
         if nearbyConnected || online { return .synced }
         return .deviceOnly
+    }
+
+    /// The QA dump's word for the state (docs/QA.md "Progress fields").
+    var dumpState: String {
+        switch self {
+        case .synced: return "synced"
+        case .sending, .queued: return "syncing"
+        case .retrying: return "retrying"
+        case .deviceOnly: return "local"
+        }
+    }
+    /// Finer than `dumpState`: which syncing it is.
+    var detail: String {
+        switch self {
+        case .synced: return "synced"
+        case .sending(let d, let t): return "sending \(d)/\(t)"
+        case .queued(let n): return "queued \(n)"
+        case .retrying(let n): return "retrying \(n)"
+        case .deviceOnly: return "local"
+        }
+    }
+}
+
+/// Bounded log of the pill's transitions (QA dump `sync_badge_history`).
+///
+/// The e2e `progress` step sampled the pill every few hundred ms and never once saw it leave
+/// "synced": a small post's upload starts and finishes between two samples. Recording every
+/// change where it happens makes "it went synced → syncing → synced" provable instead of a race.
+struct SyncBadgeHistory: Equatable, Sendable {
+    struct Entry: Equatable, Sendable {
+        var circle: String
+        var state: String
+        var detail: String
+        var pending: Int
+        var atMs: UInt64
+    }
+    static let cap = 20
+    private(set) var entries: [Entry] = []
+
+    /// Append when what the pill shows changed (same circle, state, detail and count = no entry).
+    mutating func record(circle: String, _ badge: SyncBadgeState, pending: Int, atMs: UInt64) {
+        let e = Entry(circle: circle, state: badge.dumpState, detail: badge.detail, pending: pending, atMs: atMs)
+        if let last = entries.last, last.circle == e.circle, last.state == e.state,
+           last.detail == e.detail, last.pending == e.pending { return }
+        entries.append(e)
+        if entries.count > Self.cap { entries.removeFirst(entries.count - Self.cap) }
     }
 }
 

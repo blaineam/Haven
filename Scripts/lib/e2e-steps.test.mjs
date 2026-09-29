@@ -4,7 +4,7 @@ import {
   num, delta, parseUiNodes, findNode, center, CONSENT, isConsentSurface, fgsTypes, holdsMediaProjection,
   auditShareLog, longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields,
   persistExportAllowance, reactLatency, ingestedFirst, feedNotGatedOnDmWarm, PERF_FIELDS,
-  nonDecreasing, recordProgress,
+  nonDecreasing, recordProgress, badgeTransitions,
 } from './e2e-steps.mjs';
 
 test('num / delta treat missing and junk as zero', () => {
@@ -148,4 +148,31 @@ test('progress: monotonic got series and give-up detection per watched ref', () 
   recordProgress(bad, { media_transfers: [{ ref: 'x', got: 2, total: 9, lane: 'peer' }] }, ['x'], () => false);
   recordProgress(bad, { media_transfers: [{ ref: 'x', got: 5, total: 9, lane: 'peer' }], media_gave_up: ['x'] }, ['x'], () => false);
   assert.ok(bad.x.gaveUp && bad.x.gaveUpWhileReceiving);
+});
+
+test('progress: the pill\'s transition log proves synced → syncing → synced', () => {
+  const c = 'c1';
+  const h = [
+    { circle: c, state: 'synced', detail: 'synced', pending: 0, atMs: 100 },
+    { circle: c, state: 'syncing', detail: 'queued 2', pending: 2, atMs: 210 },
+    { circle: 'other', state: 'syncing', detail: 'queued 1', pending: 1, atMs: 215 },
+    { circle: c, state: 'syncing', detail: 'sending 0/1', pending: 1, atMs: 220 },
+    { circle: c, state: 'synced', detail: 'synced', pending: 0, atMs: 900 },
+  ];
+  const t = badgeTransitions(h, { sinceMs: 200, circle: c });
+  assert.equal(t.sawSending, true);
+  assert.equal(t.settled, true);
+  assert.deepEqual(t.seq, ['syncing:2(queued 2)', 'syncing:1(sending 0/1)', 'synced:0']);
+  // still sending at the end → not settled
+  assert.equal(badgeTransitions(h.slice(0, 4), { sinceMs: 200, circle: c }).settled, false);
+  // never left synced → neither
+  const idle = badgeTransitions([h[0], h[4]], { circle: c });
+  assert.equal(idle.sawSending, false);
+  assert.equal(idle.settled, false);
+  // entries before the post don't count, other circles don't count, junk is tolerated
+  assert.equal(badgeTransitions(h, { sinceMs: 1000, circle: c }).sawSending, false);
+  assert.equal(badgeTransitions(h, { sinceMs: 0, circle: 'nope' }).sawSending, false);
+  assert.equal(badgeTransitions(undefined).sawSending, false);
+  // a syncing row with 0 pending is not a send
+  assert.equal(badgeTransitions([{ circle: c, state: 'syncing', pending: 0, atMs: 5 }], { circle: c }).sawSending, false);
 });

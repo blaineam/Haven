@@ -27,7 +27,7 @@ import { ChannelFreshness, judgeDump, fmtDuration, FRESHNESS_DEFAULTS } from './
 import {
   num, delta, parseUiNodes, findNode, center, CONSENT, isConsentSurface, holdsMediaProjection, auditShareLog,
   longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields, persistExportAllowance,
-  reactLatency, ingestedFirst, feedNotGatedOnDmWarm, nonDecreasing, recordProgress,
+  reactLatency, ingestedFirst, feedNotGatedOnDmWarm, nonDecreasing, recordProgress, badgeTransitions,
 } from './lib/e2e-steps.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -960,9 +960,15 @@ async function main() {
     score('relayfirst: B received via the relay', d('stub', 'received_via_relay') > 0, show('stub', ['received_via_relay', 'received_via_direct']));
     score('relayfirst: B received nothing by direct peer stream', d('stub', 'received_via_direct') === 0, show('stub', ['received_via_direct']));
     for (const n of fleet.filter((x) => devices[x])) {
+      // by_role / by_why / recent (Apple + Android) name WHICH blobs streamed and why no hint
+      // answered them — cumulative, so shown as-is next to the deltas.
+      const why = rf(after[n])?.served_direct_friend_by_why;
+      const recent = (rf(after[n])?.served_direct_friend_recent || []).slice(-4);
       score(`relayfirst: ${n} (account A) streamed nothing directly to friends`,
         d(n, 'served_direct_friend') === 0 && d(n, 'served_direct_friend_bytes') === 0,
-        show(n, ['served_direct_friend', 'served_direct_friend_bytes', 'relay_hints_sent', 'media_requests_from_friends']));
+        show(n, ['served_direct_friend', 'served_direct_friend_bytes', 'relay_hints_sent', 'media_requests_from_friends'])
+          + (why ? ` by_role=${JSON.stringify(rf(after[n]).served_direct_friend_by_role)} by_why=${JSON.stringify(why)}` : '')
+          + (recent.length ? ` recent=${JSON.stringify(recent)}` : ''));
     }
     score('relayfirst: authored media enqueued for the relay BEFORE the broadcast [ios]',
       num(rf(after.ios).broadcast_before_enqueue) === 0 && num(rf(after.ios).authored_media_posts_checked) >= 2,
@@ -1272,22 +1278,25 @@ async function main() {
     const tag = `${MARKER}_Progress_Video`;
     // Make the shared circle A's active one first (the pill reports the ACTIVE circle).
     await op(ios, { op: 'post', body: `${MARKER}_Progress_Seed`, circle_id: shared }, 2000);
+    const tPost = Date.now() - 1000;   // the history's atMs is the app's clock (sim = host, skew 0)
     await op(ios, { op: 'post', body: tag, media: 'video', circle_id: shared,
       video_path: ios.stage(distinctVideo('progress'), 'qa-progress.mp4') }, 500);
-    // A's pill: sample fast until synced again.
-    let sawSending = false, badges = [];
+    // A's pill. The app LOGS every change of it (`sync_badge_history`): the send is asserted from
+    // that log — sampling the live pill raced the upload, which can start and finish between two
+    // dumps. The samples are kept only for the report line.
+    let tr = { sawSending: false, settled: false, seq: [] }, badges = [];
     const tA = Date.now();
     while (Date.now() - tA < BUDGET.mediaBlob) {
       const j = await freshDump(ios);
       const b = j?.sync_badge || {};
-      badges.push(`${b.state}:${b.pending_user_uploads}:${b.flush_done}/${b.flush_total}`);
-      if ((b.state === 'syncing' || b.state === 'retrying') && (num(b.pending_user_uploads) >= 1 || num(b.flush_total) >= 1)) sawSending = true;
-      if (num(b.flush_total) >= 1) sawSending = true;
-      if (sawSending && b.state === 'synced' && num(b.pending_user_uploads) === 0 && j.posts?.some((p) => p.body === tag)) break;
+      badges.push(`${b.state}:${b.pending_user_uploads}+${b.pending_media ?? '?'}:${b.flush_done}/${b.flush_total}`);
+      tr = badgeTransitions(j?.sync_badge_history, { sinceMs: tPost, circle: shared });
+      if (tr.settled && b.state === 'synced' && j.posts?.some((p) => p.body === tag)) break;
       await sleep(500);
     }
     const last = (await freshDump(ios))?.sync_badge || {};
-    score('progress: A\'s sync pill showed the send (syncing, ≥1 pending or flush_total ≥ 1)', sawSending, badges.slice(0, 12).join(' '));
+    score('progress: A\'s sync pill went synced → syncing (≥1 pending) → synced [history]', tr.sawSending && tr.settled,
+      `history=${tr.seq.join(' → ') || '(none)'} samples=${badges.slice(0, 8).join(' ')}`);
     score('progress: A\'s sync pill settles to synced / 0 pending', last.state === 'synced' && num(last.pending_user_uploads) === 0,
       JSON.stringify(last));
 
@@ -1460,8 +1469,12 @@ async function main() {
     score(`responsive: persist exports during the burst ≤ ${allow}`, num(perf.persistExportCount) <= allow, `count=${perf.persistExportCount}`);
     const c0 = num(perf.persistExportCount);
     await sleep(BUDGET.idle);
-    const c1 = num((await freshDump(ios))?.perf?.persistExportCount);
-    score(`responsive: no persist exports while idle (${BUDGET.idle / 1000}s)`, c1 === c0, `${c0} → ${c1}`);
+    const idlePerf = (await freshDump(ios))?.perf || {};
+    const c1 = num(idlePerf.persistExportCount);
+    // persistReasons / engineDirtiedBy (Apple): what asked for each export and which engine calls
+    // made it non-empty — the attribution a red here needs.
+    score(`responsive: no persist exports while idle (${BUDGET.idle / 1000}s)`, c1 === c0,
+      `${c0} → ${c1} reasons=${JSON.stringify(idlePerf.persistReasons || {})} dirtiedBy=${JSON.stringify(idlePerf.engineDirtiedBy || {})}`);
   }
 
   // 0. newfriend runs FIRST: A and B are strangers until it makes them friends (E2E_PREFRIEND=0).

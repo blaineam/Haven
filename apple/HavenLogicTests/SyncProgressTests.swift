@@ -145,4 +145,46 @@ final class SyncProgressTests: XCTestCase {
         s.discover((0..<(MediaWantedSet.cap + 50)).map { "r\($0)" })
         XCTAssertEqual(s.count, MediaWantedSet.cap)
     }
+
+    // MARK: media in the pill
+
+    /// The event envelope lands in well under a second; the video it names is what takes time. The
+    /// pill must keep saying "syncing" while your just-posted media is still headed for the relay.
+    func testAuthoredMediaKeepsThePillSyncing() {
+        var p = UploadProgress()
+        p.mediaPendingByCircle[c] = 2
+        XCTAssertEqual(derive(p), .queued(pending: 2))
+        p.pendingByCircle[c] = 1
+        XCTAssertEqual(derive(p), .queued(pending: 3), "events and media add up")
+        XCTAssertEqual(p.totalPending(c), 3)
+        p.mediaPendingByCircle[c] = 0
+        p.pendingByCircle[c] = 0
+        XCTAssertEqual(derive(p), .synced)
+        p.mediaPendingByCircle["other"] = 4
+        XCTAssertEqual(derive(p), .synced, "another circle's uploads are not this pill's")
+        XCTAssertEqual(derive(p, hosts: true), .synced)
+    }
+
+    // MARK: history
+
+    func testHistoryRecordsEachChangeOnce() {
+        var h = SyncBadgeHistory()
+        h.record(circle: c, .synced, pending: 0, atMs: 1)
+        h.record(circle: c, .synced, pending: 0, atMs: 2)          // no change → no entry
+        h.record(circle: c, .queued(pending: 1), pending: 1, atMs: 3)
+        h.record(circle: c, .sending(done: 0, total: 1), pending: 1, atMs: 4)
+        h.record(circle: c, .synced, pending: 0, atMs: 5)
+        XCTAssertEqual(h.entries.map(\.state), ["synced", "syncing", "syncing", "synced"])
+        XCTAssertEqual(h.entries.map(\.detail), ["synced", "queued 1", "sending 0/1", "synced"])
+        XCTAssertEqual(h.entries.map(\.atMs), [1, 3, 4, 5])
+    }
+
+    func testHistoryIsBounded() {
+        var h = SyncBadgeHistory()
+        for i in 0..<(SyncBadgeHistory.cap * 3) {
+            h.record(circle: c, i.isMultiple(of: 2) ? .synced : .queued(pending: 1), pending: i % 2, atMs: UInt64(i))
+        }
+        XCTAssertEqual(h.entries.count, SyncBadgeHistory.cap)
+        XCTAssertEqual(h.entries.last?.atMs, UInt64(SyncBadgeHistory.cap * 3 - 1), "newest kept")
+    }
 }

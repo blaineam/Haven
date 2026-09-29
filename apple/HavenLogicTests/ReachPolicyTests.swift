@@ -122,4 +122,24 @@ final class PendingEnrollmentTests: XCTestCase {
         p.refresh(other, nowMs: t0)             // never tracked → refresh does not start tracking
         XCTAssertFalse(p.isTracked(other))
     }
+
+    // MARK: LaunchOrder
+
+    func testRelaunchReopensTheRememberedCircle() {
+        let ids = ["default", "c1", "dm:a-b"]
+        XCTAssertEqual(LaunchOrder.restoredActiveCircle(saved: "c1", current: "default", circleIds: ids, isDeleted: { _ in false }), "c1")
+        XCTAssertEqual(LaunchOrder.restoredActiveCircle(saved: nil, current: "default", circleIds: ids, isDeleted: { _ in false }), "default")
+        XCTAssertEqual(LaunchOrder.restoredActiveCircle(saved: "gone", current: "default", circleIds: ids, isDeleted: { _ in false }), "default",
+                       "a circle we left is not reopened")
+        XCTAssertEqual(LaunchOrder.restoredActiveCircle(saved: "c1", current: "default", circleIds: ids, isDeleted: { $0 == "c1" }), "default",
+                       "a deleted circle is not reopened")
+        XCTAssertEqual(LaunchOrder.restoredActiveCircle(saved: "dm:a-b", current: "default", circleIds: ids, isDeleted: { _ in false }), "default",
+                       "a DM thread is not the feed")
+    }
+
+    func testTheActiveCircleIsItsOwnFirstMailboxPhase() {
+        XCTAssertEqual(LaunchOrder.mailboxPhases(["default", "c1", "c2"], active: "c1"), [["c1"], ["default", "c2"]])
+        XCTAssertEqual(LaunchOrder.mailboxPhases(["c1"], active: "c1"), [["c1"]])
+        XCTAssertEqual(LaunchOrder.mailboxPhases(["default", "c2"], active: "c1"), [["default", "c2"]])
+    }
 }

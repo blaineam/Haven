@@ -111,6 +111,26 @@ enum MediaVariants {
         return out
     }
 
+    /// What `ref` is to a media list: the kind of companion it is, or `content` when it is listed
+    /// bare and is no companion at all. nil = the list does not carry that blob.
+    ///
+    /// Thumbs and previews are named ONLY inside their `thumb:` / `preview:` markers — the bare ref
+    /// is never in the list — so "does this post carry blob X" cannot be answered with
+    /// `media.contains(X)`. The relay-first serve asked exactly that to find a blob's circle, missed
+    /// every thumb and preview, concluded "no circle → no relay" and streamed them to friends
+    /// peer-to-peer while the relay held them.
+    enum Role: String, Sendable { case content, thumb, preview, poster, original }
+    static func role(of ref: String, in media: [String]) -> Role? {
+        guard !ref.isEmpty else { return nil }
+        for m in media {
+            if let t = parseThumb(m), t.thumb == ref { return .thumb }
+            if let v = parsePreview(m), v.preview == ref { return .preview }
+            if let p = parsePoster(m), p.poster == ref { return .poster }
+            if let o = parseOriginal(m), o.original == ref { return .original }
+        }
+        return media.contains(ref) ? .content : nil
+    }
+
     static func poster(for video: String, in media: [String]) -> String? {
         for r in media {
             if let p = parsePoster(r), p.video == video { return p.poster }

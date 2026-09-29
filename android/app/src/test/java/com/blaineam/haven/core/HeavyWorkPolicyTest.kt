@@ -82,4 +82,12 @@ class HeavyWorkPolicyTest {
         assertTrue(HeavyWorkPolicy.backupAllowed(priority = false, c = Conditions(heat = Heat.FAIR)))
         assertFalse(HeavyWorkPolicy.backupAllowed(priority = true, c = Conditions(heat = Heat.CRITICAL)))
     }
+
+    /** The QA attribution of a direct friend serve names its cause (e2e `relayfirst`). */
+    @Test fun stream_reason_names_why_no_hint_answered() {
+        assertEquals("circle-unresolved", HeavyWorkPolicy.streamReason(friend(onRelay = true, relay = false), circleKnown = false))
+        assertEquals("circle-has-no-relay", HeavyWorkPolicy.streamReason(friend(relay = false), circleKnown = true))
+        assertEquals("hints-exhausted", HeavyWorkPolicy.streamReason(friend(onRelay = true, hints = HeavyWorkPolicy.MAX_RELAY_HINTS), circleKnown = true))
+        assertEquals("not-on-relay-nor-queued", HeavyWorkPolicy.streamReason(friend(), circleKnown = true))
+    }
 }

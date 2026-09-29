@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import os
 #if canImport(UIKit)
 import UIKit   // UIApplication.beginBackgroundTask for the media-upload drain (no-op path on macOS)
 #endif
@@ -106,10 +107,22 @@ final class MediaBackupQueue {
     private var pendingRefs: Set<String> = []
     private func reindexPending() {
         pendingRefs = Set((inFlightHi + inFlightLo + pending + priorityPending).map(\.ref))
+        // The sync pill waits on media you just posted too (fresh-post jobs carry `at`; a backfill
+        // job promoted for a waiting peer does not, and is nothing the user is waiting on).
+        var authored: [String: Int] = [:]
+        for j in inFlightHi + priorityPending where j.at != nil { authored[j.cid, default: 0] += 1 }
+        BackgroundUploader.shared.setAuthoredMediaPending(authored)
     }
 
     /// Whether a specific blob is still waiting to reach a relay (drives the post upload indicator).
     func hasPending(_ ref: String) -> Bool { pendingRefs.contains(ref) }
+
+    /// The circle a queued / in-flight upload of `ref` is headed for — the relay-first serve's
+    /// fallback when the ref is not (yet) in any feed it can walk.
+    func circleId(forPending ref: String) -> String? {
+        guard pendingRefs.contains(ref) else { return nil }
+        return (inFlightHi + priorityPending + inFlightLo + pending).first { $0.ref == ref }?.cid
+    }
 
     /// Is ANY blob still owed to a relay? Read by `NotificationManager.scheduleRefresh` to decide
     /// whether a background wake is worth asking iOS for. Refs sitting inside their retry backoff
@@ -2285,7 +2298,26 @@ enum SharedStore {
         }
         return body(&seenMailbox)
     }
-    nonisolated private static func seenContains(_ key: String) -> Bool { withSeen { $0.contains(key) } }
+    nonisolated private static func seenContains(_ key: String) -> Bool {
+        withSeen { $0.contains(key) } || awaitingPersist.withLock { $0[key] != nil }
+    }
+    /// Keys a mailbox pass INGESTED whose engine state is not on disk yet (the debounced persist has
+    /// not landed): skipped by the next poll like seen keys, but held in memory only — a kill before
+    /// the save forgets them and they are re-fetched, exactly as unmarked keys always were. A count,
+    /// so two passes holding the same key release it only when both have.
+    nonisolated private static let awaitingPersist = OSAllocatedUnfairLock(initialState: [String: Int]())
+    nonisolated static func holdAwaitingPersist(_ keys: [String]) {
+        guard !keys.isEmpty else { return }
+        awaitingPersist.withLock { m in for k in keys { m[k, default: 0] += 1 } }
+    }
+    nonisolated static func releaseAwaitingPersist(_ keys: [String]) {
+        guard !keys.isEmpty else { return }
+        awaitingPersist.withLock { m in
+            for k in keys {
+                if let n = m[k], n > 1 { m[k] = n - 1 } else { m.removeValue(forKey: k) }
+            }
+        }
+    }
     /// Record a key as seen and schedule a debounced save (one write per burst, off the caller).
     /// Public so FeedStore can mark HELLO/event keys after successful ingest only.
     nonisolated static func markSeenPublic(_ key: String) { markSeen(key) }
@@ -2299,6 +2331,8 @@ enum SharedStore {
             set = set.filter { !$0.hasPrefix(prefix) || $0.contains("/__live__/") }
             return before - set.count
         }
+        // A re-open means "fetch these again" — for keys still awaiting their persist too.
+        awaitingPersist.withLock { m in m = m.filter { !$0.key.hasPrefix(prefix) } }
         if removed > 0 {
             HavenLog.relay("mailbox seen: forgot \(removed) keys under \(prefix.prefix(48))")
             scheduleSeenSave()

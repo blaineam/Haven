@@ -53,7 +53,10 @@ final class Engine: @unchecked Sendable {
     func run<T>(lane: EngineLane = .background, readOnly: Bool = false,
                 caller: String = #function, line: Int = #line,
                 _ body: (HavenSocial) throws -> T) async rethrows -> T {
-        try await lanes.run(lane: lane, readOnly: readOnly) { core in
+        #if DEBUG
+        if !readOnly { HavenPerf.shared.noteEngineDirty("\(caller):\(line)") }
+        #endif
+        return try await lanes.run(lane: lane, readOnly: readOnly) { core in
             try Self.instrumented(caller: caller, line: line) { try body(core) }
         }
     }

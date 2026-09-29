@@ -167,20 +167,23 @@ Every budget below is env-tunable and every timing lands in `build/e2e-history.j
 
 | Step | What it proves |
 |---|---|
-| `relayfirst` | iOS posts a distinct photo + video to the shared circle. Media present on every leg (blob budget); B's `received_via_relay` grew and `received_via_direct` did not; no account-A device streamed to a friend (`served_direct_friend(_bytes)` Δ 0); `broadcast_before_enqueue == 0` over ≥2 checked posts; `pending_media_uploads` went up (or `authored_refs_enqueued` grew) and drains to 0. **Gate sub-check:** `heavy_work_override` on iOS+Android → B's `media_ask` is declined (`last_decline` contains `forced=qa`), nothing streamed or hinted; lifted → the next ask gets a relay hint, still no stream. |
+| `relayfirst` | iOS posts a distinct photo + video to the shared circle. Media present on every leg (blob budget); B's `received_via_relay` grew and `received_via_direct` did not; no account-A device streamed to a friend (`served_direct_friend(_bytes)` Δ 0); `broadcast_before_enqueue == 0` over ≥2 checked posts; `pending_media_uploads` went up (or `authored_refs_enqueued` grew) and drains to 0. A red serve line prints `served_direct_friend_by_role` / `_by_why` / `_recent` — which blobs (content, thumb, preview, poster, original, unresolved) streamed and why no hint answered them. **Gate sub-check:** `heavy_work_override` on iOS+Android → B's `media_ask` is declined (`last_decline` contains `forced=qa`), nothing streamed or hinted; lifted → the next ask gets a relay hint, still no stream. |
 | `newfriend` | Runs first; the bootstrap is told `E2E_PREFRIEND=0` (no bundle exchange, no relay pre-authorization, iOS not pre-wired to B's relay). B (relay host) mints a ticketed link, iOS accepts and posts text + photo BEFORE approval, B's approval is held `E2E_NF_HOLD_MS` (20s). From approval: friends on both sides (`E2E_BUDGET_NF_FRIEND` 20s), the pre-approval text (`_NF_TEXT` 20s) and photo (blob) reach B, B's first text (`_NF_INVITER_TEXT` 30s) and photo reach iOS, iOS's DM reaches B (`_NF_DM` 30s). The 403s must have been absorbed as `pendingEnrollment` (`relay_backoff.pending_enrollment_refusals > 0`) with `peak_backoff_ms ≤ E2E_NF_MAX_BACKOFF` (30s). Afterwards the harness authorizes `members.txt` on the stub, restoring the baseline. |
 | `screenshare` | Android calls the stub (the only cross-account pair the emulator has; the stub runs the same Apple WebRTC routing as iOS). REAL MediaProjection consent, driven with `uiautomator dump` + `input tap` (`PROJECT_MEDIA` appop reset to default first). Sub-cases: **deny** (no screen track on the peer, call + camera intact, no `mediaProjection` FGS type in `dumpsys activity services`, app alive); **entire screen** (Android FGS-ready before capture, sender params applied, frames captured, capture ≤1280; peer `call.remote_tracks[*].screen` routed by stream id `screen`, frames decoded > 0 and growing, ≤1280, camera slot a distinct track; stop removes it); **again** (a fresh consent is prompted — tokens are single-use — and works); **single app** (SKIPPED with the reason if the chooser has no such option). Logcat `HavenScreenShare`: FGS-ready before every capture, no `start failed`/SecurityException. Budget `E2E_BUDGET_SHARE_FRAME` (20s). |
 | `callgate` | A real iOS↔stub call closes iOS's heavy-work gate (`heavy_work.reason` contains `haven-call`, `_GATE_CLOSE` 10s). Mid-call iOS posts a photo: B still gets it via the relay, iOS's relay uploads still land, a direct `media_ask` from B is declined for the call, nothing streams, `missing_media_fetches` does not move (`E2E_CALLGATE_WINDOW` 15s). Hangup lifts the gate within `_GATE_LIFT` (5s) — asserted as "reason no longer contains `haven-call`", because the simulator's thermal state mirrors the host — and `pending_media_uploads` drains. |
-| `progress` | Uses the "Progress fields" below. iOS posts a video into its active (shared) circle: its `sync_badge` must be seen sending (`syncing`/`retrying` with `pending_user_uploads ≥ 1`, or `flush_total ≥ 1`, at any fast sample) and settle to `synced`/0. On the stub and Android: every `media_transfers` `got` series for the post's refs is non-decreasing, the media lands (blob budget) and leaves `media_transfers`, `media_received_count` moves by at least 1 and at most the post's blobs and never again 18 s later, `media_wanted_count` returns to its pre-step value, and no ref ever appears in `media_gave_up` while its bytes were still arriving. |
+| `progress` | Uses the "Progress fields" below. iOS posts a video into its active (shared) circle: its `sync_badge_history` (the pill's own transition log, not harness samples — an upload can start and finish between two dumps) must show, since the post, an entry `syncing`/`retrying` with `pending ≥ 1` followed by a last entry `synced`/0. On the stub and Android: every `media_transfers` `got` series for the post's refs is non-decreasing, the media lands (blob budget) and leaves `media_transfers`, `media_received_count` moves by at least 1 and at most the post's blobs and never again 18 s later, `media_wanted_count` returns to its pre-step value, and no ref ever appears in `media_gave_up` while its bytes were still arriving. |
 | `audience` | iOS DMs B and posts to the circle: the DM lands only in B's thread keyed by A and never in any circle feed on any leg; the circle post reaches every member device. |
-| `launch` | iOS terminated; B + desktop post 3 texts + 1 photo across the active and default circles; relaunch. `launch.first_feed_rendered_ms` (since process start) ≤ `E2E_BUDGET_LAUNCH_IOS` 5s, all 3 texts within `_CATCHUP` 15s of relaunch, the active circle's first ingest precedes the others, the feed paint does not wait on the DM warm, first mailbox pass ≤ `_MAILBOX_PASS`. Android force-stop/start: first feed ≤ `_LAUNCH_ANDROID` 8s. |
-| `responsive` | Needs the `perf` fields and `react_latency` (below). Absent → FAIL (`E2E_REQUIRE_PERF=0` downgrades that to SKIPPED for an older build; the soren `e2e` suite pins it to 1). Each react's latency is `react_latency.publishedMs` (`-1` = never published = fail). `perf_reset`, then a burst from B + desktop (2 videos, 20 texts, 1 photo) while iOS reacts 5× at 2s spacing: no MediaStore work on main, stall max < 250 ms and ≤ 3 stalls, engine user-wait p95 < 300 ms, each react < 500 ms, persist exports ≤ burst/2.5s + 2, and none during 60s idle. |
+| `launch` | iOS terminated; B + desktop post 3 texts + 1 photo across the active and default circles; relaunch. `launch.first_feed_rendered_ms` (since process start) ≤ `E2E_BUDGET_LAUNCH_IOS` 5s, all 3 texts within `_CATCHUP` 15s of relaunch, the active circle's first ingest precedes the others (Apple remembers the active circle per account across launches — Android always has — and the first mailbox pass pulls it alone first), the feed paint does not wait on the DM warm, first mailbox pass ≤ `_MAILBOX_PASS`. Android force-stop/start: first feed ≤ `_LAUNCH_ANDROID` 8s. |
+| `responsive` | Needs the `perf` fields and `react_latency` (below). Absent → FAIL (`E2E_REQUIRE_PERF=0` downgrades that to SKIPPED for an older build; the soren `e2e` suite pins it to 1). Each react's latency is `react_latency.publishedMs` (`-1` = never published = fail). `perf_reset`, then a burst from B + desktop (2 videos, 20 texts, 1 photo) while iOS reacts 5× at 2s spacing: no MediaStore work on main, stall max < 250 ms and ≤ 3 stalls, engine user-wait p95 < 300 ms, each react < 500 ms, persist exports ≤ burst/2.5s + 2, and none during 60s idle (a red prints `perf.persistReasons` and `perf.engineDirtiedBy`). |
 
 Dump fields behind them (DEBUG builds only, like the rest of the driver): `relay_first`
 (served_direct_friend/_bytes/_own, relay_hints_sent/_deferred, serve_declined + last_decline,
 received_via_relay/_direct, media_requests_from_friends, relay_uploads_landed, missing_media_fetches,
 authored_refs_enqueued, authored_media_posts_checked, broadcast_before_enqueue — Apple, Android,
-desktop), `heavy_work` {suspended, friend_serving, reason, forced} (Apple, Android),
+desktop; plus served_direct_friend_by_role {content|thumb|preview|poster|original|unresolved|cached: n},
+served_direct_friend_by_why {circle-unresolved|circle-has-no-relay|hints-exhausted|
+not-on-relay-nor-queued|other: n} and served_direct_friend_recent [{ref, role, why, at_ms}] ≤ 20 —
+Apple, Android), `heavy_work` {suspended, friend_serving, reason, forced} (Apple, Android),
 `pending_media_uploads`, `contacts`, `pending_connections`, `circle_relays`, `relay_backoff`
 {relays[{relay, fails, backoff_until_ms, reason}], peak_backoff_ms, pending_enrollment,
 pending_enrollment_refusals} (Apple; Android has the pending-enrollment half), `launch`
@@ -285,7 +288,9 @@ from launch or from the last `{"op":"perf_reset"}`, which zeroes them.
 "perf":{"mainStallCount":0,"mainStallMaxMs":0,
         "engineUserWaitP95Ms":0.0,"engineUserWaitMaxMs":0.0,
         "persistExportCount":0,"lastPersistExportAtMs":0,
-        "refreshCount":0,"mediaStoreOnMainCount":0,"heldRefSetSize":0},
+        "refreshCount":0,"mediaStoreOnMainCount":0,"heldRefSetSize":0,
+        "persistReasons":{"persist(then:_:line:):6542":3},
+        "engineDirtiedBy":{"pullMailbox(circleIds:):6262":12}},
 "react_latency":{"engineAppliedMs":0.0,"publishedMs":0.0}
 ```
 
@@ -294,6 +299,8 @@ from launch or from the last `{"op":"perf_reset"}`, which zeroes them.
 | `mainStallCount` / `mainStallMaxMs` | main-thread stalls ≥ 100 ms and the worst one. Apple: `MainThreadStallDetector` (100 ms main-queue ping). Android: a DEBUG main-`Looper` watchdog (same ping). |
 | `engineUserWaitP95Ms` / `engineUserWaitMaxMs` | how long **user-initiated** engine calls (post, react, comment, DM, the visible feed rebuild) waited for the engine — the priority lane's queue wait, over the last 512 calls. Apple only; Android reports `0`. |
 | `persistExportCount` / `lastPersistExportAtMs` | whole-state `exportState` runs that actually happened (a persist skipped because nothing changed does not count) and the wall-clock ms of the last one. |
+| `persistReasons` | exports that ran, keyed by what asked for them (`<function>:<line>` of the persist call). Apple only. |
+| `engineDirtiedBy` | the 25 most frequent engine calls not marked `readOnly` (`<function>:<line>`) — any one of them makes the next persist export. DEBUG, Apple only. |
 | `refreshCount` | feed rebuilds that completed and were applied. Apple only (Android reports `0`). |
 | `mediaStoreOnMainCount` | inbound-media hash / write / reassembly work that ran on the main thread. **Must stay 0** (the DEBUG demo seed's bundled-asset import is excluded explicitly). Apple only. |
 | `heldRefSetSize` | media files the in-memory held-media index knows are on disk. Apple only. |
@@ -311,7 +318,8 @@ can assert that progress actually moves rather than that a spinner existed:
 
 ```json
 {"sync_badge":{"circle":"…","state":"synced|syncing|retrying|local",
-               "pending_user_uploads":0,"flush_done":0,"flush_total":0},
+               "pending_user_uploads":0,"pending_media":0,"flush_done":0,"flush_total":0},
+ "sync_badge_history":[{"circle":"…","state":"syncing","detail":"queued 2","pending":2,"atMs":0}],
  "media_transfers":[{"ref":"…","got":12,"total":40,"lane":"relay|peer|waitingForUpload"}],
  "media_wanted_count":0,"media_received_count":0,
  "history_handoff":{"role":"none|target|source",
@@ -323,7 +331,12 @@ can assert that progress actually moves rather than that a spinner existed:
   (posts, comments, reactions, messages) still headed for a mailbox — epoch-head upkeep is never
   counted, so a fresh launch reads `synced`/0. `flush_done`/`flush_total` are this upload pass
   (Apple) or this upload burst (Android) for that circle; `syncing` covers both "queued" and
-  "Sending i of n".
+  "Sending i of n". `pending_media` counts media blobs of posts you just authored still headed for a
+  relay: the pill waits on them too (the envelope lands in under a second, the video is what takes
+  time), so `state` is `syncing` while either count is non-zero.
+- `sync_badge_history` is the pill's transition log, newest last, ≤ 20: one entry each time what it
+  shows (circle, state, `detail` — `queued n` / `sending d/t` / `retrying n` — or `pending` =
+  events + media) changes, stamped with the app's wall clock. DEBUG only; Apple + Android.
 - `media_transfers` lists every ref a placeholder is showing progress or a wait for. `peer` = direct
   chunks (`got`/`total` in 32 KB chunks), `relay` = a relay restore (`got`/`total` in relay chunks,
   0/0 for a single-blob fetch), `waitingForUpload` = relays answered without it (the placeholder's

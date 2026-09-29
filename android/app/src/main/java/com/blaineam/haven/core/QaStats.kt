@@ -30,6 +30,22 @@ object QaStats {
         synchronized(lock) { counts["serve_declined"] = (counts["serve_declined"] ?: 0L) + 1; lastDecline = why }
     }
 
+    /** Friend asks answered with a direct STREAM: by what the ref is and why no hint answered it. */
+    private val directByRole = HashMap<String, Long>()
+    private val directByWhy = HashMap<String, Long>()
+    private val directRecent = ArrayList<JSONObject>()
+
+    fun directServe(ref: String, role: String, why: String) {
+        if (!BuildConfig.DEBUG) return
+        synchronized(lock) {
+            directByRole[role] = (directByRole[role] ?: 0L) + 1
+            directByWhy[why] = (directByWhy[why] ?: 0L) + 1
+            directRecent += JSONObject().put("ref", ref.take(16)).put("role", role).put("why", why)
+                .put("at_ms", System.currentTimeMillis())
+            while (directRecent.size > 20) directRecent.removeAt(0)
+        }
+    }
+
     fun authoredEnqueued(refs: List<String>) {
         if (!BuildConfig.DEBUG) return
         synchronized(lock) {
@@ -65,6 +81,9 @@ object QaStats {
             "media_requests_from_friends", "serve_declined", "authored_refs_enqueued",
             "pending_enrollment_refusals")) o.put(k, counts[k] ?: 0L)
         o.put("last_decline", lastDecline)
+        o.put("served_direct_friend_by_role", JSONObject(HashMap(directByRole)))
+        o.put("served_direct_friend_by_why", JSONObject(HashMap(directByWhy)))
+        o.put("served_direct_friend_recent", org.json.JSONArray(ArrayList(directRecent)))
         o.put("authored_media_posts_checked", checked)
         o.put("broadcast_before_enqueue", early)
         val c = HeavyWorkMonitor.current

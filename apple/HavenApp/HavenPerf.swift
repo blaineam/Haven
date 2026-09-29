@@ -19,6 +19,10 @@ final class HavenPerf: @unchecked Sendable {
         var lastPersistExportAtMs: UInt64 = 0
         var refreshCount = 0
         var mediaStoreOnMainCount = 0
+        /// Exports that ran, by what asked for them ("<function>:<line>").
+        var persistReasons: [String: Int] = [:]
+        /// State-changing engine calls ("<function>:<line>") — what makes the next persist export.
+        var dirtiedBy: [String: Int] = [:]
     }
     private static let userWaitWindow = 512
     private let state = OSAllocatedUnfairLock(initialState: State())
@@ -43,11 +47,20 @@ final class HavenPerf: @unchecked Sendable {
         }
     }
     /// A whole-state `exportState()` actually ran (a skipped, unchanged persist does not count).
-    func notePersistExport() {
+    func notePersistExport(reason: String = "") {
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         state.withLock { s in
             s.persistExportCount += 1
             s.lastPersistExportAtMs = nowMs
+            if !reason.isEmpty, s.persistReasons.count < 200 || s.persistReasons[reason] != nil {
+                s.persistReasons[reason, default: 0] += 1
+            }
+        }
+    }
+    /// An engine call not marked `readOnly` ran (DEBUG attribution for idle exports).
+    func noteEngineDirty(_ caller: String) {
+        state.withLock { s in
+            if s.dirtiedBy.count < 400 || s.dirtiedBy[caller] != nil { s.dirtiedBy[caller, default: 0] += 1 }
         }
     }
     /// A feed rebuild (`FeedStore.refresh`) completed.
@@ -76,6 +89,11 @@ final class HavenPerf: @unchecked Sendable {
             "refreshCount": s.refreshCount,
             "mediaStoreOnMainCount": s.mediaStoreOnMainCount,
             "heldRefSetSize": heldRefSetSize,
+            "persistReasons": s.persistReasons,
+            // The top state-changing engine callers: a persist that exports while nothing the user
+            // can see changed traces back to one of these.
+            "engineDirtiedBy": Dictionary(uniqueKeysWithValues:
+                s.dirtiedBy.sorted { $0.value > $1.value }.prefix(25).map { ($0.key, $0.value) }),
         ]
     }
 }

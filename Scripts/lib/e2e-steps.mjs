@@ -178,6 +178,23 @@ export function nonDecreasing(series) {
 }
 
 /**
+ * Read the pill's transition log (`sync_badge_history`, newest last) for one circle since `sinceMs`:
+ * did it go synced → syncing/retrying (≥1 pending) → synced (0 pending)? Sampling the live pill raced
+ * the upload — a small post starts and finishes between two dumps — so the step asserts on the log
+ * the app keeps instead. `settled` = the LAST entry after the first send is synced with 0 pending.
+ */
+export function badgeTransitions(history, { sinceMs = 0, circle } = {}) {
+  const rows = (Array.isArray(history) ? history : [])
+    .filter((e) => num(e?.atMs) >= sinceMs && (!circle || e?.circle === circle));
+  const seq = rows.map((e) => `${e.state}:${num(e.pending)}${e.detail && e.detail !== e.state ? `(${e.detail})` : ''}`);
+  const firstSend = rows.findIndex((e) => (e.state === 'syncing' || e.state === 'retrying') && num(e.pending) >= 1);
+  const sawSending = firstSend >= 0;
+  const last = rows[rows.length - 1];
+  const settled = sawSending && rows.length > firstSend + 1 && last?.state === 'synced' && num(last?.pending) === 0;
+  return { sawSending, settled, seq };
+}
+
+/**
  * Fold one dump's progress fields into a per-ref record for the refs we watch:
  * rec[ref] = {got: [..], total, lanes: Set, present, gaveUpWhileReceiving}.
  */

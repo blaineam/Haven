@@ -280,9 +280,14 @@ authorize "$MEMBERS"
 # is MagicDNS (100.100.100.100), which the emulator's user-mode network cannot reach: the AVD then
 # boots with "Active default network: none" — mailbox steps still pass over adb reverse while every
 # iroh dial, push and call fails, and whole runs scored the host's VPN instead of Haven.
+# `-crash-report-mode never`: after ANY emulator crash, the next launch otherwise opens a MODAL
+# "send crash report?" Qt dialog before booting — nobody clicks it, qemu sits there forever holding
+# the AVD lock, and every later boot dies with "Running multiple emulators with the same AVD"
+# (2026-09-29: two runs in a row skipped the android leg that way).
 boot_haven_emulator() {
   nohup "${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}/emulator/emulator" -avd haven_phone \
     -no-snapshot-load -no-snapshot-save -no-boot-anim -dns-server 1.1.1.1,8.8.8.8 \
+    -crash-report-mode never \
     >"$OUT/emulator.log" 2>&1 &
 }
 android_has_network() {

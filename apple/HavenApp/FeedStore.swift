@@ -2910,6 +2910,9 @@ final class FeedStore: ObservableObject {
         afterPersist.append(after)
         persist(why, line: line)
     }
+    /// Seen-marks currently riding `afterNextPersist` (reset by every export).
+    private var deferredMarkKeys = 0
+    private static let maxDeferredMarkKeys = 64
     /// Run `after` once the NEXT export — whoever asks for it — is on disk, without asking for one.
     private func afterNextPersist(_ after: @escaping @MainActor (Bool) -> Void) {
         guard !DemoEnv.isDemo, engine != nil else { after(false); return }
@@ -2919,6 +2922,7 @@ final class FeedStore: ObservableObject {
     private func persistNow(_ why: String = #function, line: Int = #line) {
         let waiting = afterPersist
         afterPersist.removeAll()
+        deferredMarkKeys = 0
         let reason = persistReason.isEmpty ? "\(why):\(line)" : persistReason
         persistReason = ""
         persistDebouncePending = false   // a pending debounce is satisfied by this export
@@ -6643,7 +6647,15 @@ final class FeedStore: ObservableObject {
                 if saved { for k in processed { SharedStore.markSeenPublic(k) } }
                 SharedStore.releaseAwaitingPersist(processed)
             }
-            if ingested.isEmpty && batch.unlockedCircles.isEmpty { afterNextPersist(marks) } else { persist(then: marks) }
+            // Bounded: past `maxDeferredMarkKeys` deferred keys the pass asks for the export after
+            // all, so a kill that skips the background flush re-fetches at most that many.
+            if ingested.isEmpty, batch.unlockedCircles.isEmpty,
+               deferredMarkKeys + processed.count <= Self.maxDeferredMarkKeys {
+                deferredMarkKeys += processed.count
+                afterNextPersist(marks)
+            } else {
+                persist(then: marks)
+            }
         }
         if helloIngested { refresh(); syncWithContacts() }
         if relayIngested { objectWillChange.send() }   // Storage / circle relay chips re-read the store
@@ -7195,6 +7207,7 @@ final class FeedStore: ObservableObject {
         persistReason = ""
         let waiting = afterPersist
         afterPersist.removeAll()
+        deferredMarkKeys = 0
         let destination: @Sendable () async -> URL? = { [weak self] in await self?.persistDestination(for: engine) }
         let saved = await StatePersister.shared.persist(engine: engine, reason: "\(#function):\(#line)", to: destination)
         for f in waiting { f(saved) }

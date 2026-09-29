@@ -531,6 +531,13 @@ fn replace_member_set(my_account: &str, my_device: &str, accounts: &[String], de
     set.into_iter().collect()
 }
 
+/// Claim the one scheduled state write of a burst: true for the first caller, false while a write
+/// is already pending (the writer clears the flag just before it snapshots, so a later mutation
+/// schedules the next one).
+fn claim_coalesced_write(pending: &std::sync::atomic::AtomicBool) -> bool {
+    !pending.swap(true, std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Does a live relay announce say anything new — the relay joined this circle's list, came back
 /// from inactive, or its HTTP interface changed? Only then is a backfill of my history worth it.
 fn relay_announce_is_news(new_for_circle: bool, reactivated: bool, iface_changed: bool) -> bool {
@@ -5303,7 +5310,7 @@ impl Engine {
                 "hello from {} is an engine-known circle member — adopted as contact, handshake continues",
                 &id_hex.chars().take(8).collect::<String>()
             );
-            self.persist();
+            self.persist_coalesced(); // network-driven: coalesce (see persist_coalesced)
             return;
         }
         if !hello.circle_id.starts_with("dm:") {
@@ -5362,7 +5369,7 @@ impl Engine {
                 self.live_deliver_to_my_devices(wire::EVENT, payload);
             }
             self.bump_activity(); // a live event arrived → keep sync tight while the conversation is active
-            self.persist();
+            self.persist_coalesced(); // network-driven: coalesce (see persist_coalesced)
             self.emit_changed();
             self.request_missing_media();
             // Freshness + persisted dedupe: a re-delivered / re-sealed old envelope (history
@@ -6583,7 +6590,7 @@ impl Engine {
     /// parity — without this a friend's device-seed phone stays "forbidden" at this relay).
     fn handle_device_roster_announce(self: &Arc<Self>, body: &[u8]) {
         if self.social.ingest_roster_wire(body.to_vec()) {
-            self.persist();
+            self.persist_coalesced(); // network-driven: coalesce (see persist_coalesced)
             self.authorize_membership();
         }
     }
@@ -11381,13 +11388,19 @@ impl Engine {
 
     // ---- persistence --------------------------------------------------------------------
 
-    /// Write the engine state at most once every few seconds instead of once per authored post.
+    /// Write the engine state at most once every few seconds instead of once per call.
     ///
-    /// Only ever used for bulk authoring — see `after_author_inner`. The flag is the whole
-    /// mechanism: a write is already scheduled, so this call is a no-op rather than another
-    /// full serialisation of a state that is growing with every post.
+    /// Bulk authoring (`after_author_inner`) and every NETWORK-driven mutation — a live event, a
+    /// hello, a roster announce, a self-sync apply — go through here. Each `persist()` is a full
+    /// clone + serialisation of every circle's events under the ONE engine lock (and on a tokio
+    /// worker, which blocks the runtime while it waits); run once per inbound frame, the desktop
+    /// spent the multirelay e2e in `export_state` — 13 holds totalling 356 s, one of 180 s — with
+    /// its self-sync loop and mailbox poll parked behind it for ten minutes, so it never read the
+    /// post it was waiting for. Everything these paths ingest is re-fetchable from the mailbox (the
+    /// poll path, whose seen-set makes a key permanent, still persists synchronously). The flag is
+    /// the whole mechanism: a write is already scheduled, so this call is a no-op.
     fn persist_coalesced(self: &Arc<Self>) {
-        if self.persist_pending.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if !claim_coalesced_write(&self.persist_pending) {
             return;
         }
         let me = self.clone();
@@ -11684,7 +11697,7 @@ impl Engine {
             applied
         };
         if applied {
-            self.persist();
+            self.persist_coalesced(); // network-driven: coalesce (see persist_coalesced)
             self.emit_changed();
         }
         log::info!(
@@ -12548,6 +12561,17 @@ mod multirelay_parity_tests {
         assert_eq!(self_sync_schedule(12_000, 12_000, 31_000, 30_000), (true, 42_000));
         // Periodic deadline with an idle-stretched interval.
         assert_eq!(self_sync_schedule(31_000, 0, 31_000, 180_000), (true, 211_000));
+    }
+
+    #[test]
+    fn a_burst_of_network_mutations_schedules_one_state_write() {
+        use super::claim_coalesced_write;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let pending = AtomicBool::new(false);
+        let claimed = (0..500).filter(|_| claim_coalesced_write(&pending)).count();
+        assert_eq!(claimed, 1, "500 inbound frames must cost ONE full export, not 500");
+        pending.store(false, Ordering::SeqCst); // the writer takes its snapshot
+        assert!(claim_coalesced_write(&pending), "a mutation after the snapshot schedules the next write");
     }
 
     #[test]

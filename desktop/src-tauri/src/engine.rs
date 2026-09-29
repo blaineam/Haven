@@ -531,6 +531,12 @@ fn replace_member_set(my_account: &str, my_device: &str, accounts: &[String], de
     set.into_iter().collect()
 }
 
+/// Does a live relay announce say anything new — the relay joined this circle's list, came back
+/// from inactive, or its HTTP interface changed? Only then is a backfill of my history worth it.
+fn relay_announce_is_news(new_for_circle: bool, reactivated: bool, iface_changed: bool) -> bool {
+    new_for_circle || reactivated || iface_changed
+}
+
 /// Is a self-sync pass due, and when is the next periodic one? A pass runs when the periodic
 /// deadline passed OR an armed nudge (`nudge_at` ≠ 0, a local edit of synced state) expired; either
 /// way the pass snapshots everything, so both are consumed and the periodic clock restarts.
@@ -5368,7 +5374,17 @@ impl Engine {
     // ---- relay / mailbox ----------------------------------------------------------------
 
     async fn handle_relay_node(self: &Arc<Self>, body: &[u8]) {
-        let Some(circle_id) = self.ingest_relay_announce(body) else { return };
+        let Some((circle_id, news)) = self.ingest_relay_announce(body) else { return };
+        if !news {
+            // A RE-announce of a relay we already hold for this circle, unchanged. Members send
+            // these every sync tick for every relay of every circle; each one used to re-export this
+            // device's ENTIRE history into the circle (backfill_mailbox → export_my_envelopes, a full
+            // epoch bundle under the engine lock) and run a poll. With three relays in play the
+            // desktop spent the multirelay e2e inside those exports — engine lock held 20 s, 34 s,
+            // 144 s, dumps taking 150 s — and never got to the private post it was waiting for. iOS
+            // backfills only for a NEW relay (`wasNew`); so does this now.
+            return;
+        }
         self.refresh_haven_fabric();
         self.backfill_mailbox(&circle_id).await;
         self.poll_mailbox().await;
@@ -5378,7 +5394,9 @@ impl Engine {
     /// mailbox blob — the bytes are identical). Pure state: learns/reactivates the relay, records
     /// its HTTP/DERP/TURN interface. Returns the circle id on success so the LIVE path can chase
     /// it with a backfill+poll; the mailbox path must NOT (it is already inside a poll).
-    fn ingest_relay_announce(&self, body: &[u8]) -> Option<String> {
+    /// The bool is "news": the relay was new for this circle, reactivated, or its HTTP interface
+    /// changed — the only cases worth a backfill (see [`relay_announce_is_news`]).
+    fn ingest_relay_announce(&self, body: &[u8]) -> Option<(String, bool)> {
         let mut r = wire::Reader::new(body);
         let cid = r.lp()?;
         let circle_id = String::from_utf8_lossy(&cid).into_owned();
@@ -5436,6 +5454,7 @@ impl Engine {
         if node_hex.len() != 64 {
             return None;
         }
+        let news;
         {
             // A contact RE-ANNOUNCED a circle relay. Reactivating a deactivated/forgotten entry is
             // allowed ONLY when the announce comes from the relay's OWNER — the announced id is one of
@@ -5484,16 +5503,18 @@ impl Engine {
             p.set_relay_added_at(&node_hex, announced_added_at);
             let was_suppressed_or_inactive = was_reactivated;
             let list = p.relays.entry(circle_id.clone()).or_default();
-            if !list.contains(&node_hex) {
+            let new_for_circle = !list.contains(&node_hex);
+            if new_for_circle {
                 list.push(node_hex.clone());
             }
             // Record the relay's announced HTTP media interface (the reliable cross-NAT path).
-            if !announced_urls.is_empty()
+            let iface_changed = !announced_urls.is_empty()
                 && !announced_token.is_empty()
-                && p.set_relay_http(&node_hex, announced_urls.clone(), announced_token.clone())
-            {
+                && p.set_relay_http(&node_hex, announced_urls.clone(), announced_token.clone());
+            if iface_changed {
                 self.roster_on_new_interface(&node_hex);
             }
+            news = relay_announce_is_news(new_for_circle, was_reactivated, iface_changed);
             if let Some(derp) = announced_derp {
                 p.set_relay_derp(&node_hex, &derp);
             }
@@ -5512,7 +5533,7 @@ impl Engine {
                 self.relay_health.lock().remove(&node_hex);
             }
         }
-        Some(circle_id)
+        Some((circle_id, news))
     }
 
     /// Fetch a relay's SELF-PUBLISHED interface (`haven/relay/__interface__` — its current public
@@ -12527,6 +12548,15 @@ mod multirelay_parity_tests {
         assert_eq!(self_sync_schedule(12_000, 12_000, 31_000, 30_000), (true, 42_000));
         // Periodic deadline with an idle-stretched interval.
         assert_eq!(self_sync_schedule(31_000, 0, 31_000, 180_000), (true, 211_000));
+    }
+
+    #[test]
+    fn only_a_new_reactivated_or_rewired_relay_announce_is_news() {
+        use super::relay_announce_is_news;
+        assert!(!relay_announce_is_news(false, false, false), "a plain re-announce must not backfill");
+        assert!(relay_announce_is_news(true, false, false));
+        assert!(relay_announce_is_news(false, true, false));
+        assert!(relay_announce_is_news(false, false, true));
     }
 
     #[test]

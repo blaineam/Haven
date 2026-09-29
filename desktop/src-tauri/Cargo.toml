@@ -141,6 +141,18 @@ opt-level = 3
 [profile.dev.package.x25519-dalek]
 opt-level = 3
 
+# The e2e fleet's desktop. An unoptimized debug build held the engine lock for minutes under load
+# and aborted on an arithmetic overflow inside a dependency that a shipped build silently wraps, so
+# its timings and crashes described a binary nobody ships. `qa` is optimized like release and wraps
+# on overflow like release, but keeps `debug_assertions`, because the QA driver and demo hooks are
+# compiled only under it.
+[profile.qa]
+inherits = "dev"
+opt-level = 2
+overflow-checks = false
+debug = "line-tables-only"
+incremental = true
+
 [profile.release]
 opt-level = "s"
 lto = true

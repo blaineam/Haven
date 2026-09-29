@@ -11,6 +11,10 @@
 #
 # Prefer a per-user service instead (no root)? Use ../haven-relay.service.
 #
+# Updates: /usr/bin belongs to apt, so this relay never replaces itself — it checks GitHub
+# Releases (signed, anonymous) and logs "haven-relay X is available" once per version; upgrade
+# with the new .deb. Silence even that with `ExecStart=/usr/bin/haven-relay run --auto-update off`.
+#
 [Unit]
 Description=Haven relay (always-on circle mailbox, ciphertext only)
 Documentation=https://github.com/blaineam/haven/blob/main/relay/README.md
@@ -26,6 +30,7 @@ Environment=HOME=/var/lib/haven-relay
 WorkingDirectory=/var/lib/haven-relay
 StateDirectory=haven-relay
 ExecStart=/usr/bin/haven-relay run
+# Always restart (crash, OOM, or an operator/update-requested restart exit 75).
 Restart=always
 RestartSec=5
 

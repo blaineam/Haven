@@ -11,6 +11,8 @@ license = "AGPL-3.0-or-later"
 homepage = "https://wemiller.com/apps/haven"
 repository = "https://github.com/blaineam/haven"
 
+build = "build.rs"
+
 [[bin]]
 name = "haven-relay"
 path = "src/main.rs"
@@ -61,3 +63,12 @@ rand = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # Pure-Rust QR encoder (no image backend) for the terminal "paste this into the app" code.
 qrcode = { version = "0.14", default-features = false }
+# Release-signature verification for the self-updater (same crate haven-net/haven-p2p already use).
+ed25519-dalek = "2"
+# HTTPS for the self-updater: the exact reqwest build iroh already links (rustls, ring provider
+# installed in main) — no new crates in the tree. Only ever GETs public GitHub release data.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+
+[target.'cfg(unix)'.dependencies]
+# statvfs for the disk guard (already in the tree via tokio/iroh).
+libc = "0.2"

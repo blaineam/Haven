@@ -429,6 +429,13 @@ green with zero setup.
 | `STORE_*` (8) | Microsoft Store MSIX | MSIX + submit skipped |
 | `ASC_API_KEY_ID`, `ASC_API_ISSUER_ID`, `ASC_API_KEY_P8` | App Store submission (`apple-store.yml`) | job skips with a notice; submit by hand |
 
+**One exception — fails CLOSED:** `RELAY_SIGNING_KEY` (base64 of the 32-byte Ed25519 release seed)
+signs every `haven-relay-<target>` asset (`<asset>.sig`) in `release.yml` ▸ publish and
+`relay-release.yml` ▸ release. Self-updating relays only install signed binaries, so a tag/dispatch
+publish **errors** if the secret is missing (or holds a key the relay doesn't trust) rather than
+ship an unsigned relay. Set it once: `gh secret set RELAY_SIGNING_KEY < relay-signing-key.b64`.
+Key rotation: `docs/RELAY-AND-DEPLOY.md` ▸ "Self-updating relays".
+
 Separate from these secrets, two **repo variables** control the channel policy (see
 [Release channels](#release-channels--what-goes-where)) — **both are now set to `false`**, so the
 Windows and Android GUI builds no longer ride the public Release (they come off as short-retention

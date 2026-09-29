@@ -63,6 +63,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      # The FULL version incl. any -rc.N — what the relay binary reports (HAVEN_RELAY_BUILD_VERSION)
+      # and what its release signature binds, so a candidate is never mistaken for the final.
+      full_version: ${{ steps.v.outputs.full_version }}
       is_rc: ${{ steps.v.outputs.is_rc }}
     steps:
       - uses: actions/checkout@v4
@@ -129,8 +132,11 @@ jobs:
 
           # Downstream stamping always uses the clean X.Y.Z (an rc stamps the same
           # version it's a candidate for).
-          echo "version=$core" >> "$GITHUB_OUTPUT"
-          echo "is_rc=$is_rc" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$core"
+            echo "full_version=$version"
+            echo "is_rc=$is_rc"
+          } >> "$GITHUB_OUTPUT"
           if [ "$is_rc" = true ]; then
             echo "Haven **$core** — release CANDIDATE ($raw): builds + QAs, no production publish." >> "$GITHUB_STEP_SUMMARY"
           else
@@ -163,6 +169,9 @@ jobs:
             target: x86_64-apple-darwin
             deb: false
     runs-on: ${{ matrix.os }}
+    env:
+      # `haven-relay version` reports this (incl. -rc.N) — the self-updater compares it.
+      HAVEN_RELAY_BUILD_VERSION: ${{ needs.meta.outputs.full_version }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -226,6 +235,8 @@ jobs:
       matrix:
         target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
     runs-on: windows-latest
+    env:
+      HAVEN_RELAY_BUILD_VERSION: ${{ needs.meta.outputs.full_version }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -706,6 +717,36 @@ jobs:
           if [ "$AND_ON_GH" != "false" ]; then
             printf '> _Android (.apk / .aab) is attached by the `android` workflow as a stopgap until the Google Play listing is public._\n' >> NOTES.md
           fi
+      # ── Relay release signatures ────────────────────────────────────────────────────────
+      # Self-updating relays install ONLY binaries carrying a valid Ed25519 signature (over the
+      # file's SHA-256 + asset name + version) from a key compiled into the relay. Fail CLOSED: no
+      # secret → no release, so an unsigned (un-updatable) relay can never ship. The signer also
+      # refuses a key the relay doesn't trust, and every .sig is re-verified before upload.
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Sign relay binaries (fails closed without RELAY_SIGNING_KEY)
+        env:
+          RELAY_SIGNING_KEY: ${{ secrets.RELAY_SIGNING_KEY }}
+          FULL_VERSION: ${{ needs.meta.outputs.full_version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELAY_SIGNING_KEY:-}" ]; then
+            echo "::error::RELAY_SIGNING_KEY secret is not set — refusing to publish unsigned relay" \
+                 "binaries (self-updating relays would never install them). See docs/RELAY-AND-DEPLOY.md."
+            exit 1
+          fi
+          cargo build --release --locked --manifest-path core/Cargo.toml -p haven-relay-sign
+          signer=core/target/release/haven-relay-sign
+          bins=()
+          for f in dist/haven-relay-*; do
+            case "$f" in *.sig) continue ;; esac
+            bins+=("$f")
+          done
+          if [ "${#bins[@]}" -eq 0 ]; then
+            echo "::error::no haven-relay-<target> binaries found in dist/ to sign"
+            exit 1
+          fi
+          "$signer" sign --version "$FULL_VERSION" "${bins[@]}"
+          "$signer" verify --version "$FULL_VERSION" "${bins[@]}"
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:

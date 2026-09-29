@@ -241,6 +241,54 @@ Summary of the honest promise: **never logged, never sold, never readable.** Not
 seen" — a relay necessarily learns `IP ↔ node id` for as long as it is moving your bytes,
 and nothing persists it.
 
+## Self-updating relays — signed releases (implemented)
+
+A standalone `haven-relay` keeps itself current from **GitHub Releases** — $0 infrastructure, no
+update server. Operator docs: `relay/README.md` ▸ "Automatic updates"; code:
+`core/haven-relay/src/update/`.
+
+**Signing.** Release CI (`release.yml` `publish`, `relay-release.yml` `release`) builds the tiny
+`haven-relay-sign` tool (`core/haven-relay-sign`, no net stack) and writes `<asset>.sig` next to
+every `haven-relay-<target>[.exe]` asset. A `.sig` is text (`haven-relay-sig v1`, version, asset,
+sha256, key id, sig); the Ed25519 signature covers
+`"haven-relay/release-signature/v1\0" ‖ version ‖ 0 ‖ asset-name ‖ 0 ‖ sha256(file)`. The verifier
+rebuilds that message from what IT expects (the version it chose, its own target's asset name, the
+hash it computed), so cross-asset and version replays can't verify. The signature format module
+(`update/sig.rs`) is compiled into both the signer and the relay.
+
+- **Secret:** `RELAY_SIGNING_KEY` = base64 of the 32-byte Ed25519 seed. CI **fails closed**: no
+  secret → the publish job errors before uploading anything; a key whose public half isn't in the
+  relay's `TRUSTED_KEYS` is refused too; every `.sig` is re-verified before upload. Branch/PR
+  builds never sign (they never publish).
+- **Trusted keys** live in `core/haven-relay/src/update/sig.rs` (`TRUSTED_KEYS`, a list).
+  Rotation: add the new public key, ship a release signed with the OLD key (every relay learns the
+  new key through a trusted update), switch the secret, and drop the old key a release or two
+  later. Keep an offline spare key in the list so a leaked key can be revoked without stranding
+  relays.
+- **Version:** CI stamps the FULL tag version (incl. `-rc.N`) into the binary via
+  `HAVEN_RELAY_BUILD_VERSION`; `haven-relay version` reports it and the signature binds it.
+
+**Channels.** `stable` = newest non-prerelease release (`vX.Y.Z`, `relay-vX.Y.Z`); `rc` = newest
+including prereleases (`vX.Y.Z-rc.N`). Semver ordering with `rc.N < final`; never a downgrade; a
+version that failed after install is recorded in `<data>/update/state.json` and never re-offered.
+
+**Install + rollback.** Docker: into the data volume, run by the entrypoint supervisor (which
+restarts on exit code 75 and has its own crash-loop rollback). systemd/launchd/cron-loop: atomic
+in-place `rename`, previous kept as `.prev`, exit 75 → service manager restarts. apt-owned
+`/usr/bin`, Windows tasks, hand-started relays: notify only. A fresh binary is on probation: it
+must write a healthy `<data>/health.json` (HTTP answers, iroh endpoint bound, store readable)
+within `HAVEN_RELAY_UPDATE_HEALTH_SECS` (180 s) and survive ≤ 3 starts, else it restores `.prev`
+and marks itself bad. Node identity and store are never touched.
+
+**Privacy.** Anonymous GETs of public GitHub data only — no node id, no telemetry, fixed
+User-Agent; the updater logs only version events (the no-logs rule is unchanged).
+
+**Self-maintenance.** Disk guard (`--min-free`, default 1 GiB): below the floor, HTTP PUTs get
+`507` and iroh PUTs `ERR insufficient storage` (small ≤ 64 KiB writes still accepted until ¼ of the
+floor), mesh pulls pause; GC keeps running and service resumes when space frees. The hourly GC
+also reaps stale `.part` temps store-wide. HTTP interface memory is bounded (1024 connections,
+1 GiB of buffered bodies).
+
 ## The deployment tool (`haven-relay`)
 
 Goal: anyone can stand up a compliant relay on any major cloud in one command, with
@@ -272,7 +320,8 @@ privacy-hardened defaults they can't accidentally turn off.
 **Implemented:** the relay itself ships in two forms — an **in-app RelayHost** (FFI,
 runs in-process; the Mac runs it as an *invisible background relay* via accessory
 activation policy) and a **standalone `haven-relay` daemon** (single static Rust binary;
-`relay/` packages it for macOS launchd, Linux systemd, and Docker). It serves both roles
+`relay/` packages it for macOS launchd, Linux systemd, and Docker; it **self-updates from
+signed GitHub releases** with health-checked rollback). It serves both roles
 (connection relay + media store-and-forward) over Haven Net with no public host. The
 storage mailbox also supports a **pre-signed-URL** model (`PresignStore`) so members never
 hold bucket credentials.

@@ -10,7 +10,15 @@
 # there the declared-but-unset ARG tripped `set -u` (exit 2) before wget even ran, so we default
 # it to "" and fall back to `uname -m` on the build machine (NAS builds are native-arch anyway).
 # The default tracks the newest RELEASE, deliberately. Pin a specific tag with
-# `--build-arg HAVEN_RELAY_VERSION=v1.1.2` when you want to hold a version on purpose.
+# `--build-arg HAVEN_RELAY_VERSION=v1.1.2` when you want to hold a version on purpose — and then
+# also set HAVEN_RELAY_UPDATE_CHANNEL=off, or the relay will self-update past your pin.
+#
+# ── SELF-UPDATING ──────────────────────────────────────────────────────────────────────────
+# You only ever build this image ONCE. After that the relay updates itself: it checks GitHub
+# Releases (anonymous GET, no telemetry), verifies each new binary's Ed25519 release signature,
+# installs it into the DATA VOLUME (/data/update/bin — survives container recreation), and the
+# entrypoint supervisor restarts into it. A new binary that fails its health check is rolled back
+# and never retried. Channel: HAVEN_RELAY_UPDATE_CHANNEL=stable (default) | rc | off.
 # ── SOURCE mode ────────────────────────────────────────────────────────────────────────────
 # `--build-arg HAVEN_RELAY_SOURCE=1` builds the relay from GitHub at `HAVEN_RELAY_REF` (a branch,
 # tag or commit sha) instead of downloading a release asset — so a relay fix can be tested on the
@@ -56,6 +64,8 @@ RUN set -eux; \
     if [ "$HAVEN_RELAY_SOURCE" = "1" ]; then \
       install -m 0755 /tmp/haven-relay-src /usr/local/bin/haven-relay; \
       rm -f /tmp/haven-relay-src; \
+      # A branch build: the entrypoint defaults auto-update OFF so a release can't replace it.
+      touch /etc/haven-relay-source-build; \
     else \
       rm -f /tmp/haven-relay-src; \
       case "$arch" in \
@@ -98,6 +108,9 @@ RUN chmod 0755 /entrypoint.sh
 
 # Persisted store (identity + sealed-blob mailbox); HAVEN_RELAY_DIR points the relay at it.
 ENV HAVEN_RELAY_DIR=/data
+# Self-updates land in the data volume (/data/update/bin), never in the image — see above. Also
+# what makes `docker compose exec haven-relay haven-relay update --now` install to the right place.
+ENV HAVEN_RELAY_UPDATE_INSTALL=volume
 # Ensure bundled cloudflared is found even if PATH is minimal.
 ENV PATH="/usr/local/bin:${PATH}"
 VOLUME ["/data"]
@@ -109,3 +122,6 @@ EXPOSE 8674 8675 3340 3478/udp
 # self-hosted relay on your own box; if you'd rather run unprivileged, add `user: "1000:1000"` to
 # the compose service and make sure that UID owns the data volume/dir.
 ENTRYPOINT ["/entrypoint.sh"]
+# The running relay self-checks every 30s (HTTP interface answers, iroh endpoint bound, store
+# readable) into /data/health.json; this reports it. `docker ps` shows (healthy)/(unhealthy).
+HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 CMD ["haven-relay", "health"]

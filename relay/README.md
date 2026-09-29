@@ -74,10 +74,66 @@ next login after step 2 (or run step 2 now and it starts immediately). Remove th
 any time with `haven-relay service uninstall`. The auto-start command carries through your
 `--data` path, so a custom storage location survives reboots.
 
-### Updating an existing relay
+### Automatic updates (signed) and self-maintenance
 
-Re-run the same install line — it always fetches the latest release — then **restart the
-service**, because replacing the binary does not replace the running process:
+A relay is invisible while it works, so it keeps **itself** current. Every ~6 hours (plus random
+jitter) it asks GitHub Releases for the newest version on its channel and, when there is one:
+
+1. downloads `haven-relay-<target>` and its `.sig` into `<data>/update/staging/`;
+2. verifies the **Ed25519 release signature** against keys compiled into the relay — the
+   signature binds the file's SHA-256, the asset name *and* the version, so a tampered binary, a
+   binary for another platform, or an old (validly signed) release replayed as "new" are all
+   refused;
+3. runs `<new> version` — it must execute here and report exactly the chosen version;
+4. installs it atomically and restarts into it, keeping the previous binary as `.prev`;
+5. the new binary must pass its **self health check** (HTTP interface answers, iroh endpoint
+   bound, store readable) within 3 minutes. If it doesn't — or crashes on start 3 times — it is
+   **rolled back** to the previous binary and that version is **never tried again**.
+
+Your identity (node id), circle link and sealed store are never touched by any of this.
+
+| Where it runs | What auto-update does |
+|---|---|
+| Docker / NAS (this repo's compose) | installs into the data volume, the entrypoint supervisor restarts it — see [docker/README.md](docker/README.md) |
+| `install.sh` + systemd user unit / launchd agent / `@reboot` cron loop | replaces the binary in place (`rename`), exits with code 75, the service manager restarts it |
+| `.deb` (`/usr/bin/haven-relay`, owned by apt) | **notify only** — logs "haven-relay X is available" once; upgrade with the new .deb |
+| Windows Scheduled Task, or a relay started by hand | **notify only** (nothing would restart it); re-run the installer |
+
+Privacy: the check is a plain anonymous `GET` of the public release list and the asset — no node
+id, no install id, no telemetry, a fixed User-Agent. The updater logs only its own version events.
+
+Knobs (flag / environment / `--config` JSON key):
+
+| Flag | Env | JSON | Default | |
+|---|---|---|---|---|
+| `--auto-update off\|stable\|rc` | `HAVEN_RELAY_UPDATE_CHANNEL` | `auto_update` | `stable` | `rc` also follows release candidates (never downgrades: a newer stable never moves to an older rc) |
+| `--update-interval-hours N` | `HAVEN_RELAY_UPDATE_INTERVAL_HOURS` | `update_interval_hours` | `6` | 1–336, jitter added |
+| `--min-free SIZE` | `HAVEN_RELAY_MIN_FREE` | `min_free` | `1G` | disk guard floor, `0` = off |
+| — | `HAVEN_RELAY_UPDATE_INSTALL` | — | auto | `volume` / `inplace` / `notify` to force a strategy |
+| — | `HAVEN_RELAY_UPDATE_HEALTH_SECS` | — | `180` | probation window for a fresh update |
+
+Commands: `haven-relay update` (check only), `haven-relay update --now` (install now; restart to
+switch), `haven-relay update --status` (last good / on probation / known-bad versions),
+`haven-relay update --channel rc --now`, `haven-relay health` (exit 0 if the running relay's last
+self-check passed and is fresh — what Docker's HEALTHCHECK runs).
+
+**Self-maintenance** (always on):
+
+- **Disk guard.** Free space on the store's filesystem is checked every 30 s. Below `--min-free`
+  the relay refuses media uploads and mesh replication with a clear `507 Insufficient Storage`
+  (`ERR insufficient storage` over iroh) while still accepting small mailbox/control writes; below
+  a quarter of it, every new write is refused. Reads, TOUCH and GC keep running, and service
+  resumes by itself once space is freed.
+- **GC.** The hourly sweep (mailbox TTL, your media retention) also deletes abandoned `.part`
+  temp files anywhere in the store, and stale update downloads.
+- **Bounded memory.** The HTTP interface caps concurrent connections (1024) and buffered upload
+  bytes (1 GiB total), so a burst of uploads queues instead of growing without limit.
+
+### Updating an existing relay by hand
+
+Normally you don't have to (see above). To update right now anyway: `haven-relay update --now`
+and restart it — or re-run the same install line, which always fetches the latest release, then
+**restart the service**, because replacing the binary does not replace the running process:
 
 ```sh
 curl -fsSL https://wemiller.com/apps/haven/relay/install.sh | sh   # (add the same --store you used)

@@ -1,0 +1,16 @@
+[package]
+name = "haven-relay-sign"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Release-signing tool for haven-relay binaries (used by CI; never shipped)."
+license = "AGPL-3.0-or-later"
+
+# Deliberately tiny (no iroh / tokio / net stack) so the release workflow can build it in seconds on
+# the publish runner. The signature format lives in haven-relay/src/update/sig.rs and is compiled
+# into BOTH this tool and the relay, so signer and verifier can never drift apart.
+[dependencies]
+ed25519-dalek = "2"
+sha2 = "0.10"
+rand = "0.8"
+data-encoding = "2.11.0"

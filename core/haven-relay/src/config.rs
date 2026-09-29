@@ -95,6 +95,63 @@ pub struct Config {
     pub turn_urls: Vec<String>,
     /// Long-lived TURN password (username `haven`), persisted like `http_token`.
     pub turn_token: String,
+    /// Self-maintenance knobs (auto-update channel/interval, disk guard floor).
+    pub maintenance: Maintenance,
+}
+
+/// Self-update + self-maintenance settings. Flag > environment > default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Maintenance {
+    /// `--auto-update off|stable|rc` / `HAVEN_RELAY_UPDATE_CHANNEL` (default stable).
+    pub update_channel: crate::update::version::Channel,
+    /// `--update-interval-hours N` / `HAVEN_RELAY_UPDATE_INTERVAL_HOURS` (default 6, 1–336).
+    pub update_interval: std::time::Duration,
+    /// `--min-free SIZE` / `HAVEN_RELAY_MIN_FREE` (default 1G; 0 disables the disk guard).
+    pub min_free_bytes: u64,
+}
+
+/// `HAVEN_RELAY_UPDATE_CHANNEL`, if set and valid.
+pub fn update_channel_from_env() -> Option<crate::update::version::Channel> {
+    std::env::var("HAVEN_RELAY_UPDATE_CHANNEL")
+        .ok()
+        .and_then(|v| crate::update::version::Channel::parse(&v))
+}
+
+/// Fold flags (or config-file fields) and the environment into [`Maintenance`].
+pub fn resolve_maintenance(
+    channel: Option<String>,
+    interval_hours: Option<String>,
+    min_free: Option<String>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Maintenance> {
+    use crate::update::version::Channel;
+    let pick = |flag: Option<String>, var: &str| flag.or_else(|| env(var).filter(|v| !v.trim().is_empty()));
+    let update_channel = match pick(channel, "HAVEN_RELAY_UPDATE_CHANNEL") {
+        Some(c) => Channel::parse(&c).ok_or_else(|| anyhow!("--auto-update must be off, stable or rc (got '{c}')"))?,
+        None => Channel::Stable,
+    };
+    let hours = match pick(interval_hours, "HAVEN_RELAY_UPDATE_INTERVAL_HOURS") {
+        Some(h) => h
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|h| (1..=24 * 14).contains(h))
+            .ok_or_else(|| anyhow!("--update-interval-hours must be 1–336 (got '{h}')"))?,
+        None => crate::update::DEFAULT_INTERVAL.as_secs() / 3600,
+    };
+    let min_free_bytes = match pick(min_free, "HAVEN_RELAY_MIN_FREE") {
+        Some(s) => parse_size(&s)?,
+        None => crate::diskguard::DEFAULT_MIN_FREE,
+    };
+    Ok(Maintenance {
+        update_channel,
+        update_interval: std::time::Duration::from_secs(hours * 3600),
+        min_free_bytes,
+    })
+}
+
+fn process_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
 }
 
 /// On-disk JSON config (the `--config` form), all fields optional except `link`.
@@ -158,6 +215,15 @@ struct FileConfig {
     /// Total-size cap on the media store, e.g. "50G" / "500M" (0/absent = unbounded).
     #[serde(default)]
     media_max_bytes: Option<String>,
+    /// "off" | "stable" | "rc" (default stable).
+    #[serde(default)]
+    auto_update: Option<String>,
+    /// Hours between update checks (default 6).
+    #[serde(default)]
+    update_interval_hours: Option<u64>,
+    /// Disk-guard free-space floor, e.g. "1G" ("0" disables).
+    #[serde(default)]
+    min_free: Option<String>,
 }
 
 fn default_s3_port() -> u16 {
@@ -297,6 +363,13 @@ impl Config {
             .filter(|u| u.starts_with("turn:") || u.starts_with("turns:"))
             .collect();
 
+        let maintenance = resolve_maintenance(
+            arg_value(args, "--auto-update"),
+            arg_value(args, "--update-interval-hours"),
+            arg_value(args, "--min-free"),
+            process_env,
+        )?;
+
         let seed = load_or_create_seed(&data_dir)?;
         let http_token = load_or_create_http_token(&data_dir)?;
         let turn_token = load_or_create_turn_token(&data_dir)?;
@@ -304,7 +377,7 @@ impl Config {
             link, data_dir, seed, backend, s3_port, rclone_bin, rclone_config, peers,
             http_bind, http_url, auto_tunnel, tunnel_token, http_token, retention,
             derp_enabled, derp_bind, derp_url, proxy_bind,
-            turn_enabled, turn_bind, turn_public_ip, turn_urls, turn_token,
+            turn_enabled, turn_bind, turn_public_ip, turn_urls, turn_token, maintenance,
         })
     }
 
@@ -364,6 +437,12 @@ impl Config {
             .filter(|u| u.starts_with("turn:") || u.starts_with("turns:"))
             .collect();
         let turn_token = load_or_create_turn_token(&data_dir)?;
+        let maintenance = resolve_maintenance(
+            fc.auto_update.clone(),
+            fc.update_interval_hours.map(|h| h.to_string()),
+            fc.min_free.clone(),
+            process_env,
+        )?;
         Ok(Self {
             link,
             data_dir,
@@ -396,6 +475,7 @@ impl Config {
             turn_public_ip,
             turn_urls,
             turn_token,
+            maintenance,
         })
     }
 }
@@ -702,6 +782,28 @@ mod tests {
         qa_gc_overrides_from(&mut r, |n| (n != "HAVEN_RELAY_QA_GC_GRACE_SECS").then(|| "0".to_string()));
         assert_eq!(r.mailbox_ttl, haven_net::blobstore::MAILBOX_TTL);
         assert_eq!(r.gc_interval, haven_net::blobstore::GC_INTERVAL);
+    }
+
+    #[test]
+    fn maintenance_flag_beats_env_beats_default() {
+        use crate::update::version::Channel;
+        let none = |_: &str| None;
+        let m = resolve_maintenance(None, None, None, none).unwrap();
+        assert_eq!(m.update_channel, Channel::Stable);
+        assert_eq!(m.update_interval, std::time::Duration::from_secs(6 * 3600));
+        assert_eq!(m.min_free_bytes, crate::diskguard::DEFAULT_MIN_FREE);
+        let env = |n: &str| match n {
+            "HAVEN_RELAY_UPDATE_CHANNEL" => Some("rc".to_string()),
+            "HAVEN_RELAY_UPDATE_INTERVAL_HOURS" => Some("12".to_string()),
+            "HAVEN_RELAY_MIN_FREE" => Some("0".to_string()),
+            _ => None,
+        };
+        let m = resolve_maintenance(None, None, None, env).unwrap();
+        assert_eq!((m.update_channel, m.update_interval.as_secs(), m.min_free_bytes), (Channel::Rc, 12 * 3600, 0));
+        let m = resolve_maintenance(Some("off".into()), Some("1".into()), Some("5G".into()), env).unwrap();
+        assert_eq!((m.update_channel, m.update_interval.as_secs(), m.min_free_bytes), (Channel::Off, 3600, 5 << 30));
+        assert!(resolve_maintenance(Some("nightly".into()), None, None, none).is_err());
+        assert!(resolve_maintenance(None, Some("0".into()), None, none).is_err());
     }
 
     #[test]

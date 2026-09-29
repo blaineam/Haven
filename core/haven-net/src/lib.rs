@@ -305,6 +305,12 @@ impl Node {
         addr
     }
 
+    /// Is this node's iroh endpoint open and bound to at least one local socket? (Liveness probe
+    /// for the headless relay's health check — no network traffic.)
+    pub fn endpoint_bound(&self) -> bool {
+        !self.endpoint.is_closed() && !self.endpoint.bound_sockets().is_empty()
+    }
+
     /// Our current home relay URL (the DERP relay we're registered on), if established. Peers can be told
     /// this so they seed their own address book and never depend on pkarr/DNS resolving us.
     pub fn home_relay_url(&self) -> Option<String> {

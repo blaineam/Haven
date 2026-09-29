@@ -428,8 +428,58 @@ fn resolve_retention(
             retention.media_max_bytes = Some(bytes);
         }
     }
+    apply_qa_gc_overrides(&mut retention);
     Ok(retention)
 }
+
+/// QA-only GC clock overrides (DEBUG builds only — a release relay ignores them entirely, so no
+/// shipped relay can be told to shred its mailbox by an environment variable):
+///
+/// * `HAVEN_RELAY_QA_MAILBOX_TTL_SECS` — mailbox idle TTL in SECONDS (instead of days),
+/// * `HAVEN_RELAY_QA_GC_GRACE_SECS`   — first-enable grace before the first sweep (default 48h),
+/// * `HAVEN_RELAY_QA_GC_INTERVAL_SECS` — sweep interval (default hourly).
+///
+/// They exist for the e2e `multirelay` step, which has to watch a real sweep delete a mailbox key
+/// and then prove the sibling relay's mesh pull does not bring it back — inside one run, not 30
+/// days. See docs/QA.md ▸ multirelay.
+#[cfg(debug_assertions)]
+fn apply_qa_gc_overrides(retention: &mut haven_net::blobstore::Retention) {
+    if qa_gc_overrides_from(retention, |name| std::env::var(name).ok()) {
+        eprintln!(
+            "⚠ QA GC clock (debug build): mailbox TTL {}s, grace {}s, sweep every {}s — never use this for real data.",
+            retention.mailbox_ttl.as_secs(),
+            retention.gc_grace.as_secs(),
+            retention.gc_interval.as_secs()
+        );
+    }
+}
+
+/// The override itself, over an injected variable lookup so it is testable without touching the
+/// process environment (which parallel tests share). True when anything was overridden.
+#[cfg(debug_assertions)]
+fn qa_gc_overrides_from(
+    retention: &mut haven_net::blobstore::Retention,
+    var: impl Fn(&str) -> Option<String>,
+) -> bool {
+    let secs = |name: &str| var(name).and_then(|v| v.trim().parse::<u64>().ok());
+    let mut any = false;
+    if let Some(s) = secs("HAVEN_RELAY_QA_MAILBOX_TTL_SECS").filter(|s| *s > 0) {
+        retention.mailbox_ttl = std::time::Duration::from_secs(s);
+        any = true;
+    }
+    if let Some(s) = secs("HAVEN_RELAY_QA_GC_GRACE_SECS") {
+        retention.gc_grace = std::time::Duration::from_secs(s);
+        any = true;
+    }
+    if let Some(s) = secs("HAVEN_RELAY_QA_GC_INTERVAL_SECS").filter(|s| *s > 0) {
+        retention.gc_interval = std::time::Duration::from_secs(s);
+        any = true;
+    }
+    any
+}
+
+#[cfg(not(debug_assertions))]
+fn apply_qa_gc_overrides(_retention: &mut haven_net::blobstore::Retention) {}
 
 /// Parse a human size — plain bytes or a K/M/G/T suffix (optionally with a trailing B),
 /// decimal allowed: "50G", "500M", "1.5T", "1073741824". Powers of 1024.
@@ -628,6 +678,30 @@ mod tests {
         assert_eq!(r.media_max_bytes, Some(50 * (1u64 << 30)));
         // A zero mailbox TTL would delete every event on the next sweep — refused.
         assert!(resolve_retention(Some(0), None, None).is_err());
+    }
+
+    #[test]
+    fn qa_gc_clock_overrides_only_what_is_set() {
+        use std::time::Duration;
+        let mut r = haven_net::blobstore::Retention::default();
+        assert!(!qa_gc_overrides_from(&mut r, |_| None), "nothing set → nothing changes");
+        assert_eq!(r, haven_net::blobstore::Retention::default());
+        let env = |n: &str| match n {
+            "HAVEN_RELAY_QA_MAILBOX_TTL_SECS" => Some("60".to_string()),
+            "HAVEN_RELAY_QA_GC_GRACE_SECS" => Some("0".to_string()),
+            "HAVEN_RELAY_QA_GC_INTERVAL_SECS" => Some("5".to_string()),
+            _ => None,
+        };
+        assert!(qa_gc_overrides_from(&mut r, env));
+        assert_eq!(r.mailbox_ttl, Duration::from_secs(60));
+        assert_eq!(r.gc_grace, Duration::ZERO);
+        assert_eq!(r.gc_interval, Duration::from_secs(5));
+        assert_eq!(r.media_max_age, None, "media retention is never touched by the QA clock");
+        // A zero TTL / interval would mean "delete everything" / "spin" — ignored, not honoured.
+        let mut r = haven_net::blobstore::Retention::default();
+        qa_gc_overrides_from(&mut r, |n| (n != "HAVEN_RELAY_QA_GC_GRACE_SECS").then(|| "0".to_string()));
+        assert_eq!(r.mailbox_ttl, haven_net::blobstore::MAILBOX_TTL);
+        assert_eq!(r.gc_interval, haven_net::blobstore::GC_INTERVAL);
     }
 
     #[test]

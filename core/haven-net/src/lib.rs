@@ -342,25 +342,29 @@ impl Node {
                 blobstore::rehydrate_device_rosters(&root, &cfg.auth);
             }
             // Stamp the GC-enabled marker(s) now so the 48h first-enable grace clock starts.
-            let _ = blobstore::gc_sweep_with(&root, &retention, blobstore::GC_GRACE);
+            let _ = blobstore::gc_sweep_with(&root, &retention, retention.gc_grace);
             // Hourly GC for the in-process store. A plain thread (not a tokio task):
             // `RelayServerHandle.attach` calls this from outside any async runtime on the app
-            // platforms. Wakes every minute so it exits promptly once the relay is disabled.
+            // platforms. Wakes every minute (or every `gc_interval`, when a DEBUG relay under the
+            // e2e harness shortened it) so it exits promptly once the relay is disabled.
+            let tick = retention
+                .gc_interval
+                .clamp(std::time::Duration::from_secs(1), std::time::Duration::from_secs(60));
             let holder = Arc::downgrade(&self.relay);
             std::thread::spawn(move || {
                 let mut slept = std::time::Duration::ZERO;
                 loop {
-                    std::thread::sleep(std::time::Duration::from_secs(60));
-                    slept += std::time::Duration::from_secs(60);
+                    std::thread::sleep(tick);
+                    slept += tick;
                     let Some(relay) = holder.upgrade() else { return };
                     let Some((root, retention)) =
                         lock(&relay).as_ref().map(|c| (c.root.clone(), c.retention))
                     else {
                         return;
                     };
-                    if slept >= blobstore::GC_INTERVAL {
+                    if slept >= retention.gc_interval {
                         slept = std::time::Duration::ZERO;
-                        let stats = blobstore::gc_sweep_with(&root, &retention, blobstore::GC_GRACE);
+                        let stats = blobstore::gc_sweep_with(&root, &retention, retention.gc_grace);
                         // Operator visibility, but ONLY when a media limit is configured —
                         // default (app-embedded) relays keep the existing no-output posture.
                         if retention.media_limited() {

@@ -163,11 +163,23 @@ pub struct Retention {
     pub media_max_age: Option<std::time::Duration>,
     /// Total-size cap on `haven/media/**`. `None` = unbounded (today's behavior).
     pub media_max_bytes: Option<u64>,
+    /// First-enable grace before the first sweep may delete anything ([`GC_GRACE`]). Only ever
+    /// changed by a DEBUG `haven-relay` under the e2e harness (see the CLI's QA env) — a release
+    /// relay always runs the constant.
+    pub gc_grace: std::time::Duration,
+    /// How often the hosted relay sweeps ([`GC_INTERVAL`]). Same DEBUG-only override as `gc_grace`.
+    pub gc_interval: std::time::Duration,
 }
 
 impl Default for Retention {
     fn default() -> Self {
-        Self { mailbox_ttl: MAILBOX_TTL, media_max_age: None, media_max_bytes: None }
+        Self {
+            mailbox_ttl: MAILBOX_TTL,
+            media_max_age: None,
+            media_max_bytes: None,
+            gc_grace: GC_GRACE,
+            gc_interval: GC_INTERVAL,
+        }
     }
 }
 

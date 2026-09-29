@@ -2074,8 +2074,10 @@ async function main() {
       const tu = Date.now();
       await op(ios, { op: 'post', body: tag('AfterMove'), circle_id: cS }, 1500);
       gate('multirelay: A writes to R_A again at its new address (not parked in backoff)', 'ios', await convergeSince(ios,
-        // Counters are summed over the relay's CURRENT urls, so any putOk here landed at the new door.
-        (j) => statsRow(j, RA.node)?.backoffRemainingMs === 0 && statsCounter(j, RA.node, 'putOk') > 0,
+        // Counters are summed over the relay's CURRENT urls — so once the new door is among them and
+        // none of the old ones is, any putOk here landed at the new door.
+        (j) => knowsUrlPort(j, RA.node, plan.ra2.pub) && !knowsUrlPort(j, RA.node, plan.ra.pub)
+          && statsRow(j, RA.node)?.backoffRemainingMs === 0 && statsCounter(j, RA.node, 'putOk') > 0,
         BUDGET.text * 2, tu), BUDGET.text * 2);
       const st2 = await mrProxy('GET', '/stats');
       score('multirelay: the fleet is using R_A\'s new door', num(st2?.ports?.[plan.ra2.pub]?.hits) > 0, `hits on :${plan.ra2.pub} = ${st2?.ports?.[plan.ra2.pub]?.hits}`);

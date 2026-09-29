@@ -193,6 +193,7 @@ final class FeedStore: ObservableObject {
         circleMembersCache.removeAll(); deviceIdsCache.removeAll(); dialTargetsCache.removeAll()
         messagesCache.removeAll(); messagesStale.removeAll()
         sensitiveCache.removeAll(); reportsCache.removeAll()
+        RosterEcho.shared.withLock { $0 = RosterEcho() }   // a new engine has seen no roster yet
         ownDeviceHexCache = (0, [])
     }
     /// A circle's members from the read model. A miss answers `[]` and schedules the read.
@@ -2908,6 +2909,11 @@ final class FeedStore: ObservableObject {
         guard !DemoEnv.isDemo, engine != nil else { after(false); return }
         afterPersist.append(after)
         persist(why, line: line)
+    }
+    /// Run `after` once the NEXT export — whoever asks for it — is on disk, without asking for one.
+    private func afterNextPersist(_ after: @escaping @MainActor (Bool) -> Void) {
+        guard !DemoEnv.isDemo, engine != nil else { after(false); return }
+        afterPersist.append(after)
     }
     /// Export right now (still off-main). Satisfies a pending debounce and everything waiting on it.
     private func persistNow(_ why: String = #function, line: Int = #line) {
@@ -5963,17 +5969,18 @@ final class FeedStore: ObservableObject {
     /// `receive`, answering "did this CHANGE anything?" for a device roster too.
     ///
     /// The core's `receive` reports a device roster (tag 0x04) as applied whenever it VERIFIES —
-    /// including a roster it already holds (`RosterIngest::AlreadyCurrent.known()` is true). Every
-    /// hello reply carries the sender's roster, so an idle fleet re-delivered the same rosters every
-    /// ~30 s, and each read as a new event: a whole-state export, a fan-out to every other device
-    /// of mine (which re-applied and re-fanned it) and a silent self-sync push — forever. A roster
-    /// goes through `ingestRosterWireStatus` (-1 refused / 0 already current / 1 stored) instead,
-    /// and only a stored one also takes the circle arm (which drains tree commits parked on it).
+    /// including a roster it already holds. Every hello reply carries the sender's roster verbatim,
+    /// so an idle fleet re-delivered the same rosters every ~30 s and each read as a new event: a
+    /// whole-state export, a fan-out to every other device of mine (which re-applied and re-fanned
+    /// it) and a silent self-sync push — forever. A byte-identical repeat is answered "nothing new"
+    /// without touching the engine (`RosterEcho`); the first copy, and any re-signed roster, go
+    /// through `receive` exactly as before.
     nonisolated static func receiveChanged(_ s: HavenSocial, circleId: String, envelope: Data) -> Bool {
         if envelope.first == 0x04 {
-            guard s.ingestRosterWireStatus(wire: envelope) > 0 else { return false }
-            _ = try? s.receive(circleId: circleId, envelope: envelope)
-            return true
+            if RosterEcho.shared.withLock({ $0.isRepeat(envelope) }) { return false }
+            let ok = (try? s.receive(circleId: circleId, envelope: envelope)) == true
+            if !ok { RosterEcho.shared.withLock { $0.forget(envelope) } }   // refused: a later copy may take
+            return ok
         }
         return (try? s.receive(circleId: circleId, envelope: envelope)) == true
     }
@@ -6624,12 +6631,19 @@ final class FeedStore: ObservableObject {
             HavenPerf.shared.noteApplied("mailbox NONE applied of \(processed.count): \(processed.prefix(2).map { String($0.suffix(40)) })")
         }
         #endif
+        //
+        // A pass where NOTHING applied (duplicates — a sibling or a hello reply re-uploading history
+        // under fresh keys — or events only buffered until their key/roster lands) does not ask for
+        // an export of its own: its marks ride the next one that happens anyway (new content, the
+        // background flush, teardown). Until then the keys are held in memory, so a kill re-fetches
+        // them — the invariant is the same, only the forced export per idle poll is gone.
         if !processed.isEmpty {
             SharedStore.holdAwaitingPersist(processed)
-            persist(then: { saved in
+            let marks: @MainActor (Bool) -> Void = { saved in
                 if saved { for k in processed { SharedStore.markSeenPublic(k) } }
                 SharedStore.releaseAwaitingPersist(processed)
-            })
+            }
+            if ingested.isEmpty && batch.unlockedCircles.isEmpty { afterNextPersist(marks) } else { persist(then: marks) }
         }
         if helloIngested { refresh(); syncWithContacts() }
         if relayIngested { objectWillChange.send() }   // Storage / circle relay chips re-read the store

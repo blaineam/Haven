@@ -439,6 +439,8 @@ targets:
       - path: HavenApp/HeldMediaIndex.swift
       # The sync pill / media spinner / "media waiting" decisions — pure state, Foundation only.
       - path: HavenApp/SyncProgress.swift
+      # Byte-identical device-roster re-deliveries (receive() reports a known roster as applied).
+      - path: HavenApp/RosterEcho.swift
       - path: Shared/SharedNotificationPrivacy.swift
       - path: HavenLogicTests
     settings:

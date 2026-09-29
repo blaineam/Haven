@@ -460,6 +460,7 @@ object HavenNet : InboundListener {
         // engine from the account PUBLIC bundle + its own device seed (the device identity is baked in),
         // and NEVER registers a device or registers for push (the primary owns those). A seeded/legacy
         // device keeps today's path: engine over the account seed, then adopt the device identity.
+        RosterEcho.clear()   // a new engine has seen no roster yet
         social = if (core.seedless) {
             HavenSocial.newSeedless(core.bundle, DeviceKeyStore.deviceAccount().secretSeed())
         } else {
@@ -8771,17 +8772,18 @@ object HavenNet : InboundListener {
     /**
      * `receive`, answering "did this CHANGE anything?" for a device roster too (Apple
      * `FeedStore.receiveChanged` parity). The core reports a roster envelope (tag 0x04) as applied
-     * whenever it verifies — an ALREADY-CURRENT one included — and every hello reply carries the
-     * sender's roster, so an idle fleet re-applied the same rosters every ~30 s: a whole-state
-     * persist, a fan-out to my other devices (which re-applied and re-fanned it) and a self-sync
-     * push each time. A roster goes through `ingestRosterWireStatus` (-1 refused / 0 current /
-     * 1 stored); only a stored one also takes the circle arm (tree commits parked on it).
+     * whenever it verifies — an ALREADY-HELD one included — and every hello reply carries the
+     * sender's roster verbatim, so an idle fleet re-applied the same rosters every ~30 s: a
+     * whole-state persist, a fan-out to my other devices (which re-applied and re-fanned it) and a
+     * self-sync push each time. A byte-identical repeat is answered "nothing new" without touching
+     * the engine ([RosterEcho]); the first copy and any re-signed roster go through as before.
      */
     private fun receiveChanged(circleId: String, env: ByteArray): Boolean {
         if (env.isNotEmpty() && env[0] == 0x04.toByte()) {
-            if (runCatching { social.ingestRosterWireStatus(env) }.getOrDefault((-1).toByte()) <= 0) return false
-            runCatching { social.receive(circleId, env) }
-            return true
+            if (RosterEcho.isRepeat(env)) return false
+            val ok = runCatching { social.receive(circleId, env) }.getOrDefault(false)
+            if (!ok) RosterEcho.forget(env)   // refused: a later copy may take
+            return ok
         }
         return runCatching { social.receive(circleId, env) }.getOrDefault(false)
     }

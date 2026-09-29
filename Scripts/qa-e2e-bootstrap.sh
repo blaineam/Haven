@@ -272,6 +272,24 @@ for i in $(seq 1 30); do [[ -s "$DATA_DIR/qa-device-hex.txt" ]] && break; sleep 
 [[ -s "$MEMBERS.next" ]] && mv "$MEMBERS.next" "$MEMBERS"
 authorize "$MEMBERS"
 
+# Cold boot (never a quick-boot snapshot: a snapshot can restore a dead network stack) with explicit
+# public DNS. The emulator otherwise forwards to the HOST resolver, and on a Mac running Tailscale that
+# is MagicDNS (100.100.100.100), which the emulator's user-mode network cannot reach: the AVD then
+# boots with "Active default network: none" — mailbox steps still pass over adb reverse while every
+# iroh dial, push and call fails, and whole runs scored the host's VPN instead of Haven.
+boot_haven_emulator() {
+  nohup "${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}/emulator/emulator" -avd haven_phone \
+    -no-snapshot-load -no-snapshot-save -no-boot-anim -dns-server 1.1.1.1,8.8.8.8 \
+    >"$OUT/emulator.log" 2>&1 &
+}
+android_has_network() {
+  adb shell dumpsys connectivity 2>/dev/null | grep -q "Active default network: [0-9]"
+}
+wait_android_network() {  # $1 = seconds
+  for i in $(seq 1 "$1"); do android_has_network && return 0; sleep 1; done
+  return 1
+}
+
 # ── 6. Android emulator as linked device of A (best-effort leg) ───────────────
 # E2E_ANDROID=0 leaves the emulator alone entirely (a wedged shared emulator — adbd not answering —
 # otherwise hangs this script on its first `adb shell`, since these calls carry no timeout).
@@ -282,7 +300,7 @@ elif command -v adb >/dev/null 2>&1; then
     EMU="$(ls "$HOME/.android/avd" 2>/dev/null | grep -m1 haven_phone || true)"
     if [[ -n "$EMU" ]]; then
       log "booting android emulator haven_phone"
-      nohup "${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}/emulator/emulator" -avd haven_phone -no-snapshot-save -no-boot-anim >"$OUT/emulator.log" 2>&1 &
+      boot_haven_emulator
       # A COLD boot (no snapshot) on a host that is also building the iOS app and the desktop takes
       # 5–6 minutes to even answer adb here. The old 3-minute wait gave up while it was still
       # booting, so two consecutive release-QA runs skipped the android leg — and the emulator that
@@ -316,10 +334,31 @@ elif command -v adb >/dev/null 2>&1; then
     adb shell svc wifi enable >/dev/null 2>&1 || true
     adb shell svc data enable >/dev/null 2>&1 || true
     net_ok=0
-    for i in $(seq 1 20); do
-      adb shell dumpsys connectivity 2>/dev/null | grep -q "Active default network: [0-9]" && { net_ok=1; break; }
-      sleep 1
-    done
+    wait_android_network 20 && net_ok=1
+    if [[ "$net_ok" != "1" ]]; then
+      # Recovery 1: bounce wifi (the radio sometimes comes up before the virtual AP).
+      log "android emulator has no default network — bouncing wifi"
+      adb shell svc wifi disable >/dev/null 2>&1 || true; sleep 2
+      adb shell svc wifi enable >/dev/null 2>&1 || true
+      wait_android_network 30 && net_ok=1
+    fi
+    if [[ "$net_ok" != "1" ]]; then
+      # Recovery 2: a cold reboot with explicit DNS (a reused emulator may have been started by
+      # something else without it).
+      log "android emulator still has no network — cold-rebooting it with explicit DNS"
+      adb emu kill >/dev/null 2>&1 || true
+      for i in $(seq 1 30); do [[ "$(adb get-state 2>/dev/null || true)" != "device" ]] && break; sleep 1; done
+      boot_haven_emulator
+      for i in $(seq 1 160); do [[ "$(adb get-state 2>/dev/null || true)" == "device" ]] && break; sleep 3; done
+      for i in $(seq 1 100); do
+        [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == "1" ]] && break
+        sleep 3
+      done
+      adb shell cmd connectivity airplane-mode disable >/dev/null 2>&1 || true
+      adb shell svc wifi enable >/dev/null 2>&1 || true
+      adb shell svc data enable >/dev/null 2>&1 || true
+      wait_android_network 45 && net_ok=1
+    fi
     [[ "$net_ok" == "1" ]] || log "WARN: android emulator has NO default network — iroh dials and android calls will fail"
     # gradle splits per ABI — universal covers every emulator arch.
     APK="$ROOT/android/app/build/outputs/apk/debug/app-universal-debug.apk"

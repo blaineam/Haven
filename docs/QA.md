@@ -263,7 +263,8 @@ What it asserts (every timing lands in `build/e2e-history.jsonl`):
    C_S post lands on R_C and reaches A.
 6. **No thundering herd** — while R_A is down (`E2E_MR_DOWN_MS`, 120 s), the whole fleet's requests
    against it, after a 15 s settle, stay ≤ `E2E_MR_DOWN_MAX_PER_MIN` (60/min) and do not climb from
-   the first half of the window to the second.
+   the first half of the window to the second (a climb counts once the second half runs at ≥ half
+   the cap — readers failing over one by one at a few requests a minute is not a stampede).
 
 **QA GC clock (DEBUG `haven-relay` only).** `HAVEN_RELAY_QA_MAILBOX_TTL_SECS`,
 `HAVEN_RELAY_QA_GC_GRACE_SECS` and `HAVEN_RELAY_QA_GC_INTERVAL_SECS` shorten the mailbox TTL, the

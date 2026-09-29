@@ -1779,7 +1779,9 @@ async function main() {
     // Cross-relay reading, both directions.
     await convergeAll(['stub'], mediaPresent(`${tag('A_Shared')}_Photo`), BUDGET.mediaBlob, 'multirelay: A\'s shared photo readable by B');
     await convergeAll(['ios', ...(devices.android ? ['android'] : [])], mediaPresent(`${tag('B_Shared')}_Photo`), BUDGET.mediaBlob, 'multirelay: B\'s shared photo readable by A');
-    await convergeAll(readersOfA.filter((n) => n !== 'stub'), hasPost(tag('A_Private')), BUDGET.text, 'multirelay: A\'s private post on A\'s other devices');
+    // A's other devices learn that C_A now lives on R_A the way they learn any relay setting: through
+    // self-sync, so they get the self-sync budget (the relay list, not the post, is the slow part).
+    await convergeAll(readersOfA.filter((n) => n !== 'stub'), hasPost(tag('A_Private')), BUDGET.settings, 'multirelay: A\'s private post on A\'s other devices');
 
     const storeKeys = { ra: () => mrStoreKeys(RA.store).map((k) => k.key), rc: () => mrStoreKeys(RC.store).map((k) => k.key), rb: () => mrStoreKeys(RB.store).map((k) => k.key) };
     const waitStore = async (name, pred, budget) => {

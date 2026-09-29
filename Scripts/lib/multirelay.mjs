@@ -210,8 +210,11 @@ export function herdVerdict(times, { downAt, upAt, settleMs = 15_000, maxPerMin 
   const mid = from + span / 2;
   const firstHalf = hitsBetween(times, from, mid), secondHalf = hitsBetween(times, mid, upAt);
   const perMin = Math.round((n / span) * 60_000 * 10) / 10;
-  // "Not climbing" with slack: a backoff that is working holds flat or decays; a storm doubles.
-  const climbing = secondHalf > Math.max(firstHalf * 2, firstHalf + 10);
+  // "Not climbing" with slack: a backoff that is working holds flat or decays; a storm doubles. A
+  // climb only counts once the second half is running at half the cap or more — a fleet going
+  // from 9 to 27 requests over two minutes is readers failing over one by one, not a stampede.
+  const secondPerMin = (secondHalf / (span / 2)) * 60_000;
+  const climbing = secondHalf > Math.max(firstHalf * 2, firstHalf + 10) && secondPerMin >= maxPerMin / 2;
   const ok = perMin <= maxPerMin && !climbing;
   return { ok, perMin, firstHalf, secondHalf,
     why: `${n} request(s) in ${(span / 1000).toFixed(0)}s = ${perMin}/min (max ${maxPerMin}); halves ${firstHalf} → ${secondHalf}${climbing ? ' CLIMBING' : ''}` };

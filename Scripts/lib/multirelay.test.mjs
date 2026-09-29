@@ -102,8 +102,15 @@ test('herdVerdict: bounded + flat passes, a storm or a climb fails, a short wind
   assert.equal(herdVerdict(calm, { downAt, upAt }).ok, true);
   const storm = at(15_000, 2000, 60);                            // ~1000/min
   assert.equal(herdVerdict(storm, { downAt, upAt }).ok, false);
+  // 3 hits in the first half, 40 in the second (~42/min): under the 60/min cap overall, but climbing
+  // past half of it — a backoff that is getting worse, not better.
   const climb = [...at(20_000, 3, 10_000), ...at(80_000, 40, 1_000)];
-  assert.match(herdVerdict(climb, { downAt, upAt, maxPerMin: 1000 }).why, /CLIMBING/);
+  const cv = herdVerdict(climb, { downAt, upAt, maxPerMin: 60 });
+  assert.equal(cv.ok, false);
+  assert.match(cv.why, /CLIMBING/);
+  // Readers failing over one by one (9 → 27 over ~2.5 min, measured on the fleet) is not a storm.
+  const trickle = [...at(20_000, 9, 7_000), ...at(78_000, 27, 2_500)];
+  assert.equal(herdVerdict(trickle, { downAt, upAt, maxPerMin: 60 }).ok, true, herdVerdict(trickle, { downAt, upAt, maxPerMin: 60 }).why);
   assert.match(herdVerdict(calm, { downAt, upAt: 30_000 }).why, /too short/);
 });
 

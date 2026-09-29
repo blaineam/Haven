@@ -3973,6 +3973,7 @@ object HavenNet : InboundListener {
             // [authoredUploads]. Epoch heads ride along but are upkeep, not the user's content.
             uploadStarted(circleId)
             var landed = false
+            var failedOnce = false
             try {
                 var delaySecs = 5L
                 while (true) {
@@ -3986,11 +3987,14 @@ object HavenNet : InboundListener {
                         landed = ok
                         break
                     }
-                    uploadRetrying(circleId, true)
-                    try { kotlinx.coroutines.delay(delaySecs * 1000) } finally { uploadRetrying(circleId, false) }
+                    // Failed once = "Retrying" until it lands (or gives up) — through the retry attempts
+                    // too, so the pill doesn't flicker back to "Sending" for each one.
+                    if (!failedOnce) { failedOnce = true; uploadRetrying(circleId, true) }
+                    kotlinx.coroutines.delay(delaySecs * 1000)
                     delaySecs *= 3
                 }
             } finally {
+                if (failedOnce) uploadRetrying(circleId, false)
                 uploadFinished(circleId, landed)
             }
         }

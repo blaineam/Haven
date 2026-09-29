@@ -16,7 +16,7 @@ package com.blaineam.haven.core
  *  item to the queue draining, so "Sending 2 of 5" counts every item of one burst. */
 data class UploadProgress(
     val pendingByCircle: Map<String, Int> = emptyMap(),
-    /** Of the pending items, how many are waiting out a retry backoff right now. */
+    /** Of the pending items, how many have failed at least once and are retrying (in backoff or in a retry attempt). */
     val retryingByCircle: Map<String, Int> = emptyMap(),
     val sessionTotalByCircle: Map<String, Int> = emptyMap(),
     val sessionDoneByCircle: Map<String, Int> = emptyMap(),

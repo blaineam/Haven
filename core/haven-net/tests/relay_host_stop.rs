@@ -111,6 +111,39 @@ async fn an_open_iroh_blob_connection_does_not_keep_a_stopped_relay_serving() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The Mac host starts its HTTP interface from two places (host start and the fabric-rebind
+/// reattach), each as "try the fixed port, else an ephemeral one". Both used to find no interface,
+/// both bound, and the loser fell back to an EPHEMERAL port — the relay's URL moved out from under
+/// every member. Concurrent starts must agree on the one fixed-port interface.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_http_starts_share_the_fixed_port() {
+    let dir = std::env::temp_dir().join(format!("haven-host-serve-race-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let relay = RelayNode::spawn([44u8; 32], None).await.unwrap();
+    let node = relay.node();
+    let start = |n: std::sync::Arc<haven_net::Node>, port: u16| async move {
+        match n.relay_serve_http(&format!("127.0.0.1:{port}"), "tok").await {
+            Ok(p) => p,
+            Err(_) => n.relay_serve_http("127.0.0.1:0", "tok").await.unwrap(),
+        }
+    };
+    // A race, so run it enough times to lose it without the single-flight.
+    for _ in 0..40 {
+        node.enable_relay(dir.clone());
+        let port = free_port();
+        let (a, b, c) = tokio::join!(
+            tokio::spawn(start(node.clone(), port)),
+            tokio::spawn(start(node.clone(), port)),
+            tokio::spawn(start(node.clone(), port))
+        );
+        let got = (a.unwrap(), b.unwrap(), c.unwrap());
+        assert_eq!(got, (port, port, port), "a concurrent start moved the relay off its fixed port");
+        node.disable_relay();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropping_the_path_router_stops_it() {
     let port = free_port();

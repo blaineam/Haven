@@ -145,6 +145,11 @@ pub struct Node {
     conns: Conns,
     handler: InboundHandler,
     relay: Arc<Mutex<Option<RelayCfg>>>,
+    /// Serializes [`Self::relay_serve_http`]: the check for an existing interface and the bind that
+    /// creates one must be ONE step, or two concurrent starts (the Mac host's start + its fabric
+    /// reattach) both find none, the loser's fixed-port bind fails, and it falls back to an
+    /// EPHEMERAL port — moving the relay's URL out from under every member.
+    serve_http_lock: Arc<tokio::sync::Mutex<()>>,
     dial_gate: Arc<Mutex<HashMap<EndpointId, DialGate>>>,
     /// Single-flight per-peer dial locks (see `conn_for`). The gate alone can't stop a burst:
     /// it's checked BEFORE `endpoint.connect` and only updated when a dial FINISHES — a dead id
@@ -220,6 +225,7 @@ impl Node {
             conns,
             handler,
             relay,
+            serve_http_lock: Arc::new(tokio::sync::Mutex::new(())),
             dial_gate: Arc::new(Mutex::new(HashMap::new())),
             dialing: Arc::new(Mutex::new(HashMap::new())),
             dial_attempts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -395,6 +401,9 @@ impl Node {
     /// port. Idempotent while already serving (returns the existing port). Errors if no relay is
     /// hosted here.
     pub async fn relay_serve_http(&self, bind: &str, token: &str) -> Result<u16> {
+        // Single-flight: a second caller waits for the first bind, then finds it and returns its
+        // port (see `serve_http_lock`).
+        let _serving = self.serve_http_lock.lock().await;
         let (root, auth) = {
             let g = lock(&self.relay);
             let Some(cfg) = g.as_ref() else { return Err(anyhow!("relay not hosted")) };

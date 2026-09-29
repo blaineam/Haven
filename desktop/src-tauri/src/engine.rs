@@ -9822,13 +9822,17 @@ impl Engine {
     /// works while the author happens to be online — which is exactly how media a few days old became
     /// permanently unreachable while fresh media (author still around) looked fine.
     async fn fetch_media_healing(self: &Arc<Self>, circle_id: &str, reference: &str) -> bool {
-        if self.fetch_media_from_relay(circle_id, reference).await {
-            return self.accept_fetched_blob(reference);
+        let got = if self.fetch_media_from_relay(circle_id, reference).await {
+            self.accept_fetched_blob(reference)
+        } else if self.heal_forbidden_relays().await && self.fetch_media_from_relay(circle_id, reference).await {
+            self.accept_fetched_blob(reference)
+        } else {
+            false
+        };
+        if got {
+            qa_media::bump(&qa_media::RECEIVED_VIA_RELAY, 1);
         }
-        if self.heal_forbidden_relays().await && self.fetch_media_from_relay(circle_id, reference).await {
-            return self.accept_fetched_blob(reference);
-        }
-        false
+        got
     }
 
     /// Gate a just-fetched sealed blob on it actually OPENING before we call the fetch a success.
@@ -9982,6 +9986,14 @@ impl Engine {
     /// that keeps asking after that provably cannot read the relay copy and is served directly. Nothing
     /// is streamed while a call is up here (it owns the uplink). Returns whether to stream now.
     async fn relay_first_allows_stream(self: &Arc<Self>, reference: &str, requester: &str) -> bool {
+        let allowed = self.relay_first_decide(reference, requester).await;
+        if !requester.eq_ignore_ascii_case(&self.social.my_node_hex()) {
+            qa_media::bump(&qa_media::REQUESTS_FROM_FRIENDS, 1);
+        }
+        allowed
+    }
+
+    async fn relay_first_decide(self: &Arc<Self>, reference: &str, requester: &str) -> bool {
         const MAX_HINTS: u32 = 3;
         const WINDOW_MS: u64 = 30 * 60_000;
         static HINTS: std::sync::OnceLock<StdMutex<HashMap<String, (u32, u64)>>> = std::sync::OnceLock::new();
@@ -9989,6 +10001,7 @@ impl Engine {
         let own = requester.eq_ignore_ascii_case(&self.social.my_node_hex());
         if matches!(self.qa_call_state(), Some((ringing, in_call)) if ringing || in_call) {
             log::info!("media REQ {}: not serving — a call is up", short(reference));
+            qa_media::bump(&qa_media::DECLINED, 1);
             return false;
         }
         let own_relay = self.own_hosted_relay_hex();
@@ -10050,6 +10063,7 @@ impl Engine {
         );
         let body = self.media_frame_body(reference, &circle_id, "");
         self.send_call_frame(wire::MEDIA_AVAILABLE, &body, requester);
+        qa_media::bump(&qa_media::HINTS_SENT, 1);
         false
     }
 
@@ -10213,6 +10227,7 @@ impl Engine {
         // seal as before. The receiver tries the symmetric open first, then falls back to the engine's KEM.
         let own = requester_hex == self.node_id_hex();
         let own_key = if own { Some(self.own_media_key()) } else { None };
+        qa_media::bump(if own { &qa_media::SERVED_DIRECT_OWN } else { &qa_media::SERVED_DIRECT_FRIEND }, 1);
         for index in 0..total {
             if missing.is_some_and(|m| !m.contains(&index)) {
                 continue; // requester already has it
@@ -10233,6 +10248,9 @@ impl Engine {
             };
             self.send_frame_awaited(wire::MEDIA_CHUNK, &wire::chunk_frame(ref_bytes, index, total, &sealed), requester_hex)
                 .await;
+            if !own {
+                qa_media::bump(&qa_media::SERVED_DIRECT_FRIEND_BYTES, chunk.len() as u64);
+            }
         }
     }
 
@@ -10307,6 +10325,7 @@ impl Engine {
             st.resume_fallback.remove(&reference);
         }
         if ok {
+            qa_media::bump(&qa_media::RECEIVED_VIA_DIRECT, 1);
             self.emit_changed();
         }
     }
@@ -12203,5 +12222,42 @@ impl Engine {
                 log::info!("friend-invite: grant parked — ticket consumed");
             }
         }
+    }
+}
+
+/// Relay-first media counters for the DEBUG qa dump (e2e step `relayfirst`, docs/QA.md) — Apple
+/// `QaMediaStats` / Android `QaStats` parity. Bumps compile to nothing in a release build.
+pub(crate) mod qa_media {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub static SERVED_DIRECT_FRIEND: AtomicU64 = AtomicU64::new(0);
+    pub static SERVED_DIRECT_FRIEND_BYTES: AtomicU64 = AtomicU64::new(0);
+    pub static SERVED_DIRECT_OWN: AtomicU64 = AtomicU64::new(0);
+    pub static HINTS_SENT: AtomicU64 = AtomicU64::new(0);
+    pub static RECEIVED_VIA_RELAY: AtomicU64 = AtomicU64::new(0);
+    pub static RECEIVED_VIA_DIRECT: AtomicU64 = AtomicU64::new(0);
+    pub static REQUESTS_FROM_FRIENDS: AtomicU64 = AtomicU64::new(0);
+    pub static DECLINED: AtomicU64 = AtomicU64::new(0);
+
+    #[inline]
+    pub fn bump(counter: &AtomicU64, n: u64) {
+        if cfg!(debug_assertions) {
+            counter.fetch_add(n, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn snapshot() -> serde_json::Value {
+        let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
+        serde_json::json!({
+            "served_direct_friend": g(&SERVED_DIRECT_FRIEND),
+            "served_direct_friend_bytes": g(&SERVED_DIRECT_FRIEND_BYTES),
+            "served_direct_own": g(&SERVED_DIRECT_OWN),
+            "relay_hints_sent": g(&HINTS_SENT),
+            "received_via_relay": g(&RECEIVED_VIA_RELAY),
+            "received_via_direct": g(&RECEIVED_VIA_DIRECT),
+            "media_requests_from_friends": g(&REQUESTS_FROM_FRIENDS),
+            "serve_declined": g(&DECLINED),
+        })
     }
 }

@@ -521,6 +521,8 @@ fn write_dump(engine: &Arc<Engine>) -> DumpTiming {
         // "engine received nothing" is precisely the fork that matters.
         "call_engine": call_engine,
         "call": call,
+        // Relay-first media counters (e2e step `relayfirst`).
+        "relay_first": crate::engine::qa_media::snapshot(),
         "circles": circles,
         // What the engine is HOLDING BACK: parked (received-but-unopenable) envelopes per circle,
         // plus the rosters we know. A short feed alone cannot tell "never arrived" from "arrived and

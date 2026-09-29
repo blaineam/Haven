@@ -141,6 +141,8 @@ class WebRTCPeer(
                 it.maxFramerate = ScreenSharePolicy.FPS
             }
             val ok = sender.setParameters(p)
+            // QA dump: false if ANY peer's screen sender refused the cap.
+            QaStats.shareSenderParamsOk = (QaStats.shareSenderParamsOk ?: true) && ok
             Log.i(ScreenSharePolicy.LOG_TAG, "${peerHex.take(8)} screen sender params ok=$ok " +
                 "encodings=${p.encodings.size} maxBitrate=${ScreenSharePolicy.MAX_BITRATE_BPS}")
         }.onFailure { Log.w(ScreenSharePolicy.LOG_TAG, "${peerHex.take(8)} screen sender params failed", it) }

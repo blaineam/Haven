@@ -3645,6 +3645,7 @@ object HavenNet : InboundListener {
      *  backlog), thumbs first, then posters, then content — so the placeholder-feeding bytes land
      *  before the big blobs start. Apple FeedStore.enqueueAuthoredMedia parity. */
     private fun enqueueAuthoredMedia(circleId: String, media: List<String>) {
+        QaStats.authoredEnqueued(media)   // upload-before-broadcast evidence (DEBUG qa dump)
         for (ref in MediaVariants.allPreviews(media) + MediaVariants.allThumbs(media) +
             MediaVariants.uploadOrder(media)) {
             enqueueBackup(circleId, ref, priority = true)
@@ -3669,6 +3670,7 @@ object HavenNet : InboundListener {
         // goes out, so receivers' first relay lookup races a running upload rather than one that has
         // not started — and they are not driven to ask this phone for the bytes directly.
         enqueueAuthoredMedia(circleId, withThumbs)   // serialized priority lane: thumbs → posters → blobs
+        QaStats.broadcast(postId)
         afterAuthor(circleId, env,
             PushBanner.forPost(circleId, circleName(circleId), body, withThumbs, story = false, postId = postId))
         // A post the engine accepted is Haven's one "significant action" for the rating gates.
@@ -6032,6 +6034,7 @@ object HavenNet : InboundListener {
                                     acceptFetchedBlob(job.ref, job.circleId)
                             } finally { restoreInFlight.remove(job.ref) }
                             if (got) {
+                                QaStats.bump("received_via_relay")
                                 mediaArrived(job.ref)
                                 withContext(Dispatchers.Main) { feedVersion.value++ }
                             } else if (!LocalMedia.has(job.ref)) {
@@ -8327,6 +8330,7 @@ object HavenNet : InboundListener {
         scope.launch(Dispatchers.IO) {
             val cond = HeavyWorkMonitor.refresh()
             val own = runCatching { social.myNodeHex() }.getOrNull() == requester
+            if (!own) QaStats.bump("media_requests_from_friends")
             val cid = if (own) null else circleOfRef(ref)
             val req = HeavyWorkPolicy.ServeRequest(
                 isOwnDevice = own,
@@ -8347,6 +8351,7 @@ object HavenNet : InboundListener {
                     Log.i("MediaSync", "media REQ ${ref.take(12)} from=${requester.take(8)} — on a relay: hinting instead of streaming")
                     reverifyBackupAfterDirectAsk(ref)
                     CallManager.sealedSend(Wire.MEDIA_AVAILABLE, mediaFrameBody(ref, cid, ""), requester)
+                    QaStats.bump("relay_hints_sent")
                 }
                 is HeavyWorkPolicy.ServeDecision.HintWhenUploaded -> {
                     if (!noteRelayHint(ref, requester)) return@launch
@@ -8356,9 +8361,12 @@ object HavenNet : InboundListener {
                         if (hintOnUpload.size > 500) hintOnUpload.clear()
                     }
                     promoteBackup(ref)
+                    QaStats.bump("relay_hints_deferred")
                 }
-                is HeavyWorkPolicy.ServeDecision.Decline ->
+                is HeavyWorkPolicy.ServeDecision.Decline -> {
+                    QaStats.declined(verdict.why)
                     Log.i("MediaSync", "media REQ ${ref.take(12)} from=${requester.take(8)} — not serving: ${verdict.why}")
+                }
             }
         }
     }
@@ -8371,6 +8379,7 @@ object HavenNet : InboundListener {
             if (requester == me) continue   // own devices re-ask on their own lane
             Log.i("MediaSync", "media ${ref.take(12)} landed on a relay — telling ${requester.take(8)}")
             CallManager.sealedSend(Wire.MEDIA_AVAILABLE, mediaFrameBody(ref, cid.ifEmpty { circleId }, ""), requester)
+            QaStats.bump("relay_hints_sent")
         }
     }
 
@@ -8459,6 +8468,7 @@ object HavenNet : InboundListener {
         SyncMetrics.incOut()   // a media item is being served/pushed (iOS nbMediaOut += 1)
         val refBytes = ref.toByteArray(Charsets.UTF_8)
         val isOwn = runCatching { social.myNodeHex() }.getOrNull() == requesterHex
+        QaStats.bump(if (isOwn) "served_direct_own" else "served_direct_friend")
         val buf = ByteArray(mediaChunkSize)
         java.io.RandomAccessFile(file, "r").use { raf ->
             for (index in 0 until total) {
@@ -8486,6 +8496,7 @@ object HavenNet : InboundListener {
                     return
                 }
                 sendFrameAwait(Wire.MEDIA_CHUNK, chunkFrame(refBytes, index, total, sealed), requesterHex)
+                if (!isOwn) QaStats.bump("served_direct_friend_bytes", len.toLong())
             }
         }
     }
@@ -8576,6 +8587,7 @@ object HavenNet : InboundListener {
         ReassemblyStore.clear(ref)
         if (!ok) { clearRestoreProgress(ref); return }
         mediaArrived(ref)   // clears the spinner/i-of-n and counts it received (once per ref)
+        QaStats.bump("received_via_direct")
         scope.launch(Dispatchers.Main) { feedVersion.value++ }
         // "Save others' posts to Photos" — per-circle override (received media stores under the
         // default circle), falling back to the app-wide default.

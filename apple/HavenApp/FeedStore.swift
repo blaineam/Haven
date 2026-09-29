@@ -1464,6 +1464,11 @@ final class FeedStore: ObservableObject {
             self.invalidateMessagesCache(circleId)   // their events are gone from the thread too
             self.persist(); await self.reloadCircles(); self.refresh()
             self.nudgeSelfSyncSoon()   // the removal tombstone reaches my other devices in seconds
+            // …and the circle's RELAYS lose them too. A relay only ever added members, so a removed
+            // friend kept listing and fetching this circle's mailbox on every relay that had been
+            // taught about them. Only the creator may shrink the set (the relay checks), so this is
+            // a no-op for circles I don't own.
+            if circleId.hasPrefix("c1") { self.enrollMembers(circleId: circleId, force: true, replace: true) }
         }
     }
 
@@ -7843,7 +7848,10 @@ final class FeedStore: ObservableObject {
     /// Tell every relay serving `circleId` who its members are, so a peer the operator never listed
     /// in the relay link is still served. Best-effort: a relay that refuses (we aren't served there
     /// ourselves) or predates the verb simply keeps its existing set.
-    func enrollMembers(circleId: String, force: Bool = false) {
+    /// `replace`: state the WHOLE set (the creator after a removal) instead of adding to it — the
+    /// relay drops and revokes everyone else (`RelayAuth::replace_members`), and refuses unless we
+    /// speak for the circle's creator.
+    func enrollMembers(circleId: String, force: Bool = false, replace: Bool = false) {
         guard engine != nil else { return }
         let nowMs = now()
         // `force`: a member was just added (approval) — the set DID change, so the gate that assumes
@@ -7854,16 +7862,21 @@ final class FeedStore: ObservableObject {
         guard !relays.isEmpty else { return }
         // Rule (2) of `learn`: we must name OURSELVES or the relay declines outright.
         var members = Set(dialTargets(circleId).map { $0.lowercased() })
+        // A replace names every remaining member's ACCOUNT too — the relay re-expands each account's
+        // verified devices, so nobody who stays is dropped for want of a device id.
+        if replace { for a in cachedMembers(circleId) { members.insert(a.lowercased()) } }
         members.insert(myNodeHex.lowercased())
         members.insert(myDeviceNodeHex.lowercased())
-        guard members.count > 1 else { return }
+        guard members.count > 1 || replace else { return }
         lastEnrollMs[circleId] = nowMs
         let list = Array(members)
         Task.detached {
             for hex in relays {
                 guard let c = await RelayClients.client(hex) else { continue }
-                let ok = await c.enrollMembers(circleId: circleId, members: list)
-                if ok { HavenLog.relay("enrolled \(list.count) members of \(circleId) at \(hex.prefix(8))") }
+                let ok = replace
+                    ? await c.enrollMembersReplace(circleId: circleId, members: list)
+                    : await c.enrollMembers(circleId: circleId, members: list)
+                if ok { HavenLog.relay("\(replace ? "replaced" : "enrolled") \(list.count) members of \(circleId) at \(hex.prefix(8))") }
             }
         }
     }

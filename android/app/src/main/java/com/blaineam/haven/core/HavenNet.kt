@@ -2603,6 +2603,31 @@ object HavenNet : InboundListener {
         // read anything new.)
         authorizeMembership()
         selfSyncNudge()   // the severance record travels to my other devices now
+        // …and every OTHER relay serving the circle loses them too: a relay only ever added
+        // members, so a removed friend kept listing this circle's mailbox wherever they had been
+        // enrolled. Only the creator may shrink the set (the relay checks) — owned circles only.
+        if (circleId.startsWith("c1")) replaceCircleMembersOnRelays(circleId)
+    }
+
+    /** Tell each relay serving [circleId] its WHOLE member set (creator after a removal), so members
+     *  that dropped out are revoked there. iOS `enrollMembers(replace: true)` parity. */
+    private fun replaceCircleMembersOnRelays(circleId: String) {
+        val myAcct = runCatching { social.myNodeHex() }.getOrNull()?.lowercase() ?: return
+        val relays = relaysFor(circleId).filter { !it.startsWith("s3:") && it.length == 64 }
+        if (relays.isEmpty()) return
+        val members = LinkedHashSet<String>()
+        members.add(myAcct)
+        runCatching { node?.nodeIdHex() }.getOrNull()?.lowercase()?.let { members.add(it) }
+        for (t in dialTargets(circleId)) members.add(t.lowercase())
+        for (m in runCatching { social.contactNodeIds(circleId) }.getOrDefault(emptyList())) members.add(m.lowercase())
+        val list = members.toList()
+        scope.launch {
+            for (hex in relays) {
+                val client = relayClientFor(hex) ?: continue
+                val ok = runCatching { client.enrollMembersReplace(circleId, list) }.getOrDefault(false)
+                if (ok) Log.i(TAG, "replaced ${list.size} members of $circleId at ${hex.take(8)}")
+            }
+        }
     }
 
     /** True if [hex] was explicitly removed from [circleId] (severance) — don't dial / show them there. */

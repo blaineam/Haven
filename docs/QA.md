@@ -62,7 +62,7 @@ npm link`), it's just `soren run Haven`.
 | `vm-linux` | utm | **launches** the `haven-linux` UTM VM and confirms it reaches `started` (reuses an already-running VM) | UTM + the VM present |
 | `vm-windows` | utm | **launches** the `Windows` UTM VM and confirms `started` | UTM + the VM present |
 | `e2e` | cmd | **full cross-device E2E with perf gates** — see below | DEBUG builds of all four clients |
-| `qa-harness` | cmd | the e2e harness's own unit tests — the dump-channel freshness decision (`Scripts/lib/dump-freshness.mjs`), the one part of the harness that can *invent* a failure | node (no fleet) |
+| `qa-harness` | cmd | the e2e harness's own unit tests — the dump-channel freshness decision (`Scripts/lib/dump-freshness.mjs`), the one part of the harness that can *invent* a failure, plus the step decisions (`e2e-steps.mjs`, `multirelay.mjs`) | node (no fleet) |
 
 ### The `ios` suite is hermetic (`HAVEN_NO_NET`)
 
@@ -157,7 +157,7 @@ Subsets + reuse: `E2E_STEPS=post,dm node Scripts/qa-e2e-full.mjs`,
 `E2E_BOOTSTRAP=skip` to reuse a hot fleet, `E2E_KILL=1` to tear down after.
 
 Default step order: `newfriend,profile,circle,post,story,file,music,dm,relayfirst,progress,audience,call,
-screenshare,callgate,react,comment,media,satellite,launch,responsive,invite_offline`. Steps that need
+screenshare,callgate,react,comment,media,satellite,launch,responsive,invite_offline,multirelay`. Steps that need
 the circle shared with B create it themselves, so `E2E_STEPS=relayfirst` works on its own.
 
 ### Relay-first, new friends, screen share, call gate, audience, launch, responsiveness
@@ -193,6 +193,99 @@ fgs_ready_before_capture, capture_w/h, frames_captured, sender_params_ok, encode
 progress fields). The relayfirst media-pending counter is `pending_media_uploads` (blobs) —
 distinct from `sync_badge.pending_user_uploads` (events).
 
+### multirelay — friends who each run their own relay
+
+The fleet above has ONE relay. `multirelay` (default-on, LAST in the step order because it re-points
+A's default relay and takes relays down on purpose) adds two headless `haven-relay` CLI instances
+built from the worktree (`cargo build -p haven-relay`) and proves that friends who each operate
+their own relay interoperate without colliding:
+
+| relay | operator | how it gets there |
+|---|---|---|
+| **R_A** | account A (iOS) | `haven-relay run --link <A's relay_link>` → iOS `add_relay` with the printed interface JSON for C_A + C_S + C_R, **as A's default** |
+| **R_B** | account B | the stub's in-app relay, unchanged (toggled off/on with `host_relay`) |
+| **R_C** | account B (a second relay) | `haven-relay run --link <B's relay_link>` → stub `add_relay` for C_S only |
+
+Circles: C_S (A+B, shared), C_A (A only), C_B (B only), C_R (A+B, used only for the removal check).
+Each CLI relay gets its own data dir under `OUT/relays/`, its own `HAVEN_RELAY_SEED` (random per
+run), its own token, `--no-tunnel --no-derp --no-turn --no-proxy`, `--peer` = the other CLI relay,
+and binds **loopback only** on an internal port (`E2E_MR_PORT_BASE`+10000; default 18684/18685/18686)
+behind the **counting proxy** `Scripts/qa-relay-proxy.mjs`, whose public ports (8684 R_A, 8685
+R_C, 8686 R_A after its move, control 8689) are what clients are told via `--http-url`. The step
+refuses to start if any of those ports is already listening, never uses 8674/8675/3340/3478 (the
+stub's — and the user's own relay's — defaults), logs `pgrep -fl haven-relay` first and only ever
+kills the pids it spawned (`OUT/relay-*.pid`; teardown runs from `finish()`, FAIL-FAST and the
+process `exit` hook). The proxy exits by itself when the harness does.
+
+Why a proxy: **a relay writes no logs — there is no opt-in** (see the relay README), and a relay
+that is down cannot count anything. The proxy counts requests per public port (timestamps + status
+codes only), can throttle a door so a reader is caught mid-download, and keeps answering the TCP
+connect after the relay behind it dies, then drops the socket — which is exactly what a client sees
+from a relay dying mid-flight.
+
+What it asserts (every timing lands in `build/e2e-history.jsonl`):
+
+1. **Separation** — every relay has its own node id, token and port; A's C_A posts land on R_A,
+   B's C_B posts on R_B, C_S on R_A + R_C + R_B (dual-write or mesh); C_B never on R_A/R_C and C_A
+   never on R_C (store dirs are read directly); every client's `relay_stats` rows are **correctly
+   attributed** (each relay's token fingerprint and ports, nothing crossed) and A's list still holds
+   R_B after R_A's announce. **Collision sub-check:** a second relay pointed at R_A's internal port —
+   on `0.0.0.0` and on `127.0.0.1` — must exit non-zero naming the port. (Darwin lets a
+   specific-address listener and a wildcard listener share a port; `httprelay::serve` now probes for
+   that overlap and refuses — before, both relays came up and split the traffic silently.)
+2. **Cross-relay reading** — B reads A's C_S photo, A reads B's; B's `getOk` on R_A/R_C and A's on
+   R_B/R_C grow; B receives relay-first (`received_via_direct` Δ 0) and nobody streams directly.
+3. **Enrollment isolation** — per relay: unsigned → 401, wrong token → 401, a validly signed
+   stranger (real token, random node key — `strangerAuth` in `Scripts/lib/multirelay.mjs`) → 403 for
+   LIST/GET/PUT, and nothing it PUT reaches a store. A may PUT its own `haven/self/<A>/…` on R_A
+   (control) but gets 403 writing or listing `haven/self/<B>/…` on R_B (`relay_probe`, signed by the
+   app's own signer). Removing B from C_R must turn B's LIST of C_R on R_A into 403 within
+   `E2E_MR_BUDGET_REVOKE`.
+4. **Mesh** — a fresh sentinel key planted on R_C crosses to R_A; one back-dated past the TTL never
+   does; R_A and R_C converge on the same C_S event set; each relay's C_S event count holds still
+   over a quiet window (`E2E_MR_QUIET_MS`); no client shows a duplicate post. Finally R_C restarts
+   with the **QA GC clock** (below) and a real sweep deletes its idle keys; for two mesh cycles no
+   swept key may sit on R_C older than the TTL (a sibling handing back an expired key).
+5. **Reliability** — R_B off (stub `host_relay` false) while A posts: B still gets it, R_B backfills
+   when it is back, no duplicate. R_A's door is throttled (`E2E_MR_THROTTLE_BPS`), A posts a noisy
+   8 s 720p video, R_A is SIGKILLed while a reader has a GET in flight (reported SKIPPED if no reader
+   fetched from R_A); every reader completes with a never-decreasing progress series. R_A restarts on
+   a NEW port (same seed + data dir): iOS and B learn the new URL (`E2E_MR_BUDGET_REANNOUNCE`), A
+   writes there with no backoff left, and the old door goes quiet. R_C restarts with a rotated
+   `http_token`: iOS and B converge on the new token fingerprint (`E2E_MR_BUDGET_TOKEN`) and B's next
+   C_S post lands on R_C and reaches A.
+6. **No thundering herd** — while R_A is down (`E2E_MR_DOWN_MS`, 120 s), the whole fleet's requests
+   against it, after a 15 s settle, stay ≤ `E2E_MR_DOWN_MAX_PER_MIN` (60/min) and do not climb from
+   the first half of the window to the second.
+
+**QA GC clock (DEBUG `haven-relay` only).** `HAVEN_RELAY_QA_MAILBOX_TTL_SECS`,
+`HAVEN_RELAY_QA_GC_GRACE_SECS` and `HAVEN_RELAY_QA_GC_INTERVAL_SECS` shorten the mailbox TTL, the
+first-enable grace (48 h) and the sweep interval (1 h) so a real sweep can be watched inside one
+run. A release build compiles them out; a shortened clock prints a warning at start.
+
+Driver ops added for it (DEBUG, Apple unless noted): `relay_link` (→ dump `relay_link`; Android
+too, per circle), `add_relay` `{"relay": <node hex | interface JSON>, "circle_ids": [...],
+"default": bool}` (the Storage → Connect a relay paste; Android too, all circles), `forget_relay`
+`{"hex"}`, `host_relay` `{"on"}` (the host toggle), `remove_member` `{"circle_id","dm_to"}`,
+`relay_probe` `{"relay","method":"GET|PUT|HEAD|LIST","key","body"}` (→ dump `relay_probe`
+`{relay,method,key,status,url}`). Dump fields: `hosted_relay` `{node, serving, enabled, httpPort}`
+(Apple) and `relay_stats` (Apple + Android) — one row per known relay:
+
+```json
+{"relay":"<hex>","name":"…","active":true,"urls":["http://127.0.0.1:8684"],"urlsBad":[],
+ "tokenFp":"<first 12 hex of sha256(token)>","addedAtMs":0,"isDefault":true,"circles":["…"],
+ "reachable":true,"backoffUntilMs":0,"backoffRemainingMs":0,"fails":0,"lastSuccessMs":0,
+ "reason":"|failure|pendingEnrollment",
+ "putOk":0,"putRefused":0,"putFail":0,"getOk":0,"getMiss":0,"getRefused":0,"getFail":0,
+ "listOk":0,"listRefused":0,"listFail":0}
+```
+
+The counters are the client's HTTP outcomes per base URL, summed over the relay's CURRENT urls (so
+after a move they count the new door only); `reachable` = a successful op within 2 min. The token
+itself is never in the dump.
+
+`E2E_STEPS=multirelay` runs it alone (it creates the shared circle itself).
+
 ### qa-cmd v2 — the cross-platform QA driver contract
 
 DEBUG builds of all four clients accept a one-shot JSON drop file and answer
@@ -213,7 +306,7 @@ stub-authorization step.
 ```json
 {"op":"post|story|dm|react|comment|profile|circle_create|circle_invite|file|music_post|dump|mark_read|link_constraint
       |call|call_accept|call_end|call_speaker|call_route_legacy|perf_reset|heavy_work_override|media_ask
-      |relay_backoff_reset|screen_share",
+      |relay_backoff_reset|screen_share|relay_link|add_relay|forget_relay|host_relay|remove_member|relay_probe",
  "body":"…","media":"photo|video","photo_path":"…","video_path":"…","file_path":"…",
  "target_id":"<event id>","emoji":"❤️","dm_to":"<64hex>","name":"…","circle_id":"…",
  "music":{"title":"…","artist":"…"},"caption":"…","level":"normal|low|ultra|auto","on":true}

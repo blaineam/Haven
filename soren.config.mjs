@@ -162,8 +162,8 @@ export default {
     'qa-harness': {
       type: 'cmd',
       cmd: 'node',
-      args: ['--test', 'Scripts/lib/dump-freshness.test.mjs', 'Scripts/lib/e2e-steps.test.mjs'],
-      description: 'e2e harness unit tests (dump-channel freshness + step decisions)',
+      args: ['--test', 'Scripts/lib/dump-freshness.test.mjs', 'Scripts/lib/e2e-steps.test.mjs', 'Scripts/lib/multirelay.test.mjs'],
+      description: 'e2e harness unit tests (dump-channel freshness + step decisions + multirelay)',
       tags: ['e2e'],
     },
 

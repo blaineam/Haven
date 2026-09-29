@@ -20,7 +20,8 @@
 //   profile, circle_create, circle_invite, file, music_post, dump, mark_read, plus the step-specific
 //   heavy_work_override, media_ask, relay_backoff_reset, screen_share, invite_link, connect_link.
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, rmSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, rmSync, statSync, readdirSync, openSync, closeSync, utimesSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ChannelFreshness, judgeDump, fmtDuration, FRESHNESS_DEFAULTS } from './lib/dump-freshness.mjs';
@@ -29,6 +30,11 @@ import {
   longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields, persistExportAllowance,
   reactLatency, ingestedFirst, feedNotGatedOnDmWarm, nonDecreasing, recordProgress,
 } from './lib/e2e-steps.mjs';
+import {
+  portPlan, collisionVerdict, decodeComp, eventKeys, mailboxCircles, holdsMedia, misplacedCircles, keyDiff,
+  stableCounts, tokenFingerprint, urlPort, attributionProblems, statsRow, statsCounter, knowsUrlPort, hitsBetween,
+  herdVerdict, strangerIdentity, strangerAuth, isolationVerdict, inflightMedia, resurrected,
+} from './lib/multirelay.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = process.env.QA_OUT || join(ROOT, 'build', `e2e-${stamp()}`);
@@ -41,7 +47,7 @@ const RUN_NONCE = Date.now();   // per-run fixture salt — see the satellite la
 const REPORT = [];
 const PERF = [];
 const HISTORY = join(ROOT, 'build', 'e2e-history.jsonl');
-const STEPS = (process.env.E2E_STEPS || 'newfriend,profile,circle,post,story,file,music,dm,relayfirst,progress,audience,call,screenshare,callgate,react,comment,media,satellite,launch,responsive,invite_offline').split(',');
+const STEPS = (process.env.E2E_STEPS || 'newfriend,profile,circle,post,story,file,music,dm,relayfirst,progress,audience,call,screenshare,callgate,react,comment,media,satellite,launch,responsive,invite_offline,multirelay').split(',');
 
 // Convergence budgets (ms). Generous but bounded; tune via env.
 // One active-cadence mailbox poll is ~30-45s; a budget must cover a full poll plus
@@ -687,6 +693,135 @@ function bootstrap() {
            E2E_PREFRIEND: STEPS.includes('newfriend') ? '0' : (process.env.E2E_PREFRIEND || '1') },
   });
   if (r.status !== 0) { console.error('bootstrap failed'); process.exit(1); }
+}
+
+// ── multirelay fleet: headless `haven-relay` CLI instances + the counting proxy ─────────────
+//
+// Owned by this process and ONLY this process: every relay and the proxy are spawned here, their
+// pids are recorded in OUT/, and teardown kills exactly those pids — never by name, because the
+// user's own `haven-relay` (or another agent's) may be running on this Mac. Teardown runs from
+// `finish()`, from FAIL-FAST exits and from the process `exit` hook, so no path leaves one behind.
+const MR = { bin: '', procs: new Map(), proxy: null, preexisting: [] };
+
+function mrPgrep() {
+  const out = shOk('pgrep', ['-fl', 'haven-relay']) || '';
+  return out.split('\n').map((l) => l.trim()).filter((l) => l && !/pgrep/.test(l));
+}
+
+/** Is anything LISTENING on this TCP port? (lsof; null = could not tell.) */
+function mrPortBusy(port) {
+  const r = spawnSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' });
+  if (r.error) return null;
+  return String(r.stdout || '').trim().length > 0;
+}
+
+function mrBuild() {
+  const log = join(OUT, 'relay-build.log');
+  const r = spawnSync('cargo', ['build', '-p', 'haven-relay'], { cwd: join(ROOT, 'core'), encoding: 'utf8' });
+  writeFileSync(log, `${r.stdout || ''}\n${r.stderr || ''}`);
+  const bin = join(ROOT, 'core/target/debug/haven-relay');
+  return r.status === 0 && existsSync(bin) ? bin : null;
+}
+
+/** `haven-relay id` for a seed — the node id the relay WILL have, known before it starts. */
+function mrNodeId(dir, seed) {
+  mkdirSync(dir, { recursive: true });
+  return (shOk(MR.bin, ['id', '--data', dir], { env: { ...process.env, HAVEN_RELAY_SEED: seed } }) || '').trim();
+}
+
+function mrStartRelay(name, { dir, seed, link, internal, pub, peers = [], env = {}, bind = '127.0.0.1' }) {
+  mkdirSync(dir, { recursive: true });
+  const args = ['run', ...(link ? ['--link', link] : []), '--data', dir,
+    '--http', `${bind}:${internal}`, '--http-url', `http://127.0.0.1:${pub}`,
+    '--no-tunnel', '--no-derp', '--no-turn', '--no-proxy', ...peers.flatMap((p) => ['--peer', p])];
+  const logPath = join(OUT, `relay-${name}.log`);
+  const fd = openSync(logPath, 'a');
+  const child = spawn(MR.bin, args, { env: { ...process.env, HAVEN_RELAY_SEED: seed, ...env }, stdio: ['ignore', fd, fd] });
+  closeSync(fd);
+  child.exitInfo = null;
+  child.on('exit', (code, signal) => { child.exitInfo = { code, signal }; });
+  MR.procs.set(name, child);
+  writeFileSync(join(OUT, `relay-${name}.pid`), String(child.pid));
+  log(`multirelay: started ${name} pid ${child.pid} (${bind}:${internal} → public :${pub})`);
+  return child;
+}
+
+async function mrStopRelay(name, signal = 'SIGTERM') {
+  const child = MR.procs.get(name);
+  if (!child) return;
+  if (child.exitInfo === null) {
+    try { child.kill(signal); } catch { /* gone */ }
+    for (let i = 0; i < 50 && child.exitInfo === null; i++) await sleep(100);
+    if (child.exitInfo === null) { try { child.kill('SIGKILL'); } catch { /* gone */ } await sleep(300); }
+  }
+  MR.procs.delete(name);
+  log(`multirelay: stopped ${name} (${JSON.stringify(child.exitInfo)})`);
+}
+
+/** Wait for a relay's interface.json written at/after `since`, naming `pub`. */
+async function mrWaitInterface(dir, pub, since, timeoutMs = 45_000) {
+  const p = join(dir, 'interface.json');
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    try {
+      if (statSync(p).mtimeMs >= since - 1000) {
+        const j = JSON.parse(readFileSync(p, 'utf8'));
+        if ((j.urls || []).some((u) => u.endsWith(`:${pub}`))) return j;
+      }
+    } catch { /* not yet */ }
+    await sleep(500);
+  }
+  return null;
+}
+
+async function mrProxyStart(control) {
+  const logPath = join(OUT, 'relay-proxy.log');
+  const fd = openSync(logPath, 'a');
+  const child = spawn(process.execPath, [join(ROOT, 'Scripts/qa-relay-proxy.mjs'), '--control', String(control), '--parent', String(process.pid)],
+    { stdio: ['ignore', fd, fd] });
+  closeSync(fd);
+  child.exitInfo = null;
+  child.on('exit', (code, signal) => { child.exitInfo = { code, signal }; });
+  MR.proxy = { child, control };
+  writeFileSync(join(OUT, 'relay-proxy.pid'), String(child.pid));
+  for (let i = 0; i < 40; i++) {
+    if (await mrProxy('GET', '/stats').catch(() => null)) return true;
+    await sleep(250);
+  }
+  return false;
+}
+
+async function mrProxy(method, path) {
+  if (!MR.proxy) return null;
+  const r = await fetch(`http://127.0.0.1:${MR.proxy.control}${path}`, { method });
+  return r.json();
+}
+
+/** Every key a relay store holds: [{key, mtimeMs, size}] (store dir layout: blobstore.rs safe_path). */
+function mrStoreKeys(root) {
+  const out = [];
+  const walk = (dir, parts) => {
+    let ents = [];
+    try { ents = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      if (e.name.startsWith('.')) continue;
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p, [...parts, decodeComp(e.name)]);
+      else if (e.isFile() && !e.name.endsWith('.part')) {
+        try { const st = statSync(p); out.push({ key: [...parts, decodeComp(e.name)].join('/'), mtimeMs: st.mtimeMs, size: st.size }); } catch { /* raced a GC */ }
+      }
+    }
+  };
+  walk(root, []);
+  return out;
+}
+
+/** Synchronous, for the exit hook: SIGTERM everything this run started (and only that). */
+function mrKillAll() {
+  for (const [, child] of MR.procs) { if (child.exitInfo === null) { try { child.kill('SIGTERM'); } catch { /* gone */ } } }
+  MR.procs.clear();
+  if (MR.proxy?.child && MR.proxy.child.exitInfo === null) { try { MR.proxy.child.kill('SIGTERM'); } catch { /* gone */ } }
+  MR.proxy = null;
 }
 
 // ── scenario ────────────────────────────────────────────────────────────────
@@ -1464,6 +1599,504 @@ async function main() {
     score(`responsive: no persist exports while idle (${BUDGET.idle / 1000}s)`, c1 === c0, `${c0} → ${c1}`);
   }
 
+  // ── multirelay: friends who each run their OWN relay interoperate without colliding ──────────
+  //
+  // Topology (docs/QA.md ▸ multirelay): R_A = a headless `haven-relay` CLI that ACCOUNT A operates
+  // (started from A's own relay link, adopted through A's own "Connect a relay" paste, made A's
+  // default); R_B = B's in-app relay (the stub, unchanged); R_C = a SECOND relay B operates, adopted
+  // by B for the shared circle only. R_A and R_C sit behind the counting proxy (qa-relay-proxy.mjs)
+  // because no relay logs anything — and a dead one can't count.
+  //
+  // Circles: C_S shared (A+B), C_A private to A, C_B private to B, C_R (A+B) used only to watch a
+  // member removal revoke relay access.
+  const MRB = {
+    announce: +(process.env.E2E_MR_BUDGET_ANNOUNCE || 120_000),
+    store: +(process.env.E2E_MR_BUDGET_STORE || 150_000),
+    mesh: +(process.env.E2E_MR_BUDGET_MESH || 150_000),
+    meshHost: +(process.env.E2E_MR_BUDGET_MESH_HOST || 420_000),
+    enroll: +(process.env.E2E_MR_BUDGET_ENROLL || 150_000),
+    revoke: +(process.env.E2E_MR_BUDGET_REVOKE || 150_000),
+    reannounce: +(process.env.E2E_MR_BUDGET_REANNOUNCE || 360_000),
+    token: +(process.env.E2E_MR_BUDGET_TOKEN || 360_000),
+    down: +(process.env.E2E_MR_DOWN_MS || 120_000),
+    maxDownPerMin: +(process.env.E2E_MR_DOWN_MAX_PER_MIN || 60),
+    quiet: +(process.env.E2E_MR_QUIET_MS || 60_000),
+    gcTtl: +(process.env.E2E_MR_GC_TTL_S || 60),
+  };
+
+  async function stepMultiRelay() {
+    const ios = devices.ios, stub = devices.stub;
+    const tag = (s) => `${MARKER}_MR_${s}`;
+    const readersOfA = ['stub', ...(devices.android ? ['android'] : []), 'desktop'].filter((n) => devices[n]);
+    let plan;
+    try { plan = portPlan(+(process.env.E2E_MR_PORT_BASE || 8684)); } catch (e) { score('multirelay: port plan', false, e.message); return; }
+
+    // ── 0. preflight: never touch a relay (or a port) this run did not start ──────────────────
+    MR.preexisting = mrPgrep();
+    log(`multirelay: pre-existing haven-relay processes (left alone): ${MR.preexisting.length ? MR.preexisting.join(' | ') : 'none'}`);
+    const planPorts = [plan.ra.pub, plan.ra.internal, plan.rc.pub, plan.rc.internal, plan.ra2.pub, plan.ra2.internal, plan.control];
+    const busy = planPorts.filter((p) => mrPortBusy(p));
+    score('multirelay: the step\'s ports are free (nothing pre-existing is displaced)', busy.length === 0,
+      busy.length ? `busy: ${busy.join(', ')} — set E2E_MR_PORT_BASE` : planPorts.join(','));
+    if (busy.length) return;
+    MR.bin = mrBuild();
+    score('multirelay: haven-relay CLI built from this worktree', !!MR.bin, MR.bin || `see ${join(OUT, 'relay-build.log')}`);
+    if (!MR.bin) return;
+    if (!(await mrProxyStart(plan.control))) { score('multirelay: counting proxy up', false); return; }
+    for (const r of ['ra', 'rc', 'ra2']) {
+      const res = await mrProxy('POST', `/route?pub=${plan[r].pub}&upstream=${plan[r].internal}`);
+      if (!res?.listening) { score(`multirelay: proxy listening on :${plan[r].pub}`, false, JSON.stringify(res)); return; }
+    }
+    if (devices.android) for (const r of ['ra', 'rc', 'ra2']) shOk('adb', ['reverse', `tcp:${plan[r].pub}`, `tcp:${plan[r].pub}`]);
+
+    // ── 1. circles ─────────────────────────────────────────────────────────────────────────────
+    const cS = await ensureSharedCircle();
+    if (!cS || !B) { score('multirelay (needs a circle shared with B)', false); return; }
+    const mkCircle = async (dev, name) => {
+      await op(dev, { op: 'circle_create', name }, 2500);
+      let id = null;
+      await converge(dev, (j) => !!(id = j.circles?.find((c) => c.name === name)?.id), 30_000);
+      return id;
+    };
+    const cA = await mkCircle(ios, tag('CircleA'));
+    const cB = await mkCircle(stub, tag('CircleB'));
+    const cR = await mkCircle(ios, tag('CircleRevoke'));
+    score('multirelay: private + revoke circles created', !!(cA && cB && cR), JSON.stringify({ cA, cB, cR }));
+    if (!cA || !cB || !cR) return;
+    await op(ios, { op: 'circle_invite', circle_id: cR, dm_to: B });
+    const cRMember = await converge(stub, (j) => j.circles?.some((c) => c.id === cR), BUDGET.text * 2);
+    score('multirelay: B joined C_R', cRMember >= 0);
+    const aDump0 = await freshDump(ios);
+    const A = aDump0?.account_hex || '';
+
+    // ── 2. the relays, from each operator's OWN relay link ─────────────────────────────────────
+    await op(ios, { op: 'relay_link' }, 1500);
+    let linkA = '', linkB = '';
+    await converge(ios, (j) => (linkA = j.relay_link || '').startsWith('haven-relay://'), 30_000);
+    await op(stub, { op: 'relay_link' }, 1500);
+    await converge(stub, (j) => (linkB = j.relay_link || '').startsWith('haven-relay://'), 30_000);
+    score('multirelay: both operators minted a relay link in-app', !!(linkA && linkB), `A=${linkA.length}B B=${linkB.length}B`);
+    if (!linkA || !linkB) return;
+    const RA = { name: 'ra', dir: join(OUT, 'relays/ra'), seed: randomBytes(32).toString('hex') };
+    const RC = { name: 'rc', dir: join(OUT, 'relays/rc'), seed: randomBytes(32).toString('hex') };
+    RA.node = mrNodeId(RA.dir, RA.seed); RC.node = mrNodeId(RC.dir, RC.seed);
+    RA.store = join(RA.dir, 'store'); RC.store = join(RC.dir, 'store');
+    let t0 = Date.now();
+    mrStartRelay('ra', { ...RA, link: linkA, internal: plan.ra.internal, pub: plan.ra.pub, peers: [RC.node] });
+    mrStartRelay('rc', { ...RC, link: linkB, internal: plan.rc.internal, pub: plan.rc.pub, peers: [RA.node] });
+    RA.iface = await mrWaitInterface(RA.dir, plan.ra.pub, t0);
+    RC.iface = await mrWaitInterface(RC.dir, plan.rc.pub, t0);
+    score('multirelay: R_A and R_C up (interface published)', !!(RA.iface && RC.iface),
+      `R_A=${RA.iface?.node?.slice(0, 10)} R_C=${RC.iface?.node?.slice(0, 10)}`);
+    if (!RA.iface || !RC.iface) return;
+    RA.token = RA.iface.token; RC.token = RC.iface.token;
+    const stubJ = await freshDump(stub);
+    const RB = {
+      name: 'rb', node: String(stubJ?.hosted_relay?.node || '').toLowerCase(),
+      token: process.env.HAVEN_STUB_TOKEN || '8e17157a4fd8f6eeef1c3accdd9fc1de',
+      store: join(process.env.HOME, 'Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/haven-relay-store'),
+      port: num(stubJ?.hosted_relay?.httpPort) || 8674,
+    };
+    const rbRow = statsRow(stubJ, RB.node);
+    score('multirelay: R_B (B\'s in-app relay) is hosting and its token is the one the fleet was wired with',
+      !!RB.node && stubJ?.hosted_relay?.serving === true && (!rbRow?.tokenFp || rbRow.tokenFp === tokenFingerprint(RB.token)),
+      JSON.stringify(stubJ?.hosted_relay));
+    const ids = [RA.node, RB.node, RC.node], toks = [RA.token, RB.token, RC.token];
+    const ports = [plan.ra.pub, RB.port, plan.rc.pub];
+    score('multirelay: every relay has its own node id, token and port',
+      new Set(ids).size === 3 && new Set(toks).size === 3 && new Set(ports).size === 3 && RA.iface.node === RA.node && RC.iface.node === RC.node,
+      `ids=${ids.map((x) => x.slice(0, 8))} ports=${ports}`);
+
+    // ── 2b. two relays on ONE port must fail loudly, never split the traffic ───────────────────
+    for (const bind of ['0.0.0.0', '127.0.0.1']) {
+      const name = `collide-${bind === '0.0.0.0' ? 'wild' : 'lo'}`;
+      const dir = join(OUT, `relays/${name}`);
+      const child = mrStartRelay(name, { dir, seed: randomBytes(32).toString('hex'), link: linkA, internal: plan.ra.internal, pub: plan.ra.pub, bind });
+      for (let i = 0; i < 60 && child.exitInfo === null; i++) await sleep(250);
+      const exited = child.exitInfo !== null;
+      const output = (() => { try { return readFileSync(join(OUT, `relay-${name}.log`), 'utf8'); } catch { return ''; } })();
+      const v = collisionVerdict({ exited, code: child.exitInfo?.code, output });
+      score(`multirelay: a second relay on R_A's port (${bind}:${plan.ra.internal}) fails loudly`, v.ok, v.why);
+      await mrStopRelay(name);
+    }
+    score('multirelay: R_A still up after the collision attempts', MR.procs.get('ra')?.exitInfo === null);
+
+    // ── 3. adoption through the real paste flow ────────────────────────────────────────────────
+    const ifaceJson = (r) => JSON.stringify({ node: r.iface.node, urls: r.iface.urls, token: r.iface.token });
+    await op(ios, { op: 'add_relay', relay: ifaceJson(RA), circle_ids: [cA, cS, cR], default: true }, 3000);
+    await op(stub, { op: 'add_relay', relay: ifaceJson(RC), circle_ids: [cS] }, 3000);
+    const hasFor = (hex, cid) => (j) => (statsRow(j, hex)?.circles || []).includes(cid);
+    gate('multirelay: A adopted R_A for C_A + C_S (as default)', 'ios',
+      await converge(ios, (j) => hasFor(RA.node, cA)(j) && hasFor(RA.node, cS)(j) && statsRow(j, RA.node)?.isDefault === true, 30_000), 30_000);
+    const tAnn = Date.now();
+    gate('multirelay: B learns A\'s relay for C_S (announce)', 'stub',
+      await convergeSince(stub, hasFor(RA.node, cS), MRB.announce, tAnn), MRB.announce);
+    gate('multirelay: A learns B\'s second relay for C_S (announce)', 'ios',
+      await convergeSince(ios, hasFor(RC.node, cS), MRB.announce, tAnn), MRB.announce);
+    gate('multirelay: B enrolled on R_A for C_S (B\'s own signed LIST answers 200)', 'stub', await (async () => {
+      const t = Date.now();
+      while (Date.now() - t < budgetFor(stub, MRB.enroll)) {
+        await op(stub, { op: 'relay_probe', relay: RA.node, method: 'LIST', key: `haven/mailbox/${cS}/` }, 2500);
+        const j = await freshDump(stub);
+        if (j?.relay_probe?.status === 200) return Date.now() - t;
+        await sleep(3000);
+      }
+      return -1;
+    })(), MRB.enroll);
+
+    // ── 4. separation: each circle's content on the relays that circle uses, nowhere else ──────
+    const before = await snap(['ios', ...readersOfA]);
+    const post = async (dev, cid, body, photoTag) => {
+      await op(dev, { op: 'post', body, circle_id: cid }, 1500);
+      await op(dev, { op: 'post', body: `${body}_Photo`, media: 'photo', circle_id: cid,
+        photo_path: dev.stage(distinctPhoto(photoTag), `qa-${photoTag}.jpg`) }, 3000);
+    };
+    await post(ios, cA, tag('A_Private'), 'mr-a-private');
+    await post(stub, cB, tag('B_Private'), 'mr-b-private');
+    await post(ios, cS, tag('A_Shared'), 'mr-a-shared');
+    await post(stub, cS, tag('B_Shared'), 'mr-b-shared');
+    const tPost = Date.now();
+    const refOf = (j, body) => (j?.posts || []).find((p) => p.body === body)?.media_refs?.[0] || '';
+    const aJ = await freshDump(ios), bJ = await freshDump(stub);
+    const refs = { aPriv: refOf(aJ, `${tag('A_Private')}_Photo`), aShared: refOf(aJ, `${tag('A_Shared')}_Photo`),
+      bPriv: refOf(bJ, `${tag('B_Private')}_Photo`), bShared: refOf(bJ, `${tag('B_Shared')}_Photo`) };
+    score('multirelay: photo refs known', Object.values(refs).every(Boolean), JSON.stringify(refs));
+
+    // Cross-relay reading, both directions.
+    await convergeAll(['stub'], mediaPresent(`${tag('A_Shared')}_Photo`), BUDGET.mediaBlob, 'multirelay: A\'s shared photo readable by B');
+    await convergeAll(['ios', ...(devices.android ? ['android'] : [])], mediaPresent(`${tag('B_Shared')}_Photo`), BUDGET.mediaBlob, 'multirelay: B\'s shared photo readable by A');
+    await convergeAll(readersOfA.filter((n) => n !== 'stub'), hasPost(tag('A_Private')), BUDGET.text, 'multirelay: A\'s private post on A\'s other devices');
+
+    const storeKeys = { ra: () => mrStoreKeys(RA.store).map((k) => k.key), rc: () => mrStoreKeys(RC.store).map((k) => k.key), rb: () => mrStoreKeys(RB.store).map((k) => k.key) };
+    const waitStore = async (name, pred, budget) => {
+      const t = Date.now();
+      while (Date.now() - t < budget) { if (pred(storeKeys[name]())) return Date.now() - t; await sleep(2000); }
+      return -1;
+    };
+    const record = (step, device, ms, budget) => { PERF.push({ step, device, ms, budget }); return ms >= 0 && ms <= budget; };
+    const onStore = async (label, name, pred, budget) => {
+      const ms = await waitStore(name, pred, budget);
+      const ok = record(`multirelay: ${label}`, name, ms < 0 ? -1 : Date.now() - tPost, budget + (Date.now() - tPost - ms));
+      score(`multirelay: ${label} (${ms < 0 ? 'never' : ((Date.now() - tPost) / 1000).toFixed(1) + 's since post'})`, ms >= 0);
+      return ok;
+    };
+    await onStore('A\'s private circle lands on R_A', 'ra', (k) => eventKeys(k, cA).length > 0 && holdsMedia(k, refs.aPriv), MRB.store);
+    await onStore('B\'s private circle lands on R_B', 'rb', (k) => eventKeys(k, cB).length > 0 && holdsMedia(k, refs.bPriv), MRB.store);
+    await onStore('shared circle lands on R_A', 'ra', (k) => eventKeys(k, cS).length > 0 && holdsMedia(k, refs.aShared) && holdsMedia(k, refs.bShared), MRB.store);
+    await onStore('shared circle lands on R_C', 'rc', (k) => eventKeys(k, cS).length > 0 && holdsMedia(k, refs.aShared) && holdsMedia(k, refs.bShared), MRB.mesh);
+    await onStore('shared circle lands on R_B', 'rb', (k) => eventKeys(k, cS).length > 0 && holdsMedia(k, refs.aShared), MRB.meshHost);
+    const keysNow = { ra: storeKeys.ra(), rc: storeKeys.rc(), rb: storeKeys.rb() };
+    const misplaced = misplacedCircles(keysNow, { ra: [cB], rc: [cA, cB] });
+    score('multirelay: no circle\'s mailbox on a relay nobody configured for it', misplaced.length === 0,
+      misplaced.length ? JSON.stringify(misplaced) : `R_A circles=${[...mailboxCircles(keysNow.ra)].length} R_C=${[...mailboxCircles(keysNow.rc)].length}`);
+    score('multirelay: B\'s private media never on A\'s relay or B\'s second relay',
+      !holdsMedia(keysNow.ra, refs.bPriv) && !holdsMedia(keysNow.rc, refs.bPriv));
+    score('multirelay: A\'s private media never on B\'s second relay', !holdsMedia(keysNow.rc, refs.aPriv));
+
+    // Every client's relay list carries every relay it knows, each with ITS OWN token + URLs.
+    const truth = {
+      [RA.node]: { tokenFp: tokenFingerprint(RA.token), ports: [plan.ra.pub, plan.ra2.pub, plan.ra.internal, plan.ra2.internal] },
+      [RC.node]: { tokenFp: tokenFingerprint(RC.token), ports: [plan.rc.pub, plan.rc.internal] },
+      [RB.node]: { tokenFp: tokenFingerprint(RB.token), ports: [RB.port] },
+    };
+    // Desktop publishes no relay_stats (docs/QA.md: Apple + Android), so it is not judged here.
+    const lists = await snap(['ios', 'stub', ...(devices.android ? ['android'] : [])]);
+    for (const n of Object.keys(lists)) {
+      const p = attributionProblems(lists[n]?.relay_stats, truth);
+      score(`multirelay: relay list correctly attributed [${n}]`, Array.isArray(lists[n]?.relay_stats) && p.length === 0,
+        Array.isArray(lists[n]?.relay_stats) ? (p.join('; ') || `${lists[n].relay_stats.length} relay(s)`) : 'no relay_stats in the dump');
+    }
+    score('multirelay: A\'s list holds BOTH its own relay and B\'s (the announce overwrote nothing)',
+      !!statsRow(lists.ios, RA.node) && !!statsRow(lists.ios, RB.node) && !!statsRow(lists.ios, RC.node),
+      (lists.ios?.relay_stats || []).map((r) => `${r.relay.slice(0, 8)}:${r.urls?.map(urlPort)}`).join(' '));
+    score('multirelay: B\'s list holds R_A, R_B and R_C',
+      !!statsRow(lists.stub, RA.node) && !!statsRow(lists.stub, RC.node) && !!statsRow(lists.stub, RB.node));
+
+    // Relay-first: B read A's media from a relay A uses, nothing streamed peer to peer.
+    const after = await snap(['ios', ...readersOfA]);
+    const d = (n, k) => delta(rf(before[n]), rf(after[n]), k);
+    const readDelta = (n, hex) => statsCounter(after[n], hex, 'getOk') - statsCounter(before[n], hex, 'getOk');
+    score('multirelay: B fetched A\'s content from A\'s relays (R_A / R_C getOk grew)',
+      readDelta('stub', RA.node) + readDelta('stub', RC.node) > 0,
+      `R_A Δ${readDelta('stub', RA.node)} R_C Δ${readDelta('stub', RC.node)} R_B Δ${readDelta('stub', RB.node)}`);
+    score('multirelay: A fetched B\'s content from B\'s relays (R_B / R_C getOk grew)',
+      readDelta('ios', RB.node) + readDelta('ios', RC.node) > 0 || d('ios', 'received_via_relay') > 0,
+      `R_B Δ${readDelta('ios', RB.node)} R_C Δ${readDelta('ios', RC.node)} R_A Δ${readDelta('ios', RA.node)} via_relay Δ${d('ios', 'received_via_relay')}`);
+    score('multirelay: B received relay-first, never a direct stream', d('stub', 'received_via_relay') > 0 && d('stub', 'received_via_direct') === 0,
+      `via_relay Δ${d('stub', 'received_via_relay')} via_direct Δ${d('stub', 'received_via_direct')}`);
+    for (const n of ['ios', 'stub', ...(devices.android ? ['android'] : [])]) {
+      score(`multirelay: ${n} streamed nothing directly to a friend`, d(n, 'served_direct_friend_bytes') === 0,
+        `served_direct_friend_bytes Δ${d(n, 'served_direct_friend_bytes')}`);
+    }
+    score('multirelay: A\'s writes went to A\'s relay (putOk on R_A grew)', statsCounter(after.ios, RA.node, 'putOk') > statsCounter(before.ios, RA.node, 'putOk'));
+
+    // ── 5. enrollment isolation ────────────────────────────────────────────────────────────────
+    const stranger = strangerIdentity();
+    const probe = async (port, method, key, auth) => {
+      const path = method === 'LIST' ? `/l/${key}` : `/k/${key}`;
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}${path}`, { method: method === 'LIST' ? 'GET' : method, headers: auth ? { Authorization: auth } : {} });
+        return r.status;
+      } catch (e) { return `ERR ${e.cause?.code || e.message}`; }
+    };
+    for (const [name, port, token] of [['R_A', plan.ra.pub, RA.token], ['R_B', RB.port, RB.token], ['R_C', plan.rc.pub, RC.token]]) {
+      const listKey = `haven/mailbox/${cS}/`, mediaKey = `haven/media/${refs.aShared}`, putKey = `haven/mailbox/${cS}/qa-stranger-${RUN_NONCE}`;
+      const results = [
+        { name: 'unsigned GET', status: await probe(port, 'GET', mediaKey, null), expect: [401] },
+        { name: 'wrong-token GET', status: await probe(port, 'GET', mediaKey, strangerAuth(stranger, 'not-the-token', 'GET', mediaKey)), expect: [401] },
+        { name: 'stranger LIST', status: await probe(port, 'LIST', listKey, strangerAuth(stranger, token, 'GET', listKey)), expect: [403] },
+        { name: 'stranger GET media', status: await probe(port, 'GET', mediaKey, strangerAuth(stranger, token, 'GET', mediaKey)), expect: [403] },
+        { name: 'stranger PUT', status: await probe(port, 'PUT', putKey, strangerAuth(stranger, token, 'PUT', putKey)), expect: [403] },
+      ];
+      const v = isolationVerdict(results);
+      score(`multirelay: a non-member gets 401/403 on ${name}`, v.ok, v.ok ? results.map((r) => `${r.name}=${r.status}`).join(' ') : v.bad.join('; '));
+    }
+    score('multirelay: nothing the stranger PUT reached any store',
+      ![...storeKeys.ra(), ...storeKeys.rc(), ...storeKeys.rb()].some((k) => k.includes('qa-stranger-')));
+    const devProbe = async (dev, relay, method, key, body = '') => {
+      await op(dev, { op: 'relay_probe', relay, method, key, body }, 1000);
+      let st = 0;
+      await converge(dev, (j) => j.relay_probe?.key === key && j.relay_probe?.method === method && !j.relay_probe?.pending && (st = j.relay_probe.status) !== 0, 30_000);
+      return st;
+    };
+    const ownKey = `haven/self/${A}/qa/probe-${RUN_NONCE}`;
+    const own = await devProbe(ios, RA.node, 'PUT', ownKey, 'qa');
+    score('multirelay: control — A may write its OWN self-sync lane on its relay', own === 200, `PUT ${ownKey.slice(0, 40)}… → ${own}`);
+    const intoB = await devProbe(ios, RB.node, 'PUT', `haven/self/${B}/qa/probe-${RUN_NONCE}`, 'qa');
+    score('multirelay: A cannot write into B\'s self-sync lane on B\'s relay', intoB === 403, `→ ${intoB}`);
+    const listB = await devProbe(ios, RB.node, 'LIST', `haven/self/${B}/`);
+    score('multirelay: A cannot enumerate B\'s self-sync lane on B\'s relay', listB === 403, `→ ${listB}`);
+
+    // Removing a member revokes their access on the relay that serves that circle.
+    const revokeProbe = async () => devProbe(stub, RA.node, 'LIST', `haven/mailbox/${cR}/`);
+    let pre = 0;
+    const tE = Date.now();
+    while (Date.now() - tE < MRB.enroll && (pre = await revokeProbe()) !== 200) await sleep(3000);
+    score('multirelay: B was enrolled on R_A for C_R before the removal', pre === 200, `LIST → ${pre}`);
+    if (pre === 200) {
+      await op(ios, { op: 'remove_member', circle_id: cR, dm_to: B }, 2000);
+      const tRm = Date.now();
+      let post = 0;
+      while (Date.now() - tRm < MRB.revoke && (post = await revokeProbe()) !== 403) await sleep(5000);
+      const ms = post === 403 ? Date.now() - tRm : -1;
+      PERF.push({ step: 'multirelay: removal revokes relay access', device: 'ra', ms, budget: MRB.revoke });
+      score('multirelay: removing B from C_R revokes B\'s access to C_R on R_A', post === 403,
+        `B's LIST of C_R on R_A ${(MRB.revoke / 1000)}s after the removal → ${post}`);
+    }
+
+    // ── 6. mesh coordination ───────────────────────────────────────────────────────────────────
+    // Sentinels under a circle no client uses: a FRESH one proves R_A pulls from R_C at all; a
+    // STALE one (idle past the TTL on R_C) must never be pulled — that would be a resurrection.
+    const sentinelCircle = `qa-mesh-${RUN_NONCE}`;
+    const sFresh = `haven/mailbox/${sentinelCircle}/${'f'.repeat(56)}${String(RUN_NONCE).slice(-8).padStart(8, '0')}`;
+    const sStale = `haven/mailbox/${sentinelCircle}/${'0'.repeat(56)}${String(RUN_NONCE).slice(-8).padStart(8, '0')}`;
+    for (const k of [sFresh, sStale]) {
+      const p = join(RC.store, ...k.split('/'));
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, 'qa-sentinel');
+    }
+    const old = new Date(Date.now() - 31 * 24 * 3600 * 1000);
+    utimesSync(join(RC.store, ...sStale.split('/')), old, old);
+    const meshMs = await waitStore('ra', (k) => k.includes(sFresh), MRB.mesh);
+    gate('multirelay: mesh — R_A pulls a fresh key from its sibling R_C', 'ra', meshMs, MRB.mesh);
+    score('multirelay: mesh — an expired key on R_C is never pulled into R_A', !storeKeys.ra().includes(sStale),
+      meshMs >= 0 ? 'one full mesh cycle ran (the fresh sentinel crossed)' : 'mesh never ran — this proves nothing');
+    // Shared circle: R_A and R_C converge on the same event set (dual-write or mesh), no duplicates.
+    const meshed = await waitStore('rc', (k) => keyDiff(eventKeys(storeKeys.ra(), cS), eventKeys(k, cS)).onlyA.length === 0
+      && keyDiff(eventKeys(storeKeys.ra(), cS), eventKeys(k, cS)).onlyB.length === 0, MRB.mesh);
+    const diff = keyDiff(eventKeys(storeKeys.ra(), cS), eventKeys(storeKeys.rc(), cS));
+    gate('multirelay: mesh — R_A and R_C hold the same C_S events', 'rc', meshed, MRB.mesh);
+    if (meshed < 0) log(`multirelay: C_S only on R_A ${diff.onlyA.length}, only on R_C ${diff.onlyB.length}`);
+    // LIST counts hold still over a quiet window (a re-seal that mints new keys would grow them).
+    const counts = { ra: [], rc: [], rb: [] };
+    for (let i = 0; i < 4; i++) {
+      for (const n of Object.keys(counts)) counts[n].push(eventKeys(storeKeys[n](), cS).length);
+      if (i < 3) await sleep(MRB.quiet / 3);
+    }
+    for (const n of Object.keys(counts)) {
+      const v = stableCounts(counts[n]);
+      score(`multirelay: C_S event count stable across polls with nothing posted [${n}]`, v.ok, v.why);
+    }
+    for (const n of ['ios', ...readersOfA]) {
+      const j = await freshDump(devices[n]);
+      const dup = [tag('A_Shared'), tag('B_Shared')].filter((b) => (j?.posts || []).filter((p) => p.body === b).length > 1);
+      score(`multirelay: no duplicate posts [${n}]`, dup.length === 0, dup.join(','));
+    }
+
+    // ── 7. reliability ─────────────────────────────────────────────────────────────────────────
+    // (a) B's in-app relay goes offline while A posts: A's post still reaches B (via R_A / R_C),
+    //     and R_B backfills once it is back — without a duplicate on B.
+    await op(stub, { op: 'host_relay', on: false }, 3000);
+    const rbOff = await converge(stub, (j) => j.hosted_relay?.serving === false, 20_000);
+    score('multirelay: R_B taken offline (B\'s host toggle)', rbOff >= 0);
+    const offBody = tag('WhileRBOff');
+    let tOff = Date.now();
+    await op(ios, { op: 'post', body: offBody, circle_id: cS }, 1500);
+    gate('multirelay: A\'s post reaches B while B\'s own relay is down', 'stub', await convergeSince(stub, hasPost(offBody), BUDGET.text, tOff), BUDGET.text);
+    await op(stub, { op: 'host_relay', on: true }, 3000);
+    const rbOn = await converge(stub, (j) => j.hosted_relay?.serving === true, 60_000);
+    score('multirelay: R_B back online', rbOn >= 0, JSON.stringify((await freshDump(stub))?.hosted_relay));
+    const offKeysOnRA = eventKeys(storeKeys.ra(), cS);
+    const tBack = Date.now();
+    const backfilled = await waitStore('rb', (k) => keyDiff(offKeysOnRA, eventKeys(k, cS)).onlyA.length === 0, MRB.meshHost);
+    gate('multirelay: R_B backfilled what it missed while down', 'rb', backfilled < 0 ? -1 : Date.now() - tBack, MRB.meshHost);
+    if (backfilled < 0) log(`multirelay: R_B still lacks ${keyDiff(offKeysOnRA, eventKeys(storeKeys.rb(), cS)).onlyA.length} C_S event(s) R_A holds`);
+    score('multirelay: no duplicate of the while-down post on B',
+      ((await freshDump(stub))?.posts || []).filter((p) => p.body === offBody).length === 1);
+
+    // (b) R_A dies MID-TRANSFER. Its door is throttled so a reader downloading from it is caught in
+    //     the act; readers must finish via another relay holding the blob (or after the restart),
+    //     with progress that never goes backwards.
+    await mrProxy('POST', `/throttle?pub=${plan.ra.pub}&bps=${+(process.env.E2E_MR_THROTTLE_BPS || 65_536)}`);
+    const vidBody = tag('Video');
+    const vidPath = (() => {
+      const out = join(OUT, 'mr-video.mp4');
+      // Noisy on purpose (resists the app's re-encode, so the blob stays megabytes), with a box at a
+      // run-specific spot so the content ref is this run's own.
+      const r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30',
+        '-vf', `noise=alls=70:allf=t,drawbox=x=${RUN_NONCE % 1200}:y=${RUN_NONCE % 640}:w=64:h=64:color=red@1:t=fill`,
+        '-t', '8', '-c:v', 'libx264', '-b:v', '6M', '-pix_fmt', 'yuv420p', out], { encoding: 'utf8' });
+      return r.status === 0 && existsSync(out) ? out : distinctVideo('mr-video');
+    })();
+    log(`multirelay: video fixture ${vidPath} (${statSync(vidPath).size} B)`);
+    const b0 = await snap(readersOfA);
+    await op(ios, { op: 'post', body: vidBody, media: 'video', circle_id: cS, video_path: ios.stage(vidPath, 'qa-mr-video.mp4') }, 3000);
+    let vidRefs = [];
+    await converge(ios, (j) => (vidRefs = (j.posts || []).find((p) => p.body === vidBody)?.media_refs || []).length > 0, 60_000);
+    score('multirelay: video post refs known', vidRefs.length > 0, vidRefs.map((r) => r.slice(0, 10)).join(','));
+    let caught = null;
+    const tWatch = Date.now();
+    while (Date.now() - tWatch < +(process.env.E2E_MR_CATCH_MS || 90_000) && vidRefs.length) {
+      const st = await mrProxy('GET', '/stats');
+      const f = vidRefs.flatMap((r) => inflightMedia(st, plan.ra.pub, r));
+      if (f.length && f.some((x) => x.bytes > 0)) { caught = f; break; }
+      await sleep(400);
+    }
+    const downAt = Date.now();
+    await mrStopRelay('ra', 'SIGKILL');
+    score('multirelay: R_A killed while a reader was mid-download from it', !!caught,
+      caught ? `${caught.length} in-flight GET(s), ${caught.map((f) => `${f.bytes}B/${(f.ageMs / 1000).toFixed(1)}s`).join(' ')}`
+        : `SKIPPED — no reader fetched the video from R_A within ${(+(process.env.E2E_MR_CATCH_MS || 90_000)) / 1000}s (it came from another relay first); R_A killed anyway`);
+    await mrProxy('POST', `/throttle?pub=${plan.ra.pub}&bps=0`);
+    // Readers finish (any relay), progress monotonic.
+    await Promise.all(readersOfA.map(async (n) => {
+      const dev = devices[n];
+      const rec = {};
+      const t = Date.now();
+      let got = -1;
+      while (Date.now() - t < budgetFor(dev, BUDGET.mediaBlob)) {
+        const j = await freshDump(dev);
+        const p = (j?.posts || []).find((x) => x.body === vidBody);
+        const present = (ref) => { const i = (p?.media_refs || []).indexOf(ref); return i >= 0 && Boolean(p.media_present?.[i]); };
+        recordProgress(rec, j, vidRefs, present);
+        if (vidRefs.every((r) => rec[r].present)) { got = Date.now() - downAt; break; }
+        await sleep(1000);
+      }
+      gate(`multirelay: video completes after R_A died [${n}]`, n, got, BUDGET.mediaBlob);
+      for (const r of vidRefs) {
+        const x = rec[r] || { got: [] };
+        score(`multirelay: progress never goes backwards across the failover [${n} ${r.slice(0, 10)}]`,
+          nonDecreasing(x.got) && !x.gaveUpWhileReceiving, `got=${JSON.stringify(x.got.slice(-10))} lanes=${x.lanes} gaveUpWhileReceiving=${x.gaveUpWhileReceiving}`);
+      }
+    }));
+    score('multirelay: the video is held by a relay that is still up (R_C or R_B)',
+      vidRefs.every((r) => holdsMedia(storeKeys.rc(), r) || holdsMedia(storeKeys.rb(), r)));
+    void b0;
+
+    // (c) No thundering herd against the dead relay.
+    const herdEnd = downAt + MRB.down;
+    while (Date.now() < herdEnd) await sleep(1000);
+    const upAt = Date.now();
+    const st1 = await mrProxy('GET', '/stats');
+    const hv = herdVerdict(st1?.ports?.[plan.ra.pub]?.times || [], { downAt, upAt, maxPerMin: MRB.maxDownPerMin });
+    PERF.push({ step: 'multirelay: requests/min against the dead relay', device: 'fleet', ms: Math.round(hv.perMin), budget: MRB.maxDownPerMin });
+    score('multirelay: requests against the DEAD relay stay bounded and do not climb', hv.ok, hv.why);
+
+    // (d) R_A comes back on a NEW port: clients learn it (self-published interface / re-announce)
+    //     and are not left parked in backoff.
+    t0 = Date.now();
+    mrStartRelay('ra', { ...RA, internal: plan.ra2.internal, pub: plan.ra2.pub, peers: [RC.node] });
+    const iface2 = await mrWaitInterface(RA.dir, plan.ra2.pub, t0);
+    score('multirelay: R_A restarted on a new port with the same identity', iface2?.node === RA.node && iface2?.token === RA.token,
+      JSON.stringify(iface2?.urls || []));
+    const learn = await Promise.all(['ios', 'stub'].map(async (n) => {
+      const ms = await convergeSince(devices[n], (j) => knowsUrlPort(j, RA.node, plan.ra2.pub), MRB.reannounce, t0);
+      gate(`multirelay: learns R_A's new port [${n}]`, n, ms, MRB.reannounce);
+      return ms;
+    }));
+    if (learn.some((ms) => ms >= 0)) {
+      const tu = Date.now();
+      await op(ios, { op: 'post', body: tag('AfterMove'), circle_id: cS }, 1500);
+      gate('multirelay: A writes to R_A again at its new address (not parked in backoff)', 'ios', await convergeSince(ios,
+        // Counters are summed over the relay's CURRENT urls, so any putOk here landed at the new door.
+        (j) => statsRow(j, RA.node)?.backoffRemainingMs === 0 && statsCounter(j, RA.node, 'putOk') > 0,
+        BUDGET.text * 2, tu), BUDGET.text * 2);
+      const st2 = await mrProxy('GET', '/stats');
+      score('multirelay: the fleet is using R_A\'s new door', num(st2?.ports?.[plan.ra2.pub]?.hits) > 0, `hits on :${plan.ra2.pub} = ${st2?.ports?.[plan.ra2.pub]?.hits}`);
+      await sleep(30_000);
+      const st3 = await mrProxy('GET', '/stats');
+      const late = hitsBetween(st3?.ports?.[plan.ra.pub]?.times || [], Date.now() - 30_000, Date.now());
+      score('multirelay: the old door is abandoned once the new one is known', late <= 5, `${late} request(s) to :${plan.ra.pub} in the last 30s`);
+    }
+
+    // (e) Token rotation on R_C: clients recover the new token.
+    await mrStopRelay('rc');
+    const newTok = randomBytes(16).toString('hex');
+    writeFileSync(join(RC.dir, 'http_token'), newTok);
+    t0 = Date.now();
+    mrStartRelay('rc', { ...RC, internal: plan.rc.internal, pub: plan.rc.pub, peers: [RA.node] });
+    const ifaceC2 = await mrWaitInterface(RC.dir, plan.rc.pub, t0);
+    score('multirelay: R_C restarted with a rotated token', ifaceC2?.token === newTok);
+    for (const n of ['ios', 'stub']) {
+      gate(`multirelay: recovers R_C's rotated token [${n}]`, n, await convergeSince(devices[n],
+        (j) => statsRow(j, RC.node)?.tokenFp === tokenFingerprint(newTok), MRB.token, t0), MRB.token);
+    }
+    const rotBody = tag('AfterRotate');
+    const rcBefore = eventKeys(storeKeys.rc(), cS).length;
+    const tRot = Date.now();
+    await op(stub, { op: 'post', body: rotBody, circle_id: cS }, 1500);
+    gate('multirelay: B\'s post lands on R_C after the rotation', 'rc', await (async () => {
+      const ms = await waitStore('rc', (k) => eventKeys(k, cS).length > rcBefore, MRB.store);
+      return ms < 0 ? -1 : Date.now() - tRot;
+    })(), MRB.store);
+    gate('multirelay: …and reaches A', 'ios', await convergeSince(ios, hasPost(rotBody), BUDGET.text, tRot), BUDGET.text);
+
+    // (f) A REAL sweep on R_C (QA GC clock, DEBUG relay only) deletes idle mailbox keys, and the
+    //     sibling's mesh pull does not bring them back.
+    await mrStopRelay('rc');
+    const ttl = MRB.gcTtl;
+    const idleBefore = mrStoreKeys(RC.store).filter((k) => k.key.startsWith('haven/mailbox/') && Date.now() - k.mtimeMs > ttl * 1000 + 5_000).map((k) => k.key);
+    t0 = Date.now();
+    mrStartRelay('rc', { ...RC, internal: plan.rc.internal, pub: plan.rc.pub, peers: [RA.node],
+      env: { HAVEN_RELAY_QA_MAILBOX_TTL_SECS: String(ttl), HAVEN_RELAY_QA_GC_GRACE_SECS: '0', HAVEN_RELAY_QA_GC_INTERVAL_SECS: '5' } });
+    await mrWaitInterface(RC.dir, plan.rc.pub, t0);
+    // Swept = gone, or re-stamped after the restart by a client's refresh-repair PUT/TOUCH.
+    const swept = await (async () => {
+      const t = Date.now();
+      while (Date.now() - t < 60_000) {
+        const have = new Map(mrStoreKeys(RC.store).map((k) => [k.key, k.mtimeMs]));
+        if (idleBefore.length && idleBefore.every((k) => !have.has(k) || have.get(k) >= t0)) return Date.now() - t;
+        await sleep(2000);
+      }
+      return -1;
+    })();
+    score(`multirelay: the QA GC clock sweeps R_C's idle mailbox keys (${idleBefore.length} older than ${ttl}s)`, idleBefore.length > 0 && swept >= 0,
+      `swept after ${swept} ms; stale sentinel gone=${!storeKeys.rc().includes(sStale)}`);
+    // For two mesh cycles in both directions, no swept key may sit on R_C OLDER than the TTL — that
+    // can only be a sibling handing back a key it should have treated as expired (the sweep, every
+    // 5s, would otherwise have removed it). Fresh re-PUTs by clients are legitimate repair.
+    const obs = [];
+    const tObs = Date.now();
+    while (Date.now() - tObs < 75_000) {
+      for (const k of mrStoreKeys(RC.store)) if (idleBefore.includes(k.key)) obs.push({ key: k.key, ageMs: Date.now() - k.mtimeMs });
+      await sleep(2500);
+    }
+    const res = resurrected(obs, { ttlS: ttl });
+    score('multirelay: no swept key was resurrected by the sibling\'s mesh pull', res.length === 0,
+      `${new Set(obs.map((o) => o.key)).size} swept key(s) seen again (all fresh re-PUTs unless listed): ${res.slice(0, 3).map((o) => `${o.key.slice(-12)}@${(o.ageMs / 1000).toFixed(0)}s`).join(' ')}`);
+    log(`multirelay: done — relays ${[...MR.procs.keys()].join(',')} are stopped in teardown`);
+  }
+
   // 0. newfriend runs FIRST: A and B are strangers until it makes them friends (E2E_PREFRIEND=0).
   if (STEPS.includes('newfriend')) {
     await stepNewFriend();
@@ -1494,7 +2127,7 @@ async function main() {
   // Warm the fleet before ANY timed content assertion (see warmUp above). Satellite counts: it is
   // the most timing-sensitive step in the suite, so running it on a cold fleet measures the fleet
   // coming up rather than the feature.
-  if (['post', 'satellite', 'relayfirst', 'progress', 'audience', 'callgate', 'launch', 'responsive'].some((x) => STEPS.includes(x))) await warmUp();
+  if (['post', 'satellite', 'relayfirst', 'progress', 'audience', 'callgate', 'launch', 'responsive', 'multirelay'].some((x) => STEPS.includes(x))) await warmUp();
 
   // 3. posts: text + photo + video (author iOS; friend authors one from stub)
   if (STEPS.includes('post')) {
@@ -2004,6 +2637,13 @@ async function main() {
       BUDGET.text * 3, 'grant fetched — friendship async-complete');
   }
 
+  // LAST on purpose: it makes A's own relay A's default and takes relays down on purpose, which no
+  // step written against the single-relay fleet should have to absorb.
+  if (STEPS.includes('multirelay')) {
+    try { await stepMultiRelay(); }
+    finally { for (const name of [...MR.procs.keys()]) await mrStopRelay(name); mrKillAll(); }
+  }
+
   finish();
 }
 
@@ -2025,6 +2665,7 @@ function writeReport() {
 }
 
 function finish() {
+  mrKillAll();   // the multirelay step's relays + proxy, by pid (never by name)
   writeReport();
   // Recomputed here, not borrowed from writeReport: those locals moved when the report was split
   // out for FAIL-FAST, and a stale reference would only blow up at the very END of a long run —
@@ -2130,6 +2771,7 @@ if (invokedDirectly) {
   takeRunLock();
   mkdirSync(OUT, { recursive: true });
   process.on('exit', releaseRunLock);
+  process.on('exit', mrKillAll);   // FAIL-FAST / abort / crash: the relays this run started go too
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.on(sig, () => { releaseRunLock(); process.exit(2); });
   }

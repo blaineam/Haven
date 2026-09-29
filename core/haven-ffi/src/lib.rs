@@ -2134,6 +2134,17 @@ impl NetState {
     /// My own roster wire to broadcast. A primary re-signs it fresh (minting the capability trailer live);
     /// a SEEDLESS device (no account key) rebroadcasts the primary-signed wire it was granted, VERBATIM, so
     /// the trailer survives (§7 capability fidelity). `None` until I hold my roster.
+    /// The state half of [`Self::own_roster_wire`] — see [`OwnRosterPlan`].
+    fn own_roster_plan(&self) -> Option<OwnRosterPlan> {
+        match &self.me_secret {
+            Some(me) => self
+                .device_lists
+                .get(&self.me_pub.node_id_bytes())
+                .map(|cd| OwnRosterPlan::Sign { encoded: encode_roster(&self.me_pub, cd), account_seed: me.secret_seed() }),
+            None => self.seedless_roster_wire.clone().map(OwnRosterPlan::Verbatim),
+        }
+    }
+
     fn own_roster_wire(&self) -> Option<Vec<u8>> {
         match &self.me_secret {
             Some(me) => {
@@ -2382,6 +2393,14 @@ struct ShadowTree {
     /// so the newcomer is Welcomed and the circle can re-flip. (A Remove SHRINKS the tree via a
     /// chained commit, not a rebuild, so the removed device stays cryptographically excluded.)
     genesis_devices: Vec<[u8; 32]>,
+    /// Memo for [`mls_replay`], keyed by a digest of EVERY input it reads (group id, the full
+    /// commit set, every held Welcome, the device seed). A replay walks and re-verifies the whole
+    /// chain — O(commits²) parses plus the tree crypto per epoch — and every bundle (each post's
+    /// head export included) and every tree envelope received ran it two or three times under the
+    /// engine lock, with inputs that had not changed since the last call. Exact-input keyed, so it
+    /// can never serve a stale state: any new commit/Welcome changes the digest. At most two entries
+    /// (the with-seed and without-seed callers). Lives and dies with this tree; never persisted.
+    replay_memo: std::sync::Mutex<Vec<([u8; 32], Option<KeyingState>)>>,
 }
 
 impl ShadowTree {
@@ -2396,6 +2415,7 @@ impl ShadowTree {
             joined_genesis: std::collections::HashMap::new(),
             my_secret_root: None,
             genesis_devices: Vec::new(),
+            replay_memo: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -3238,6 +3258,7 @@ fn keying_winning_genesis(shadow: &ShadowTree) -> Option<([u8; 32], Vec<u8>)> {
 }
 
 /// This device's keying state after replaying the tree commit chain from its Welcome (§4.5, §5.1).
+#[derive(Clone)]
 struct KeyingState {
     /// Tree epoch (1 = genesis; +1 per applied Add/Remove commit).
     epoch: u64,
@@ -3332,6 +3353,57 @@ fn keying_rebuild_own_commit(
 /// I authored it) — until the chain ends. Returns `None` if I hold no usable Welcome (I haven't
 /// joined), or if a self-contained Welcome FAILS CLOSED (my leaf absent / key mismatch ⇒ revoked).
 fn mls_replay(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> Option<KeyingState> {
+    let digest = mls_replay_input_digest(shadow, my_device_seed);
+    let mut memo = shadow.replay_memo.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, hit)) = memo.iter().find(|(d, _)| *d == digest) {
+        return hit.clone();
+    }
+    let out = mls_replay_uncached(shadow, my_device_seed);
+    if memo.len() >= 2 {
+        memo.remove(0);
+    }
+    memo.push((digest, out.clone()));
+    out
+}
+
+/// Everything [`mls_replay_uncached`] reads, hashed — the memo key. Adding an input to the replay
+/// without adding it here would let the memo serve a stale state, so keep the two in step.
+fn mls_replay_input_digest(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"haven-mls-replay-memo-v1");
+    h.update(&(shadow.group_id.len() as u64).to_le_bytes());
+    h.update(&shadow.group_id);
+    match my_device_seed {
+        Some(seed) => {
+            h.update(&[1]);
+            h.update(&seed);
+        }
+        None => {
+            h.update(&[0]);
+        }
+    }
+    h.update(&(shadow.commits.len() as u64).to_le_bytes());
+    for (k, v) in &shadow.commits {
+        h.update(k);
+        h.update(&(v.len() as u64).to_le_bytes());
+        h.update(v);
+    }
+    h.update(&(shadow.my_welcomes.len() as u64).to_le_bytes());
+    for (k, w) in &shadow.my_welcomes {
+        h.update(k);
+        h.update(&w.epoch.to_le_bytes());
+        h.update(&w.leaf_index.to_le_bytes());
+        h.update(&w.joiner_secret);
+        h.update(&w.leaf_secret);
+        h.update(&w.cth);
+        h.update(&(w.tree_bytes.len() as u64).to_le_bytes());
+        h.update(&w.tree_bytes);
+    }
+    *h.finalize().as_bytes()
+}
+
+/// The chain replay itself; callers go through the memoized [`mls_replay`].
+fn mls_replay_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> Option<KeyingState> {
     let gid = shadow.group_id.clone();
     let my_secret_root = my_device_seed.map(|s| keying_secret_root(&s, &gid));
     // Prefer the highest-epoch SELF-CONTAINED Welcome I hold (a mid-life Add or a re-entry). It lets
@@ -3515,7 +3587,17 @@ fn keying_join_payload(genesis_hash: &[u8; 32], device_id: &[u8; 32]) -> Vec<u8>
 /// not "I hold the genesis Welcome," so a device that entered mid-life (or re-entered as a sleeper,
 /// §5.5) via a self-contained Welcome — and so holds no GENESIS Welcome — can still join the gate.
 /// `None` if there is no genesis, I can't derive the epoch, or I have no device identity.
+// Production signs the ack outside the engine lock via the two halves below; this joined form
+// remains for the verbatim pre-refactor bundle builder the golden test compares against.
+#[cfg(test)]
 fn keying_emit_join(st: &mut NetState, idx: usize) -> Option<Vec<u8>> {
+    keying_emit_join_plan(st, idx).map(|(gh, seed)| keying_join_wire(&gh, &seed))
+}
+
+/// The state half of [`keying_emit_join`]: decides whether I attest (and records my own join) and
+/// returns what the ack signs over — (winning genesis hash, my device seed). The signature itself is
+/// [`keying_join_wire`], a pure function, so a bundle can sign it with the engine lock released.
+fn keying_emit_join_plan(st: &mut NetState, idx: usize) -> Option<([u8; 32], [u8; 32])> {
     if !st.mls_keying {
         return None; // join acks only flow once keying is switched on — OFF stays byte-identical to M2
     }
@@ -3531,15 +3613,22 @@ fn keying_emit_join(st: &mut NetState, idx: usize) -> Option<Vec<u8>> {
     if !can_derive {
         return None;
     }
-    let signer = Identity::from_seed(&seed);
+    let did = st.device.as_ref()?.public().node_id_bytes();
+    st.shadow_trees.get_mut(&circle_id)?.joined.insert(did);
+    Some((gh, seed))
+}
+
+/// The signed join-ack wire for genesis `gh`, from my device seed. Pure (hybrid signature, the
+/// deterministic ML-DSA variant) — no engine state.
+fn keying_join_wire(gh: &[u8; 32], seed: &[u8; 32]) -> Vec<u8> {
+    let signer = Identity::from_seed(seed);
     let did = signer.public().node_id_bytes();
-    let sig = signer.sign(&keying_join_payload(&gh, &did));
+    let sig = signer.sign(&keying_join_payload(gh, &did));
     let mut body = Vec::with_capacity(64 + sig.len());
-    body.extend_from_slice(&gh);
+    body.extend_from_slice(gh);
     body.extend_from_slice(&did);
     body.extend_from_slice(&sig);
-    st.shadow_trees.get_mut(&circle_id)?.joined.insert(did);
-    Some(tagged(TAG_MLS_JOIN, &body))
+    tagged(TAG_MLS_JOIN, &body)
 }
 
 /// Ingest a join ack (§7.2): verify the device's signature against its authorized bundle and record
@@ -7112,6 +7201,25 @@ have_seed={} have_device={} members={}",
     }
 }
 
+/// What [`HavenSocial::epoch_sync_bundle_paged`] takes from under the engine lock: every piece of
+/// state its bundle needs, with the signing/sealing still to do.
+struct BundlePlan {
+    roster: Option<OwnRosterPlan>,
+    /// The (cached, or freshly sealed and cached) key commit — `None` when the tree is live.
+    commit: Option<Vec<u8>>,
+    shadow_wires: Vec<Vec<u8>>,
+    /// (winning genesis hash, my device seed) when I attest a join ack.
+    join: Option<([u8; 32], [u8; 32])>,
+    admin_wires: Vec<Vec<u8>>,
+    upgrade_wires: Vec<Vec<u8>>,
+    /// The page's events, cloned — empty for a head-only bundle.
+    events: Vec<Event>,
+    epoch: u64,
+    key: [u8; 32],
+    compact: bool,
+    signer_seed: [u8; 32],
+}
+
 impl HavenSocial {
     /// `epoch_sync_bundle_inner`, also reporting the page it chose: (bundle, oldest `created_at` on
     /// it, event count, the media-list entries its events carry). Zero/empty for head-only bundles
@@ -7120,14 +7228,15 @@ impl HavenSocial {
         &self, circle_id: &str, mine_only: bool, limit: u32, head_only: bool, before_ms: u64,
     ) -> (Vec<Vec<u8>>, u64, u32, Vec<String>) {
         // TWO PHASES. Everything that reads or mutates engine state (the sender-retention purge,
-        // keying/rotation, the cached key commit, the page pick) runs under the lock; the per-event
-        // SEALING — a deterministic AEAD + a hybrid Ed25519 + ML-DSA signature each, i.e. nearly
-        // all of the cost — runs on a snapshot with the lock RELEASED, the shape `feed` uses.
+        // keying/rotation, the tree bookkeeping, the cached key commit, the page pick) runs under
+        // the lock; every SIGNATURE — the per-event seals (a deterministic AEAD + a hybrid Ed25519 +
+        // ML-DSA signature each, i.e. nearly all of the cost), the roster's capability trailer and
+        // the join ack — runs on a snapshot with the lock RELEASED, the shape `feed` uses.
         // Measured at 2,000 events: 555 ms, 100% of it under the one lock every other engine call
         // needs (21 s on a loaded desktop — a call ring timed out waiting behind a history
-        // backfill). Sealing is a pure function of (signer, circle, epoch, key, event), so the
-        // bytes are identical to sealing under the lock (`bundle_reference` pins that).
-        let (mut out, tail, events, epoch, key, compact, signer_seed) = {
+        // backfill). Each of those is a pure function of its inputs, so the bytes are identical to
+        // producing them under the lock (`bundle_reference` pins that).
+        let plan = {
             let mut st = self.state.lock().unwrap();
             let me_hex = hex(&st.me().node_id_bytes());
             let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return (vec![], 0, 0, vec![]) };
@@ -7160,7 +7269,7 @@ impl HavenSocial {
             // `rotate_if_stale` and the M5 PCS leaf-Update cadence gate on exactly this predicate.
             let full_bundle = !head_only && mine_only && limit == 0;
             let shadow_wires = shadow_emit_bundle(&mut st, idx, full_bundle);
-            let join_wire = keying_emit_join(&mut st, idx);
+            let join = keying_emit_join_plan(&mut st, idx);
             let admin_wires: Vec<Vec<u8>> =
                 st.circles[idx].admin_grants.iter().map(|g| tagged(TAG_ADMIN_GRANT, g)).collect();
             // Upgrade offers ride the legacy circle's lane so its members see them. Only re-broadcast the
@@ -7229,14 +7338,12 @@ impl HavenSocial {
             // account seed) can only reach this once their circle is capable, which is exactly the S4 precondition.
             let author_under_device = st.device.is_some()
                 && circle_fully_seed_drop_capable(&accounts, &st.device_lists, &st.seed_drop_capable);
-            let mut out: Vec<Vec<u8>> = Vec::new();
             // Share my OWN device roster so peers seal their content to all my devices (and never a revoked
             // one). Idempotent: a same-version roster is ignored on the receiver, so this can't rotation-storm.
             // A3: a primary re-signs its wire; a seedless device emits the primary-signed wire it holds VERBATIM
-            // (trailer intact) — it cannot re-mint it.
-            if let Some(wire) = st.own_roster_wire() {
-                out.push(wire);
-            }
+            // (trailer intact) — it cannot re-mint it. (Signed below, with the lock released.)
+            let roster = st.own_roster_plan();
+            let mut commit: Option<Vec<u8>> = None;
             // Key commit: the hybrid KEM is random, so a re-seal for the SAME context yields new bytes
             // and the content-addressed mailbox would accumulate a copy per backfill. Reuse the cached
             // sealed commit while (epoch, key, secret, recipient devices) are unchanged.
@@ -7260,56 +7367,65 @@ impl HavenSocial {
             // content keys come from the tree. When shadow/parked, emit the KeyCommit exactly as today.
             if mls_live.is_none() {
                 match &st.circles[idx].cached_commit {
-                    Some((ctx, bytes)) if *ctx == commit_ctx => out.push(bytes.clone()),
+                    Some((ctx, bytes)) if *ctx == commit_ctx => commit = Some(bytes.clone()),
                     _ => {
-                        if let Ok(commit) = seal_key_commit(signer_of(&st, author_under_device), &members, circle_id, epoch, &key, &secret) {
-                            let bytes = tagged(TAG_KEY_COMMIT, &commit.to_bytes());
+                        if let Ok(sealed) = seal_key_commit(signer_of(&st, author_under_device), &members, circle_id, epoch, &key, &secret) {
+                            let bytes = tagged(TAG_KEY_COMMIT, &sealed.to_bytes());
                             st.circles[idx].cached_commit = Some((commit_ctx, bytes.clone()));
-                            out.push(bytes);
+                            commit = Some(bytes);
                         }
                     }
                 }
             }
-            // The tree wires + join ack + admin grants ride EVERY bundle (incl. head-only) so relay-only
-            // readers and late joiners converge on the tree and the §7.2 gate; strictly additive.
-            let mut tail: Vec<Vec<u8>> = shadow_wires;
-            tail.extend(join_wire);
-            tail.extend(admin_wires);
-            tail.extend(upgrade_wires);
-            if head_only {
-                out.extend(tail);
-                return (out, 0, 0, vec![]); // roster + current key commit (or the tree) — no event re-seals
-            }
-            let mut picked: Vec<&Event> = st.circles[idx]
-                .events
-                .iter()
-                .filter(|e| !mine_only || e.author == me_hex)
-                // The paging cursor. Strictly older, so a receiver can pass the created_at of the
-                // oldest post it holds and never be handed that same post back forever.
-                .filter(|e| before_ms == 0 || e.created_at < before_ms)
-                .collect();
-            if limit > 0 {
-                // "The most recent N" by TIME, not by position: the events vector is in arrival order
-                // (imports and catch-up append), so a positional tail could skip older-but-late events
-                // forever once the cursor moved past them. And the cut is extended over a timestamp tie:
-                // the next page is strictly older than this page's oldest, so splitting a tie would drop
-                // its other half for good.
-                picked.sort_by_key(|e| e.created_at);
-                let n = limit as usize;
-                if picked.len() > n {
-                    let cut = picked[picked.len() - n].created_at;
-                    let start = picked.partition_point(|e| e.created_at < cut);
-                    picked = picked.split_off(start);
-                }
-            }
-            let events: Vec<Event> = picked.into_iter().cloned().collect();
             let compact = circle_is_compact_wire_capable(&st, idx);
             // `Identity` is not `Clone` (it holds the secret keys); its seed rebuilds it exactly —
             // `from_seed` is the only way one is ever constructed.
             let signer_seed = signer_of(&st, author_under_device).secret_seed();
-            (out, tail, events, epoch, key, compact, signer_seed)
+            // A head-only bundle is roster + current key commit (or the tree) — no event re-seals.
+            let events: Vec<Event> = if head_only {
+                Vec::new()
+            } else {
+                let mut picked: Vec<&Event> = st.circles[idx]
+                    .events
+                    .iter()
+                    .filter(|e| !mine_only || e.author == me_hex)
+                    // The paging cursor. Strictly older, so a receiver can pass the created_at of the
+                    // oldest post it holds and never be handed that same post back forever.
+                    .filter(|e| before_ms == 0 || e.created_at < before_ms)
+                    .collect();
+                if limit > 0 {
+                    // "The most recent N" by TIME, not by position: the events vector is in arrival order
+                    // (imports and catch-up append), so a positional tail could skip older-but-late events
+                    // forever once the cursor moved past them. And the cut is extended over a timestamp tie:
+                    // the next page is strictly older than this page's oldest, so splitting a tie would drop
+                    // its other half for good.
+                    picked.sort_by_key(|e| e.created_at);
+                    let n = limit as usize;
+                    if picked.len() > n {
+                        let cut = picked[picked.len() - n].created_at;
+                        let start = picked.partition_point(|e| e.created_at < cut);
+                        picked = picked.split_off(start);
+                    }
+                }
+                picked.into_iter().cloned().collect()
+            };
+            BundlePlan {
+                roster, commit, shadow_wires, join, admin_wires, upgrade_wires, events, epoch, key, compact, signer_seed,
+            }
         };
         // ── Lock released: nothing below touches engine state. ──
+        Self::finish_bundle(circle_id, plan)
+    }
+
+    /// Phase two of [`Self::epoch_sync_bundle_paged`], run with the engine lock RELEASED: every
+    /// signature and seal, then assembly in the wire order receivers have always seen — roster, key
+    /// commit, events, then the tree wires + join ack + admin grants + upgrade offers.
+    fn finish_bundle(circle_id: &str, p: BundlePlan) -> (Vec<Vec<u8>>, u64, u32, Vec<String>) {
+        let BundlePlan { roster, commit, shadow_wires, join, admin_wires, upgrade_wires, events, epoch, key, compact, signer_seed } = p;
+        let mut out: Vec<Vec<u8>> =
+            Vec::with_capacity(2 + events.len() + shadow_wires.len() + 1 + admin_wires.len() + upgrade_wires.len());
+        out.extend(roster.map(OwnRosterPlan::finish));
+        out.extend(commit);
         let oldest = events.iter().map(|e| e.created_at).min().unwrap_or(0);
         let count = events.len() as u32;
         let mut media: Vec<String> = Vec::new();
@@ -7326,7 +7442,6 @@ impl HavenSocial {
         }
         if !events.is_empty() {
             let signer = Identity::from_seed(&signer_seed);
-            out.reserve(events.len() + tail.len());
             for e in &events {
                 if let Ok(env) = seal_event_in_epoch(&signer, circle_id, epoch, &key, e) {
                     out.push(tagged(TAG_EPOCH_EVENT, &env.to_bytes_gated(compact)));
@@ -7335,7 +7450,12 @@ impl HavenSocial {
         }
         // Tree wires + join ack + admin grants (built up front). In M2/parked they ride ALONGSIDE the
         // KeyCommit (shadow); when LIVE they ARE the key distribution (§4.5). Additive either way.
-        out.extend(tail);
+        // The tree wires + join ack + admin grants ride EVERY bundle (incl. head-only) so relay-only
+        // readers and late joiners converge on the tree and the §7.2 gate; strictly additive.
+        out.extend(shadow_wires);
+        out.extend(join.map(|(gh, seed)| keying_join_wire(&gh, &seed)));
+        out.extend(admin_wires);
+        out.extend(upgrade_wires);
         (out, oldest, count, media)
     }
 
@@ -8066,6 +8186,28 @@ fn my_roster_wire(me: &Identity, me_pub: &HavenId, cd: &ContactDevices) -> Vec<u
     tagged(TAG_DEVICE_ROSTER, &body)
 }
 
+/// [`NetState::own_roster_wire`] split at the signature, so a bundle can take the state it needs
+/// under the engine lock and sign the capability trailer with the lock released.
+enum OwnRosterPlan {
+    /// A primary: the encoded roster, plus the account seed that signs the trailer.
+    Sign { encoded: Vec<u8>, account_seed: [u8; 32] },
+    /// A seedless device: the primary-signed wire it holds, emitted verbatim (A3).
+    Verbatim(Vec<u8>),
+}
+
+impl OwnRosterPlan {
+    fn finish(self) -> Vec<u8> {
+        match self {
+            Self::Sign { mut encoded, account_seed } => {
+                let me = Identity::from_seed(&account_seed);
+                encoded.extend_from_slice(&SeedDropCapability::issue(&me, SEED_DROP_VERSION).to_bytes());
+                tagged(TAG_DEVICE_ROSTER, &encoded)
+            }
+            Self::Verbatim(wire) => wire,
+        }
+    }
+}
+
 /// Record a seed-drop capability TRAILER carried alongside a received roster (S0). Verifies the
 /// account-signed marker and, if valid and >= v1, MONOTONICALLY records the account as capable. A
 /// missing / short / forged trailer is simply ignored — never treated as "downgraded" (absence is never
@@ -8269,6 +8411,22 @@ mod net_tests {
                      head_only={head_only} before_ms={before_ms})"
                 );
             }
+        }
+
+        // A circle LIVE on the TreeKEM tree: the bundle then carries tree wires and a signed join ack
+        // (signed outside the lock now) instead of a key commit, plus the roster's signed trailer.
+        let (insts, tcid) = mls_capable_fleet(&[[95u8; 32], [96u8; 32]], &[[97u8; 32], [98u8; 32]], 0);
+        flip_and_join(&insts, &tcid);
+        let t = &insts[0];
+        for i in 0..12u64 {
+            t.post(tcid.clone(), format!("tree {i}"), vec![format!("m{i}")], None, None, false, false, 3_000 + i).unwrap();
+        }
+        let _ = t.epoch_sync_bundle_paged(&tcid, true, 0, false, 0);
+        for (mine_only, limit, head_only) in [(true, 0u32, false), (false, 5, false), (true, 0, true)] {
+            let want = t.epoch_sync_bundle_paged_reference(&tcid, mine_only, limit, head_only, 0);
+            let got = t.epoch_sync_bundle_paged(&tcid, mine_only, limit, head_only, 0);
+            assert!(want.0.iter().any(|w| w[0] == TAG_MLS_JOIN), "fixture must exercise the join ack");
+            assert_eq!(got, want, "tree-live bundle drifted (mine_only={mine_only} limit={limit} head_only={head_only})");
         }
     }
 
@@ -11502,6 +11660,66 @@ mod net_tests {
         a.post(cid.clone(), "healed".into(), vec![], None, None, false, false, 5_000).unwrap();
         sync_all(&[a, b], &cid, 3);
         assert!(b.feed(cid.clone(), 6_000, None).iter().any(|m| m.body == "healed"), "post-heal content round-trips");
+    }
+
+    /// The `mls_replay` memo is keyed by every input the replay reads, so it must agree with an
+    /// uncached replay before AND after the chain advances (a PCS Update adds a commit) — a stale
+    /// hit here would pin a device to an old epoch's keys.
+    #[test]
+    fn mls_replay_memo_tracks_the_chain() {
+        let agree = |s: &HavenSocial, cid: &str| -> u64 {
+            let st = s.state.lock().unwrap();
+            let shadow = st.shadow_trees.get(cid).expect("live circle has a shadow tree");
+            let seed = st.device.as_ref().map(|d| d.secret_seed());
+            for sd in [seed, None] {
+                let a = mls_replay(shadow, sd);
+                let a2 = mls_replay(shadow, sd); // a memo hit
+                let b = mls_replay_uncached(shadow, sd);
+                let key = |k: &Option<KeyingState>| {
+                    k.as_ref().map(|k| (k.epoch, k.sender_root, k.init_secret, k.joiner_secret, k.cth, k.tip_hash, k.tree.clone()))
+                };
+                assert!(key(&a) == key(&b) && key(&a2) == key(&b), "memoized replay diverged from a fresh replay");
+            }
+            mls_replay_uncached(shadow, seed).map(|k| k.epoch).unwrap_or(0)
+        };
+        let (insts, cid, e1) = with_clock_advanced(0, || {
+            let (insts, cid) = mls_capable_fleet(&[[73u8; 32], [74u8; 32]], &[[83u8; 32], [84u8; 32]], 0); // fs_bug_3's fleet
+            flip_and_join(&insts, &cid);
+            let e1 = agree(&insts[0], &cid);
+            (insts, cid, e1)
+        });
+        assert_eq!(e1, 1);
+        let (a, b) = (&insts[0], &insts[1]);
+        with_clock_advanced(ROTATE_INTERVAL_SECS + 1, || sync_all(&[a, b], &cid, 4));
+        let _clk = clock_guard();
+        assert_eq!(agree(a, &cid), 2, "the memo followed the chain to the new epoch");
+        assert_eq!(agree(b, &cid), 2);
+    }
+
+    /// Measurement, not an assertion: the engine-lock hold of a bundle in a LIVE TreeKEM circle.
+    /// The tree bookkeeping (chain replay, join ack, keying refresh) runs under the lock on every
+    /// bundle — including the head-only one each post uploads.
+    /// `cargo test -p haven_ffi --lib mls_bundle_lock_hold_benchmark -- --ignored --nocapture`
+    #[test]
+    #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
+    fn mls_bundle_lock_hold_benchmark() {
+        let _clk = clock_guard();
+        let (insts, cid) = mls_capable_fleet(
+            &[[101u8; 32], [102u8; 32], [103u8; 32]], &[[111u8; 32], [112u8; 32], [113u8; 32]], 0);
+        flip_and_join(&insts, &cid);
+        let a = &insts[0];
+        assert!(a.mls_keying_status(cid.clone()).epoch >= 1, "the circle is live on the tree");
+        for i in 0..40u64 {
+            a.post(cid.clone(), format!("tree post {i}"), vec![], None, None, false, false, 2_000 + i).unwrap();
+        }
+        let _ = a.epoch_sync_bundle_paged(&cid, true, 0, false, 0);
+        for _ in 0..3 {
+            let (t_head, h_head, _) = time_bundle(a, &cid, true, 0, true, 0);
+            let (t_page, h_page, _) = time_bundle(a, &cid, false, 40, false, 0);
+            eprintln!(
+                "MLSBENCH head_only total={t_head:>10.3?} hold={h_head:>10.3?} | page40 total={t_page:>10.3?} hold={h_page:>10.3?}"
+            );
+        }
     }
 
     /// §9 M5 / §6.3-3 — Welcome retention is BOUNDED, not pinned forever. The committer issues a fresh

@@ -8102,7 +8102,12 @@ final class FeedStore: ObservableObject {
         if !force, let http = RelayMailboxStore.shared.httpInterface(lower),
            http.urls.contains(where: { !SharedStore.httpUrlBad($0) }) { return }
         let nowMs = now()
-        if let last = relayInterfaceRefreshMs[lower], nowMs &- last < 300_000 { return }
+        // A caller that WATCHED the front door fail (`force`: a 401 on a rotated token, a dead call
+        // hairpin) may ask once a minute; the speculative media-miss path keeps the 5-minute gap.
+        // At 5 minutes for both, a relay whose token rotated right after an unrelated refresh stayed
+        // refused for up to five minutes (e2e `multirelay`: 305 s to recover).
+        let minGap: UInt64 = force ? 60_000 : 300_000
+        if let last = relayInterfaceRefreshMs[lower], nowMs &- last < minGap { return }
         relayInterfaceRefreshMs[lower] = nowMs
         Task { @MainActor in
             guard let c = await RelayClients.client(lower) else { return }

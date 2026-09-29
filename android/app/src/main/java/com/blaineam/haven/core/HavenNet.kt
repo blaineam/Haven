@@ -4624,8 +4624,11 @@ object HavenNet : InboundListener {
         val held = relayEntries[lower]
         if (!force && held != null && httpUrlsFor(held).isNotEmpty()) return
         val nowMs = System.currentTimeMillis()
+        // A caller that WATCHED the front door fail (`force`: a 401 on a rotated token) may ask once a
+        // minute; the speculative path keeps the 5-minute gap. iOS parity.
+        val minGap = if (force) 60_000L else 300_000L
         synchronized(relayInterfaceRefreshMs) {
-            if (nowMs - (relayInterfaceRefreshMs[lower] ?: 0L) < 300_000) return
+            if (nowMs - (relayInterfaceRefreshMs[lower] ?: 0L) < minGap) return
             relayInterfaceRefreshMs[lower] = nowMs
         }
         scope.launch {

@@ -3,11 +3,13 @@
 // THE FAILURE THIS EXISTS TO CATCH
 // --------------------------------
 // The harness drives four clients by writing a command file and reading a JSON dump back. On
-// Android that dump travels through `/sdcard/Download/qa-dump-<pkg>.json` and MediaStore, and a
-// reinstall can orphan the provider's row for it: every `renameTo` the driver does then fails
-// ("MediaProvider: Database update failed while renaming"), the app keeps running perfectly, and
-// the harness reads the SAME FROZEN FILE forever. Nothing in the JSON says so — it parses, it has
-// posts in it, it looks like a healthy device that simply received nothing.
+// Android that dump used to travel through `/sdcard/Download/qa-dump-<pkg>.json` and MediaStore,
+// and a reinstall could orphan the provider's row for it: every `renameTo` the driver did then
+// failed ("MediaProvider: Database update failed while renaming"), the app kept running perfectly,
+// and the harness read the SAME FROZEN FILE forever. Nothing in the JSON says so — it parses, it
+// has posts in it, it looks like a healthy device that simply received nothing. (Since 2026-09-29
+// the Android channel lives in the app's internal `files/qa/`, read via `run-as` — no MediaStore
+// in the path — but any leg's writer can still die, and this check is what notices.)
 //
 // That has cost two investigations. In August it turned healthy android legs into 7x perf
 // "regressions" and then into legs that "never" converged, and very nearly convicted a shipped
@@ -198,5 +200,37 @@ export class ChannelFreshness {
       advancing: advanced,
       condemned,
     };
+  }
+}
+
+/**
+ * Per-leg channel statistics for the run report: how long a `{"op":"dump"}` took to come back as a
+ * dump the command itself produced (issued → the dump's own skew-corrected ts), and how many reads
+ * were not that. A `fresh` verdict with a POSITIVE lag is the previous dump (written before the
+ * command, inside tolerance) — counted as `prior`, never as a latency.
+ */
+export class DumpStats {
+  constructor() { this.legs = {}; }
+
+  /** @param {string} label @param {{verdict:string, lagMs:number|null}} r a judgeDump/observe result */
+  note(label, r) {
+    const st = (this.legs[label] ??= { reads: 0, fresh: 0, prior: 0, stale: 0, unreadable: 0, lat: [] });
+    st.reads += 1;
+    if (r.verdict === 'fresh') {
+      st.fresh += 1;
+      if (Number.isFinite(r.lagMs)) { if (r.lagMs <= 0) st.lat.push(-r.lagMs); else st.prior += 1; }
+    } else if (r.verdict === 'stale') st.stale += 1;
+    else if (r.verdict === 'unreadable') st.unreadable += 1;
+    return this;
+  }
+
+  /** {label, reads, fresh, prior, stale, unreadable, p50, p95, max} per leg (ms; NaN when none). */
+  summary() {
+    const pct = (s, q) => (s.length ? s[Math.min(s.length - 1, Math.floor(q * s.length))] : NaN);
+    return Object.entries(this.legs).map(([label, st]) => {
+      const s = [...st.lat].sort((a, b) => a - b);
+      const { lat, ...counts } = st;
+      return { label, ...counts, p50: pct(s, 0.5), p95: pct(s, 0.95), max: s.length ? s[s.length - 1] : NaN };
+    });
   }
 }

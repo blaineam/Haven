@@ -24,7 +24,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, rmS
 import { randomBytes } from 'node:crypto';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ChannelFreshness, judgeDump, fmtDuration, FRESHNESS_DEFAULTS } from './lib/dump-freshness.mjs';
+import { ChannelFreshness, DumpStats, judgeDump, fmtDuration, FRESHNESS_DEFAULTS } from './lib/dump-freshness.mjs';
 import {
   num, delta, parseUiNodes, findNode, center, CONSENT, isConsentSurface, holdsMediaProjection, auditShareLog,
   longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields, persistExportAllowance,
@@ -223,37 +223,57 @@ function makeIos(udid) {
   };
 }
 
-const ANDROID_DEV_DIR = '/sdcard/Download';
+// The android channel lives in the app's INTERNAL files dir — `files/qa/` under the debuggable
+// build's data dir, reached with `run-as`. It used to be `/sdcard/Download`, where MediaProvider
+// owns a row per file: after reinstalls (owner UID change) or over long runs those rows rotted,
+// renames failed ("MediaProvider: Database update failed while renaming …qa-dump….json.tmp"), and
+// the harness read frozen dumps (or none) while the app was healthy — killing whole runs. Nothing
+// here touches shared storage any more.
+const ANDROID_QA_DIR = 'files/qa';                                   // relative to the app's data dir
+const ANDROID_QA_ABS = `/data/user/0/${AND_PKG}/${ANDROID_QA_DIR}`;  // what the app sees (staged media paths)
+let andPushSeq = 0;
+
+/// `adb exec-out run-as <pkg> cat files/qa/<name>` — the file's bytes, or null if unreadable.
+/// exec-out is binary-clean (no pty CRLF mangling); a missing file answers non-zero → null.
+function androidQaRead(name) {
+  return shOk('adb', ['exec-out', `run-as ${AND_PKG} cat ${ANDROID_QA_DIR}/${name} 2>/dev/null`]);
+}
+
+/// Deliver a host file to `files/qa/<name>` atomically: push to a UNIQUE shell-owned tmp, run-as
+/// copy it to `<name>.tmp` in the SAME dir, then `mv` (a rename — the driver sees the old file or
+/// the whole new one, never half). The shell tmp is removed in the same round trip. Returns true on
+/// success. `run-as` reading /data/local/tmp is what the bootstrap's seed staging has always used.
+function androidQaWrite(src, name) {
+  const tmp = `/data/local/tmp/haven-qa-${process.pid}-${++andPushSeq}-${name}`;
+  if (shOk('adb', ['push', src, tmp]) === null) return false;
+  const d = ANDROID_QA_DIR;
+  const inner = `mkdir -p ${d} && cat ${tmp} > ${d}/${name}.tmp && mv -f ${d}/${name}.tmp ${d}/${name}`;
+  return shOk('adb', ['shell', `run-as ${AND_PKG} sh -c '${inner}'; rc=$?; rm -f ${tmp}; exit $rc`]) !== null;
+}
 
 function makeAndroid() {
-  // Every adb interaction is best-effort: an emulator hiccup (sdcard I/O errors,
-  // adb restarts) must degrade this leg to RED checks, never crash the whole run.
-  const dev = ANDROID_DEV_DIR;
+  // Every adb interaction is best-effort: an emulator hiccup (adb restarts, a wedged shell) must
+  // degrade this leg to RED checks, never crash the whole run.
   let iofails = 0;
-  const guarded = (args) => {
-    const r = shOk('adb', args);
-    if (r === null && ++iofails === 3) log('WARN: android adb failing repeatedly — leg will show RED');
-    return r;
+  const note = (ok) => {
+    if (!ok && ++iofails === 3) log('WARN: android adb failing repeatedly — leg will show RED');
+    return ok;
   };
+  const cmdPath = `${ANDROID_QA_DIR}/qa-cmd.json`;
+  const dumpName = `qa-dump-${AND_PKG}.json`;
   return {
     label: 'android',
     qaWrite: (cmd) => {
       const tmp = join(OUT, 'and-cmd.json'); writeFileSync(tmp, JSON.stringify(cmd));
-      guarded(['push', tmp, `${dev}/qa-cmd.json`]);
-      // Deliberately NOT verified by reading the file back: the driver DELETES the drop as soon as
-      // it applies it (QaDriver.kt:153), so an empty read means "already consumed" just as often as
-      // "never landed", and re-pushing on that guess would apply the same op twice — a second
-      // call_accept or post is worse than the fault it was chasing. The channel is proven once, up
-      // front, by `assertAndroidCommandChannel()`, and any later rot is caught by the dump
-      // freshness check rather than guessed at per write.
+      if (!note(androidQaWrite(tmp, 'qa-cmd.json'))) log(`WARN android qaWrite '${cmd.op}' failed — this leg will read RED`);
     },
-    poke: () => guarded(['shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', 'haven://qa']),
-    dump: () => {
-      const tmp = join(OUT, 'and-dump.json');
-      if (guarded(['pull', `${dev}/qa-dump-${AND_PKG}.json`, tmp]) === null) return null;
-      return readJson(tmp);
-    },
-    stage: (src, name) => { guarded(['push', src, `${dev}/${name}`]); return `${dev}/${name}`; },
+    poke: () => note(shOk('adb', ['shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', 'haven://qa']) !== null),
+    // Like the host legs: the driver deletes the drop on consume, so "still there" means "not yet
+    // taken" — and waiting for that keeps the NEXT command from overwriting an unconsumed one. An
+    // adb failure answers "not pending" so a sick emulator cannot stall every op for 10s.
+    pending: () => shOk('adb', ['shell', `run-as ${AND_PKG} test -f ${cmdPath} && echo y`])?.trim() === 'y',
+    dump: () => readJsonText(androidQaRead(dumpName)),
+    stage: (src, name) => { note(androidQaWrite(src, name)); return `${ANDROID_QA_ABS}/${name}`; },
 
     // ── stale-channel plumbing (see the FRESH block near the top) ──────────────────────────
     // The emulator keeps its OWN clock and it drifts from the host's — 782 ms behind when this was
@@ -280,12 +300,11 @@ function makeAndroid() {
       s.sort((a, b) => a.rtt - b.rtt);
       return Math.round(s[0].skew);
     },
-    // Exactly the bootstrap's post-install wipe. Virgin files make MediaStore mint fresh rows
-    // owned by the current install, which is the documented cure for the orphaned-row freeze.
+    // Drop the dump + any half-staged drop so the driver mints them again on its next op.
     wipe: () => {
-      const out = guarded(['shell', 'rm', '-f', `${dev}/qa-dump-${AND_PKG}.json`,
-                           `${dev}/qa-dump-${AND_PKG}.json.tmp`, `${dev}/qa-cmd.json`]);
-      if (out === null) return ['adb shell rm failed outright'];
+      const d = ANDROID_QA_DIR;
+      const out = shOk('adb', ['shell', `run-as ${AND_PKG} rm -f ${d}/${dumpName} ${d}/${dumpName}.tmp ${cmdPath} ${cmdPath}.tmp 2>&1`]);
+      if (out === null) return ['adb shell run-as rm failed outright (app not installed / not debuggable?)'];
       // `rm -f` exits 0 even when the unlink is refused, so its OUTPUT is the only signal.
       return String(out).trim() ? [String(out).trim()] : [];
     },
@@ -293,7 +312,7 @@ function makeAndroid() {
       const out = [];
       // Two questions before anything else: is the app even running, and is it FOREGROUNDED?
       // QaDriver polls the drop file only between onResume and onPause, so a backgrounded
-      // activity is a dead dump channel that has nothing to do with MediaStore.
+      // activity is a dead dump channel.
       const pid = String(shOk('adb', ['shell', 'pidof', AND_PKG]) || '').trim();
       out.push(pid ? `process:    ${AND_PKG} is RUNNING (pid ${pid})`
                    : `process:    ${AND_PKG} is GONE — THIS IS THE CAUSE. Nothing is writing the dump.`);
@@ -305,9 +324,9 @@ function makeAndroid() {
           out.push(`            resumed (onResume/onPause), so a backgrounded app is a dead channel.`);
         }
       }
-      const p = `${dev}/qa-dump-${AND_PKG}.json`;
+      const p = `${ANDROID_QA_DIR}/${dumpName}`;
       // Age computed ON THE DEVICE so neither clock skew nor date parsing can distort it.
-      const st = shOk('adb', ['shell', `p=${p}; echo "$(stat -c "%s|%U|%Y" "$p")|$(date +%s)"`]);
+      const st = shOk('adb', ['shell', `echo "$(run-as ${AND_PKG} stat -c "%s|%U|%Y" ${p})|$(date +%s)"`]);
       const [size, owner, mtime, now] = String(st || '').trim().split('|');
       if (mtime && now) {
         out.push(`dump file:  ${p}`);
@@ -315,21 +334,13 @@ function makeAndroid() {
       } else {
         out.push(`dump file:  ${p} — cannot stat (${String(st || '(adb failed)').trim().split('\n')[0]})`);
       }
-      // THE SIGNATURE. A reinstall can orphan MediaStore's row for this file; every `renameTo` the
-      // driver does then fails with this line while the app itself stays perfectly healthy, and the
-      // harness reads the same frozen file forever.
-      const lg = shOk('adb', ['logcat', '-d', '-t', '4000']) || '';
-      const hits = lg.split('\n').filter((l) => /Database update failed/.test(l));
-      if (hits.length) {
-        out.push(`logcat:     ${hits.length} x "MediaProvider: Database update failed while renaming"`
-                 + ` in the last 4000 lines — THIS IS THE KNOWN CAUSE.`);
-        out.push(`            ${hits[hits.length - 1].trim().slice(0, 160)}`);
-        out.push(`            The install orphaned the provider's row for the dump file: every rename`);
-        out.push(`            fails, the app keeps writing, and nothing the harness reads ever changes.`);
-      } else {
-        out.push('logcat:     no "Database update failed" lines in the last 4000 — NOT the MediaStore'
-                 + ' row rot; look at whether the activity is foregrounded (the driver polls only while it is).');
-      }
+      // The driver logs every failed dump write; surface the latest so the cause is in the report.
+      const lg = shOk('adb', ['logcat', '-d', '-t', '4000', '-s', 'HavenQA']) || '';
+      const hits = lg.split('\n').filter((l) => /qa-dump write failed|qa-cmd .* failed/.test(l));
+      out.push(hits.length
+        ? `logcat:     ${hits.length} HavenQA failure line(s); last: ${hits[hits.length - 1].trim().slice(0, 160)}`
+        : 'logcat:     no HavenQA write/op failures in the last 4000 lines — look at whether the activity'
+          + ' is foregrounded (the driver polls only while it is).');
       return out;
     },
   };
@@ -369,9 +380,10 @@ function makeDesktop() {
 }
 
 function readJson(p) { try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return null; } }
+function readJsonText(t) { try { return t ? JSON.parse(t) : null; } catch { return null; } }
 
 /// Drop a host-side leg's qa files so the driver mints them again — the file-based twin of the
-/// android MediaStore wipe. Both drivers rewrite the dump on their next heartbeat (<=5s).
+/// android run-as wipe. Both drivers rewrite the dump on their next heartbeat (<=5s).
 /// Returns the problems it hit: a wipe that CANNOT remove the file is itself the diagnosis, and
 /// silently swallowing it would leave the failure looking like the re-dump never happened.
 function wipeLocalQaFiles(dir) {
@@ -413,37 +425,21 @@ function localDumpDiag(p) {
 // ── driver ops ──────────────────────────────────────────────────────────────
 
 // ── the android command channel, proven once before the matrix runs ─────────
-// `adb push` reports success even when MediaProvider's row for the destination is orphaned and the
-// bytes never become readable at that path. The app then never sees a command while its dumps keep
-// working (it writes those itself), so the leg looks alive and simply ignores what it is told: the
-// 2026-09-03 release gate lost the whole android call matrix that way — `call_accept` pushed, the
-// phone ringing its full 60 s, and the driver logging only the `dump` ops on either side.
-//
-// Proven by round trip, not by the app's behaviour, and only while nothing else is in flight — the
-// driver deletes each drop as it applies it, so this must run BEFORE the matrix starts.
+// A leg that cannot be TOLD anything reports its state cheerfully and ignores every instruction
+// (the 2026-09-03 release gate lost its whole android call matrix that way, back when the channel
+// ran through /sdcard and MediaProvider). Prove the exact write path qaWrite uses by round trip —
+// a probe NAME the driver never consumes, so this is safe while the app runs.
 function assertAndroidCommandChannel() {
   const probe = join(OUT, 'and-channel-probe.json');
   const body = JSON.stringify({ op: 'channel-probe', nonce: RUN_NONCE });
   writeFileSync(probe, body);
-  const path = `${ANDROID_DEV_DIR}/qa-channel-probe.json`;
-  const roundTrip = () => {
-    shOk('adb', ['push', probe, path]);
-    return shOk('adb', ['shell', 'cat', path])?.trim();
-  };
-  let got = roundTrip();
-  if (got !== body) {
-    log('WARN: android command channel did not take a probe — clearing stale MediaStore rows');
-    shOk('adb', ['shell', 'content', 'delete', '--uri', 'content://media/external/file',
-      '--where', `"_data LIKE '%/Download/qa-%'"`]);
-    shOk('adb', ['shell', 'rm', '-f', `${ANDROID_DEV_DIR}/qa-*`]);
-    got = roundTrip();
-  }
-  shOk('adb', ['shell', 'rm', '-f', path]);
-  if (got === body) { log('android command channel: verified (a pushed file reads back)'); return true; }
-  log('WARN: ANDROID COMMAND CHANNEL IS DEAD — pushes report success and the file never appears.');
+  const wrote = androidQaWrite(probe, 'qa-channel-probe.json');
+  const got = androidQaRead('qa-channel-probe.json')?.trim();
+  shOk('adb', ['shell', `run-as ${AND_PKG} rm -f ${ANDROID_QA_DIR}/qa-channel-probe.json`]);
+  if (wrote && got === body) { log(`android command channel: verified (run-as round trip through ${ANDROID_QA_DIR}/)`); return true; }
+  log('WARN: ANDROID COMMAND CHANNEL IS DEAD — a run-as write into the app\'s files/qa/ did not read back.');
   log('      Every android check in this run would be about the harness, not the app.');
-  log('      Cure: adb shell content delete --uri content://media/external/file '
-    + `--where "_data LIKE '%/Download/qa-%'"  (then re-run)`);
+  log(`      Check: adb shell run-as ${AND_PKG} ls ${ANDROID_QA_DIR}  (the DEBUG build must be installed — run-as needs debuggable)`);
   return false;
 }
 
@@ -508,10 +504,14 @@ function measureSkew(dev, why = '') {
 /// is the difference between a dead channel and a leg this check simply has no opinion about.
 const dumpTsOf = (dump) => (dump == null ? null : (typeof dump.ts_ms === 'number' ? dump.ts_ms : undefined));
 
+/// Per-leg dump-channel stats for the report (Scripts/lib/dump-freshness.mjs ▸ DumpStats).
+const DUMP_STATS = new DumpStats();
+
 async function noteDumpFreshness(dev, issuedAt, dump) {
   const ch = channelFor(dev);
   if (ch.suspended) return;                    // a recovery's own reads must not re-trip this
   const r = ch.observe({ issuedAt, dumpTsMs: dumpTsOf(dump), skewMs: SKEW[dev.label] ?? 0 });
+  DUMP_STATS.note(dev.label, r);
   if (r.verdict === 'fresh' || r.verdict === 'unknown') return;
   if (!r.condemned) {
     // Lagging but still being rewritten — a slow leg, not a dead channel. Worth saying, at most
@@ -600,9 +600,8 @@ async function handleStaleChannel(dev, r) {
   log(`(August: healthy android legs scored as 7x perf regressions and then as "never").`);
   log('');
   log(`  what to do: re-run the bootstrap (it wipes the qa drop files on every install), and on`);
-  log(`  android confirm the app is FOREGROUNDED — its driver polls only while it is. If the`);
-  log(`  MediaProvider lines above are present, the reinstall orphaned the provider row and the`);
-  log(`  wipe is the cure. Set E2E_STALE_ABORT=0 to run on regardless.`);
+  log(`  android confirm the app is FOREGROUNDED — its driver polls only while it is — and read the`);
+  log(`  HavenQA logcat line above. Set E2E_STALE_ABORT=0 to run on regardless.`);
   log('');
   writeReport();
   process.exit(1);
@@ -2743,6 +2742,11 @@ function writeReport() {
     ...REPORT.map((r) => `| ${r.name} | ${r.ok ? 'GREEN' : '**RED**'} |`),
     '', '## Perf', '', '| Step | Device | Latency | Budget |', '|---|---|---|---|',
     ...PERF.map((p) => `| ${p.step} | ${p.device} | ${p.ms < 0 ? 'never' : (p.ms / 1000).toFixed(1) + 's'} | ${(p.budget / 1000)}s |`),
+    '', '## Dump channel', '',
+    '_command issued → freshly written dump (skew-corrected); stale/unreadable are reads that were not_', '',
+    '| Leg | Reads | Fresh | Stale | Unreadable | p50 | p95 | max |', '|---|---|---|---|---|---|---|---|',
+    ...DUMP_STATS.summary().map((x) => `| ${x.label} | ${x.reads} | ${x.fresh} (${x.prior} prior) | ${x.stale}`
+      + ` | ${x.unreadable} | ${fmtDuration(x.p50)} | ${fmtDuration(x.p95)} | ${fmtDuration(x.max)} |`),
     '', `**pass ${pass} / fail ${fail}**`,
   ].join('\n');
   writeFileSync(join(OUT, 'E2E_REPORT.md'), md);

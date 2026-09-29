@@ -90,7 +90,10 @@ if [[ "${E2E_FRESH:-1}" != "0" ]]; then
   fi
   if [[ "${E2E_ANDROID:-1}" != "0" ]] && command -v adb >/dev/null 2>&1 && [[ "$(adb get-state 2>/dev/null || true)" == "device" ]]; then
     adb shell pm clear com.blaineam.haven >/dev/null 2>&1 || true
-    adb shell rm -f /sdcard/Download/qa-seed.txt /sdcard/Download/qa-device-hex.txt "/sdcard/Download/qa-dump-$AND_PKG.json" 2>/dev/null || true
+    # The qa channel lives in the app's internal files/qa/ (pm clear already empties it; this is
+    # belt-and-braces). The /sdcard/Download/qa-* rm only sweeps files the OLD channel left behind.
+    adb shell "run-as $AND_PKG rm -rf files/qa" >/dev/null 2>&1 || true
+    adb shell 'rm -f /sdcard/Download/qa-*' >/dev/null 2>&1 || true
   fi
 fi
 
@@ -400,14 +403,12 @@ elif command -v adb >/dev/null 2>&1; then
     fi
     if [[ -f "$APK" ]]; then
       adb install -r "$APK" >/dev/null 2>&1 || log "WARN: apk install failed"
-      # A reinstall can orphan MediaStore's rows for the qa drop files (owner UID changes), after
-      # which EVERY dump rename fails ("MediaProvider: Database update failed") and the harness
-      # reads a stale dump forever — observed as phantom perf regressions (18-22s android lanes)
-      # and finally "never" converging legs while the app itself was healthy. Start every run with
-      # virgin files so the provider mints fresh rows owned by the new install.
-      adb shell rm -f "/sdcard/Download/qa-dump-com.blaineam.haven.json" \
-        "/sdcard/Download/qa-dump-com.blaineam.haven.json.tmp" \
-        "/sdcard/Download/qa-cmd.json" >/dev/null 2>&1 || true
+      # Start every run with an empty qa channel (the app's internal files/qa/). The channel used
+      # to be /sdcard/Download, where a reinstall orphaned MediaProvider's rows (owner UID change)
+      # and every dump rename failed ("MediaProvider: Database update failed") — the harness then
+      # read frozen dumps while the app was healthy. Sweep any leftovers of that old channel too.
+      adb shell "run-as $AND_PKG rm -rf files/qa" >/dev/null 2>&1 || true
+      adb shell 'rm -f /sdcard/Download/qa-*' >/dev/null 2>&1 || true
     else
       log "WARN: no debug apk found — android runs whatever is installed"
     fi
@@ -426,39 +427,40 @@ elif command -v adb >/dev/null 2>&1; then
     for _p in $(grep -oE 'android\.permission\.[A-Z_]+' "$ROOT/android/app/src/main/AndroidManifest.xml" | sort -u); do
       adb shell pm grant "$AND_PKG" "$_p" >/dev/null 2>&1 || true
     done
-    # Scoped storage (API 30+): adb-pushed files in /sdcard/Download are shell-owned — grant the
-    # DEBUG build's All-Files access so QaDriver can read qa-seed.txt / qa-cmd.json / fixtures.
-    adb shell appops set "$AND_PKG" MANAGE_EXTERNAL_STORAGE allow >/dev/null 2>&1 || true
     adb reverse tcp:8674 tcp:8674 >/dev/null 2>&1 || true
     adb reverse tcp:8675 tcp:8675 >/dev/null 2>&1 || true
-    # hand the fleet seed to the android DEBUG build
-    # Stage the seed where the app can actually read it at first boot: its OWN filesDir via
-    # run-as (a debuggable app can always read filesDir; /sdcard needs a not-yet-live grant and
-    # SELinux blocks /data/local/tmp). Push to a shell-owned tmp, then run-as-copy it in.
-    adb push "$SEED_FILE" /data/local/tmp/qa-seed.txt >/dev/null 2>&1 || true
-    adb shell "run-as $AND_PKG sh -c 'mkdir -p files && cat /data/local/tmp/qa-seed.txt > files/qa-seed.txt'" 2>/dev/null \
-      || log "WARN: run-as seed stage failed — android may run unseeded"
-    adb push "$SEED_FILE" /sdcard/Download/qa-seed.txt >/dev/null 2>&1 || true
+    # The qa channel is the app's INTERNAL files/qa/ (docs/QA.md "qa-cmd v2"): a debuggable build
+    # lets `run-as` reach it, and no MediaProvider row sits in the path to rot. Writes push to a
+    # shell-owned tmp, then run-as-copy into <name>.tmp and mv (atomic — the driver never sees half
+    # a file). run-as CAN read /data/local/tmp on this AVD even though the app process cannot.
+    and_qa_put() {   # <host file> <name under files/qa>
+      local tmp="/data/local/tmp/haven-qa-$$-$2"
+      adb push "$1" "$tmp" >/dev/null 2>&1 || return 1
+      adb shell "run-as $AND_PKG sh -c 'mkdir -p files/qa && cat $tmp > files/qa/$2.tmp && mv -f files/qa/$2.tmp files/qa/$2'; rc=\$?; rm -f $tmp; exit \$rc" >/dev/null 2>&1
+    }
+    and_qa_has() { [[ "$(adb shell "run-as $AND_PKG test -f files/qa/$1 && echo y" 2>/dev/null | tr -d '\r')" == "y" ]]; }
+    # Hand the fleet seed to the android DEBUG build — staged BEFORE first launch (adopted at boot).
+    and_qa_put "$SEED_FILE" qa-seed.txt || log "WARN: run-as seed stage failed — android may run unseeded"
     adb shell am start -n "$AND_PKG/.MainActivity" >/dev/null 2>&1 || true
     sleep 8
     # Wire the stub relay through the qa driver (authoritative; prefs-file surgery
     # raced the app's own rewrites and left the leg silently relay-less).
     printf '{"op":"wire_relay","hex":"%s","urls":["http://10.0.2.2:8674","http://127.0.0.1:8674"],"token":"%s"}' "$NODE" "$TOKEN" >/tmp/and-wire.json
-    adb push /tmp/and-wire.json /sdcard/Download/qa-cmd.json >/dev/null 2>&1 || true
+    and_qa_put /tmp/and-wire.json qa-cmd.json || log "WARN: run-as wire_relay stage failed"
     adb shell am start -a android.intent.action.VIEW -d "haven://qa" >/dev/null 2>&1 || true
     # Wait for the driver to CONSUME the drop (it deletes it on apply). A cold emulator's first
     # launch can take well over the old fixed 4s to bring the engine up, and the harness's very
     # first {"op":"dump"} then OVERWROTE the unconsumed wire_relay — the leg ran the whole suite
     # with no relay at all (relay_stats [], warm-up "never") while every other leg was fine.
     for i in $(seq 1 60); do
-      adb shell ls /sdcard/Download/qa-cmd.json >/dev/null 2>&1 || break
+      and_qa_has qa-cmd.json || break
       [[ $((i % 10)) == 0 ]] && adb shell am start -a android.intent.action.VIEW -d "haven://qa" >/dev/null 2>&1
       sleep 1
     done
-    adb shell ls /sdcard/Download/qa-cmd.json >/dev/null 2>&1 && log "WARN: android never consumed wire_relay — this leg has NO relay"
+    and_qa_has qa-cmd.json && log "WARN: android never consumed wire_relay — this leg has NO relay"
     sleep 2
     ANDROID_HEXES="$OUT/android-hexes.txt"
-    adb pull /sdcard/Download/qa-device-hex.txt "$ANDROID_HEXES" >/dev/null 2>&1 || true
+    adb exec-out "run-as $AND_PKG cat files/qa/qa-device-hex.txt 2>/dev/null" >"$ANDROID_HEXES" 2>/dev/null || true
     if [[ -s "$ANDROID_HEXES" ]]; then
       { cat "$MEMBERS"; tr -d ' \r' <"$ANDROID_HEXES"; echo; } | grep -E '^[0-9a-f]{64}$' | sort -u >"$MEMBERS.next" || true
       [[ -s "$MEMBERS.next" ]] && mv "$MEMBERS.next" "$MEMBERS"

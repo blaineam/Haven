@@ -430,6 +430,11 @@ targets:
       # Relay-first media serving + the call/thermal/Low-Power heavy-I/O gate — pure decisions,
       # Foundation only (the live sampling is HeavyWorkMonitor.swift, app-only).
       - path: HavenApp/HeavyWorkPolicy.swift
+      # The engine's two-lane serial executor (user-initiated calls ahead of queued background
+      # work, FIFO within each lane) and the positive-only held-media index. Foundation/os only —
+      # `Engine` wraps the executor around the FFI handle in the app.
+      - path: HavenApp/EngineLanes.swift
+      - path: HavenApp/HeldMediaIndex.swift
       - path: Shared/SharedNotificationPrivacy.swift
       - path: HavenLogicTests
     settings:

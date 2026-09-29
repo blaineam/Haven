@@ -444,12 +444,14 @@ final class MediaStore: ObservableObject {
         }
         if FileManager.default.fileExists(atPath: dst.path) {
             try? FileManager.default.removeItem(at: scratch)
+            HeldMediaIndex.shared.insert(dst.lastPathComponent)
             return ref
         }
         do { try FileManager.default.moveItem(at: scratch, to: dst) } catch {
             try? FileManager.default.removeItem(at: scratch)
             return nil
         }
+        HeldMediaIndex.shared.insert(dst.lastPathComponent)
         return ref
     }
 
@@ -544,6 +546,7 @@ final class MediaStore: ObservableObject {
         var deleted = Set<URL>()
         func remove(_ c: Cand) {
             guard !deleted.contains(c.url) else { return }
+            HeldMediaIndex.shared.remove(c.url.lastPathComponent)
             try? fm.removeItem(at: c.url); deleted.insert(c.url)
             freed += c.bytes; files += 1
             if !storedStems(for: c.stem).isDisjoint(with: inUse) { evict[c.stem] = c.bytes }
@@ -595,6 +598,7 @@ final class MediaStore: ObservableObject {
         for stem in Self.storedStems(for: ref) {
             for ext in ["jpg", "mp4", "m4a", "zip"] {
                 let url = dir.appendingPathComponent("\(stem).\(ext)")
+                HeldMediaIndex.shared.remove(url.lastPathComponent)
                 guard fm.fileExists(atPath: url.path) else { continue }
                 if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
                     freed += Int64(size)
@@ -640,6 +644,7 @@ final class MediaStore: ObservableObject {
             // stale mint_/incoming_ scratch a crash left behind (their stems are never in a feed).
             bytes += Int64(vals?.fileSize ?? 0)
             files += 1
+            HeldMediaIndex.shared.remove(url.lastPathComponent)
             try? fm.removeItem(at: url)
         }
         // SAY WHY A SWEEP FOUND NOTHING. A zero result was indistinguishable from a sweep that never
@@ -1379,8 +1384,7 @@ final class MediaStore: ObservableObject {
     /// Do we already hold the bytes for this ref?
     func has(_ ref: String) -> Bool {
         if cacheGet(ref) != nil { return true }
-        guard let url = fileURL(ref) else { return false }
-        return FileManager.default.fileExists(atPath: url.path)
+        return hasLocalFile(ref)
     }
 
     /// Raw bytes for a ref (to seal + send to a peer who's missing it).
@@ -1402,14 +1406,60 @@ final class MediaStore: ObservableObject {
             HavenLog.relay("media REJECTED \(ref.prefix(12)): \(bytes.count)B do not match its content address")
             return false
         }
-        try? bytes.write(to: url)
+        HavenPerf.shared.noteMediaStoreOnMain()   // the synchronous path hashes + writes on main
+        if (try? bytes.write(to: url)) != nil { HeldMediaIndex.shared.insert(url.lastPathComponent) }
+        landed(ref, kind: kind, url: url)
+        return true
+    }
+
+    /// `store`, with the expensive part OFF the main actor: the SHA-256 over the whole blob and the
+    /// file write run detached; only the cache bookkeeping comes back here. The inbound media paths
+    /// (relay restore, push scratch) use this — `store` hashed, wrote and (for a video) waited on
+    /// the serialized VideoToolbox poster queue on main, once per arriving blob.
+    @discardableResult
+    func storeAsync(_ ref: String, _ bytes: Data) async -> Bool {
+        guard let kind = MediaKind(ref: ref), let url = fileURL(ref) else { return false }
+        let outcome: (verified: Bool, written: Bool) = await Task.detached(priority: .utility) {
+            HavenPerf.shared.checkMediaStoreOffMain()
+            guard Self.verify(ref, bytes) else { return (false, false) }
+            return (true, (try? bytes.write(to: url)) != nil)
+        }.value
+        guard outcome.verified else {
+            HavenLog.relay("media REJECTED \(ref.prefix(12)): \(bytes.count)B do not match its content address")
+            return false
+        }
+        if outcome.written { HeldMediaIndex.shared.insert(url.lastPathComponent) }
+        landed(ref, kind: kind, url: url)
+        return true
+    }
+
+    /// Bytes for `ref` are now on disk: refresh the memory caches WITHOUT decoding anything here —
+    /// an image decodes lazily (downsampled) when drawn, a video's poster generates off-main — and
+    /// tell the media views (`MediaArrivals`), not the whole feed.
+    private func landed(_ ref: String, kind: MediaKind, url: URL) {
+        cacheRemove(ref)
         switch kind {
-        case .image: cachePut(ref, MediaItem(id: ref, kind: .image, image: PlatformImage(data: bytes), videoURL: nil))
-        case .video: cachePut(ref, MediaItem(id: ref, kind: .video, image: Self.poster(for: url), videoURL: url))
+        case .image: break
+        case .video: generatePosterInBackground(ref, url: url)
         case .audio: cachePut(ref, MediaItem(id: ref, kind: .audio, image: nil, videoURL: url))
         case .file:  cachePut(ref, MediaItem(id: ref, kind: .file, image: nil, videoURL: url))
         }
-        return true
+        MediaArrivals.shared.note(ref)
+    }
+
+    /// Off-main poster generation that re-caches the item when done (at most one per ref at a time).
+    private func generatePosterInBackground(_ ref: String, url: URL, thenRefresh: Bool = false) {
+        guard !posterInFlight.contains(ref) else { return }
+        posterInFlight.insert(ref)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let poster = Self.poster(for: url)
+            DispatchQueue.main.async {
+                self.posterInFlight.remove(ref)
+                if let poster { self.cachePut(ref, MediaItem(id: ref, kind: .video, image: poster, videoURL: url)) }
+                if thenRefresh { MediaArrivals.shared.note(ref) }   // re-render so the now-cached poster shows
+            }
+        }
     }
 
     /// Final on-disk path for a ref (sender reads chunks from here).
@@ -1417,9 +1467,16 @@ final class MediaStore: ObservableObject {
 
     /// Are this ref's bytes on disk? A cheap `stat` — used by the photo grid to decide between the image
     /// tile and the still-downloading tile WITHOUT decoding anything, which is what layout used to do.
+    ///
+    /// Answered from `HeldMediaIndex` when it has seen the file (no syscall), else a real `stat`
+    /// whose positive answer is remembered. The missing-media sweep asks this for every variant of
+    /// every post every few seconds; nearly every answer is "held", and each one used to be a stat
+    /// on the main thread.
     func hasLocalFile(_ ref: String) -> Bool {
         guard let url = fileURL(ref) else { return false }
-        return FileManager.default.fileExists(atPath: url.path)
+        return HeldMediaIndex.shared.held(url.lastPathComponent) {
+            FileManager.default.fileExists(atPath: url.path)
+        }
     }
 
     /// A fresh empty temp file for reassembling an incoming chunked transfer.
@@ -1439,17 +1496,49 @@ final class MediaStore: ObservableObject {
     @discardableResult
     func adopt(_ ref: String, from temp: URL) -> Bool {
         guard MediaKind(ref: ref) != nil, let dst = fileURL(ref) else { return false }
+        HavenPerf.shared.noteMediaStoreOnMain()   // streaming digest on main — prefer `adoptAsync`
         guard Self.verify(ref, fileAt: temp) else {
             HavenLog.relay("media REJECTED \(ref.prefix(12)): reassembled bytes do not match its content address")
             try? FileManager.default.removeItem(at: temp)
             return false
         }
+        HeldMediaIndex.shared.remove(dst.lastPathComponent)
         try? FileManager.default.removeItem(at: dst)
         do { try FileManager.default.moveItem(at: temp, to: dst) } catch { return false }
+        HeldMediaIndex.shared.insert(dst.lastPathComponent)
+        MediaArrivals.shared.note(ref)
         // Do NOT eagerly decode the full image here. With own-device media sync, a burst of received blobs
         // each got decoded to a ~20MB bitmap on arrival → memory spike → iOS jetsam (SIGKILL) on launch.
         // Just drop any stale cache entry; item()/thumbnail() decode lazily (and downsampled) when rendered.
         cacheRemove(ref)
+        return true
+    }
+
+    /// `adopt`, with the streaming digest and the move OFF the main actor — a reassembled 600 MB
+    /// video hashed on main was a multi-second freeze at the moment it finished downloading.
+    @discardableResult
+    func adoptAsync(_ ref: String, from temp: URL) async -> Bool {
+        guard MediaKind(ref: ref) != nil, let dst = fileURL(ref) else { return false }
+        let name = dst.lastPathComponent
+        let result: Bool? = await Task.detached(priority: .utility) { () -> Bool? in
+            HavenPerf.shared.checkMediaStoreOffMain()
+            guard Self.verify(ref, fileAt: temp) else {
+                try? FileManager.default.removeItem(at: temp)
+                return nil
+            }
+            HeldMediaIndex.shared.remove(name)
+            try? FileManager.default.removeItem(at: dst)
+            do { try FileManager.default.moveItem(at: temp, to: dst) } catch { return false }
+            HeldMediaIndex.shared.insert(name)
+            return true
+        }.value
+        guard let result else {
+            HavenLog.relay("media REJECTED \(ref.prefix(12)): reassembled bytes do not match its content address")
+            return false
+        }
+        guard result else { return false }
+        cacheRemove(ref)
+        MediaArrivals.shared.note(ref)
         return true
     }
 
@@ -1483,7 +1572,7 @@ final class MediaStore: ObservableObject {
                 MediaStore.shared.sizeProbeInFlight.remove(ref)
                 if let size {
                     MediaStore.shared.recordPixelSize(ref, size)
-                    FeedStore.shared.scheduleRefresh()
+                    MediaArrivals.shared.note(ref)   // the media views re-lay out; the feed list is unchanged
                 }
             }
         }
@@ -1510,7 +1599,7 @@ final class MediaStore: ObservableObject {
                 MediaStore.shared.sizeProbeInFlight.remove(ref)
                 if let size {
                     MediaStore.shared.recordPixelSize(ref, size)
-                    FeedStore.shared.scheduleRefresh()   // re-render at the now-known aspect
+                    MediaArrivals.shared.note(ref)   // re-render the media views at the now-known aspect
                 }
             }
         }
@@ -1541,18 +1630,8 @@ final class MediaStore: ObservableObject {
             if let poster = cacheGet(ref)?.image {
                 t = max(poster.size.width, poster.size.height) <= maxDimension ? poster : Self.downscale(poster, maxDimension: maxDimension)
             } else {
-                if !posterInFlight.contains(ref) {
-                    posterInFlight.insert(ref)
-                    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                        guard let self else { return }
-                        let poster = Self.poster(for: url)
-                        DispatchQueue.main.async {
-                            self.posterInFlight.remove(ref)
-                            if let poster { self.cachePut(ref, MediaItem(id: ref, kind: .video, image: poster, videoURL: url)) }
-                            FeedStore.shared.scheduleRefresh()   // re-render so the now-cached poster shows
-                        }
-                    }
-                }
+                // Re-render only the media views (`MediaArrivals`) when it lands — not a feed rebuild.
+                generatePosterInBackground(ref, url: url, thenRefresh: true)
                 t = nil
             }
         } else if let full = item(ref)?.image {
@@ -1587,7 +1666,7 @@ final class MediaStore: ObservableObject {
         if let cached = cachedThumbnail(ref, maxDimension: maxDimension) { return cached }
         let key = "\(ref)@\(Int(maxDimension.rounded()))"
         if let inFlight = thumbTasks[key] { return await inFlight.value }
-        guard let url = fileURL(ref), FileManager.default.fileExists(atPath: url.path) else { return nil }
+        guard let url = fileURL(ref), hasLocalFile(ref) else { return nil }
         let isVideo = (MediaKind(ref: ref) == .video)
         // A video's poster may already be resident from an earlier generation — downscale that (cheap,
         // and on the main actor where every other poster resize already happens) rather than running
@@ -1615,8 +1694,12 @@ final class MediaStore: ObservableObject {
                 // for a fraction of the cost. Refs are content-addressed, so a cached thumb is
                 // always valid.
                 let bucket = Int(maxDimension.rounded())
+                // Decoded HERE, off-main: `PlatformImage(data:)` is lazy, so the JPEG decode used to
+                // happen at first draw — on the main thread, mid-scroll. ImageIO with
+                // ShouldCacheImmediately hands back an already-decoded bitmap.
                 if let disk = Self.thumbDiskURL(ref, bucket: bucket),
-                   let data = try? Data(contentsOf: disk), let cached = PlatformImage(data: data) {
+                   FileManager.default.fileExists(atPath: disk.path),
+                   let cached = Self.downsampled(at: disk, maxPixel: maxDimension) {
                     return cached
                 }
                 guard let fresh = Self.downsampled(at: url, maxPixel: maxDimension) else { return nil }
@@ -1793,8 +1876,7 @@ final class MediaStore: ObservableObject {
 
     func item(_ ref: String) -> MediaItem? {
         if let c = cacheGet(ref) { return c }
-        guard let kind = MediaKind(ref: ref), let url = fileURL(ref),
-              FileManager.default.fileExists(atPath: url.path) else { return nil }
+        guard let kind = MediaKind(ref: ref), let url = fileURL(ref), hasLocalFile(ref) else { return nil }
         switch kind {
         case .image:
             let item = MediaItem(id: ref, kind: .image, image: PlatformImage(contentsOfFile: url.path), videoURL: nil)
@@ -1804,17 +1886,7 @@ final class MediaStore: ObservableObject {
             // that's a main-thread hitch the first time each video appears. Return with videoURL now (the
             // player + grid tiles don't need item().image; tiles get their poster from thumbnail(), which
             // generates off-main). Kick off an off-main poster generation that re-caches when ready.
-            if !posterInFlight.contains(ref) {
-                posterInFlight.insert(ref)
-                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    guard let self else { return }
-                    let poster = Self.poster(for: url)
-                    DispatchQueue.main.async {
-                        self.posterInFlight.remove(ref)
-                        if let poster { self.cachePut(ref, MediaItem(id: ref, kind: .video, image: poster, videoURL: url)) }
-                    }
-                }
-            }
+            generatePosterInBackground(ref, url: url)
             return MediaItem(id: ref, kind: .video, image: nil, videoURL: url)   // not cached (would shadow the real poster)
         case .audio:
             let item = MediaItem(id: ref, kind: .audio, image: nil, videoURL: url)
@@ -1994,6 +2066,40 @@ final class MediaStore: ObservableObject {
               FileManager.default.fileExists(atPath: url.path),
               let img = Self.poster(for: url) else { return nil }
         return addImage(img, forceOptimize: true)
+    }
+}
+
+// MARK: - Media arrival signal
+
+/// "Some media just landed on disk (or its poster / pixel size just became known)."
+///
+/// The narrow signal media views observe instead of the whole `FeedStore`. Media arriving used to
+/// trigger a full feed rebuild (`scheduleRefresh`: an engine `feed()` read plus a deep compare of
+/// every post) that almost always produced an identical list and so re-rendered nothing — the media
+/// tiles only caught up when something unrelated happened to publish. This publishes once per burst
+/// (coalesced), and only the views that draw media re-evaluate.
+@MainActor
+final class MediaArrivals: ObservableObject {
+    static let shared = MediaArrivals()
+    /// Bumps once per coalesced burst of arrivals. Views read it (or `onChange` it) to re-check.
+    @Published private(set) var generation: UInt64 = 0
+    /// Refs landed since the last publish, for observers that only care about one ref.
+    private(set) var lastBatch: Set<String> = []
+    private var pending: Set<String> = []
+    private var flushScheduled = false
+
+    func note(_ ref: String) {
+        pending.insert(ref)
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard let self else { return }
+            self.flushScheduled = false
+            self.lastBatch = self.pending
+            self.pending.removeAll()
+            self.generation &+= 1
+        }
     }
 }
 
@@ -2314,7 +2420,11 @@ struct MissingMediaPlaceholder: View {
     var postContext: (circleId: String, postId: String, authorShort: String)?
     /// The post's full media list — how the placeholder finds this ref's `thumb:` companion.
     var mediaList: [String] = []
-    @ObservedObject private var feed = FeedStore.shared
+    /// Actions only (download / ask the author) — never read reactively, so not observed: every
+    /// FeedStore publish re-rendered every placeholder on screen. What this view DOES draw from is
+    /// observed below, plus `MediaArrivals` so it clears the moment the bytes land.
+    private var feed: FeedStore { FeedStore.shared }
+    @ObservedObject private var arrivals = MediaArrivals.shared
     @ObservedObject private var transfer = MediaTransferState.shared   // spinner / i-of-n / waiting / gone
     @ObservedObject private var evicted = EvictedMediaStore.shared
     @ObservedObject private var wanted = MediaWantedStore.shared
@@ -2386,10 +2496,7 @@ struct MissingMediaPlaceholder: View {
     /// restore that lands via a different route than the one that set the flag), the spinner would
     /// otherwise sit on top of media that finished — reported from the field as "media obviously
     /// downloaded and blurred, with a loading status hanging over it for a while".
-    private var bytesPresent: Bool {
-        guard let url = MediaStore.shared.storagePath(for: ref) else { return false }
-        return FileManager.default.fileExists(atPath: url.path)
-    }
+    private var bytesPresent: Bool { MediaStore.shared.hasLocalFile(ref) }
 
     @ViewBuilder private var content: some View {
         if bytesPresent {

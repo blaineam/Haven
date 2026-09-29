@@ -918,6 +918,7 @@ final class AccountStore: ObservableObject {
         let fm = FileManager.default
         guard let appSup = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
         try? fm.removeItem(at: appSup.appendingPathComponent("haven-media", isDirectory: true))
+        HeldMediaIndex.shared.removeAll()   // nothing it remembers is on disk any more
         if let items = try? fm.contentsOfDirectory(at: appSup, includingPropertiesForKeys: nil) {
             for u in items where u.lastPathComponent.hasPrefix("haven-avatar") { try? fm.removeItem(at: u) }
         }

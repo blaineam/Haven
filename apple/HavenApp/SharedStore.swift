@@ -683,19 +683,19 @@ enum SharedStore {
     /// How many leading windows of THIS seal are already on disk. The `fp` check is what makes that
     /// "of this seal" rather than merely "of something with the same number of windows" — two seals of
     /// one file normally agree on chunk count, so the count alone let a partial cross seals silently.
-    private static func loadRestorePart(_ ref: String, chunks: Int, fp: String) -> Int {
+    nonisolated private static func loadRestorePart(_ ref: String, chunks: Int, fp: String) -> Int {
         guard let d = try? Data(contentsOf: restoreMetaURL(ref)),
               let m = try? JSONDecoder().decode(RestorePartMeta.self, from: d),
               m.chunks == chunks, m.fp == fp, m.got > 0, m.got <= chunks,
               FileManager.default.fileExists(atPath: restorePartURL(ref).path) else { return 0 }
         return m.got
     }
-    private static func saveRestorePart(_ ref: String, chunks: Int, got: Int, fp: String) {
+    nonisolated private static func saveRestorePart(_ ref: String, chunks: Int, got: Int, fp: String) {
         if let d = try? JSONEncoder().encode(RestorePartMeta(chunks: chunks, got: got, fp: fp)) {
             try? d.write(to: restoreMetaURL(ref), options: .atomic)
         }
     }
-    private static func clearRestorePart(_ ref: String) {
+    nonisolated private static func clearRestorePart(_ ref: String) {
         try? FileManager.default.removeItem(at: restorePartURL(ref))
         try? FileManager.default.removeItem(at: restoreMetaURL(ref))
     }
@@ -1684,9 +1684,11 @@ enum SharedStore {
         if ok {
             for i in have..<chunkCount {
                 guard let part = await fetch(source, chunkKey(ref, i)), !part.isEmpty else { ok = false; break }
-                do { try handle.write(contentsOf: part) } catch { ok = false; break }
+                // The 8 MB write + sidecar happen OFF the main actor (this enum is @MainActor).
+                guard await appendRestoreChunk(handle, part, ref: ref, chunks: chunkCount, got: i + 1, fp: fp) else {
+                    ok = false; break
+                }
                 have = i + 1
-                saveRestorePart(ref, chunks: chunkCount, got: have, fp: fp)
                 // Honest progress for the placeholder: i/n while a chunked blob reassembles.
                 FeedStore.shared.noteRestoreProgress(ref, done: have, total: chunkCount)
             }
@@ -1698,6 +1700,21 @@ enum SharedStore {
             HavenLog.relay("media restore \(ref.prefix(12)): reassemble STALLED at \(have)/\(chunkCount) via \(src) — partial kept for resume")
             return nil
         }
+        return await readAndClearRestorePart(ref, temp: temp)
+    }
+
+    /// One reassembled window onto the .part file plus its resume sidecar — off the main actor
+    /// (a `nonisolated async` function runs on the global executor).
+    nonisolated private static func appendRestoreChunk(_ handle: FileHandle, _ part: Data, ref: String,
+                                                       chunks: Int, got: Int, fp: String) async -> Bool {
+        HavenPerf.shared.checkMediaStoreOffMain()
+        do { try handle.write(contentsOf: part) } catch { return false }
+        saveRestorePart(ref, chunks: chunks, got: got, fp: fp)
+        return true
+    }
+    /// The finished blob read back whole (bounded by the manifest), off the main actor.
+    nonisolated private static func readAndClearRestorePart(_ ref: String, temp: URL) async -> Data? {
+        HavenPerf.shared.checkMediaStoreOffMain()
         let bytes = try? Data(contentsOf: temp)
         clearRestorePart(ref)
         return bytes

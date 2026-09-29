@@ -3328,6 +3328,10 @@ final class FeedStore: ObservableObject {
     static var qaInviteLink: String = ""
     /// The last `react` op's local latency (see the op); `[:]` until one ran / after `perf_reset`.
     static var qaReactLatency: [String: Double] = [:]
+    /// The relay link minted by the `relay_link` qa op (exposed via the dump as `relay_link`).
+    static var qaRelayLink: String = ""
+    /// The last `relay_probe` op's answer (`relay_probe` in the dump; `[:]` until one ran).
+    static var qaRelayProbe: [String: Any] = [:]
     /// Successful dump writes, and when the last one landed. See `dump_seq` in the payload.
     nonisolated(unsafe) static var qaDumpSeq: Int = 0
     nonisolated(unsafe) static var qaLastDumpAt = Date.distantPast
@@ -3677,6 +3681,61 @@ final class FeedStore: ObservableObject {
             // QA: start a fresh peak-backoff window (the newfriend step measures its own span).
             RelayHealth.shared.qaResetPeak()
             qaWriteDump()
+            return
+        case "relay_link":
+            // QA: the link You → Advanced → Relay hands to `haven-relay run --link` — every circle I
+            // am in, with its members. The multirelay e2e starts A's own CLI relay from it.
+            Self.qaRelayLink = relayLinkForAllCircles() ?? ""
+            qaWriteDump()
+            return
+        case "add_relay":
+            // QA: Storage → "Connect a relay" → paste. Same call the sheet makes: a bare node id or
+            // the interface JSON `haven-relay` prints, adopted for `circle_ids` (all circles when
+            // absent), optionally as the default relay. Announces frame 19 like the UI does.
+            var raw = str("relay")
+            if raw.isEmpty, let o = obj["relay"], JSONSerialization.isValidJSONObject(o),
+               let d = try? JSONSerialization.data(withJSONObject: o) {
+                raw = String(decoding: d, as: UTF8.self)
+            }
+            let wanted = (obj["circle_ids"] as? [String]) ?? []
+            let targets = wanted.isEmpty ? circles.map(\.id) : wanted.filter { cid in circles.contains { $0.id == cid } }
+            adoptRelayNode(raw, circleIds: targets, setDefault: (obj["default"] as? Bool) ?? false)
+            HavenLog.net("matrix-qa v2 add_relay: \(targets.count) circle(s) default=\((obj["default"] as? Bool) ?? false)")
+            qaWriteDump()
+            return
+        case "forget_relay":
+            // QA: the relay row's Forget action.
+            let hex = str("hex").lowercased()
+            if hex.count == 64 { forgetRelay(hex) }
+            qaWriteDump()
+            return
+        case "host_relay":
+            // QA: the "Host a relay on this device" toggle (Relays settings). The multirelay e2e takes
+            // B's in-app relay offline and brings it back while A keeps posting.
+            RelayHost.shared.setEnabled((obj["on"] as? Bool) ?? true)
+            qaWriteDump()
+            return
+        case "remove_member":
+            // QA: Circle settings → member → Remove. Durable tombstone + epoch rotation, same call.
+            let who = str("dm_to").lowercased()
+            let cid = str("circle_id")
+            if who.count == 64, circles.contains(where: { $0.id == cid }) { removeFromCircle(who, circleId: cid) }
+            qaWriteDump()
+            return
+        case "relay_probe":
+            // QA: one request against a relay, signed as THIS device (SharedStore.qaProbe). Method
+            // GET | PUT | HEAD | LIST; `body` (PUT) is sent as UTF-8.
+            let node = str("relay").lowercased()
+            let method = str("method").uppercased()
+            let key = str("key")
+            Self.qaRelayProbe = ["relay": node, "method": method, "key": key, "status": 0, "pending": true]
+            qaWriteDump()
+            Task { @MainActor [weak self] in
+                let r = await SharedStore.qaProbe(node: node, method: method.isEmpty ? "GET" : method,
+                                                  key: key, body: Data(body.utf8))
+                Self.qaRelayProbe = r
+                self?.qaWriteDump()
+            }
             return
         case "heavy_work_override":
             // QA: force HeavyWorkPolicy's suspendHeavyIO (as a call / Low Power Mode / heat would)
@@ -4174,6 +4233,13 @@ final class FeedStore: ObservableObject {
             "circle_relays": Dictionary(circles.map { ($0["id"] as? String ?? "", SharedStore.hasMailbox($0["id"] as? String ?? "")) },
                                         uniquingKeysWith: { a, _ in a }),
             "relay_backoff": qaRelayBackoff(),
+            // Per-relay view (e2e step `multirelay`, docs/QA.md): URLs, token fingerprint, health,
+            // circles served here, and the HTTP outcome counters.
+            "relay_stats": SharedStore.qaRelayStats(),
+            "relay_link": Self.qaRelayLink,
+            "hosted_relay": ["node": RelayHost.shared.nodeId, "serving": RelayHost.shared.serving,
+                             "enabled": RelayHost.shared.enabled, "httpPort": Int(RelayHost.shared.mediaHttpPort ?? 0)],
+            "relay_probe": Self.qaRelayProbe,
             // Liveness: strictly increasing while the driver is healthy. The orchestrator watches it
             // to tell a FROZEN dump apart from a device that genuinely received nothing — they are
             // indistinguishable from the file alone, and they need opposite fixes.

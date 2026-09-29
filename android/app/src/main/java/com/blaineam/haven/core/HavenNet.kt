@@ -7068,11 +7068,14 @@ object HavenNet : InboundListener {
         }
         try {
             when (c.responseCode) {
-                in 200..299 -> c.inputStream.use { it.readBytes() }
-                404 -> null
-                401, 403 -> throw RelayForbidden()
-                else -> throw java.io.IOException("http ${c.responseCode}")
+                in 200..299 -> c.inputStream.use { it.readBytes() }.also { qaCountHttp(base, "getOk") }
+                404 -> null.also { qaCountHttp(base, "getMiss") }
+                401, 403 -> { qaCountHttp(base, "getRefused"); throw RelayForbidden() }
+                else -> { qaCountHttp(base, "getFail"); throw java.io.IOException("http ${c.responseCode}") }
             }
+        } catch (e: java.io.IOException) {
+            if (e !is RelayForbidden && e.message?.startsWith("http ") != true) qaCountHttp(base, "getFail")
+            throw e
         } finally { c.disconnect() }
     }
 
@@ -7114,7 +7117,9 @@ object HavenNet : InboundListener {
         }
         try {
             val respDigest = c.getHeaderField("X-Haven-List-Digest")?.trim()?.takeIf { it.isNotEmpty() }
-            when (c.responseCode) {
+            val code = c.responseCode
+            qaCountHttp(base, if (code in 200..299) "listOk" else if (code == 401 || code == 403) "listRefused" else "listFail")
+            when (code) {
                 204 -> null to respDigest   // nothing new — skip the GETs
                 in 200..299 -> {
                     val text = c.inputStream.bufferedReader().use { it.readText() }
@@ -7123,6 +7128,9 @@ object HavenNet : InboundListener {
                 401, 403 -> throw RelayForbidden()
                 else -> throw java.io.IOException("http list ${c.responseCode}")
             }
+        } catch (e: java.io.IOException) {
+            if (e !is RelayForbidden && e.message?.startsWith("http list") != true) qaCountHttp(base, "listFail")
+            throw e
         } finally { c.disconnect() }
     }
 
@@ -7321,11 +7329,62 @@ object HavenNet : InboundListener {
             c.outputStream.use { it.write(body) }
             val code = c.responseCode
             when {
-                code in 200..299 -> Unit
-                code == 401 || code == 403 -> throw RelayForbidden()
-                else -> throw java.io.IOException("relay PUT HTTP $code")
+                code in 200..299 -> qaCountHttp(base, "putOk")
+                code == 401 || code == 403 -> { qaCountHttp(base, "putRefused"); throw RelayForbidden() }
+                else -> { qaCountHttp(base, "putFail"); throw java.io.IOException("relay PUT HTTP $code") }
             }
+        } catch (e: java.io.IOException) {
+            if (e !is RelayForbidden && e.message?.startsWith("relay PUT HTTP") != true) qaCountHttp(base, "putFail")
+            throw e
         } finally { c.disconnect() }
+    }
+
+    // ---- QA (DEBUG): per-relay HTTP outcomes (qa dump `relay_stats`, e2e step `multirelay`) ------
+
+    /** Per-base-URL HTTP outcome counts. A relay's row sums its announced URLs — how the multirelay
+     *  e2e tells which relay a write actually landed on, and measures a retry storm against a relay
+     *  that is down. Only ever incremented in DEBUG builds. Apple SharedStore.qaCount parity. */
+    private val qaHttpCounts = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>>()
+    private fun qaCountHttp(base: String, what: String) {
+        if (!BuildConfig.DEBUG) return
+        qaHttpCounts.getOrPut(base) { java.util.concurrent.ConcurrentHashMap() }
+            .getOrPut(what) { java.util.concurrent.atomic.AtomicInteger() }.incrementAndGet()
+    }
+    private val QA_HTTP_COUNT_KEYS = listOf("putOk", "putRefused", "putFail", "getOk", "getMiss",
+        "getRefused", "getFail", "listOk", "listRefused", "listFail")
+
+    /** The DEBUG dump's `relay_stats` — same field names as Apple (docs/QA.md ▸ multirelay). The
+     *  token is reported only as a fingerprint (first 12 hex of SHA-256), never itself. */
+    fun qaRelayStats(): JSONArray {
+        val out = JSONArray()
+        val now = System.currentTimeMillis()
+        val pending = qaPendingEnrollment.map { it.lowercase() }.toSet()
+        val circleIds = runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
+        for (e in relayEntries.values.sortedBy { it.hex }) {
+            val h = relayHealth[e.hex]
+            val row = JSONObject()
+                .put("relay", e.hex)
+                .put("name", e.name)
+                .put("active", e.active)
+                .put("urls", JSONArray(e.httpUrls))
+                .put("urlsBad", JSONArray(e.httpUrls.filter { (httpUrlBad[it] ?: 0L) > now }))
+                .put("tokenFp", if (e.httpToken.isEmpty()) "" else java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(e.httpToken.toByteArray()).joinToString("") { "%02x".format(it) }.take(12))
+                .put("addedAtMs", e.addedAtMs)
+                .put("isDefault", defaultRelayHex == e.hex)
+                .put("circles", JSONArray(circleIds.filter { relaysFor(it).contains(e.hex) }))
+                .put("fails", h?.fails ?: 0)
+                .put("backoffUntilMs", h?.nextRetryMs ?: 0L)
+                .put("backoffRemainingMs", maxOf(0L, (h?.nextRetryMs ?: 0L) - now))
+                .put("reachable", h?.provenAlive(now, 120_000) ?: false)
+                .put("lastSuccessMs", h?.lastSuccessMs ?: 0L)
+                .put("reason", if (e.hex.lowercase() in pending) "pendingEnrollment" else if ((h?.fails ?: 0) > 0) "failure" else "")
+            for (k in QA_HTTP_COUNT_KEYS) {
+                row.put(k, e.httpUrls.sumOf { qaHttpCounts[it]?.get(k)?.get() ?: 0 })
+            }
+            out.put(row)
+        }
+        return out
     }
 
     /** PUT one media blob (chunked wire format) to a relay's HTTP interface. Three-way — see [relayHttpPut].

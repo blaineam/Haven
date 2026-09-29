@@ -35,7 +35,7 @@ final class RelayHost: ObservableObject {
     /// dual free tunnels or a dead path-proxy after the user toggled hosting.
     private var startGeneration: UInt64 = 0
     /// Media HTTP bind port (usually 8674) — watchdog verifies it stays up.
-    private var mediaHttpPort: UInt16?
+    private(set) var mediaHttpPort: UInt16?
     /// Front-door local port (path router 8675 when unified, else media).
     private var frontDoorPort: UInt16?
     /// Cancels the tunnel/local health loop on stop.
@@ -2009,6 +2009,17 @@ final class RelayHealth: ObservableObject {
              "reason": h.fails > 0 ? "failure" : ""]
         }
         return ["relays": relays, "peak_backoff_ms": qaPeakBackoffMs]
+    }
+    /// One relay's health for `relay_stats` (camelCase — see docs/QA.md ▸ multirelay).
+    func qaRow(_ nodeHex: String) -> [String: Any] {
+        let now = nowMs()
+        let h = byNode[nodeHex]
+        return ["fails": Int(h?.fails ?? 0),
+                "backoffUntilMs": h?.nextRetryMs ?? 0,
+                "backoffRemainingMs": (h?.nextRetryMs ?? 0) > now ? (h?.nextRetryMs ?? 0) - now : 0,
+                "reachable": provenAlive(nodeHex, withinMs: 120_000),
+                "lastSuccessMs": h?.lastSuccessMs ?? 0,
+                "reason": (h?.fails ?? 0) > 0 ? "failure" : ""]
     }
     #endif
 

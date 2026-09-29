@@ -173,8 +173,11 @@ object QaDriver {
      *  actively driving the app, so it snaps sync cadence tight and polls the mailbox now. */
     private val MUTATING_OPS = setOf(
         "post", "story", "dm", "react", "comment", "profile",
-        "circle_create", "circle_invite", "file", "music_post", "mark_read", "wire_relay",
+        "circle_create", "circle_invite", "file", "music_post", "mark_read", "wire_relay", "add_relay",
     )
+
+    /** The last `relay_link` op's link (dump `relay_link`). */
+    @Volatile private var qaRelayLink: String = ""
 
     private fun apply(cmd: JSONObject) {
         val op = cmd.optString("op").trim().lowercase()
@@ -315,6 +318,16 @@ object QaDriver {
                 val derp = cmd.optString("derp")   // optional QA-DERP url (emulator → stub fabric route)
                 if (hex.length == 64 && urls.isNotEmpty()) HavenNet.qaWireRelay(hex, urls, token, derp)
                 else Log.w(TAG, "wire_relay: bad args hex=${hex.take(8)} urls=${urls.size}")
+            }
+            // QA: the relay link Settings hands to `haven-relay run --link` (the active circle —
+            // Android's link is per circle). Exposed as the dump's `relay_link`.
+            "relay_link" -> qaRelayLink = HavenNet.relayLink(explicit ?: HavenNet.activeCircle.value) ?: ""
+            // QA: Settings → Relays → paste. The same adoptRelay the paste box calls: a bare node id
+            // or the interface JSON `haven-relay` prints; announced to every circle (frame 19).
+            "add_relay" -> {
+                val raw = cmd.optJSONObject("relay")?.toString() ?: cmd.optString("relay")
+                if (raw.isNotBlank()) HavenNet.adoptRelay(raw, setDefault = cmd.optBoolean("default", false))
+                else Log.w(TAG, "add_relay: no relay")
             }
             "dump" -> {}   // every branch refreshes the dump on the way out
             // Zero the dump's `perf` counters so an e2e step measures only what follows.
@@ -490,6 +503,9 @@ object QaDriver {
             .put("pending_enrollment", JSONArray(runCatching { HavenNet.qaPendingEnrollment }.getOrDefault(emptyList())))
             .put("pending_enrollment_refusals", QaStats.count("pending_enrollment_refusals")))
         o.put("contacts", JSONArray(HavenNet.contacts.map { JSONObject().put("hex", it.idHex).put("name", it.name) }))
+        // Per-relay view (e2e `multirelay`): URLs, token fingerprint, health, circles, HTTP outcomes.
+        o.put("relay_stats", runCatching { HavenNet.qaRelayStats() }.getOrDefault(JSONArray()))
+        o.put("relay_link", qaRelayLink)
         // Screen share (e2e `screenshare`): lifecycle, consent, FGS ordering, capture, sender, encoder.
         val fgsAt = QaStats.shareFgsReadyAtMs; val capAt = QaStats.shareCaptureStartAtMs
         o.put("screen_share", JSONObject()

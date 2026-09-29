@@ -1895,7 +1895,9 @@ enum SharedStore {
             let (data, resp) = try await URLSession.shared.data(for: req)
             let http = resp as? HTTPURLResponse
             let respDigest = http?.value(forHTTPHeaderField: "X-Haven-List-Digest")
-            switch http?.statusCode ?? 0 {
+            let code = http?.statusCode ?? 0
+            qaCount(base, (200...299).contains(code) ? "listOk" : (code == 401 || code == 403) ? "listRefused" : "listFail")
+            switch code {
             case 204:
                 return .success((keys: nil, digest: respDigest))   // nothing new — skip the GETs
             case 200...299:
@@ -1910,7 +1912,7 @@ enum SharedStore {
             case 401, 403: return .failure(RelayForbidden())
             default: return .failure(URLError(.badServerResponse))
             }
-        } catch { return .failure(error) }
+        } catch { qaCount(base, "listFail"); return .failure(error) }
     }
 
     /// Last-seen LIST digest per (relay, circle prefix). Only committed once a listing's GET batch
@@ -1947,12 +1949,12 @@ enum SharedStore {
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             switch (resp as? HTTPURLResponse)?.statusCode ?? 0 {
-            case 200...299: return .success(data)
-            case 404: return .success(nil)
-            case 401, 403: return .failure(RelayForbidden())
-            default: return .failure(URLError(.badServerResponse))
+            case 200...299: qaCount(base, "getOk"); return .success(data)
+            case 404: qaCount(base, "getMiss"); return .success(nil)
+            case 401, 403: qaCount(base, "getRefused"); return .failure(RelayForbidden())
+            default: qaCount(base, "getFail"); return .failure(URLError(.badServerResponse))
             }
-        } catch { return .failure(error) }
+        } catch { qaCount(base, "getFail"); return .failure(error) }
     }
 
     /// PUT one key. `.success` = stored; `.failure(RelayForbidden)` = the relay is up and would take
@@ -1976,12 +1978,96 @@ enum SharedStore {
         do {
             let (_, resp) = try await URLSession.shared.upload(for: req, from: body)
             switch (resp as? HTTPURLResponse)?.statusCode ?? 0 {
-            case 200...299: return .success(())
-            case 401, 403: return .failure(RelayForbidden())
-            default: return .failure(URLError(.badServerResponse))
+            case 200...299: qaCount(base, "putOk"); return .success(())
+            case 401, 403: qaCount(base, "putRefused"); return .failure(RelayForbidden())
+            default: qaCount(base, "putFail"); return .failure(URLError(.badServerResponse))
             }
-        } catch { return .failure(error) }
+        } catch { qaCount(base, "putFail"); return .failure(error) }
     }
+
+    // MARK: - QA (DEBUG): per-relay HTTP outcomes + a signed probe (e2e step `multirelay`)
+
+    /// Count one HTTP outcome against the base URL it went to. The dump folds these into
+    /// `relay_stats` per relay (a relay's counters = the sum over its announced URLs), which is how
+    /// the multi-relay e2e tells "A's writes landed on A's relay" from "they all went to one" — and
+    /// how it measures a retry storm against a relay that is down. No-op in release.
+    private static func qaCount(_ base: String, _ what: String) {
+        #if DEBUG
+        qaHttpCounts[base, default: [:]][what, default: 0] += 1
+        #endif
+    }
+
+    #if DEBUG
+    private static var qaHttpCounts: [String: [String: Int]] = [:]
+    static let qaHttpCountKeys = ["putOk", "putRefused", "putFail", "getOk", "getMiss", "getRefused",
+                                  "getFail", "listOk", "listRefused", "listFail"]
+
+    /// The dump's `relay_stats`: one row per relay this device knows, with its announced URLs, a
+    /// fingerprint of its token (never the token), health/backoff, the circles it serves HERE, and
+    /// the HTTP outcome counters summed over its URLs. Field names are a contract (docs/QA.md).
+    static func qaRelayStats() -> [[String: Any]] {
+        let store = RelayMailboxStore.shared
+        let circleIds = FeedStore.shared.circles.map(\.id)
+        return store.allEntries().map { e in
+            let urls = e.httpUrls ?? []
+            var row: [String: Any] = [
+                "relay": e.hex,
+                "name": e.name,
+                "active": e.active,
+                "urls": urls,
+                "urlsBad": urls.filter { httpUrlBad($0) },
+                "tokenFp": qaTokenFingerprint(e.httpToken ?? ""),
+                "addedAtMs": e.addedAtMs ?? 0,
+                "isDefault": store.defaultNodeHex == e.hex,
+                "circles": circleIds.filter { store.relays(forCircle: $0).contains(e.hex) },
+            ]
+            for (k, v) in RelayHealth.shared.qaRow(e.hex) { row[k] = v }
+            if RelayEnrollment.pendingRelays().contains(e.hex.lowercased()) { row["reason"] = "pendingEnrollment" }
+            for k in qaHttpCountKeys {
+                row[k] = urls.reduce(0) { $0 + (qaHttpCounts[$1]?[k] ?? 0) }
+            }
+            return row
+        }
+    }
+
+    /// First 12 hex of SHA-256(token) — enough for the harness (which knows every relay's token) to
+    /// check attribution, never enough to use.
+    static func qaTokenFingerprint(_ token: String) -> String {
+        guard !token.isEmpty else { return "" }
+        return String(SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined().prefix(12))
+    }
+
+    /// QA: one request against a relay's HTTP interface, SIGNED AS THIS DEVICE exactly like every
+    /// real request (`httpAuth`). The multi-relay e2e uses it to prove the relay's authorization —
+    /// "may this device write into another account's self-sync lane?" — with the product's own
+    /// signer rather than a harness re-implementation. Returns {status, url} per URL tried.
+    static func qaProbe(node: String, method: String, key: String, body: Data) async -> [String: Any] {
+        guard let http = RelayMailboxStore.shared.httpInterface(node) else {
+            return ["relay": node, "method": method, "key": key, "status": -1, "error": "no http interface"]
+        }
+        var last: [String: Any] = ["relay": node, "method": method, "key": key, "status": -1]
+        for base in http.urls {
+            let isList = method == "LIST"
+            let wireMethod = isList ? "GET" : method
+            guard let url = isList ? httpListURL(base, key) : httpKeyURL(base, key),
+                  let auth = httpAuth(http.token, wireMethod, key, body) else { continue }
+            var req = URLRequest(url: url, timeoutInterval: 10)
+            req.httpMethod = wireMethod
+            req.setValue(auth, forHTTPHeaderField: "Authorization")
+            if wireMethod == "PUT" { req.httpBody = body }
+            do {
+                let (_, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                last = ["relay": node, "method": method, "key": key, "status": code, "url": base]
+                return last
+            } catch {
+                last = ["relay": node, "method": method, "key": key, "status": -1, "url": base,
+                        "error": error.localizedDescription]
+            }
+        }
+        return last
+    }
+    #endif
 
     // MARK: - Self-sync slot transport (the relay-HTTP rung of SelfSyncCoordinator's ladder)
     //

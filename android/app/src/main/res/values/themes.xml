@@ -10,4 +10,12 @@
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">@bool/haven_light_status_bar</item>
     </style>
+
+    <!-- Invisible host for the system screen-share consent (ScreenShareConsentActivity): the call
+         stays visible behind the system dialog. -->
+    <style name="Theme.Haven.Consent" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
 </resources>

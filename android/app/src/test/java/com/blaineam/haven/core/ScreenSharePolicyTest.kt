@@ -66,4 +66,11 @@ class ScreenSharePolicyTest {
         assertFalse(ScreenSharePolicy.isScreenTrack("video0", emptyList()))
         assertFalse(ScreenSharePolicy.isScreenTrack(null, emptyList()))
     }
+
+    @Test fun consentIsGrantedOnlyForOkWithData() {
+        assertEquals(ScreenSharePolicy.CONSENT_GRANTED, ScreenSharePolicy.consentOutcome(-1, true))
+        assertEquals("denied(-1)", ScreenSharePolicy.consentOutcome(-1, false))
+        assertEquals("denied(0)", ScreenSharePolicy.consentOutcome(0, true))
+        assertEquals("denied(0)", ScreenSharePolicy.consentOutcome(0, false))
+    }
 }

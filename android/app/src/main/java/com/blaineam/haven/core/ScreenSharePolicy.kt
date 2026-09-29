@@ -63,4 +63,17 @@ object ScreenSharePolicy {
         if (streamIds.isNotEmpty()) return STREAM_ID in streamIds
         return trackId == TRACK_ID
     }
+
+    /** [consentOutcome] for a usable grant; anything else is `denied(<resultCode>)`. */
+    const val CONSENT_GRANTED = "granted"
+    /** `Activity.RESULT_OK` (kept here so the decision stays JVM-testable). */
+    private const val RESULT_OK = -1
+
+    /**
+     * What the MediaProjection consent came back as. Only RESULT_OK WITH the projection intent is a
+     * grant — an OK without data cannot start a capture. Anything else records the code, which is
+     * how a chooser destroyed mid-flight (RESULT_CANCELED, 0) shows up in the QA dump.
+     */
+    fun consentOutcome(resultCode: Int, hasData: Boolean): String =
+        if (resultCode == RESULT_OK && hasData) CONSENT_GRANTED else "denied($resultCode)"
 }

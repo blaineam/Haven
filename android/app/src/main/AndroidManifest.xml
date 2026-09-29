@@ -134,6 +134,18 @@
                 android:resource="@xml/shortcuts" />
         </activity>
 
+        <!-- Screen-share consent host. Its OWN task (taskAffinity) so the system consent dialog and
+             the Android 14+ app chooser are not stacked on MainActivity's singleTask task, where
+             sharing "a single app → Haven" relaunched MainActivity, cleared the chooser and came
+             back RESULT_CANCELED. Translucent, never in recents, never exported. -->
+        <activity
+            android:name=".ui.ScreenShareConsentActivity"
+            android:exported="false"
+            android:taskAffinity="${applicationId}.screenshare"
+            android:excludeFromRecents="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:theme="@style/Theme.Haven.Consent" />
+
         <!-- Handing a received file attachment to whatever app can open it. Haven's media is sealed
              at rest and lives in private storage, so opening one means staging a decrypted copy in
              our own cache and granting the receiving app a one-shot read on it — never a world- or

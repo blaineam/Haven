@@ -365,6 +365,7 @@ struct CircleView: View {
             PeerAvatar(nodeHex: c.idHex, name: c.displayName, size: 38)
             VStack(alignment: .leading, spacing: 2) {
                 Text(c.displayName).font(.subheadline.weight(.medium))
+                    .accessibilityIdentifier("circleMemberName")
                 HStack(spacing: 5) {
                     Circle().fill(connected ? Color.green : Color.secondary).frame(width: 7, height: 7)
                     Text(connected ? "Connected" : "Waiting to connect")

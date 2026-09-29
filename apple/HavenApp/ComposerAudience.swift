@@ -48,11 +48,24 @@ enum ComposerAudience {
 
     private static let ackKey = "haven.audienceAck.v1"
 
+    /// UI tests: `HAVEN_RESET_AUDIENCE_ACK=1` forgets every acknowledgement once per launch, so the
+    /// one-time confirmation can be asserted on a simulator that already acknowledged it. DEBUG-only
+    /// — a shipping build can never be made to re-ask.
+    private static let resetForUITestsOnce: Void = {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["HAVEN_RESET_AUDIENCE_ACK"] == "1" {
+            UserDefaults.standard.removeObject(forKey: ackKey)
+        }
+        #endif
+    }()
+
     static func isAcknowledged(_ circleId: String) -> Bool {
-        (UserDefaults.standard.stringArray(forKey: ackKey) ?? []).contains(circleId)
+        _ = resetForUITestsOnce
+        return (UserDefaults.standard.stringArray(forKey: ackKey) ?? []).contains(circleId)
     }
 
     static func acknowledge(_ circleId: String) {
+        _ = resetForUITestsOnce
         var ids = UserDefaults.standard.stringArray(forKey: ackKey) ?? []
         guard !ids.contains(circleId) else { return }
         ids.append(circleId)

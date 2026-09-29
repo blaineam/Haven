@@ -528,6 +528,7 @@ struct StoryViewer: View {
                         .contentShape(Rectangle())   // .plain adds no hit shape — see the Keep pill
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("storySharer")
                 }
                 Text(relativeTimeShort(s.createdAt)).font(.caption2).foregroundStyle(.white.opacity(0.7))
                 Spacer()

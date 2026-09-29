@@ -214,8 +214,6 @@ fun CircleScreen(onAddFriend: () -> Unit) {
     val audienceCount = remember(active, circlesVersion, HavenNet.contacts.size, HavenNet.blocked.size) {
         ComposerAudience.othersCount(active)
     }
-    var showAudienceConfirm by remember { mutableStateOf(false) }
-    var showPrivatePicker by remember { mutableStateOf(false) }
     fun postNow() {
         val actionsBefore = com.blaineam.haven.support.RatingManager.significantActions(context)
         HavenNet.post(active, draft.trim(), pendingMedia.toList(), pendingMusic, retentionSecs = disappearSecs)
@@ -453,37 +451,16 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                     }
                 }
             }
-            // Say out loud who this reaches — the audience used to be implicit in the circle switcher,
-            // and people posted private things to the whole circle meaning to write to one person.
-            Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 12.dp, top = 2.dp)) {
-                ComposerAudienceChip(audienceName, audienceCount) { showPrivatePicker = true }
-            }
-            // Composer text + send.
-            Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 12.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = draft, onValueChange = { draft = it },
-                    placeholder = { Text(stringResource(R.string.composer_placeholder)) },   // the chip above names the circle
-                    modifier = Modifier.weight(1f), shape = RoundedCornerShape(22.dp), maxLines = 4,
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),
-                )
-                Spacer(Modifier.size(8.dp))
-                val canPost = draft.isNotBlank() || pendingMedia.isNotEmpty() || pendingMusic != null
-                // Labeled "Post", not a bare paper plane: the plane is what a private message's send
-                // looks like, and this goes to the whole circle. White-on-brand-gradient — never themed.
-                val postCd = stringResource(R.string.composer_post_cd_named, audienceName)
-                Box(Modifier.height(48.dp).clip(CircleShape).background(HavenTheme.brandHorizontal)
-                    .clickable(enabled = canPost) {
-                        if (ComposerAudience.needsConfirmation(context, active, audienceCount)) showAudienceConfirm = true
-                        else postNow()
-                    }
-                    .padding(horizontal = 18.dp)
-                    .semantics { contentDescription = postCd },
-                    contentAlignment = Alignment.Center) {
-                    Text(stringResource(R.string.composer_post_button), color = Color.White,
-                        fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                }
-            }
+            // Say out loud who this reaches (chip, placeholder, labeled Post, one-time confirmation,
+            // "Send privately…") — see AudienceComposerBar. Attachments stay in this composer; only
+            // the words travel to a private thread.
+            AudienceComposerBar(
+                circleId = active, circleName = audienceName, count = audienceCount,
+                draft = draft, onDraftChange = { draft = it },
+                canPost = draft.isNotBlank() || pendingMedia.isNotEmpty() || pendingMusic != null,
+                onPost = { postNow() },
+                onSendPrivately = { picks, text -> ComposerAudience.sendPrivately(picks, text); draft = "" },
+            )
             }
         }
 
@@ -518,25 +495,6 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                 onDismiss = { showMusicDialog = false },
             )
         }
-    }
-    if (showAudienceConfirm) {
-        AudienceConfirmDialog(
-            circleName = audienceName, count = audienceCount,
-            onPost = { showAudienceConfirm = false; ComposerAudience.acknowledge(context, active); postNow() },
-            onSendPrivately = { showAudienceConfirm = false; showPrivatePicker = true },
-            onDismiss = { showAudienceConfirm = false },
-        )
-    }
-    if (showPrivatePicker) {
-        // Attachments stay in this composer; only the words travel to the private thread.
-        NewMessagePicker(
-            onDismiss = { showPrivatePicker = false },
-            onStart = { picks ->
-                showPrivatePicker = false
-                ComposerAudience.sendPrivately(picks, draft.trim())
-                draft = ""
-            },
-        )
     }
     if (showSchedule) {
         fun doSchedule(sendAtMs: Long) {
@@ -2787,9 +2745,7 @@ fun PostCard(
             val replyAudience = remember(circleId) { HavenNet.circleName(circleId) }
             OutlinedTextField(
                 value = commentDraft, onValueChange = { commentDraft = it },
-                placeholder = { Text(
-                    if (replyAudience.length <= 14) stringResource(R.string.circle_reply_placeholder_named, replyAudience)
-                    else stringResource(R.string.circle_reply_placeholder_generic), fontSize = 13.sp, maxLines = 1) },
+                placeholder = { Text(replyPlaceholder(replyAudience), fontSize = 13.sp, maxLines = 1) },
                 modifier = Modifier.weight(1f), shape = RoundedCornerShape(18.dp), maxLines = 5,
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink),

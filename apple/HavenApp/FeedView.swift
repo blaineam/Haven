@@ -717,6 +717,7 @@ struct FeedView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("storyRing")
                 }
             }
             .padding(.horizontal, 4).padding(.vertical, 2)
@@ -1249,6 +1250,7 @@ struct PostCommentField: View {
                 // Replies are read by the whole circle, not just the author — the placeholder says so.
                 TextField(ComposerAudience.replyPlaceholder(FeedStore.shared.activeCircleTitle),
                           text: $text, axis: .vertical)
+                    .accessibilityIdentifier("replyField")
                     .lineLimit(1...5)
                     .textFieldStyle(.plain)   // drop the macOS system focus ring — matches iOS
                     .font(.caption).padding(.horizontal, 12).padding(.vertical, 8)
@@ -1328,6 +1330,7 @@ struct PostHeader: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("postAuthor")
             }
             Text(relativeTimeShort(item.createdAt)).font(.caption2).foregroundStyle(.secondary)
             if item.edited {

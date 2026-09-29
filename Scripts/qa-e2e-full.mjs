@@ -95,7 +95,16 @@ const REQUIRE_PERF = process.env.E2E_REQUIRE_PERF !== '0';
 function stamp() { return new Date().toISOString().replace(/[:T]/g, '-').slice(0, 16); }
 function log(m) { const s = `[e2e ${new Date().toISOString().slice(11, 19)}] ${m}`; console.log(s); appendFileSync(join(OUT, 'run.log'), s + '\n'); }
 function sh(cmd, args, opts = {}) { return execFileSync(cmd, args, { encoding: 'utf8', ...opts }); }
-function shOk(cmd, args, opts = {}) { const r = spawnSync(cmd, args, { encoding: 'utf8', ...opts }); return r.status === 0 ? (r.stdout || '') : null; }
+// Every adb call gets a ceiling. They are synchronous, so ONE hung `adb shell am start` (a wedged
+// emulator — seen on the multirelay run: 6+ minutes, with two relays and a proxy idling behind it)
+// froze the whole harness. A timed-out call returns null, which every adb caller already treats as
+// "that leg is unhealthy", exactly like any other adb failure. `E2E_ADB_TIMEOUT_MS` overrides.
+const ADB_TIMEOUT_MS = +(process.env.E2E_ADB_TIMEOUT_MS || 60_000);
+function shOk(cmd, args, opts = {}) {
+  const r = spawnSync(cmd, args, { encoding: 'utf8', ...(cmd === 'adb' ? { timeout: ADB_TIMEOUT_MS } : {}), ...opts });
+  if (r.error?.code === 'ETIMEDOUT') log(`WARN adb ${args.slice(0, 3).join(' ')} … hung ${ADB_TIMEOUT_MS / 1000}s — killed`);
+  return r.status === 0 ? (r.stdout || '') : null;
+}
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 // FAIL FAST (E2E_FAIL_FAST=1, on by default for the satellite step — see below).
 //

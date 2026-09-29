@@ -10,7 +10,7 @@ mkdir -p "$OUT"
 NODE="${HAVEN_STUB_NODE:-401f6cda9ed29974eb0ef02412de42bbd125c4bf16f7a857f285fe8aeb57af89}"
 TOKEN="${HAVEN_STUB_TOKEN:-8e17157a4fd8f6eeef1c3accdd9fc1de}"
 DATA_DIR="${HAVEN_DESKTOP_DATA:-$HOME/Library/Application Support/Haven/qa-matrix}"
-DESK="${HAVEN_DESKTOP_BIN:-$ROOT/desktop/src-tauri/target/debug/haven-desktop}"
+DESK="${HAVEN_DESKTOP_BIN:-$ROOT/desktop/src-tauri/target/qa/haven-desktop}"
 IOS_BUNDLE="${HAVEN_IOS_BUNDLE:-com.blaineam.kith}"
 AND_PKG="${HAVEN_AND_PKG:-com.blaineam.haven}"
 
@@ -55,7 +55,7 @@ if [[ "${E2E_FRESH:-1}" != "0" ]]; then
     fi
   fi
   pkill -f "HavenStub.app" 2>/dev/null || true
-  pkill -f 'target/debug/haven-desktop' 2>/dev/null || true
+  pkill -f 'target/qa/haven-desktop' 2>/dev/null || true
   sleep 1
   rm -rf "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support"/{haven-relay-store,haven-media,haven-feed.json,haven-mailbox-seen.txt,haven-selfsync.bin,qa-*} 2>/dev/null || true
   # The authorize list is ALSO read from subdirs and the isolated stub HOME (qa-e2e-authorize.sh
@@ -228,12 +228,12 @@ hexline() { [[ -s "$1" ]] && printf '%s\n' "$(tr -d ' \r\n' <"$1")"; }
 authorize "$MEMBERS"
 
 # ── 5. Tauri as linked device of A ────────────────────────────────────────────
-pkill -f 'target/debug/haven-desktop' 2>/dev/null || true; sleep 1
+pkill -f 'target/qa/haven-desktop' 2>/dev/null || true; sleep 1
 # Rebuild when missing OR stale — `[[ -x ]] ||` alone silently reran yesterday's binary.
 # cargo is incremental, so this is a no-op when nothing changed.
 if [[ ! -x "$DESK" ]] || [[ -n "$(find "$ROOT/core" "$ROOT/desktop/src-tauri/src" -type f -name '*.rs' -newer "$DESK" -print -quit 2>/dev/null)" ]]; then
   log "building haven-desktop (missing or stale)…"
-  (cd "$ROOT/desktop/src-tauri" && cargo build -q) || { echo "error: desktop build FAILED"; exit 1; }
+  (cd "$ROOT/desktop/src-tauri" && cargo build -q --profile qa --bin haven-desktop) || { echo "error: desktop build FAILED"; exit 1; }
 fi
 mkdir -p "$DATA_DIR"
 python3 - "$DATA_DIR" "$NODE" "$TOKEN" <<'PY'
@@ -318,6 +318,21 @@ elif command -v adb >/dev/null 2>&1; then
       [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == "1" ]] && { booted=1; break; }
       sleep 3
     done
+    # A long-lived emulator can finish "booted" with core system services dead (seen: package
+    # manager gone — "Can't find service: package" — after rild/bluetooth aborts). Installs and the
+    # MediaStore dump channel then fail while the app itself looks healthy. Cold-reboot it once.
+    if [[ "$booted" == "1" ]] && ! adb shell pm path android >/dev/null 2>&1; then
+      log "android emulator is booted but its package manager is dead — cold-rebooting it"
+      adb emu kill >/dev/null 2>&1 || true
+      for i in $(seq 1 30); do [[ "$(adb get-state 2>/dev/null || true)" != "device" ]] && break; sleep 1; done
+      boot_haven_emulator
+      for i in $(seq 1 160); do [[ "$(adb get-state 2>/dev/null || true)" == "device" ]] && break; sleep 3; done
+      booted=0
+      for i in $(seq 1 100); do
+        [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == "1" ]] && { booted=1; break; }
+        sleep 3
+      done
+    fi
     if [[ "$booted" != "1" ]]; then
       log "WARN: android emulator never finished booting — android leg skipped"
     else

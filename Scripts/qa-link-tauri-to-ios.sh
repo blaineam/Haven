@@ -196,7 +196,7 @@ lsof -nP -iTCP:8674 -sTCP:LISTEN
 export HAVEN_QA_SEED_FILE=$OUT/ios-to-tauri-haven-seed.txt
 cd $ROOT/desktop/src-tauri
 # Prefer already-built binary after first cargo tauri dev:
-./target/debug/haven-desktop
+./target/qa/haven-desktop
 # or: cargo tauri dev
 \`\`\`
 

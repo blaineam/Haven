@@ -246,6 +246,17 @@ pub async fn serve(root: PathBuf, bind: &str, token: String, auth: Arc<Mutex<Rel
     let addr: SocketAddr = bind.parse().map_err(|e| anyhow!("bad http bind {bind}: {e}"))?;
     let listener = TcpListener::bind(addr).await.map_err(|e| anyhow!("http bind {bind}: {e}"))?;
     let port = listener.local_addr()?.port();
+    if addr.port() != 0 {
+        if let Some(other) = overlapping_listener(SocketAddr::new(addr.ip(), port)) {
+            // Dropping `listener` releases the port we just took, so the OTHER relay keeps serving
+            // everything it was serving before we came along.
+            bail!(
+                "http bind {bind}: port {port} is already served by another listener on {other} — two \
+                 relays sharing one port would silently split the traffic between them; pick a \
+                 different --http port"
+            );
+        }
+    }
     let token = Arc::new(token);
     let root = Arc::new(root);
     // Replay window, shared across connections (a nonce burnt on one socket must be burnt on all).
@@ -261,6 +272,81 @@ pub async fn serve(root: PathBuf, bind: &str, token: String, auth: Arc<Mutex<Rel
         }
     });
     Ok(HttpRelay { port, handle })
+}
+
+/// Another process already listening on an OVERLAPPING address for `bound`'s port, if any.
+///
+/// Darwin and the BSDs let a socket bound to a SPECIFIC address (`127.0.0.1:8674`) and a socket
+/// bound to the WILDCARD (`0.0.0.0:8674`) listen on the same port at the same time — `SO_REUSEADDR`,
+/// which tokio sets on every listener, is all it takes, in either order. Two relays on one Mac then
+/// both start "successfully": loopback clients (the simulator, `adb reverse`, a local reverse proxy)
+/// reach whichever one bound the specific address, LAN clients reach the other, and each relay's
+/// store fills with half of the traffic addressed to it. Nothing errors, so nothing tells the
+/// operator. (Linux refuses the second bind outright, which is the behaviour we want everywhere.)
+///
+/// The probe: bind a throwaway socket (also `SO_REUSEADDR`, never listened on) to each overlapping
+/// address. Our own listener cannot make that fail — a specific address beside our wildcard (or a
+/// wildcard beside our specific address) is exactly what `SO_REUSEADDR` permits — so `EADDRINUSE`
+/// can only mean somebody else already holds it. TIME_WAIT leftovers of a previous run don't count
+/// either, for the same reason, so a relay restarting on its own port is never refused.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+fn overlapping_listener(bound: SocketAddr) -> Option<SocketAddr> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let port = bound.port();
+    let mut candidates: Vec<SocketAddr> = Vec::new();
+    match bound.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => {
+            candidates.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+            // The primary LAN address (UDP-connect trick — nothing is sent). A relay bound to one
+            // LAN interface beside a wildcard one splits LAN traffic the same way.
+            if let Some(lan) = std::net::UdpSocket::bind("0.0.0.0:0")
+                .ok()
+                .and_then(|s| s.connect("8.8.8.8:80").ok().map(|_| s))
+                .and_then(|s| s.local_addr().ok())
+                .map(|a| a.ip())
+                .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+            {
+                candidates.push(SocketAddr::new(lan, port));
+            }
+        }
+        IpAddr::V6(ip) if ip.is_unspecified() => {
+            candidates.push(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port));
+        }
+        IpAddr::V4(_) => candidates.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)),
+        IpAddr::V6(_) => candidates.push(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port)),
+    }
+    for candidate in candidates {
+        let probe = if candidate.is_ipv4() { tokio::net::TcpSocket::new_v4() } else { tokio::net::TcpSocket::new_v6() };
+        let Ok(probe) = probe else { continue };
+        let _ = probe.set_reuseaddr(true);
+        if let Err(e) = probe.bind(candidate) {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Everywhere else the kernel already refuses an overlapping bind, so the bind error IS the loud
+/// failure and there is nothing to probe.
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+)))]
+fn overlapping_listener(_bound: SocketAddr) -> Option<SocketAddr> {
+    None
 }
 
 async fn handle_conn(
@@ -653,6 +739,50 @@ mod tests {
         assert_eq!(percent_decode("haven/media/a%20b"), "haven/media/a b");
         assert_eq!(percent_decode("plain"), "plain");
         assert_eq!(percent_decode("%2e%2e/etc"), "../etc");
+    }
+
+    /// Two relays on one host must never both come up on the same port. Darwin lets a
+    /// specific-address listener and a wildcard listener share a port, in either order; `serve`
+    /// has to notice and refuse rather than silently split the traffic.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn overlapping_port_is_refused_not_split() {
+        let root = std::env::temp_dir().join(format!("httprelay-overlap-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let auth: Arc<Mutex<RelayAuth>> = Arc::default();
+
+        // Someone else holds the WILDCARD: our loopback bind must fail.
+        let other = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = other.local_addr().unwrap().port();
+        let err = serve(root.clone(), &format!("127.0.0.1:{port}"), String::new(), auth.clone())
+            .await
+            .err()
+            .expect("a loopback relay beside a wildcard listener must be refused");
+        assert!(err.to_string().contains("already served"), "{err}");
+        drop(other);
+
+        // Someone else holds LOOPBACK: our wildcard bind must fail too (the other order).
+        let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = other.local_addr().unwrap().port();
+        assert!(
+            serve(root.clone(), &format!("0.0.0.0:{port}"), String::new(), auth.clone()).await.is_err(),
+            "a wildcard relay beside a loopback listener must be refused"
+        );
+        drop(other);
+
+        // Nobody else: a fixed port serves, and the same port serves again after a stop (the
+        // restart case — our own leftovers never read as a collision).
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let first = serve(root.clone(), &format!("127.0.0.1:{free}"), String::new(), auth.clone()).await.unwrap();
+        assert_eq!(first.port(), free);
+        drop(first);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let again = serve(root.clone(), &format!("127.0.0.1:{free}"), String::new(), auth.clone()).await.unwrap();
+        assert_eq!(again.port(), free);
+        // Two relays on DIFFERENT ports coexist.
+        let other_port = serve(root.clone(), "127.0.0.1:0", String::new(), auth).await.unwrap();
+        assert_ne!(other_port.port(), free);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

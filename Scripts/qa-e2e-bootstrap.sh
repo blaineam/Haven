@@ -441,7 +441,7 @@ elif command -v adb >/dev/null 2>&1; then
     and_qa_put() {   # <host file> <name under files/qa>
       local tmp="/data/local/tmp/haven-qa-$$-$2"
       adb push "$1" "$tmp" >/dev/null 2>&1 || return 1
-      adb shell "run-as $AND_PKG sh -c 'mkdir -p files/qa && cat $tmp > files/qa/$2.tmp && mv -f files/qa/$2.tmp files/qa/$2'; rc=\$?; rm -f $tmp; exit \$rc" >/dev/null 2>&1
+      adb shell "run-as $AND_PKG sh -c 'umask 077 && mkdir -p files/qa && cat $tmp > files/qa/$2.tmp && mv -f files/qa/$2.tmp files/qa/$2'; rc=\$?; rm -f $tmp; exit \$rc" >/dev/null 2>&1
     }
     and_qa_has() { [[ "$(adb shell "run-as $AND_PKG test -f files/qa/$1 && echo y" 2>/dev/null | tr -d '\r')" == "y" ]]; }
     # Hand the fleet seed to the android DEBUG build — staged BEFORE first launch (adopted at boot).

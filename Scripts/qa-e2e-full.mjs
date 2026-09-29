@@ -247,7 +247,7 @@ function androidQaWrite(src, name) {
   const tmp = `/data/local/tmp/haven-qa-${process.pid}-${++andPushSeq}-${name}`;
   if (shOk('adb', ['push', src, tmp]) === null) return false;
   const d = ANDROID_QA_DIR;
-  const inner = `mkdir -p ${d} && cat ${tmp} > ${d}/${name}.tmp && mv -f ${d}/${name}.tmp ${d}/${name}`;
+  const inner = `umask 077 && mkdir -p ${d} && cat ${tmp} > ${d}/${name}.tmp && mv -f ${d}/${name}.tmp ${d}/${name}`;
   return shOk('adb', ['shell', `run-as ${AND_PKG} sh -c '${inner}'; rc=$?; rm -f ${tmp}; exit $rc`]) !== null;
 }
 

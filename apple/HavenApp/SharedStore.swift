@@ -1692,12 +1692,15 @@ enum SharedStore {
             }
         }
         try? handle.close()
-        FeedStore.shared.clearRestoreProgress(ref)
         guard ok else {
             // KEEP the partial + sidecar — a later attempt against this same seal resumes from `have`.
+            // The i/n stays too: those chunks ARE held, and resetting it made a transfer that was
+            // switching lanes look like it had started over. The caller's lanes (or the no-progress
+            // watchdog) decide when the spinner comes down.
             HavenLog.relay("media restore \(ref.prefix(12)): reassemble STALLED at \(have)/\(chunkCount) via \(src) — partial kept for resume")
             return nil
         }
+        FeedStore.shared.clearRestoreProgress(ref)
         let bytes = try? Data(contentsOf: temp)
         clearRestorePart(ref)
         return bytes

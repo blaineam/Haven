@@ -151,15 +151,23 @@ struct PostCenterKey: PreferenceKey {
 }
 
 
-/// Delivery state of a circle's authored content (the composer status light).
-enum PostSyncStatus: Equatable {
-    case synced, pending, stuck
-    var color: Color { switch self { case .synced: return .green; case .pending: return .yellow; case .stuck: return .red } }
+/// How the composer pill draws each delivery state (`SyncBadgeState`, SyncProgress.swift).
+extension SyncBadgeState {
+    var color: Color {
+        switch self {
+        case .synced: return .green
+        case .sending, .queued: return .yellow
+        case .retrying: return .orange
+        case .deviceOnly: return .red
+        }
+    }
     var label: String {
         switch self {
-        case .synced: return "Synced"
-        case .pending: return "Syncing…"
-        case .stuck: return "On this device only"
+        case .synced: return String(localized: "Synced")
+        case .sending(let done, let total): return String(localized: "Sending \(done) of \(total)")
+        case .queued(let n): return String(localized: "Syncing \(n)…")
+        case .retrying(let n): return String(localized: "Retrying (\(n) waiting)")
+        case .deviceOnly: return String(localized: "On this device only")
         }
     }
 }
@@ -179,28 +187,48 @@ enum PostSyncStatus: Equatable {
 struct SyncStatusBadge: View {
     let circleId: String
     @ObservedObject private var store = FeedStore.shared
+    // Event-driven: the uploader publishes when its pending/sent counts change, FeedStore when
+    // connectivity does. (This was an always-on 2.5s TimelineView re-deriving the same answer.)
+    @ObservedObject private var uploader = BackgroundUploader.shared
     @State private var showDetail = false
+    /// A pass just finished for this circle: say "Synced" for a moment before the pill folds away, so a
+    /// send visibly COMPLETES instead of just disappearing.
+    @State private var justSynced = false
+    @State private var syncedFade: Task<Void, Never>?
+
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 2.5)) { _ in
-            let s = store.syncStatus(circleId: circleId)
-            // Only surface the pill when there's something to know — "Syncing…" or "device-only". When
-            // everything's synced it collapses to nothing so it doesn't pad out the composer.
-            if s != .synced {
+        let s = store.syncStatus(circleId: circleId)
+        Group {
+            // Only surface the pill when there's something to know. When everything's synced it collapses
+            // to nothing so it doesn't pad out the composer.
+            if s != .synced || justSynced {
                 Button { showDetail = true } label: {
                     HStack(spacing: 5) {
                         Circle().fill(s.color).frame(width: 7, height: 7)
                             .shadow(color: s.color.opacity(0.6), radius: 2)
-                        Text(s.label).font(.caption2).foregroundStyle(.secondary)
+                        Text(s.label).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                     }
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .havenGlass(in: Capsule())
                 }
                 .buttonStyle(.plain)
                 .help("Tap for live sync detail. Yellow: still syncing. Red: only on this device.")
+                .accessibilityIdentifier("syncBadge")
                 .transition(.opacity)
                 .popover(isPresented: $showDetail, arrowEdge: .bottom) { SyncDetailView() }
             }
         }
+        .onChange(of: s) { old, new in
+            guard new == .synced, old != .synced, old != .deviceOnly else { return }
+            justSynced = true
+            syncedFade?.cancel()
+            syncedFade = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeOut(duration: 0.3)) { justSynced = false }
+            }
+        }
+        .onChange(of: circleId) { _, _ in justSynced = false; syncedFade?.cancel() }
     }
 }
 
@@ -548,6 +576,9 @@ struct FeedView: View {
             }
             .sensoryFeedback(.success, trigger: store.postTick)
             .sensoryFeedback(.impact(weight: .light), trigger: store.reactionTick)
+            #if DEBUG
+            .overlay { QATransferScene() }
+            #endif
             .sheet(isPresented: $showMediaPicker) {
                 MediaPicker { refs in attachedMedia.append(contentsOf: refs) }.macSheetClose()
             }
@@ -2811,3 +2842,27 @@ struct ProfileView: View {
         .padding(.bottom, 4)
     }
 }
+
+#if DEBUG
+/// UI-test scene (HAVEN_DEMO + HAVEN_SCENE=transfer): the placeholder of a blob arriving peer-to-peer,
+/// fed by `FeedStore.qaSimulatePeerTransfer` through the real chunk bookkeeping, so HavenUITests can
+/// assert that "Downloading… i/n" advances. Draws nothing in any other launch.
+struct QATransferScene: View {
+    @State private var ref: String?
+    var body: some View {
+        Group {
+            if let ref {
+                MissingMediaPlaceholder(ref: ref)
+                    .frame(width: 240, height: 180)
+                    .accessibilityIdentifier("qaTransferTile")
+            }
+        }
+        .task {
+            guard DemoEnv.isDemo, DemoEnv.scene == .transfer, ref == nil else { return }
+            let r = "img_" + String(repeating: "0", count: 60) + "0a11"
+            ref = r
+            FeedStore.shared.qaSimulatePeerTransfer(ref: r, total: 40)
+        }
+    }
+}
+#endif

@@ -307,6 +307,7 @@ from launch or from the last `{"op":"perf_reset"}`, which zeroes them.
 | `engineUserWaitP95Ms` / `engineUserWaitMaxMs` | how long **user-initiated** engine calls (post, react, comment, DM, the visible feed rebuild) waited for the engine — the priority lane's queue wait, over the last 512 calls. Apple only; Android reports `0`. |
 | `persistExportCount` / `lastPersistExportAtMs` | whole-state `exportState` runs that actually happened (a persist skipped because nothing changed does not count) and the wall-clock ms of the last one. |
 | `persistReasons` | exports that ran, keyed by what asked for them (`<function>:<line>` of the persist call). Apple only. |
+| `recentApplied` | the last 30 inbound envelopes that changed the engine (`live`/`mailbox`, circle, envelope tag, sender) — an export while idle names its cause here. DEBUG, Apple only. |
 | `engineDirtiedBy` | the 25 most frequent engine calls not marked `readOnly` (`<function>:<line>`) — any one of them makes the next persist export. DEBUG, Apple only. |
 | `refreshCount` | feed rebuilds that completed and were applied. Apple only (Android reports `0`). |
 | `mediaStoreOnMainCount` | inbound-media hash / write / reassembly work that ran on the main thread. **Must stay 0** (the DEBUG demo seed's bundled-asset import is excluded explicitly). Apple only. |

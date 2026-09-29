@@ -9,8 +9,8 @@ import os
 /// re-delivered the same roster bytes every ~30 s, and each one read as a new event: a whole-state
 /// export, a fan-out to every other device of mine (which re-applied and re-fanned it), and a
 /// self-sync push. This only RECOGNISES a repeat: the caller still hands it to the engine (every
-/// roster receipt replays parked events) and counts it as a change only if that landed events —
-/// see `FeedStore.receiveChanged`. Pure and bounded so HavenLogicTests covers it.
+/// roster receipt replays parked events) and withholds only the engine export when that landed no
+/// events — see `FeedStore.receiveOutcome`. Pure and bounded so HavenLogicTests covers it.
 struct RosterEcho: Sendable {
     static let cap = 512
     private var order: [String] = []

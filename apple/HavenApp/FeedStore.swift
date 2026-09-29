@@ -5970,29 +5970,37 @@ final class FeedStore: ObservableObject {
         }
     }
 
-    /// `receive`, answering "did this CHANGE anything?" for a device roster too.
+    /// What one `receive` did. `quietRoster`: a byte-identical REPEAT of a device roster that landed
+    /// no events — handled exactly like an applied envelope (fan-out, activity, refresh: the fleet's
+    /// cadence and delivery timing lean on those) EXCEPT that it owes no engine export.
+    enum ReceiveOutcome: Equatable, Sendable {
+        case none, changed, quietRoster
+        var applied: Bool { self != .none }
+    }
+
+    /// `receive`, telling a roster repeat apart from a change.
     ///
     /// The core's `receive` reports a device roster (tag 0x04) as applied whenever it VERIFIES —
     /// including a roster it already holds. Every hello reply carries the sender's roster verbatim,
-    /// so an idle fleet re-delivered the same rosters every ~30 s and each read as a new event: a
-    /// whole-state export, a fan-out to every other device of mine (which re-applied and re-fanned
-    /// it) and a silent self-sync push — forever.
+    /// so an idle fleet re-delivered the same rosters every ~30 s and each one exported the whole
+    /// engine (the e2e idle window's steady exports, attributed via `perf.recentApplied`).
     ///
-    /// A byte-identical REPEAT (`RosterEcho`) still goes through `receive` — every roster receipt
-    /// replays the engine's parked-event and tree-commit buffers, and delivery relies on that (with
-    /// the repeat skipped outright, Android's first feed after a relaunch waited 15 s to forever for
-    /// events parked behind it) — but it counts as a change only when that replay actually landed
-    /// events. The first copy, and any re-signed roster, count exactly as before.
-    nonisolated static func receiveChanged(_ s: HavenSocial, circleId: String, envelope: Data) -> Bool {
+    /// A repeat (`RosterEcho`) still goes through `receive` — every roster receipt replays the
+    /// engine's parked-event and tree-commit buffers, and delivery relies on that — and it is a real
+    /// change when that replay landed events (a circle's event count grew). Otherwise it is
+    /// `quietRoster`. Skipping repeats outright, or treating them as not-applied, measurably slowed
+    /// delivery across the fleet (receivers relaxed their poll cadence, Android's first feed after a
+    /// relaunch waited 8 s to forever), so only the export is withheld.
+    nonisolated static func receiveOutcome(_ s: HavenSocial, circleId: String, envelope: Data) -> ReceiveOutcome {
         guard envelope.first == 0x04, RosterEcho.shared.withLock({ $0.isRepeat(envelope) }) else {
             let ok = (try? s.receive(circleId: circleId, envelope: envelope)) == true
             if !ok, envelope.first == 0x04 { RosterEcho.shared.withLock { $0.forget(envelope) } }   // refused: retry a later copy
-            return ok
+            return ok ? .changed : .none
         }
         let cids = s.circles().map(\.id)
         let before = cids.reduce(UInt64(0)) { $0 &+ s.historyEventCount(circleId: $1) }
-        guard (try? s.receive(circleId: circleId, envelope: envelope)) == true else { return false }
-        return cids.reduce(UInt64(0)) { $0 &+ s.historyEventCount(circleId: $1) } != before
+        guard (try? s.receive(circleId: circleId, envelope: envelope)) == true else { return .none }
+        return cids.reduce(UInt64(0)) { $0 &+ s.historyEventCount(circleId: $1) } != before ? .changed : .quietRoster
     }
 
     private func eventPayload(_ circleId: String, _ env: Data) -> Data {
@@ -6220,12 +6228,13 @@ final class FeedStore: ObservableObject {
     /// contract as pullMailbox's content path, for a tiny batch.
     private func ingestHintedEnvelopes(_ batch: [(cid: String, key: String, env: Data)]) async {
         guard let engine else { return }
-        let ingested: [(cid: String, key: String, env: Data)] = await engine.run { s in
-            batch.filter { FeedStore.receiveChanged(s, circleId: $0.cid, envelope: $0.env) }
+        let results: [(item: (cid: String, key: String, env: Data), outcome: ReceiveOutcome)] = await engine.run { s in
+            batch.map { ($0, FeedStore.receiveOutcome(s, circleId: $0.cid, envelope: $0.env)) }
         }
+        let ingested = results.filter { $0.outcome.applied }.map(\.item)
         guard self.engine === engine, !ingested.isEmpty else { return }
         for item in ingested { SharedStore.markSeenPublic(item.key) }
-        persist()
+        if results.contains(where: { $0.outcome == .changed }) { persist() }
         bumpActivity()
         for item in ingested {
             invalidateMessagesCache(item.cid)
@@ -6499,7 +6508,8 @@ final class FeedStore: ObservableObject {
         let batch: (ingested: [(circleId: String, envelope: Data)],
                     controlKeys: [String: [String]],
                     unlockedCircles: Set<String>,
-                    processedKeys: [String]) = await Task.detached(priority: .utility) {
+                    processedKeys: [String],
+                    realChange: Bool) = await Task.detached(priority: .utility) {
             // SLICED, with real suspension points between engine holds. One monolithic
             // engine pass re-acquired the (barging, unfair) engine mutex back-to-back
             // for the whole backlog, so any main-thread social.* touch during the drain —
@@ -6513,19 +6523,23 @@ final class FeedStore: ObservableObject {
             var controlKeys: [String: [String]] = [:]
             var unlocked = Set<String>()
             var processed: [String] = []
+            var anyRealChange = false
             var sliceStart = 0
             while sliceStart < content.count {
                 let slice = Array(content[sliceStart..<min(sliceStart + 6, content.count)])
                 if sliceStart > 0 { try? await Task.sleep(nanoseconds: 3_000_000) }
                 sliceStart += 6
-                let part: ([(String, Data)], [String: [String]], Set<String>, [String])
+                let part: ([(String, Data)], [String: [String]], Set<String>, [String], Bool)
                 part = await engine.run { s in
+                var realChange = false
                 var changed: [(String, Data)] = []
                 var controlKeys: [String: [String]] = [:]
                 var unlocked = Set<String>()
                 var processed: [String] = []
                 for (cid, key, env) in slice {
-                    let applied = FeedStore.receiveChanged(s, circleId: cid, envelope: env)
+                    let outcome = FeedStore.receiveOutcome(s, circleId: cid, envelope: env)
+                    let applied = outcome.applied
+                    if outcome == .changed { realChange = true }
                     // Every processed envelope is marked seen — `false` means "duplicate" or
                     // "buffered until its key/roster arrives" and the pending buffer is durable,
                     // so the mailbox copy is redundant either way (marking only on `true` melted
@@ -6547,14 +6561,15 @@ final class FeedStore: ObservableObject {
                         }
                     }
                 }
-                return (changed, controlKeys, unlocked, processed)
+                return (changed, controlKeys, unlocked, processed, realChange)
                 }
+                if part.4 { anyRealChange = true }
                 changed += part.0
                 for (k, v) in part.1 { controlKeys[k, default: []] += v }
                 unlocked.formUnion(part.2)
                 processed += part.3
             }
-            return (changed, controlKeys, unlocked, processed)
+            return (changed, controlKeys, unlocked, processed, anyRealChange)
         }.value
         guard self.engine === engine else { return 0 }
         let ingested = batch.ingested
@@ -6655,7 +6670,8 @@ final class FeedStore: ObservableObject {
             }
             // Bounded: past `maxDeferredMarkKeys` deferred keys the pass asks for the export after
             // all, so a kill that skips the background flush re-fetches at most that many.
-            if ingested.isEmpty, batch.unlockedCircles.isEmpty,
+            // (Roster repeats count as applied for everything else, but owe no export.)
+            if !batch.realChange, batch.unlockedCircles.isEmpty,
                deferredMarkKeys + processed.count <= Self.maxDeferredMarkKeys {
                 deferredMarkKeys += processed.count
                 afterNextPersist(marks)
@@ -10345,10 +10361,10 @@ final class FeedStore: ObservableObject {
         // receive() verifies + decrypts — real CPU per frame, and event frames arrive in BURSTS
         // during a sync. Do the crypto off-main; hop back only for the (already-coalesced) applies.
         Task { @MainActor [weak self] in
-            let ok = await engine.run { s in
-                Self.receiveChanged(s, circleId: circleId, envelope: envelope)
+            let outcome = await engine.run { s in
+                Self.receiveOutcome(s, circleId: circleId, envelope: envelope)
             }
-            guard ok else { return }
+            guard outcome.applied else { return }
             guard let self, self.engine === engine else { return }
             #if DEBUG
             HavenPerf.shared.noteApplied("live c=\(circleId.prefix(10)) tag=\(envelope.first.map { String(format: "%02x", $0) } ?? "--") from=\(senderDevice?.prefix(8) ?? "?") own=\(fromOwnDevice) nearby=\(viaNearby)")
@@ -10376,7 +10392,8 @@ final class FeedStore: ObservableObject {
             if circleId.hasPrefix("dm:"), let partner = self.dmPartnerHex(circleId) { self.recordHeard(partner) }
             self.invalidateMessagesCache(circleId)
             self.invalidateSyncBundle(circleId)
-            self.schedulePersist()             // coalesced — a sync burst writes once, not per event
+            // coalesced — a sync burst writes once, not per event; a roster repeat owes no export
+            if outcome == .changed { self.schedulePersist() }
             self.scheduleRefresh()             // coalesced feed rebuild
             self.scheduleRequestMissingMedia() // coalesced media pull (scans the whole feed)
             self.scheduleCircleSideEffects(circleId)  // notify + badge + DM media, coalesced off-main

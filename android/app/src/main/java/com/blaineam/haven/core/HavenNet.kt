@@ -460,7 +460,6 @@ object HavenNet : InboundListener {
         // engine from the account PUBLIC bundle + its own device seed (the device identity is baked in),
         // and NEVER registers a device or registers for push (the primary owns those). A seeded/legacy
         // device keeps today's path: engine over the account seed, then adopt the device identity.
-        RosterEcho.clear()   // a new engine has seen no roster yet
         social = if (core.seedless) {
             HavenSocial.newSeedless(core.bundle, DeviceKeyStore.deviceAccount().secretSeed())
         } else {
@@ -2322,7 +2321,7 @@ object HavenNet : InboundListener {
             val l = s.lowercase()
             l == mineAcct || l == mineDev || myOtherDeviceTargets().any { it == l }
         } ?: false
-        val changed = receiveChanged(ev.circleId, ev.envelope)
+        val changed = runCatching { social.receive(ev.circleId, ev.envelope) }.getOrDefault(false)
         if (changed) {
             // FAN OUT to my other devices. A sender dials the device ids ITS copy of my roster
             // resolves — often just one — so a DM delivered straight to my tablet never reached my
@@ -5636,7 +5635,7 @@ object HavenNet : InboundListener {
         val newlyIngested = ArrayList<Pair<String, ByteArray>>()
         fun ingestMailboxEnv(circleId: String, env: ByteArray): Boolean {
             receiveRan = true
-            if (!receiveChanged(circleId, env)) return false
+            if (!runCatching { social.receive(circleId, env) }.getOrDefault(false)) return false
             newlyIngested.add(circleId to env)
             notifyInbound(circleId)
             return true
@@ -8767,33 +8766,6 @@ object HavenNet : InboundListener {
                 Log.d(TAG, "send type=$type to ${toNodeHex.take(8)} failed: $lastErr")
             }
         }
-    }
-
-    /**
-     * `receive`, answering "did this CHANGE anything?" for a device roster too (Apple
-     * `FeedStore.receiveChanged` parity). The core reports a roster envelope (tag 0x04) as applied
-     * whenever it verifies — an ALREADY-HELD one included — and every hello reply carries the
-     * sender's roster verbatim, so an idle fleet re-applied the same rosters every ~30 s: a
-     * whole-state persist, a fan-out to my other devices (which re-applied and re-fanned it) and a
-     * self-sync push each time.
-     *
-     * A byte-identical REPEAT ([RosterEcho]) still goes through `receive` — every roster receipt
-     * replays the engine's parked-event and tree-commit buffers, and delivery relies on that
-     * (skipping it outright left the first feed after a relaunch waiting 15 s to forever) — but it
-     * counts as a change only when that replay actually landed events.
-     */
-    private fun receiveChanged(circleId: String, env: ByteArray): Boolean {
-        val isRoster = env.isNotEmpty() && env[0] == 0x04.toByte()
-        if (!isRoster || !RosterEcho.isRepeat(env)) {
-            val ok = runCatching { social.receive(circleId, env) }.getOrDefault(false)
-            if (!ok && isRoster) RosterEcho.forget(env)   // refused: a later copy may take
-            return ok
-        }
-        val cids = runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
-        fun events() = cids.sumOf { runCatching { social.historyEventCount(it) }.getOrDefault(0uL).toLong() }
-        val before = events()
-        if (!runCatching { social.receive(circleId, env) }.getOrDefault(false)) return false
-        return events() != before
     }
 
     // ---- Persistence ---------------------------------------------------------------------

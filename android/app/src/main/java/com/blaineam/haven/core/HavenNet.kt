@@ -8775,17 +8775,25 @@ object HavenNet : InboundListener {
      * whenever it verifies — an ALREADY-HELD one included — and every hello reply carries the
      * sender's roster verbatim, so an idle fleet re-applied the same rosters every ~30 s: a
      * whole-state persist, a fan-out to my other devices (which re-applied and re-fanned it) and a
-     * self-sync push each time. A byte-identical repeat is answered "nothing new" without touching
-     * the engine ([RosterEcho]); the first copy and any re-signed roster go through as before.
+     * self-sync push each time.
+     *
+     * A byte-identical REPEAT ([RosterEcho]) still goes through `receive` — every roster receipt
+     * replays the engine's parked-event and tree-commit buffers, and delivery relies on that
+     * (skipping it outright left the first feed after a relaunch waiting 15 s to forever) — but it
+     * counts as a change only when that replay actually landed events.
      */
     private fun receiveChanged(circleId: String, env: ByteArray): Boolean {
-        if (env.isNotEmpty() && env[0] == 0x04.toByte()) {
-            if (RosterEcho.isRepeat(env)) return false
+        val isRoster = env.isNotEmpty() && env[0] == 0x04.toByte()
+        if (!isRoster || !RosterEcho.isRepeat(env)) {
             val ok = runCatching { social.receive(circleId, env) }.getOrDefault(false)
-            if (!ok) RosterEcho.forget(env)   // refused: a later copy may take
+            if (!ok && isRoster) RosterEcho.forget(env)   // refused: a later copy may take
             return ok
         }
-        return runCatching { social.receive(circleId, env) }.getOrDefault(false)
+        val cids = runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
+        fun events() = cids.sumOf { runCatching { social.historyEventCount(it) }.getOrDefault(0uL).toLong() }
+        val before = events()
+        if (!runCatching { social.receive(circleId, env) }.getOrDefault(false)) return false
+        return events() != before
     }
 
     // ---- Persistence ---------------------------------------------------------------------

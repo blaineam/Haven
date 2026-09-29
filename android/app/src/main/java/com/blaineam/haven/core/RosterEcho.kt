@@ -6,8 +6,9 @@ import java.security.MessageDigest
  * Device-roster envelopes (tag 0x04) this process already fed to the engine, by content (Apple
  * `RosterEcho` parity). The core's `receive` reports a roster as applied whenever it verifies — an
  * already-held one included — and every hello reply carries the sender's roster verbatim, so an idle
- * fleet re-applied identical bytes every ~30 s. Identical bytes cannot change anything the first copy
- * did not; a re-signed roster is new bytes. Bounded; pure JVM so unit tests cover it.
+ * fleet re-applied identical bytes every ~30 s. This only RECOGNISES a repeat: the caller still hands
+ * it to the engine (every roster receipt replays parked events) and counts it as a change only if that
+ * landed events (HavenNet.receiveChanged). Bounded; pure JVM so unit tests cover it.
  */
 object RosterEcho {
     const val CAP = 512

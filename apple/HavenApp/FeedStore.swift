@@ -5976,17 +5976,23 @@ final class FeedStore: ObservableObject {
     /// including a roster it already holds. Every hello reply carries the sender's roster verbatim,
     /// so an idle fleet re-delivered the same rosters every ~30 s and each read as a new event: a
     /// whole-state export, a fan-out to every other device of mine (which re-applied and re-fanned
-    /// it) and a silent self-sync push — forever. A byte-identical repeat is answered "nothing new"
-    /// without touching the engine (`RosterEcho`); the first copy, and any re-signed roster, go
-    /// through `receive` exactly as before.
+    /// it) and a silent self-sync push — forever.
+    ///
+    /// A byte-identical REPEAT (`RosterEcho`) still goes through `receive` — every roster receipt
+    /// replays the engine's parked-event and tree-commit buffers, and delivery relies on that (with
+    /// the repeat skipped outright, Android's first feed after a relaunch waited 15 s to forever for
+    /// events parked behind it) — but it counts as a change only when that replay actually landed
+    /// events. The first copy, and any re-signed roster, count exactly as before.
     nonisolated static func receiveChanged(_ s: HavenSocial, circleId: String, envelope: Data) -> Bool {
-        if envelope.first == 0x04 {
-            if RosterEcho.shared.withLock({ $0.isRepeat(envelope) }) { return false }
+        guard envelope.first == 0x04, RosterEcho.shared.withLock({ $0.isRepeat(envelope) }) else {
             let ok = (try? s.receive(circleId: circleId, envelope: envelope)) == true
-            if !ok { RosterEcho.shared.withLock { $0.forget(envelope) } }   // refused: a later copy may take
+            if !ok, envelope.first == 0x04 { RosterEcho.shared.withLock { $0.forget(envelope) } }   // refused: retry a later copy
             return ok
         }
-        return (try? s.receive(circleId: circleId, envelope: envelope)) == true
+        let cids = s.circles().map(\.id)
+        let before = cids.reduce(UInt64(0)) { $0 &+ s.historyEventCount(circleId: $1) }
+        guard (try? s.receive(circleId: circleId, envelope: envelope)) == true else { return false }
+        return cids.reduce(UInt64(0)) { $0 &+ s.historyEventCount(circleId: $1) } != before
     }
 
     private func eventPayload(_ circleId: String, _ env: Data) -> Data {

@@ -1,3 +1,7 @@
-1.8.11 — Mírate en las videollamadas.
-- La vista previa reflejada de tu propia cámara aparece ahora en la esquina durante una llamada, para que compruebes cómo te ves mientras habláis.
-- Con la cámara apagada, esa esquina muestra un icono de cámara apagada en lugar de un recuadro negro vacío.
+2.0.0 — Más ligero, más rápido, más claro.
+• Fotos y vídeos se suben una vez al relay de tu círculo y tus amigos los bajan de allí: el móvil se calienta menos.
+• Las transferencias grandes paran en llamadas, con calor o en Ahorro de batería.
+• Ve a quién llega cada publicación, envía en privado con un toque, escribe desde un perfil.
+• Nuevos amigos conectados en segundos.
+• Arranque más rápido, desplazamiento fluido, sincronización honesta.
+• Compartir pantalla desde Android ya llega a todos.

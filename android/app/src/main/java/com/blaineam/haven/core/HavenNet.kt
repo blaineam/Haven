@@ -12,11 +12,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -700,6 +705,7 @@ object HavenNet : InboundListener {
                 withContext(Dispatchers.Main) { started.value = true }
                 Log.i(TAG, "node started: ${node?.nodeIdHex()}")
                 publishAccountDevices()   // account id -> my device ids, so contacts can dial me relay-free
+                watchNetworkPath()        // path change → re-open iroh dial gates once
                 // Matrix QA: dump our public identity so Scripts/qa-exchange-bundles.sh can seed iOS,
                 // and ingest qa-peer-bundle.bin if the driver staged a sim peer (HTTP-mailbox stub path
                 // where HELLO cannot dial). Without mutual addContactBundle reverse media never opens.
@@ -736,6 +742,30 @@ object HavenNet : InboundListener {
             }
         }
         startMailboxLoop()
+    }
+
+    /** Network path changed (Wi-Fi ↔ cellular, new network): failures on the OLD path say nothing
+     *  about the new one, so re-open every iroh dial gate once (strike counts kept — a genuinely dead
+     *  peer goes straight back to its cooldown) and poll now. iOS `noteNetworkPathChanged` parity. */
+    @Volatile private var lastNetworkHandle = 0L
+    private var pathWatchRegistered = false
+    private fun watchNetworkPath() {
+        if (pathWatchRegistered) return
+        pathWatchRegistered = true
+        val cm = appContext.getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        runCatching {
+            cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    val h = network.networkHandle
+                    val prev = lastNetworkHandle
+                    lastNetworkHandle = h
+                    if (prev == 0L || prev == h) return   // the initial report, or the same network
+                    val reopened = runCatching { node?.forgiveAllDials() }.getOrNull()
+                    Log.i(TAG, "network path changed — re-opened ${reopened ?: 0u} dial gate(s)")
+                    pollMailboxNow()
+                }
+            })
+        }.onFailure { Log.w(TAG, "network path watch unavailable", it) }
     }
 
     // Adaptive sync cadence (device-heat control). The loop keeps a cheap 10s heartbeat, but the
@@ -961,6 +991,7 @@ object HavenNet : InboundListener {
     /** Append the ticket to an invite link (after the `?d=` hints, before the `#` fragment). */
     private fun friendInviteEmbed(link: String): String {
         val t = friendInviteLinkValue() ?: return link
+        beginFirstContactFastPoll(180_000)   // the link is being shown: someone may accept any second
         val hash = link.indexOf('#').let { if (it < 0) link.length else it }
         val sep = if (link.substring(0, hash).contains('?')) "&" else "?"
         return link.substring(0, hash) + sep + "t=" + t + link.substring(hash)
@@ -985,7 +1016,81 @@ object HavenNet : InboundListener {
         acceptedInvites.add(AcceptedInvite(text, inviteNow(), dropLanded = false, granted = false))
         saveInvites()
         Log.i(TAG, "friend-invite: accepted ticket (relays=${t.relays.size})")
+        // Poll the inviter's relays from the START, in the default circle (where their hello, key
+        // commit and first posts land) — waiting for the grant, or their frame-19 announce, left a
+        // new friend's content sitting on a relay nobody here was reading. Light adoption only: the
+        // full adoptRelay (backfill + announce to every circle) still runs at grant time.
+        adoptInviteRelaysLight(t.relays)
+        val inviter = bytesToHex(t.accountId)
+        clearRosterPullBackoff(inviter)
+        forgiveDials(inviter, t.deviceHints.map { bytesToHex(it) })
+        beginFirstContactFastPoll()
         scope.launch { friendInviteTick() }
+        pollMailboxNow()
+    }
+
+    /** Associate ticket relays with the DEFAULT circle (and record entries) without the heavyweight
+     *  adoptRelay backfill. Never resurrects a relay the user deleted. */
+    private fun adoptInviteRelaysLight(relays: List<String>) {
+        var changed = false
+        val list = relayNodes.getOrPut(DEFAULT_CIRCLE) { mutableListOf() }
+        for (raw in relays) {
+            val hex = raw.trim().lowercase()
+            if (hex.length != 64 || relayForgottenAtMs(hex) > 0L) continue
+            ensureRelayEntry(hex, activate = true)
+            if (!list.contains(hex)) {
+                list.add(hex); changed = true
+                // Refuses our writes until the inviter enrolls us — expected; see [PendingEnrollment].
+                synchronized(pendingEnrollment) { pendingEnrollment.noteAdopted(hex, System.currentTimeMillis()) }
+            }
+        }
+        if (changed) {
+            saveRelayNodes()
+            clearRosterPullBackoff(null)   // a new relay may hold the rosters we couldn't find
+        }
+    }
+
+    // ---- First-contact fast poll -------------------------------------------------------------
+    // While a handshake is in flight (ticket accepted awaiting its grant, drop just opened, request
+    // just approved, link just shown) poll every ~7s for a couple of minutes instead of the 30-90s
+    // adaptive cadence: each leg of the offline handshake is a relay round trip the OTHER side only
+    // sees on its next poll. Bounded: the window only extends on a new handshake event.
+    @Volatile private var fastPollUntilMs = 0L
+    @Volatile private var fastPollJob: Job? = null
+    fun beginFirstContactFastPoll(windowMs: Long = 120_000) {
+        if (HavenOffline.enabled) return
+        fastPollUntilMs = maxOf(fastPollUntilMs, System.currentTimeMillis() + windowMs)
+        if (fastPollJob?.isActive == true) return
+        Log.i(TAG, "friend-invite: first-contact fast poll on (${windowMs / 1000}s)")
+        fastPollJob = scope.launch {
+            while (System.currentTimeMillis() < fastPollUntilMs) {
+                delay(7_000)
+                pollMailboxNow()                       // coalesces with an in-flight poll
+                runCatching { friendInviteTick() }     // single-flight; the handshake legs themselves
+            }
+        }
+    }
+
+    /** Run [op] over [items] with at most [limit] in flight; results in INPUT order. One dead relay's
+     *  timeout then overlaps the others instead of delaying every relay behind it. */
+    private suspend fun <I, T> boundedFanOut(items: List<I>, limit: Int = 6, op: suspend (I) -> T): List<T> =
+        coroutineScope {
+            val sem = Semaphore(maxOf(1, limit))
+            items.map { item -> async { sem.withPermit { op(item) } } }.awaitAll()
+        }
+
+    /** Fresh evidence a peer is reachable NOW (friend added / approved, a hello from them): clear the
+     *  iroh dial backoff on every id we'd dial them on (iOS `forgiveDials` parity). */
+    private fun forgiveDials(accountHex: String, extra: List<String> = emptyList()) {
+        val n = node ?: return
+        val acct = accountHex.lowercase()
+        val ids = LinkedHashSet<String>()
+        ids.add(acct)
+        runCatching { social.deviceNodeIdsFor(acct) }.getOrNull()?.forEach { ids.add(it.lowercase()) }
+        deviceHintsFor(acct).forEach { ids.add(it.lowercase()) }
+        extra.forEach { ids.add(it.lowercase()) }
+        val mine = setOf(accountNodeHex.lowercase(), n.nodeIdHex().lowercase())
+        for (id in ids) if (id.length == 64 && id !in mine) runCatching { n.forgiveDial(id) }
     }
 
     /** One pass of every pending invite duty — sync bucket; cheap no-op when idle. Single-flight. */
@@ -1009,15 +1114,17 @@ object HavenNet : InboundListener {
             val expires = t.issuedAt + uniffi.haven_ffi.friendInviteDefaultTtlSecs()
             val key = runCatching { uniffi.haven_ffi.friendInviteDropKey(t) }.getOrNull() ?: continue
             val blob = runCatching { uniffi.haven_ffi.friendInviteBuildDrop(t, expires, hello) }.getOrNull() ?: continue
-            var landed = false
-            for (relay in t.relays) {
-                val c = relayClientFor(relay) ?: continue
-                if (runCatching { c.put(key, blob) }.isSuccess) {
-                    landed = true
-                    Log.i(TAG, "friend-invite: drop landed on ${relay.take(8)}")
+            val landed = boundedFanOut(t.relays) { relay ->
+                val c = relayClientFor(relay) ?: return@boundedFanOut false
+                runCatching { c.put(key, blob) }.isSuccess.also {
+                    if (it) Log.i(TAG, "friend-invite: drop landed on ${relay.take(8)}")
                 }
+            }.any { it }
+            if (landed) {
+                a.dropLanded = true; saveInvites()
+                // Wake the inviter (silent): their next poll opens the drop and shows the prompt now.
+                pushWake(bytesToHex(t.accountId), null, null, silent = true)
             }
-            if (landed) { a.dropLanded = true; saveInvites() }
         }
     }
 
@@ -1025,10 +1132,12 @@ object HavenNet : InboundListener {
         for (a in acceptedInvites.filter { it.dropLanded && !it.granted }) {
             val t = runCatching { uniffi.haven_ffi.friendTicketParse(a.ticket) }.getOrNull() ?: continue
             val key = runCatching { uniffi.haven_ffi.friendInviteGrantKey(t) }.getOrNull() ?: continue
-            for (relay in t.relays) {
-                val c = relayClientFor(relay) ?: continue
-                val blob = runCatching { c.get(key) }.getOrNull() ?: continue
-                if (blob.isEmpty()) continue
+            val fetched = boundedFanOut(t.relays) { relay ->
+                val c = relayClientFor(relay) ?: return@boundedFanOut null
+                runCatching { c.get(key) }.getOrNull()
+            }
+            for (blob in fetched) {
+                if (blob == null || blob.isEmpty()) continue
                 val hello = runCatching {
                     uniffi.haven_ffi.friendInviteOpenGrant(t, blob, inviteNow().toULong())
                 }.getOrNull() ?: continue
@@ -1037,7 +1146,15 @@ object HavenNet : InboundListener {
                 for (r in t.relays) runCatching { adoptRelay(r, setDefault = false) }
                 a.granted = true
                 saveInvites()
+                val inviter = bytesToHex(t.accountId)
+                // The inviter approved and enrolled us on their relays: retry what they refused now.
+                triggerPendingEnrollment(t.relays, "grant")
+                clearRosterPullBackoff(inviter)
+                forgiveDials(inviter)
+                bumpActivity()
+                beginFirstContactFastPoll()
                 runCatching { syncWithContacts() }
+                pollMailboxNow()
                 break
             }
         }
@@ -1051,10 +1168,11 @@ object HavenNet : InboundListener {
         val prefix = "haven/invite/$myAcct/"
         val keys = mutableSetOf<String>()
         runCatching { relayHost?.localList(prefix)?.let { keys.addAll(it) } }
-        for (relay in allActiveRelayHexes().filter { !it.startsWith("s3:") }) {
-            val c = relayClientFor(relay) ?: continue
-            runCatching { c.list(prefix) }.getOrNull()?.let { keys.addAll(it) }
-        }
+        val relays = allActiveRelayHexes().filter { !it.startsWith("s3:") }
+        boundedFanOut(relays) { relay ->
+            val c = relayClientFor(relay) ?: return@boundedFanOut null
+            runCatching { c.list(prefix) }.getOrNull()
+        }.forEach { it?.let { l -> keys.addAll(l) } }
         if (keys.isEmpty()) return
         for (iss in pending) {
             val t = runCatching { uniffi.haven_ffi.friendTicketParse(iss.ticket) }.getOrNull() ?: continue
@@ -1062,11 +1180,10 @@ object HavenNet : InboundListener {
             if (dropKey !in keys) continue
             var blob: ByteArray? = runCatching { relayHost?.localGet(dropKey) }.getOrNull()
             if (blob == null) {
-                for (relay in allActiveRelayHexes().filter { !it.startsWith("s3:") }) {
-                    val c = relayClientFor(relay) ?: continue
-                    val b = runCatching { c.get(key = dropKey) }.getOrNull()
-                    if (b != null && b.isNotEmpty()) { blob = b; break }
-                }
+                blob = boundedFanOut(relays) { relay ->
+                    val c = relayClientFor(relay) ?: return@boundedFanOut null
+                    runCatching { c.get(key = dropKey) }.getOrNull()?.takeIf { it.isNotEmpty() }
+                }.firstOrNull { it != null }
             }
             val body = blob ?: continue
             val hello = runCatching {
@@ -1076,6 +1193,7 @@ object HavenNet : InboundListener {
             val alreadyContact = acceptor.isNotEmpty() && contacts.any { it.idHex.equals(acceptor, ignoreCase = true) }
             if (iss.acceptorHex != acceptor) { iss.acceptorHex = acceptor; saveInvites() }
             Log.i(TAG, "friend-invite: acceptance drop opened (from ${acceptor.take(8)}) — surfacing prompt")
+            beginFirstContactFastPoll()   // the acceptor is likely still looking at their screen
             handleHello(hello, viaNearby = false, senderDevice = null)
             // Mutual-add race: we had already added them — approval is implicit; grant now.
             if (alreadyContact && acceptor.isNotEmpty()) friendInviteNoteApproved(acceptor)
@@ -1095,14 +1213,16 @@ object HavenNet : InboundListener {
             val key = runCatching { uniffi.haven_ffi.friendInviteGrantKey(t) }.getOrNull() ?: continue
             val blob = runCatching { uniffi.haven_ffi.friendInviteBuildGrant(t, expires, hello) }.getOrNull() ?: continue
             var landed = runCatching { relayHost?.localPut(key, blob) == true }.getOrDefault(false)
-            for (relay in allActiveRelayHexes().filter { !it.startsWith("s3:") }) {
-                val c = relayClientFor(relay) ?: continue
-                if (runCatching { c.put(key, blob) }.isSuccess) landed = true
+            val puts = boundedFanOut(allActiveRelayHexes().filter { !it.startsWith("s3:") }) { relay ->
+                val c = relayClientFor(relay) ?: return@boundedFanOut false
+                runCatching { c.put(key, blob) }.isSuccess
             }
+            if (puts.any { it }) landed = true
             if (landed) {
                 iss.consumedAt = inviteNow()
                 saveInvites()
                 Log.i(TAG, "friend-invite: grant parked — ticket consumed")
+                pushWake(hex, null, null, silent = true)   // the acceptor's grant poll completes it now
             }
         }
     }
@@ -1824,6 +1944,11 @@ object HavenNet : InboundListener {
         if (senderDevice != null && senderDevice.length == 64 && !senderDevice.equals(idHex, ignoreCase = true)) {
             recordDeviceHints(idHex, listOf(senderDevice))
         }
+        // A LIVE-lane hello (or a brand-new contact's) is fresh evidence they're reachable: drop any
+        // dial backoff armed while they weren't. An old mailbox hello from a known contact is not.
+        if (senderDevice != null || contacts.none { it.idHex.equals(idHex, ignoreCase = true) }) {
+            forgiveDials(idHex, listOfNotNull(senderDevice))
+        }
         val actualVerify = runCatching { social.bundleVerificationHex(hello.bundle) }.getOrNull()
             ?: return HelloOutcome(true, "malformed")
         val name = runCatching { social.verifyProfile(hello.bundle, hello.signedProfile) }.getOrNull() ?: "Someone"
@@ -2310,6 +2435,8 @@ object HavenNet : InboundListener {
         // Ticketed invite: park a sealed acceptance on THEIR relays too, so this works even if
         // they're offline for days — the live hello below still wins when both are online.
         friendInviteExtract(trimmed)?.let { friendInviteAccept(it) }
+        forgiveDials(info.idHex)   // a deliberate add: dial them now, not after an old backoff
+        bumpActivity()
         sendHello(DEFAULT_CIRCLE, info.idHex)
         return true
     }
@@ -2425,6 +2552,17 @@ object HavenNet : InboundListener {
         // If this approval answers a ticketed offline invite, park the grant on my relays so the
         // acceptor completes the friendship whenever they next come online.
         scope.launch { friendInviteNoteApproved(req.idHex) }
+        // iOS parity: tight cadence, a fresh dial gate, the relays taught the new member NOW (the
+        // 10-min enroll gate otherwise refuses them), my relay re-announced, their roster pull
+        // un-gated, a silent wake, and a short fast-poll window while the handshake completes.
+        bumpActivity()
+        forgiveDials(req.idHex)
+        clearRosterPullBackoff(req.idHex)
+        lastEnrollMs.clear()
+        runCatching { enrollCircleMembers() }
+        runCatching { reannounceOwnRelay() }
+        pushWake(req.idHex.lowercase(), null, null, silent = true)
+        beginFirstContactFastPoll()
     }
 
     fun dismiss(req: PendingRequest) { pending.removeAll { it.idHex == req.idHex } }
@@ -2948,7 +3086,13 @@ object HavenNet : InboundListener {
                 runCatching { social.deviceNodeIdsFor(hex) }.getOrDefault(emptyList())
                     .any { !it.equals(hex, ignoreCase = true) }
             }
-            val candidates = contacts.map { it.idHex }.filter { rosterPullDue(it) }
+            // No relay to ask (and no hosted store): skip WITHOUT recording attempts — a pass that
+            // asked nobody used to burn each contact's full 10-min backoff (a new friend's relays
+            // only arrive with the grant / frame 19).
+            val hasCandidates = relayHost != null ||
+                allRelays().any { !it.startsWith("s3:") }
+            val candidates = if (!hasCandidates) emptyList()
+                else contacts.map { it.idHex }.filter { rosterPullDue(it) }
             val due = (candidates.filterNot(resolvable) + candidates.filter(resolvable))
                 .take(ROSTER_PULL_PER_PASS)
             if (due.isNotEmpty()) {
@@ -3287,6 +3431,14 @@ object HavenNet : InboundListener {
     private fun rosterPullDue(accountHex: String): Boolean {
         val last = synchronized(rosterPullAt) { rosterPullAt[accountHex.lowercase()] } ?: return true
         return System.currentTimeMillis() - last > ROSTER_PULL_BACKOFF_MS
+    }
+
+    /** Forget the pull backoff for one contact (or all, null): a relay was just adopted, a friend
+     *  approved, or a grant arrived — new reason to expect the roster is fetchable now. */
+    private fun clearRosterPullBackoff(accountHex: String?) {
+        synchronized(rosterPullAt) {
+            if (accountHex == null) rosterPullAt.clear() else rosterPullAt.remove(accountHex.lowercase())
+        }
     }
 
     private fun noteRosterPullAttempt(accountHex: String) {
@@ -3969,19 +4121,33 @@ object HavenNet : InboundListener {
         // backoff, ~10 min worst case; attempts are idempotent (content-addressed keys +
         // per-(relay,key) seen skip). Desktop/iOS parity.
         scope.launch {
-            var delaySecs = 5L
-            while (true) {
-                var ok = true
-                for (head in runCatching { social.exportEpochHead(circleId) }.getOrDefault(emptyList())) {
-                    ok = uploadEvent(circleId, head) && ok
+            // The composer pill counts this event until it lands (or live retries give up) — see
+            // [authoredUploads]. Epoch heads ride along but are upkeep, not the user's content.
+            uploadStarted(circleId)
+            var landed = false
+            var failedOnce = false
+            try {
+                var delaySecs = 5L
+                while (true) {
+                    var ok = true
+                    for (head in runCatching { social.exportEpochHead(circleId) }.getOrDefault(emptyList())) {
+                        ok = uploadEvent(circleId, head) && ok
+                    }
+                    ok = uploadEvent(circleId, env) && ok
+                    if (ok || delaySecs > 300) {
+                        if (!ok) Log.i(TAG, "uploadEvent: giving up live retries for an authored event in ${circleId.take(16)} — daily backfill will carry it")
+                        landed = ok
+                        break
+                    }
+                    // Failed once = "Retrying" until it lands (or gives up) — through the retry attempts
+                    // too, so the pill doesn't flicker back to "Sending" for each one.
+                    if (!failedOnce) { failedOnce = true; uploadRetrying(circleId, true) }
+                    kotlinx.coroutines.delay(delaySecs * 1000)
+                    delaySecs *= 3
                 }
-                ok = uploadEvent(circleId, env) && ok
-                if (ok || delaySecs > 300) {
-                    if (!ok) Log.i(TAG, "uploadEvent: giving up live retries for an authored event in ${circleId.take(16)} — daily backfill will carry it")
-                    break
-                }
-                kotlinx.coroutines.delay(delaySecs * 1000)
-                delaySecs *= 3
+            } finally {
+                if (failedOnce) uploadRetrying(circleId, false)
+                uploadFinished(circleId, landed)
             }
         }
         // Push leg (Apple PushManager.wake/syncSelf parity): the blind worker forwards a banner
@@ -4298,6 +4464,9 @@ object HavenNet : InboundListener {
             o.optString("node", "").trim().lowercase()
         } else text.lowercase()
         if (nodeHex.length != 64) return
+        // Announced by a member = we're in; retry what a pending-enrollment relay refused (no-op
+        // for any relay not pending).
+        triggerPendingEnrollment(listOf(nodeHex), "relay announce")
         // A contact RE-ANNOUNCED a circle relay. Reactivating a deactivated/forgotten entry is allowed
         // ONLY when the announce comes from the relay's OWNER — the announced id is one of the sender's
         // own authorized device ids (their in-app relay; that's what lets your Mac's relay come back on
@@ -5279,6 +5448,7 @@ object HavenNet : InboundListener {
                     val r = relayHttpPut(base, entry.httpToken, key, env)
                     if (r.isSuccess) {
                         markRelayOk(nodeHex); landed = true; putOk = true
+                        confirmEnrollment(nodeHex)
                         markMailboxSeen("put:$nodeHex|$key")
                         withContext(Dispatchers.Main) { relayActive.value = true }
                         break
@@ -5295,10 +5465,15 @@ object HavenNet : InboundListener {
                     .onSuccess {
                         landed = true
                         markRelayOk(nodeHex)
+                        confirmEnrollment(nodeHex)
                         markMailboxSeen("put:$nodeHex|$key")
                         withContext(Dispatchers.Main) { relayActive.value = true }
                     }
-                    .onFailure { Log.d(TAG, "mailbox put failed ($nodeHex): ${it.message}"); relayFailed(nodeHex) }
+                    .onFailure {
+                        Log.d(TAG, "mailbox put failed ($nodeHex): ${it.message}")
+                        // The expected 403 of a relay pending enrollment is not an outage.
+                        if (!(isForbiddenError(it) && absorbPendingRefusal(nodeHex))) relayFailed(nodeHex)
+                    }
             }
         }
         if (landed) markMailboxSeen(key)
@@ -5850,9 +6025,12 @@ object HavenNet : InboundListener {
                             // only works while the author happens to be online — which is exactly how
                             // media a few days old became permanently unreachable while fresh media
                             // (author still around) looked fine.
-                            val got = (fetchMediaFromRelay(job.circleId, job.ref) ||
-                                (healForbiddenRelays() && fetchMediaFromRelay(job.circleId, job.ref))) &&
-                                acceptFetchedBlob(job.ref, job.circleId)
+                            restoreInFlight.add(job.ref)
+                            val got = try {
+                                (fetchMediaFromRelay(job.circleId, job.ref) ||
+                                    (healForbiddenRelays() && fetchMediaFromRelay(job.circleId, job.ref))) &&
+                                    acceptFetchedBlob(job.ref, job.circleId)
+                            } finally { restoreInFlight.remove(job.ref) }
                             if (got) {
                                 mediaArrived(job.ref)
                                 withContext(Dispatchers.Main) { feedVersion.value++ }
@@ -6277,6 +6455,90 @@ object HavenNet : InboundListener {
             mediaRestoreProgress.remove(ref)
         }
         synchronized(fastReq) { fastReq.remove(ref) }
+        synchronized(transferWatch) { transferWatch.remove(ref) }
+        restoreMark.remove(ref)
+        // "Received" counts EVERY lane (relay restore, peer stream), once per ref — a relay copy and
+        // a peer stream can race to land the same blob. It used to count peer reassemblies only.
+        val first = synchronized(countedArrivals) {
+            if (countedArrivals.size > 20_000) countedArrivals.clear()
+            countedArrivals.add(ref)
+        }
+        if (first) scope.launch(Dispatchers.Main) { SyncMetrics.incIn() }
+        if (wantedMedia.arrived(ref)) SyncMetrics.setPending(wantedMedia.count)
+    }
+
+    // ---- Honest transfer progress (see SyncProgress.kt) -----------------------------------------
+
+    /** Refs the missing-media sweep wants and doesn't hold — "media waiting" (persistent across sweeps). */
+    private val wantedMedia = MediaWantedSet()
+    @Volatile private var lastWantedPruneMs = 0L
+    /** Refs already counted into "received" (see [mediaArrived]). */
+    private val countedArrivals = HashSet<String>()
+    /** Relay reassembly chunks landed per ref — the watchdog's view of relay progress. */
+    private val restoreMark = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    /** Relay restores in flight: they report nothing until a chunk lands, so a watchdog must not
+     *  time out underneath one. */
+    private val restoreInFlight = java.util.Collections.synchronizedSet(HashSet<String>())
+    /** Visible downloads under a no-progress watchdog: ref → (watch, mark unavailable on stall). */
+    private val transferWatch = HashMap<String, Pair<TransferStallWatch, Boolean>>()
+    @Volatile private var transferWatchRunning = false
+    /** Last time a peer chunk published i/n for a ref — per-chunk Main launches coalesced to ~10 Hz. */
+    private val chunkProgressAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun transferProgressMark(ref: String): Int =
+        (synchronized(incomingLock) { incomingMedia[ref]?.got?.size } ?: 0) + (restoreMark[ref] ?: 0)
+
+    /** Keep [ref]'s spinner up until bytes land or none have for [TransferStallWatch.NO_PROGRESS_MS]. */
+    private fun watchTransfer(ref: String, markUnavailableOnStall: Boolean) {
+        synchronized(transferWatch) {
+            val cur = transferWatch[ref]
+            if (cur != null) {
+                if (markUnavailableOnStall && !cur.second) transferWatch[ref] = cur.first to true
+                return
+            }
+            transferWatch[ref] = TransferStallWatch(transferProgressMark(ref), System.currentTimeMillis()) to markUnavailableOnStall
+            if (transferWatchRunning) return
+            transferWatchRunning = true
+        }
+        scope.launch {
+            while (true) {
+                delay(5_000)
+                if (!checkTransferWatches()) break
+            }
+        }
+    }
+
+    /** One watchdog pass. False (and the loop ends) when nothing is left to watch. */
+    private fun checkTransferWatches(): Boolean {
+        val now = System.currentTimeMillis()
+        val stalled = ArrayList<Pair<String, Boolean>>()
+        val arrived = ArrayList<String>()
+        val more = synchronized(transferWatch) {
+            val it = transferWatch.entries.iterator()
+            while (it.hasNext()) {
+                val (ref, e) = it.next().let { en -> en.key to en.value }
+                if (LocalMedia.has(ref)) { it.remove(); arrived.add(ref); continue }
+                if (e.first.observe(transferProgressMark(ref), now, busy = restoreInFlight.contains(ref))) {
+                    it.remove(); stalled.add(ref to e.second)
+                }
+            }
+            if (transferWatch.isEmpty()) transferWatchRunning = false
+            transferWatch.isNotEmpty()
+        }
+        if (arrived.isNotEmpty() || stalled.isNotEmpty()) scope.launch(Dispatchers.Main) {
+            for (ref in arrived) downloadingMedia.remove(ref)
+            for ((ref, markUnavailable) in stalled) {
+                Log.i("MediaSync", "fetch ${ref.take(10)}: no bytes for ${TransferStallWatch.NO_PROGRESS_MS / 1000}s — download stopped")
+                downloadingMedia.remove(ref)
+                mediaRestoreProgress.remove(ref)
+                // Relays answered and none holds it yet: that is "Waiting for sender…", not gone.
+                if (markUnavailable && !waitingForSenderMedia.contains(ref) && !LocalMedia.has(ref)) {
+                    if (!unavailableMedia.contains(ref)) unavailableMedia.add(ref)
+                    wantedMedia.gaveUp(ref); SyncMetrics.setPending(wantedMedia.count)
+                }
+            }
+        }
+        return more
     }
 
     /** Relays answered and none holds it — an honest different truth from "downloading" (we
@@ -6294,18 +6556,24 @@ object HavenNet : InboundListener {
             mediaRestoreProgress[ref] = done to total
             if (!downloadingMedia.contains(ref)) downloadingMedia.add(ref)   // a chunked pull IS a download
         }
+        // …and something must take that spinner down again if the bytes stop coming.
+        watchTransfer(ref, markUnavailableOnStall = false)
     }
 
+    /** Drop [ref]'s i/n. The SPINNER is not this function's to lower: bytes arriving
+     *  ([mediaArrived]) or the no-progress watchdog do that — a reassembly that stalls on one relay
+     *  may be about to resume on the next, or a direct transfer may be carrying it. */
     private fun clearRestoreProgress(ref: String) {
+        restoreMark.remove(ref)
         scope.launch(Dispatchers.Main) {
             mediaRestoreProgress.remove(ref)
-            downloadingMedia.remove(ref)
         }
     }
 
     /** User tapped "Download" on a placeholder for a blob we deliberately evicted: clear the eviction
      *  (so the normal missing-media path may fetch it), request it now (relay restore + a direct peer
-     *  ask), and surface a spinner. If it hasn't arrived in ~45s, mark it unavailable. */
+     *  ask), and surface a spinner. If no bytes arrive for ~45s, mark it unavailable (unless the relays
+     *  said the sender hasn't uploaded it yet — that stays "Waiting for sender…"). */
     /** When each ref was last requested because it came on screen — see [requestMediaOnView]. */
     private val viewRequestedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
@@ -6426,11 +6694,9 @@ object HavenNet : InboundListener {
         }
         if (circleId != null) enqueueRestore(circleId, ref) { ask() }   // relay-first (mailbox → HTTP → S3 → iroh)
         else ask()
-        scope.launch {
-            kotlinx.coroutines.delay(45_000)
-            downloadingMedia.remove(ref)
-            if (!LocalMedia.has(ref)) { if (!unavailableMedia.contains(ref)) unavailableMedia.add(ref) }
-        }
+        // Down when the bytes land, or after ~45s with NO new bytes by any lane — not on a fixed
+        // timer that fired mid-transfer and called a still-arriving photo "No longer available".
+        watchTransfer(ref, markUnavailableOnStall = true)
     }
 
     // ---- Missing-media fetch lanes (fresh vs old; Apple FeedStore parity) -----------------------
@@ -6546,7 +6812,15 @@ object HavenNet : InboundListener {
                 }
             }
         }
-        SyncMetrics.setPending(missing.size)   // media refs still missing locally (iOS nbMediaPending)
+        // "Media waiting" = the persistent wanted-set (iOS parity), minus what has been given up on
+        // ("No longer available") until a retry clears that.
+        val unavailableNow = unavailableMedia.toSet()
+        wantedMedia.discover(missing.keys.filter { it !in unavailableNow })
+        if (nowMs - lastWantedPruneMs > 30_000) {
+            lastWantedPruneMs = nowMs
+            wantedMedia.prune { it !in missing && (LocalMedia.has(it) || EvictedMediaStore.contains(it) || it in unavailableNow) }
+        }
+        SyncMetrics.setPending(wantedMedia.count)
         synchronized(smallMediaRefs) {
             if (smallMediaRefs.size > 5000) smallMediaRefs.clear()
             smallMediaRefs.addAll(thumbs.keys)
@@ -6877,6 +7151,13 @@ object HavenNet : InboundListener {
 
     private fun noteRefused(nodeHex: String, what: String) {
         synchronized(rosterNeeded) { rosterNeeded.add(nodeHex) }
+        // A friend-invite relay still PENDING ENROLLMENT refuses us by design until the inviter
+        // enrolls us: no streak, no stand-down (which would drop it from relaysFor for up to 10 min)
+        // — just a short flat retry.
+        if (absorbPendingRefusal(nodeHex)) {
+            Log.i(TAG, "relay ${nodeHex.take(8)} REFUSED $what — pending enrollment; retrying in ${PendingEnrollment.RETRY_GAP_MS / 1000}s")
+            return
+        }
         val streak = refusedStreak.merge(nodeHex, 1) { a, b -> a + b } ?: 1
         // The first few refusals are free: that is the window in which publishing our roster
         // genuinely fixes things, and backing off early would slow down the case that DOES heal.
@@ -6898,6 +7179,70 @@ object HavenNet : InboundListener {
     /** True while a relay is in refusal backoff — skip it rather than spending a request on a no. */
     private fun relayStoodDown(nodeHex: String): Boolean =
         (refusedUntilMs[nodeHex] ?: 0L) > System.currentTimeMillis()
+
+    // ---- Pending enrollment (friend-invite relays that 403 until the inviter enrolls us) ----------
+    private val pendingEnrollment = PendingEnrollment()
+    @Volatile private var pendingRetryJob: Job? = null
+    @Volatile private var lastPendingTriggerMs = 0L
+
+    private fun isForbiddenError(e: Throwable?): Boolean =
+        e is RelayForbidden || e?.message?.lowercase()?.let { it.contains("forbidden") || it.contains("refused") } == true
+
+    /** True when a refusal from [nodeHex] is the expected pending-enrollment 403 — the caller must
+     *  then skip every long backoff. Schedules the short flat retry. */
+    private fun absorbPendingRefusal(nodeHex: String): Boolean {
+        val d = synchronized(pendingEnrollment) {
+            pendingEnrollment.onFailure(nodeHex, forbidden = true, nowMs = System.currentTimeMillis())
+        }
+        if (d !is PendingEnrollment.Decision.RetrySoon) return false
+        if (pendingRetryJob?.isActive != true) {
+            pendingRetryJob = scope.launch {
+                delay(d.afterMs)
+                val still = synchronized(pendingEnrollment) { pendingEnrollment.anyPending(System.currentTimeMillis()) }
+                if (still) retryPendingEnrollmentUploads(emptyList(), full = false)
+            }
+        }
+        return true
+    }
+
+    /** An authorized write landed on [nodeHex]: enrolled. Re-drive what it had refused. */
+    private fun confirmEnrollment(nodeHex: String) {
+        val was = synchronized(pendingEnrollment) { pendingEnrollment.confirm(nodeHex) }
+        if (!was) return
+        Log.i(TAG, "relay ${nodeHex.take(8)} enrollment confirmed — re-driving deferred uploads")
+        scope.launch { retryPendingEnrollmentUploads(listOf(nodeHex.lowercase()), full = true) }
+    }
+
+    /** The grant arrived / the inviter announced the relay: retry now, and once more shortly after
+     *  (their enroll call may land a beat after the grant). Rate-limited — announces repeat. */
+    private fun triggerPendingEnrollment(relays: List<String>, reason: String) {
+        val now = System.currentTimeMillis()
+        val tracked = synchronized(pendingEnrollment) {
+            relays.map { it.lowercase() }.filter { pendingEnrollment.isTracked(it) }
+                .also { t -> t.forEach { pendingEnrollment.refresh(it, now) } }
+        }
+        if (tracked.isEmpty() || now - lastPendingTriggerMs < 10_000) return
+        lastPendingTriggerMs = now
+        Log.i(TAG, "pending-enrollment retry ($reason) relays=${tracked.size}")
+        synchronized(refusedStreak) { tracked.forEach { refusedStreak.remove(it); refusedUntilMs.remove(it) } }
+        scope.launch {
+            retryPendingEnrollmentUploads(tracked, full = true)
+            delay(15_000)
+            retryPendingEnrollmentUploads(tracked, full = true)
+        }
+    }
+
+    /** Re-drive uploads deferred by pending-enrollment refusals: persisted media backups always;
+     *  with [full], also re-offer my events + media for every circle served by [relays] (content
+     *  that landed on another relay is otherwise never retried on the one that refused it). */
+    private suspend fun retryPendingEnrollmentUploads(relays: List<String>, full: Boolean) {
+        runCatching { drainPersistedBackups() }
+        if (!full || relays.isEmpty()) return
+        val wanted = relays.map { it.lowercase() }.toSet()
+        for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {
+            if (relaysFor(c.id).any { it.lowercase() in wanted }) runCatching { backfillMailbox(c.id, eventsToo = true) }
+        }
+    }
 
     /** A relay answered us properly again — forget the refusal history entirely. */
     private fun noteRelayAccepted(nodeHex: String) {
@@ -7253,6 +7598,7 @@ object HavenNet : InboundListener {
             val r = httpUploadMedia(entry, nodeHex, ref, key, blob, chunked, fp, force)
             if (r.isSuccess) {
                 markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true
+                confirmEnrollment(nodeHex)
                 android.util.Log.i("MediaSync", "HTTP uploaded ref=$ref to ${nodeHex.take(8)}")
                 continue
             }
@@ -7280,8 +7626,8 @@ object HavenNet : InboundListener {
                     client.put(key, blob)
                 }
             }
-                .onSuccess { markRelayOk(nodeHex); markBackedUp(nodeHex, ref); landed = true }
-                .onFailure { relayFailed(nodeHex) }
+                .onSuccess { markRelayOk(nodeHex); markBackedUp(nodeHex, ref); landed = true; confirmEnrollment(nodeHex) }
+                .onFailure { if (!(isForbiddenError(it) && absorbPendingRefusal(nodeHex))) relayFailed(nodeHex) }
         }
         return landed
     }
@@ -7835,13 +8181,14 @@ object HavenNet : InboundListener {
         for (i in have until count) {
             val chunk = getChunk(i)
             if (chunk == null || !LocalMedia.appendSealedPart(part, chunk)) {
-                // KEEP the partial + sidecar — the next attempt resumes from `have`.
-                clearRestoreProgress(ref)
+                // KEEP the partial + sidecar — the next attempt resumes from `have`. The i/n stays
+                // too (those chunks ARE held); the watchdog lowers the spinner if nothing follows.
                 android.util.Log.i("MediaSync", "reassemble ref=$ref STALLED at chunk $i/$count — partial kept for resume")
                 return false
             }
             have = i + 1
             saveRestorePart(ref, count, have, fp)
+            restoreMark[ref] = have
             noteRestoreProgress(ref, have, count)   // honest i/n for the placeholder
         }
         clearRestoreProgress(ref)
@@ -8209,14 +8556,26 @@ object HavenNet : InboundListener {
                 true
             }
         }
-        if (!complete) return
+        if (!complete) {
+            // Direct chunks drive the same i/n as a relay restore — coalesced to ~10 Hz, since every
+            // publish is a Main hop — and keep the spinner up exactly while they keep coming.
+            val now = System.currentTimeMillis()
+            val last = chunkProgressAt[ref] ?: 0L
+            if (now - last >= 100) {
+                chunkProgressAt[ref] = now
+                val got = synchronized(incomingLock) { entry.got.size }
+                noteRestoreProgress(ref, got, total)
+            }
+            return
+        }
+        chunkProgressAt.remove(ref)
         // Whether the adopt succeeds or rejects the bytes on a digest mismatch, this reassembly is
         // over: on rejection the part file is already gone, so leaving the record behind would
         // resurrect a bitmap whose bytes no longer exist and stall the ref forever.
         val ok = LocalMedia.adoptPlainPart(DEFAULT_CIRCLE, ref, entry.part)
         ReassemblyStore.clear(ref)
-        if (!ok) return
-        SyncMetrics.incIn()   // a media item was fully received + stored (iOS nbMediaIn += 1)
+        if (!ok) { clearRestoreProgress(ref); return }
+        mediaArrived(ref)   // clears the spinner/i-of-n and counts it received (once per ref)
         scope.launch(Dispatchers.Main) { feedVersion.value++ }
         // "Save others' posts to Photos" — per-circle override (received media stores under the
         // default circle), falling back to the app-wide default.
@@ -8314,12 +8673,15 @@ object HavenNet : InboundListener {
     private suspend fun sendFrameAwait(type: Int, payload: ByteArray, toNodeHex: String) {
         val n = node ?: return
         val frame = Wire.frame(type, payload)
-        val targets = LinkedHashSet(
-            runCatching { social.deviceNodeIdsFor(toNodeHex) }
-                .getOrNull()?.takeIf { it.isNotEmpty() } ?: listOf(toNodeHex)
-        )
-        targets.addAll(deviceHintsFor(toNodeHex))
-        for (t in targets) runCatching { n.sendToNode(t, frame) }
+        val targets = dialTargetsFor(toNodeHex)
+        coroutineScope { targets.map { t -> async { runCatching { n.sendToNode(t, frame) } } }.awaitAll() }
+    }
+
+    /** Transport dial set for one account (or device) id, best-first — see [DialOrder]. */
+    private fun dialTargetsFor(toNodeHex: String): List<String> {
+        val resolved = runCatching { social.deviceNodeIdsFor(toNodeHex) }
+            .getOrNull()?.takeIf { it.isNotEmpty() } ?: listOf(toNodeHex)
+        return DialOrder.targets(toNodeHex, resolved, deviceHintsFor(toNodeHex))
     }
 
     private fun sendFrame(type: Int, payload: ByteArray, toNodeHex: String) {
@@ -8332,21 +8694,19 @@ object HavenNet : InboundListener {
             // an unexpanded send (calls' accept/ICE, media requests) silently reaches nobody.
             // deviceNodeIdsFor is identity for an unknown/device-id input, so pre-expanded callers
             // (dialTargets) stay correct.
-            val targets = LinkedHashSet(
-                runCatching { social.deviceNodeIdsFor(toNodeHex) }
-                    .getOrNull()?.takeIf { it.isNotEmpty() } ?: listOf(toNodeHex)
-            )
             // Invite-link dial hints bridge the roster bootstrap: until this contact's signed
-            // roster lands, their account id resolves to no node — the hint is the only real id.
-            targets.addAll(deviceHintsFor(toNodeHex))
-            var lastErr: String? = null
-            var anyOk = false
-            for (t in targets) {
-                runCatching { n.sendToNode(t, frame) }
-                    .onSuccess { anyOk = true }
-                    .onFailure { lastErr = it.message }
+            // roster lands, their account id resolves to no node — the hint is the only real id,
+            // so it goes FIRST and the dead account id is dropped ([DialOrder]).
+            val targets = dialTargetsFor(toNodeHex)
+            // Every target CONCURRENTLY: serially, a dead account id's ~30s connect timeout (and its
+            // dial-gate strike) ran before the device id that actually answers was even tried.
+            val results = coroutineScope {
+                targets.map { t -> async { runCatching { n.sendToNode(t, frame) } } }.awaitAll()
             }
-            if (!anyOk) Log.d(TAG, "send type=$type to ${toNodeHex.take(8)} failed: $lastErr")
+            if (results.none { it.isSuccess }) {
+                val lastErr = results.lastOrNull { it.isFailure }?.exceptionOrNull()?.message
+                Log.d(TAG, "send type=$type to ${toNodeHex.take(8)} failed: $lastErr")
+            }
         }
     }
 
@@ -8794,17 +9154,96 @@ object HavenNet : InboundListener {
     /** The relay node hexes that hold a given circle's mailbox (iOS RelayMailboxStore.relays(forCircle:)). */
     fun relaysForCircle(circleId: String): List<String> = relaysFor(circleId)
 
-    /** How reachable a circle's posts are right now, for the composer's green/yellow/red light. */
-    enum class SyncStatus { SYNCED, SYNCING, LOCAL }
+    /** What the composer pill says for [circleId] — derived from the REAL pending authored uploads
+     *  ([authoredUploads]), not from connectivity alone. (The old SyncStatus could only ever answer
+     *  SYNCED or LOCAL, so its "Syncing" branch was unreachable.) */
+    fun syncBadge(circleId: String, p: UploadProgress = authoredUploads.value): SyncBadgeState =
+        SyncBadgeState.derive(p, circleId, hostsRelay = false,
+            hasRelay = relaysForCircle(circleId).isNotEmpty(),
+            nearbyConnected = NearbyTransport.hasConnectedPeers(), online = internetActive.value)
 
-    /** SYNCED = a relay holds it for offline members, or a nearby member is connected right now.
-     *  SYNCING = the nearby mesh is up but no peer is connected yet. LOCAL = device-only (no relay,
-     *  no mesh) — the post won't leave this device until one comes online. */
-    fun syncStatus(circleId: String): SyncStatus = when {
-        NearbyTransport.hasConnectedPeers() -> SyncStatus.SYNCED        // a member is right here
-        relaysForCircle(circleId).isNotEmpty() -> SyncStatus.SYNCED     // a relay holds it for offline members
-        internetActive.value -> SyncStatus.SYNCED                       // online: best-effort iroh delivery, no nag
-        else -> SyncStatus.LOCAL                                        // offline + no relay/peer = device-only
+    // ---- Authored-upload progress (the composer pill's source) ----------------------------------
+    private val uploadLock = Any()
+    private val upPending = HashMap<String, Int>()
+    private val upRetrying = HashMap<String, Int>()
+    private val upTotal = HashMap<String, Int>()
+    private val upDone = HashMap<String, Int>()
+    /** Compose-observable snapshot; only the pill reads it. */
+    val authoredUploads = mutableStateOf(UploadProgress())
+
+    private fun uploadStarted(circleId: String) {
+        synchronized(uploadLock) {
+            upPending.merge(circleId, 1, Int::plus)
+            upTotal.merge(circleId, 1, Int::plus)
+        }
+        publishUploadProgress()
+    }
+    private fun uploadRetrying(circleId: String, on: Boolean) {
+        synchronized(uploadLock) {
+            val n = (upRetrying[circleId] ?: 0) + if (on) 1 else -1
+            if (n > 0) upRetrying[circleId] = n else upRetrying.remove(circleId)
+        }
+        publishUploadProgress()
+    }
+    private fun uploadFinished(circleId: String, landed: Boolean) {
+        synchronized(uploadLock) {
+            val n = (upPending[circleId] ?: 1) - 1
+            if (landed) upDone.merge(circleId, 1, Int::plus)
+            if (n > 0) upPending[circleId] = n else {
+                // The burst is over: the next post starts a fresh "Sending 1 of 1".
+                upPending.remove(circleId); upTotal.remove(circleId); upDone.remove(circleId)
+            }
+        }
+        publishUploadProgress()
+    }
+    /** The honest-progress UI's state for the QA dump (schema: docs/QA.md ▸ "Progress fields"),
+     *  field-for-field with the Apple dump. Android has no history-handoff source or target yet, so
+     *  `history_handoff` always reads role "none". */
+    fun qaProgressJson(): JSONObject {
+        val circle = activeCircle.value
+        val p = authoredUploads.value
+        val state = when (syncBadge(circle, p)) {
+            SyncBadgeState.Synced -> "synced"
+            is SyncBadgeState.Sending -> "syncing"
+            is SyncBadgeState.Retrying -> "retrying"
+            SyncBadgeState.Local -> "local"
+        }
+        val transfers = org.json.JSONArray()
+        val downloading = downloadingMedia.toSet()
+        for (ref in (downloading + waitingForSenderMedia.toSet()).sorted()) {
+            val peer = synchronized(incomingLock) { incomingMedia[ref]?.let { it.got.size to it.total } }
+            val relay = mediaRestoreProgress[ref]
+            val row = JSONObject().put("ref", ref)
+            when {
+                peer != null -> row.put("got", peer.first).put("total", peer.second).put("lane", "peer")
+                ref in downloading -> row.put("got", relay?.first ?: 0).put("total", relay?.second ?: 0).put("lane", "relay")
+                else -> row.put("got", 0).put("total", 0).put("lane", "waitingForUpload")
+            }
+            transfers.put(row)
+        }
+        return JSONObject()
+            .put("sync_badge", JSONObject()
+                .put("circle", circle)
+                .put("state", state)
+                .put("pending_user_uploads", p.pending(circle))
+                .put("flush_done", p.sessionDoneByCircle[circle] ?: 0)
+                .put("flush_total", p.sessionTotalByCircle[circle] ?: 0))
+            .put("media_transfers", transfers)
+            .put("media_wanted_count", wantedMedia.count)
+            .put("media_received_count", SyncMetrics.mediaIn.intValue)
+            .put("history_handoff", JSONObject()
+                .put("role", "none").put("state", "idle").put("done", 0).put("total", 0)
+                .put("media_done", 0).put("media_total", 0))
+    }
+
+    /** Snapshot taken ON Main at publish time, so the last publish always carries the latest counts. */
+    private fun publishUploadProgress() {
+        scope.launch(Dispatchers.Main) {
+            val p = synchronized(uploadLock) {
+                UploadProgress(HashMap(upPending), HashMap(upRetrying), HashMap(upTotal), HashMap(upDone))
+            }
+            if (authoredUploads.value != p) authoredUploads.value = p
+        }
     }
 
     /** Add a relay node to a circle's redundant set + persist (additive, never replaces). Used by self-sync. */

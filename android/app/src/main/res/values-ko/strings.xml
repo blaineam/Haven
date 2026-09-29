@@ -243,6 +243,9 @@
     <string name="circle_sync_activity_title">동기화 현황</string>
     <string name="circle_syncing_items">항목 %1$d개 동기화 중…%2$s</string>
     <string name="circle_up_to_date">최신 상태</string>
+    <string name="sync_badge_sending">보내는 중 %1$d/%2$d</string>
+    <string name="sync_badge_retrying">다시 시도 중(%1$d개 대기 중)</string>
+    <string name="sync_badge_synced">동기화됨</string>
     <string name="circle_media_sent">보낸 미디어 %1$d개</string>
     <string name="circle_media_received">받은 미디어 %1$d개</string>
     <string name="circle_media_waiting">대기 중인 미디어 %1$d개</string>

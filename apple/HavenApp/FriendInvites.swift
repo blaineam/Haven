@@ -136,6 +136,8 @@ final class FriendInviteStore: ObservableObject {
     /// crypto runs detached; only the tiny bookkeeping comes back to the main actor.
     func currentTicketLinkValueAsync() async -> String? {
         prune()
+        // The invite link is on screen: someone may accept it any second.
+        beginFirstContactFastPoll(seconds: 180)
         if let live = issued.last(where: { $0.consumedAt == nil && isLive($0.issuedAt) }),
            let v = Self.linkValue(live.ticket) { return v }
         guard let material = mintMaterial() else { return nil }
@@ -215,8 +217,48 @@ final class FriendInviteStore: ObservableObject {
         accepted.append(Accepted(ticket: text, acceptedAt: Self.now(), dropLanded: false, granted: false))
         save()
         HavenLog.net("friend-invite: accepted ticket (relays=\(t.relays.count)) — parking drop")
+        // Adopt the inviter's relays NOW, into the default circle — not at grant time, and not only
+        // under `__bootstrap__` (which the mailbox poll never reads): this is where their hello,
+        // key commit and first posts will land, and polling it from the start is what makes a new
+        // friend's content appear in seconds instead of after their 10-min frame-19 re-announce.
+        RelayMailboxStore.shared.adoptFriendInviteRelays(t.relays)
+        // Learn each relay's HTTP interface over iroh right away (the ticket carries node ids only;
+        // the interface otherwise arrives with the inviter's frame-19 announce).
+        for r in t.relays where r.count == 64 { FeedStore.shared.refreshRelayInterfaceIfNeeded(r) }
+        let inviter = Self.hexString(t.accountId)
+        SharedStore.clearRosterPullBackoff(inviter)
+        FeedStore.shared.forgiveDials(accountHex: inviter, extra: t.deviceHints.map(Self.hexString))
+        beginFirstContactFastPoll()
         Task { await self.tick() }
+        FeedStore.shared.pollMailboxNow()
     }
+
+    // MARK: - First-contact fast poll
+
+    private var fastPollUntil = Date.distantPast
+    private var fastPollTask: Task<Void, Never>?
+
+    /// While a handshake is in flight — a ticket just accepted and awaiting its grant, an invite
+    /// link just shown, a drop just opened, a request just approved — poll every few seconds for a
+    /// couple of minutes instead of the 45–90s idle cadence. Every leg of the offline handshake is a
+    /// relay round trip the OTHER side only sees on its next poll, so at idle cadence four legs cost
+    /// minutes; this collapses them to seconds while someone is actually waiting. Bounded (the
+    /// window only extends on a new handshake event) and foreground-only.
+    func beginFirstContactFastPoll(seconds: TimeInterval = 120) {
+        guard !HavenNet.offline else { return }
+        fastPollUntil = max(fastPollUntil, Date().addingTimeInterval(seconds))
+        guard fastPollTask == nil else { return }
+        HavenLog.net("friend-invite: first-contact fast poll on (\(Int(seconds))s)")
+        fastPollTask = Task { @MainActor [weak self] in
+            while let self, Date() < self.fastPollUntil, !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.fastPollIntervalNs)
+                guard FeedStore.shared.appIsForeground else { continue }
+                FeedStore.shared.pollMailboxNow()   // single-flight downstream; also runs tick()
+            }
+            self?.fastPollTask = nil
+        }
+    }
+    private static let fastPollIntervalNs: UInt64 = 7_000_000_000
 
     // MARK: - The poll pass (both roles)
 
@@ -240,27 +282,28 @@ final class FriendInviteStore: ObservableObject {
             let expires = t.issuedAt + expirySecs
             guard let key = try? friendInviteDropKey(ticket: t),
                   let blob = try? friendInviteBuildDrop(ticket: t, expires: expires, payload: hello) else { continue }
-            var landed = false
-            for relay in t.relays {
+            // Every relay at once: one dead relay's timeout no longer delays the drop on the others.
+            let results = await SharedStore.fanOut(t.relays, limit: Self.relayFanOut) { relay -> Bool in
                 // The inviter's relay can be the relay THIS device hosts (shared-relay circles,
                 // and the QA fleet's stub) — RelayClients refuses self-dials, so store directly.
                 if RelayHost.shared.serving, relay == RelayHost.shared.nodeId {
-                    if RelayHost.shared.localPut(key, blob) { landed = true }
-                    continue
+                    return RelayHost.shared.localPut(key, blob)
                 }
-                if let c = await RelayClients.client(relay) {
-                    if (try? await c.put(key: key, data: blob)) != nil {
-                        landed = true
-                        RelayHealth.shared.recordSuccess(relay)
-                        HavenLog.net("friend-invite: drop landed on \(relay.prefix(8))")
-                    } else {
-                        RelayHealth.shared.recordFailure(relay)
-                    }
+                guard let c = await RelayClients.client(relay) else { return false }
+                if (try? await c.put(key: key, data: blob)) != nil {
+                    RelayHealth.shared.recordSuccess(relay)
+                    HavenLog.net("friend-invite: drop landed on \(relay.prefix(8))")
+                    return true
                 }
+                RelayHealth.shared.recordFailure(relay)
+                return false
             }
-            if landed {
+            if results.contains(true), accepted.indices.contains(i) {
                 accepted[i].dropLanded = true
                 save()
+                // Wake the inviter (silent, no banner): their next poll opens the drop and shows the
+                // approval prompt now, not whenever their phone next happens to poll.
+                PushManager.shared.wake(Self.hexString(t.accountId), silent: true)
             }
         }
     }
@@ -269,13 +312,15 @@ final class FriendInviteStore: ObservableObject {
         for (i, a) in accepted.enumerated() where a.dropLanded && !a.granted {
             guard let t = Self.ticket(a.ticket),
                   let key = try? friendInviteGrantKey(ticket: t) else { continue }
-            for relay in t.relays {
-                var fetched: Data?
+            // Ask every ticket relay at once; take the answers in relay order.
+            let fetchedAll = await SharedStore.fanOut(t.relays, limit: Self.relayFanOut) { relay -> Data? in
                 if RelayHost.shared.serving, relay == RelayHost.shared.nodeId {
-                    fetched = RelayHost.shared.localGet(key)
-                } else if let c = await RelayClients.client(relay) {
-                    fetched = await c.get(key: key)
+                    return RelayHost.shared.localGet(key)
                 }
+                guard let c = await RelayClients.client(relay) else { return nil }
+                return await c.get(key: key)
+            }
+            for (relay, fetched) in zip(t.relays, fetchedAll) {
                 guard let blob = fetched, !blob.isEmpty else { continue }
                 guard let hello = try? friendInviteOpenGrant(ticket: t, blob: blob, now: Self.now()) else {
                     HavenLog.net("friend-invite: grant blob refused (tamper/expiry) from \(relay.prefix(8))")
@@ -287,10 +332,20 @@ final class FriendInviteStore: ObservableObject {
                 // adopt the ticket relays as REAL relays, and let standard sync carry the rest
                 // (epoch keys, history, relay entries).
                 await FeedStore.shared.ingestInviteHello(hello)
-                RelayMailboxStore.shared.adoptBootstrapRelays(t.relays)
-                accepted[i].granted = true
+                RelayMailboxStore.shared.adoptFriendInviteRelays(t.relays)   // idempotent (also at accept)
+                // The inviter approved (and enrolled us on their relays): retry whatever their
+                // relays refused while we were pending, now rather than on a backoff.
+                RelayEnrollment.triggerNow(relays: t.relays, reason: "grant")
+                if accepted.indices.contains(i) { accepted[i].granted = true }
                 save()
+                // The friendship is real now: un-gate their roster pull and dials, and keep polling
+                // fast while their key commit and first page of history land.
+                let inviter = Self.hexString(t.accountId)
+                SharedStore.clearRosterPullBackoff(inviter)
+                FeedStore.shared.forgiveDials(accountHex: inviter)
+                beginFirstContactFastPoll()
                 FeedStore.shared.syncWithContacts(force: true)
+                FeedStore.shared.pollMailboxNow()
                 break
             }
         }
@@ -309,11 +364,12 @@ final class FriendInviteStore: ObservableObject {
         if RelayHost.shared.serving {
             keys.formUnion(RelayHost.shared.localList(prefix))
         }
-        for relay in RelayMailboxStore.shared.allRelays() {
-            if let c = await RelayClients.client(relay), let listed = try? await c.list(prefix: prefix) {
-                keys.formUnion(listed)
-            }
+        let relays = RelayMailboxStore.shared.allRelays()
+        let listings = await SharedStore.fanOut(relays, limit: Self.relayFanOut) { relay -> [String] in
+            guard let c = await RelayClients.client(relay), let listed = try? await c.list(prefix: prefix) else { return [] }
+            return listed
         }
+        for l in listings { keys.formUnion(l) }
         guard !keys.isEmpty else { return }
         for p in pending {
             guard let t = Self.ticket(p.ticket),
@@ -321,12 +377,11 @@ final class FriendInviteStore: ObservableObject {
                   keys.contains(dropKey) else { continue }
             var blob: Data? = RelayHost.shared.serving ? RelayHost.shared.localGet(dropKey) : nil
             if blob == nil {
-                for relay in RelayMailboxStore.shared.allRelays() {
-                    if let c = await RelayClients.client(relay), let b = await c.get(key: dropKey), !b.isEmpty {
-                        blob = b
-                        break
-                    }
+                let got = await SharedStore.fanOut(relays, limit: Self.relayFanOut) { relay -> Data? in
+                    guard let c = await RelayClients.client(relay), let b = await c.get(key: dropKey), !b.isEmpty else { return nil }
+                    return b
                 }
+                blob = got.lazy.compactMap { $0 }.first
             }
             guard let blob, let hello = try? friendInviteOpenDrop(ticket: t, blob: blob, now: Self.now()) else { continue }
             // The drop payload is the acceptor's hello. Feeding it through handleHello surfaces
@@ -338,6 +393,7 @@ final class FriendInviteStore: ObservableObject {
                 save()
             }
             HavenLog.net("friend-invite: acceptance drop opened (from \(acceptor?.prefix(8) ?? "?")) — surfacing prompt")
+            beginFirstContactFastPoll()   // the acceptor is likely still looking at their screen
             let consumed = await FeedStore.shared.ingestInviteHello(hello)
             // Auto-consumed = we had ALREADY added them (mutual invite race): there will be no
             // approval tap, so the approval IS implicit — park the grant right now, or an offline
@@ -368,25 +424,38 @@ final class FriendInviteStore: ObservableObject {
                 var landed = RelayHost.shared.serving && RelayHost.shared.localPut(key, blob)
                 let relays = RelayMailboxStore.shared.allRelays()
                 HavenLog.net("friend-invite: grant → relays=\(relays.count) serving=\(RelayHost.shared.serving)")
-                for relay in relays {
-                    if let c = await RelayClients.client(relay) {
-                        do { try await c.put(key: key, data: blob); landed = true }
-                        catch { HavenLog.net("friend-invite: grant put FAILED on \(relay.prefix(8)): \(error)") }
-                    } else {
+                let puts = await SharedStore.fanOut(relays, limit: Self.relayFanOut) { relay -> Bool in
+                    guard let c = await RelayClients.client(relay) else {
                         HavenLog.net("friend-invite: grant put — no client for \(relay.prefix(8))")
+                        return false
+                    }
+                    do { try await c.put(key: key, data: blob); return true }
+                    catch {
+                        HavenLog.net("friend-invite: grant put FAILED on \(relay.prefix(8)): \(error)")
+                        return false
                     }
                 }
+                if puts.contains(true) { landed = true }
                 HavenLog.net("friend-invite: grant write landed=\(landed)")
                 if landed, self.issued.indices.contains(idx) {
                     self.issued[idx].consumedAt = Self.now()
                     self.save()
                     HavenLog.net("friend-invite: grant parked — ticket consumed")
+                    // Wake the acceptor (silent): their grant poll completes the friendship now.
+                    PushManager.shared.wake(hex, silent: true)
                 }
             }
         }
     }
 
     // MARK: - Helpers
+
+    /// Relays written/read at once by the handshake legs (tickets carry a handful).
+    private static let relayFanOut = 6
+
+    private static func hexString(_ d: Data) -> String {
+        d.map { String(format: "%02x", $0) }.joined()
+    }
 
     private static func hexData(_ s: String) -> Data? {
         let chars = Array(s.lowercased())
@@ -399,5 +468,79 @@ final class FriendInviteStore: ObservableObject {
             i += 2
         }
         return out
+    }
+}
+
+/// App-side holder of `PendingEnrollment` (see ReachPolicy.swift): which friend-invite relays are
+/// still expected to refuse us, the short retry driver while they do, and the immediate re-drive
+/// when the grant / an announce / a first successful write says enrollment has landed.
+@MainActor
+enum RelayEnrollment {
+    private static var policy = PendingEnrollment()
+    private static var retryTask: Task<Void, Never>?
+    private static var lastTriggerMs: UInt64 = 0
+
+    private static func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
+
+    static func noteAdopted(_ relays: [String]) {
+        for r in relays where r.count == 64 { policy.noteAdopted(r, nowMs: nowMs()) }
+    }
+    static func isTracked(_ relay: String) -> Bool { policy.isTracked(relay) }
+    static func anyPending() -> Bool { policy.anyPending(nowMs: nowMs()) }
+
+    /// Error text from the iroh relay lane for a membership refusal (the HTTP lane has its own type).
+    nonisolated static func isForbidden(_ error: Error) -> Bool {
+        if error is SharedStore.RelayForbidden { return true }
+        let s = String(describing: error).lowercased()
+        return s.contains("forbidden") || s.contains("refused")
+    }
+
+    /// A refusal from `relay`. Returns TRUE when it is the expected pending-enrollment 403 — the
+    /// caller must then skip every long backoff (relay health, media stall); a short flat retry is
+    /// scheduled here instead, and `ref`'s media backoff becomes the same short gap.
+    @discardableResult
+    static func absorbRefusal(_ relay: String, ref: String? = nil) -> Bool {
+        guard case .retrySoon = policy.onFailure(relay: relay, forbidden: true, nowMs: nowMs()) else { return false }
+        if let ref { MediaBackupBackoff.notePendingEnrollment(ref) }
+        scheduleRetry()
+        return true
+    }
+
+    /// An authorized write succeeded on `relay`: enrollment has landed. Re-drive everything that
+    /// was deferred for it (a post that landed ELSEWHERE is never retried here on its own).
+    static func confirm(_ relay: String) {
+        guard policy.confirm(relay) else { return }
+        HavenLog.relay("relay \(relay.prefix(8)) enrollment confirmed — re-driving deferred uploads")
+        FeedStore.shared.retryPendingEnrollmentUploads(relays: [relay.lowercased()], full: true)
+    }
+
+    /// The grant arrived / the inviter announced the relay: enrollment is (about to be) in place.
+    /// Re-open the pending window for relays still unconfirmed and retry now, then once more
+    /// shortly after (the inviter's enroll call may land a beat after its grant).
+    static func triggerNow(relays: [String], reason: String) {
+        let tracked = relays.map { $0.lowercased() }.filter { policy.isTracked($0) }
+        guard !tracked.isEmpty else { return }
+        let now = nowMs()
+        for r in tracked { policy.refresh(r, nowMs: now) }
+        guard now &- lastTriggerMs > 10_000 else { return }   // announces repeat — don't stampede
+        lastTriggerMs = now
+        HavenLog.relay("pending-enrollment retry (\(reason)) relays=\(tracked.count)")
+        FeedStore.shared.retryPendingEnrollmentUploads(relays: tracked, full: true)
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            FeedStore.shared.retryPendingEnrollmentUploads(relays: tracked, full: true)
+        }
+    }
+
+    /// The flat short-gap driver: while any relay is pending and something was refused, retry the
+    /// deferred media + queued events every `retryGapMs` — never escalating, never past the window.
+    private static func scheduleRetry() {
+        guard retryTask == nil else { return }
+        retryTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: PendingEnrollment.retryGapMs * 1_000_000)
+            retryTask = nil
+            guard anyPending() else { return }
+            FeedStore.shared.retryPendingEnrollmentUploads(relays: [], full: false)
+        }
     }
 }

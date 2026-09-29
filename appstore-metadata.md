@@ -11,16 +11,17 @@ Private, encrypted circles
 ## description
 Haven is a private social network for the people who actually matter. No ads. No tracking. No algorithm deciding what you see. No company server holding your memories.
 
-Everything you share is end-to-end encrypted with hybrid post-quantum cryptography and travels directly between your devices — over the internet, or over Bluetooth and Wi‑Fi when you're together offline. Even we can't read it.
+Everything you share is end-to-end encrypted with hybrid post-quantum cryptography and travels between your devices over the internet — directly, or through a relay that can't read it — or over Bluetooth and Wi‑Fi when you're together offline. Even we can't read it.
 
-• Private circles — share with family and close friends in separate, invite‑only circles
+• Private circles — share with family and close friends in separate, invite‑only circles, and always see exactly who a post will reach
 • Posts, photos, videos & stories — with a modern camera, easy captions, and a song
 • Direct & group messages — with sender names, timestamps, and delivery checks, plus scheduled and screenshot‑protected secret messages
 • Group voice & video calls — 1:1 and group, with screen sharing, peer‑to‑peer, no call server in the middle
 • All your devices in sync — start on iPhone, pick up on iPad or Mac; your posts and messages follow you
 • Disappearing posts — you decide how long things stick around
 • Nearby sharing — works with no internet at all, phone to phone
-• Bring your own storage — keep memories alive on your own S3 bucket or a relay you run
+• Your relay does the heavy lifting — photos and videos go up once to a relay you run and friends fetch them from there, so your phone stays cool; or keep memories on your own S3 bucket
+• Stays out of your way — big transfers wait while you're on a call, or when your device is hot or in Low Power Mode
 • No account, no phone number, no email — your identity lives only on your device
 
 Haven is a stronghold for the people you love. It's built so that no one — not advertisers, not data brokers, not even the people who made it — can get between you and your circle.
@@ -29,19 +30,22 @@ Haven is a stronghold for the people you love. It's built so that no one — not
 private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,no ads,quantum
 
 ## promotional_text
-Free. A private, end‑to‑end encrypted home for your closest people — no ads, no tracking, no subscription. Peer‑to‑peer, post‑quantum, yours.
+New in 2.0: your relay does the heavy lifting for photos and videos, so your phone stays cool — and you always see exactly who a post reaches. Still free.
 
 ## whats_new
+2.0.0 — Lighter on your phone, clearer about who sees what.
+• Your relay does the heavy lifting: when your circle has a relay, photos and videos go up to it once and friends fetch them from there. Your phone no longer streams media to each friend, so it stays cooler and easier on the battery.
+• Haven stays out of the way: during calls, or when your device is hot or in Low Power Mode, big background transfers pause and pick up again later.
+• Always know who sees a post: the composer shows exactly who it reaches — the circle and how many people — and the Post button says so too. The first time you post in a circle, Haven checks with you once. Replies are marked as visible to the circle, “Send privately instead” is one tap away, and profiles and member lists have a Message button.
+• New friends connect and see each other's posts in seconds instead of minutes.
+• Faster launch, smoother scrolling, and taps that respond right away.
+• Honest sync status: real counts of what's sending and receiving, and progress that actually moves.
+• More reliable screen sharing on calls.
+
+## whats_new_previous
 1.8.11 — Better video calls.
 - Everyone on a video call now sees their own mirrored camera preview in the corner, so you can check how you look while you talk.
 - With your camera off, the preview shows a camera-off icon instead of an empty box.
-
-## whats_new_previous
-1.8.1 — Smoother feed, cooler phone.
-
-• Scrolling the feed is smooth again, and Haven no longer heats up while you browse photos and videos already on your device — even large libraries you brought in from Instagram.
-• You control your offline invite links now: choose how long a link stays valid — 7 days, 30, 90, a year, or never — and regenerate one any time to retire the old link.
-• Plus a networking fix so the app works less hard when your connection changes.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

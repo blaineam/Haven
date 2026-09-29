@@ -913,11 +913,13 @@ final class FeedStore: ObservableObject {
                 SwitchFlipMigration.accountLeafRetired = true   // record the flag so we stop retrying
             }
         }
-        // One-time badge compute at startup (kept OFF the per-refresh hot path): every DM's feed in
-        // one engine pass into the read model, then the watermark count. BEFORE refresh(), so the
-        // DM reads never contend with the rebuild refresh() starts.
-        await warmDMThreads()
+        // Paint the feed FIRST. The one-time DM warm (every DM's feed decoded in one engine pass into
+        // the read model, then the unread-badge count) used to be AWAITED before this — so the feed
+        // the user is looking at waited on decoding every conversation they have. refresh() queues
+        // its engine read now; the warm follows it on the engine, off the launch path (badges land a
+        // beat later, which nobody can see; the empty feed, everyone could).
         refresh()
+        Task { @MainActor [weak self] in await self?.warmDMThreads() }
         // Media-backup drain holds a UIApplication assertion. On a pocket cold launch (push /
         // BGAppRefresh) the wake path already runs one budgeted pass via slimBackgroundSync —
         // starting another here stacks assertions and keeps the process warm for the whole drain.
@@ -1040,7 +1042,7 @@ final class FeedStore: ObservableObject {
                     cids.map { ($0, s.exportEpochHead(circleId: $0)) }
                 }
                 for (cid, envs) in heads {
-                    for head in envs { BackgroundUploader.shared.enqueue(circleId: cid, env: head) }
+                    for head in envs { BackgroundUploader.shared.enqueue(circleId: cid, env: head, maintenance: true) }
                 }
             }
         }
@@ -1673,6 +1675,21 @@ final class FeedStore: ObservableObject {
     private func deviceHints(for accountHex: String) -> [String] {
         contactDeviceHints[accountHex.lowercased()] ?? []
     }
+
+    /// Fresh evidence a peer is reachable NOW — a friend added or approved, a hello from them just
+    /// arrived: clear the iroh dial backoff on every id we would dial them on. The gate (2→30 min on
+    /// mobile) was armed while they were offline or not yet up, and nothing ever forgave it, so a
+    /// brand-new friend could sit out half an hour of "unreachable" after both sides were online.
+    func forgiveDials(accountHex: String, extra: [String] = []) {
+        guard let node else { return }
+        let acct = accountHex.lowercased()
+        var ids: Set<String> = [acct]
+        for d in deviceIdsCache[acct] ?? [] { ids.insert(d.lowercased()) }
+        for h in deviceHints(for: acct) { ids.insert(h.lowercased()) }
+        for e in extra { ids.insert(e.lowercased()) }
+        let mine: Set<String> = [myNodeHex.lowercased(), myDeviceNodeHex.lowercased()]
+        for id in ids where id.count == 64 && !mine.contains(id) { _ = node.forgiveDial(nodeHex: id) }
+    }
     /// My own device ids to ride an invite link (this device first) — what a scanner dials to
     /// reach me before holding my signed roster.
     func inviteDeviceIds() -> [String] {
@@ -1873,7 +1890,14 @@ final class FeedStore: ObservableObject {
         ContactsStore.shared.add(name: req.name, idHex: req.idHex, verificationHex: vhex)
         dialTargetsCache.removeAll()   // the new friend must be dialable now, not when the 10s cache expires
         ContactsStore.shared.setAuthoritativeName(idHex: req.idHex, req.name)
-        recordHeard(req.idHex)
+        // NOT recordHeard: the request usually came through the MAILBOX, which proves nothing about
+        // them being online — and marking them "warm" made the next sync pass skip the hello/roster
+        // to exactly the person we just approved (the 120s warm-keepalive skip). Instead: a fresh
+        // start on their dial gate, tight cadence, and their roster pull un-gated.
+        forgiveDials(accountHex: req.idHex)
+        bumpActivity()
+        pendingForcedHellos.insert("\(req.idHex.lowercased())|default")
+        SharedStore.clearRosterPullBackoff(req.idHex)
         persist(); await reloadCircles()
         if let hello = helloPayload(circleId: "default", circleName: "Your circle") {
             sendIroh(0, hello, to: req.idHex); nearbyBroadcast(0, hello)
@@ -1893,6 +1917,15 @@ final class FeedStore: ObservableObject {
         // If this approval answers a ticketed offline invite, park the grant on my relays so the
         // acceptor completes the friendship whenever they next come online.
         FriendInviteStore.shared.noteApproved(accountHex: req.idHex)
+        // Teach my relays the new member NOW (the 10-min enroll gate would leave them refused —
+        // 403 on every mailbox/media op — for up to ten minutes), tell them where my relays are
+        // (frame 19; the periodic re-announce is 10 min on a phone), and wake them: a friend who
+        // accepted and pocketed the phone otherwise learns of the approval on their next poll.
+        enrollMembers(circleId: "default", force: true)
+        reannounceOwnRelay()
+        PushManager.shared.wake(req.idHex.lowercased(), silent: true)
+        FriendInviteStore.shared.beginFirstContactFastPoll()
+        syncWithContacts(force: true)
         refresh()
     }
 
@@ -2520,16 +2553,119 @@ final class FeedStore: ObservableObject {
         // If someone reacted or replied to this post while this blob was still missing, tell them
         // it is here now (docs/PREVIEW-TIER-DESIGN.md §4.4). No-op unless they actually engaged.
         IncompleteInterestStore.shared.mediaArrived(ref)
+        HistoryHandoff.shared.noteMediaLanded(ref)   // the handoff banner counts it now, not next tick
         downloadingMedia.remove(ref)
         waitingForSenderMedia.remove(ref)
         unavailableMedia.remove(ref)
         unopenableMedia.remove(ref)
         MediaTransferState.shared.clearRestoreProgress(ref)   // drops pending chunk progress too
+        transferWatch[ref] = nil
+        // "Received" counts EVERY lane — relay restore, peer stream, handoff — not just peer
+        // reassembly. Once per ref: a relay copy and a peer stream can race to land the same blob.
+        if countedArrivals.insert(ref).inserted {
+            if countedArrivals.count > 20_000 { countedArrivals = [ref] }
+            SyncMetrics.shared.nbMediaIn += 1
+        }
+        if wantedMedia.arrived(ref) { publishWantedCount() }
     }
 
+    // MARK: - Honest transfer progress (see SyncProgress.swift)
+
+    /// Media refs the missing-media scans want and don't hold yet — "media waiting". Persistent across
+    /// scans: each scan covers the active circle plus ONE rotating other circle, so its own `missing`
+    /// count jumped around every pass.
+    private var wantedMedia = MediaWantedSet()
+    private var lastWantedPruneMs: UInt64 = 0
+    /// Refs already counted into `nbMediaIn` (see `mediaArrived`).
+    private var countedArrivals = Set<String>()
+    private func publishWantedCount() {
+        let n = wantedMedia.count
+        if SyncMetrics.shared.nbMediaPending != n { SyncMetrics.shared.nbMediaPending = n }
+    }
+
+    /// Visible downloads under a no-progress watchdog. A spinner comes down when the bytes land
+    /// (`mediaArrived`) or when NOTHING has arrived for `TransferStallWatch.noProgressMs` — never on a
+    /// fixed timer, and never just because the relay missed while a direct transfer is still going.
+    /// `markUnavailable`: a user-tapped Download that stalls says "No longer available" (with Retry).
+    private var transferWatch: [String: (watch: TransferStallWatch, markUnavailable: Bool)] = [:]
+    private var transferWatchTask: Task<Void, Never>?
+    /// Relay restores in flight — they report nothing until a chunk lands, so a watchdog must not
+    /// time out underneath one (restore has its own network timeouts).
+    private var relayRestoreInFlight = Set<String>()
+
+    /// Bytes landed so far for `ref`, by any lane: direct chunks held + relay reassembly chunks.
+    private func transferProgressMark(_ ref: String) -> Int {
+        (incoming[ref]?.got.count ?? 0) + (MediaTransferState.shared.restoreProgress[ref]?.done ?? 0)
+    }
+
+    private func watchTransfer(_ ref: String, markUnavailableOnStall: Bool) {
+        if var e = transferWatch[ref] {
+            if markUnavailableOnStall, !e.markUnavailable { e.markUnavailable = true; transferWatch[ref] = e }
+            return
+        }
+        transferWatch[ref] = (TransferStallWatch(progress: transferProgressMark(ref), nowMs: now()),
+                              markUnavailableOnStall)
+        guard transferWatchTask == nil else { return }
+        transferWatchTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self else { return }
+                if !self.checkTransferWatches() { self.transferWatchTask = nil; return }
+            }
+        }
+    }
+
+    /// One watchdog pass. False when nothing is left to watch.
+    private func checkTransferWatches() -> Bool {
+        let nowMs = now()
+        for (ref, entry) in transferWatch {
+            if MediaStore.shared.has(ref) {
+                transferWatch[ref] = nil
+                downloadingMedia.remove(ref)
+                continue
+            }
+            var e = entry
+            let stalled = e.watch.observe(progress: transferProgressMark(ref), nowMs: nowMs,
+                                          busy: relayRestoreInFlight.contains(ref))
+            guard stalled else { transferWatch[ref] = e; continue }
+            transferWatch[ref] = nil
+            HavenLog.relay("MEDIA-FETCH ref=\(ref.prefix(10)): no bytes for \(TransferStallWatch.noProgressMs / 1000)s — download stopped")
+            downloadingMedia.remove(ref)
+            clearRestoreProgress(ref)
+            // Relays answered and none holds it yet: the honest state is "Waiting for sender…", not gone.
+            if e.markUnavailable, !waitingForSenderMedia.contains(ref) {
+                unavailableMedia.insert(ref)
+                wantedMedia.gaveUp(ref); publishWantedCount()
+            }
+        }
+        return !transferWatch.isEmpty
+    }
+
+    #if DEBUG
+    /// UI-test hook (HAVEN_DEMO + HAVEN_SCENE=transfer): feed `total - 1` chunks of a fake blob through
+    /// the REAL peer-chunk bookkeeping (`finishChunk`), one every 0.4s, so the placeholder's
+    /// "Downloading… i/n" can be asserted to advance. Stops one short so nothing is adopted.
+    /// Runs once per launch and outlives the view that asked (a re-created view must not restart it).
+    func qaSimulatePeerTransfer(ref: String, total: Int) {
+        guard DemoEnv.isDemo, total > 1, !qaTransferStarted else { return }
+        qaTransferStarted = true
+        if incoming[ref] == nil {
+            incoming[ref] = IncomingMedia(tempURL: MediaStore.shared.makeTempFile(), total: total, got: [])
+        }
+        Task { @MainActor [weak self] in
+            for i in 0..<(total - 1) {
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                self?.finishChunk(ref: ref, index: i)
+            }
+        }
+    }
+    private var qaTransferStarted = false
+    #endif
+
     /// User tapped "Download" on a placeholder for a blob we deliberately evicted: clear the eviction
-    /// (so the normal missing-media path may fetch it), request it now, and surface a spinner. If it
-    /// hasn't arrived in ~45s, mark it unavailable (the relay/peers don't have it either).
+    /// (so the normal missing-media path may fetch it), request it now, and surface a spinner. If no
+    /// bytes arrive for ~45s (by any lane), mark it unavailable — unless the relays said the sender
+    /// hasn't uploaded it yet, which stays "Waiting for sender…".
     func downloadEvicted(_ ref: String) {
         EvictedMediaStore.shared.clear(ref)
         unavailableMedia.remove(ref)
@@ -2541,11 +2677,7 @@ final class FeedStore: ObservableObject {
         guard !MediaStore.shared.has(ref) else { scheduleRefresh(); return }
         downloadingMedia.insert(ref)
         requestMedia(ref)
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 45_000_000_000)
-            downloadingMedia.remove(ref)
-            if !MediaStore.shared.has(ref) { unavailableMedia.insert(ref) }
-        }
+        watchTransfer(ref, markUnavailableOnStall: true)
     }
 
     // MARK: - Persistence (so posts + contacts survive restarts and updates)
@@ -2926,6 +3058,9 @@ final class FeedStore: ObservableObject {
             try? await Task.sleep(nanoseconds: 3_000_000_000)   // let the new path settle
             pathChangeRebindPending = false
             RelayHealth.shared.resetBackoffs()
+            // Failures on the OLD path say nothing about the new one: re-open every iroh dial gate
+            // once (strike counts kept, so a genuinely dead peer goes straight back to its cooldown).
+            _ = self.node?.forgiveAllDials()
             SharedStore.clearAllHttpUrlBad()
             await rebindTransportForFabric(force: true)
             // The rebind re-announces + re-syncs; the uploader drains anything the wedged
@@ -3819,6 +3954,61 @@ final class FeedStore: ObservableObject {
         }
     }
 
+    /// The honest-progress UI's state, for the cross-device e2e (schema in docs/QA.md ▸ "Progress
+    /// fields"): what the composer pill says for the active circle, every transfer a placeholder is
+    /// showing, the wanted/received media counters, and the history handoff banner.
+    private func qaProgressDump() -> [String: Any] {
+        let circle = activeCircleId
+        let badge = syncStatus(circleId: circle)
+        let up = BackgroundUploader.shared.progress
+        let state: String
+        switch badge {
+        case .synced: state = "synced"
+        case .sending, .queued: state = "syncing"
+        case .retrying: state = "retrying"
+        case .deviceOnly: state = "local"
+        }
+        let t = MediaTransferState.shared
+        var transfers: [[String: Any]] = []
+        for ref in t.downloading.union(t.waitingForSender).sorted() {
+            if let p = incoming[ref] {
+                transfers.append(["ref": ref, "got": p.got.count, "total": p.total, "lane": "peer"])
+            } else if t.downloading.contains(ref) {
+                let p = t.restoreProgress[ref]
+                transfers.append(["ref": ref, "got": p?.done ?? 0, "total": p?.total ?? 0, "lane": "relay"])
+            } else {
+                transfers.append(["ref": ref, "got": 0, "total": 0, "lane": "waitingForUpload"])
+            }
+        }
+        let h = HistoryHandoff.shared.status
+        let role: String
+        let hState: String
+        switch h.phase {
+        case .idle: role = "none"; hState = "idle"
+        case .waitingForSource: role = "target"; hState = "waiting"
+        case .receiving: role = "target"; hState = "receiving"
+        case .received: role = "target"; hState = "received"
+        case .noAnswer: role = "target"; hState = "noAnswer"
+        case .sending: role = "source"; hState = "sending"
+        }
+        return [
+            "sync_badge": [
+                "circle": circle,
+                "state": state,
+                "pending_user_uploads": up.pending(circle),
+                "flush_done": up.flushDoneByCircle[circle] ?? 0,
+                "flush_total": up.flushTotalByCircle[circle] ?? 0,
+            ] as [String: Any],
+            "media_transfers": transfers,
+            "media_wanted_count": wantedMedia.count,
+            "media_received_count": SyncMetrics.shared.nbMediaIn,
+            "history_handoff": [
+                "role": role, "state": hState, "done": h.done, "total": h.total,
+                "media_done": h.mediaDone, "media_total": h.mediaTotal,
+            ] as [String: Any],
+        ]
+    }
+
     private func qaWriteDumpFile(_ snapshot: [QaCircleSnapshot], accountHex: String, tsMs: UInt64,
                                  delivery: String, treeChain: String) {
         guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
@@ -3943,7 +4133,7 @@ final class FeedStore: ObservableObject {
             "delivery": (try? JSONSerialization.jsonObject(with: Data(delivery.utf8))) ?? [:],
             // Fork forensics — session-only chain, dump is the only window (see desktop twin).
             "tree_chain": (try? JSONSerialization.jsonObject(with: Data(treeChain.utf8))) ?? [],
-        ]
+        ].merging(qaProgressDump()) { a, _ in a }
         guard let data = try? JSONSerialization.data(withJSONObject: dump, options: [.sortedKeys]) else {
             HavenLog.net("matrix-qa dump: JSON encode failed — dump is now STALE")
             return
@@ -3992,8 +4182,12 @@ final class FeedStore: ObservableObject {
         #endif
     }
 
-    /// Stale-result guard for the off-main feed rebuild: only the newest refresh may publish.
+    /// Stale-result guard for the off-main feed rebuild. A result publishes unless one from a NEWER
+    /// refresh already has: during an ingest burst, requiring `== refreshGeneration` dropped EVERY
+    /// finished rebuild while a later one was queued behind it, so the feed sat stale for the whole
+    /// burst. Only results older than one already on screen are dropped now.
     private var refreshGeneration: UInt64 = 0
+    private var lastPublishedRefreshGen: UInt64 = 0
     func refresh() {
         guard let engine else { items = []; return }
         // While a bulk import runs, rebuild SLOWLY — but do rebuild.
@@ -4062,7 +4256,8 @@ final class FeedStore: ObservableObject {
                         fp(raw), fp(filtered))
             }
             let raw = read.raw, filtered = read.filtered, hiddenHere = read.hiddenHere
-            guard let self, self.engine === engine, self.refreshGeneration == gen, self.activeCircleId == circleId else { return }
+            guard let self, self.engine === engine, gen > self.lastPublishedRefreshGen, self.activeCircleId == circleId else { return }
+            self.lastPublishedRefreshGen = gen
             HavenPerf.shared.noteRefresh()
             self.adoptMembers([circleId: read.members], publish: false)   // `items` below publishes
             // Warm the messages snapshot for the active circle so chat/feed siblings skip a cold feed().
@@ -4256,28 +4451,20 @@ final class FeedStore: ObservableObject {
         }
     }
 
-    /// Delivery status for a circle, for the composer's status light. green = a relay holds your content
-    /// (or, with no relay, a nearby member has it); yellow = still syncing; red = only on this device.
-    func syncStatus(circleId: String) -> PostSyncStatus {
+    /// Delivery status for a circle, for the composer's sync pill — derived from the upload queue's
+    /// REAL pending user items (see `SyncBadgeState.derive`), not from "is any pass running".
+    func syncStatus(circleId: String) -> SyncBadgeState {
         let relays = RelayMailboxStore.shared.relays(forCircle: circleId)
         // If THIS device HOSTS a relay serving this circle, the mailbox is literally on this machine —
         // you're the relay, so you're synced. (Don't sit on "Syncing…" trying to client-connect to your
         // own in-process relay, which is exactly why the relay-hosting Mac showed perpetual yellow.)
-        if RelayHost.shared.serving, !RelayHost.shared.nodeId.isEmpty, relays.contains(RelayHost.shared.nodeId) {
-            return .synced
-        }
-        if !relays.isEmpty {
-            // A relay holds posts for offline members. Show yellow ONLY while a flush is ACTIVELY running
-            // (a real, transient upload) — NOT whenever the queue is non-empty. A stuck/unreachable item
-            // retries silently in the background; it must not pin the badge to "Syncing…" forever (the
-            // post already went directly to any online members; the relay copy is best-effort).
-            return BackgroundUploader.shared.isFlushing ? .pending : .synced
-        }
-        if nearby?.hasConnectedPeers == true { return .synced }   // delivered directly to ≥1 nearby member
-        // No relay + no nearby peer. Without a relay there's no "uploading" state to resolve — posts go
-        // best-effort directly to whoever's reachable over iroh. So online = done-what-we-can (green, no
-        // nag); only genuinely OFFLINE is the device-only warning.
-        return online ? .synced : .stuck
+        let hosts = RelayHost.shared.serving && !RelayHost.shared.nodeId.isEmpty
+            && relays.contains(RelayHost.shared.nodeId)
+        return SyncBadgeState.derive(progress: BackgroundUploader.shared.progress, circleId: circleId,
+                                     // The UI-test upload script stands in for a relay (demo seeds none).
+                                     hostsRelay: hosts, hasRelay: !relays.isEmpty || BackgroundUploader.qaSimulated,
+                                     nearbyConnected: nearby?.hasConnectedPeers == true,
+                                     online: online || BackgroundUploader.qaSimulated)
     }
 
     // MARK: - Sensitive content (federated SCA flags)
@@ -5233,7 +5420,10 @@ final class FeedStore: ObservableObject {
         // path-discovery churn (the self-connect leak and the open_path_on_conn OOM). It took a Mac
         // to 28 GB. Hence: one pass at a time, a few contacts per pass, and a long per-contact
         // backoff so a permanently-unresolvable contact costs almost nothing.
-        if !rosterPullInFlight {
+        // No relay to ask yet (a brand-new friend's relays arrive with the grant / frame 19): skip
+        // WITHOUT recording an attempt — a pull that asked nobody used to burn the full 10-min
+        // backoff, so the roster that makes a new friend's devices dialable waited it out.
+        if !rosterPullInFlight, SharedStore.rosterPullHasCandidates() {
             let due = ContactsStore.shared.contacts
                 .map(\.idHex)
                 .filter { hex in (reads.deviceIds[hex.lowercased()] ?? [hex]).allSatisfy { $0.lowercased() == hex.lowercased() } }
@@ -5697,7 +5887,7 @@ final class FeedStore: ObservableObject {
         // recipient set changes, and the persisted seen-set dedupes the re-upload. Read by the same
         // pass that sealed the event, so the head is enqueued AHEAD of the event as before.
         for head in authored.epochHeads {
-            BackgroundUploader.shared.enqueue(circleId: circleId, env: head)
+            BackgroundUploader.shared.enqueue(circleId: circleId, env: head, maintenance: true)
         }
         BackgroundUploader.shared.enqueue(circleId: circleId, env: env)
         persist()   // we just authored something — save it
@@ -6022,8 +6212,28 @@ final class FeedStore: ObservableObject {
                 }
             }
         }
-        let msgs = await SharedStore.pollMailbox(circleIds: ids)
-        guard !msgs.isEmpty else { return 0 }
+        // The circle on screen FIRST, ingested and painted on its own, then everything else. One
+        // monolithic pass made the visible feed wait for every DM/circle × relay (and every dead
+        // relay's timeouts) before a single envelope was ingested. Still ONE single-flight pull:
+        // the phases run back to back inside it, never overlapping.
+        let active = activeCircleId
+        let phases: [[String]] = ids.contains(active)
+            ? [[active], ids.filter { $0 != active }]
+            : [ids]
+        var total = 0
+        for phase in phases where !phase.isEmpty {
+            let msgs = await SharedStore.pollMailbox(circleIds: phase)
+            guard self.engine === engine else { return total }
+            guard !msgs.isEmpty else { continue }
+            total += await ingestMailboxBatch(msgs, engine: engine)
+            guard self.engine === engine else { return total }
+        }
+        return total
+    }
+
+    /// The ingest half of one `pullMailbox` phase: route hellos / relay announces, receive() the
+    /// content off-main, re-open circles a new key unlocked, paint, save, THEN mark seen.
+    @MainActor private func ingestMailboxBatch(_ msgs: [(String, String, Data)], engine: Engine) async -> Int {
         let me = myNodeHex.lowercased()
         // Control plane first: HELLOs, durable relay announces (__relay__), key commits / rosters,
         // then content. LIST order is a filesystem walk — without this sort a linked host buffers
@@ -6216,6 +6426,12 @@ final class FeedStore: ObservableObject {
                 HavenLog.relay("mailbox: parked re-open of \(cid.prefix(12)) after drain")
             }
         }
+        // Paint BEFORE the export: the feed read and the whole-engine export share the engine, and
+        // queuing the export first made every newly-arrived post wait out a full state
+        // serialization before it could appear. (Cache invalidation first, so the paint and the DM
+        // read model see the new envelopes.)
+        for cid in Set(ingested.map(\.circleId)) { invalidateMessagesCache(cid); invalidateSyncBundle(cid) }
+        if !ingested.isEmpty || !batch.unlockedCircles.isEmpty { refresh() }
         // Persist whenever we ran ANY receive: an envelope that only BUFFERED (event arrived before
         // its key commit / the sender's roster) mutated the now-durable pending_epoch buffer — if we
         // don't save the engine state here, a kill before the key arrives loses the buffered event.
@@ -6228,16 +6444,12 @@ final class FeedStore: ObservableObject {
         for k in batch.processedKeys { SharedStore.markSeenPublic(k) }
         if helloIngested { refresh(); syncWithContacts() }
         if relayIngested { objectWillChange.send() }   // Storage / circle relay chips re-read the store
-        guard !ingested.isEmpty else {
-            // Key-commit-only pass: still refresh so a recovering linked host paints newly unlocked
-            // history as the next poll drains re-queued events.
-            if !batch.unlockedCircles.isEmpty { refresh() }
-            return 0
-        }
+        // (A key-commit-only pass already refreshed above, so a recovering linked host paints newly
+        // unlocked history as the next poll drains re-queued events.)
+        guard !ingested.isEmpty else { return 0 }
         bumpActivity()   // a message arrived → keep sync tight while the conversation is live
-        // Drop stale feed reads before badge/notify — a cold messages() per envelope was the
-        // beachball: N × feed() on main while utility workers still held the engine mutex.
-        for cid in Set(ingested.map(\.circleId)) { invalidateMessagesCache(cid); invalidateSyncBundle(cid) }
+        // (Stale feed reads were dropped above, before the paint — a cold messages() per envelope
+        // was the beachball: N × feed() on main while utility workers still held the engine mutex.)
         // Batch fan-out: one Task for many envelopes (same shape as own-device catch-up).
         liveDeliverManyToMyDevices(1, ingested.map { eventPayload($0.circleId, $0.envelope) })
         // Multipeer siblings that share no good internet path still need a hop — sealed, so only
@@ -6265,7 +6477,7 @@ final class FeedStore: ObservableObject {
             // requestMissingDMMedia here — that would cold-call feed() on main right after invalidate).
             scheduleCircleSideEffects(item.circleId)
         }
-        refresh(); requestMissingMedia()
+        requestMissingMedia()   // (the paint already ran, ahead of the state export)
         return ingested.count
     }
 
@@ -6390,15 +6602,25 @@ final class FeedStore: ObservableObject {
                 await MainActor.run { [weak self] in self?.adoptDeviceIds([nodeHex.lowercased(): learned]) }
             }
             else { targets = [nodeHex] }
-            // Invite-link dial hints bridge the roster bootstrap: until this contact's signed
-            // roster lands, their account id resolves to no node — the hint is the only real id.
-            for h in hints where !targets.contains(where: { $0.lowercased() == h }) { targets.append(h) }
-            var anyOk = false
-            var lastErr: String?
-            for t in targets {
-                do { try await node.sendToNode(nodeIdHex: t, payload: f); anyOk = true }
-                catch { lastErr = error.localizedDescription }
+            // Best-first, and without the dead account id when invite hints exist (`DialOrder`).
+            targets = DialOrder.targets(account: nodeHex, resolved: targets, hints: hints)
+            // Every target CONCURRENTLY. Serially, a new friend's dead account id (which never
+            // resolves under per-device transport) sat first and burned a ~30s connect timeout —
+            // and then its 2-min dial gate — before the invite-hint device id that actually
+            // answers was even tried. Each target is a distinct device, so each still gets the frame.
+            let results: [String?] = await withTaskGroup(of: String?.self) { group in
+                for t in targets {
+                    group.addTask {
+                        do { try await node.sendToNode(nodeIdHex: t, payload: f); return nil }
+                        catch { return error.localizedDescription }
+                    }
+                }
+                var acc: [String?] = []
+                for await r in group { acc.append(r) }
+                return acc
             }
+            let anyOk = results.contains { $0 == nil }
+            let lastErr: String? = results.compactMap { $0 }.last
             // ONLY WRITE ON CHANGE. @Published fires objectWillChange on EVERY assignment — even
             // nil over nil — and this runs on every iroh send: hellos, call frames, event fan-out.
             // Each write invalidated every view observing FeedStore, which is every PostCard on
@@ -6727,8 +6949,11 @@ final class FeedStore: ObservableObject {
         let out = MediaStore.shared.makeTempFile()
         let ok = await engine.run { $0.openCircleMediaFile(circleId: circleId, sealedPath: sealed.path, outPath: out.path) }
         guard ok else { try? FileManager.default.removeItem(at: out); return false }
-        // Media-only arrival: `MediaArrivals` re-renders the tiles; no feed rebuild needed.
-        return await MediaStore.shared.adoptAsync(ref, from: out)
+        // Media-only arrival: `MediaArrivals` re-renders the tiles; no feed rebuild needed. The
+        // verify + move run off-main (adoptAsync); the arrival bookkeeping is back on main here.
+        let adopted = await MediaStore.shared.adoptAsync(ref, from: out)
+        if adopted { mediaArrived(ref) }
+        return adopted
     }
 
     /// The handoff's progress denominator: total events across these circles.
@@ -7446,16 +7671,45 @@ final class FeedStore: ObservableObject {
         }
     }
 
+    /// Re-drive uploads deferred by a friend-invite relay's pending-enrollment 403s. `full: false`
+    /// (the short-gap timer) only re-runs the media queue and the event uploader for what already
+    /// failed; `full: true` (grant / announce / first successful write) also re-offers my media and
+    /// my envelopes for every circle served by `relays` — content that landed on some OTHER relay
+    /// is otherwise never retried on the one that refused it. Per-(relay, key) upload marks make
+    /// the re-offer a no-op wherever it already landed.
+    func retryPendingEnrollmentUploads(relays: [String], full: Bool) {
+        guard let engine else { return }
+        let released = MediaBackupBackoff.releasePendingEnrollment()
+        if released > 0 { HavenLog.sync("media-backup: \(released) ref(s) released for pending-enrollment retry") }
+        MediaBackupQueue.shared.drainPersisted(engine: engine)
+        Task { await BackgroundUploader.shared.flush() }
+        guard full, !relays.isEmpty else { return }
+        let wanted = Set(relays.map { $0.lowercased() })
+        let cids = circles.map(\.id).filter { cid in
+            RelayMailboxStore.shared.relays(forCircle: cid).contains { wanted.contains($0.lowercased()) }
+        }
+        guard !cids.isEmpty else { return }
+        backfillMailboxMedia(circleIds: cids)
+        Task.detached(priority: .utility) {
+            for cid in cids {
+                let envs = await engine.run { $0.exportMyEnvelopes(circleId: cid) }
+                for env in envs { _ = await SharedStore.uploadEvent(circleId: cid, env: env) }
+            }
+        }
+    }
+
     /// Last member-enroll per circle — the set changes rarely, so once per 10 min is plenty.
     private var lastEnrollMs: [String: UInt64] = [:]
 
     /// Tell every relay serving `circleId` who its members are, so a peer the operator never listed
     /// in the relay link is still served. Best-effort: a relay that refuses (we aren't served there
     /// ourselves) or predates the verb simply keeps its existing set.
-    func enrollMembers(circleId: String) {
+    func enrollMembers(circleId: String, force: Bool = false) {
         guard engine != nil else { return }
         let nowMs = now()
-        if let last = lastEnrollMs[circleId], nowMs &- last < 600_000 { return }
+        // `force`: a member was just added (approval) — the set DID change, so the gate that assumes
+        // it rarely does must not hold the new friend out for up to ten minutes.
+        if !force, let last = lastEnrollMs[circleId], nowMs &- last < 600_000 { return }
         let relays = RelayMailboxStore.shared.relays(forCircle: circleId)
             .filter { !$0.hasPrefix("s3:") && $0.count == 64 }
         guard !relays.isEmpty else { return }
@@ -7605,6 +7859,9 @@ final class FeedStore: ObservableObject {
         // the UI (adoptRelayNode → self-sync `relay-readd`, LWW), never from an announce. So: drop the
         // announce entirely for a forgotten relay, and never re-add it below.
         if RelayMailboxStore.shared.isForgotten(lower) { return }
+        // The inviter announcing a relay we're still pending on = we're a member now; retry what it
+        // refused instead of waiting out a backoff (no-op for any relay not pending enrollment).
+        RelayEnrollment.triggerNow(relays: [lower], reason: "relay announce")
         // NEVER let an announce tell us about our OWN running relay. The live front door is
         // authoritative; an announce blob is only ever a stale photograph of it.
         //
@@ -8390,7 +8647,12 @@ final class FeedStore: ObservableObject {
             if mayDirectAsk(ref, circleHasRelay: circleHasRelay) { askForMedia(ref: ref, myHex: myHex, plain: payload) }
             return
         }
+        relayRestoreInFlight.insert(ref)
+        // A chunked restore raises a spinner by itself (noteRestoreProgress); make sure something
+        // lowers it if the bytes stop coming.
+        watchTransfer(ref, markUnavailableOnStall: false)
         Task { @MainActor in
+            defer { self.relayRestoreInFlight.remove(ref) }
             if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, engine: engine) {
                 await MediaStore.shared.storeAsync(ref, data); mediaArrived(ref); MediaFetchBackoff.clear(ref)
                 autoSaveReceived(ref)   // media-only: MediaArrivals re-renders the tiles, no feed rebuild
@@ -8617,7 +8879,16 @@ final class FeedStore: ObservableObject {
             }
         }
         let circleIds = circles.map { $0.id }
-        SyncMetrics.shared.nbMediaPending = missing.count
+        // "Media waiting" = the persistent wanted-set, not this pass's partial view. Gave-up refs
+        // ("No longer available") are out until a retry clears that.
+        let unavailableNow = unavailableMedia
+        wantedMedia.discover(missing.keys.filter { !unavailableNow.contains($0) })
+        if nowMs &- lastWantedPruneMs > 30_000 {
+            lastWantedPruneMs = nowMs
+            wantedMedia.prune { missing[$0] == nil
+                && (MediaStore.shared.has($0) || EvictedMediaStore.shared.contains($0) || unavailableNow.contains($0)) }
+        }
+        publishWantedCount()
         let hasMailbox = circleIds.contains(where: { SharedStore.hasMailbox($0) })
         if smallMediaRefs.count > 5000 { smallMediaRefs.removeAll() }
         smallMediaRefs.formUnion(thumbs.keys)
@@ -8641,8 +8912,12 @@ final class FeedStore: ObservableObject {
             }
             if hasMailbox {
                 downloadingMedia.insert(ref)   // honest placeholder: an AUTO restore IS a download
+                relayRestoreInFlight.insert(ref)
+                // The spinner stays up through the relay AND a direct ask that follows a miss; the
+                // watchdog takes it down only when no bytes have arrived for a while.
+                watchTransfer(ref, markUnavailableOnStall: false)
                 Task { @MainActor in
-                    defer { if !MediaStore.shared.has(ref) { self.downloadingMedia.remove(ref) } }
+                    defer { self.relayRestoreInFlight.remove(ref) }
                     if let data = await SharedStore.restore(ref: ref, circleIds: circleIds, engine: engine) {
                         HavenLog.relay("MEDIA-FETCH ok ref=\(ref.prefix(10)) bytes=\(data.count) via=relay")
                         await MediaStore.shared.storeAsync(ref, data); self.mediaArrived(ref)
@@ -8665,6 +8940,11 @@ final class FeedStore: ObservableObject {
                         // the next retry of this lane pulls it from the relay instead.
                         HavenLog.relay("MEDIA-FETCH miss ref=\(ref.prefix(10)) — relay had none, asking peers")
                         directAsk()
+                    } else if !MediaStore.shared.has(ref) {
+                        // Relay-first patience (or heavy work paused): nothing is downloading now. If the
+                        // relays answered without it, `restore` already marked it "Waiting for sender…".
+                        self.transferWatch[ref] = nil
+                        self.downloadingMedia.remove(ref)
                     }
                 }
             } else if self.mayDirectAsk(ref, circleHasRelay: false) {
@@ -8741,6 +9021,7 @@ final class FeedStore: ObservableObject {
                     // attempt, not a restart of the ladder.
                     guard exhaustedRetryBudget > 0, retriedExhaustedThisLaunch.insert(ref).inserted else {
                         unavailableMedia.insert(ref)
+                        if wantedMedia.arrived(ref) { publishWantedCount() }   // given up — no longer "waiting"
                         continue
                     }
                     exhaustedRetryBudget -= 1
@@ -8790,7 +9071,7 @@ final class FeedStore: ObservableObject {
             HavenLog.net("media REQ ref=\(ref.prefix(12)) — refused, link is ultra-constrained")
             return
         }
-        if haveLocal, requesterHex == myNodeHex { HistoryHandoff.shared.noteSending() }   // my other device, mid-handoff
+        if haveLocal, requesterHex == myNodeHex { HistoryHandoff.shared.noteSending(ref: ref) }   // my other device, mid-handoff
         if haveLocal, let url = localURL {
             if servingNow.contains("\(ref)|\(requesterHex)") {
                 HavenLog.net("media REQ ref=\(ref.prefix(12)) — already streaming to \(requesterHex.prefix(8)), ignoring")
@@ -9477,6 +9758,10 @@ final class FeedStore: ObservableObject {
             // rather than at chunk 0. Recorded only AFTER the bytes are on disk — see ReassemblyStore.
             ReassemblyStore.shared.note(ref: ref, part: entry.tempURL.lastPathComponent,
                                         total: entry.total, got: entry.got)
+            // Direct chunks drive the same i/n as a relay restore (coalesced to ~10 Hz there), and the
+            // spinner stays up exactly while they keep coming.
+            noteRestoreProgress(ref, done: entry.got.count, total: entry.total)
+            if transferWatch[ref] == nil { watchTransfer(ref, markUnavailableOnStall: false) }
             return
         }
         // Whether adopt succeeds or rejects the bytes on a digest mismatch, this reassembly is over:
@@ -9485,16 +9770,19 @@ final class FeedStore: ObservableObject {
         //
         // The verify (a streaming SHA-256 over the whole file — seconds for a big video) and the move
         // run off-main in `adoptAsync`; the bookkeeping that closes this reassembly stays synchronous
-        // so a late duplicate chunk cannot find a half-finished entry.
+        // so a late duplicate chunk cannot find a half-finished entry, and the outcome handling
+        // (arrival / progress clear, auto-save, re-mirror) runs back on main once it completes —
+        // the same steps, in the same order, as the synchronous adopt did.
         let temp = entry.tempURL
         ReassemblyStore.shared.clear(ref)
-        SyncMetrics.shared.nbMediaIn += 1
         incoming[ref] = nil
         let circle = mediaReqCircle[ref] ?? activeCircleId
         mediaReqCircle[ref] = nil
         Task { @MainActor [weak self] in
             // The media views re-render via `MediaArrivals` (adoptAsync notes it) — no feed rebuild.
-            guard await MediaStore.shared.adoptAsync(ref, from: temp), let self else { return }
+            let adopted = await MediaStore.shared.adoptAsync(ref, from: temp)
+            guard let self else { return }
+            if adopted { self.mediaArrived(ref) } else { self.clearRestoreProgress(ref) }
             self.autoSaveReceived(ref)
             // DURABILITY: this blob just arrived peer-to-peer, which means the relay didn't have it (or
             // we'd have restored it from there). Re-mirror it to the circle's relay so it survives the
@@ -9693,7 +9981,15 @@ final class FeedStore: ObservableObject {
             return (false, "engine-add-failed")   // transient — leave the slot for the next poll
         }
         dialTargetsCache.removeAll()   // a just-handshaked member must be dialable now, not in 10s
-        recordHeard(idHex)
+        // "Heard" only when the hello came over a LIVE lane. A mailbox hello can be minutes old and
+        // says nothing about reachability — recording it made the next sync pass treat the peer as
+        // warm and skip the hello/roster that completes the handshake on their side.
+        if viaNearby || senderDevice != nil { recordHeard(idHex) }
+        // Fresh reachability evidence (a live-lane hello, or a brand-new member): clear their dial
+        // backoff. Not for every old mailbox hello from a known member — that is no evidence at all.
+        if senderDevice != nil || !reads.engineKnows {
+            forgiveDials(accountHex: idHex, extra: senderDevice.map { [$0] } ?? [])
+        }
         persist(); await reloadCircles()
         if let card = reads.card, !card.name.isEmpty {
             ContactsStore.shared.setCard(idHex: idHex, name: card.name, bio: card.bio, link: card.link,

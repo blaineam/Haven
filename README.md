@@ -46,6 +46,14 @@ S3-compatible bucket, or a direct peer-to-peer link.
   by a permanent link or QR — no phone, no email, ever.
 - **Local-first transport.** Traffic prefers Bluetooth, then local/peer-to-peer
   WiFi, and only falls back to a relay when there's no closer path.
+- **Relay-first media (2.0) — your phone stays cool.** When a circle has a relay, photos
+  and videos go up to it once (sealed end-to-end) and friends fetch them from there, instead
+  of your phone streaming a copy to each friend. Heavy background transfers pause during
+  calls and when the device is hot or in Low Power Mode / Battery Saver, and resume later.
+- **Always clear who sees what (2.0).** The composer shows exactly who a post reaches
+  ("Everyone in <circle> · N people"), the Post button is labeled with its audience, the first
+  post in a circle asks once, replies are marked as visible to the circle, and "Send privately
+  instead" plus a Message button on profiles and member lists make the private path one tap away.
 - **You're in control.** Block anyone, approve every new contact, and on-device
   sensitive-content guards keep flagged media blurred — all without anything
   leaving your phone.

@@ -33,6 +33,7 @@ enum DemoScene: String {
     case story       // full-screen story viewer
     case identity    // the identity switcher / backup sheet
     case call        // an in-progress group call overlay
+    case transfer    // UI test: a media placeholder fed simulated peer chunks (QATransferScene)
 }
 
 enum DemoEnv {
@@ -400,9 +401,9 @@ enum DemoArt {
     static func installPhotos() {
         for (ref, asset) in photoMap where !MediaStore.shared.has(ref) {
             if let img = bundledImage(asset), let data = img.jpegData(compressionQuality: 0.9) {
-                MediaStore.shared.store(ref, data)
+                MediaStore.shared.store(ref, data, seeding: true)
             } else if let img = fallbackGradient(), let data = img.jpegData(compressionQuality: 0.9) {
-                MediaStore.shared.store(ref, data)   // only if the bundled asset is missing
+                MediaStore.shared.store(ref, data, seeding: true)   // only if the bundled asset is missing
             }
         }
     }

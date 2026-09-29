@@ -1,3 +1,7 @@
-1.8.11 — Veja você mesmo nas chamadas de vídeo.
-- A prévia espelhada da sua câmera agora aparece no canto durante a chamada, para você conferir como está aparecendo enquanto conversam.
-- Com a câmera desligada, o canto mostra um ícone de câmera desligada em vez de uma caixa preta vazia.
+2.0.0 — Mais leve, mais rápido, mais claro.
+• Fotos e vídeos sobem uma vez para o relay do seu círculo e os amigos baixam de lá: o celular esquenta menos.
+• Transferências grandes pausam em chamadas, com calor ou na Economia de bateria.
+• Veja quem uma publicação alcança, envie em privado com um toque, mande mensagem do perfil.
+• Novos amigos conectados em segundos.
+• Abertura mais rápida, rolagem suave, sincronização honesta.
+• O compartilhamento de tela do Android agora chega a todos.

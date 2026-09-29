@@ -116,6 +116,7 @@ import com.blaineam.haven.core.LocalMedia
 import com.blaineam.haven.core.ProfileStore
 import com.blaineam.haven.core.PendingRequest
 import com.blaineam.haven.core.SyncMetrics
+import com.blaineam.haven.core.SyncBadgeState
 import com.blaineam.haven.core.loadAndDownscale
 import com.blaineam.haven.core.nowMs
 import kotlinx.coroutines.launch
@@ -152,25 +153,38 @@ fun CircleScreen(onAddFriend: () -> Unit) {
     // Repair an account that was imported into twice, without being asked. Once per session, and a
     // no-op when nothing is duplicated — the rule is shared with iOS (PostDedupe).
     LaunchedEffect(active, version) { HavenNet.sweepDuplicateImportsOnce(active) }
-    val items: List<FeedItemFfi> = remember(version, active, profile.retentionDays, circleSettingsVersion, circlesVersion, HavenNet.blocked.size, showHidden, hiddenCount) {
-        // Per-circle auto-delete override (falls back to the app-wide retention default).
-        val raw = runCatching { HavenNet.engine.feed(active, nowMs(), com.blaineam.haven.core.CircleSettings.retentionSecs(active)) }.getOrDefault(emptyList())
-        // Hide posts from blocked people and from anyone no longer in this circle (removed members),
-        // so a removal actually clears their content even if a later sync re-ingests their old events.
-        // null = the lookup failed (don't blank the feed); empty list = a genuine solo circle (hide
-        // everyone else). My own posts always stay.
-        val memberHexes: List<String>? = runCatching { HavenNet.membersOf(active).map { it.idHex } }.getOrNull()
-        raw.filter { fi ->
-            val allowedAuthor = when {
-                fi.isMe -> true
-                HavenNet.blocked.any { it.startsWith(fi.authorShort) } -> false
-                memberHexes == null -> true   // membership lookup failed — don't hide everything
-                else -> memberHexes.any { it.startsWith(fi.authorShort) }
+    // The feed read (`engine.feed` decodes + re-opens every envelope in the circle) runs OFF the main
+    // thread. It used to run inside `remember` during composition, so every feedVersion bump — each
+    // ingest burst, media landing, periodic tick — decoded the whole circle on the UI thread.
+    // produceState keeps the last list while a re-read runs (no flash on a version bump); it is
+    // tagged with its circle so switching circles never shows the previous circle's posts.
+    val feedRead by androidx.compose.runtime.produceState(
+        initialValue = "" to emptyList<FeedItemFfi>(),
+        version, active, profile.retentionDays, circleSettingsVersion, circlesVersion, HavenNet.blocked.size, showHidden, hiddenCount,
+    ) {
+        val circle = active
+        val showHiddenNow = showHidden
+        value = circle to kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            // Per-circle auto-delete override (falls back to the app-wide retention default).
+            val raw = runCatching { HavenNet.engine.feed(circle, nowMs(), com.blaineam.haven.core.CircleSettings.retentionSecs(circle)) }.getOrDefault(emptyList())
+            // Hide posts from blocked people and from anyone no longer in this circle (removed members),
+            // so a removal actually clears their content even if a later sync re-ingests their old events.
+            // null = the lookup failed (don't blank the feed); empty list = a genuine solo circle (hide
+            // everyone else). My own posts always stay.
+            val memberHexes: List<String>? = runCatching { HavenNet.membersOf(circle).map { it.idHex } }.getOrNull()
+            raw.filter { fi ->
+                val allowedAuthor = when {
+                    fi.isMe -> true
+                    HavenNet.blocked.any { it.startsWith(fi.authorShort) } -> false
+                    memberHexes == null -> true   // membership lookup failed — don't hide everything
+                    else -> memberHexes.any { it.startsWith(fi.authorShort) }
+                }
+                // Personal per-post hide (reversible via the "show hidden" toggle).
+                allowedAuthor && (showHiddenNow || !com.blaineam.haven.core.HiddenStore.isHidden(fi.id))
             }
-            // Personal per-post hide (reversible via the "show hidden" toggle).
-            allowedAuthor && (showHidden || !com.blaineam.haven.core.HiddenStore.isHidden(fi.id))
         }
     }
+    val items: List<FeedItemFfi> = if (feedRead.first == active) feedRead.second else emptyList()
     val storyGroups = remember(items) { groupStories(items) }
     // Stories live in the tray, not the list. Unsent posts are gone too — a "Message unsent" tombstone
     // in the feed is clutter, not information (PostCard still renders it for a deep link / comment sheet).
@@ -1960,40 +1974,35 @@ private fun ConnectionDot() {
     }
 }
 
-/** A small yellow/red pill by the composer: can this circle's posts actually reach others right now?
- *  Yellow = still syncing (mesh searching); red = device-only. When everything is SYNCED the pill
- *  collapses to nothing so it doesn't pad out the composer (iOS SyncStatusBadge parity). Tapping it
- *  opens a compact bottom sheet with the live sent / received / waiting counters. Polls every 2.5s. */
+/** A small pill by the composer: are this circle's posts actually getting out? Derived from the REAL
+ *  pending authored uploads (HavenNet.authoredUploads): "Sending 2 of 5" while they go, "Retrying (N
+ *  waiting)" during backoff, red when offline with nowhere to deliver. A burst that completes says
+ *  "Synced" for a moment, then the pill folds away (iOS SyncStatusBadge parity). Event-driven — it
+ *  recomposes when the upload counts or connectivity change, not on a 2.5s poll. Tapping it opens
+ *  the live sent / received / waiting counters. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SyncStatusBadge(circleId: String) {
-    var status by remember(circleId) { mutableStateOf(HavenNet.syncStatus(circleId)) }
+    val progress by HavenNet.authoredUploads
+    val online by HavenNet.internetActive
+    val peers = SyncMetrics.nearbyPeers.intValue
+    val status = remember(circleId, progress, online, peers) { HavenNet.syncBadge(circleId, progress) }
     var showDetail by remember { mutableStateOf(false) }
-    LaunchedEffect(circleId) {
-        while (true) {
-            status = HavenNet.syncStatus(circleId)
-            kotlinx.coroutines.delay(2500)
+    var justSynced by remember(circleId) { mutableStateOf(false) }
+    var previous by remember(circleId) { mutableStateOf(status) }
+    LaunchedEffect(status) {
+        val was = previous
+        previous = status
+        // Any newer state cancels a running flash, so decide afresh every time.
+        justSynced = status == SyncBadgeState.Synced && was != SyncBadgeState.Synced && was != SyncBadgeState.Local
+        if (justSynced) {
+            kotlinx.coroutines.delay(2000)
+            justSynced = false
         }
     }
     // Only surface the pill when there's something to know. Collapse to nothing when fully synced.
-    val (color, label) = when (status) {
-        HavenNet.SyncStatus.SYNCED -> return
-        HavenNet.SyncStatus.SYNCING -> Color(0xFFF59E0B) to stringResource(R.string.circle_syncing_label)
-        HavenNet.SyncStatus.LOCAL -> Color(0xFFEF4444) to stringResource(R.string.circle_device_only)
-    }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .padding(horizontal = 6.dp)
-            .clip(RoundedCornerShape(50))
-            .clickable { showDetail = true }
-            .background(HavenTheme.card)
-            .padding(horizontal = 9.dp, vertical = 4.dp),
-    ) {
-        Box(Modifier.size(8.dp).clip(CircleShape).background(color))
-        Spacer(Modifier.size(5.dp))
-        Text(label, color = HavenTheme.textSecondary, fontSize = 11.sp)
-    }
+    if (status == SyncBadgeState.Synced && !justSynced) return
+    SyncBadgePill(status) { showDetail = true }
     if (showDetail) {
         ModalBottomSheet(
             onDismissRequest = { showDetail = false },

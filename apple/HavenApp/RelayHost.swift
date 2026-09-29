@@ -1480,6 +1480,9 @@ final class RelayMailboxStore: ObservableObject {
             list.append(hex)
             relaysByCircle[circleId] = list
             UserDefaults.standard.set(relaysByCircle, forKey: key)
+            // A relay we didn't have may hold the rosters we couldn't find — let the next sync
+            // pass ask it now instead of after each contact's 10-min pull backoff.
+            SharedStore.clearRosterPullBackoff()
         }
     }
 
@@ -1908,6 +1911,25 @@ final class RelayMailboxStore: ObservableObject {
         // explicit user re-add.
         for h in hexes where !isForgotten(h) { add(circleId: "__bootstrap__", nodeHex: h) }
         if defaultNodeHex == nil, let first = hexes.first(where: { $0.count == 64 && !isForgotten($0) }) { defaultNodeHex = first }
+    }
+
+    /// Relays carried by a friend-invite TICKET (the inviter's mailbox relays). Adopted into the
+    /// DEFAULT circle — the circle the friendship lives in — as well as `__bootstrap__`: the mailbox
+    /// poll reads `relays(forCircle:)`, so a bootstrap-only relay was never polled (once this device
+    /// already had a default relay) until the inviter's frame-19 announce arrived, up to 10 min
+    /// later. Android adopts ticket relays into its circles the same way. Never resurrects a relay
+    /// the user deleted (same rule as `adoptBootstrapRelays`). Returns whether anything was added.
+    @discardableResult
+    func adoptFriendInviteRelays(_ hexes: [String]) -> Bool {
+        let before = relays(forCircle: "default")
+        adoptBootstrapRelays(hexes)
+        for h in hexes where !isForgotten(h) { add(circleId: "default", nodeHex: h) }
+        let after = relays(forCircle: "default")
+        // Newly adopted ticket relays refuse our writes until the inviter enrolls us — expected,
+        // so their 403s must not trip the long backoffs (see `PendingEnrollment`).
+        let added = after.filter { h in !before.contains(where: { $0.caseInsensitiveCompare(h) == .orderedSame }) }
+        RelayEnrollment.noteAdopted(added)
+        return after != before
     }
 
     /// Every distinct ACTIVE relay across all circles — for mesh sync / the active transport set.

@@ -1,3 +1,7 @@
-1.8.11 — See yourself on video calls.
-- The mirrored camera preview of your own side now shows in the corner during a call, so you can check how you look while you talk.
-- With your camera off, that corner shows a camera-off icon instead of an empty black box.
+2.0.0 — Lighter, faster, clearer.
+• Photos and videos go up to your circle's relay once and friends fetch them there, so your phone runs cooler.
+• Big transfers pause during calls, when your phone is hot, or in Battery Saver.
+• See exactly who a post reaches, send privately in one tap, and message people from their profile.
+• New friends connect in seconds.
+• Faster launch, smoother scrolling, honest sync status.
+• Screen sharing from Android now reaches everyone on the call.

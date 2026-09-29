@@ -8,7 +8,8 @@ struct HistoryHandoffBanner: View {
 
     var body: some View {
         if handoff.status.phase != .idle {
-            HistoryHandoffProgress(status: handoff.status, onDismiss: { handoff.dismissReceived() })
+            HistoryHandoffProgress(status: handoff.status, onDismiss: { handoff.dismissReceived() },
+                                   onRetry: { handoff.retryRequest() })
                 .padding(14)
                 .background(HavenTheme.brandHorizontal, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .foregroundStyle(.white)
@@ -21,11 +22,13 @@ struct HistoryHandoffBanner: View {
 struct HistoryHandoffProgress: View {
     let status: HistoryHandoff.Status
     var onDismiss: (() -> Void)? = nil
+    var onRetry: (() -> Void)? = nil
 
     private var icon: String {
         switch status.phase {
         case .received: return "checkmark.circle.fill"
         case .sending: return "arrow.up.circle"
+        case .noAnswer: return "exclamationmark.circle"
         default: return "clock.arrow.2.circlepath"
         }
     }
@@ -36,6 +39,7 @@ struct HistoryHandoffProgress: View {
         case .receiving: return "Bringing over your history"
         case .received: return "Your history is here"
         case .sending: return "Sending history to your new device"
+        case .noAnswer: return "No answer from your other device"
         case .idle: return ""
         }
     }
@@ -46,6 +50,12 @@ struct HistoryHandoffProgress: View {
             return "Open Haven on your other device, or leave it on a charger — it starts on its next wake."
         case .receiving where status.mediaTotal > 0:
             return "\(min(status.done, max(status.total, status.done))) of \(max(status.total, status.done)) posts and messages · \(min(status.mediaDone, status.mediaTotal)) of \(status.mediaTotal) photos and videos"
+        case .noAnswer:
+            return "Your other device may need a Haven update before it can send your history. Update Haven there, then try again."
+        case .sending where status.mediaTotal > 0:
+            return "\(min(status.done, max(status.total, status.done))) of \(max(status.total, status.done)) posts and messages · \(min(status.mediaDone, status.mediaTotal)) of \(status.mediaTotal) photos and videos"
+        case .sending where status.total > 0:
+            return "\(min(status.done, status.total)) of \(status.total) posts and messages"
         case .sending:
             return "Keep Haven open on this phone until your new device has everything — the screen stays on while it sends."
         case .receiving:
@@ -70,11 +80,21 @@ struct HistoryHandoffProgress: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
-                if status.phase == .received, let onDismiss {
+                if status.phase == .received || status.phase == .noAnswer, let onDismiss {
                     Button(action: onDismiss) { Image(systemName: "xmark").font(.caption.weight(.bold)) }
                         .buttonStyle(.plain)
                         .accessibilityLabel(Text("Dismiss"))
                 }
+            }
+            // The counts replaced the "keep it open" advice in the detail line; it still matters.
+            if status.phase == .sending, status.total + status.mediaTotal > 0 {
+                Text("Keep Haven open on this phone until your new device has everything — the screen stays on while it sends.")
+                    .font(.caption2).opacity(0.75)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if status.phase == .noAnswer, let onRetry {
+                Button(action: onRetry) { Text("Retry").font(.caption.weight(.semibold)) }
+                    .buttonStyle(.bordered).tint(.white)
             }
             switch status.phase {
             case .receiving, .sending:

@@ -1,0 +1,125 @@
+import XCTest
+
+final class DialOrderTests: XCTestCase {
+    let acct = String(repeating: "a", count: 64)
+    let dev1 = String(repeating: "1", count: 64)
+    let dev2 = String(repeating: "2", count: 64)
+    let hint = String(repeating: "b", count: 64)
+
+    /// A brand-new friend: no roster (the engine answers [account]) but an invite hint — the hint is
+    /// the only id that answers, and the dead account id must not be dialed at all.
+    func testNewFriendDialsHintOnly() {
+        XCTAssertEqual(DialOrder.targets(account: acct, resolved: [acct], hints: [hint]), [hint])
+    }
+
+    /// Roster known, no hint: devices first, account id kept LAST (pre-multidevice safety net).
+    func testRosterKeepsAccountLast() {
+        XCTAssertEqual(DialOrder.targets(account: acct, resolved: [dev1, dev2, acct], hints: []), [dev1, dev2, acct])
+    }
+
+    /// Hints first, then roster devices; account dropped; duplicates and case folded.
+    func testHintsFirstThenDevicesDeduped() {
+        let got = DialOrder.targets(account: acct.uppercased(), resolved: [dev1, acct, hint.uppercased()], hints: [hint])
+        XCTAssertEqual(got, [hint, dev1])
+    }
+
+    /// Nothing known but the account: it is the only handle there is.
+    func testAccountOnlyFallback() {
+        XCTAssertEqual(DialOrder.targets(account: acct, resolved: [], hints: []), [acct])
+    }
+}
+
+@MainActor
+final class BoundedFanOutTests: XCTestCase {
+    /// Results come back in INPUT order even when later items finish first.
+    func testResultsInInputOrder() async {
+        let got = await BoundedFanOut.run([3, 1, 2], limit: 3) { n -> Int in
+            try? await Task.sleep(nanoseconds: UInt64(n) * 20_000_000)
+            return n * 10
+        }
+        XCTAssertEqual(got, [30, 10, 20])
+    }
+
+    /// Never more than `limit` in flight, and every item runs exactly once.
+    func testRespectsLimit() async {
+        let probe = InFlightProbe()
+        let items = Array(0..<12)
+        let got = await BoundedFanOut.run(items, limit: 4) { i -> Int in
+            probe.enter()
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            probe.leave()
+            return i
+        }
+        XCTAssertEqual(got, items)
+        XCTAssertLessThanOrEqual(probe.peak, 4)
+        XCTAssertGreaterThan(probe.peak, 1, "ran concurrently, not serially")
+    }
+
+    /// The point of the change: total time is ~max, not ~sum, of the per-item waits.
+    func testSlowItemDoesNotSerializeTheRest() async {
+        let start = Date()
+        _ = await BoundedFanOut.run(Array(0..<6), limit: 6) { _ -> Bool in
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            return true
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.9, "6 × 200ms ran concurrently")
+    }
+
+    func testEmpty() async {
+        let got = await BoundedFanOut.run([Int](), limit: 4) { $0 }
+        XCTAssertTrue(got.isEmpty)
+    }
+}
+
+@MainActor
+private final class InFlightProbe {
+    private(set) var peak = 0
+    private var now = 0
+    func enter() { now += 1; peak = max(peak, now) }
+    func leave() { now -= 1 }
+}
+
+final class PendingEnrollmentTests: XCTestCase {
+    let relay = String(repeating: "c", count: 64)
+    let t0: UInt64 = 1_000_000
+
+    func testRefusalFromFreshTicketRelayRetriesSoon() {
+        var p = PendingEnrollment()
+        p.noteAdopted(relay, nowMs: t0)
+        XCTAssertEqual(p.onFailure(relay: relay.uppercased(), forbidden: true, nowMs: t0 + 30_000),
+                       .retrySoon(afterMs: PendingEnrollment.retryGapMs))
+        XCTAssertLessThanOrEqual(PendingEnrollment.retryGapMs, 15_000)
+    }
+
+    func testOutageStillBacksOff() {
+        var p = PendingEnrollment()
+        p.noteAdopted(relay, nowMs: t0)
+        XCTAssertEqual(p.onFailure(relay: relay, forbidden: false, nowMs: t0 + 1_000), .backOff)
+    }
+
+    func testWindowExpiresToOrdinaryBackoff() {
+        var p = PendingEnrollment()
+        p.noteAdopted(relay, nowMs: t0)
+        XCTAssertEqual(p.onFailure(relay: relay, forbidden: true, nowMs: t0 + PendingEnrollment.windowMs), .backOff)
+        XCTAssertFalse(p.anyPending(nowMs: t0 + PendingEnrollment.windowMs))
+    }
+
+    func testConfirmedOrUnknownRelayBacksOff() {
+        var p = PendingEnrollment()
+        XCTAssertEqual(p.onFailure(relay: relay, forbidden: true, nowMs: t0), .backOff, "never adopted from a ticket")
+        p.noteAdopted(relay, nowMs: t0)
+        XCTAssertTrue(p.confirm(relay))
+        XCTAssertFalse(p.confirm(relay), "already confirmed")
+        XCTAssertEqual(p.onFailure(relay: relay, forbidden: true, nowMs: t0 + 1_000), .backOff)
+    }
+
+    func testGrantReopensWindowOnlyForTrackedRelay() {
+        var p = PendingEnrollment()
+        p.noteAdopted(relay, nowMs: t0)
+        p.refresh(relay, nowMs: t0 + 280_000)   // grant arrives late — window re-opens
+        XCTAssertTrue(p.isPending(relay, nowMs: t0 + 400_000))
+        let other = String(repeating: "d", count: 64)
+        p.refresh(other, nowMs: t0)             // never tracked → refresh does not start tracking
+        XCTAssertFalse(p.isTracked(other))
+    }
+}

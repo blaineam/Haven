@@ -249,6 +249,9 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="circle_sync_activity_title">Actividad de sincronización</string>
     <string name="circle_syncing_items">Sincronizando %1$d elemento%2$s…</string>
     <string name="circle_up_to_date">Todo al día</string>
+    <string name="sync_badge_sending">Enviando %1$d de %2$d</string>
+    <string name="sync_badge_retrying">Reintentando (%1$d en espera)</string>
+    <string name="sync_badge_synced">Sincronizado</string>
     <string name="circle_media_sent">%1$d archivos multimedia enviados</string>
     <string name="circle_media_received">%1$d archivos multimedia recibidos</string>
     <string name="circle_media_waiting">%1$d archivos multimedia en espera</string>

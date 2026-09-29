@@ -1400,13 +1400,16 @@ final class MediaStore: ObservableObject {
     /// that don't hash to a content-addressed ref are DROPPED, not stored: they are, by definition,
     /// not the media this post is about.
     @discardableResult
-    func store(_ ref: String, _ bytes: Data) -> Bool {
+    ///
+    /// `seeding`: the DEBUG demo seed importing its bundled assets — not inbound media, so it does not
+    /// count toward `HavenPerf.mediaStoreOnMainCount` (which the e2e asserts stays 0).
+    func store(_ ref: String, _ bytes: Data, seeding: Bool = false) -> Bool {
         guard let kind = MediaKind(ref: ref), let url = fileURL(ref) else { return false }
         guard Self.verify(ref, bytes) else {
             HavenLog.relay("media REJECTED \(ref.prefix(12)): \(bytes.count)B do not match its content address")
             return false
         }
-        HavenPerf.shared.noteMediaStoreOnMain()   // the synchronous path hashes + writes on main
+        if !seeding { HavenPerf.shared.noteMediaStoreOnMain() }   // the synchronous path hashes + writes on main
         if (try? bytes.write(to: url)) != nil { HeldMediaIndex.shared.insert(url.lastPathComponent) }
         landed(ref, kind: kind, url: url)
         return true

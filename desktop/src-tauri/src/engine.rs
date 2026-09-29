@@ -205,6 +205,8 @@ struct DynState {
     last_activity_ms: u64,
     next_sync_due_ms: u64,
     next_poll_due_ms: u64,
+    /// Self-sync has its OWN due time and loop (see `start_self_sync_loop`), same adaptive cadence.
+    next_self_sync_due_ms: u64,
     /// #4 local-limit sweep throttle: last run (ms) + in-flight guard, so the age/size cap enforcement
     /// runs at most ~every 10 min off the sync tick (a `force` from a settings change bypasses the
     /// throttle). iOS `FeedStore.lastLimitSweepAt` / `limitSweepInFlight`.
@@ -527,6 +529,14 @@ fn replace_member_set(my_account: &str, my_device: &str, accounts: &[String], de
         }
     }
     set.into_iter().collect()
+}
+
+/// Is a self-sync pass due, and when is the next periodic one? A pass runs when the periodic
+/// deadline passed OR an armed nudge (`nudge_at` ≠ 0, a local edit of synced state) expired; either
+/// way the pass snapshots everything, so both are consumed and the periodic clock restarts.
+fn self_sync_schedule(now: u64, nudge_at: u64, next_due: u64, interval: u64) -> (bool, u64) {
+    let due = now >= next_due || (nudge_at != 0 && now >= nudge_at);
+    (due, if due { now + interval } else { next_due })
 }
 
 /// Peer-to-peer iroh frame chunk — 32 KB, matching iOS/Android (`HavenNet.kt:2173`). Theirs is the
@@ -1653,6 +1663,44 @@ impl Engine {
         }
     }
 
+    /// Self-sync on its OWN clock, never queued behind the mailbox poll and the sync fan-out.
+    ///
+    /// It used to run in the heartbeat right after `poll_mailbox`, in series — and a poll over a fat
+    /// mailbox (or one stuck behind the engine lock) took minutes, so self-sync passes on the e2e
+    /// desktop leg landed 5 and 11 minutes apart. Self-sync is how this device learns what my OTHER
+    /// devices changed — above all a relay adopted on the phone (my own devices get no frame-19
+    /// announce: that goes to circle MEMBERS), so the desktop sat on its old relays and missed
+    /// everything posted to a private circle on the new one for ~10 minutes (e2e `multirelay`: A's
+    /// private post never / 584 s on desktop; Android, whose self-sync has its own clock, 2.6 s).
+    /// Same adaptive cadence as the poll (30 s base) and the same debounced nudge; `poll_self_sync`
+    /// is single-flight, so a slow pass is skipped over, never stacked.
+    fn start_self_sync_loop(self: &Arc<Self>) {
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let now = now_ms();
+                let due = {
+                    let mut st = me.dyn_state.lock();
+                    let (due, next) = self_sync_schedule(
+                        now,
+                        st.selfsync_nudge_at_ms,
+                        st.next_self_sync_due_ms,
+                        Self::adaptive_interval(now, st.last_activity_ms, 30_000),
+                    );
+                    if due {
+                        st.selfsync_nudge_at_ms = 0;
+                        st.next_self_sync_due_ms = next;
+                    }
+                    due
+                };
+                if due {
+                    me.poll_self_sync().await;
+                }
+            }
+        });
+    }
+
     /// Base cadence stretched by how long the app has sat idle. Idle <3min = base; <15min = ×3; else ×6.
     fn adaptive_interval(now: u64, last_activity_ms: u64, base: u64) -> u64 {
         let idle = now.saturating_sub(last_activity_ms);
@@ -1671,6 +1719,7 @@ impl Engine {
         st.last_activity_ms = now_ms();
         st.next_sync_due_ms = 0;
         st.next_poll_due_ms = 0;
+        st.next_self_sync_due_ms = 0;
     }
 
     /// qa-cmd v2 cadence contract (DEBUG driver only — see `qa.rs`): a qa op represents a user
@@ -1698,6 +1747,7 @@ impl Engine {
             // Base cadences from start_mailbox_loop: poll 30s, sync 20s.
             st.next_poll_due_ms = st.next_poll_due_ms.min(now + 30_000);
             st.next_sync_due_ms = st.next_sync_due_ms.min(now + 20_000);
+            st.next_self_sync_due_ms = st.next_self_sync_due_ms.min(now + 30_000);
         }
     }
 
@@ -1719,6 +1769,7 @@ impl Engine {
     // source). Any real activity resets it to the tight base cadence (see bump_activity), and pushes
     // still wake the app for immediacy either way. iOS FeedStore parity: sync base 20s, poll base 30s.
     fn start_mailbox_loop(self: &Arc<Self>) {
+        self.start_self_sync_loop();
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -1739,23 +1790,9 @@ impl Engine {
                         false
                     }
                 };
-                // Debounced "self-sync now" nudge (see nudge_self_sync): a local edit of synced
-                // state armed a deadline — honor it here, off-schedule, so the edit reaches the
-                // user's other devices in seconds. A due poll bucket clears any pending nudge too
-                // (its own pass snapshots the same mutation), so a burst never runs twice.
-                let nudge_due = {
-                    let mut st = me.dyn_state.lock();
-                    let due = st.selfsync_nudge_at_ms != 0 && now >= st.selfsync_nudge_at_ms;
-                    if due || poll_due {
-                        st.selfsync_nudge_at_ms = 0;
-                    }
-                    due
-                };
+                // Self-sync is NOT run from here any more — see `start_self_sync_loop`.
                 if poll_due {
                     me.poll_mailbox().await;
-                    me.poll_self_sync().await;
-                } else if nudge_due {
-                    me.poll_self_sync().await;
                 }
 
                 // Sync bucket (base 20s): the network fan-out that runs the radio hot, so it backs off
@@ -5451,8 +5488,11 @@ impl Engine {
                 list.push(node_hex.clone());
             }
             // Record the relay's announced HTTP media interface (the reliable cross-NAT path).
-            if !announced_urls.is_empty() && !announced_token.is_empty() {
-                p.set_relay_http(&node_hex, announced_urls.clone(), announced_token.clone());
+            if !announced_urls.is_empty()
+                && !announced_token.is_empty()
+                && p.set_relay_http(&node_hex, announced_urls.clone(), announced_token.clone())
+            {
+                self.roster_on_new_interface(&node_hex);
             }
             if let Some(derp) = announced_derp {
                 p.set_relay_derp(&node_hex, &derp);
@@ -5557,7 +5597,9 @@ impl Engine {
             );
             let circles: Vec<String> = {
                 let mut p = me.prefs.lock();
-                p.set_relay_http(&lower, urls.clone(), token);
+                if p.set_relay_http(&lower, urls.clone(), token) {
+                    me.roster_on_new_interface(&lower);
+                }
                 if let Some(d) = &derp {
                     p.set_relay_derp(&lower, d);
                 }
@@ -9243,6 +9285,17 @@ impl Engine {
         );
     }
 
+    /// A relay's HTTP interface was just learned or changed (announce, interface refresh): queue a
+    /// roster publish to it. The devroster PUT is what authorizes this device on a headless relay,
+    /// and its only other triggers are a refusal (`note_refused`) or the 2-minute backfill tick — so
+    /// a relay learned over HTTP after the publish already failed over an unreachable iroh dial
+    /// stayed unauthorized until one of those came round. Rides the next `heal_forbidden_relays`
+    /// (end of every self-sync pass; rate-limited to one publish per 30 s).
+    fn roster_on_new_interface(&self, node_hex: &str) {
+        self.roster_published.lock().remove(node_hex);
+        self.roster_needed.lock().insert(node_hex.to_string());
+    }
+
     /// Re-publish our device roster to every relay that refused us, so the next attempt is allowed.
     /// True if anything was published (i.e. a retry is worth making). Rate-limited to 30s: a relay
     /// that refuses us for some OTHER reason must not turn every media miss into a publish storm.
@@ -12393,6 +12446,21 @@ mod multirelay_parity_tests {
         assert!(interface_refresh_due(Some(t0), t0 + 300_000, false), "speculative: 5 min gap");
         // A clock that stepped backwards reads as "just fetched" (saturating), never as overdue.
         assert!(!interface_refresh_due(Some(t0), t0 - 5, true));
+    }
+
+    #[test]
+    fn self_sync_runs_on_its_deadline_or_an_expired_nudge_and_restarts_the_clock() {
+        use super::self_sync_schedule;
+        // First tick after launch: next_due = 0 → due at once.
+        assert_eq!(self_sync_schedule(1_000, 0, 0, 30_000), (true, 31_000));
+        // Not due, no nudge → untouched.
+        assert_eq!(self_sync_schedule(10_000, 0, 31_000, 30_000), (false, 31_000));
+        // An armed nudge that has not expired yet waits…
+        assert_eq!(self_sync_schedule(10_000, 12_000, 31_000, 30_000), (false, 31_000));
+        // …and fires once it has, restarting the periodic clock.
+        assert_eq!(self_sync_schedule(12_000, 12_000, 31_000, 30_000), (true, 42_000));
+        // Periodic deadline with an idle-stretched interval.
+        assert_eq!(self_sync_schedule(31_000, 0, 31_000, 180_000), (true, 211_000));
     }
 
     #[test]

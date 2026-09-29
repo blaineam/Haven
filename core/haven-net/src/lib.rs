@@ -498,8 +498,8 @@ impl Node {
     /// Mesh anti-entropy: pull every sealed blob a SIBLING relay holds that our in-process relay lacks,
     /// into our store (idempotent set-union). No-op if we don't host a relay. Returns blobs pulled.
     pub async fn relay_sync_from(&self, peer_node_hex: &str) -> usize {
-        let Some((root, retention)) =
-            lock(&self.relay).as_ref().map(|c| (c.root.clone(), c.retention))
+        let Some((root, retention, auth)) =
+            lock(&self.relay).as_ref().map(|c| (c.root.clone(), c.retention, c.auth.clone()))
         else {
             return 0;
         };
@@ -514,7 +514,10 @@ impl Node {
         // retention (mailbox TTL; media under the operator's own limits) are never pulled
         // back, and pulled files keep the peer's idle age — so a GC'd entry can't ping-pong
         // between sibling relays forever.
-        let pulled = blobstore::pull_missing_from_peer(&root, &client, &retention).await;
+        // Only the mailboxes of circles this relay serves: a sibling (especially an older one that
+        // still lists everything) must not turn our store into a mirror of ITS other circles.
+        let serves = move |c: &str| lock(&auth).serves_circle(c);
+        let pulled = blobstore::pull_missing_from_peer(&root, &client, &retention, &serves).await;
         // Deliberately NOT closed. An application close abandons whatever path iroh had just
         // established, so the next tick starts cold on the relay path again and the connection never
         // lives long enough to go direct. `conn()` re-dials by itself if it genuinely dropped.

@@ -299,6 +299,7 @@ pub(crate) fn keys_to_pull(
     root: &Path,
     peer_keys: &[(String, u64)],
     retention: &Retention,
+    serves_circle: &(dyn Fn(&str) -> bool + Sync),
 ) -> Vec<(String, u64)> {
     let mailbox_ttl = retention.mailbox_ttl.as_secs();
     let media_ttl = retention.media_max_age.map(|d| d.as_secs());
@@ -314,6 +315,11 @@ pub(crate) fn keys_to_pull(
         }
         if *age >= mailbox_ttl && key.starts_with(MAILBOX_PREFIX) {
             continue; // expired on the peer's clock → never resurrect
+        }
+        if let Some(c) = mailbox_circle(key) {
+            if !serves_circle(c) {
+                continue; // a mailbox we don't serve is not ours to hold (an older sibling may still offer it)
+            }
         }
         if key.starts_with(MEDIA_PREFIX) {
             if media_ttl.is_some_and(|ttl| *age >= ttl) {
@@ -442,8 +448,14 @@ pub(crate) const SYNC_PREFIX: &str = "haven";
 pub struct RelayAuth {
     /// circleId → authorized member node hexes.
     members: HashMap<String, HashSet<String>>,
-    /// Sibling relay node hexes allowed to replicate via broad LIST (mesh anti-entropy).
-    relays: HashSet<String>,
+    /// Sibling relay node hex → the circles it is a sibling FOR (mesh anti-entropy). A relay is
+    /// registered per circle — `authorize(circle, members, relays)` names the relays of THAT
+    /// circle — and it replicates exactly those circles' mailboxes (plus the namespaces that name
+    /// no circle: media, device rosters, self-sync slots). This used to be one flat set, so a relay
+    /// that shared ONE circle with us was granted every circle we host: friends who each run their
+    /// own relay and share a single circle had each other's PRIVATE circles and DM mailboxes
+    /// mirrored onto their relays within one mesh pass (found by the e2e `multirelay` step).
+    relays: HashMap<String, HashSet<String>>,
     /// account hex → its VERIFIED device hexes, recorded whenever an account-signed devroster is
     /// accepted ([`Self::authorize_devices`] — verified PUTs on both transports + startup
     /// rehydrate). This is what lets a device touch its OWN account's `haven/self/…` slots under
@@ -462,8 +474,45 @@ impl RelayAuth {
         let members: HashSet<String> = members.into_iter().map(|m| m.to_lowercase()).collect();
         self.members.insert(circle_id.to_string(), members);
         for r in relays {
-            self.relays.insert(r.to_lowercase());
+            self.add_sibling(&r, circle_id);
         }
+    }
+
+    /// Record `relay` as a sibling for `circle` (it may replicate that circle's mailbox).
+    pub(crate) fn add_sibling(&mut self, relay: &str, circle: &str) {
+        self.relays.entry(relay.to_lowercase()).or_default().insert(circle.to_string());
+    }
+
+    /// Is `peer` a sibling relay for at least one circle?
+    pub(crate) fn is_sibling(&self, peer: &str) -> bool {
+        self.relays.contains_key(&peer.to_lowercase())
+    }
+
+    /// Is `peer` a sibling relay for THIS circle?
+    pub(crate) fn is_sibling_for(&self, peer: &str, circle: &str) -> bool {
+        self.relays.get(&peer.to_lowercase()).map(|c| c.contains(circle)).unwrap_or(false)
+    }
+
+    /// May `peer` see `key` in a listing? Keys that name a circle (`haven/mailbox/<c>/…`) only to
+    /// that circle's members and siblings (a DM mailbox also to anyone this relay serves, the same
+    /// rule `blob_forbidden` applies to DM keys); everything else is decided by the prefix gate the
+    /// LIST already passed. Applied to every LIST/AGES answer, so a broad listing a sibling is
+    /// allowed to request carries only the circles it replicates.
+    pub(crate) fn listing_visible(&self, peer: &str, key: &str) -> bool {
+        match mailbox_circle(key) {
+            Some(c) if c.starts_with("dm:") => self.is_known(peer) || self.is_sibling_for(peer, c),
+            Some(c) => self.is_member_of(c, peer) || self.is_sibling_for(peer, c),
+            None => true,
+        }
+    }
+
+    /// Does this relay serve `circle` at all (the mesh PULL filter: never replicate a mailbox we
+    /// don't serve)? A DM mailbox counts when one of its participants is someone we serve.
+    pub(crate) fn serves_circle(&self, circle: &str) -> bool {
+        if let Some(rest) = circle.strip_prefix("dm:") {
+            return rest.split('-').any(|acct| self.is_known(acct));
+        }
+        self.knows_circle(circle)
     }
     /// Expand every circle this account is a member of to ALSO include its DEVICE ids — called after a
     /// device roster written to `haven/devroster/<account>` is cryptographically verified. A device
@@ -542,6 +591,10 @@ impl RelayAuth {
 
     pub(crate) fn deauthorize(&mut self, circle_id: &str) {
         self.members.remove(circle_id);
+        for circles in self.relays.values_mut() {
+            circles.remove(circle_id);
+        }
+        self.relays.retain(|_, circles| !circles.is_empty());
     }
 
     /// True if `peer` is a member of at least ONE circle this relay serves — the "already paired"
@@ -962,13 +1015,13 @@ impl BlobServer {
         let mut a = self.auth.lock().unwrap();
         a.members.insert(circle_id.to_string(), members.into_iter().collect());
         for r in relays {
-            a.relays.insert(r);
+            a.add_sibling(&r, circle_id);
         }
     }
 
     /// Forget a circle's authorization (e.g., we stopped serving it / left it).
     pub fn deauthorize(&self, circle_id: &str) {
-        self.auth.lock().unwrap().members.remove(circle_id);
+        self.auth.lock().unwrap().deauthorize(circle_id);
     }
 
     /// Mesh anti-entropy: pull every sealed blob a PEER relay holds (under Haven's prefix)
@@ -993,7 +1046,9 @@ impl BlobServer {
         )?;
         // A standalone BlobServer has no operator retention knobs — default policy (media
         // unlimited), exactly today's behavior. The configurable host is Node::relay_sync_from.
-        let pulled = pull_missing_from_peer(&self.root, &client, &Retention::default()).await;
+        let auth = self.auth.clone();
+        let serves = move |c: &str| auth.lock().unwrap().serves_circle(c);
+        let pulled = pull_missing_from_peer(&self.root, &client, &Retention::default(), &serves).await;
         let _ = client.close().await;
         Ok(pulled)
     }
@@ -1076,6 +1131,7 @@ pub(crate) async fn pull_missing_from_peer(
     root: &Path,
     client: &BlobClient,
     retention: &Retention,
+    serves_circle: &(dyn Fn(&str) -> bool + Sync),
 ) -> usize {
     // Age-aware inventory when the peer speaks AGES; a pre-GC peer only speaks LIST, so
     // everything it advertises counts as fresh (the old pull-everything behavior).
@@ -1094,7 +1150,7 @@ pub(crate) async fn pull_missing_from_peer(
     // 4.6 GB peak / unresponsive while serving. Remainder is picked up on later passes.
     // Prefer mailbox keys first so event history converges before multi‑MB media.
     const MAX_MESH_PULLS_PER_PASS: usize = 24;
-    let mut want = keys_to_pull(root, &peer_keys, retention);
+    let mut want = keys_to_pull(root, &peer_keys, retention, serves_circle);
     want.sort_by(|a, b| {
         let rank = |k: &str| {
             if k.starts_with("haven/mailbox/") {
@@ -1645,8 +1701,38 @@ pub fn load_learned_relays(root: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Union `relays` into the learned-siblings file (idempotent, capped).
+/// The per-circle half of the learned-siblings file: `(circle, relays)` pairs, re-validated on read
+/// like everything else in it. A file written before circles were recorded has none — its relays
+/// are still dialed (the flat list) but are siblings for nothing until a member teaches them again.
+pub fn load_learned_siblings(root: &Path) -> Vec<(String, Vec<String>)> {
+    let Ok(bytes) = std::fs::read(learned_relays_path(root)) else { return Vec::new() };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return Vec::new() };
+    let Some(map) = v.get("by_circle").and_then(|m| m.as_object()) else { return Vec::new() };
+    map.iter()
+        .filter(|(c, _)| !c.is_empty() && c.len() <= MAX_CIRCLE_ID)
+        .filter_map(|(c, rs)| {
+            let rs: Vec<String> = rs
+                .as_array()?
+                .iter()
+                .filter_map(|r| r.as_str())
+                .filter(|r| r.len() == 64 && r.bytes().all(|b| b.is_ascii_hexdigit()))
+                .map(|r| r.to_lowercase())
+                .take(MAX_LEARNED_RELAYS)
+                .collect();
+            (!rs.is_empty()).then(|| (c.clone(), rs))
+        })
+        .take(MAX_LEARNED_CIRCLES)
+        .collect()
+}
+
+/// Union `relays` into the learned-siblings file (idempotent, capped) — and, when the teacher named
+/// the circle they serve, record them as siblings FOR that circle.
 pub fn save_learned_relays(root: &Path, relays: &[String]) {
+    save_learned_siblings(root, None, relays);
+}
+
+/// [`save_learned_relays`], remembering which circle the relays were taught for.
+pub fn save_learned_siblings(root: &Path, circle: Option<&str>, relays: &[String]) {
     let mut all = load_learned_relays(root);
     for r in relays {
         let r = r.to_lowercase();
@@ -1654,7 +1740,19 @@ pub fn save_learned_relays(root: &Path, relays: &[String]) {
             all.push(r);
         }
     }
-    let doc = serde_json::json!({ "v": 1, "relays": all });
+    let mut by_circle: std::collections::BTreeMap<String, Vec<String>> = load_learned_siblings(root).into_iter().collect();
+    if let Some(c) = circle.filter(|c| !c.is_empty() && c.len() <= MAX_CIRCLE_ID) {
+        if by_circle.contains_key(c) || by_circle.len() < MAX_LEARNED_CIRCLES {
+            let set = by_circle.entry(c.to_string()).or_default();
+            for r in relays {
+                let r = r.to_lowercase();
+                if r.len() == 64 && !set.contains(&r) && set.len() < MAX_LEARNED_RELAYS {
+                    set.push(r);
+                }
+            }
+        }
+    }
+    let doc = serde_json::json!({ "v": 2, "relays": all, "by_circle": by_circle });
     let Ok(bytes) = serde_json::to_vec(&doc) else { return };
     let path = learned_relays_path(root);
     if let Some(dir) = path.parent() {
@@ -1669,12 +1767,22 @@ const MAX_LEARNED_RELAYS: usize = 32;
 
 pub(crate) fn rehydrate_learned_grants(root: &Path, auth: &Arc<Mutex<RelayAuth>>) {
     let grants = load_learned_grants(root);
-    if grants.is_empty() {
+    let siblings = load_learned_siblings(root);
+    if grants.is_empty() && siblings.is_empty() {
         return;
     }
     let mut a = auth.lock().unwrap();
     for (circle, members) in grants {
         a.merge_members(&circle, &members);
+    }
+    // Relays members taught us for a circle may replicate THAT circle's mailbox from us (and we
+    // from them — the mesh loop dials the flat list). Without this two headless relays that the
+    // same members use never meshed at all: each learned whom to pull from, and each refused the
+    // other's pull, because only `--peer` flags ever made a relay a sibling on the serving side.
+    for (circle, relays) in siblings {
+        for r in relays {
+            a.add_sibling(&r, &circle);
+        }
     }
 }
 
@@ -1688,8 +1796,15 @@ pub(crate) fn rehydrate_learned_grants(root: &Path, auth: &Arc<Mutex<RelayAuth>>
 /// meant an unrecognized key, and every key outside `haven/mailbox/`, was public).
 pub(crate) fn blob_forbidden(auth: &Arc<Mutex<RelayAuth>>, peer: &str, verb: u8, key: &str) -> bool {
     let a = auth.lock().unwrap();
-    if a.relays.contains(peer) {
-        return false; // sibling relay → may sync freely (mesh anti-entropy)
+    if a.is_sibling(peer) {
+        // Sibling relay → may replicate (mesh anti-entropy): broad listings (filtered per circle
+        // by `listing_visible`), the namespaces that name no circle, and the mailboxes of the
+        // circles it is a sibling FOR. A mailbox of any other circle is judged exactly as for
+        // anyone else below — which for a relay is "no".
+        match mailbox_circle(key) {
+            Some(c) if !a.is_sibling_for(peer, c) => {}
+            _ => return false,
+        }
     }
     // A device roster is self-authenticating: `verify_devroster` refuses any blob whose signature
     // doesn't bind it to the account named in the key, so an unauthenticated write can inject
@@ -2029,6 +2144,10 @@ pub(crate) async fn handle_request(
             if let Ok(base) = safe_path(&root, &key) {
                 collect_keys(&root, &base, &mut keys);
             }
+            {
+                let a = auth.lock().unwrap();
+                keys.retain(|k| a.listing_visible(&peer, k));
+            }
             keys.sort();
             let body = keys.join("\n");
             let _ = send.write_all(body.as_bytes()).await;
@@ -2040,6 +2159,10 @@ pub(crate) async fn handle_request(
             // an empty reply — local_list's fall-back-to-root would enumerate self/ slots.
             let mut pairs =
                 if safe_path(&root, &key).is_ok() { local_list_ages(&root, &key) } else { Vec::new() };
+            {
+                let a = auth.lock().unwrap();
+                pairs.retain(|(k, _)| a.listing_visible(&peer, k));
+            }
             pairs.sort();
             let body = pairs
                 .into_iter()
@@ -2107,7 +2230,13 @@ pub(crate) async fn handle_request(
                 && !relays.is_empty()
                 && auth.lock().unwrap().is_member_of(&circle, &peer);
             if ok {
-                save_learned_relays(&root, &relays);
+                save_learned_siblings(&root, Some(&circle), &relays);
+                {
+                    let mut a = auth.lock().unwrap();
+                    for r in &relays {
+                        a.add_sibling(r, &circle);
+                    }
+                }
                 let _ = send.write_all(b"OK").await;
             } else {
                 let _ = send.write_all(b"ERR forbidden").await;
@@ -2436,6 +2565,11 @@ impl BlobClient {
             let bytes = recv.read_to_end(MAX_BLOB as usize).await.ah()?;
             if bytes == MISS {
                 Ok(None)
+            } else if bytes == b"ERR forbidden" {
+                // The server's refusal, not a blob. Returned as `Some(bytes)` this was handed to the
+                // caller as 13 bytes of "sealed" content — and a mesh pull would have STORED it as
+                // the blob. An error is what every other verb already reports.
+                Err(anyhow!("ERR forbidden"))
             } else {
                 Ok(Some(bytes))
             }
@@ -2663,7 +2797,7 @@ mod tests {
             // Media has no TTL by DEFAULT → an old age never blocks replication.
             ("haven/media/ancient".to_string(), ttl + 5),
         ];
-        let want = keys_to_pull(&dir, &peer, &Retention::default());
+        let want = keys_to_pull(&dir, &peer, &Retention::default(), &|_| true);
         assert_eq!(
             want,
             vec![
@@ -2905,7 +3039,7 @@ mod tests {
             ("haven/mailbox/fam/ok".to_string(), 1 * day),   // mailbox unaffected by media limits
         ];
         assert_eq!(
-            keys_to_pull(&dir, &peer, &ret),
+            keys_to_pull(&dir, &peer, &ret, &|_| true),
             vec![
                 ("haven/media/fresh".to_string(), 1 * day),
                 ("haven/mailbox/fam/ok".to_string(), 1 * day),
@@ -2913,7 +3047,7 @@ mod tests {
             "an aged-out media key is not re-pulled under the same relay's config"
         );
         // The DEFAULT config (no media limits) still pulls ancient media — today's behavior.
-        assert!(keys_to_pull(&dir, &peer, &Retention::default())
+        assert!(keys_to_pull(&dir, &peer, &Retention::default(), &|_| true)
             .contains(&("haven/media/aged_out".to_string(), 10 * day)));
 
         // Size-eviction horizon: once the cap evicted blobs written up to time T, media at
@@ -2928,7 +3062,7 @@ mod tests {
             ("haven/media/brand_new".to_string(), 0),      // newer than the horizon → pull
         ];
         assert_eq!(
-            keys_to_pull(&dir, &peer2, &ret),
+            keys_to_pull(&dir, &peer2, &ret, &|_| true),
             vec![("haven/media/brand_new".to_string(), 0)]
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -3000,7 +3134,7 @@ mod tests {
 
         // Configure circle 'fam' with one member + one sibling relay.
         auth.lock().unwrap().members.insert("fam".into(), [member.clone()].into_iter().collect());
-        auth.lock().unwrap().relays.insert(sibling.clone());
+        auth.lock().unwrap().add_sibling(&sibling, "fam");
 
         // The member may read their circle; a stranger may not (read, nor scoped enumerate).
         assert!(!blob_forbidden(&auth, &member, VERB_GET, &mbkey));
@@ -3091,8 +3225,51 @@ mod tests {
         assert!(blob_forbidden(&auth, &acct, VERB_LIST, "haven/self"));
         assert!(blob_forbidden(&auth, &acct, VERB_LIST, "haven/self/"));
         let sibling = "ee".repeat(32);
-        auth.lock().unwrap().relays.insert(sibling.clone());
+        auth.lock().unwrap().add_sibling(&sibling, "fam");
         assert!(!blob_forbidden(&auth, &sibling, VERB_LIST, "haven/self/"), "mesh anti-entropy still replicates");
+    }
+
+    /// Friends who each run their own relay and share ONE circle must not mirror each other's
+    /// other circles. A sibling is registered per circle; it may replicate that circle's mailbox,
+    /// never another's (read or listed), and a mesh pull never takes a mailbox we don't serve.
+    #[test]
+    fn a_sibling_replicates_only_the_circles_it_is_a_sibling_for() {
+        let auth: Arc<Mutex<RelayAuth>> = Arc::new(Mutex::new(RelayAuth::default()));
+        let (b, a_relay) = ("bb".repeat(32), "aa".repeat(32));
+        // B's relay serves B's private circle and the circle B shares with A (whose relay is a
+        // sibling for the shared circle only).
+        auth.lock().unwrap().authorize("private", vec![b.clone()], vec![]);
+        auth.lock().unwrap().authorize("shared", vec![b.clone()], vec![a_relay.clone()]);
+        let shared_key = format!("haven/mailbox/shared/{}", "01".repeat(32));
+        let private_key = format!("haven/mailbox/private/{}", "02".repeat(32));
+        let dm_key = format!("haven/mailbox/dm:{}-{}/{}", b, "cc".repeat(32), "03".repeat(32));
+        assert!(!blob_forbidden(&auth, &a_relay, VERB_GET, &shared_key));
+        assert!(blob_forbidden(&auth, &a_relay, VERB_GET, &private_key), "another circle's mailbox");
+        assert!(blob_forbidden(&auth, &a_relay, VERB_LIST, "haven/mailbox/private/"));
+        assert!(blob_forbidden(&auth, &a_relay, VERB_GET, &dm_key), "B's DMs are not the shared circle");
+        // Broad listings stay allowed for mesh inventory, but carry only its circles.
+        assert!(!blob_forbidden(&auth, &a_relay, VERB_AGES, "haven"));
+        let a = auth.lock().unwrap();
+        assert!(a.listing_visible(&a_relay, &shared_key));
+        assert!(!a.listing_visible(&a_relay, &private_key));
+        assert!(!a.listing_visible(&a_relay, &dm_key));
+        assert!(a.listing_visible(&a_relay, "haven/media/img_x"), "media names no circle");
+        // Members see their own circle's keys in a listing, as before.
+        assert!(a.listing_visible(&b, &private_key));
+        drop(a);
+        // Pull side: never take a mailbox this relay doesn't serve.
+        let dir = std::env::temp_dir().join(format!("haven-sibling-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let peer = vec![(shared_key.clone(), 5), (private_key.clone(), 5), ("haven/media/img_x".to_string(), 5)];
+        let serves = |c: &str| c == "shared";
+        let want: Vec<String> = keys_to_pull(&dir, &peer, &Retention::default(), &serves).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(want, vec![shared_key.clone(), "haven/media/img_x".to_string()]);
+        // Deauthorizing the shared circle ends the sibling relationship with it.
+        auth.lock().unwrap().deauthorize("shared");
+        assert!(blob_forbidden(&auth, &a_relay, VERB_GET, &shared_key));
+        assert!(blob_forbidden(&auth, &a_relay, VERB_AGES, "haven"), "no longer a sibling for anything");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- the pairing handshake: learning circles after the link ----------------------------

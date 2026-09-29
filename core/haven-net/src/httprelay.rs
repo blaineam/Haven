@@ -540,6 +540,12 @@ async fn handle_conn(
             }
             Route::List(_) => {
                 let mut keys = local_list(root, &key);
+                // Same per-circle view as the iroh LIST: a sibling's broad listing carries only the
+                // circles it replicates (see `RelayAuth::listing_visible`).
+                {
+                    let a = auth.lock().unwrap();
+                    keys.retain(|k| a.listing_visible(&peer, k));
+                }
                 keys.sort();
                 let body = keys.join("\n");
                 let digest = list_digest(&body);

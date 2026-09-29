@@ -155,3 +155,46 @@ async fn a_member_cannot_enroll_itself_into_someone_elses_circle() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A relay a member TEACHES us for a circle becomes a sibling for THAT circle — it may replicate
+/// that circle's mailbox from us (so two headless relays the same members use actually mesh,
+/// which `--peer` flags used to be the only way to get) — and for nothing else: our other circles
+/// stay out of its listings and out of its reach (found by the e2e `multirelay` step, where friends'
+/// relays sharing one circle mirrored each other's private circles).
+#[tokio::test]
+async fn a_taught_sibling_replicates_that_circle_and_only_that_circle() {
+    let alice = Identity::generate();
+    let sibling = Identity::generate();
+    let relay_id = Identity::generate();
+    let dir = store_dir("sibling");
+    let server = BlobServer::spawn(relay_id.node_secret_bytes(), dir.clone()).await.unwrap();
+    let me = hex(&alice.public().node_id_bytes());
+    server.authorize("shared", vec![me.clone()], vec![]);
+    server.authorize("private", vec![me.clone()], vec![]);
+    let addr = server.local_dial_addr().await.unwrap();
+    let alice_c = BlobClient::connect_addr(alice.node_secret_bytes(), addr.clone()).await.unwrap();
+    let shared_key = format!("haven/mailbox/shared/{}", "11".repeat(32));
+    let private_key = format!("haven/mailbox/private/{}", "22".repeat(32));
+    alice_c.put(&shared_key, b"s").await.unwrap();
+    alice_c.put(&private_key, b"p").await.unwrap();
+
+    let sib_hex = hex(&sibling.public().node_id_bytes());
+    let sib_c = BlobClient::connect_addr(sibling.node_secret_bytes(), addr).await.unwrap();
+    // Untaught: a stranger relay sees nothing.
+    assert!(sib_c.list_ages("haven").await.map(|v| v.is_empty()).unwrap_or(true));
+
+    timeout(Duration::from_secs(10), alice_c.enroll_relays("shared", &[sib_hex.clone()]))
+        .await
+        .expect("enroll_relays timed out")
+        .expect("a member may teach the relay who else serves its circle");
+
+    let listed: Vec<String> = sib_c.list_ages("haven").await.unwrap().into_iter().map(|(k, _)| k).collect();
+    assert!(listed.contains(&shared_key), "the taught circle is replicated: {listed:?}");
+    assert!(!listed.contains(&private_key), "another circle never appears in its listing: {listed:?}");
+    assert_eq!(sib_c.get(&shared_key).await.unwrap().as_deref(), Some(&b"s"[..]));
+    assert!(sib_c.get(&private_key).await.map(|b| b.is_none()).unwrap_or(true), "another circle is out of reach");
+    // Persisted per circle, so a restart keeps the (scoped) relationship.
+    let learned = haven_net::blobstore::load_learned_siblings(&dir);
+    assert_eq!(learned, vec![("shared".to_string(), vec![sib_hex])]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

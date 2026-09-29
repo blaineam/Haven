@@ -268,6 +268,10 @@ pub(crate) const VERB_ENROLL: u8 = b'E';
 /// same idea for siblings. An older relay answers `ERR verb` — the same degrade path ENROLL has.
 pub(crate) const VERB_ENROLL_RELAYS: u8 = b'R';
 
+/// First line of an ENROLL body that REPLACES the circle's member set instead of adding to it
+/// (the circle's creator removing a member — see [`RelayAuth::replace_members`]).
+pub(crate) const ENROLL_REPLACE_MARKER: &str = "!replace";
+
 /// Sentinel returned by GET when the key is absent. Chosen to be distinguishable from a
 /// stored blob: it begins with a NUL and is exactly these 5 bytes.
 const MISS: &[u8] = b"\0MISS";
@@ -378,6 +382,17 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+fn decode_hex32_opt(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
 /// Escape a key component for on-disk storage: `%` → `%25`, `:` → `%3A`. Colons are illegal in
 /// NTFS names (alternate data streams) and used to be REJECTED outright here — which silently made
 /// every DM mailbox key (`haven/mailbox/dm:<a>-<b>/<hash>`) unstorable on EVERY platform: DMs
@@ -464,6 +479,12 @@ pub struct RelayAuth {
     /// doesn't already hold — the roster blob itself is stored (and served) at
     /// `haven/devroster/<acct>`.
     account_devices: HashMap<String, HashSet<String>>,
+    /// circleId → ids its CREATOR removed ([`Self::replace_members`]). Membership on a relay used
+    /// to be grow-only — `learn` unions, the link re-applies its original roster on every restart —
+    /// so a member removed from a circle kept reading and listing that circle's mailbox on every
+    /// relay that had ever been taught about them (e2e `multirelay`, "removal revokes"). Only the
+    /// creator can revoke, and nothing but the creator can bring a revoked id back.
+    revoked: HashMap<String, HashSet<String>>,
 }
 
 impl RelayAuth {
@@ -475,6 +496,11 @@ impl RelayAuth {
         self.members.insert(circle_id.to_string(), members);
         for r in relays {
             self.add_sibling(&r, circle_id);
+        }
+        // A roster that still names someone the creator removed (the operator's link, re-applied
+        // on every restart; a host's stale view) must not undo the removal.
+        if self.revoked.contains_key(circle_id) {
+            self.apply_revocations(circle_id, &[]);
         }
     }
 
@@ -697,8 +723,22 @@ impl RelayAuth {
                 return None;
             }
         }
+        // A member the circle's creator removed stays removed: an ordinary member's (possibly
+        // stale) view can't re-add them. The creator naming them again IS a re-add, and lifts it.
+        let by_creator = self.speaks_for_creator(circle_id, peer);
+        if by_creator {
+            if let Some(r) = self.revoked.get_mut(circle_id) {
+                for m in members {
+                    r.remove(m);
+                }
+            }
+        }
+        let revoked = self.revoked.get(circle_id).cloned().unwrap_or_default();
         let set = self.members.entry(circle_id.to_string()).or_default();
         for m in members {
+            if revoked.contains(m) {
+                continue;
+            }
             if set.len() >= MAX_CIRCLE_MEMBERS && !set.contains(m) {
                 continue; // same reasoning as MAX_LEARNED_CIRCLES, per circle
             }
@@ -707,6 +747,89 @@ impl RelayAuth {
         let mut out: Vec<String> = set.iter().cloned().collect();
         out.sort();
         Some(out)
+    }
+
+    /// Does `peer` speak for the account that CREATED `circle_id`? Only owned (`c1…`) circles have a
+    /// verifiable creator — the id binds it (`haven_p2p::device::circle_id_binds_creator`) — and the
+    /// peer must be that account itself or one of its devices named by an account-signed roster
+    /// stored here. Legacy/ownerless circles (`default`, `dm:…`) have no creator, so nobody may
+    /// shrink them this way.
+    pub(crate) fn speaks_for_creator(&self, circle_id: &str, peer: &str) -> bool {
+        let p = peer.to_lowercase();
+        let binds = |acct: &str| {
+            decode_hex32_opt(acct)
+                .map(|b| haven_p2p::device::circle_id_binds_creator(circle_id, &b))
+                .unwrap_or(false)
+        };
+        if binds(&p) {
+            return true;
+        }
+        self.account_devices.iter().any(|(acct, devs)| devs.contains(&p) && binds(acct))
+    }
+
+    /// REPLACE a circle's member set — the creator removing someone. Accepted only from a peer
+    /// that speaks for the circle's creator ([`Self::speaks_for_creator`]) for a circle this relay
+    /// already serves, naming itself (the same self-inclusion rule as `learn`). The remaining
+    /// members' verified devices are re-expanded; every id that drops out is recorded as REVOKED,
+    /// so neither `learn` nor the link's roster (re-applied on restart) can bring it back.
+    /// Returns `(members, revoked)` to persist, or `None` if refused.
+    pub(crate) fn replace_members(
+        &mut self,
+        circle_id: &str,
+        peer: &str,
+        members: &[String],
+    ) -> Option<(Vec<String>, Vec<String>)> {
+        let p = peer.to_lowercase();
+        if !self.is_known(&p) || !self.knows_circle(circle_id) || !self.speaks_for_creator(circle_id, &p) {
+            return None;
+        }
+        if members.is_empty() || members.len() > MAX_ENROLL_MEMBERS {
+            return None;
+        }
+        let members: Vec<String> = members.iter().map(|m| m.to_lowercase()).collect();
+        if members.iter().any(|m| m.len() != 64 || !m.bytes().all(|b| b.is_ascii_hexdigit())) {
+            return None;
+        }
+        if !members.contains(&p) {
+            return None;
+        }
+        let mut next: HashSet<String> = members.into_iter().collect();
+        for (acct, devs) in &self.account_devices {
+            if next.contains(acct) {
+                next.extend(devs.iter().cloned());
+            }
+        }
+        let before = self.members.get(circle_id).cloned().unwrap_or_default();
+        let dropped: Vec<String> = before.difference(&next).cloned().collect();
+        let r = self.revoked.entry(circle_id.to_string()).or_default();
+        r.extend(dropped);
+        for m in &next {
+            r.remove(m);
+        }
+        self.members.insert(circle_id.to_string(), next.clone());
+        let mut m: Vec<String> = next.into_iter().collect();
+        m.sort();
+        let mut x: Vec<String> = self.revoked.get(circle_id).map(|r| r.iter().cloned().collect()).unwrap_or_default();
+        x.sort();
+        Some((m, x))
+    }
+
+    /// Re-apply persisted revocations after a (re)authorize: the link's roster and learned unions
+    /// may name a removed member again; the creator's removal wins. Also drops the removed
+    /// accounts' verified devices from the circle.
+    pub(crate) fn apply_revocations(&mut self, circle_id: &str, revoked: &[String]) {
+        let r = self.revoked.entry(circle_id.to_string()).or_default();
+        r.extend(revoked.iter().map(|x| x.to_lowercase()));
+        let r = r.clone();
+        let mut gone: HashSet<String> = r.clone();
+        for acct in &r {
+            if let Some(devs) = self.account_devices.get(acct) {
+                gone.extend(devs.iter().cloned());
+            }
+        }
+        if let Some(set) = self.members.get_mut(circle_id) {
+            set.retain(|m| !gone.contains(m));
+        }
     }
 }
 
@@ -1012,11 +1135,7 @@ impl BlobServer {
     /// everyone", which is how a stranger read a circle's blobs). Every host calls it: the daemon
     /// from the pasted link, the apps from each circle's roster.
     pub fn authorize(&self, circle_id: &str, members: Vec<String>, relays: Vec<String>) {
-        let mut a = self.auth.lock().unwrap();
-        a.members.insert(circle_id.to_string(), members.into_iter().collect());
-        for r in relays {
-            a.add_sibling(&r, circle_id);
-        }
+        self.auth.lock().unwrap().authorize(circle_id, members, relays);
     }
 
     /// Forget a circle's authorization (e.g., we stopped serving it / left it).
@@ -1655,16 +1774,50 @@ pub fn load_learned_grants(root: &Path) -> Vec<(String, Vec<String>)> {
 /// Persist one learned grant (upserting the circle's full member set). Atomic temp+rename so a
 /// crash mid-write can never leave a half-written policy file that reads as "no grants".
 pub fn save_learned_grant(root: &Path, circle: &str, members: &[String]) {
+    save_learned_grant_with(root, circle, members, None);
+}
+
+/// The creator's removals per circle (`"x"` in the grants file) — see [`RelayAuth::replace_members`].
+pub fn load_learned_revocations(root: &Path) -> Vec<(String, Vec<String>)> {
+    let Ok(bytes) = std::fs::read(learned_grants_path(root)) else { return Vec::new() };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return Vec::new() };
+    let Some(arr) = v.get("grants").and_then(|g| g.as_array()) else { return Vec::new() };
+    arr.iter()
+        .filter_map(|g| {
+            let c = g.get("c")?.as_str()?;
+            let x: Vec<String> = g
+                .get("x")?
+                .as_array()?
+                .iter()
+                .filter_map(|m| m.as_str())
+                .filter(|m| m.len() == 64 && m.bytes().all(|b| b.is_ascii_hexdigit()))
+                .map(String::from)
+                .collect();
+            (!c.is_empty() && c.len() <= MAX_CIRCLE_ID && !x.is_empty()).then(|| (c.to_string(), x))
+        })
+        .collect()
+}
+
+/// [`save_learned_grant`], also recording the circle's revocations when `revoked` is given (an
+/// existing record is kept otherwise).
+pub fn save_learned_grant_with(root: &Path, circle: &str, members: &[String], revoked: Option<&[String]>) {
     let mut grants = load_learned_grants(root);
+    let mut revs: std::collections::BTreeMap<String, Vec<String>> = load_learned_revocations(root).into_iter().collect();
     match grants.iter_mut().find(|(c, _)| c == circle) {
         Some(entry) => entry.1 = members.to_vec(),
         None => grants.push((circle.to_string(), members.to_vec())),
+    }
+    if let Some(x) = revoked {
+        revs.insert(circle.to_string(), x.to_vec());
     }
     let doc = serde_json::json!({
         "v": 1,
         "grants": grants
             .iter()
-            .map(|(c, m)| serde_json::json!({ "c": c, "m": m }))
+            .map(|(c, m)| match revs.get(c).filter(|x| !x.is_empty()) {
+                Some(x) => serde_json::json!({ "c": c, "m": m, "x": x }),
+                None => serde_json::json!({ "c": c, "m": m }),
+            })
             .collect::<Vec<_>>(),
     });
     let Ok(bytes) = serde_json::to_vec(&doc) else { return };
@@ -1768,12 +1921,17 @@ const MAX_LEARNED_RELAYS: usize = 32;
 pub(crate) fn rehydrate_learned_grants(root: &Path, auth: &Arc<Mutex<RelayAuth>>) {
     let grants = load_learned_grants(root);
     let siblings = load_learned_siblings(root);
-    if grants.is_empty() && siblings.is_empty() {
+    let revocations = load_learned_revocations(root);
+    if grants.is_empty() && siblings.is_empty() && revocations.is_empty() {
         return;
     }
     let mut a = auth.lock().unwrap();
     for (circle, members) in grants {
         a.merge_members(&circle, &members);
+    }
+    // After every union (the link's roster included): the creator's removals win.
+    for (circle, revoked) in revocations {
+        a.apply_revocations(&circle, &revoked);
     }
     // Relays members taught us for a circle may replicate THAT circle's mailbox from us (and we
     // from them — the mesh loop dials the flat list). Without this two headless relays that the
@@ -2185,11 +2343,29 @@ pub(crate) async fn handle_request(
             let mut body = vec![0u8; blen as usize];
             recv.read_exact(&mut body).await.ah()?;
             let circle = key.strip_prefix(ENROLL_PREFIX).unwrap_or("").to_string();
-            let members: Vec<String> = String::from_utf8_lossy(&body)
+            let mut members: Vec<String> = String::from_utf8_lossy(&body)
                 .lines()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
+            // `!replace` first: the circle's CREATOR stating the whole member set (a removal).
+            // A relay predating it reads the marker as a malformed id and refuses the whole
+            // request, so an old relay simply keeps its current set.
+            if members.first().map(|m| m == ENROLL_REPLACE_MARKER).unwrap_or(false) {
+                members.remove(0);
+                let replaced = auth.lock().unwrap().replace_members(&circle, &peer, &members);
+                match replaced {
+                    Some((set, revoked)) => {
+                        save_learned_grant_with(&root, &circle, &set, Some(&revoked));
+                        let _ = send.write_all(b"OK").await;
+                    }
+                    None => {
+                        let _ = send.write_all(b"ERR forbidden").await;
+                    }
+                }
+                let _ = send.finish();
+                return Ok(());
+            }
             // `learn` holds the authorization rule and returns the circle's resulting member set
             // only when it accepted. Persist EXACTLY what it accepted — never the raw request —
             // so the file can only ever contain grants that passed the gate.
@@ -2483,6 +2659,15 @@ impl BlobClient {
             }
         })
         .await
+    }
+
+    /// The circle's CREATOR tells the relay the circle's whole member set, so members it removed
+    /// lose access here (see `RelayAuth::replace_members`). `members` must include our own id.
+    pub async fn enroll_replace(&self, circle: &str, members: &[String]) -> Result<()> {
+        let mut body: Vec<String> = Vec::with_capacity(members.len() + 1);
+        body.push(ENROLL_REPLACE_MARKER.to_string());
+        body.extend(members.iter().cloned());
+        self.enroll(circle, &body).await
     }
 
     /// A mailbox op was refused. Before giving up, teach the relay this key's circle (naming only

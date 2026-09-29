@@ -791,6 +791,14 @@ impl RelayClient {
         self.inner.enroll(&circle_id, &members).await.is_ok()
     }
 
+    /// The circle's CREATOR states its whole member set after removing someone, so the removed
+    /// member loses access to the circle's mailbox on this relay (a relay only ever ADDED members
+    /// before — a removed friend kept listing and fetching there). Refused unless we speak for the
+    /// circle's creator; a relay predating the verb keeps its set. `members` must include our id.
+    pub async fn enroll_members_replace(&self, circle_id: String, members: Vec<String>) -> bool {
+        self.inner.enroll_replace(&circle_id, &members).await.is_ok()
+    }
+
     /// Connect to a relay by its node id (from the relay link). `seed` is this device's
     /// 32-byte identity (its own transport key).
     #[uniffi::constructor]

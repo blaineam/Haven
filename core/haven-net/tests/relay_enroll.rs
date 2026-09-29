@@ -198,3 +198,49 @@ async fn a_taught_sibling_replicates_that_circle_and_only_that_circle() {
     assert_eq!(learned, vec![("shared".to_string(), vec![sib_hex])]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Removing a member revokes them on the relay (e2e `multirelay`): only the circle's CREATOR may
+/// state a smaller member set, an ordinary member's stale view can't re-add the removed id, the
+/// removal survives the link roster being re-applied, and the creator can bring them back.
+#[tokio::test]
+async fn the_creator_removing_a_member_revokes_them_on_the_relay() {
+    let alice = Identity::generate(); // creator
+    let bob = Identity::generate(); // removed
+    let carol = Identity::generate(); // stays
+    let relay_id = Identity::generate();
+    let dir = store_dir("revoke");
+    let server = BlobServer::spawn(relay_id.node_secret_bytes(), dir.clone()).await.unwrap();
+    let (a, b, c) = (hex(&alice.public().node_id_bytes()), hex(&bob.public().node_id_bytes()), hex(&carol.public().node_id_bytes()));
+    let circle = haven_p2p::device::mint_owned_circle_id(&alice.public().node_id_bytes());
+    server.authorize(&circle, vec![a.clone(), b.clone(), c.clone()], vec![]);
+    let addr = server.local_dial_addr().await.unwrap();
+    let alice_c = BlobClient::connect_addr(alice.node_secret_bytes(), addr.clone()).await.unwrap();
+    let bob_c = BlobClient::connect_addr(bob.node_secret_bytes(), addr.clone()).await.unwrap();
+    let carol_c = BlobClient::connect_addr(carol.node_secret_bytes(), addr).await.unwrap();
+    let prefix = format!("haven/mailbox/{circle}/");
+    assert!(bob_c.list(&prefix).await.is_ok(), "bob is a member to begin with");
+
+    // Not the creator: refused, nothing changes.
+    assert!(carol_c.enroll_replace(&circle, &[c.clone(), a.clone()]).await.is_err());
+    assert!(bob_c.list(&prefix).await.is_ok());
+
+    // The creator removes bob.
+    alice_c.enroll_replace(&circle, &[a.clone(), c.clone()]).await.expect("the creator may state the member set");
+    assert!(bob_c.list(&prefix).await.is_err(), "a removed member can no longer list the circle");
+    assert!(carol_c.list(&prefix).await.is_ok(), "the others keep their access");
+
+    // A member with a stale view (still listing bob) cannot re-add him.
+    carol_c.enroll(&circle, &[c.clone(), b.clone()]).await.expect("carol's enroll is accepted for herself");
+    assert!(bob_c.list(&prefix).await.is_err(), "a stale enroll must not undo the creator's removal");
+
+    // The link's roster re-applied (what every restart does) doesn't bring him back either.
+    server.authorize(&circle, vec![a.clone(), b.clone(), c.clone()], vec![]);
+    assert!(bob_c.list(&prefix).await.is_err(), "re-applying a roster that names him must not undo it");
+    let revoked = haven_net::blobstore::load_learned_revocations(&dir);
+    assert!(revoked.iter().any(|(cc, x)| cc == &circle && x.contains(&b)), "revocation persisted: {revoked:?}");
+
+    // The creator re-adding him does.
+    alice_c.enroll(&circle, &[a.clone(), b.clone()]).await.unwrap();
+    assert!(bob_c.list(&prefix).await.is_ok(), "the creator can re-add a removed member");
+    let _ = std::fs::remove_dir_all(&dir);
+}

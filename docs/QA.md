@@ -249,8 +249,10 @@ What it asserts (every timing lands in `build/e2e-history.jsonl`):
    `E2E_MR_BUDGET_REVOKE`.
 4. **Mesh** — a fresh sentinel key planted in C_S on R_C crosses to R_A once a member has taught
    them to each other (`E2E_MR_BUDGET_MESH_HOST`, the host teaches on its ≥5-min mesh tick); one
-   back-dated past the TTL never does; R_A and R_C converge on the same C_S event set; each relay's C_S event count holds still
-   over a quiet window (`E2E_MR_QUIET_MS`); no client shows a duplicate post. Finally R_C restarts
+   back-dated past the TTL never does; R_A and R_C converge on the same C_S event set; over a quiet
+   window (`E2E_MR_QUIET_MS`) no relay gains a C_S envelope that existed on NO relay when the window
+   opened (a late mesh arrival is convergence, a new key is a re-seal mint); no client shows a
+   duplicate post. Finally R_C restarts
    with the **QA GC clock** (below) and a real sweep deletes its idle keys; for two mesh cycles no
    swept key may sit on R_C older than the TTL (a sibling handing back an expired key).
 5. **Reliability** — R_B off (stub `host_relay` false) while A posts: B still gets it, R_B backfills

@@ -219,6 +219,9 @@ async fn the_creator_removing_a_member_revokes_them_on_the_relay() {
     let carol_c = BlobClient::connect_addr(carol.node_secret_bytes(), addr).await.unwrap();
     let prefix = format!("haven/mailbox/{circle}/");
     assert!(bob_c.list(&prefix).await.is_ok(), "bob is a member to begin with");
+    // Bob also HOSTS a relay for the circle, in-app — whose relay id is his own device id, so he is
+    // a sibling for it too. The removal has to close that door as well.
+    alice_c.enroll_relays(&circle, &[b.clone()]).await.expect("a member may name the circle's relays");
 
     // Not the creator: refused, nothing changes.
     assert!(carol_c.enroll_replace(&circle, &[c.clone(), a.clone()]).await.is_err());
@@ -227,6 +230,13 @@ async fn the_creator_removing_a_member_revokes_them_on_the_relay() {
     // The creator removes bob.
     alice_c.enroll_replace(&circle, &[a.clone(), c.clone()]).await.expect("the creator may state the member set");
     assert!(bob_c.list(&prefix).await.is_err(), "a removed member can no longer list the circle");
+    assert!(
+        bob_c.list_ages("haven").await.map(|v| v.iter().all(|(k, _)| !k.starts_with(&prefix))).unwrap_or(true),
+        "nor see it through a sibling listing"
+    );
+    // Re-teaching him as the circle's relay doesn't reopen it either.
+    carol_c.enroll_relays(&circle, &[b.clone()]).await.ok();
+    assert!(bob_c.list(&prefix).await.is_err(), "a removed member's relay is not the circle's relay");
     assert!(carol_c.list(&prefix).await.is_ok(), "the others keep their access");
 
     // A member with a stale view (still listing bob) cannot re-add him.

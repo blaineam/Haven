@@ -506,7 +506,14 @@ impl RelayAuth {
 
     /// Record `relay` as a sibling for `circle` (it may replicate that circle's mailbox).
     pub(crate) fn add_sibling(&mut self, relay: &str, circle: &str) {
-        self.relays.entry(relay.to_lowercase()).or_default().insert(circle.to_string());
+        let relay = relay.to_lowercase();
+        // A relay the circle's creator revoked is not one of its relays any more — which matters
+        // because an in-app host's relay id IS its owner's device id: left a sibling, a removed
+        // member kept full access to the circle through the sibling door.
+        if self.revoked.get(circle).is_some_and(|r| r.contains(&relay)) {
+            return;
+        }
+        self.relays.entry(relay).or_default().insert(circle.to_string());
     }
 
     /// Is `peer` a sibling relay for at least one circle?
@@ -807,6 +814,7 @@ impl RelayAuth {
             r.remove(m);
         }
         self.members.insert(circle_id.to_string(), next.clone());
+        self.apply_revocations(circle_id, &[]);
         let mut m: Vec<String> = next.into_iter().collect();
         m.sort();
         let mut x: Vec<String> = self.revoked.get(circle_id).map(|r| r.iter().cloned().collect()).unwrap_or_default();
@@ -830,6 +838,13 @@ impl RelayAuth {
         if let Some(set) = self.members.get_mut(circle_id) {
             set.retain(|m| !gone.contains(m));
         }
+        // …and a revoked id is no longer a SIBLING for the circle either (see `add_sibling`).
+        for id in &gone {
+            if let Some(circles) = self.relays.get_mut(id) {
+                circles.remove(circle_id);
+            }
+        }
+        self.relays.retain(|_, circles| !circles.is_empty());
     }
 }
 

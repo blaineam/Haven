@@ -4420,6 +4420,10 @@ impl Engine {
             // stay dropped (handshake guard) and self-sync re-severs them on every pass.
             self.clear_circle_removal(DEFAULT_CIRCLE, &req.id_hex);
             self.accept_contact(DEFAULT_CIRCLE, &req.bundle, &req.id_hex, &req.name, &req.verify_hex, true);
+            // Teach the relay I HOST in-process the new member now: nothing else refreshes its
+            // allow-list on approval, so the new friend's writes bounced 403 until an unrelated
+            // roster announce or transport rebind (iOS/Android parity; no-op when not hosting).
+            self.authorize_membership();
             self.forgive_dials(&req.id_hex, None); // a fresh start on their dial gate (iOS/Android parity)
             self.nudge_self_sync(); // the new contact (+ lifted tombstone) rides a prompt pass
             // If this approval answers a ticketed offline invite, park the grant on my relays so

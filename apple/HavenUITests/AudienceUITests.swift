@@ -12,6 +12,7 @@ import XCTest
 final class AudienceUITests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
+        SpringboardHygiene.dismissQueuedOpenPrompts()
     }
 
     /// `resetAck` launches with `HAVEN_RESET_AUDIENCE_ACK=1` (DEBUG-only) so the one-time

@@ -443,6 +443,8 @@ targets:
       - path: HavenApp/RosterEcho.swift
       # Call ringback/ringtone start off the main actor. AVFoundation only.
       - path: HavenApp/CallTones.swift
+      # Which self-sync merges owe an engine export (a circle record's relays do not).
+      - path: HavenApp/SelfSyncEngineDiff.swift
       - path: Shared/SharedNotificationPrivacy.swift
       - path: HavenLogicTests
     settings:

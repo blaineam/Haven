@@ -107,6 +107,16 @@ function shOk(cmd, args, opts = {}) {
   return r.status === 0 ? (r.stdout || '') : null;
 }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+// Android logcat into the run dir. The emulator's default ring buffer holds only a few minutes of a
+// busy run, so a red from early in the matrix used to be undiagnosable by the time anyone looked
+// (the android→stub hangup red, 2026-09-30). The buffer is enlarged when the leg boots, snapshotted
+// before anything clears it (the screenshare step does), and saved again with every report.
+let androidLogcatOn = false;
+function saveAndroidLogcat(label) {
+  if (!androidLogcatOn) return;
+  const txt = shOk('adb', ['logcat', '-d', '-v', 'threadtime']);
+  if (txt) { try { writeFileSync(join(OUT, `android-logcat-${label}.txt`), txt); } catch (_) { /* best effort */ } }
+}
 // FAIL FAST (E2E_FAIL_FAST=1, on by default for the satellite step — see below).
 //
 // The satellite legs are SLOW ON PURPOSE: they model a link that is genuinely slow in the real
@@ -853,6 +863,8 @@ async function main() {
     log('android leg SKIPPED by E2E_ANDROID=0 (emulator untouched)');
   } else if (shOk('adb', ['get-state'])?.trim() === 'device') {
     devices.android = makeAndroid();
+    androidLogcatOn = true;
+    shOk('adb', ['logcat', '-G', '16M']);   // keep the whole run, not the last few minutes
     // Prove the command channel before anything depends on it — a leg that cannot be TOLD anything
     // reports its state cheerfully and ignores every instruction.
     assertAndroidCommandChannel();
@@ -1236,6 +1248,7 @@ async function main() {
     const and = devices.android, stub = devices.stub;
     if (!and || !B) { score('screenshare (needs the android leg and B)', false, !and ? 'no android device' : 'B unknown'); return; }
     shOk('adb', ['shell', 'appops', 'set', AND_PKG, 'PROJECT_MEDIA', 'default']);   // real consent only
+    saveAndroidLogcat('before-screenshare');   // the clear below would otherwise lose the call matrix
     shOk('adb', ['logcat', '-c']);
     await op(and, { op: 'call', dm_to: B });
     await converge(stub, (j) => j.call?.ringing || j.call?.in_call, BUDGET.text);
@@ -2773,6 +2786,7 @@ async function main() {
 /// The markdown report, split out of `finish` so a FAIL-FAST exit still leaves one behind —
 /// a run that stopped early is exactly when you want the partial matrix on disk.
 function writeReport() {
+  saveAndroidLogcat('final');
   const pass = REPORT.filter((r) => r.ok).length, fail = REPORT.length - pass;
   const md = [
     `# Haven full E2E — ${MARKER}`, '',

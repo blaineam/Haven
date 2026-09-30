@@ -1,5 +1,6 @@
 package com.blaineam.haven.core
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
@@ -38,5 +39,29 @@ class RelayNodeMapTest {
         }
         done.await(); writer.join(); reader.join()
         assertTrue("concurrent read threw: ${failure.get()}", failure.get() == null)
+    }
+
+    private val acct = "f".repeat(64)
+    private val device = "d".repeat(64)
+
+    @Test
+    fun aDeadAccountIdEntryIsSupersededByALearnedDeviceRelay() {
+        val out = RelayNodeMap.supersededAccountRelays(listOf(acct), device, setOf(acct)) { false }
+        assertEquals(listOf(acct), out)
+    }
+
+    @Test
+    fun anAccountIdRelayThatAnnouncedItsOwnInterfaceIsNeverSuperseded() {
+        // The flip-flop: the Mac hosts relay `acct`; learning `device` must not evict it, or its
+        // next announce re-adds it and the two evict each other forever.
+        val out = RelayNodeMap.supersededAccountRelays(listOf(acct, device), device, setOf(acct)) { it == acct }
+        assertTrue(out.isEmpty())
+    }
+
+    @Test
+    fun theLearnedRelayAndNonAccountEntriesAreNeverSuperseded() {
+        val other = "e".repeat(64)
+        assertTrue(RelayNodeMap.supersededAccountRelays(listOf(acct, other), acct, setOf(acct)) { false }.isEmpty())
+        assertTrue(RelayNodeMap.supersededAccountRelays(listOf(other), device, setOf(acct)) { false }.isEmpty())
     }
 }

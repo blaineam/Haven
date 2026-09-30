@@ -16,4 +16,21 @@ import java.util.concurrent.CopyOnWriteArrayList
 object RelayNodeMap {
     fun newMap(): ConcurrentHashMap<String, MutableList<String>> = ConcurrentHashMap()
     fun newList(from: Collection<String> = emptyList()): MutableList<String> = CopyOnWriteArrayList(from)
+
+    /**
+     * Which of a circle's relay entries a newly learned relay SUPERSEDES: entries equal to a member's
+     * (or my own) ACCOUNT id — pre-device-seed leftovers nothing serves. Never one that has announced
+     * its own HTTP interface or ever answered us: a Mac hosting a relay under its account id is a live relay, and
+     * superseding it made two relays evict each other on every announce (e2e fleet: the stub's
+     * `fe263256` re-"learned" ~30×/min, each time re-exporting history, fsyncing prefs and polling —
+     * the churn that also raced relaysFor into a crash).
+     */
+    fun supersededAccountRelays(
+        entries: List<String>,
+        learned: String,
+        accountIds: Set<String>,
+        isLiveRelay: (String) -> Boolean,
+    ): List<String> = entries.filter { a ->
+        a.length == 64 && a != learned && a in accountIds && !isLiveRelay(a)
+    }
 }

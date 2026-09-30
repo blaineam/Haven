@@ -167,6 +167,9 @@ the circle shared with B create it themselves, so `E2E_STEPS=relayfirst` works o
 
 Pure decisions for these steps live in `Scripts/lib/e2e-steps.mjs` (unit-tested, soren `qa-harness`).
 Every budget below is env-tunable and every timing lands in `build/e2e-history.jsonl`.
+With the Android leg on, the run dir also gets `android-logcat-final.txt` (rewritten with every report;
+the logcat ring is enlarged to 16 MB at boot) and `android-logcat-before-screenshare.txt` (the
+screenshare step clears logcat).
 
 | Step | What it proves |
 |---|---|

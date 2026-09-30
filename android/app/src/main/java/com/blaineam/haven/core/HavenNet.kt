@@ -146,6 +146,9 @@ object HavenNet : InboundListener {
     // parity with the desktop `relays: HashMap<String, Vec<String>>`.
     // Read on IO threads while announces / forgets / self-sync write it — see [RelayNodeMap].
     private val relayNodes = RelayNodeMap.newMap()
+    /** Relay node ids announced TO us as relays this process (frame 19) — never superseded as stale
+     *  account ids; see [RelayNodeMap.supersededAccountRelays]. */
+    private val announcedRelayNodes: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
     /** Relays the user explicitly FORGOT/deactivated — auto-learn (frame-19 announce / SelfSync) must
      *  not resurrect a *deactivated* relay passively, or Forget is a visible no-op. A deliberate
      *  re-announce DOES reactivate it (handleRelayNode). Cleared on explicit re-adoption / reactivation.
@@ -4533,6 +4536,7 @@ object HavenNet : InboundListener {
         // so members automatically pool relays (more redundancy, no manual setup). Append, never
         // replace — parity with desktop handle_relay_node. Propagate the announced adoption stamp
         // (not now()) so the freshest legit re-add flows without any echo fabricating a new timestamp.
+        announcedRelayNodes.add(nodeHex)
         val list = relayNodes.getOrPut(circleId) { RelayNodeMap.newList() }
         ensureRelayEntry(nodeHex, isS3 = false, activate = true, adoptedAtMs = announcedAddedAt)
         // Record the relay's announced HTTP media interface (the reliable cross-NAT path).
@@ -4581,7 +4585,12 @@ object HavenNet : InboundListener {
         val staleAccounts = (runCatching { social.contactNodeIds(circleId) }.getOrDefault(emptyList()) +
                              listOf(runCatching { social.myNodeHex() }.getOrDefault(""))).map { it.lowercase() }.toSet()
         var supersededAny = false
-        for (a in staleAccounts) if (a.length == 64 && a != nodeHex && list.remove(a)) { suppressedRelays.add(a); supersededAny = true }
+        val superseded = RelayNodeMap.supersededAccountRelays(list.toList(), nodeHex, staleAccounts) { a ->
+            // Live evidence it's a real relay: it was itself announced as a relay, or announced an
+            // HTTP interface. A dead pre-device-seed leftover never is.
+            a in announcedRelayNodes || relayEntries[a]?.httpUrls?.isNotEmpty() == true
+        }
+        for (a in superseded) if (list.remove(a)) { suppressedRelays.add(a); supersededAny = true }
         if (supersededAny) saveRelayNodes()
         if (list.contains(nodeHex)) { saveRelayNodes(); return }
         list.add(nodeHex)

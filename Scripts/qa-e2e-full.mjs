@@ -243,12 +243,39 @@ function androidQaRead(name) {
 /// copy it to `<name>.tmp` in the SAME dir, then `mv` (a rename — the driver sees the old file or
 /// the whole new one, never half). The shell tmp is removed in the same round trip. Returns true on
 /// success. `run-as` reading /data/local/tmp is what the bootstrap's seed staging has always used.
+//
+// A failed attempt is LOGGED WITH ITS CAUSE (exit status / signal / timeout + stderr) and retried:
+// the 2026-09-30 gate lost its android leg to one bare "qaWrite 'dump' failed" with nothing saying
+// why (it was a 60 s hang — the emulator's system_server wedged under an app CPU storm). A single
+// hiccup must not RED a leg, and a persistent one must name itself.
+const AND_QA_WRITE_ATTEMPTS = +(process.env.E2E_AND_QA_WRITE_ATTEMPTS || 3);
+function adbAttempt(args) {
+  const r = spawnSync('adb', args, { encoding: 'utf8', timeout: ADB_TIMEOUT_MS });
+  if (r.status === 0 && !r.error) return null;
+  const why = r.error?.code === 'ETIMEDOUT' ? `hung ${ADB_TIMEOUT_MS / 1000}s — killed`
+    : r.error ? `${r.error.code || r.error.message}`
+    : r.signal ? `killed by ${r.signal}` : `exit ${r.status}`;
+  const err = String(r.stderr || r.stdout || '').trim().split('\n').slice(-2).join(' | ').slice(0, 200);
+  return err ? `${why}: ${err}` : why;
+}
 function androidQaWrite(src, name) {
-  const tmp = `/data/local/tmp/haven-qa-${process.pid}-${++andPushSeq}-${name}`;
-  if (shOk('adb', ['push', src, tmp]) === null) return false;
   const d = ANDROID_QA_DIR;
-  const inner = `umask 077 && mkdir -p ${d} && cat ${tmp} > ${d}/${name}.tmp && mv -f ${d}/${name}.tmp ${d}/${name}`;
-  return shOk('adb', ['shell', `run-as ${AND_PKG} sh -c '${inner}'; rc=$?; rm -f ${tmp}; exit $rc`]) !== null;
+  for (let attempt = 1; attempt <= AND_QA_WRITE_ATTEMPTS; attempt++) {
+    const tmp = `/data/local/tmp/haven-qa-${process.pid}-${++andPushSeq}-${name}`;
+    // The in-dir tmp is unique per attempt too: a retry must not race a half-finished `cat` from a
+    // killed attempt into the same `<name>.tmp`.
+    const dtmp = `${d}/${name}.${process.pid}-${andPushSeq}.tmp`;
+    const inner = `umask 077 && mkdir -p ${d} && cat ${tmp} > ${dtmp} && mv -f ${dtmp} ${d}/${name}`;
+    const why = adbAttempt(['push', src, tmp])
+      ?? adbAttempt(['shell', `run-as ${AND_PKG} sh -c '${inner}'; rc=$?; rm -f ${tmp}; run-as ${AND_PKG} rm -f ${dtmp}; exit $rc`]);
+    if (why === null) {
+      if (attempt > 1) log(`android qaWrite '${name}' landed on attempt ${attempt}`);
+      return true;
+    }
+    log(`WARN android qaWrite '${name}' attempt ${attempt}/${AND_QA_WRITE_ATTEMPTS} failed — ${why}`);
+    if (attempt < AND_QA_WRITE_ATTEMPTS) spawnSync('sleep', [String(attempt)]);
+  }
+  return false;
 }
 
 function makeAndroid() {
@@ -303,7 +330,9 @@ function makeAndroid() {
     // Drop the dump + any half-staged drop so the driver mints them again on its next op.
     wipe: () => {
       const d = ANDROID_QA_DIR;
-      const out = shOk('adb', ['shell', `run-as ${AND_PKG} rm -f ${d}/${dumpName} ${d}/${dumpName}.tmp ${cmdPath} ${cmdPath}.tmp 2>&1`]);
+      // `*.tmp` covers every writer's per-attempt tmp names (QaFiles on the app side, androidQaWrite
+      // here); the glob must expand INSIDE run-as — the shell user cannot list the app's dir.
+      const out = shOk('adb', ['shell', `run-as ${AND_PKG} sh -c 'rm -f ${d}/${dumpName} ${cmdPath} ${d}/*.tmp' 2>&1`]);
       if (out === null) return ['adb shell run-as rm failed outright (app not installed / not debuggable?)'];
       // `rm -f` exits 0 even when the unlink is refused, so its OUTPUT is the only signal.
       return String(out).trim() ? [String(out).trim()] : [];

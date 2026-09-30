@@ -145,7 +145,18 @@ fi
 # confusing "failed to launch" three steps later instead of naming the actual problem here.
 [[ -d "$IOS_APP" ]] || { echo "error: no iOS app at $IOS_APP after build — see $OUT/ios-build.log"; exit 1; }
 xcrun simctl install "$SIM" "$IOS_APP" || { echo "error: simctl install failed for $IOS_APP"; exit 1; }
-SIMCTL_CHILD_HAVEN_SKIP_ONBOARDING=1 xcrun simctl launch "$SIM" "$IOS_BUNDLE" >/dev/null 2>&1 || true
+# The iOS 27 simulator sometimes registers a fresh install with installd but not FrontBoard, so
+# every launch fails "Application … is unknown to FrontBoard" and the run dies at "iOS seed dump
+# missing". A reboot of the simulator plus a reinstall clears it; do that once automatically.
+if ! SIMCTL_CHILD_HAVEN_SKIP_ONBOARDING=1 xcrun simctl launch "$SIM" "$IOS_BUNDLE" >/dev/null 2>&1; then
+  log "iOS launch failed (FrontBoard lost the install?) — rebooting the simulator and reinstalling"
+  xcrun simctl shutdown "$SIM" >/dev/null 2>&1 || true
+  xcrun simctl boot "$SIM" >/dev/null 2>&1 || true
+  xcrun simctl bootstatus "$SIM" -b >/dev/null 2>&1 || true
+  xcrun simctl install "$SIM" "$IOS_APP" || { echo "error: simctl install failed for $IOS_APP"; exit 1; }
+  SIMCTL_CHILD_HAVEN_SKIP_ONBOARDING=1 xcrun simctl launch "$SIM" "$IOS_BUNDLE" >/dev/null 2>&1 \
+    || log "WARN: iOS launch still failing after a simulator reboot"
+fi
 
 # ── 1b. Stage account A's contact bundle for the stub BEFORE its (only) launch —
 # DEBUG builds ingest qa-peer-bundle.bin at startup, and mutual addContactBundle is

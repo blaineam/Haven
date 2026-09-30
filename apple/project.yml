@@ -445,6 +445,8 @@ targets:
       - path: HavenApp/CallTones.swift
       # Which self-sync merges owe an engine export (a circle record's relays do not).
       - path: HavenApp/SelfSyncEngineDiff.swift
+      # Whether the bell's list/watermark persist (a demo launch pulls its fresh engine from 0).
+      - path: HavenApp/ActivityPersistence.swift
       - path: Shared/SharedNotificationPrivacy.swift
       - path: HavenLogicTests
     settings:

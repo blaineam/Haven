@@ -441,6 +441,8 @@ targets:
       - path: HavenApp/SyncProgress.swift
       # Byte-identical device-roster re-deliveries (receive() reports a known roster as applied).
       - path: HavenApp/RosterEcho.swift
+      # Which self-sync merges owe an engine export (a circle record's relays do not).
+      - path: HavenApp/SelfSyncEngineDiff.swift
       - path: Shared/SharedNotificationPrivacy.swift
       - path: HavenLogicTests
     settings:

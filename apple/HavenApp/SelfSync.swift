@@ -576,17 +576,18 @@ final class SelfSyncCoordinator {
     /// pins, read watermarks, contacts, relays — lives in its own store and saves itself, so a
     /// whole-engine export after it wrote the same engine bytes again.
     private(set) var lastSyncTouchedEngine = false
-    /// Key prefixes whose records `applyLocal` turns into engine calls.
-    nonisolated static let engineKeyPrefixes = ["circle:", "circle-deleted:", "circle-recreated:",
-                                                "circle-removed:", "circle-readd:", "removal:", "roster:"]
-    /// Did the live records under `engineKeyPrefixes` differ between two states?
+    /// Did the engine-applied records differ between two states? (`SelfSyncEngineDiff` — a `circle:`
+    /// record's relays are not engine state.)
     nonisolated static func engineRecordsDiffer(_ a: [SelfSyncEntry], _ b: [SelfSyncEntry]) -> Bool {
-        func pick(_ es: [SelfSyncEntry]) -> [String: Data] {
+        func dict(_ es: [SelfSyncEntry]) -> [String: Data] {
             var m: [String: Data] = [:]
-            for e in es where engineKeyPrefixes.contains(where: { e.key.hasPrefix($0) }) { m[e.key] = e.value }
+            for e in es { m[e.key] = e.value }
             return m
         }
-        return pick(a) != pick(b)
+        return SelfSyncEngineDiff.differs(dict(a), dict(b)) { bytes in
+            guard let r = decodeCircleSync(bytes: bytes) else { return nil }
+            return AnyHashable([AnyHashable(r.name), AnyHashable(r.memberBundles), AnyHashable(r.creator)])
+        }
     }
     private let peerKeysTTL: TimeInterval = 600
 

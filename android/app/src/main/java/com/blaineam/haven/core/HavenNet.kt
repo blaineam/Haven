@@ -451,8 +451,15 @@ object HavenNet : InboundListener {
 
     @Volatile private var ready = false
 
-    @Synchronized
+    /** Lock-free once booted: the ConnectionService / SyncWorker re-entries must not queue on the
+     *  monitor behind a boot in flight just to learn it is done (see [EngineBoot]). */
     fun init(context: Context) {
+        if (ready) return
+        initLocked(context)
+    }
+
+    @Synchronized
+    private fun initLocked(context: Context) {
         if (ready) return   // atomic: never expose half-initialized state to a concurrent caller
         QaStats.mark("engine_init_start")   // DEBUG launch timeline (e2e `launch`); no-op in release
         appContext = context.applicationContext

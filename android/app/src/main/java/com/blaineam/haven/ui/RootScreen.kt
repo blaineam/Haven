@@ -175,7 +175,10 @@ private fun MainScaffold() {
             com.blaineam.haven.core.CallManager.init(context, HavenNet.nodeIdHex)
             HavenNet.presentDemoConnected()
         } else {
-            com.blaineam.haven.core.QaStats.timed("root_init") { HavenNet.init(context) }
+            // Off main: init is @Synchronized and SyncWorker may be inside it (see EngineBoot).
+            com.blaineam.haven.core.QaStats.timed("root_init") {
+                com.blaineam.haven.core.EngineBoot.offMain { HavenNet.init(context) }
+            }
             com.blaineam.haven.core.QaStats.timed("root_start") { HavenNet.start() }
             com.blaineam.haven.core.CallManager.init(context, HavenNet.nodeIdHex)
             com.blaineam.haven.core.ConnectionService.restoreIfEnabled(context)

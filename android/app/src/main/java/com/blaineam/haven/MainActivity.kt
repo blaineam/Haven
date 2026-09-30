@@ -76,6 +76,11 @@ class MainActivity : FragmentActivity() {
         com.blaineam.haven.core.QaDriver.onPause()
     }
 
+    override fun onStop() {
+        super.onStop()
+        com.blaineam.haven.core.HavenNet.flushPendingPersist()
+    }
+
     /** Poll until [HavenNet.isReady], then run [handleQaExtras] (DEBUG matrix only). */
     private fun scheduleQaExtras(intent: Intent?, attempt: Int = 0) {
         if (!BuildConfig.DEBUG || intent == null) return

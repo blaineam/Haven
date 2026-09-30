@@ -3765,6 +3765,14 @@ object HavenNet : InboundListener {
         }
     }
 
+    /** Backgrounding (MainActivity.onStop): land a coalesced import write that is still waiting out
+     *  its delay. Every other mutation already persists synchronously before anything is sent. */
+    fun flushPendingPersist() {
+        if (!ready || !persistPending) return
+        persistPending = false
+        scope.launch(Dispatchers.IO) { persist() }
+    }
+
     /** Last coalesced import bump, and whether one is already pending. */
     private var lastImportBumpMs = 0L
     private var importBumpPending = false
@@ -6106,6 +6114,12 @@ object HavenNet : InboundListener {
     private fun jobKey(job: MediaJob) =
         (if (job is MediaJob.Backup) (if (job.force) "BF|" else "B|") else "R|") + job.ref + "|" + job.circleId
 
+    /** May [ref] leave this device over the current link? Only satellite-safe media while ULTRA. */
+    private fun linkMayMove(ref: String): Boolean = HeavyWorkPolicy.mayMoveOverLink(
+        ultraConstrained = LowDataMonitor.effective.value == uniffi.haven_ffi.LinkConstraint.ULTRA,
+        satelliteSafe = LocalMedia.maySendOnUltraConstrained(ref),
+    )
+
     /** Enqueue a media blob to mirror to the circle's relays — serialized (one in RAM at a time).
      *  [force] = the 1.0.8 recovery overwrite (bypass the "already held?" probe + ledger).
      *  [priority] = just-authored media — rides the fast lane ahead of any backfill backlog and
@@ -6853,25 +6867,20 @@ object HavenNet : InboundListener {
                 val backfill = now >= item.createdAt &&
                     (now - item.createdAt) > BACKFILL_LAZY_MS.toULong()
                 if (!backfill) item.media.forEach { consider(it) }
-                // Thumb companions: remember the pairing (feeds the blurred placeholder) and
-                // prefetch for EVERY post regardless of lane/data saver — ≤32KB by contract.
+                // Thumb companions: remember the pairing (feeds the blurred placeholder).
                 for (m in item.media) {
-                    MediaVariants.parseThumb(m)?.let { (content, thumb) ->
-                        thumbOfContent[content] = thumb
-                        if (!LocalMedia.has(thumb) && !unopenableMedia.contains(thumb)) thumbs[thumb] = c.id
-                    }
-                    // POSTERS ride the same lane as thumbs — a poster is a small still, not a video.
-                    // Left in the general `missing` map it queues behind full-size clips, so a video
-                    // tile has no poster for as long as the backlog takes and falls back to
-                    // generating one locally: expensive (a decode session per attempt) and pointless,
-                    // because the sender already cut one and shipped it. iOS parity.
-                    for (m in item.media) {
-                        MediaVariants.parsePoster(m)?.let { (_, poster) ->
-                            if (!LocalMedia.has(poster) && !unopenableMedia.contains(poster)) {
-                                thumbs[poster] = c.id
-                            }
-                        }
-                    }
+                    MediaVariants.parseThumb(m)?.let { (content, thumb) -> thumbOfContent[content] = thumb }
+                }
+                // Small companions — previews, thumbs, posters — prefetch for EVERY post regardless of
+                // lane/data saver (≤32 KB by contract). Each is named only inside its marker, so the
+                // content walk above never asks for one. PREVIEWS lead: on a satellite link the preview
+                // is the only blob its sender uploads, and it used to be fetched only from the
+                // background-notification path, so a foreground receiver never asked for it (e2e
+                // `satellite preview blob (stub→) → android`). POSTERS ride here too rather than in
+                // `missing`, where a video tile waited behind full-size clips and generated its own
+                // poster instead. iOS parity.
+                for (small in MediaVariants.prefetchCompanions(item.media)) {
+                    if (!LocalMedia.has(small) && !unopenableMedia.contains(small)) thumbs[small] = c.id
                 }
                 // Same lazy rule as the post — a backfilled thread's attachments load on tap.
                 if (!backfill) item.comments.forEach { cm ->
@@ -7564,6 +7573,15 @@ object HavenNet : InboundListener {
      *  answering their ask with the old seal reports success while fixing nothing. */
     suspend fun uploadMedia(circleId: String, ref: String, force: Boolean = false,
                             reseal: Boolean = false): Boolean {
+        // ULTRA-CONSTRAINED LINK: previews only, by EVERY upload path. enqueueBackup gates the queue,
+        // but a friend's media-wanted ask (forced re-seal), a relay hint's promoted upload and the
+        // quarantine repair call this directly — and the media-wanted path put a 330 KB original on
+        // the relay while the link was forced to satellite (e2e `satellite holds back the full photo
+        // (android→)`). A held non-force job stays persisted and re-runs when the link improves.
+        if (!linkMayMove(ref)) {
+            Log.i("MediaSync", "upload ${ref.take(12)} held — link is ultra-constrained (previews only)")
+            return false
+        }
         if (uploadMediaOnce(circleId, ref, force, reseal)) return true
         // Nothing took the blob and at least one relay REFUSED it rather than being down: publish our
         // roster to the refusers and try once more, exactly as the Restore job does for the read side. A
@@ -8813,6 +8831,12 @@ object HavenNet : InboundListener {
     private fun handleMediaResumeRequest(body: ByteArray) {
         val req = MediaResume.decode(body) ?: return
         if (!LocalMedia.has(req.ref)) return
+        // Same ultra-constrained gate as a first request (frame 3): a resume is a serve too, and its
+        // relay-first branch can promote the full upload.
+        if (!linkMayMove(req.ref)) {
+            Log.i(TAG, "media RESUME ${req.ref.take(12)} — refused, link is ultra-constrained")
+            return
+        }
         // Same relay-first / heavy-I/O gate as a first request; the bitmap is honoured in streamServe.
         relayFirstServe(req.ref, req.requesterHex, resume = req)
     }
@@ -8933,7 +8957,7 @@ object HavenNet : InboundListener {
     // ---- Persistence ---------------------------------------------------------------------
 
     private fun persist() {
-        runCatching { stateFile.writeBytes(social.exportState()) }
+        runCatching { StateFiles.writeAtomic(stateFile, social.exportState()) }
             .onSuccess { QaPerf.notePersistExport() }   // the QA dump's perf.persistExportCount
             .onFailure { Log.e(TAG, "persist failed", it) }
     }
@@ -8943,7 +8967,7 @@ object HavenNet : InboundListener {
         // the shared file so no future identity can pick it up.
         if (!stateFile.exists() && legacyStateFile.exists()) {
             runCatching { social.importState(legacyStateFile.readBytes()) }
-            runCatching { stateFile.writeBytes(social.exportState()) }
+            runCatching { StateFiles.writeAtomic(stateFile, social.exportState()) }
             runCatching { legacyStateFile.delete() }
             return
         }

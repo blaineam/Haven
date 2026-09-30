@@ -131,4 +131,13 @@ final class HeavyWorkPolicyTests: XCTestCase {
                        "hints-exhausted")
         XCTAssertEqual(HeavyWorkPolicy.streamReason(friend(), circleKnown: true), "not-on-relay-nor-queued")
     }
+
+    /// On a satellite link only satellite-safe media may leave — by ANY path (a friend's media-wanted
+    /// ask used to force the full original onto the relay mid-pass).
+    func testUltraConstrainedLinkMovesOnlySatelliteSafeMedia() {
+        XCTAssertTrue(HeavyWorkPolicy.mayMoveOverLink(ultraConstrained: false, satelliteSafe: false))
+        XCTAssertTrue(HeavyWorkPolicy.mayMoveOverLink(ultraConstrained: false, satelliteSafe: true))
+        XCTAssertTrue(HeavyWorkPolicy.mayMoveOverLink(ultraConstrained: true, satelliteSafe: true))
+        XCTAssertFalse(HeavyWorkPolicy.mayMoveOverLink(ultraConstrained: true, satelliteSafe: false))
+    }
 }

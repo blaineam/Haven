@@ -235,4 +235,16 @@ extension MediaVariantsTests {
         // A marker's CONTENT half is not a companion of anything: the parent resolves as content.
         XCTAssertFalse(media.contains("img_thumb"), "precondition: the thumb is never listed bare")
     }
+
+    /// Every receive path walks `media`, and companions are named only inside their markers — so the
+    /// preview a satellite sender uploads (and nothing else) was never requested by a DM receiver.
+    func testPrefetchCompanionsListsPreviewsFirstAndNeverTheContent() {
+        let media = ["img_a", "vid_b",
+                     MediaVariants.thumbMarker(content: "img_a", thumb: "img_ta"),
+                     MediaVariants.posterMarker(video: "vid_b", poster: "img_pb"),
+                     MediaVariants.previewMarker(content: "img_a", preview: "img_va"),
+                     MediaVariants.previewMarker(content: "img_a", preview: "img_va")]
+        XCTAssertEqual(MediaVariants.prefetchCompanions(in: media), ["img_va", "img_ta", "img_pb"])
+        XCTAssertEqual(MediaVariants.prefetchCompanions(in: ["img_a"]), [])
+    }
 }

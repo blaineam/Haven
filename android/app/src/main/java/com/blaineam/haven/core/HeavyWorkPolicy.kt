@@ -123,4 +123,16 @@ object HeavyWorkPolicy {
         c.suspendHeavyIO -> priority
         else -> true
     }
+
+    /**
+     * May a blob leave this device over the current link (docs/PREVIEW-TIER-DESIGN.md §4.1)? On an
+     * ultra-constrained link only satellite-safe media (a preview, or anything already inside the
+     * preview budget) crosses — by EVERY path: the backup queue, a forced re-seal answering a
+     * friend's media-wanted ask, a relay hint's promoted upload, a resume serve. Only the queue was
+     * gated, so a friend's media-wanted ask put a 330 KB original on the relay mid-satellite-pass.
+     * Held work is deferred, not dropped: the persisted backup re-runs when the link improves.
+     * Apple `HeavyWorkPolicy.mayMoveOverLink` parity.
+     */
+    fun mayMoveOverLink(ultraConstrained: Boolean, satelliteSafe: Boolean): Boolean =
+        !ultraConstrained || satelliteSafe
 }

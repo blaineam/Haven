@@ -5,7 +5,7 @@
 // that the check must be immune to), named as such.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { judgeDump, ChannelFreshness, fmtDuration, FRESHNESS_DEFAULTS } from './dump-freshness.mjs';
+import { judgeDump, ChannelFreshness, DumpStats, fmtDuration, FRESHNESS_DEFAULTS } from './dump-freshness.mjs';
 
 const T0 = 1_700_000_000_000;   // an arbitrary fixed "now"
 
@@ -206,4 +206,32 @@ test('fmtDuration reads like prose', () => {
 
 test('judgeDump refuses a nonsense issuedAt rather than guessing', () => {
   assert.throws(() => judgeDump({ issuedAt: undefined, dumpTsMs: T0 }), TypeError);
+});
+
+// ── DumpStats: the report's per-leg channel numbers ─────────────────────────────────────────
+
+test('DumpStats: latency counts only dumps the command produced; the previous dump is "prior"', () => {
+  const s = new DumpStats();
+  for (const ts of [T0 + 800, T0 + 1200, T0 + 3000]) s.note('android', judgeDump({ issuedAt: T0, dumpTsMs: ts }));
+  s.note('android', judgeDump({ issuedAt: T0, dumpTsMs: T0 - 4000 }));   // one command old, still fresh
+  const [a] = s.summary();
+  assert.deepEqual(
+    { label: a.label, reads: a.reads, fresh: a.fresh, prior: a.prior, stale: a.stale, unreadable: a.unreadable },
+    { label: 'android', reads: 4, fresh: 4, prior: 1, stale: 0, unreadable: 0 });
+  assert.equal(a.p50, 1200);
+  assert.equal(a.max, 3000);
+});
+
+test('DumpStats: stale and unreadable reads are counted, unknown ones are not judged', () => {
+  const s = new DumpStats();
+  s.note('android', judgeDump({ issuedAt: T0, dumpTsMs: T0 - 5 * 60_000 }));
+  s.note('android', judgeDump({ issuedAt: T0, dumpTsMs: null }));
+  s.note('android', judgeDump({ issuedAt: T0, dumpTsMs: undefined }));
+  const [a] = s.summary();
+  assert.equal(a.reads, 3);
+  assert.equal(a.stale, 1);
+  assert.equal(a.unreadable, 1);
+  assert.equal(a.fresh, 0);
+  assert.ok(Number.isNaN(a.p50));
+  assert.equal(fmtDuration(a.p50), 'unknown');
 });

@@ -2220,6 +2220,29 @@ impl RatchetReceiver {
         Some(mk)
     }
 
+    /// The key [`Self::message_key`] would return for `i` right now, WITHOUT consuming anything: no
+    /// advance, no skipped-key caching, no delete-on-use. Lets a caller derive `MK_i` from a snapshot,
+    /// do the (expensive) open elsewhere, and still consume the key through `message_key` — which then
+    /// returns this same value, as long as the receiver is not touched in between. The caller wipes
+    /// the returned key when done.
+    pub fn peek_message_key(&self, i: u32) -> Option<[u8; 32]> {
+        if i < self.next {
+            return self.skipped.get(&i).copied();
+        }
+        if i - self.next > RATCHET_MAX_JUMP {
+            return None;
+        }
+        let mut ck = self.ck;
+        for _ in self.next..i {
+            let nck = ratchet_next_chain(&ck);
+            wipe_secret(&mut ck);
+            ck = nck;
+        }
+        let mk = ratchet_message_key(&ck);
+        wipe_secret(&mut ck);
+        Some(mk)
+    }
+
     /// Advance `CK_next → CK_{next+1}`, wiping the consumed chain key (FS deletion point).
     fn advance(&mut self) {
         let nck = ratchet_next_chain(&self.ck);
@@ -4331,6 +4354,19 @@ mod ratchet_m6_tests {
         // resets the chain".
         let other = SenderChain::new(&SENDER_KEY, GID, EPOCH + 1).next_key().1;
         assert_ne!(other, sent[0], "a new epoch re-roots CK_0");
+    }
+
+    /// `peek_message_key` returns exactly what `message_key` then returns, for every order a DM
+    /// lane sees (in order, a forward jump, a late message from the skipped cache, a replay, a jump
+    /// past the bound) — and consumes nothing, so the peeked receiver's later answers are unchanged.
+    #[test]
+    fn peek_message_key_matches_message_key_without_consuming() {
+        let mut r = RatchetReceiver::new(&SENDER_KEY, GID, EPOCH);
+        for i in [0u32, 1, 5, 3, 2, 3, 9, 4, 20, 8, 20, 21, RATCHET_MAX_JUMP + 40] {
+            let peeked = r.peek_message_key(i);
+            assert_eq!(r.peek_message_key(i), peeked, "a peek consumes nothing (index {i})");
+            assert_eq!(r.message_key(i), peeked, "peek == message_key (index {i})");
+        }
     }
 
     /// **Per-message FS (§9 M6):** capturing MK_i (or the receiver state AFTER processing message

@@ -29,7 +29,7 @@ use haven_p2p::social::{
 };
 use haven_p2p::groupkey::{
     mailbox_prefix, new_circle_secret, new_epoch_key, open_event_in_epoch_authored, open_key_commit,
-    seal_event_in_epoch, seal_event_ratcheted, seal_key_commit, EpochEnvelope,
+    seal_event_in_epoch, seal_event_ratcheted, seal_key_commit, EpochEnvelope, OpenedKeyCommit,
 };
 
 /// The seed-drop protocol version this build advertises (S0). A build with the S1 receive-side verifier
@@ -1678,7 +1678,8 @@ struct Circle {
     /// (16.8 GB / 5 min) and every other platform silently kept whichever key polled last.
     my_epoch_keys_alt: HashMap<u64, Vec<[u8; 32]>>,
     peer_epoch_keys_alt: HashMap<(String, u64), Vec<[u8; 32]>>,
-    pending_epoch: Vec<Vec<u8>>,
+    /// Parked epoch envelopes, each kept with its parse (see [`ParkedEpoch`]); only the bytes persist.
+    pending_epoch: Vec<ParkedEpoch>,
     /// My STABLE circle secret (zeros = not yet generated) — derives opaque storage-key prefixes for
     /// my blobs; distributed in my key commits. Peers' secrets are stored so I can find their blobs.
     my_circle_secret: [u8; 32],
@@ -2038,7 +2039,7 @@ struct NetState {
     /// NEVER the account seed). A seedless device therefore cannot sign a roster, mint a profile card, or
     /// author under the account key — every such site branches on this `Option`, which is the whole point of
     /// the refactor (a missed guard is a compile error, not a runtime forgery).
-    me_secret: Option<Identity>,
+    me_secret: Option<Arc<Identity>>,
     /// The primary-signed roster WIRE bytes (tagged `TAG_DEVICE_ROSTER`, incl. the SeedDropCapability
     /// trailer) that a SEEDLESS device holds for its OWN account (A3). A seedless device cannot re-mint this
     /// (no account key), so it persists + rebroadcasts these exact bytes VERBATIM — re-encoding would strip
@@ -2053,7 +2054,7 @@ struct NetState {
     /// This DEVICE's identity (Option 1). `None` until the app calls `use_device_identity` (then every
     /// device on the account has a distinct transport id and opens content sealed to its own bundle, so a
     /// revoked device is cut off cryptographically). Content is dual-opened: device key first, then `me`.
-    device: Option<Identity>,
+    device: Option<Arc<Identity>>,
     circles: Vec<Circle>,
     /// Verified multi-device rosters keyed by account node id — MINE (so my own linked devices receive
     /// content) and each contact's (so I seal to their devices, never a revoked one). Empty for any
@@ -2593,17 +2594,15 @@ fn decode_shadow_welcome(b: &[u8]) -> Option<([u8; 32], ShadowWelcome)> {
 /// Resolve a shadow commit/welcome signer's device/account hex to its verifying bundle — the
 /// same three-case resolution `receive_key_commit` uses (my account, a member account, or an
 /// authorized device of a member/mine).
-fn resolve_shadow_sender(st: &NetState, idx: usize, sender_hex: &str) -> Option<HavenId> {
+fn resolve_shadow_sender_ref<'a>(st: &'a NetState, idx: usize, sender_hex: &str) -> Option<&'a HavenId> {
     let me_hex = hex(&st.me().node_id_bytes());
     if sender_hex == me_hex {
-        return Some(st.me().clone());
+        return Some(st.me());
     }
-    if let Some(m) =
-        st.circles[idx].members.iter().find(|m| hex(&m.node_id_bytes()) == sender_hex).cloned()
-    {
+    if let Some(m) = st.circles[idx].members.iter().find(|m| hex(&m.node_id_bytes()) == sender_hex) {
         return Some(m);
     }
-    authorized_device_and_account(st, idx, sender_hex).map(|(bundle, _)| bundle)
+    authorized_device_and_account_ref(st, idx, sender_hex).map(|(bundle, _)| bundle)
 }
 
 /// Build (once) the elected creator's genesis commit + a Welcome for every device, and cache the
@@ -2772,6 +2771,16 @@ fn receive_mls_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
         return Ok(false);
     }
     let is_genesis = commit.epoch == 1 && commit.parent_commit_hash == shadow_genesis_parent(&gid);
+    // Already stored (same bytes — the key is their hash) with its parent held: every path below then
+    // answers `false` without retry and the store is a no-op, so the signature / credential / authority
+    // checks cannot change anything. Tree wires ride every bundle, so this is the common case — and
+    // those checks are hybrid-signature verifications under the engine lock.
+    if st.shadow_trees.get(&circle_id).is_some_and(|s| {
+        s.commits.contains_key(&treekem::commit_hash(body))
+            && (is_genesis || s.commits.contains_key(&commit.parent_commit_hash))
+    }) {
+        return Ok(false);
+    }
     if is_genesis {
         // AUDIT L1 — authenticate the genesis to the elected creator/admin. Selection is otherwise by
         // leaf-count (`keying_winning_genesis`) with NO signer check, so any mls-capable member could
@@ -2961,7 +2970,7 @@ fn receive_mls_welcome(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
     }
     let Ok(env) = SealedEnvelope::from_bytes(body) else { return Ok(false) };
     let sender_hex = env.sender_hex();
-    let Some(sender) = resolve_shadow_sender(st, idx, &sender_hex) else {
+    let Some(sender) = resolve_shadow_sender_ref(st, idx, &sender_hex) else {
         // Roster lag: we can't verify the sender YET. Retryable — the roster may be in flight.
         TREE_RETRYABLE.with(|f| f.set(true));
         return Ok(false);
@@ -2969,11 +2978,9 @@ fn receive_mls_welcome(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
     // Dual-open: my device key first (the Welcome is sealed to my device bundle), then account key.
     // An OPEN failure below is NOT retryable: the overwhelmingly common cause is a Welcome sealed to
     // a DIFFERENT device sharing our mailbox prefix — someone else's mail, never ours to apply.
-    let opened = st
-        .device
-        .as_ref()
-        .and_then(|d| open_bytes(d, &sender, &env).ok())
-        .or_else(|| st.me_secret.as_ref().and_then(|m| open_bytes(m, &sender, &env).ok()));
+    // (Answered from the receive memo when `receive` already opened it with the lock released.)
+    let digest = if recv_ctx_active() { *blake3::hash(body).as_bytes() } else { [0u8; 32] };
+    let opened = commit_openers(st).iter().find_map(|me| open_sealed_memo(me, sender, &env, &digest));
     let Some(plaintext) = opened else { return Ok(false) };
     let Some((commit_hash, welcome)) = decode_shadow_welcome(&plaintext) else { return Ok(false) };
     // FAIL CLOSED (§4.2 revoked-in-the-meantime): reject a SELF-CONTAINED Welcome unless MY device is
@@ -3025,10 +3032,43 @@ fn receive_mls_welcome(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
 
 /// Resolve an account node id to its verifying public bundle (me or a circle member).
 fn mls_account_bundle(st: &NetState, idx: usize, acct: &[u8; 32]) -> Option<HavenId> {
+    mls_account_bundle_ref(st, idx, acct).cloned()
+}
+
+fn mls_account_bundle_ref<'a>(st: &'a NetState, idx: usize, acct: &[u8; 32]) -> Option<&'a HavenId> {
     if *acct == st.me().node_id_bytes() {
-        return Some(st.me().clone());
+        return Some(st.me());
     }
-    st.circles[idx].members.iter().find(|m| m.node_id_bytes() == *acct).cloned()
+    st.circles[idx].members.iter().find(|m| m.node_id_bytes() == *acct)
+}
+
+thread_local! {
+    /// [`admin_grant_verifies`] answers, by the grant wire's digest, with the grantor bundle checked.
+    static ADMIN_GRANT_VERIFIED: std::cell::RefCell<HashMap<[u8; 32], (Arc<HavenId>, bool)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// `g.verify(grantor).is_ok()` for the grant decoded from `wire`, memoized: a pure function of the wire
+/// and the grantor's bundle (compared key-for-key on every hit). `circle_admin_set` re-verifies every
+/// grant — a hybrid ML-DSA check each — on every keying refresh, i.e. after every tree envelope.
+fn admin_grant_verifies(wire: &[u8], g: &AdminGrant, grantor: &HavenId) -> bool {
+    let digest = *blake3::hash(wire).as_bytes();
+    let hit = ADMIN_GRANT_VERIFIED.with_borrow(|m| match m.get(&digest) {
+        Some((b, ok)) if same_bundle(b, grantor) => Some(*ok),
+        _ => None,
+    });
+    if let Some(ok) = hit {
+        return ok;
+    }
+    let ok = g.verify(grantor).is_ok();
+    let bundle = shared_bundle(grantor);
+    ADMIN_GRANT_VERIFIED.with_borrow_mut(|m| {
+        if m.len() >= 1024 {
+            m.clear();
+        }
+        m.insert(digest, (bundle, ok));
+    });
+    ok
 }
 
 /// The current admin set for a circle (§4.3): the pinned creator plus every account reachable by a
@@ -3104,8 +3144,8 @@ fn circle_admin_set(st: &NetState, idx: usize) -> Option<std::collections::HashS
         if g.circle_id != gid || g.creator != creator {
             continue;
         }
-        let Some(grantor_pub) = mls_account_bundle(st, idx, &g.grantor_account) else { continue };
-        if g.verify(&grantor_pub).is_ok() {
+        let Some(grantor_pub) = mls_account_bundle_ref(st, idx, &g.grantor_account) else { continue };
+        if admin_grant_verifies(w, &g, grantor_pub) {
             edges.push((g.grantor_account, g.admin_account));
         }
     }
@@ -3177,12 +3217,37 @@ fn tree_leaf_device_ids(tree: &treekem::RatchetTree) -> Vec<[u8; 32]> {
     let mut out = Vec::new();
     for slot in &tree.slots {
         if let treekem::TreeSlot::Leaf(l) = slot {
-            if let Ok(c) = DeviceCredential::from_bytes(&l.device_credential) {
-                out.push(c.device.node_id_bytes());
+            if let Some((device, _)) = leaf_credential_ids(&l.device_credential) {
+                out.push(device);
             }
         }
     }
     out
+}
+
+thread_local! {
+    /// [`leaf_credential_ids`] answers, by the credential bytes' digest.
+    static LEAF_CREDENTIAL_IDS: std::cell::RefCell<HashMap<[u8; 32], Option<([u8; 32], [u8; 32])>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// (device node id, account id) of a tree leaf's credential — `DeviceCredential::from_bytes`, memoized by
+/// the bytes it decodes (a pure function of them). The decode expands the device's full ML-DSA/ML-KEM
+/// bundle just to read two ids (~3 ms per leaf unoptimized), and the keying refresh that runs after
+/// EVERY tree envelope asks for every leaf twice, under the engine lock.
+fn leaf_credential_ids(bytes: &[u8]) -> Option<([u8; 32], [u8; 32])> {
+    let digest = *blake3::hash(bytes).as_bytes();
+    if let Some(hit) = LEAF_CREDENTIAL_IDS.with_borrow(|m| m.get(&digest).copied()) {
+        return hit;
+    }
+    let ids = DeviceCredential::from_bytes(bytes).ok().map(|c| (c.device.node_id_bytes(), c.account_id));
+    LEAF_CREDENTIAL_IDS.with_borrow_mut(|m| {
+        if m.len() >= 4096 {
+            m.clear();
+        }
+        m.insert(digest, ids);
+    });
+    ids
 }
 
 /// The distinct ACCOUNT ids present as leaves in `tree` (a member's leaves resolve to its account —
@@ -3195,9 +3260,9 @@ fn tree_leaf_accounts(tree: &treekem::RatchetTree) -> Vec<[u8; 32]> {
     let mut seen = HashSet::new();
     for slot in &tree.slots {
         if let treekem::TreeSlot::Leaf(l) = slot {
-            if let Ok(c) = DeviceCredential::from_bytes(&l.device_credential) {
-                if seen.insert(c.account_id) {
-                    out.push(c.account_id);
+            if let Some((_, account_id)) = leaf_credential_ids(&l.device_credential) {
+                if seen.insert(account_id) {
+                    out.push(account_id);
                 }
             }
         }
@@ -3650,10 +3715,19 @@ fn receive_mls_join(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, 
     let did: [u8; 32] = body[32..64].try_into().unwrap();
     let sig = &body[64..];
     let did_hex = hex(&did);
-    let Some(bundle) = resolve_shadow_sender(st, idx, &did_hex) else {
+    let Some(bundle) = resolve_shadow_sender_ref(st, idx, &did_hex) else {
         TREE_RETRYABLE.with(|f| f.set(true));
         return Ok(false);
     };
+    // Already recorded exactly: applying it again changes nothing and answers `false` whatever its
+    // signature says — so skip the hybrid verify. Peers re-send their join ack in every bundle.
+    if st
+        .shadow_trees
+        .get(&st.circles[idx].id)
+        .is_some_and(|sh| sh.joined.contains(&did) && sh.joined_genesis.get(&did) == Some(&gh))
+    {
+        return Ok(false);
+    }
     if bundle.verify(&keying_join_payload(&gh, &did), sig).is_err() {
         return Ok(false);
     }
@@ -4153,23 +4227,7 @@ fn receive_key_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
         .map_err(|e| HavenError::Invalid { msg: format!("bad commit: {e}") })?;
     let sender_hex = env.sender_hex();
     let me_hex = hex(&st.me().node_id_bytes());
-    // Resolve the committer to its verifying bundle AND the ACCOUNT it commits for. The epoch key is keyed
-    // by the committer's ACCOUNT, never the signing device — so a device-signed commit (seed-drop S3) lands
-    // in the very slot the account's own commits fill, and the read path (which looks the key up by the
-    // event's author account) finds it. Three cases:
-    let (committer, committer_account_hex) = if sender_hex == me_hex {
-        (st.me().clone(), me_hex.clone()) // my own account-key re-synced commit (multi-device / backfill)
-    } else if let Some(m) =
-        st.circles[idx].members.iter().find(|m| hex(&m.node_id_bytes()) == sender_hex).cloned()
-    {
-        (m, sender_hex.clone()) // a member's own account key: account == sender
-    } else if let Some((bundle, acct)) = authorized_device_and_account(st, idx, &sender_hex) {
-        // An AUTHORIZED DEVICE of a member — or of MINE. Its credential chain to `acct` was verified at
-        // roster ingest, so it commits FOR `acct`; store under `acct`. My own sibling device resolves to MY
-        // account here, so its device-signed commit converges into my own-device epoch keys (below), not a
-        // peer slot — preserving multi-device convergence now that siblings sign commits under device keys.
-        (bundle, hex(&acct))
-    } else {
+    let Some((committer, committer_account_hex)) = resolve_committer(st, idx, &sender_hex, &me_hex) else {
         // Committer not resolvable YET (a new friend whose bundle/roster hasn't landed). Park it —
         // the mailbox already marked its key seen, so dropping it here lost the key until a resend.
         park_pending_commit(&mut st.circles[idx], body);
@@ -4179,11 +4237,16 @@ fn receive_key_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
     // back to the ACCOUNT key (older account-sealed content, or peers who don't know my roster yet). On a
     // SEEDLESS device the account arm is simply ABSENT (`me_secret` is `None`) — everything relevant is
     // sealed to its device bundle (C), so device-only opening is complete (§2.2 E).
-    let opened = st
-        .device
-        .as_ref()
-        .and_then(|d| open_key_commit(d, &committer, &env).ok())
-        .or_else(|| st.me_secret.as_ref().and_then(|m| open_key_commit(m, &committer, &env).ok()));
+    let openers = commit_openers(st);
+    let digest = if recv_ctx_active() { *blake3::hash(body).as_bytes() } else { [0u8; 32] };
+    // A parked commit replayed by a drain inside `receive`: open it with the lock RELEASED instead
+    // (re-park now, replay once the result is memoized — see `RecvCtx`).
+    if defer_commit_open(&openers, &committer, &env, &digest) {
+        park_pending_commit(&mut st.circles[idx], body);
+        note_deferred(&st.circles[idx].id, None);
+        return Ok(false);
+    }
+    let opened = openers.iter().find_map(|me| open_key_commit_memo(me, &committer, &env, &digest));
     let Some(opened) = opened else {
         return Ok(false); // not addressed to me, or I was excluded from this epoch
     };
@@ -4271,6 +4334,7 @@ fn park_pending_commit(c: &mut Circle, body: &[u8]) {
 fn drain_pending_commits(st: &mut NetState, idx: usize) -> bool {
     let pending = std::mem::take(&mut st.circles[idx].pending_commit);
     let mut learned = false;
+    let _drain = DrainScope::enter();
     for raw in pending {
         if let Ok(true) = receive_key_commit(st, idx, &raw) {
             learned = true;
@@ -4285,43 +4349,81 @@ fn drain_pending_commits(st: &mut NetState, idx: usize) -> bool {
 /// live field state of both stuck DM circles), every FRESH event — the DM just sent, whose key
 /// commit lands seconds later — was the one silently discarded, while its mailbox key was still
 /// marked seen: deterministic permanent loss of exactly the newest content.
-fn park_pending(c: &mut Circle, body: &[u8]) {
-    if c.pending_epoch.iter().any(|p| p == body) {
+fn park_pending(c: &mut Circle, body: &[u8], parsed: Option<ParsedEpoch>) {
+    // De-dupe by digest where both sides have one (a drain re-parks up to 512 entries against each
+    // other); byte comparison otherwise. Same answer either way.
+    let dup = match &parsed {
+        Some(n) => c.pending_epoch.iter().any(|p| match &p.parsed {
+            Some(q) => q.digest == n.digest,
+            None => p.raw == body,
+        }),
+        None => c.pending_epoch.iter().any(|p| p.raw == body),
+    };
+    if dup {
         return;
     }
     if c.pending_epoch.len() >= 512 {
         c.pending_epoch.remove(0);
     }
-    c.pending_epoch.push(body.to_vec());
+    c.pending_epoch.push(ParkedEpoch { raw: body.to_vec(), parsed });
+}
+
+/// An epoch envelope decoded once, with the digest of its bytes (the receive memo's body key).
+///
+/// Decoding is NOT cheap: the legacy JSON container spells ~3.6 KB of bytes as ~12 KB of decimal
+/// arrays — ~35 µs per envelope in a release build, and many times that unoptimized. The receive path
+/// used to decode each envelope under the engine lock, and every drain re-decoded the WHOLE parked
+/// buffer (twice: replay + fossil GC) — per key commit, per tree envelope, per roster. So an envelope
+/// is decoded once, outside the lock where it arrives, and a parked one keeps its decode.
+#[derive(Clone)]
+struct ParsedEpoch {
+    env: Arc<EpochEnvelope>,
+    digest: [u8; 32],
+}
+
+impl ParsedEpoch {
+    /// `digest` is BLAKE3 over the TAGGED envelope (`TAG_EPOCH_EVENT ‖ body`) — the very hash `receive`
+    /// already takes for its re-delivery filter, so an arriving envelope is hashed once.
+    fn parse(body: &[u8]) -> Result<Self, HavenError> {
+        let mut h = blake3::Hasher::new();
+        h.update(&[TAG_EPOCH_EVENT]);
+        h.update(body);
+        Self::parse_with_digest(body, *h.finalize().as_bytes())
+    }
+
+    fn parse_with_digest(body: &[u8], digest: [u8; 32]) -> Result<Self, HavenError> {
+        let env = EpochEnvelope::from_bytes(body)
+            .map_err(|e| HavenError::Invalid { msg: format!("bad epoch envelope: {e}") })?;
+        Ok(Self { env: Arc::new(env), digest })
+    }
+}
+
+/// One parked epoch envelope: the bytes (what persists and what is replayed) and their decode (`None`
+/// only if they never decoded — replay then drops them exactly as a failed decode always did).
+struct ParkedEpoch {
+    raw: Vec<u8>,
+    parsed: Option<ParsedEpoch>,
+}
+
+impl ParkedEpoch {
+    fn from_raw(raw: Vec<u8>) -> Self {
+        let parsed = ParsedEpoch::parse(&raw).ok();
+        Self { raw, parsed }
+    }
 }
 
 /// Apply (or buffer, if its epoch key hasn't arrived yet) an epoch-sealed event.
-fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, HavenError> {
-    let env = EpochEnvelope::from_bytes(body)
-        .map_err(|e| HavenError::Invalid { msg: format!("bad epoch envelope: {e}") })?;
+///
+/// `pre` is the envelope already decoded (outside the lock, or when it was parked); `None` decodes here.
+fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8], pre: Option<ParsedEpoch>) -> Result<bool, HavenError> {
+    let parsed = match pre {
+        Some(p) => p,
+        None => ParsedEpoch::parse(body)?,
+    };
+    let env: &EpochEnvelope = &parsed.env;
     let sender_hex = env.sender_hex();
     let me_hex = hex(&st.me().node_id_bytes());
-    // Resolve the SENDER to (verifying bundle, expected author account). Three cases, all preserving today's
-    // behavior for existing traffic (no contact device signs in this release):
-    //   • my own account/device  → self-forward: the event's internal author (me or a friend I forwarded) is
-    //     preserved, no author bind (`expected_author = None`).
-    //   • a circle member's ACCOUNT key → strict bind, author must == that account (unchanged).
-    //   • a circle member's AUTHORIZED DEVICE (seed-drop S1) → the device signs for its account, so bind
-    //     author == that account. The credential chain proving device→account was checked at roster ingest.
-    let (sender, expected_author): (Option<HavenId>, Option<String>) = if sender_hex == me_hex {
-        (Some(st.me().clone()), None)
-    } else if let Some(m) = st.circles[idx]
-        .members
-        .iter()
-        .find(|m| hex(&m.node_id_bytes()) == sender_hex)
-        .cloned()
-    {
-        (Some(m), Some(sender_hex.clone()))
-    } else if let Some((bundle, acct_id)) = authorized_device_and_account(st, idx, &sender_hex) {
-        (Some(bundle), Some(hex(&acct_id)))
-    } else {
-        (None, None)
-    };
+    let (sender, expected_author) = resolve_epoch_sender(st, idx, &sender_hex, &me_hex);
     let Some(sender) = sender else {
         // Unknown sender — most often a member's authorized device whose signed ROSTER hasn't
         // reached us yet (multi-device roster lag). Previously we DROPPED here; combined with the
@@ -4330,7 +4432,7 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
         // so once the roster arrives the event is recovered. (A genuinely-removed sender's event
         // simply never opens and ages out of the buffer.)
         let c = &mut st.circles[idx];
-        park_pending(c, body);
+        park_pending(c, body, Some(parsed.clone()));
         return Ok(false);
     };
     // The epoch key is keyed by the ACCOUNT (the committer), not the signing device — so a device-signed
@@ -4340,9 +4442,21 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
     let Some(key) = st.circles[idx].key_for(&me_hex, key_author_hex, env.epoch) else {
         // Epoch key not learned yet — buffer (capped + de-duped); a later key commit unlocks it.
         let c = &mut st.circles[idx];
-        park_pending(c, body);
+        park_pending(c, body, Some(parsed.clone()));
         return Ok(false);
     };
+    // A parked event replayed by a drain inside `receive`: verify + decrypt it with the lock RELEASED
+    // instead (re-park now, replay once the result is memoized — see `RecvCtx`). Ratcheted lanes are
+    // excluded: `message_key` below advances the receiver, so a replay would not re-derive the key.
+    if env.ratchet_index().is_none() && deferring() {
+        let mut keys = vec![key];
+        keys.extend(st.circles[idx].alt_keys_for(&me_hex, key_author_hex, env.epoch));
+        if defer_event_open(&sender, &keys, expected_author.as_deref(), &parsed) {
+            park_pending(&mut st.circles[idx], body, Some(parsed.clone()));
+            note_deferred(&st.circles[idx].id, Some(parsed.digest));
+            return Ok(false);
+        }
+    }
     // M6 (§6.5): a DM sealed under the sender ratchet carries an AUTHENTICATED index. Re-derive its
     // per-message key `MK_i` from the epoch sender `key` via a per-(sender account, epoch)
     // `RatchetReceiver`, whose bounded skipped-key cache tolerates OUT-OF-ORDER and DAYS-LATE
@@ -4372,7 +4486,7 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
     // The device's hybrid signature is verified inside; the author is then bound to `expected_author`
     // (its authorizing account for a contact device, itself for a member account, or unbound for my own
     // self-forwards). A device of account A can only produce author==A, so no re-attribution is possible.
-    let opened = open_event_in_epoch_authored(&sender, &open_key, &env, expected_author.as_deref());
+    let opened = open_epoch_event_memo(&sender, &open_key, &parsed, expected_author.as_deref());
     // FS: wipe the derived per-message key the instant it has been used (or failed). A no-op-ish
     // wipe of the plain epoch-key copy in the non-ratcheted path is harmless (the map still holds it).
     if env.ratchet_index().is_some() {
@@ -4391,7 +4505,7 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
             let alts = st.circles[idx].alt_keys_for(&me_hex, key_author_hex, env.epoch);
             match alts
                 .iter()
-                .find_map(|k| open_event_in_epoch_authored(&sender, k, &env, expected_author.as_deref()).ok())
+                .find_map(|k| open_epoch_event_memo(&sender, k, &parsed, expected_author.as_deref()).ok())
             {
                 Some(e) => e,
                 None => return Ok(false),
@@ -4440,8 +4554,11 @@ fn receive_legacy(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, Ha
 /// events return to the buffer).
 fn drain_pending(st: &mut NetState, idx: usize) {
     let pending = std::mem::take(&mut st.circles[idx].pending_epoch);
-    for raw in pending {
-        let _ = receive_epoch_event(st, idx, &raw);
+    {
+        let _drain = DrainScope::enter();
+        for p in pending {
+            let _ = receive_epoch_event(st, idx, &p.raw, p.parsed);
+        }
     }
     // GC provably-DEAD parked entries so they can't starve the 512-slot buffer. An envelope
     // sealed at epoch E is unrecoverable once every key-holder has pruned past E: senders keep
@@ -4463,8 +4580,15 @@ fn drain_pending(st: &mut NetState, idx: usize) {
         m.insert(me_hex.clone(), my_epoch);
         m
     };
-    c.pending_epoch.retain(|raw| {
-        let Ok(env) = EpochEnvelope::from_bytes(raw) else { return false };
+    let deferred = deferred_bodies();
+    c.pending_epoch.retain(|p| {
+        let Some(parsed) = &p.parsed else { return false };
+        // Re-parked only to be opened with the lock released: it is NOT stale, whatever its epoch —
+        // the replay decides its fate exactly as an in-place open would have.
+        if deferred.contains(&parsed.digest) {
+            return true;
+        }
+        let env = &parsed.env;
         let author = env.sender_hex();
         match newest_by_author.get(&author) {
             // Keep anything whose sealing epoch is still within (or ahead of) the recoverable
@@ -4548,6 +4672,504 @@ fn drain_all_pending(st: &mut NetState) -> bool {
     }
     let after: usize = st.circles.iter().map(|c| c.events.len()).sum();
     after > before
+}
+
+// ── Receive-path crypto off the engine lock ──────────────────────────────────────────────────────
+//
+// Every incoming envelope used to verify its hybrid signature (Ed25519 + ML-DSA) and decrypt under the
+// ONE engine lock — and so did every drain it triggered: a key commit that unlocks a few hundred parked
+// events opened all of them inside that single hold (633 ms for one commit in a debug build at 500
+// envelopes; the e2e desktop logged 58 s holds in `receive_locked`). Same discipline as the bundle
+// sealer: the crypto is a PURE function of its inputs, so it runs with the lock released and the locked
+// apply only looks the answer up.
+//
+//   * Before the apply, `receive` snapshots the inputs of the envelope's own open (sender bundle, epoch
+//     key + alt keys, or committer + my identities) under a short hold and opens it unlocked.
+//   * During the apply, a DRAIN (parked events / parked commits) that meets an open it has no answer for
+//     re-parks the entry instead of opening it, and records the exact inputs as a job.
+//   * After the apply, `receive` runs the jobs unlocked, then re-drains the affected circles under the
+//     lock — memo hits now — until nothing is deferred.
+//
+// The memo is keyed by EVERY input of the call it answers (the sender/committer bundle — checked for
+// equality on lookup — the key or my identity seed, the expected author, the envelope bytes), so a state
+// change between phases can only MISS, and a miss opens under the lock exactly as before. It lives for
+// one `receive` (or `import_state`) call on one thread.
+
+/// One deferred epoch-event open: the exact inputs of the locked call (primary key, then alts, in order).
+struct EventOpenJob {
+    sender: Arc<HavenId>,
+    keys: Vec<[u8; 32]>,
+    expected: Option<String>,
+    parsed: ParsedEpoch,
+}
+
+/// One deferred key-commit open: my identities in dual-open order (device, then account).
+struct CommitOpenJob {
+    openers: Vec<Arc<Identity>>,
+    committer: Arc<HavenId>,
+    env: Arc<SealedEnvelope>,
+    digest: [u8; 32],
+}
+
+impl EventOpenJob {
+    /// Run the open chain exactly as the locked code would (stop at the first key that opens) and
+    /// memoize every attempt.
+    fn run(mut self) {
+        for k in &self.keys {
+            let r = open_event_in_epoch_authored(&self.sender, k, &self.parsed.env, self.expected.as_deref()).ok();
+            let done = r.is_some();
+            let mk = event_memo_key(&self.sender, k, self.expected.as_deref(), &self.parsed.digest);
+            let sender = self.sender.clone();
+            with_recv_ctx(|c| {
+                c.event_memo.insert(mk, (sender, r));
+            });
+            if done {
+                break;
+            }
+        }
+        // Key copies (a ratcheted DM's is a per-message key) die with the job.
+        for k in self.keys.iter_mut() {
+            treekem::wipe_secret(k);
+        }
+    }
+}
+
+impl CommitOpenJob {
+    fn run(self) {
+        for me in &self.openers {
+            let r = open_key_commit(me, &self.committer, &self.env).ok();
+            let done = r.is_some();
+            let mk = commit_memo_key(me, &self.committer, &self.digest);
+            let committer = self.committer.clone();
+            with_recv_ctx(|c| {
+                c.commit_memo.insert(mk, (committer, r));
+            });
+            if done {
+                return;
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct RecvCtx {
+    /// Answers keyed by [`event_memo_key`], with the sender bundle they were computed for.
+    event_memo: HashMap<[u8; 32], (Arc<HavenId>, Option<Event>)>,
+    commit_memo: HashMap<[u8; 32], (Arc<HavenId>, Option<OpenedKeyCommit>)>,
+    /// `open_bytes` answers for a TreeKEM Welcome (same key shape as `commit_memo`, own domain).
+    sealed_memo: HashMap<[u8; 32], (Arc<HavenId>, Option<Vec<u8>>)>,
+    /// Drain depth — only a DRAIN defers (an envelope's own open decides `receive`'s return value).
+    in_drain: u32,
+    /// Off for the last re-drain round, so a pathological churn still terminates (opening in place).
+    defer: bool,
+    event_jobs: Vec<EventOpenJob>,
+    commit_jobs: Vec<CommitOpenJob>,
+    /// Circles with an entry re-parked for an unlocked open (re-drained after the jobs run).
+    deferred_circles: HashSet<String>,
+    /// The subset whose deferred entry is a parked KEY COMMIT (that buffer is re-drained first).
+    deferred_commit_circles: HashSet<String>,
+    /// Digests of the re-parked event bodies: the drain's fossil GC must not drop them meanwhile.
+    deferred_bodies: HashSet<[u8; 32]>,
+}
+
+#[cfg(test)]
+thread_local! {
+    // Opens this thread deferred out of a drain (events, commits) — lets a test prove its fixture
+    // actually exercised the deferral rather than trusting that it did.
+    static DEFERRED_OPENS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+thread_local! {
+    static RECV_CTX: std::cell::RefCell<Option<RecvCtx>> = const { std::cell::RefCell::new(None) };
+    /// Shared copies of the peer bundles this thread has resolved, by node id (see [`shared_bundle`]).
+    static BUNDLES: std::cell::RefCell<HashMap<[u8; 32], Arc<HavenId>>> = std::cell::RefCell::new(HashMap::new());
+}
+
+fn with_recv_ctx<R>(f: impl FnOnce(&mut RecvCtx) -> R) -> Option<R> {
+    RECV_CTX.with_borrow_mut(|c| c.as_mut().map(f))
+}
+
+fn recv_ctx_active() -> bool {
+    RECV_CTX.with_borrow(|c| c.is_some())
+}
+
+/// Installs a fresh [`RecvCtx`] for the current thread; restores the previous one on drop (panic-safe).
+struct RecvCtxScope {
+    prev: Option<RecvCtx>,
+}
+
+impl RecvCtxScope {
+    fn install() -> Self {
+        let fresh = RecvCtx { defer: true, ..Default::default() };
+        Self { prev: RECV_CTX.with_borrow_mut(|c| c.replace(fresh)) }
+    }
+}
+
+impl Drop for RecvCtxScope {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        RECV_CTX.with_borrow_mut(|c| *c = prev);
+    }
+}
+
+/// Marks a drain for its duration (see [`RecvCtx::in_drain`]).
+struct DrainScope;
+
+impl DrainScope {
+    fn enter() -> Self {
+        with_recv_ctx(|c| c.in_drain += 1);
+        DrainScope
+    }
+}
+
+impl Drop for DrainScope {
+    fn drop(&mut self) {
+        with_recv_ctx(|c| c.in_drain = c.in_drain.saturating_sub(1));
+    }
+}
+
+fn deferring() -> bool {
+    with_recv_ctx(|c| c.defer && c.in_drain > 0).unwrap_or(false)
+}
+
+/// `digest` is the re-parked event body's (the GC exemption); `None` for a key commit.
+fn note_deferred(circle_id: &str, digest: Option<[u8; 32]>) {
+    with_recv_ctx(|c| {
+        c.deferred_circles.insert(circle_id.to_string());
+        match digest {
+            Some(d) => {
+                c.deferred_bodies.insert(d);
+            }
+            None => {
+                c.deferred_commit_circles.insert(circle_id.to_string());
+            }
+        }
+    });
+}
+
+fn deferred_bodies() -> HashSet<[u8; 32]> {
+    with_recv_ctx(|c| c.deferred_bodies.clone()).unwrap_or_default()
+}
+
+/// Every public key of two bundles is equal (`==` on the keys — no re-encoding).
+fn same_bundle(a: &HavenId, b: &HavenId) -> bool {
+    a.signing == b.signing && a.kem_x == b.kem_x && a.sig_pq == b.sig_pq && a.kem_pq == b.kem_pq
+}
+
+/// An `Arc` copy of a bundle held in engine state, shared per node id on this thread.
+///
+/// A `HavenId` carries the expanded ML-DSA / ML-KEM public keys: cloning one is ~160 µs in a debug
+/// build, and the receive path used to clone the sender's bundle under the lock for every envelope —
+/// and every bundle of every roster to resolve a device sender. A key comparison is several times
+/// cheaper, and the cached copy is only ever handed out when EVERY key equals the state's bundle.
+fn shared_bundle(b: &HavenId) -> Arc<HavenId> {
+    let id = b.node_id_bytes();
+    BUNDLES.with_borrow_mut(|m| {
+        if let Some(a) = m.get(&id) {
+            if same_bundle(a, b) {
+                return a.clone();
+            }
+        }
+        if m.len() >= 1024 {
+            m.clear();
+        }
+        let a = Arc::new(b.clone());
+        m.insert(id, a.clone());
+        a
+    })
+}
+
+fn memo_len_prefixed(h: &mut blake3::Hasher, b: &[u8]) {
+    h.update(&(b.len() as u64).to_le_bytes());
+    h.update(b);
+}
+
+/// Memo key of one epoch-event open. The sender enters by node id; the rest of its bundle is compared
+/// on lookup (see [`memo_sender_matches`]).
+fn event_memo_key(sender: &HavenId, key: &[u8; 32], expected: Option<&str>, body_digest: &[u8; 32]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new_derive_key("haven-ffi recv memo: epoch event open v1");
+    h.update(&sender.node_id_bytes());
+    h.update(key);
+    match expected {
+        Some(a) => {
+            h.update(&[1]);
+            memo_len_prefixed(&mut h, a.as_bytes());
+        }
+        None => {
+            h.update(&[0]);
+        }
+    }
+    h.update(body_digest);
+    *h.finalize().as_bytes()
+}
+
+fn commit_memo_key(me: &Identity, committer: &HavenId, body_digest: &[u8; 32]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new_derive_key("haven-ffi recv memo: key commit open v1");
+    h.update(&me.secret_seed());
+    h.update(&committer.node_id_bytes());
+    h.update(body_digest);
+    *h.finalize().as_bytes()
+}
+
+fn sealed_memo_key(me: &Identity, sender: &HavenId, body_digest: &[u8; 32]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new_derive_key("haven-ffi recv memo: sealed open v1");
+    h.update(&me.secret_seed());
+    h.update(&sender.node_id_bytes());
+    h.update(body_digest);
+    *h.finalize().as_bytes()
+}
+
+/// `open_bytes(me, …).ok()`, answered from the receive memo when possible.
+fn open_sealed_memo(me: &Identity, sender: &HavenId, env: &SealedEnvelope, digest: &[u8; 32]) -> Option<Vec<u8>> {
+    if recv_ctx_active() {
+        let mk = sealed_memo_key(me, sender, digest);
+        let hit = with_recv_ctx(|c| match c.sealed_memo.get(&mk) {
+            Some((s, r)) if memo_sender_matches(s, sender) => Some(r.clone()),
+            _ => None,
+        })
+        .flatten();
+        if let Some(r) = hit {
+            return r;
+        }
+    }
+    open_bytes(me, sender, env).ok()
+}
+
+/// A Welcome's dual open, run with the lock released (see `plan_primary_open`).
+struct SealedOpenJob {
+    openers: Vec<Arc<Identity>>,
+    sender: Arc<HavenId>,
+    env: SealedEnvelope,
+    digest: [u8; 32],
+}
+
+impl SealedOpenJob {
+    fn run(self) {
+        for me in &self.openers {
+            let r = open_bytes(me, &self.sender, &self.env).ok();
+            let done = r.is_some();
+            let mk = sealed_memo_key(me, &self.sender, &self.digest);
+            let sender = self.sender.clone();
+            with_recv_ctx(|c| {
+                c.sealed_memo.insert(mk, (sender, r));
+            });
+            if done {
+                return;
+            }
+        }
+    }
+}
+
+fn memo_sender_matches(stored: &Arc<HavenId>, sender: &HavenId) -> bool {
+    std::ptr::eq(Arc::as_ptr(stored), sender) || same_bundle(stored, sender)
+}
+
+/// A memoized epoch-event open for these exact inputs, if one was computed.
+fn event_memo_get(sender: &HavenId, key: &[u8; 32], expected: Option<&str>, digest: &[u8; 32]) -> Option<Option<Event>> {
+    let mk = event_memo_key(sender, key, expected, digest);
+    with_recv_ctx(|c| match c.event_memo.get(&mk) {
+        Some((s, r)) if memo_sender_matches(s, sender) => Some(r.clone()),
+        _ => None,
+    })
+    .flatten()
+}
+
+fn commit_memo_get(me: &Identity, committer: &HavenId, digest: &[u8; 32]) -> Option<Option<OpenedKeyCommit>> {
+    let mk = commit_memo_key(me, committer, digest);
+    with_recv_ctx(|c| match c.commit_memo.get(&mk) {
+        Some((s, r)) if memo_sender_matches(s, committer) => Some(r.clone()),
+        _ => None,
+    })
+    .flatten()
+}
+
+/// `open_event_in_epoch_authored`, answered from the receive memo when these exact inputs were already
+/// opened with the lock released.
+fn open_epoch_event_memo(
+    sender: &HavenId, key: &[u8; 32], parsed: &ParsedEpoch, expected: Option<&str>,
+) -> Result<Event, haven_p2p::CoreError> {
+    if recv_ctx_active() {
+        if let Some(hit) = event_memo_get(sender, key, expected, &parsed.digest) {
+            return hit.ok_or(haven_p2p::CoreError::Crypto("epoch event did not open"));
+        }
+    }
+    open_event_in_epoch_authored(sender, key, &parsed.env, expected)
+}
+
+/// `open_key_commit(me, …).ok()`, answered from the receive memo when possible.
+fn open_key_commit_memo(me: &Identity, committer: &HavenId, env: &SealedEnvelope, digest: &[u8; 32]) -> Option<OpenedKeyCommit> {
+    if recv_ctx_active() {
+        if let Some(hit) = commit_memo_get(me, committer, digest) {
+            return hit;
+        }
+    }
+    open_key_commit(me, committer, env).ok()
+}
+
+/// In a deferring drain: is this open chain NOT answerable from the memo? If so it is recorded as a
+/// job and the caller re-parks the entry.
+fn defer_event_open(sender: &Arc<HavenId>, keys: &[[u8; 32]], expected: Option<&str>, parsed: &ParsedEpoch) -> bool {
+    if !deferring() {
+        return false;
+    }
+    for k in keys {
+        match event_memo_get(sender, k, expected, &parsed.digest) {
+            Some(Some(_)) => return false,
+            Some(None) => continue,
+            None => {
+                #[cfg(test)]
+                DEFERRED_OPENS.with(|d| d.set((d.get().0 + 1, d.get().1)));
+                with_recv_ctx(|c| {
+                    c.event_jobs.push(EventOpenJob {
+                        sender: sender.clone(),
+                        keys: keys.to_vec(),
+                        expected: expected.map(str::to_string),
+                        parsed: parsed.clone(),
+                    })
+                });
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn defer_commit_open(openers: &[Arc<Identity>], committer: &Arc<HavenId>, env: &SealedEnvelope, digest: &[u8; 32]) -> bool {
+    if !deferring() {
+        return false;
+    }
+    for me in openers {
+        match commit_memo_get(me, committer, digest) {
+            Some(Some(_)) => return false,
+            Some(None) => continue,
+            None => {
+                #[cfg(test)]
+                DEFERRED_OPENS.with(|d| d.set((d.get().0, d.get().1 + 1)));
+                with_recv_ctx(|c| {
+                    c.commit_jobs.push(CommitOpenJob {
+                        openers: openers.to_vec(),
+                        committer: committer.clone(),
+                        env: Arc::new(env.clone()),
+                        digest: *digest,
+                    })
+                });
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// My identities in key-commit dual-open order: this DEVICE's key, then the ACCOUNT key (absent on a
+/// seedless device).
+fn commit_openers(st: &NetState) -> Vec<Arc<Identity>> {
+    st.device.iter().chain(st.me_secret.iter()).cloned().collect()
+}
+
+/// Resolve a key commit's committer to its verifying bundle AND the ACCOUNT it commits for. The epoch
+/// key is keyed by the committer's ACCOUNT, never the signing device — so a device-signed commit
+/// (seed-drop S3) lands in the very slot the account's own commits fill, and the read path (which looks
+/// the key up by the event's author account) finds it. `None` = not resolvable yet.
+fn resolve_committer(st: &NetState, idx: usize, sender_hex: &str, me_hex: &str) -> Option<(Arc<HavenId>, String)> {
+    if sender_hex == me_hex {
+        Some((shared_bundle(st.me()), me_hex.to_string())) // my own account-key re-synced commit (multi-device / backfill)
+    } else if let Some(m) = st.circles[idx].members.iter().find(|m| hex(&m.node_id_bytes()) == sender_hex) {
+        Some((shared_bundle(m), sender_hex.to_string())) // a member's own account key: account == sender
+    } else {
+        // An AUTHORIZED DEVICE of a member — or of MINE. Its credential chain to `acct` was verified at
+        // roster ingest, so it commits FOR `acct`; store under `acct`. My own sibling device resolves to MY
+        // account here, so its device-signed commit converges into my own-device epoch keys, not a peer
+        // slot — preserving multi-device convergence now that siblings sign commits under device keys.
+        authorized_device_and_account_ref(st, idx, sender_hex).map(|(bundle, acct)| (shared_bundle(bundle), hex(&acct)))
+    }
+}
+
+/// Resolve an epoch event's SENDER to (verifying bundle, expected author account). Three cases, all
+/// preserving today's behavior for existing traffic:
+///   • my own account/device  → self-forward: the event's internal author (me or a friend I forwarded) is
+///     preserved, no author bind (`expected_author = None`).
+///   • a circle member's ACCOUNT key → strict bind, author must == that account (unchanged).
+///   • a circle member's AUTHORIZED DEVICE (seed-drop S1) → the device signs for its account, so bind
+///     author == that account. The credential chain proving device→account was checked at roster ingest.
+fn resolve_epoch_sender(st: &NetState, idx: usize, sender_hex: &str, me_hex: &str) -> (Option<Arc<HavenId>>, Option<String>) {
+    if sender_hex == me_hex {
+        (Some(shared_bundle(st.me())), None)
+    } else if let Some(m) = st.circles[idx].members.iter().find(|m| hex(&m.node_id_bytes()) == sender_hex) {
+        (Some(shared_bundle(m)), Some(sender_hex.to_string()))
+    } else if let Some((bundle, acct_id)) = authorized_device_and_account_ref(st, idx, sender_hex) {
+        (Some(shared_bundle(bundle)), Some(hex(&acct_id)))
+    } else {
+        (None, None)
+    }
+}
+
+/// The unlocked work an envelope's own apply will need (see [`plan_primary_open`]).
+enum PrimaryJob {
+    Event(EventOpenJob),
+    Commit(CommitOpenJob),
+    Welcome(SealedOpenJob),
+}
+
+impl PrimaryJob {
+    fn run(self) {
+        match self {
+            PrimaryJob::Event(j) => j.run(),
+            PrimaryJob::Commit(j) => j.run(),
+            PrimaryJob::Welcome(j) => j.run(),
+        }
+    }
+}
+
+/// An envelope decoded outside the lock for [`plan_primary_open`].
+enum PrimaryWire<'a> {
+    Event(&'a ParsedEpoch),
+    Sealed(SealedEnvelope, [u8; 32]),
+}
+
+/// The unlocked open an envelope's own apply will need, planned from a short read of the state. `None`
+/// when there is nothing worth doing ahead (not openable yet, not addressed to a tree, another tag).
+fn plan_primary_open(st: &NetState, idx: usize, tag: u8, wire: PrimaryWire<'_>) -> Option<PrimaryJob> {
+    let me_hex = hex(&st.me().node_id_bytes());
+    match (tag, wire) {
+        (TAG_EPOCH_EVENT, PrimaryWire::Event(parsed)) => {
+            let env = &parsed.env;
+            let (sender, expected) = resolve_epoch_sender(st, idx, &env.sender_hex(), &me_hex);
+            let sender = sender?;
+            let key_author = expected.clone().unwrap_or_else(|| me_hex.clone());
+            let key = st.circles[idx].key_for(&me_hex, &key_author, env.epoch)?;
+            let keys = match env.ratchet_index() {
+                // A ratcheted DM opens under MK_i only (no alt fallback). Derive it from the receiver
+                // WITHOUT consuming: the apply then consumes it for real and gets this same key.
+                Some(i) => {
+                    let slot = (key_author.clone(), env.epoch);
+                    let mk = match st.circles[idx].mls_ratchet.recv.get(&slot) {
+                        Some(r) => r.peek_message_key(i),
+                        None => treekem::RatchetReceiver::new(&key, st.circles[idx].id.as_bytes(), env.epoch)
+                            .peek_message_key(i),
+                    }?;
+                    vec![mk]
+                }
+                None => {
+                    let mut keys = vec![key];
+                    keys.extend(st.circles[idx].alt_keys_for(&me_hex, &key_author, env.epoch));
+                    keys
+                }
+            };
+            Some(PrimaryJob::Event(EventOpenJob { sender, keys, expected, parsed: parsed.clone() }))
+        }
+        (TAG_KEY_COMMIT, PrimaryWire::Sealed(env, digest)) => {
+            let (committer, _) = resolve_committer(st, idx, &env.sender_hex(), &me_hex)?;
+            Some(PrimaryJob::Commit(CommitOpenJob { openers: commit_openers(st), committer, env: Arc::new(env), digest }))
+        }
+        (TAG_MLS_WELCOME, PrimaryWire::Sealed(env, digest)) => {
+            if !circle_is_mls_capable(st, idx) {
+                return None;
+            }
+            let sender = shared_bundle(resolve_shadow_sender_ref(st, idx, &env.sender_hex())?);
+            Some(PrimaryJob::Welcome(SealedOpenJob { openers: commit_openers(st), sender, env, digest }))
+        }
+        _ => None,
+    }
 }
 
 /// A circle summary for the UI.
@@ -4713,7 +5335,24 @@ struct EngineLock<T> {
 struct EngineGuard<'a, T> {
     guard: std::sync::MutexGuard<'a, T>,
     taken: std::time::Instant,
+    taken_cpu: Option<std::time::Duration>,
     site: &'static std::panic::Location<'static>,
+}
+
+/// This thread's consumed CPU time (`None` where the platform has no per-thread clock). A long hold
+/// with little CPU under it is a holder that was descheduled — host contention — not work to move
+/// off the lock; the watchdog prints both so a log line says which.
+#[cfg(unix)]
+fn thread_cpu_time() -> Option<std::time::Duration> {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: `ts` is a valid, writable timespec; the call only writes into it.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    (rc == 0).then(|| std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
+}
+
+#[cfg(not(unix))]
+fn thread_cpu_time() -> Option<std::time::Duration> {
+    None
 }
 
 impl<T> EngineLock<T> {
@@ -4725,7 +5364,7 @@ impl<T> EngineLock<T> {
     fn lock(&self) -> Result<EngineGuard<'_, T>, std::sync::PoisonError<std::sync::MutexGuard<'_, T>>> {
         let site = std::panic::Location::caller();
         let guard = self.inner.lock()?;
-        Ok(EngineGuard { guard, taken: std::time::Instant::now(), site })
+        Ok(EngineGuard { guard, taken: std::time::Instant::now(), taken_cpu: thread_cpu_time(), site })
     }
 }
 
@@ -4760,6 +5399,9 @@ thread_local! {
     // take the lock more than once (a snapshot scope, then a short write-back scope), where the
     // last guard alone would under-report.
     static MAX_ENGINE_HOLD_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    // The SUM of every hold released on this thread since it was last reset to 0 — for a batch
+    // of calls, the share of its wall time that parked every other engine caller.
+    static TOTAL_ENGINE_HOLD_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 impl<T> Drop for EngineGuard<'_, T> {
@@ -4769,13 +5411,20 @@ impl<T> Drop for EngineGuard<'_, T> {
         LAST_ENGINE_HOLD_NANOS.with(|c| c.set(held.as_nanos() as u64));
         #[cfg(test)]
         MAX_ENGINE_HOLD_NANOS.with(|c| c.set(c.get().max(held.as_nanos() as u64)));
+        #[cfg(test)]
+        TOTAL_ENGINE_HOLD_NANOS.with(|c| c.set(c.get() + held.as_nanos() as u64));
         if held >= ENGINE_HOLD_WARN {
+            let cpu = match (self.taken_cpu, thread_cpu_time()) {
+                (Some(a), Some(b)) => format!(" (on-CPU {} ms)", b.saturating_sub(a).as_millis()),
+                _ => String::new(),
+            };
             tracing::warn!(
                 target: "haven_ffi::engine_lock",
-                "engine lock held {} ms by {}:{}",
+                "engine lock held {} ms by {}:{}{}",
                 held.as_millis(),
                 self.site.file(),
-                self.site.line()
+                self.site.line(),
+                cpu
             );
         }
     }
@@ -4804,7 +5453,7 @@ impl HavenSocial {
         Ok(Arc::new(Self {
             state: EngineLock::new(NetState {
                 me_pub: me_pub.clone(),
-                me_secret: Some(me),
+                me_secret: Some(Arc::new(me)),
                 seedless_roster_wire: None,
                 cached_profile: None,
                 device: None,
@@ -4869,7 +5518,7 @@ impl HavenSocial {
                 me_secret: None,
                 seedless_roster_wire: None,
                 cached_profile: None,
-                device: Some(Identity::from_seed(&dev_seed)),
+                device: Some(Arc::new(Identity::from_seed(&dev_seed))),
                 circles: vec![Circle::bare(DEFAULT_CIRCLE.to_string(), "My Circle".to_string())],
                 device_lists: std::collections::HashMap::new(),
                 seed_drop_capable: {
@@ -5324,7 +5973,7 @@ impl HavenSocial {
     /// Pair with `register_device` so contacts learn to seal to this device. Idempotent.
     pub fn use_device_identity(&self, device_seed: Vec<u8>) -> bool {
         let Ok(seed): Result<[u8; 32], _> = device_seed.try_into() else { return false };
-        self.state.lock().unwrap().device = Some(Identity::from_seed(&seed));
+        self.state.lock().unwrap().device = Some(Arc::new(Identity::from_seed(&seed)));
         true
     }
 
@@ -6342,65 +6991,7 @@ impl HavenSocial {
     /// per-recipient envelope (read-path compatibility during migration). Returns true if it changed
     /// state (a new event, or a newly-learned epoch key).
     pub fn receive(&self, circle_id: String, envelope: Vec<u8>) -> Result<bool, HavenError> {
-        if envelope.is_empty() {
-            return Ok(false);
-        }
-        // Identical bytes can't change state (sealing is deterministic; the engine's own dedupe
-        // returns false for them) — but proving that costs a full unseal under the engine lock,
-        // and peers re-blast entire histories (key commit + epoch events) every few minutes.
-        // Reject those re-deliveries by outer hash BEFORE the engine lock, so a history blast
-        // costs N hash lookups, not N unseals. ONLY these two tags dedupe: an epoch event that
-        // can't open yet parks in the DURABLE pending buffer (persisted; drains when its key
-        // arrives) and a key commit re-applies as a convergent no-op — so skipping a re-delivery
-        // loses nothing. Every other tag (MLS commit/welcome/join, rosters, legacy JSON) may
-        // legitimately park with NO durable buffer and complete via re-delivery once its
-        // prerequisites land — those keep paying the unseal, and they're rare control traffic.
-        // An envelope for an UNKNOWN circle is never recorded, so the same bytes still apply
-        // once the circle exists.
-        let dedupe = matches!(envelope[0], TAG_KEY_COMMIT | TAG_EPOCH_EVENT);
-        let outer = *blake3::hash(&envelope).as_bytes();
-        if dedupe {
-            let seen = self.seen_envelopes.lock().unwrap();
-            if seen.get(&circle_id).is_some_and(|s| s.contains(&outer)) {
-                return Ok(false);
-            }
-        }
-        // A device roster's signature checks (ML-DSA over the list + every credential) run here,
-        // BEFORE the engine lock, for the same reason `ingest_roster_wire_status` does it: they are
-        // the cost of the envelope, and holding the lock across them parks every other reader.
-        let pre_verified = if envelope[0] == TAG_DEVICE_ROSTER {
-            pre_verify_roster_wire(&envelope[1..])
-        } else {
-            None
-        };
-        let Some(result) = self.receive_locked(&circle_id, &envelope, pre_verified) else { return Ok(false) };
-        // Record ONLY outcomes that are durable. `result.is_ok()` was too broad: a KEY COMMIT
-        // rejected at the sender-authorization gate (:3627 — we cannot yet name the committer,
-        // because their roster or circle membership has not landed) returns Ok(false) WITHOUT
-        // applying and WITHOUT parking anywhere. Caching that hash meant the peer's byte-identical
-        // re-emit (`cached_commit`) short-circuited here forever, so the commit could never be
-        // re-attempted once the missing prerequisite DID arrive — every later retry was free and
-        // useless. Measured: 126 retries doing zero authorization work, and a mid-run membership
-        // repair that could not take effect until the process was relaunched (seen_envelopes is
-        // in-memory). That is what made this failure look permanent and un-selfhealing.
-        //
-        // An EPOCH EVENT answering Ok(false) is different: it parked in the DURABLE pending buffer
-        // (or was a duplicate), so it genuinely never needs the bytes again.
-        let durable = match (&result, envelope[0]) {
-            (Ok(true), _) => true,                    // applied
-            (Ok(false), TAG_EPOCH_EVENT) => true,     // parked durably / duplicate
-            _ => false,                               // rejected commit — must stay re-processable
-        };
-        if dedupe && durable {
-            let mut seen = self.seen_envelopes.lock().unwrap();
-            let set = seen.entry(circle_id).or_default();
-            // Growth guard only — clearing merely re-prices those envelopes at one unseal each.
-            if set.len() >= 65_536 {
-                set.clear();
-            }
-            set.insert(outer);
-        }
-        result
+        self.receive_impl(circle_id, envelope, true)
     }
 
     /// Re-seal everything **I** authored to a circle — to sync a peer that just
@@ -6749,8 +7340,8 @@ impl HavenSocial {
             // under the state lock would make the dump itself the slow thing being measured.
             const SLOTS_SCANNED: usize = 64;
             let mut want: std::collections::BTreeSet<String> = Default::default();
-            for raw in c.pending_epoch.iter().take(SLOTS_SCANNED) {
-                if let Ok(env) = EpochEnvelope::from_bytes(raw) {
+            for p in c.pending_epoch.iter().take(SLOTS_SCANNED) {
+                if let Some(env) = p.parsed.as_ref().map(|p| &p.env) {
                     let a = env.sender_hex();
                     want.insert(format!("{}@{}", &a[..a.len().min(8)], env.epoch));
                 }
@@ -7105,8 +7696,21 @@ have_seed={} have_device={} members={}",
 
     /// Serialize all circles (members + events) for on-disk persistence.
     pub fn export_state(&self) -> Vec<u8> {
-        let st = self.state.lock().unwrap();
-        let ps = PersistState {
+        // Snapshot under the lock, serialize with it released: the JSON encode of a large store (every
+        // event, and every 32-byte key as a decimal array) was most of the hold — 2.7 s for a 170 KB
+        // state on the loaded e2e desktop, parking every receive and feed behind a routine save.
+        let ps = {
+            let st = self.state.lock().unwrap();
+            Self::persist_snapshot(&st)
+        };
+        serde_json::to_vec(&ps).unwrap_or_default()
+    }
+}
+
+impl HavenSocial {
+    /// Everything `export_state` persists, copied out of the engine state.
+    fn persist_snapshot(st: &NetState) -> PersistState {
+        PersistState {
             circles: st.circles.iter().map(|c| PersistCircle {
                 id: c.id.clone(),
                 name: c.name.clone(),
@@ -7130,7 +7734,7 @@ have_seed={} have_device={} members={}",
                 peer_circle_secrets: c.peer_circle_secrets.iter().map(|(a, s)| (a.clone(), *s)).collect(),
                 rotated_at: c.rotated_at,
                 cached_commit: c.cached_commit.clone(),
-                pending_epoch: c.pending_epoch.clone(),
+                pending_epoch: c.pending_epoch.iter().map(|p| p.raw.clone()).collect(),
                 pending_tree: c.pending_tree.clone(),
                 pending_commit: c.pending_commit.clone(),
                 creator: c.creator,
@@ -7154,57 +7758,51 @@ have_seed={} have_device={} members={}",
                     Some((account_bundle, cd.list.to_bytes(), cd.credentials.iter().map(|c| c.to_bytes()).collect()))
                 }).collect()
             },
-        };
-        serde_json::to_vec(&ps).unwrap_or_default()
+        }
     }
+}
+
+#[uniffi::export]
+impl HavenSocial {
 
     /// Merge a previously-exported store back in (dedup by event id / member node id),
     /// so circles, posts, and connections survive restarts and updates. Migrates the
     /// legacy single-circle format into the default circle.
     pub fn import_state(&self, data: Vec<u8>) {
-        let mut st = self.state.lock().unwrap();
-        if let Ok(ps) = serde_json::from_slice::<PersistState>(&data) {
-            for pc in ps.circles {
-                Self::merge_circle(&mut st, pc);
-            }
-            // Restore device rosters AFTER circles (no epoch rotation — the restored epochs already
-            // reflect them; re-verified against the carried account bundle, higher-version-wins).
-            for (acct, list, creds) in ps.device_rosters {
-                restore_roster(&mut st, &acct, &list, &creds);
-            }
-            // A3/D8: restore the seedless verbatim roster wire + cached profile card (additive — never
-            // clobber one we already hold this session with a `None` from an older-format state file).
-            if let Some(wire) = ps.seedless_roster_wire {
-                st.seedless_roster_wire = Some(wire);
-            }
-            if let Some(card) = ps.cached_profile {
-                st.cached_profile = Some(card);
-            }
-            // A restored buffer may already be openable with the keys/rosters we just loaded.
-            drain_all_pending(&mut st);
-        } else if let Ok(old) = serde_json::from_slice::<LegacyPersistState>(&data) {
-            Self::merge_circle(&mut st, PersistCircle {
-                id: DEFAULT_CIRCLE.to_string(),
-                name: "My Circle".to_string(),
-                members: old.contacts,
-                removed_members: vec![],
-                events: old.events,
-                my_epoch: 0,
-                my_epoch_keys: vec![],
-                peer_epoch_keys: vec![],
-                my_epoch_keys_alt: vec![],
-                peer_epoch_keys_alt: vec![],
-                my_circle_secret: [0u8; 32],
-                peer_circle_secrets: vec![],
-                rotated_at: 0,
-                cached_commit: None,
-                pending_epoch: vec![],
-                pending_tree: vec![],
-                pending_commit: vec![],
-                creator: None,
-                creator_pinned: false,
-                admin_grants: vec![],
-            });
+        // Decode the blob — and every parked envelope in it — BEFORE taking the engine lock, and let
+        // the restore's drains open what they unlock with the lock released (`RecvCtx`).
+        let current = serde_json::from_slice::<PersistState>(&data).ok().map(|mut ps| {
+            let parked: Vec<Vec<ParkedEpoch>> = ps
+                .circles
+                .iter_mut()
+                .map(|pc| std::mem::take(&mut pc.pending_epoch).into_iter().map(ParkedEpoch::from_raw).collect())
+                .collect();
+            (ps, parked)
+        });
+        let _ctx = RecvCtxScope::install();
+        self.import_state_locked(current, &data);
+        self.finish_deferred_opens();
+    }
+}
+
+/// Names the envelope kind behind a long `receive_locked` hold (the lock watchdog only knows the site).
+struct SlowApply {
+    at: std::time::Instant,
+    tag: u8,
+    len: usize,
+}
+
+impl Drop for SlowApply {
+    fn drop(&mut self) {
+        let held = self.at.elapsed();
+        if held >= ENGINE_HOLD_WARN {
+            tracing::warn!(
+                target: "haven_ffi::engine_lock",
+                "slow receive apply: tag 0x{:02x}, {} bytes, {} ms under the engine lock",
+                self.tag,
+                self.len,
+                held.as_millis()
+            );
         }
     }
 }
@@ -7494,6 +8092,160 @@ impl HavenSocial {
         out
     }
 
+    /// `receive`. Test builds also reach it with `off_lock = false` — the reference the lock-released
+    /// path is checked against (`receive_matches_the_in_place_reference`).
+    fn receive_impl(&self, circle_id: String, envelope: Vec<u8>, off_lock: bool) -> Result<bool, HavenError> {
+        if envelope.is_empty() {
+            return Ok(false);
+        }
+        // Identical bytes can't change state (sealing is deterministic; the engine's own dedupe
+        // returns false for them) — but proving that costs a full unseal under the engine lock,
+        // and peers re-blast entire histories (key commit + epoch events) every few minutes.
+        // Reject those re-deliveries by outer hash BEFORE the engine lock, so a history blast
+        // costs N hash lookups, not N unseals. ONLY these two tags dedupe: an epoch event that
+        // can't open yet parks in the DURABLE pending buffer (persisted; drains when its key
+        // arrives) and a key commit re-applies as a convergent no-op — so skipping a re-delivery
+        // loses nothing. Every other tag (MLS commit/welcome/join, rosters, legacy JSON) may
+        // legitimately park with NO durable buffer and complete via re-delivery once its
+        // prerequisites land — those keep paying the unseal, and they're rare control traffic.
+        // An envelope for an UNKNOWN circle is never recorded, so the same bytes still apply
+        // once the circle exists.
+        let dedupe = matches!(envelope[0], TAG_KEY_COMMIT | TAG_EPOCH_EVENT);
+        let outer = *blake3::hash(&envelope).as_bytes();
+        if dedupe {
+            let seen = self.seen_envelopes.lock().unwrap();
+            if seen.get(&circle_id).is_some_and(|s| s.contains(&outer)) {
+                return Ok(false);
+            }
+        }
+        // A device roster's signature checks (ML-DSA over the list + every credential) run here,
+        // BEFORE the engine lock, for the same reason `ingest_roster_wire_status` does it: they are
+        // the cost of the envelope, and holding the lock across them parks every other reader.
+        let pre_verified = if envelope[0] == TAG_DEVICE_ROSTER {
+            pre_verify_roster_wire(&envelope[1..])
+        } else {
+            None
+        };
+        // Crypto off the engine lock (see `RecvCtx`): this envelope's own open runs on a snapshot of its
+        // inputs BEFORE the apply, and any drain the apply triggers defers its opens to AFTER it.
+        // (`off_lock = false` is the test-only reference: the same apply with every open in place.)
+        let _ctx = off_lock.then(RecvCtxScope::install);
+        // An epoch event is decoded here, once (a decode failure is left for the apply to report).
+        let pre_parsed =
+            if envelope[0] == TAG_EPOCH_EVENT { ParsedEpoch::parse_with_digest(&envelope[1..], outer).ok() } else { None };
+        if off_lock {
+            self.preopen_primary(&circle_id, &envelope, pre_parsed.as_ref());
+        }
+        let Some(mut result) = self.receive_locked(&circle_id, &envelope, pre_verified, pre_parsed) else {
+            return Ok(false);
+        };
+        let drained_later = off_lock && self.finish_deferred_opens();
+        // A roster reports "anything newly ingested" (`stored || drained`); what its drain deferred and
+        // the replay then ingested counts exactly as it would have in place.
+        if envelope[0] == TAG_DEVICE_ROSTER && drained_later && matches!(result, Ok(false)) {
+            result = Ok(true);
+        }
+        // Record ONLY outcomes that are durable. `result.is_ok()` was too broad: a KEY COMMIT
+        // rejected at the sender-authorization gate (:3627 — we cannot yet name the committer,
+        // because their roster or circle membership has not landed) returns Ok(false) WITHOUT
+        // applying and WITHOUT parking anywhere. Caching that hash meant the peer's byte-identical
+        // re-emit (`cached_commit`) short-circuited here forever, so the commit could never be
+        // re-attempted once the missing prerequisite DID arrive — every later retry was free and
+        // useless. Measured: 126 retries doing zero authorization work, and a mid-run membership
+        // repair that could not take effect until the process was relaunched (seen_envelopes is
+        // in-memory). That is what made this failure look permanent and un-selfhealing.
+        //
+        // An EPOCH EVENT answering Ok(false) is different: it parked in the DURABLE pending buffer
+        // (or was a duplicate), so it genuinely never needs the bytes again.
+        let durable = match (&result, envelope[0]) {
+            (Ok(true), _) => true,                    // applied
+            (Ok(false), TAG_EPOCH_EVENT) => true,     // parked durably / duplicate
+            _ => false,                               // rejected commit — must stay re-processable
+        };
+        if dedupe && durable {
+            let mut seen = self.seen_envelopes.lock().unwrap();
+            let set = seen.entry(circle_id).or_default();
+            // Growth guard only — clearing merely re-prices those envelopes at one unseal each.
+            if set.len() >= 65_536 {
+                set.clear();
+            }
+            set.insert(outer);
+        }
+        result
+    }
+
+    /// Phase 1 of `receive`: snapshot the inputs of this envelope's own open under a short hold and run
+    /// it with the lock released, so the apply only looks the answer up.
+    fn preopen_primary(&self, circle_id: &str, envelope: &[u8], parsed: Option<&ParsedEpoch>) {
+        let tag = envelope[0];
+        let wire = match (tag, parsed) {
+            (TAG_EPOCH_EVENT, Some(p)) => PrimaryWire::Event(p),
+            (TAG_KEY_COMMIT | TAG_MLS_WELCOME, _) => match SealedEnvelope::from_bytes(&envelope[1..]) {
+                Ok(env) => PrimaryWire::Sealed(env, *blake3::hash(&envelope[1..]).as_bytes()),
+                Err(_) => return,
+            },
+            _ => return,
+        };
+        let plan = {
+            let st = self.state.lock().unwrap();
+            let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return };
+            plan_primary_open(&st, idx, tag, wire)
+        };
+        if let Some(job) = plan {
+            job.run();
+        }
+    }
+
+    /// Phase 3 of `receive` (and `import_state`): run the opens the apply's drains deferred with the
+    /// lock released, then re-drain the circles they came from — memo hits now. Loops while a re-drain
+    /// defers more (a replayed commit unlocks more events); the final round opens in place so a
+    /// pathological churn still terminates. Returns whether the re-drains ingested any event.
+    fn finish_deferred_opens(&self) -> bool {
+        const ROUNDS: usize = 8;
+        let mut grew = false;
+        for round in 0..ROUNDS {
+            let Some((events, commits, circles, commit_circles)) = with_recv_ctx(|c| {
+                c.deferred_bodies.clear();
+                (
+                    std::mem::take(&mut c.event_jobs),
+                    std::mem::take(&mut c.commit_jobs),
+                    std::mem::take(&mut c.deferred_circles),
+                    std::mem::take(&mut c.deferred_commit_circles),
+                )
+            }) else {
+                return grew;
+            };
+            if circles.is_empty() {
+                return grew;
+            }
+            for job in commits {
+                job.run();
+            }
+            for job in events {
+                job.run();
+            }
+            if round + 1 == ROUNDS {
+                with_recv_ctx(|c| c.defer = false);
+            }
+            let mut st = self.state.lock().unwrap();
+            let before: usize = st.circles.iter().map(|c| c.events.len()).sum();
+            for idx in 0..st.circles.len() {
+                if !circles.contains(&st.circles[idx].id) {
+                    continue;
+                }
+                // Same order as `drain_all_pending`: parked commits first (a replayed key unlocks
+                // events), then the event buffer.
+                if commit_circles.contains(&st.circles[idx].id) {
+                    drain_pending_commits(&mut st, idx);
+                }
+                drain_pending(&mut st, idx);
+            }
+            let after: usize = st.circles.iter().map(|c| c.events.len()).sum();
+            grew |= after > before;
+        }
+        grew
+    }
+
     /// The dispatch half of `receive`, under the engine lock. `None` means the circle doesn't
     /// exist (yet) — the caller must NOT record the envelope as seen in that case.
     /// `pre_verified` is the decoded + signature-checked form of a `TAG_DEVICE_ROSTER` envelope,
@@ -7504,12 +8256,15 @@ impl HavenSocial {
         circle_id: &str,
         envelope: &[u8],
         pre_verified: Option<PreVerifiedRoster>,
+        pre_parsed: Option<ParsedEpoch>,
     ) -> Option<Result<bool, HavenError>> {
         let mut st = self.state.lock().unwrap();
+        // Declared after the guard, so it drops first: times the hold, not the wait for the lock.
+        let _slow = SlowApply { at: std::time::Instant::now(), tag: envelope[0], len: envelope.len() };
         let idx = st.circles.iter().position(|c| c.id == circle_id)?;
         Some(match envelope[0] {
             TAG_KEY_COMMIT => receive_key_commit(&mut st, idx, &envelope[1..]),
-            TAG_EPOCH_EVENT => receive_epoch_event(&mut st, idx, &envelope[1..]),
+            TAG_EPOCH_EVENT => receive_epoch_event(&mut st, idx, &envelope[1..], pre_parsed),
             // TreeKEM tree tags. In M2 shadow (keying switch OFF) these never touch content. In M3
             // (switch ON, fully-joined) a commit/welcome/join can change which tree epoch keys the
             // content, so after ingesting one we recompute the flip (`mls_refresh_keying`) and drain
@@ -7605,7 +8360,56 @@ impl HavenSocial {
         })
     }
 
-    fn merge_circle(st: &mut NetState, pc: PersistCircle) {
+    /// The locked half of `import_state` (the blob already decoded).
+    fn import_state_locked(&self, current: Option<(PersistState, Vec<Vec<ParkedEpoch>>)>, data: &[u8]) {
+        let mut st = self.state.lock().unwrap();
+        if let Some((ps, parked)) = current {
+            for (pc, parked) in ps.circles.into_iter().zip(parked) {
+                Self::merge_circle(&mut st, pc, parked);
+            }
+            // Restore device rosters AFTER circles (no epoch rotation — the restored epochs already
+            // reflect them; re-verified against the carried account bundle, higher-version-wins).
+            for (acct, list, creds) in ps.device_rosters {
+                restore_roster(&mut st, &acct, &list, &creds);
+            }
+            // A3/D8: restore the seedless verbatim roster wire + cached profile card (additive — never
+            // clobber one we already hold this session with a `None` from an older-format state file).
+            if let Some(wire) = ps.seedless_roster_wire {
+                st.seedless_roster_wire = Some(wire);
+            }
+            if let Some(card) = ps.cached_profile {
+                st.cached_profile = Some(card);
+            }
+            // A restored buffer may already be openable with the keys/rosters we just loaded.
+            drain_all_pending(&mut st);
+        } else if let Ok(old) = serde_json::from_slice::<LegacyPersistState>(data) {
+            Self::merge_circle(&mut st, PersistCircle {
+                id: DEFAULT_CIRCLE.to_string(),
+                name: "My Circle".to_string(),
+                members: old.contacts,
+                removed_members: vec![],
+                events: old.events,
+                my_epoch: 0,
+                my_epoch_keys: vec![],
+                peer_epoch_keys: vec![],
+                my_epoch_keys_alt: vec![],
+                peer_epoch_keys_alt: vec![],
+                my_circle_secret: [0u8; 32],
+                peer_circle_secrets: vec![],
+                rotated_at: 0,
+                cached_commit: None,
+                pending_epoch: vec![],
+                pending_tree: vec![],
+                pending_commit: vec![],
+                creator: None,
+                creator_pinned: false,
+                admin_grants: vec![],
+            }, vec![]);
+        }
+    }
+
+    /// `parked` is `pc.pending_epoch`, already decoded (the caller took it out of `pc`).
+    fn merge_circle(st: &mut NetState, pc: PersistCircle, parked: Vec<ParkedEpoch>) {
         let idx = match st.circles.iter().position(|c| c.id == pc.id) {
             Some(i) => i,
             None => {
@@ -7715,10 +8519,10 @@ impl HavenSocial {
         }
         // Restore the durable retry buffer (capped + deduped). A drain runs after this whole import
         // (import_state → drain_all_pending) so any key/roster we already hold unlocks it immediately.
-        for raw in pc.pending_epoch {
+        for p in parked {
             // Evict-oldest on overflow (same policy as park_pending) — an import must not
             // silently discard restored entries past the cap and re-wedge a healed buffer.
-            park_pending(&mut st.circles[idx], &raw);
+            park_pending(&mut st.circles[idx], &p.raw, p.parsed);
         }
         for raw in pc.pending_tree {
             park_pending_tree(&mut st.circles[idx], &raw);
@@ -8167,6 +8971,14 @@ fn signer_of(st: &NetState, under_device: bool) -> &Identity {
 /// `author` to that account (S1) and (b) key the epoch commit/lookup by the account, not the signing device
 /// (S3). The device's account being a circle member (or mine) is the only remaining check.
 fn authorized_device_and_account(st: &NetState, idx: usize, sender_hex: &str) -> Option<(HavenId, [u8; 32])> {
+    authorized_device_and_account_ref(st, idx, sender_hex).map(|(bundle, acct)| (bundle.clone(), acct))
+}
+
+/// [`authorized_device_and_account`] without the copies: the same walk, in the same order, as
+/// `ContactDevices::authorized_bundles` — which cloned EVERY authorized bundle of every account (an
+/// expanded ML-DSA/ML-KEM key set each) just to compare node ids, under the engine lock, per envelope.
+fn authorized_device_and_account_ref<'a>(st: &'a NetState, idx: usize, sender_hex: &str) -> Option<(&'a HavenId, [u8; 32])> {
+    let sender = decode_hex32(sender_hex).ok()?;
     let my_id = st.me().node_id_bytes();
     for (acct_id, cd) in &st.device_lists {
         let acct_in_circle =
@@ -8174,9 +8986,9 @@ fn authorized_device_and_account(st: &NetState, idx: usize, sender_hex: &str) ->
         if !acct_in_circle {
             continue;
         }
-        for bundle in cd.authorized_bundles() {
-            if hex(&bundle.node_id_bytes()) == sender_hex {
-                return Some((bundle, *acct_id));
+        for c in cd.credentials.iter().filter(|c| cd.list.is_authorized(&c.device_id())) {
+            if c.device.node_id_bytes() == sender {
+                return Some((&c.device, *acct_id));
             }
         }
     }
@@ -8379,6 +9191,296 @@ mod net_tests {
                 r.0.len(), total, held, 100.0 * held.as_secs_f64() / total.as_secs_f64().max(1e-9)
             );
         }
+    }
+
+    // ── The RECEIVE path vs. the engine lock ─────────────────────────────────────────────────────
+
+    /// Mailbox order: blobs are content-addressed, so a drain lists them by hash — events routinely
+    /// arrive BEFORE the key commit that opens them (they park, then the commit drains them).
+    fn mailbox_order(mut envs: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+        envs.sort_by_key(|e| *blake3::hash(e).as_bytes());
+        envs
+    }
+
+    /// A receive fixture: `alice`'s whole history (key commits for several epochs, events with and
+    /// without media refs) in mailbox order, and a factory for fresh receivers that know alice.
+    fn receive_fixture(n: u64) -> (Arc<HavenSocial>, String, Vec<Vec<u8>>) {
+        let (alice, cid) = engine_with_history(n);
+        let envs = mailbox_order(alice.sync_envelopes(cid.clone()));
+        (alice, cid, envs)
+    }
+
+    fn fresh_receiver(alice: &HavenSocial, cid: &str) -> Arc<HavenSocial> {
+        let bob = HavenSocial::new([92u8; 32].to_vec()).unwrap();
+        bob.add_contact_bundle(cid.to_string(), alice.my_bundle()).unwrap();
+        bob
+    }
+
+    /// Ingest a batch on this thread: (wall, max single hold, total hold, per-envelope results).
+    fn time_ingest(
+        s: &HavenSocial, cid: &str, envs: &[Vec<u8>],
+    ) -> (std::time::Duration, std::time::Duration, std::time::Duration, Vec<Result<bool, String>>) {
+        MAX_ENGINE_HOLD_NANOS.with(|c| c.set(0));
+        TOTAL_ENGINE_HOLD_NANOS.with(|c| c.set(0));
+        let t = std::time::Instant::now();
+        let rs: Vec<Result<bool, String>> =
+            envs.iter().map(|e| s.receive(cid.to_string(), e.clone()).map_err(|e| format!("{e:?}"))).collect();
+        let total = t.elapsed();
+        let max = std::time::Duration::from_nanos(MAX_ENGINE_HOLD_NANOS.with(|c| c.get()));
+        let sum = std::time::Duration::from_nanos(TOTAL_ENGINE_HOLD_NANOS.with(|c| c.get()));
+        (total, max, sum, rs)
+    }
+
+    /// Measurement, not an assertion: ingest time and engine-lock holds for a mailbox-sized batch.
+    /// `cargo test -p haven_ffi --release receive_lock_hold_benchmark -- --ignored --nocapture`
+    #[test]
+    #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
+    fn receive_lock_hold_benchmark() {
+        let _clk = clock_guard();
+        let (alice, cid, envs) = receive_fixture(500);
+        let bob = fresh_receiver(&alice, &cid);
+        let (total, max, sum, rs) = time_ingest(&bob, &cid, &envs);
+        eprintln!(
+            "BENCH receive mailbox-order  envelopes={:4} applied={:4} total={:>10.3?} max_hold={:>10.3?} sum_hold={:>10.3?} ({:.1}%)",
+            envs.len(), rs.iter().filter(|r| matches!(r, Ok(true))).count(), total, max, sum,
+            100.0 * sum.as_secs_f64() / total.as_secs_f64().max(1e-9)
+        );
+        // In-order (commits first): no parking, each event opens on arrival.
+        let mut in_order = envs.clone();
+        in_order.sort_by_key(|e| e[0] != TAG_KEY_COMMIT);
+        let bob2 = fresh_receiver(&alice, &cid);
+        let (total, max, sum, _) = time_ingest(&bob2, &cid, &in_order);
+        eprintln!(
+            "BENCH receive commits-first  envelopes={:4} total={:>10.3?} max_hold={:>10.3?} sum_hold={:>10.3?} ({:.1}%)",
+            envs.len(), total, max, sum, 100.0 * sum.as_secs_f64() / total.as_secs_f64().max(1e-9)
+        );
+        // Re-delivery of the same batch: outer-hash dedupe.
+        let (total, max, _, _) = time_ingest(&bob2, &cid, &in_order);
+        eprintln!("BENCH receive re-delivery    total={total:>10.3?} max_hold={max:>10.3?}");
+        // export_state of the populated receiver.
+        LAST_ENGINE_HOLD_NANOS.with(|c| c.set(0));
+        let t = std::time::Instant::now();
+        let bytes = bob2.export_state();
+        eprintln!(
+            "BENCH export_state bytes={} total={:>10.3?} hold={:>10.3?}",
+            bytes.len(), t.elapsed(), std::time::Duration::from_nanos(LAST_ENGINE_HOLD_NANOS.with(|c| c.get()))
+        );
+        // Tree-live circle.
+        let (insts, tcid) = mls_capable_fleet(&[[95u8; 32], [96u8; 32]], &[[97u8; 32], [98u8; 32]], 0);
+        flip_and_join(&insts, &tcid);
+        for i in 0..100u64 {
+            insts[0].post(tcid.clone(), format!("tree {i}"), vec![format!("m{i}")], None, None, false, false, 3_000 + i).unwrap();
+        }
+        let tenvs = mailbox_order(insts[0].sync_envelopes(tcid.clone()));
+        let (total, max, sum, _) = time_ingest(&insts[1], &tcid, &tenvs);
+        eprintln!(
+            "BENCH receive tree-live      envelopes={:4} total={:>10.3?} max_hold={:>10.3?} sum_hold={:>10.3?} ({:.1}%)",
+            tenvs.len(), total, max, sum, 100.0 * sum.as_secs_f64() / total.as_secs_f64().max(1e-9)
+        );
+    }
+
+    /// Everything a receiver's state holds that it LEARNED from the envelopes it was fed — the
+    /// exported state minus what each engine mints for itself at random (its own epoch keys, circle
+    /// secret, cached commit, rotation stamp). Two receivers of the same seed fed the same bytes must
+    /// agree on all of it, order included.
+    fn received_view(s: &HavenSocial) -> serde_json::Value {
+        let mut v: serde_json::Value = serde_json::from_slice(&s.export_state()).unwrap();
+        for c in v["circles"].as_array_mut().unwrap() {
+            let o = c.as_object_mut().unwrap();
+            for k in ["my_epoch_keys", "my_epoch_keys_alt", "my_circle_secret", "cached_commit", "rotated_at"] {
+                o.remove(k);
+            }
+        }
+        v
+    }
+
+    /// Feed a batch through the lock-released path and the in-place reference, one envelope at a time.
+    fn ingest_both(new: &HavenSocial, reference: &HavenSocial, cid: &str, envs: &[Vec<u8>]) -> (Vec<String>, Vec<String>) {
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for e in envs {
+            a.push(format!("{:?}", new.receive(cid.to_string(), e.clone())));
+            b.push(format!("{:?}", reference.receive_impl(cid.to_string(), e.clone(), false)));
+        }
+        (a, b)
+    }
+
+    /// EQUIVALENCE: opening off the lock (pre-open, drain deferral, replay) leaves a receiver in
+    /// exactly the state — and answers every `receive` exactly as — the in-place path does, where
+    /// every open runs inside the apply. Covers mailbox (hash) order, which parks events ahead of
+    /// their key commits and drains them when the commit lands; the reverse; commits first; a
+    /// device-signed sender whose roster arrives LAST (parked commits + events, drained by the
+    /// roster); a re-delivery pass; and a circle live on the TreeKEM tree.
+    #[test]
+    fn receive_matches_the_in_place_reference() {
+        let _clk = clock_guard();
+        let (alice, cid, envs) = receive_fixture(180);
+        let mut orders = vec![envs.clone()];
+        orders.push(envs.iter().rev().cloned().collect());
+        let mut commits_first = envs.clone();
+        commits_first.sort_by_key(|e| e[0] != TAG_KEY_COMMIT);
+        orders.push(commits_first);
+        let before = DEFERRED_OPENS.with(|d| d.get());
+        for (n, order) in orders.iter().enumerate() {
+            let (new, reference) = (fresh_receiver(&alice, &cid), fresh_receiver(&alice, &cid));
+            let (a, b) = ingest_both(&new, &reference, &cid, order);
+            assert_eq!(a, b, "order {n}: receive() answers diverged from the in-place reference");
+            // Re-delivery of the whole batch (outer-hash dedupe + the convergent no-op paths).
+            let (a2, b2) = ingest_both(&new, &reference, &cid, order);
+            assert_eq!(a2, b2, "order {n}: re-delivery answers diverged");
+            assert_eq!(received_view(&new), received_view(&reference), "order {n}: state diverged");
+            assert!(new.feed(cid.clone(), 10_000_000, None).len() >= 180, "order {n}: the history must land");
+        }
+        let after = DEFERRED_OPENS.with(|d| d.get());
+        assert!(after.0 > before.0, "fixture must exercise a deferred event open (a commit draining parked events)");
+
+        // A device-signed sender: a SEEDLESS device (it holds no account key, so its events AND its key
+        // commits are device-signed). Its roster is delivered LAST, so until it lands the receiver cannot
+        // name the sender: the commits park in `pending_commit`, the events in `pending_epoch`, and the
+        // roster's drain replays both — the commit opens deferred to after the apply.
+        let (primary, seedless, _bob, dcid, _key) = enroll_seedless();
+        for i in 0..40u64 {
+            seedless.post(dcid.clone(), format!("dev {i}"), vec![format!("d{i}")], None, None, false, false, 5_000 + i).unwrap();
+        }
+        let mut denvs = mailbox_order(seedless.sync_envelopes(dcid.clone()));
+        denvs.sort_by_key(|e| e[0] == TAG_DEVICE_ROSTER);
+        assert!(denvs.last().is_some_and(|e| e[0] == TAG_DEVICE_ROSTER), "fixture must carry the device roster");
+        let fresh_bob = || {
+            let b = HavenSocial::new([2u8; 32].to_vec()).unwrap();
+            b.add_contact_bundle(dcid.clone(), primary.my_bundle()).unwrap();
+            assert!(b.use_device_identity([99u8; 32].to_vec()));
+            b
+        };
+        let d0 = DEFERRED_OPENS.with(|d| d.get());
+        let (new, reference) = (fresh_bob(), fresh_bob());
+        let (a, b) = ingest_both(&new, &reference, &dcid, &denvs);
+        assert_eq!(a, b, "device-signed: receive() answers diverged");
+        assert_eq!(received_view(&new), received_view(&reference), "device-signed: state diverged");
+        let d1 = DEFERRED_OPENS.with(|d| d.get());
+        assert!(d1.1 > d0.1, "fixture must exercise a deferred KEY COMMIT open (roster drain)");
+        assert!(
+            new.feed(dcid.clone(), 10_000_000, None).iter().any(|m| m.body == "dev 39"),
+            "device-signed content must land once the roster drains it"
+        );
+
+        // A tree-live circle. The fleet's secrets are random per build, so two builds cannot be
+        // compared byte-for-byte; the receive answers, the events and the buffers can (same seeds,
+        // same content, same structural order: everything reversed, so content parks ahead of keys).
+        let tree_run = |off_lock: bool| {
+            let (insts, tcid) = mls_capable_fleet(&[[95u8; 32], [96u8; 32]], &[[97u8; 32], [98u8; 32]], 0);
+            flip_and_join(&insts, &tcid);
+            for i in 0..40u64 {
+                insts[0].post(tcid.clone(), format!("tree {i}"), vec![format!("m{i}")], None, None, false, false, 3_000 + i).unwrap();
+            }
+            let envs: Vec<Vec<u8>> = insts[0].sync_envelopes(tcid.clone()).into_iter().rev().collect();
+            let answers: Vec<String> =
+                envs.iter().map(|e| format!("{:?}", insts[1].receive_impl(tcid.clone(), e.clone(), off_lock))).collect();
+            let st = insts[1].state.lock().unwrap();
+            let c = st.circles.iter().find(|c| c.id == tcid).unwrap();
+            let events: Vec<(String, String, u64)> =
+                c.events.iter().map(|e| (e.id.clone(), e.author.clone(), e.created_at)).collect();
+            (answers, events, c.pending_epoch.len(), c.pending_tree.len(), c.pending_commit.len(), c.mls_live_epoch)
+        };
+        let (new, reference) = (tree_run(true), tree_run(false));
+        assert!(new.1.len() >= 40, "tree-live content must land");
+        assert_eq!(new, reference, "tree-live: answers / events / buffers diverged from the in-place reference");
+    }
+
+    /// The receive path must verify + decrypt with the engine lock RELEASED. In place, a 500-envelope
+    /// mailbox drain spent 92% of its time under the one lock every other engine call needs, and a
+    /// single key commit held it for the whole drain of what it unlocked (633 ms unoptimized; the e2e
+    /// desktop logged 58 s). Ratios, not wall clock: they mean the same on every machine.
+    #[test]
+    fn receive_opens_outside_the_engine_lock() {
+        let _clk = clock_guard();
+        let (alice, cid, envs) = receive_fixture(300);
+        let mut best: Option<(std::time::Duration, std::time::Duration, std::time::Duration)> = None;
+        for _ in 0..3 {
+            let bob = fresh_receiver(&alice, &cid);
+            let (total, max, sum, rs) = time_ingest(&bob, &cid, &envs);
+            assert!(rs.iter().all(|r| r.is_ok()));
+            if best.map_or(true, |(_, bs, bt)| sum.as_nanos() * bt.as_nanos() < bs.as_nanos() * total.as_nanos()) {
+                best = Some((max, sum, total));
+            }
+        }
+        let (max, sum, total) = best.unwrap();
+        assert!(
+            sum * 2 < total,
+            "a mailbox drain held the engine lock {sum:?} of its {total:?} — signature checks and \
+             decryption must run with the lock released"
+        );
+        assert!(
+            max * 8 < total,
+            "one receive held the engine lock {max:?} of a {total:?} drain — a key commit must not \
+             open everything it unlocks inside one hold"
+        );
+    }
+
+    /// The user-visible property: while one thread drains a large mailbox batch, the UI's calls
+    /// (`feed`, a dump-style read) are not parked behind it.
+    #[test]
+    fn other_engine_calls_proceed_while_a_large_batch_ingests() {
+        let _clk = clock_guard();
+        let (alice, cid, envs) = receive_fixture(400);
+        let mut best_ratio = f64::MAX;
+        for _ in 0..3 {
+            let bob = fresh_receiver(&alice, &cid);
+            let ingest = {
+                let (bob, cid, envs) = (bob.clone(), cid.clone(), envs.clone());
+                std::thread::spawn(move || {
+                    let t = std::time::Instant::now();
+                    for e in envs {
+                        let _ = bob.receive(cid.clone(), e);
+                    }
+                    t.elapsed()
+                })
+            };
+            let mut worst = std::time::Duration::ZERO;
+            while !ingest.is_finished() {
+                let t = std::time::Instant::now();
+                let _ = bob.feed(cid.clone(), 10_000_000, None);
+                let _ = bob.history_event_count(cid.clone());
+                worst = worst.max(t.elapsed());
+            }
+            let wall = ingest.join().unwrap();
+            best_ratio = best_ratio.min(worst.as_secs_f64() / wall.as_secs_f64());
+            assert!(bob.feed(cid.clone(), 10_000_000, None).len() >= 400, "the batch must land");
+        }
+        assert!(
+            best_ratio < 0.25,
+            "a concurrent feed waited {:.0}% of a batch ingest — receive must not hold the engine lock \
+             across its crypto",
+            best_ratio * 100.0
+        );
+    }
+
+    /// `export_state` serializes with the lock released (the encode dominated the hold).
+    #[test]
+    fn export_state_serializes_outside_the_engine_lock() {
+        let _clk = clock_guard();
+        let (alice, cid, envs) = receive_fixture(300);
+        let bob = fresh_receiver(&alice, &cid);
+        for e in &envs {
+            let _ = bob.receive(cid.clone(), e.clone());
+        }
+        let mut best: Option<(std::time::Duration, std::time::Duration)> = None;
+        for _ in 0..3 {
+            LAST_ENGINE_HOLD_NANOS.with(|c| c.set(0));
+            let t = std::time::Instant::now();
+            let bytes = bob.export_state();
+            let total = t.elapsed();
+            let held = std::time::Duration::from_nanos(LAST_ENGINE_HOLD_NANOS.with(|c| c.get()));
+            assert!(bytes.len() > 100_000);
+            if best.map_or(true, |(bh, bt)| held.as_nanos() * bt.as_nanos() < bh.as_nanos() * total.as_nanos()) {
+                best = Some((held, total));
+            }
+        }
+        let (held, total) = best.unwrap();
+        assert!(held * 2 < total, "export_state held the engine lock {held:?} of its {total:?}");
+        // And the snapshot round-trips: a fresh engine importing it reads the same history.
+        let back = HavenSocial::new([92u8; 32].to_vec()).unwrap();
+        back.import_state(bob.export_state());
+        assert_eq!(received_view(&back), received_view(&bob));
     }
 
     /// GOLDEN: the lock-released bundle builder emits exactly the bytes (and page metadata) of the

@@ -2662,6 +2662,7 @@ dependencies = [
  "haven-p2p",
  "haven-s3",
  "jni 0.21.1",
+ "libc",
  "ndk-context",
  "serde",
  "serde_json",

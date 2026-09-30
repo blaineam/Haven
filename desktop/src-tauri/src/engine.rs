@@ -387,6 +387,8 @@ pub struct Engine {
     /// the webview says it is in. `in_call` alone cannot distinguish a leg that ignored a teardown
     /// from one that is in a DIFFERENT session — every handler is gated on the session id matching.
     qa_last_call_event: StdMutex<String>,
+    /// The outgoing call whose invite is still being retransmitted (see `call_group_invite`).
+    dialing: StdMutex<callwire::Dialing>,
     qa_call_session: StdMutex<String>,
     qa_call_trail: StdMutex<String>,
     /// The account master seed — `Some` on a primary/legacy device, `None` on a SEEDLESS device
@@ -716,6 +718,7 @@ impl Engine {
             qa_call: std::sync::atomic::AtomicU8::new(0),
             last_epoch_reseal: StdMutex::new(0),
             qa_last_call_event: StdMutex::new("none".into()),
+            dialing: StdMutex::new(callwire::Dialing::default()),
             qa_call_session: StdMutex::new(String::new()),
             qa_call_trail: StdMutex::new(String::new()),
             seed: Some(seed),
@@ -837,6 +840,7 @@ impl Engine {
             qa_call: std::sync::atomic::AtomicU8::new(0),
             last_epoch_reseal: StdMutex::new(0),
             qa_last_call_event: StdMutex::new("none".into()),
+            dialing: StdMutex::new(callwire::Dialing::default()),
             qa_call_session: StdMutex::new(String::new()),
             qa_call_trail: StdMutex::new(String::new()),
             seed: None,
@@ -10500,9 +10504,11 @@ impl Engine {
                 Some(serde_json::json!({ "kind": "groupInvite", "from": g.from, "sessionId": g.session_id, "groupName": g.group_name, "roster": g.roster }))
             }),
             wire::CALL_ACCEPT => callwire::parse_accept(body).map(|a| {
+                self.dialing.lock().settle(&a.session_id);   // answered — stop re-sending the invite
                 serde_json::json!({ "kind": "accept", "from": a.from, "sessionId": a.session_id })
             }),
             wire::CALL_HANGUP => callwire::parse_hangup(body).map(|(from, sid)| {
+                self.dialing.lock().settle(&sid);   // declined / gone — stop re-sending the invite
                 // Carry the session up to the UI so it can ignore a BYE for a call it is not in.
                 serde_json::json!({ "kind": "hangup", "from": from, "sessionId": sid })
             }),
@@ -11019,12 +11025,34 @@ impl Engine {
         }
     }
 
+    /// Ring `to`, then keep re-sending the invite every 2.5s (~30s) until someone accepts or the
+    /// call is hung up — one lost invite must not mean the callee never rings. Each copy carries a
+    /// fresh send time; receivers dedupe by session and re-send their ACCEPT on a repeat.
     pub fn call_group_invite(self: &Arc<Self>, session_id: String, group_name: String, roster: Vec<String>, to: Vec<String>) {
         let me = self.node_id_hex();
-        let frame = callwire::group_invite(&me, &session_id, &group_name, &roster.join(","), now_ms() / 1000);
-        for t in to {
-            self.send_call_frame(wire::GROUP_INVITE, &frame, &t);
+        let roster_csv = roster.join(",");
+        let frame = callwire::group_invite(&me, &session_id, &group_name, &roster_csv, now_ms() / 1000);
+        for t in &to {
+            self.send_call_frame(wire::GROUP_INVITE, &frame, t);
         }
+        if session_id.is_empty() || to.is_empty() {
+            return;
+        }
+        self.dialing.lock().begin(&session_id);
+        let this = self.clone();
+        tauri::async_runtime::spawn(async move {
+            for _ in 0..callwire::INVITE_RETRANSMIT_MAX {
+                tokio::time::sleep(std::time::Duration::from_millis(callwire::INVITE_RETRANSMIT_MS)).await;
+                if !this.dialing.lock().is_dialing(&session_id) {
+                    return;
+                }
+                let frame = callwire::group_invite(&me, &session_id, &group_name, &roster_csv, now_ms() / 1000);
+                for t in &to {
+                    this.send_call_frame(wire::GROUP_INVITE, &frame, t);
+                }
+            }
+            this.dialing.lock().settle(&session_id);
+        });
     }
 
     pub fn call_accept(self: &Arc<Self>, session_id: String, to: Vec<String>) {
@@ -11177,6 +11205,7 @@ impl Engine {
     }
 
     pub fn call_hangup(self: &Arc<Self>, to: Vec<String>, session_id: String) {
+        self.dialing.lock().settle(&session_id);
         let frame = callwire::hangup(&self.node_id_hex(), &session_id);
         for t in to {
             self.send_call_frame(wire::CALL_HANGUP, &frame, &t);

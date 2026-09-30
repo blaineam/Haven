@@ -191,9 +191,62 @@ pub fn parse_signal(payload: &[u8], fallback_session: &str) -> Option<Signal> {
     Some(Signal { from, session_id: fallback_session.to_string(), json: body.to_vec() })
 }
 
+/// How often an outgoing invite is re-sent while nobody has answered, and how many re-sends —
+/// iOS `beginOutgoing` parity (every 2.5s, ~30s). Desktop sent its invite exactly ONCE: one frame
+/// lost to a cold iroh dial or a recovering relay front door meant the callee never rang, while the
+/// offer/ICE sent a moment later arrived fine. Receivers already dedupe retransmits by session.
+pub const INVITE_RETRANSMIT_MS: u64 = 2_500;
+pub const INVITE_RETRANSMIT_MAX: u32 = 12;
+
+/// The session this device is currently dialing, if any — the invite retransmit loop runs only
+/// while it still names that session. Settled by the first ACCEPT or a hangup for the session.
+#[derive(Debug, Default)]
+pub struct Dialing {
+    session: Option<String>,
+}
+
+impl Dialing {
+    pub fn begin(&mut self, session_id: &str) {
+        self.session = Some(session_id.to_string());
+    }
+
+    pub fn is_dialing(&self, session_id: &str) -> bool {
+        self.session.as_deref() == Some(session_id)
+    }
+
+    /// Stop retransmitting `session_id`'s invite. A frame for another session changes nothing.
+    pub fn settle(&mut self, session_id: &str) {
+        if self.is_dialing(session_id) {
+            self.session = None;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dialing_settles_only_for_its_own_session() {
+        let mut d = Dialing::default();
+        assert!(!d.is_dialing("s1"));
+        d.begin("s1");
+        assert!(d.is_dialing("s1"));
+        d.settle("old-call");
+        assert!(d.is_dialing("s1"), "a late accept/hangup from another call must not stop the retries");
+        d.settle("s1");
+        assert!(!d.is_dialing("s1"));
+        d.begin("s2");
+        d.begin("s3");
+        assert!(!d.is_dialing("s2"), "a new dial replaces the old one");
+        assert!(d.is_dialing("s3"));
+    }
+
+    #[test]
+    fn invite_retransmits_span_the_ring_window_like_ios() {
+        let span = INVITE_RETRANSMIT_MS * INVITE_RETRANSMIT_MAX as u64;
+        assert!((25_000..=60_000).contains(&span), "retries must cover the callee's ring, not outlive the dial");
+    }
 
     #[test]
     fn group_invite_roundtrip() {

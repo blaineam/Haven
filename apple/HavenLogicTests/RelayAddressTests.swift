@@ -81,4 +81,22 @@ final class RelayAddressTests: XCTestCase {
             XCTAssertTrue(RelayAddress.plausiblyReachable(url, ourIPv4s: plainLAN))
         }
     }
+
+    // MARK: - Cool-down forgiveness on a relay announce
+
+    func testAReAnnounceOfADeadRelayKeepsItsCoolDown() {
+        let held = (urls: ["http://127.0.0.1:8684", "http://10.0.0.4:18684"], token: "t1")
+        XCTAssertEqual(RelayAddress.urlsToForgive(held: held, announced: held.urls, token: "t1"), [],
+                       "members keep re-announcing a relay for 5 min after it dies — that is not news")
+    }
+
+    func testANewDoorOrARotatedTokenIsForgiven() {
+        let held = (urls: ["http://127.0.0.1:8684"], token: "t1")
+        XCTAssertEqual(RelayAddress.urlsToForgive(held: held, announced: ["http://127.0.0.1:8686"], token: "t1"),
+                       ["http://127.0.0.1:8686"], "the relay moved: its new door is tried at once")
+        XCTAssertEqual(RelayAddress.urlsToForgive(held: held, announced: held.urls, token: "t2"), held.urls,
+                       "a rotated token means a restarted relay — every door is worth a try")
+        XCTAssertEqual(RelayAddress.urlsToForgive(held: nil, announced: ["https://x.example"], token: "t"),
+                       ["https://x.example"], "a relay we never held")
+    }
 }

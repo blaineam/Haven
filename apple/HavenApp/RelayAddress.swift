@@ -72,4 +72,19 @@ enum RelayAddress {
         guard parts.count == 4, parts.allSatisfy({ (0...255).contains($0) }) else { return nil }
         return parts
     }
+
+    /// Which of an announced interface's URLs may skip their failure cool-down?
+    ///
+    /// Only ones that are NEW — a URL we did not already hold, or any URL when the token changed (a
+    /// reinstalled or re-keyed relay). A re-announce of the interface we already hold is no evidence
+    /// the door works: members re-announce every relay they saw alive in the last five minutes, so a
+    /// relay that just DIED keeps being announced for five minutes, and clearing its cool-down on
+    /// each one sent every member straight back to a dead door (e2e `multirelay`: 82.6 requests/min
+    /// against the killed relay, climbing, where the cool-down alone holds it near 15).
+    static func urlsToForgive(held: (urls: [String], token: String)?, announced: [String], token: String) -> [String] {
+        guard let held else { return announced }
+        if held.token != token { return announced }
+        let old = Set(held.urls)
+        return announced.filter { !old.contains($0) }
+    }
 }

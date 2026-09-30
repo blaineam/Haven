@@ -264,7 +264,13 @@ final class SelfSyncCoordinator {
     /// severances, deletions, the synced circles' create/rename/creator-pin/member adds — are
     /// decided here on the main actor and applied in ONE engine pass at the end; the roster wires
     /// keep their one-hold-per-wire ingest.
-    private func applyLocal(_ h: AccountStateHandle, engine: Engine?, reads: EngineReads?) async {
+    /// Returns whether the ENGINE actually changed (a roster stored, or the circles / members moved).
+    /// The engine half runs `readOnly` and marks the engine dirty only then: every sync re-applies the
+    /// whole converged state (idempotent self-heal), and each pass used to dirty the engine, so any
+    /// persist that followed exported the same bytes again (e2e `responsive` idle window).
+    @discardableResult
+    private func applyLocal(_ h: AccountStateHandle, engine: Engine?, reads: EngineReads?) async -> Bool {
+        var engineChanged = false
         /// Engine work this apply decided on, run in one pass below.
         var engineOps: [(HavenSocial) -> Void] = []
         let p = ProfileStore.shared
@@ -467,9 +473,10 @@ final class SelfSyncCoordinator {
                 var rosterChanged = false
                 for (i, wire) in wires.enumerated() {
                     if i > 0 { try? await Task.sleep(nanoseconds: 3_000_000) }
-                    if await engine.run({ $0.ingestRosterWireStatus(wire: wire) }) > 0 { rosterChanged = true }
+                    if await engine.run(readOnly: true, { $0.ingestRosterWireStatus(wire: wire) }) > 0 { rosterChanged = true }
                 }
                 if rosterChanged {
+                    engineChanged = true
                     NotificationCenter.default.post(name: SharedStore.rosterEpochChangedNotification, object: nil)
                 }
             }
@@ -545,8 +552,26 @@ final class SelfSyncCoordinator {
         // The engine half of this apply, in one pass on the actor.
         if let engine, !engineOps.isEmpty {
             let ops = engineOps
-            await engine.run { s in for op in ops { op(s) } }
+            let moved = await engine.run(readOnly: true) { s -> Bool in
+                let before = Self.engineShape(s)
+                for op in ops { op(s) }
+                return Self.engineShape(s) != before
+            }
+            if moved { engineChanged = true }
         }
+        // A real change must dirty the engine so the next persist exports it.
+        if let engine, engineChanged { await engine.run { _ in () } }
+        return engineChanged
+    }
+
+    /// The part of the engine `applyLocal` can move: circles (with names) and their members.
+    nonisolated private static func engineShape(_ s: HavenSocial) -> SelfSyncEngineDiff.Shape {
+        var shape = SelfSyncEngineDiff.Shape()
+        for c in s.circles() {
+            shape.circles[c.id] = c.name
+            shape.members[c.id] = Set(s.contactNodeIds(circleId: c.id).map { $0.lowercased() })
+        }
+        return shape
     }
 
     private func boolValue(_ h: AccountStateHandle, _ key: String) -> Bool? {
@@ -576,19 +601,6 @@ final class SelfSyncCoordinator {
     /// pins, read watermarks, contacts, relays — lives in its own store and saves itself, so a
     /// whole-engine export after it wrote the same engine bytes again.
     private(set) var lastSyncTouchedEngine = false
-    /// Did the engine-applied records differ between two states? (`SelfSyncEngineDiff` — a `circle:`
-    /// record's relays are not engine state.)
-    nonisolated static func engineRecordsDiffer(_ a: [SelfSyncEntry], _ b: [SelfSyncEntry]) -> Bool {
-        func dict(_ es: [SelfSyncEntry]) -> [String: Data] {
-            var m: [String: Data] = [:]
-            for e in es { m[e.key] = e.value }
-            return m
-        }
-        return SelfSyncEngineDiff.differs(dict(a), dict(b)) { bytes in
-            guard let r = decodeCircleSync(bytes: bytes) else { return nil }
-            return AnyHashable([AnyHashable(r.name), AnyHashable(r.memberBundles), AnyHashable(r.creator)])
-        }
-    }
     private let peerKeysTTL: TimeInterval = 600
 
     private func transportId(_ t: Transport) -> String {
@@ -688,11 +700,10 @@ final class SelfSyncCoordinator {
         }
 
         let changed = base.toBytes() != preMerge
-        lastSyncTouchedEngine = changed && Self.engineRecordsDiffer(
-            (try? AccountStateHandle.fromBytes(bytes: preMerge))?.entries() ?? [], base.entries())
 
-        // 4. Apply the converged state locally + persist the new base.
-        await applyLocal(base, engine: engine, reads: reads)
+        // 4. Apply the converged state locally + persist the new base. Only an apply that actually
+        // moved the engine owes an engine export (profile, pins, relays… save in their own stores).
+        lastSyncTouchedEngine = await applyLocal(base, engine: engine, reads: reads)
         let converged = base.toBytes()
         try? converged.write(to: baseURL, options: .atomic)
 

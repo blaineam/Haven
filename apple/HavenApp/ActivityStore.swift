@@ -66,6 +66,10 @@ final class ActivityStore: ObservableObject {
     /// already punched a hole in.
     private var pulledThroughMs: UInt64
 
+    /// False on a demo launch: the list and watermark are the real account's, and the demo's freshly
+    /// seeded engine must be pulled from 0 — see `ActivityPersistence`.
+    private let persistent = ActivityPersistence.isPersistent(isDemo: DemoEnv.isDemo)
+
     private var fileURL: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -73,9 +77,11 @@ final class ActivityStore: ObservableObject {
     }
 
     private init() {
-        seenAtMs = UInt64(max(0, UserDefaults.standard.double(forKey: seenAtKey)))
-        pulledThroughMs = UInt64(max(0, UserDefaults.standard.double(forKey: pulledThroughKey)))
-        if let data = try? Data(contentsOf: fileURL),
+        seenAtMs = ActivityPersistence.restoredWatermark(
+            stored: UserDefaults.standard.double(forKey: seenAtKey), persistent: persistent)
+        pulledThroughMs = ActivityPersistence.restoredWatermark(
+            stored: UserDefaults.standard.double(forKey: pulledThroughKey), persistent: persistent)
+        if persistent, let data = try? Data(contentsOf: fileURL),
            let rows = try? JSONDecoder().decode([Entry].self, from: data) {
             entries = rows
             ids = Set(rows.map(\.id))
@@ -93,7 +99,7 @@ final class ActivityStore: ObservableObject {
         // Overlap what the engine has already given us by an hour so an event that raced the
         // previous pull isn't skipped; `ingest` dedupes by event id, so overlap costs nothing.
         // The watermark is `pulledThroughMs` and NOT the newest row in the list — see its comment.
-        let since = pulledThroughMs > 3_600_000 ? pulledThroughMs - 3_600_000 : 0
+        let since = ActivityPersistence.pullSince(watermark: pulledThroughMs)
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         Task { @MainActor [weak self] in
             let rows = await engine.run { $0.activity(sinceMs: since, nowMs: nowMs) }
@@ -165,7 +171,7 @@ final class ActivityStore: ObservableObject {
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
         guard now > seenAtMs else { return }
         seenAtMs = now
-        UserDefaults.standard.set(Double(seenAtMs), forKey: seenAtKey)
+        if persistent { UserDefaults.standard.set(Double(seenAtMs), forKey: seenAtKey) }
         recomputeUnread()
         // A LOCAL clear (never `applySyncedSeenAt`) drops the bell badge on my other devices in
         // seconds via a debounced forced self-sync pass.
@@ -177,7 +183,7 @@ final class ActivityStore: ObservableObject {
     func applySyncedSeenAt(_ ms: UInt64) {
         guard ms > seenAtMs else { return }
         seenAtMs = ms
-        UserDefaults.standard.set(Double(seenAtMs), forKey: seenAtKey)
+        if persistent { UserDefaults.standard.set(Double(seenAtMs), forKey: seenAtKey) }
         recomputeUnread()
     }
 
@@ -189,7 +195,7 @@ final class ActivityStore: ObservableObject {
     // MARK: - Persistence (debounced, off-main write)
 
     private func scheduleSave() {
-        guard !savePending else { return }
+        guard persistent, !savePending else { return }
         savePending = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self else { return }

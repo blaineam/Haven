@@ -10,7 +10,10 @@ import XCTest
 /// upload outcome so the real BackgroundUploader queue / progress / backoff machine runs without a
 /// relay (see `BackgroundUploader.qaSimulated`). Same signing requirements as `HavenUITests`.
 final class SyncProgressUITests: XCTestCase {
-    override func setUp() { continueAfterFailure = false }
+    override func setUp() {
+        continueAfterFailure = false
+        SpringboardHygiene.dismissQueuedOpenPrompts()
+    }
 
     private func app(uploads: String? = nil, scene: String? = nil) -> XCUIApplication {
         let app = XCUIApplication()

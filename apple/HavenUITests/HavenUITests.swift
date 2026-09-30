@@ -11,6 +11,8 @@ import XCTest
 /// a development team (e.g. `-allowProvisioningUpdates CODE_SIGN_STYLE=Automatic
 /// DEVELOPMENT_TEAM=<team>`), not `CODE_SIGNING_ALLOWED=NO`.
 final class HavenUITests: XCTestCase {
+    override func setUp() { SpringboardHygiene.dismissQueuedOpenPrompts() }
+
     private func app(tab: String) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["HAVEN_SKIP_ONBOARDING"] = "1"

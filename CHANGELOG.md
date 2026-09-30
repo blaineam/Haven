@@ -7,7 +7,115 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased
+## 2.0.0 — release candidate 1 (2026-09-29)
+
+Haven 2.0 is a reliability and performance release built from field reports: a phone getting hot
+on a call while it streamed media to a friend, sync progress that never moved, Android screen share
+that froze the call, new friends taking minutes to connect, and family posting private things to the
+whole circle without realizing it. It also brings friends who each run their own relay into the
+automated QA suite, which found and fixed several relay-mesh bugs. Everything below is covered by the
+Soren release gate, including new cross-device e2e steps (`relayfirst`, `newfriend`, `screenshare`,
+`callgate`, `audience`, `launch`, `responsive`, `progress`, `multirelay`).
+
+### Changed — your relay does the heavy lifting for photos and videos
+
+Media is queued for upload to the circle's relay **before** the post is broadcast, and freshly
+authored media jumps the upload queue. When a friend asks the author's device for media the relay
+holds (or is about to), the author answers with an "it's on the relay" hint instead of streaming it;
+direct device-to-device streaming to friends only happens when a circle has no relay. Missing media
+is requested from the author first, not from every contact at once, and thumbnails, posters and
+previews follow the same rule. Android serves media from a file stream instead of loading whole files
+into memory. (Apple, Android, desktop.)
+
+### Added — heavy work pauses during calls, heat and Low Power Mode
+
+A shared heavy-work policy suspends big background transfers, full-size prefetch, backfill and
+history handoff during any Haven call, a phone/FaceTime/VoIP call (CallKit observer on iOS, audio
+mode on Android), serious thermal state, and Low Power Mode / Battery Saver — and resumes them when
+the condition lifts. Your own new uploads to the relay continue at low concurrency so friends aren't
+kept waiting.
+
+### Added — it's always clear who sees a post
+
+The composer shows exactly who a post reaches ("Everyone in *Circle* · N people"), the send button
+says **Post**, and the first post in each circle asks once — "Post to everyone" or "Send privately
+instead…", which carries the draft into a private message. Replies are labelled as visible to the
+circle, and profiles and circle member lists have a **Message** button. (Apple, Android, desktop; all
+nine languages.)
+
+### Fixed — new friends connect in seconds, not minutes
+
+Ticket relays are adopted into your default circle at accept time and polled immediately (iOS filed
+them under a bootstrap circle it never polled); invite hints are dialled concurrently before the
+account id; the core parks an epoch key commit that arrives before its sender is a member and replays
+it once they are, instead of dropping it; approving a friend enrols them on your relay (including a
+relay you host yourself), re-announces it, and wakes their device; a fast poll runs during the
+handshake; dial back-off is forgiven when you add or approve someone; and a new friend's relay that
+refuses uploads until you're approved is retried on a short, flat hold instead of a back-off of up to
+an hour.
+
+### Fixed — Android screen share reaches the other side
+
+Capture now waits for the media-projection foreground service to be running (Android 14+ refused it
+before), is scaled to at most 1280 px on the long side with a 2.5 Mbps cap, renegotiates safely, and
+also rides the relay (hairpin) fallback. Consent runs in its own task so choosing "A single app →
+Haven" no longer cancels itself. Every client now tells a screen stream from the camera by stream id,
+so a shared screen can't overwrite the camera tile — the "frozen video" on iPhone, and a silenced
+peer on desktop.
+
+### Fixed — calls on a busy or misbehaving audio device
+
+Ringtone and ringback start off the main thread, so an audio output that hangs (seen with a virtual
+output device) no longer freezes the app for 15–30 s and times the call out. The desktop re-sends a
+call invite until it's answered, like the phone apps, so one lost invite no longer means the other
+side never rings.
+
+### Changed — faster launch, smoother app
+
+The feed paints before private conversations finish warming up; the active circle is remembered and
+fetched first; mailbox polling runs circles, relays and key fetches concurrently. Incoming media is
+hashed, written and posterized off the main thread; thumbnails decode off-main; feed lists are built
+once per change; screens observe only what they show; the story viewer no longer redraws 20× a
+second; taps jump ahead of background work in the engine queue; and saves are skipped when nothing
+changed (no full-state saves while idle). In the Rust core, bundle/history sealing, media crypto and
+received-envelope verification/decryption now run outside the engine lock (a 2,000-event bundle held
+it 555 ms, now well under 1 ms), and the desktop coalesces saves instead of re-saving on every frame.
+
+### Fixed — sync status tells the truth
+
+The sync pill shows real counts ("Sending 2 of 5", "Syncing 3…", "Retrying (1 waiting)"), ignores
+background upkeep, and Android's "Syncing" badge works. Download spinners stay up until the bytes
+land or progress truly stalls, count direct transfers too, and never flip to "No longer available"
+mid-transfer. History handoff shows counts on both phones and says so when the other device doesn't
+answer.
+
+### Fixed — friends who each run their own relay
+
+Sibling relays now replicate only the circles they serve (sharing one circle had mirrored a friend's
+private-circle and DM mailboxes onto your relay), and media is tagged with its circle so private
+photos and videos stay on that circle's relays. Removing a member revokes them on the circle's
+relays; a rotated relay token is re-learned; two relays can no longer silently share one port;
+stopping a hosted relay actually closes it (including for connected members); an expired mailbox
+entry can't be revived by a member's touch and copied back by a sibling; and re-announces of a relay
+that's down no longer send every device straight back to it. The desktop reaches parity (token
+re-learn, revocation, learning a relay added on another device within seconds).
+
+### Added — the relay keeps itself up to date
+
+`haven-relay` can update itself from **signed** GitHub releases (`--auto-update off|stable|rc`,
+Docker default `stable`): Ed25519 signatures over version + asset name + SHA-256, verified against
+keys built into the relay; a new version must pass a health check or it is rolled back and never
+retried; Docker updates persist on the data volume and the node id never changes. Also: a Docker
+HEALTHCHECK and supervising entrypoint, a disk guard that refuses new uploads before the disk fills,
+store-wide cleanup of stale partial uploads, and bounded HTTP memory. Release CI signs every relay
+asset and refuses to publish unsigned.
+
+### QA — a stronger automated gate
+
+The e2e fleet's desktop now runs an optimized `qa` build profile; the Android QA channel moved off
+shared storage into the app's private files (no more stale dumps); the emulator boots cold with public
+DNS and recovers a dead network or package manager; each run builds its own worktree's apps; and new
+iOS/Android UI tests cover the audience flow and the sync pill.
 
 ### Fixed — Apple: the feed banner, call header, "You" and "My Circle" now follow your language
 

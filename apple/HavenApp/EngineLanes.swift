@@ -130,3 +130,29 @@ actor LanedExecutor<Core> {
         if g > persistedGeneration { persistedGeneration = g }
     }
 }
+
+/// "Save, THEN send" for authored events, in authoring order.
+///
+/// Authoring advances the sender's ratchet / epoch state. If an event leaves the device before that
+/// state is on disk, a kill in between relaunches on OLDER state and the next events re-use key
+/// material the recipients already consumed — they silently drop them (gate `multirelay: A's shared
+/// photo readable by B`, after the `launch` step killed iOS ~3 s into the 2.5 s persist debounce).
+/// Each link awaits the previous one, then `save` (an export — a no-op when an earlier link already
+/// captured this state), then `send`. So nothing goes out before its state is durable, and events go
+/// out in the order they were authored.
+@MainActor
+final class SaveThenSendChain {
+    private var tail: Task<Void, Never>?
+
+    func enqueue(save: @escaping @Sendable () async -> Void, send: @escaping @MainActor () -> Void) {
+        let prev = tail
+        tail = Task { @MainActor in
+            await prev?.value
+            await save()
+            send()
+        }
+    }
+
+    /// Resolves once everything enqueued so far has been saved and sent.
+    func drained() async { await tail?.value }
+}

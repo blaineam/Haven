@@ -1436,12 +1436,45 @@ pub fn read_state(paths: &Paths) -> Option<Vec<u8>> {
 
 /// Write the social-state blob.
 pub fn write_state(paths: &Paths, data: &[u8]) -> Result<()> {
-    fs::write(paths.state_file(), data).context("write state")
+    write_atomic(&paths.state_file(), data).context("write state")
+}
+
+/// Write `data` to `path` so a kill at any instant leaves either the old file or the new one —
+/// never a truncated one. `fs::write` truncates first: a crash / force-quit mid-write left an
+/// empty or partial engine state that the next launch could not import (the whole account's
+/// circles, keys and history). Temp file in the same directory, fsync, then rename over.
+pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp-write");
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)
 }
 
 /// Remove a file, ignoring "not found".
 pub fn remove_if_exists(p: &Path) {
     let _ = fs::remove_file(p);
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::write_atomic;
+
+    /// The replaced file is whole, and no temp file is left beside it.
+    #[test]
+    fn an_atomic_write_replaces_the_whole_file_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("haven-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("state.bin");
+        write_atomic(&f, b"first version, longer than the second").unwrap();
+        write_atomic(&f, b"second").unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"second");
+        assert!(!f.with_extension("tmp-write").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]

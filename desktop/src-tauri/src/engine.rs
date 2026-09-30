@@ -11467,6 +11467,15 @@ impl Engine {
         });
     }
 
+    /// Quit: a coalesced (network-driven) write still waiting out its 3 s delay lands now, so the
+    /// last few seconds of ingested state survive a Cmd-Q. User actions never wait on it — they
+    /// persist synchronously before anything is sent (`after_author_inner`).
+    pub fn flush_pending_persist(&self) {
+        if self.persist_pending.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.persist();
+        }
+    }
+
     fn persist(&self) {
         if let Err(e) = store::write_state(&self.paths, &self.social.export_state()) {
             log::error!("persist failed: {e}");

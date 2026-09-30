@@ -3765,6 +3765,14 @@ object HavenNet : InboundListener {
         }
     }
 
+    /** Backgrounding (MainActivity.onStop): land a coalesced import write that is still waiting out
+     *  its delay. Every other mutation already persists synchronously before anything is sent. */
+    fun flushPendingPersist() {
+        if (!ready || !persistPending) return
+        persistPending = false
+        scope.launch(Dispatchers.IO) { persist() }
+    }
+
     /** Last coalesced import bump, and whether one is already pending. */
     private var lastImportBumpMs = 0L
     private var importBumpPending = false
@@ -8949,7 +8957,7 @@ object HavenNet : InboundListener {
     // ---- Persistence ---------------------------------------------------------------------
 
     private fun persist() {
-        runCatching { stateFile.writeBytes(social.exportState()) }
+        runCatching { StateFiles.writeAtomic(stateFile, social.exportState()) }
             .onSuccess { QaPerf.notePersistExport() }   // the QA dump's perf.persistExportCount
             .onFailure { Log.e(TAG, "persist failed", it) }
     }
@@ -8959,7 +8967,7 @@ object HavenNet : InboundListener {
         // the shared file so no future identity can pick it up.
         if (!stateFile.exists() && legacyStateFile.exists()) {
             runCatching { social.importState(legacyStateFile.readBytes()) }
-            runCatching { stateFile.writeBytes(social.exportState()) }
+            runCatching { StateFiles.writeAtomic(stateFile, social.exportState()) }
             runCatching { legacyStateFile.delete() }
             return
         }

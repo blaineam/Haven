@@ -1230,6 +1230,7 @@ async function main() {
   }
   const projectionHeld = () => holdsMediaProjection(adbText(['shell', 'dumpsys', 'activity', 'services', AND_PKG]));
   const androidAlive = () => adbText(['shell', 'pidof', AND_PKG]).trim().length > 0;
+  const androidPid = () => adbText(['shell', 'pidof', AND_PKG]).trim();
 
   async function stepScreenShare() {
     const and = devices.android, stub = devices.stub;
@@ -1246,6 +1247,7 @@ async function main() {
     const cam0 = remoteSlots((await freshDump(stub))?.call).find((s) => s.camera)?.camera || null;
     log(`screenshare: stub camera slot before any share: ${JSON.stringify(cam0)}`);
     const shareState = async () => (await freshDump(and))?.screen_share || {};
+    const sharePid0 = androidPid();
     const noScreenOnStub = (j) => !sharedScreen(j?.call);
     let granted = 0;
 
@@ -1277,17 +1279,20 @@ async function main() {
       // emits a frame when pixels change, so a still call screen used to read "6 → 6" and fail with
       // nothing wrong. Both ends are sampled so a failure says WHICH half stopped (judgeShareFlow).
       await op(and, { op: 'screen_perturb', on: true }, 2000);
+      const pidA = androidPid();
       const [a1, j1] = await Promise.all([shareState(), freshDump(stub)]);
       await sleep(SHARE_FLOW.windowMs);
       const [a2, j2] = await Promise.all([shareState(), freshDump(stub)]);
+      const pidB = androidPid();
       await op(and, { op: 'screen_perturb', on: false }, 2000);
       const s2 = sharedScreen(j2?.call);
       const flow = judgeShareFlow({
         capturedStart: a1.frames_captured, capturedEnd: a2.frames_captured,
         decodedStart: sharedScreen(j1?.call)?.screen?.frames_decoded, decodedEnd: s2?.screen?.frames_decoded,
+        senderPidStart: pidA, senderPidEnd: pidB,
       });
       score(`screenshare: sender keeps capturing while the screen changes [${label}]`,
-        flow.verdict !== 'capture stalled', `${flow.verdict} — ${flow.detail}`);
+        flow.verdict !== 'capture stalled' && flow.verdict !== 'sender died', `${flow.verdict} — ${flow.detail}`);
       score(`screenshare: peer's screen frames keep growing [${label}]`, flow.ok, `${flow.verdict} — ${flow.detail}`);
       score(`screenshare: routed by stream id "screen" [${label}]`, (s2?.screen?.stream_ids || []).includes('screen'), JSON.stringify(s2?.screen));
       score(`screenshare: peer frame long side ≤ 1280 [${label}]`,
@@ -1354,6 +1359,14 @@ async function main() {
     score('screenshare: logcat — no "screen share start failed" / SecurityException', audit.failures.length === 0,
       audit.failures.slice(0, 3).join(' | '));
     score('screenshare: app alive at the end', androidAlive());
+    // Alive is not enough: a crash mid-share restarts the app, which then passes `pidof` while every
+    // later sub-case cascades (the [again] ConcurrentModificationException looked like a stop bug,
+    // a missing camera slot and a vanished consent dialog). Same process start to finish, or say why.
+    const pidEnd = androidPid();
+    const crash = pidEnd === sharePid0 ? '' : adbText(['logcat', '-d', '-b', 'crash']).split('\n')
+      .filter((l) => /FATAL EXCEPTION|Exception|\bat com\.blaineam\./.test(l)).slice(0, 6).join(' | ');
+    score('screenshare: android app never restarted during the step', pidEnd === sharePid0,
+      `pid ${sharePid0} → ${pidEnd || 'gone'}${crash ? ` — ${crash}` : ''}`);
     await op(and, { op: 'call_end' }, 6000);
     await convergeAll(['android', 'stub'], callOver, BUDGET.text, 'screenshare: call ended');
   }

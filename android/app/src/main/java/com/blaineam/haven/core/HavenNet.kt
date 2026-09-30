@@ -144,7 +144,8 @@ object HavenNet : InboundListener {
     // Circle relay/mailbox: circleId -> ORDERED list of relay node hexes. Posts are mirrored to
     // every relay (redundancy) and read from all of them (graceful fallback if one is down) —
     // parity with the desktop `relays: HashMap<String, Vec<String>>`.
-    private val relayNodes = HashMap<String, MutableList<String>>()
+    // Read on IO threads while announces / forgets / self-sync write it — see [RelayNodeMap].
+    private val relayNodes = RelayNodeMap.newMap()
     /** Relays the user explicitly FORGOT/deactivated — auto-learn (frame-19 announce / SelfSync) must
      *  not resurrect a *deactivated* relay passively, or Forget is a visible no-op. A deliberate
      *  re-announce DOES reactivate it (handleRelayNode). Cleared on explicit re-adoption / reactivation.
@@ -1040,7 +1041,7 @@ object HavenNet : InboundListener {
      *  adoptRelay backfill. Never resurrects a relay the user deleted. */
     private fun adoptInviteRelaysLight(relays: List<String>) {
         var changed = false
-        val list = relayNodes.getOrPut(DEFAULT_CIRCLE) { mutableListOf() }
+        val list = relayNodes.getOrPut(DEFAULT_CIRCLE) { RelayNodeMap.newList() }
         for (raw in relays) {
             val hex = raw.trim().lowercase()
             if (hex.length != 64 || relayForgottenAtMs(hex) > 0L) continue
@@ -4532,7 +4533,7 @@ object HavenNet : InboundListener {
         // so members automatically pool relays (more redundancy, no manual setup). Append, never
         // replace — parity with desktop handle_relay_node. Propagate the announced adoption stamp
         // (not now()) so the freshest legit re-add flows without any echo fabricating a new timestamp.
-        val list = relayNodes.getOrPut(circleId) { mutableListOf() }
+        val list = relayNodes.getOrPut(circleId) { RelayNodeMap.newList() }
         ensureRelayEntry(nodeHex, isS3 = false, activate = true, adoptedAtMs = announcedAddedAt)
         // Record the relay's announced HTTP media interface (the reliable cross-NAT path).
         if (announcedUrls.isNotEmpty() && announcedToken.isNotEmpty()) {
@@ -4775,7 +4776,7 @@ object HavenNet : InboundListener {
         scope.launch {
             for (c in social.circles()) {
                 val cid = c.id
-                val list = relayNodes.getOrPut(cid) { mutableListOf() }
+                val list = relayNodes.getOrPut(cid) { RelayNodeMap.newList() }
                 if (!list.contains(hex)) list.add(hex)
                 // Tell members (sealed) so they use the same mailbox + fabric.
                 val sealed = relayAnnounceBlob(cid, hex)
@@ -4806,7 +4807,7 @@ object HavenNet : InboundListener {
         if (setDefault) defaultRelayHex = hex
         scope.launch {
             for (c in social.circles()) {
-                val list = relayNodes.getOrPut(c.id) { mutableListOf() }
+                val list = relayNodes.getOrPut(c.id) { RelayNodeMap.newList() }
                 if (!list.contains(hex)) list.add(hex)
                 backfillMailbox(c.id)
             }
@@ -4914,7 +4915,7 @@ object HavenNet : InboundListener {
     fun setCircleRelay(circleId: String, nodeHex: String, on: Boolean) {
         val hex = if (nodeHex.startsWith("s3:")) nodeHex else nodeHex.trim().lowercase()
         if (on) {
-            val list = relayNodes.getOrPut(circleId) { mutableListOf() }
+            val list = relayNodes.getOrPut(circleId) { RelayNodeMap.newList() }
             if (!list.contains(hex)) list.add(hex)
         } else {
             relayNodes[circleId]?.removeAll { it == hex }
@@ -5021,7 +5022,7 @@ object HavenNet : InboundListener {
             val now = relayNow()
             relayEntries[hex] = rec.entry.copy(active = true, lastSeenMs = now, addedAtMs = now)
             for (cid in rec.circles) {
-                val list = relayNodes.getOrPut(cid) { mutableListOf() }
+                val list = relayNodes.getOrPut(cid) { RelayNodeMap.newList() }
                 if (!list.contains(hex)) list.add(hex)
             }
             if (rec.wasDefault && defaultRelayHex.isEmpty()) defaultRelayHex = hex
@@ -9029,7 +9030,7 @@ object HavenNet : InboundListener {
                         val hex = arr.getString(i)
                         if (hex.isNotEmpty() && !list.contains(hex)) list.add(hex)
                     }
-                    if (list.isNotEmpty()) relayNodes[cid] = list
+                    if (list.isNotEmpty()) relayNodes[cid] = RelayNodeMap.newList(list)
                 }
             }
         }
@@ -9040,7 +9041,7 @@ object HavenNet : InboundListener {
                 o.keys().forEach { cid ->
                     val hex = o.getString(cid)
                     if (hex.isNotEmpty()) {
-                        val list = relayNodes.getOrPut(cid) { mutableListOf() }
+                        val list = relayNodes.getOrPut(cid) { RelayNodeMap.newList() }
                         if (!list.contains(hex)) list.add(hex)
                     }
                 }
@@ -9282,7 +9283,7 @@ object HavenNet : InboundListener {
             httpUrls = urls, httpToken = token, addedAtMs = now,
             derpUrl = derp.trim().trimEnd('/'),
         )
-        val list = relayNodes.getOrPut("default") { mutableListOf() }
+        val list = relayNodes.getOrPut("default") { RelayNodeMap.newList() }
         if (!list.contains(hex)) list.add(hex)
         defaultRelayHex = hex
         saveRelayNodes()
@@ -9505,7 +9506,7 @@ object HavenNet : InboundListener {
         if (hex.length != 64) return
         if (suppressedRelays.contains(hex) || !isRelayActive(hex)) return   // deactivated — don't auto-resurrect
         ensureRelayEntry(hex, isS3 = false, activate = false)
-        val list = relayNodes.getOrPut(circleId) { mutableListOf() }
+        val list = relayNodes.getOrPut(circleId) { RelayNodeMap.newList() }
         if (!list.contains(hex)) { list.add(hex); saveRelayNodes() }
     }
 

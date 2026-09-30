@@ -6,7 +6,9 @@
 // change on purpose (the DEBUG `screen_perturb` op repaints a counter every 200ms) and samples BOTH
 // ends over the same window, so each failure names its half:
 //   capture stalled — the sender captured fewer than `minCaptured` new frames despite the counter;
-//   not delivered   — it captured them, but the peer decoded under `deliverRatio` of them.
+//   not delivered   — it captured them, but the peer decoded under `deliverRatio` of them;
+//   sender died     — the sender's process changed during the window (a crash): its counter
+//                     restarting at 0 is NOT a stall, and must not be reported as one.
 // There is deliberately no SKIP path: a share that makes no frames while the screen is changing is
 // broken, whatever the host load.
 
@@ -19,9 +21,9 @@ export const SHARE_FLOW = Object.freeze({
 const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 /**
- * @param {{capturedStart:any, capturedEnd:any, decodedStart:any, decodedEnd:any}} s
+ * @param {{capturedStart:any, capturedEnd:any, decodedStart:any, decodedEnd:any, senderPidStart?:string, senderPidEnd?:string}} s
  * @param {Partial<typeof SHARE_FLOW>} [opts]
- * @returns {{ok:boolean, verdict:'flowing'|'capture stalled'|'not delivered', captured:number, decoded:number, need:number, detail:string}}
+ * @returns {{ok:boolean, verdict:'flowing'|'sender died'|'capture stalled'|'not delivered', captured:number, decoded:number, need:number, detail:string}}
  */
 export function judgeShareFlow(s, opts = {}) {
   const o = { ...SHARE_FLOW, ...opts };
@@ -30,6 +32,10 @@ export function judgeShareFlow(s, opts = {}) {
   const decoded = Math.max(0, n(s.decodedEnd) >= n(s.decodedStart) ? n(s.decodedEnd) - n(s.decodedStart) : n(s.decodedEnd));
   const need = Math.max(1, Math.ceil(captured * o.deliverRatio));
   const detail = `sender +${captured} captured (${n(s.capturedStart)}→${n(s.capturedEnd)}), peer +${decoded} decoded (${n(s.decodedStart)}→${n(s.decodedEnd)}), need ≥${need}`;
+  if (s.senderPidStart && s.senderPidStart !== (s.senderPidEnd || '')) {
+    return { ok: false, verdict: 'sender died', captured, decoded, need,
+      detail: `sender pid ${s.senderPidStart} → ${s.senderPidEnd || 'gone'}; ${detail}` };
+  }
   if (captured < o.minCaptured) return { ok: false, verdict: 'capture stalled', captured, decoded, need, detail };
   if (decoded < need) return { ok: false, verdict: 'not delivered', captured, decoded, need, detail };
   return { ok: true, verdict: 'flowing', captured, decoded, need, detail };

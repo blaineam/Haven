@@ -43,3 +43,12 @@ test('missing or non-numeric samples count as zero, and a restarted counter coun
   assert.equal(r.decoded, 20);
   assert.equal(r.verdict, 'flowing');
 });
+
+test('the [again] crash: a sender whose process restarted is SENDER DIED, not a capture stall', () => {
+  const r = judgeShareFlow({ capturedStart: 34, capturedEnd: 0, decodedStart: 3, decodedEnd: 71, senderPidStart: '4132', senderPidEnd: '5939' });
+  assert.equal(r.verdict, 'sender died');
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /4132 → 5939/);
+  assert.equal(judgeShareFlow({ capturedStart: 34, capturedEnd: 90, decodedStart: 3, decodedEnd: 71, senderPidStart: '4132', senderPidEnd: '' }).verdict, 'sender died');
+  assert.equal(judgeShareFlow({ capturedStart: 34, capturedEnd: 90, decodedStart: 3, decodedEnd: 71, senderPidStart: '4132', senderPidEnd: '4132' }).verdict, 'flowing');
+});

@@ -479,6 +479,8 @@ from launch or from the last `{"op":"perf_reset"}`, which zeroes them.
 | `persistExportCount` / `lastPersistExportAtMs` | whole-state `exportState` runs that actually happened (a persist skipped because nothing changed does not count) and the wall-clock ms of the last one. |
 | `persistReasons` | exports that ran, keyed by what asked for them (`<function>:<line>` of the persist call). Apple only. |
 | `recentApplied` | the last 30 inbound envelopes that changed the engine (`live`/`mailbox`, circle, envelope tag, sender) — an export while idle names its cause here. DEBUG, Apple only. |
+| `recentExports` | the last 40 exports, `"<startedAtMs> <reason>"` (stamped when the export started). Apple + Android. |
+| `recentChanged` | the last 40 inbound changes that owe a save, `"<atMs> <source>"`: a receive whose outcome was `.changed` (never a roster repeat / duplicate / re-offer), a hello that added a member, a changed roster announce, a self-sync apply that moved the engine. The `responsive` idle check allows an export only when one of these precedes it (`judgeIdleExports`, Scripts/lib/e2e-steps.mjs). Apple + Android. |
 | `engineDirtiedBy` | the 25 most frequent engine calls not marked `readOnly` (`<function>:<line>`) — any one of them makes the next persist export. DEBUG, Apple only. |
 | `refreshCount` | feed rebuilds that completed and were applied. Apple only (Android reports `0`). |
 | `mediaStoreOnMainCount` | inbound-media hash / write / reassembly work that ran on the main thread. **Must stay 0** (the DEBUG demo seed's bundled-asset import is excluded explicitly). Apple only. |

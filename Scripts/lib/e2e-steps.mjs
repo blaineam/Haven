@@ -280,3 +280,47 @@ export function stubIdleRates(text, sinceMs, untilMs) {
   const minutes = Math.max(untilMs - sinceMs, 1) / 60_000;
   return { notify, perMin: notify / minutes, polls, pollsWithNew };
 }
+
+/** "<ms> <text>" ring entries (perf.recentExports / perf.recentChanged) → [{at, what}], oldest first. */
+function stampedRing(ring) {
+  const out = [];
+  for (const e of Array.isArray(ring) ? ring : []) {
+    const m = String(e).match(/^(\d+)\s*(.*)$/);
+    if (m) out.push({ at: +m[1], what: m[2] });
+  }
+  return out.sort((a, b) => a.at - b.at);
+}
+
+export const IDLE_EXPORT = { slackMs: 10_000, graceMs: 1_500 };
+
+/**
+ * The `responsive` idle window: may a persist export happen while nobody is posting? Only when a
+ * REAL inbound engine change asked for it — a receive whose outcome was `.changed`, a hello that
+ * added a member, a roster announce that changed, a self-sync apply that moved the engine
+ * (perf.recentChanged). A linked device legitimately delivering one inside the window is not churn.
+ * Anything else — a roster repeat, a duplicate, a re-offered key, a timer — is red.
+ *
+ * Each export (perf.recentExports, stamped when it STARTED) must pair with at least one not-yet-used
+ * change in [start - slackMs, start + graceMs] (the grace covers a change the export captured while
+ * the receive's own bookkeeping was still returning); pairing consumes those changes, so one change
+ * never excuses two exports. Exports the ring no longer holds (count delta > window entries) are
+ * unattributed. A dump without the rings (an older build) falls back to "no exports at all".
+ */
+export function judgeIdleExports(before, after, { sinceMs, untilMs, slackMs = IDLE_EXPORT.slackMs, graceMs = IDLE_EXPORT.graceMs } = {}) {
+  const delta = num(after?.persistExportCount) - num(before?.persistExportCount);
+  if (delta <= 0) return { ok: true, delta: 0, attributed: [], unattributed: [], legacy: false };
+  if (!Array.isArray(after?.recentExports) || !Array.isArray(after?.recentChanged)) {
+    return { ok: false, delta, attributed: [], unattributed: [], legacy: true };
+  }
+  const exports = stampedRing(after.recentExports).filter((e) => e.at >= sinceMs && e.at <= untilMs);
+  const changes = stampedRing(after.recentChanged).map((c) => ({ ...c, used: false }));
+  const attributed = [], unattributed = [];
+  for (const e of exports) {
+    const cause = changes.filter((c) => !c.used && c.at >= e.at - slackMs && c.at <= e.at + graceMs);
+    for (const c of cause) c.used = true;
+    (cause.length ? attributed : unattributed).push({ ...e, cause: cause.map((c) => c.what) });
+  }
+  const missing = Math.max(0, delta - exports.length);
+  for (let i = 0; i < missing; i++) unattributed.push({ at: -1, what: '(export no longer in the ring)', cause: [] });
+  return { ok: unattributed.length === 0, delta, attributed, unattributed, legacy: false };
+}

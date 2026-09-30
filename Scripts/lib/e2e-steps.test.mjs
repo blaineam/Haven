@@ -4,7 +4,7 @@ import {
   num, delta, parseUiNodes, findNode, center, CONSENT, isConsentSurface, fgsTypes, holdsMediaProjection,
   auditShareLog, longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields,
   persistExportAllowance, reactLatency, ingestedFirst, feedNotGatedOnDmWarm, PERF_FIELDS,
-  nonDecreasing, recordProgress, badgeTransitions, adbDeviceGone, qemuCrashSince, stubIdleRates,
+  nonDecreasing, recordProgress, badgeTransitions, adbDeviceGone, qemuCrashSince, stubIdleRates, judgeIdleExports,
 } from './e2e-steps.mjs';
 
 test('num / delta treat missing and junk as zero', () => {
@@ -216,4 +216,52 @@ test('stubIdleRates: /notify per minute and own-relay polls inside the window on
   assert.equal(r.polls, 2);
   assert.equal(r.pollsWithNew, 1);
   assert.equal(stubIdleRates(undefined, 0, 1).notify, 0);
+});
+
+test('judgeIdleExports: an export caused by a real inbound change is allowed', () => {
+  const before = { persistExportCount: 16 };
+  const after = { persistExportCount: 17,
+    recentExports: ['900 authored', '5600 schedulePersist():4655'],
+    recentChanged: ['5000 live c=c1C3KWOSU3 tag=04'] };
+  const r = judgeIdleExports(before, after, { sinceMs: 1000, untilMs: 61_000 });
+  assert.equal(r.ok, true);
+  assert.equal(r.attributed.length, 1);
+  assert.deepEqual(r.attributed[0].cause, ['live c=c1C3KWOSU3 tag=04']);
+  // several changes coalesced into one debounced export are one export, and fine
+  const burst = judgeIdleExports(before, { ...after, recentChanged: ['5000 live a', '5200 live b', '5300 mailbox changed=1 unlocked=0'] },
+    { sinceMs: 1000, untilMs: 61_000 });
+  assert.equal(burst.ok, true);
+  // a change the export captured while the receive was still returning (within the grace)
+  assert.equal(judgeIdleExports(before, { ...after, recentChanged: ['6000 selfsync'] }, { sinceMs: 1000, untilMs: 61_000 }).ok, true);
+});
+
+test('judgeIdleExports: re-offer / duplicate / timer-driven exports are red', () => {
+  const before = { persistExportCount: 16 };
+  // no inbound change at all (a roster repeat or duplicate never notes one)
+  const noCause = judgeIdleExports(before, { persistExportCount: 17, recentExports: ['30000 persistNow:2933'], recentChanged: [] },
+    { sinceMs: 1000, untilMs: 61_000 });
+  assert.equal(noCause.ok, false);
+  assert.equal(noCause.unattributed[0].what, 'persistNow:2933');
+  // one real change cannot excuse a second, timer-driven export later on
+  const twice = judgeIdleExports(before, { persistExportCount: 18,
+    recentExports: ['5600 schedulePersist():4655', '35000 schedulePersist():4655'], recentChanged: ['5000 live x'] },
+  { sinceMs: 1000, untilMs: 61_000 });
+  assert.equal(twice.ok, false);
+  assert.equal(twice.attributed.length, 1);
+  assert.equal(twice.unattributed.length, 1);
+  // a change too long before the export is not its cause
+  assert.equal(judgeIdleExports(before, { persistExportCount: 17, recentExports: ['40000 x'], recentChanged: ['5000 live x'] },
+    { sinceMs: 1000, untilMs: 61_000 }).ok, false);
+  // exports the ring lost are unattributed
+  const lost = judgeIdleExports(before, { persistExportCount: 19, recentExports: ['5600 y'], recentChanged: ['5000 live'] },
+    { sinceMs: 1000, untilMs: 61_000 });
+  assert.equal(lost.ok, false);
+  assert.equal(lost.unattributed.length, 2);
+});
+
+test('judgeIdleExports: no exports is green; an old dump without the rings keeps the strict rule', () => {
+  assert.equal(judgeIdleExports({ persistExportCount: 3 }, { persistExportCount: 3 }, { sinceMs: 0, untilMs: 1 }).ok, true);
+  const legacy = judgeIdleExports({ persistExportCount: 3 }, { persistExportCount: 4 }, { sinceMs: 0, untilMs: 1 });
+  assert.equal(legacy.ok, false);
+  assert.equal(legacy.legacy, true);
 });

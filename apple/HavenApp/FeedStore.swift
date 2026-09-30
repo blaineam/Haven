@@ -6357,7 +6357,10 @@ final class FeedStore: ObservableObject {
         let ingested = results.filter { $0.outcome.applied }.map(\.item)
         guard self.engine === engine, !ingested.isEmpty else { return }
         for item in ingested { SharedStore.markSeenPublic(item.key) }
-        if results.contains(where: { $0.outcome == .changed }) { persist() }
+        if results.contains(where: { $0.outcome == .changed }) {
+            HavenPerf.shared.noteInboundChange("hinted")
+            persist()
+        }
         bumpActivity()
         for r in results where r.outcome.applied {
             let item = r.item
@@ -6790,6 +6793,9 @@ final class FeedStore: ObservableObject {
         // Only marks this pass OWES count: a relay host re-offers up to 48 already-seen control keys
         // every poll, and counting those toward `maxDeferredMarkKeys` forced an export every couple
         // of idle polls for marks that were already on disk (MailboxIngest.marksOwed).
+        if !batch.realChanged.isEmpty || !batch.unlockedCircles.isEmpty {
+            HavenPerf.shared.noteInboundChange("mailbox changed=\(batch.realChanged.count) unlocked=\(batch.unlockedCircles.count)")
+        }
         let owed = MailboxIngest.marksOwed(processed, durablySeen: SharedStore.isDurablySeen)
         if !owed.isEmpty {
             SharedStore.holdAwaitingPersist(owed)
@@ -7476,6 +7482,7 @@ final class FeedStore: ObservableObject {
             // CHANGED, not merely known: the epoch moved, so re-seal my history under it. Same reason as
             // the self-sync path — a roster announce can carry a sibling's registration.
             if status > 0 {
+                HavenPerf.shared.noteInboundChange("roster-announce")
                 NotificationCenter.default.post(name: SharedStore.rosterEpochChangedNotification, object: nil)
             }
         }
@@ -10471,7 +10478,10 @@ final class FeedStore: ObservableObject {
         if senderDevice != nil || !reads.engineKnows {
             forgiveDials(accountHex: idHex, extra: senderDevice.map { [$0] } ?? [])
         }
-        if !reads.inCircle { persist() }
+        if !reads.inCircle {
+            HavenPerf.shared.noteInboundChange("hello c=\(circleId.prefix(10))")
+            persist()
+        }
         await reloadCircles()
         if let card = reads.card, !card.name.isEmpty {
             ContactsStore.shared.setCard(idHex: idHex, name: card.name, bio: card.bio, link: card.link,
@@ -10588,7 +10598,10 @@ final class FeedStore: ObservableObject {
             self.invalidateMessagesCache(circleId)
             self.invalidateSyncBundle(circleId)
             // coalesced — a sync burst writes once, not per event; a roster repeat owes no export
-            if outcome == .changed { self.schedulePersist() }
+            if outcome == .changed {
+                HavenPerf.shared.noteInboundChange("live c=\(circleId.prefix(10)) tag=\(envelope.first.map { String(format: "%02x", $0) } ?? "--")")
+                self.schedulePersist()
+            }
             self.scheduleRefresh()             // coalesced feed rebuild
             self.scheduleRequestMissingMedia() // coalesced media pull (scans the whole feed)
             self.scheduleCircleSideEffects(circleId)  // notify + badge + DM media, coalesced off-main

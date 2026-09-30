@@ -33,8 +33,9 @@ actor StatePersister {
         // reached disk (the mailbox drain persists after EVERY pass, most of which change nothing):
         // the whole-state clone under the mutex is the expensive part, and it would write the same
         // bytes again.
+        let startedAtMs = HavenPerf.nowMs()
         guard let (data, generation) = await engine.exportIfChanged() else { return true }
-        HavenPerf.shared.notePersistExport(reason: reason)
+        HavenPerf.shared.notePersistExport(reason: reason, startedAtMs: startedAtMs)
         guard let url = await destination() else { return false }
         do {
             try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])

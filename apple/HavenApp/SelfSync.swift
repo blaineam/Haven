@@ -560,7 +560,10 @@ final class SelfSyncCoordinator {
             if moved { engineChanged = true }
         }
         // A real change must dirty the engine so the next persist exports it.
-        if let engine, engineChanged { await engine.run { _ in () } }
+        if let engine, engineChanged {
+            HavenPerf.shared.noteInboundChange("selfsync")
+            await engine.run { _ in () }
+        }
         return engineChanged
     }
 

@@ -2341,6 +2341,7 @@ object HavenNet : InboundListener {
         } ?: false
         val changed = runCatching { social.receive(ev.circleId, ev.envelope) }.getOrDefault(false)
         if (changed) {
+            QaPerf.noteInboundChange("live c=${ev.circleId.take(10)}")
             // FAN OUT to my other devices. A sender dials the device ids ITS copy of my roster
             // resolves — often just one — so a DM delivered straight to my tablet never reached my
             // phone. The send path has always done this for my OWN posts; the receive path must for
@@ -5912,6 +5913,7 @@ object HavenNet : InboundListener {
         // envelopes into pending_epoch, and those buffers must survive process death.
         if (receiveRan && !changed) persist()
         if (changed) {
+            QaPerf.noteInboundChange("mailbox ingested=${newlyIngested.size}")
             // Fan out friend content that only this device pulled from the mailbox.
             // Roster repeats are already on my other devices — never fan them out or push them.
             val fanOut = newlyIngested.filterNot { (_, env) -> RosterEcho.isRepeatRoster(env) }
@@ -9008,8 +9010,9 @@ object HavenNet : InboundListener {
     }
 
     private fun persist() {
+        val startedAtMs = System.currentTimeMillis()
         runCatching { StateFiles.writeAtomicFrom(stateFile) { social.exportState() } }
-            .onSuccess { QaPerf.notePersistExport() }   // the QA dump's perf.persistExportCount
+            .onSuccess { QaPerf.notePersistExport(startedAtMs) }   // the QA dump's perf.persistExportCount
             .onFailure { Log.e(TAG, "persist failed", it) }
     }
 

@@ -30,7 +30,7 @@ import {
   num, delta, parseUiNodes, findNode, center, CONSENT, isConsentSurface, holdsMediaProjection, auditShareLog,
   longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields, persistExportAllowance,
   reactLatency, ingestedFirst, feedNotGatedOnDmWarm, nonDecreasing, recordProgress, badgeTransitions,
-  adbDeviceGone, qemuCrashSince, stubIdleRates,
+  adbDeviceGone, qemuCrashSince, stubIdleRates, judgeIdleExports,
 } from './lib/e2e-steps.mjs';
 import {
   portPlan, collisionVerdict, decodeComp, eventKeys, mailboxCircles, holdsMedia, misplacedCircles, keyDiff,
@@ -1764,11 +1764,13 @@ async function main() {
     const burstMedia = [`${MARKER}_Burst_V1`, `${MARKER}_Burst_Photo`, `${MARKER}_Burst_V2`];
     await converge(ios, (j) => burstMedia.every((t) => hasPost(t)(j)), BUDGET.mediaBlob);
     await sleep(3000);   // one debounce window: the save for that last arrival is not "idle"
-    const c0 = num((await freshDump(ios))?.perf?.persistExportCount);
-    const idleFrom = Date.now();
+    const idleFrom = Date.now();   // before the baseline dump: every export after it is in the window
+    const perf0 = (await freshDump(ios))?.perf || {};
+    const c0 = num(perf0.persistExportCount);
     await sleep(BUDGET.idle);
     const idleTo = Date.now();
     const idlePerf = (await freshDump(ios))?.perf || {};
+    const idleDumpedAt = Date.now();
     // The relay-hosting stub's own /notify pushes while nothing is happening (release gate 3: ~5,700
     // in 15 min — re-offered device rosters were pushed to my devices on every own-relay poll).
     const stubLog = join(OUT, 'stub-stdout.log');
@@ -1781,8 +1783,11 @@ async function main() {
     const c1 = num(idlePerf.persistExportCount);
     // persistReasons / engineDirtiedBy (Apple): what asked for each export and which engine calls
     // made it non-empty — the attribution a red here needs.
-    score(`responsive: no persist exports while idle (${BUDGET.idle / 1000}s)`, c1 === c0,
-      `${c0} → ${c1} reasons=${JSON.stringify(idlePerf.persistReasons || {})} recentApplied=${JSON.stringify((idlePerf.recentApplied || []).slice(-12))} dirtiedBy=${JSON.stringify(idlePerf.engineDirtiedBy || {})}`);
+    // Precise, not loose: an export a REAL inbound change asked for (a linked device delivering a
+    // changed roster / post inside the window) is fine; any other idle export is churn — red.
+    const idle = judgeIdleExports(perf0, idlePerf, { sinceMs: idleFrom, untilMs: idleDumpedAt });
+    score(`responsive: no idle persist exports without a real inbound change (${BUDGET.idle / 1000}s)`, idle.ok,
+      `${c0} → ${c1}${idle.legacy ? ' (no recentExports/recentChanged in dump: strict)' : ''} unattributed=${JSON.stringify(idle.unattributed)} attributed=${JSON.stringify(idle.attributed)} reasons=${JSON.stringify(idlePerf.persistReasons || {})} recentApplied=${JSON.stringify((idlePerf.recentApplied || []).slice(-12))} dirtiedBy=${JSON.stringify(idlePerf.engineDirtiedBy || {})}`);
   }
 
   // ── multirelay: friends who each run their OWN relay interoperate without colliding ──────────

@@ -26,7 +26,15 @@ final class HavenPerf: @unchecked Sendable {
         /// The last few inbound envelopes that CHANGED the engine (and so owe a save): where they
         /// came from. An export while nothing is being posted traces back to one of these.
         var recentApplied: [String] = []
+        /// The last exports that ran, "<startedAtMs> <reason>" — when each export STARTED (the engine
+        /// state it captured), so the e2e idle check can pair it with the inbound change it saved.
+        var recentExports: [String] = []
+        /// The last inbound engine changes that genuinely owe a save, "<atMs> <source>": a receive
+        /// whose outcome was `.changed` (never a roster repeat / duplicate), a hello that added a
+        /// member, a roster announce that changed, a self-sync apply that moved the engine.
+        var recentChanged: [String] = []
     }
+    private static let ringCap = 40
     private static let userWaitWindow = 512
     private let state = OSAllocatedUnfairLock(initialState: State())
 
@@ -50,11 +58,12 @@ final class HavenPerf: @unchecked Sendable {
         }
     }
     /// A whole-state `exportState()` actually ran (a skipped, unchanged persist does not count).
-    func notePersistExport(reason: String = "") {
+    func notePersistExport(reason: String = "", startedAtMs: UInt64? = nil) {
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         state.withLock { s in
             s.persistExportCount += 1
             s.lastPersistExportAtMs = nowMs
+            Self.ring(&s.recentExports, "\(startedAtMs ?? nowMs) \(reason.isEmpty ? "?" : reason)")
             if !reason.isEmpty, s.persistReasons.count < 200 || s.persistReasons[reason] != nil {
                 s.persistReasons[reason, default: 0] += 1
             }
@@ -68,6 +77,17 @@ final class HavenPerf: @unchecked Sendable {
             if s.recentApplied.count > 30 { s.recentApplied.removeFirst(s.recentApplied.count - 30) }
         }
     }
+    /// An inbound envelope / hello / roster / self-sync apply really changed the engine (it owes a
+    /// save). The e2e `responsive` idle check allows an export only when one of these precedes it.
+    func noteInboundChange(_ source: String) {
+        let t = UInt64(Date().timeIntervalSince1970 * 1000)
+        state.withLock { s in Self.ring(&s.recentChanged, "\(t) \(source)") }
+    }
+    private static func ring(_ a: inout [String], _ entry: String) {
+        a.append(entry)
+        if a.count > ringCap { a.removeFirst(a.count - ringCap) }
+    }
+    static func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
     /// An engine call not marked `readOnly` ran (DEBUG attribution for idle exports).
     func noteEngineDirty(_ caller: String) {
         state.withLock { s in
@@ -102,6 +122,8 @@ final class HavenPerf: @unchecked Sendable {
             "heldRefSetSize": heldRefSetSize,
             "persistReasons": s.persistReasons,
             "recentApplied": s.recentApplied,
+            "recentExports": s.recentExports,
+            "recentChanged": s.recentChanged,
             // The top state-changing engine callers: a persist that exports while nothing the user
             // can see changed traces back to one of these.
             "engineDirtiedBy": Dictionary(uniqueKeysWithValues:

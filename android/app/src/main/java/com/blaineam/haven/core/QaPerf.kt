@@ -23,13 +23,31 @@ object QaPerf {
     private var persistExportCount = 0
     private var lastPersistExportAtMs = 0L
 
+    private const val RING_CAP = 40
+    /** "<startedAtMs> <reason>" of the last exports (Apple `recentExports` parity). */
+    private val recentExports = ArrayDeque<String>()
+    /** "<atMs> <source>" of the last inbound changes that owe a save (Apple `recentChanged`). */
+    private val recentChanged = ArrayDeque<String>()
+
+    private fun ring(q: ArrayDeque<String>, entry: String) {
+        q.addLast(entry)
+        while (q.size > RING_CAP) q.removeFirst()
+    }
+
     /** A whole-state `exportState()` ran (HavenNet.persist and the legacy migration). */
-    fun notePersistExport() {
+    fun notePersistExport(startedAtMs: Long = System.currentTimeMillis(), reason: String = "persist") {
         val now = System.currentTimeMillis()
         synchronized(lock) {
             persistExportCount += 1
             lastPersistExportAtMs = now
+            ring(recentExports, "$startedAtMs $reason")
         }
+    }
+
+    /** An inbound receive / hello really changed the engine — the save it owes is not idle churn. */
+    fun noteInboundChange(source: String) {
+        val now = System.currentTimeMillis()
+        synchronized(lock) { ring(recentChanged, "$now $source") }
     }
 
     private fun noteMainStall(ms: Long) {
@@ -44,6 +62,7 @@ object QaPerf {
         synchronized(lock) {
             mainStallCount = 0; mainStallMaxMs = 0
             persistExportCount = 0; lastPersistExportAtMs = 0
+            recentExports.clear(); recentChanged.clear()
             cpuSamples.clear(); cpuSampleTicks = 0; mainStallFrames.clear()
         }
     }
@@ -108,6 +127,8 @@ object QaPerf {
             .put("refreshCount", 0)
             .put("mediaStoreOnMainCount", 0)
             .put("heldRefSetSize", 0)
+            .put("recentExports", org.json.JSONArray(recentExports.toList()))
+            .put("recentChanged", org.json.JSONArray(recentChanged.toList()))
             // Android-only diagnostics (not part of the shared contract): sampled busy stacks.
             .put("cpuSampleTicks", cpuSampleTicks)
             .put("cpuSamplesTop", top(cpuSamples, 12))

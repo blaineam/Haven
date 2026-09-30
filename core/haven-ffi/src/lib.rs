@@ -2368,8 +2368,12 @@ struct ShadowWelcome {
 
 /// Per-circle shadow ratchet-tree state. Holds the known genesis commit(s) — more than one is a
 /// §5 fork — and the Welcomes this device holds. `mls_shadow_status` resolves the fork with
-/// `select_chain` and derives the winner's epoch secret. Not persisted (rebuilds from re-emitted
-/// commit + welcome), matching `mls_capable`/`seed_drop_capable`.
+/// `select_chain` and derives the winner's epoch secret. PERSISTED with the circle state
+/// ([`PersistShadow`]): with keying live the tree IS the circle's key schedule, and a creator that
+/// relaunched without it built a SECOND genesis with fresh randomness, re-sealed every Welcome under
+/// new mailbox keys, and could never re-learn its own earlier commits (their keys were already
+/// marked seen) — its friends stayed on the old chain and the two sides stopped reading each other
+/// (e2e `launch` kill → `multirelay`: 4 geneses in one circle, 83 re-Welcomes to one device).
 struct ShadowTree {
     /// The TreeKEM group id = the circle id bytes.
     group_id: Vec<u8>,
@@ -2402,6 +2406,12 @@ struct ShadowTree {
     /// so the newcomer is Welcomed and the circle can re-flip. (A Remove SHRINKS the tree via a
     /// chained commit, not a rebuild, so the removed device stays cryptographically excluded.)
     genesis_devices: Vec<[u8; 32]>,
+    /// (device, the divergent genesis it announced) pairs already re-Welcomed by the fork heal. A
+    /// device re-sends its JOIN ack in every bundle, and each one re-recorded the divergent genesis,
+    /// so a device that could not take the re-Welcome (it sits on a longer chain the committer
+    /// lacks) got a FRESH one — a new random KEM, a new mailbox key — on every bundle, forever.
+    /// Once per sighting now.
+    rewelcomed: std::collections::HashSet<([u8; 32], [u8; 32])>,
     /// Memo for [`mls_replay`], keyed by a digest of EVERY input it reads (group id, the full
     /// commit set, every held Welcome, the device seed). A replay walks and re-verifies the whole
     /// chain — O(commits²) parses plus the tree crypto per epoch — and every bundle (each post's
@@ -2424,6 +2434,7 @@ impl ShadowTree {
             joined_genesis: std::collections::HashMap::new(),
             my_secret_root: None,
             genesis_devices: Vec::new(),
+            rewelcomed: std::collections::HashSet::new(),
             replay_memo: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -4208,6 +4219,15 @@ fn mls_refresh_keying(st: &mut NetState, idx: usize) -> Option<u64> {
                 })
                 .unwrap_or_default();
             for did in divergent {
+                let cid = st.circles[idx].id.clone();
+                let announced = st.shadow_trees.get(&cid).and_then(|sh| sh.joined_genesis.get(&did).copied());
+                let Some(announced) = announced else { continue };
+                if st.shadow_trees.get(&cid).is_some_and(|sh| sh.rewelcomed.contains(&(did, announced))) {
+                    continue; // already healed this sighting — its ack just repeated
+                }
+                if let Some(sh) = st.shadow_trees.get_mut(&cid) {
+                    sh.rewelcomed.insert((did, announced));
+                }
                 if mls_rewelcome_device(st, idx, &did) {
                     // Record the heal against the winning tip so we do not re-emit every refresh:
                     // point the device at the genesis we just welcomed it toward.
@@ -5289,9 +5309,80 @@ struct PersistCircle {
     #[serde(default)]
     admin_grants: Vec<Vec<u8>>,
 }
+/// On-disk form of one circle's [`ShadowTree`]. Welcomes ride their own wire encoding
+/// (`encode_shadow_welcome`); commits are keyed by their hash, recomputed on load.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct PersistShadow {
+    circle: String,
+    commits: Vec<Vec<u8>>,
+    welcomes: Vec<Vec<u8>>,
+    my_genesis: Option<[u8; 32]>,
+    my_secret_root: Option<[u8; 32]>,
+    genesis_devices: Vec<[u8; 32]>,
+    /// Byte-stable re-emission: a Welcome wraps under a random KEM, so re-sealing it after a
+    /// restart mints a NEW content-addressed mailbox key for the same Welcome.
+    emit_cache: Vec<Vec<u8>>,
+    joined: Vec<[u8; 32]>,
+    joined_genesis: Vec<([u8; 32], [u8; 32])>,
+    rewelcomed: Vec<([u8; 32], [u8; 32])>,
+}
+
+impl PersistShadow {
+    fn from_tree(circle: &str, t: &ShadowTree) -> Self {
+        Self {
+            circle: circle.to_string(),
+            commits: t.commits.values().cloned().collect(),
+            welcomes: t.my_welcomes.iter().map(|(h, w)| encode_shadow_welcome(h, w)).collect(),
+            my_genesis: t.my_genesis,
+            my_secret_root: t.my_secret_root,
+            genesis_devices: t.genesis_devices.clone(),
+            emit_cache: t.emit_cache.clone(),
+            joined: t.joined.iter().copied().collect(),
+            joined_genesis: t.joined_genesis.iter().map(|(d, g)| (*d, *g)).collect(),
+            rewelcomed: t.rewelcomed.iter().copied().collect(),
+        }
+    }
+
+    /// Merge into `st`: a tree this session already built wins field by field (it is newer); the
+    /// restored one fills what the session lacks, and the commit / Welcome / join sets union.
+    fn restore(self, st: &mut NetState) {
+        let gid = self.circle.as_bytes().to_vec();
+        let t = st.shadow_trees.entry(self.circle.clone()).or_insert_with(|| ShadowTree::new(gid));
+        for c in self.commits {
+            t.commits.entry(treekem::commit_hash(&c)).or_insert(c);
+        }
+        for w in self.welcomes {
+            if let Some((h, w)) = decode_shadow_welcome(&w) {
+                t.my_welcomes.entry(h).or_insert(w);
+            }
+        }
+        if t.my_genesis.is_none() {
+            t.my_genesis = self.my_genesis;
+        }
+        if t.my_secret_root.is_none() {
+            t.my_secret_root = self.my_secret_root;
+        }
+        if t.genesis_devices.is_empty() {
+            t.genesis_devices = self.genesis_devices;
+        }
+        if t.emit_cache.is_empty() {
+            t.emit_cache = self.emit_cache;
+        }
+        t.joined.extend(self.joined);
+        for (d, g) in self.joined_genesis {
+            t.joined_genesis.entry(d).or_insert(g);
+        }
+        t.rewelcomed.extend(self.rewelcomed);
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistState {
     circles: Vec<PersistCircle>,
+    /// The circles' TreeKEM state (see [`ShadowTree`]). Defaulted so old state loads (and rebuilds,
+    /// as it did before this was persisted).
+    #[serde(default)]
+    shadow_trees: Vec<PersistShadow>,
     /// Verified device rosters (account_bundle, device_list_bytes, credential_bytes), so multi-device
     /// state survives restarts WITHOUT re-rotating epochs (those persist alongside in PersistCircle).
     #[serde(default)]
@@ -7743,6 +7834,12 @@ impl HavenSocial {
             }).collect(),
             seedless_roster_wire: st.seedless_roster_wire.clone(),
             cached_profile: st.cached_profile.clone(),
+            shadow_trees: {
+                let mut v: Vec<PersistShadow> =
+                    st.shadow_trees.iter().map(|(c, t)| PersistShadow::from_tree(c, t)).collect();
+                v.sort_by(|a, b| a.circle.cmp(&b.circle));
+                v
+            },
             device_rosters: {
                 let me_id = st.me().node_id_bytes();
                 let me_bundle = st.me().to_bytes();
@@ -8371,6 +8468,12 @@ impl HavenSocial {
             // reflect them; re-verified against the carried account bundle, higher-version-wins).
             for (acct, list, creds) in ps.device_rosters {
                 restore_roster(&mut st, &acct, &list, &creds);
+            }
+            // The circles' TreeKEM state — BEFORE anything can build a genesis on an empty tree.
+            for sh in ps.shadow_trees {
+                if st.circles.iter().any(|c| c.id == sh.circle) {
+                    sh.restore(&mut st);
+                }
             }
             // A3/D8: restore the seedless verbatim roster wire + cached profile card (additive — never
             // clobber one we already hold this session with a `None` from an older-format state file).
@@ -12586,6 +12689,57 @@ mod net_tests {
         assert!(c.feed(cid.clone(), 5_000, None).iter().any(|m| m.body == "after-add"), "C reads new content");
         assert!(a.feed(cid.clone(), 5_000, None).iter().any(|m| m.body == "b-after-add"), "A reads B's new content");
         assert!(c.feed(cid.clone(), 5_000, None).iter().any(|m| m.body == "b-after-add"), "C reads B's new content");
+    }
+
+    /// e2e `launch` → `multirelay`: the creator's device is KILLED and relaunched from its saved
+    /// state. The tree state (commits, Welcomes, my genesis, the cached re-emissions) used to be
+    /// in-memory only, so the relaunched creator built a SECOND genesis with fresh randomness, re-sealed
+    /// every Welcome under a new mailbox key, and — its old commits already marked seen — never
+    /// re-learned the chain its friends were on. Restored now: same live epoch, no new tree wire, and
+    /// both directions still read each other.
+    #[test]
+    fn mls_creator_restart_restores_the_tree_and_mints_nothing() {
+        let _clk = clock_guard();
+        let (base, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+        let (a, b) = (base[0].clone(), base[1].clone());
+        flip_and_join(&base, &cid);
+        // A mid-life Add takes the tree to epoch 2 — the commit a restarted creator must not lose.
+        let c = HavenSocial::new([3u8; 32].to_vec()).unwrap();
+        assert!(c.use_device_identity([13u8; 32].to_vec()));
+        wire_new_member(&base, &[[1u8; 32], [2u8; 32]], &c, [3u8; 32], [1u8; 32], &cid);
+        sync_all(&[&a, &b, &c], &cid, 12);
+        assert_eq!(a.mls_keying_status(cid.clone()).epoch, 2);
+        let tree_wires = |s: &Arc<HavenSocial>| -> std::collections::BTreeSet<Vec<u8>> {
+            s.sync_envelopes(cid.clone())
+                .into_iter()
+                .filter(|e| matches!(e.first(), Some(&TAG_MLS_COMMIT) | Some(&TAG_MLS_WELCOME)))
+                .collect()
+        };
+        let before = tree_wires(&a);
+        assert!(!before.is_empty());
+
+        // Kill + relaunch: a fresh engine on the same seeds, loaded from A's saved state.
+        let saved = a.export_state();
+        let a2 = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        assert!(a2.use_device_identity([11u8; 32].to_vec()));
+        a2.set_mls_keying(true);
+        a2.import_state(saved);
+        let after = tree_wires(&a2);
+        assert!(after.is_subset(&before), "the relaunched creator minted {} new tree wire(s)", after.difference(&before).count());
+        // Capability is re-learned from the peers' profile cards on reconnect (it is not persisted).
+        for (i, p) in [&b, &c].into_iter().enumerate() {
+            a2.profile_seed_drop_version(p.my_bundle(), card(p, &format!("r{i}")));
+        }
+        assert_eq!(a2.mls_keying_status(cid.clone()).state, "live");
+        assert_eq!(a2.mls_keying_status(cid.clone()).epoch, 2, "still on the chain its friends are on");
+
+        a2.post(cid.clone(), "after-restart".into(), vec![], None, None, false, false, 6_000).unwrap();
+        b.post(cid.clone(), "b-after-restart".into(), vec![], None, None, false, false, 6_100).unwrap();
+        sync_all(&[&a2, &b, &c], &cid, 4);
+        assert!(b.feed(cid.clone(), 7_000, None).iter().any(|m| m.body == "after-restart"), "B reads the restarted creator");
+        assert!(c.feed(cid.clone(), 7_000, None).iter().any(|m| m.body == "after-restart"), "C reads the restarted creator");
+        assert!(a2.feed(cid.clone(), 7_000, None).iter().any(|m| m.body == "b-after-restart"), "the restarted creator reads B");
+        assert!(tree_wires(&a2).is_subset(&before), "a full sync after the restart still minted nothing new");
     }
 
     /// §9 M4 proof — SLEEPER (§5.5): a device offline past the mailbox TTL, whose private tree state

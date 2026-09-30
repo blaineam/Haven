@@ -3490,74 +3490,123 @@ fn mls_replay_input_digest(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>
 fn mls_replay_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> Option<KeyingState> {
     let gid = shadow.group_id.clone();
     let my_secret_root = my_device_seed.map(|s| keying_secret_root(&s, &gid));
-    // Prefer the highest-epoch SELF-CONTAINED Welcome I hold (a mid-life Add or a re-entry). It lets
-    // me enter at the live epoch without the chain; the genesis path is the fallback.
-    let self_contained = shadow
-        .my_welcomes
-        .iter()
-        .filter(|(_, w)| !w.tree_bytes.is_empty())
-        .max_by_key(|(h, w)| (w.epoch, **h));
-    let mut cur = if let Some((tip_hash, welcome)) = self_contained {
-        let tree = treekem::RatchetTree::from_bytes(&welcome.tree_bytes).ok()?;
-        let th = treekem::tree_hash(&tree);
-        // FAIL CLOSED (§4.2 revoked-in-the-meantime): my leaf must be present AND its public key must
-        // match the delivered leaf secret. A removed device (blanked leaf) or a mismatched secret is
-        // rejected here — the tree refuses to admit it, no separate policy check to forget.
-        let leaf_ok = tree
-            .leaf(welcome.leaf_index)
-            .map(|l| {
-                let kp = treekem::node_keypair_from_path_secret(&welcome.leaf_secret);
-                kp.kem_x == l.leaf_kem_x && kp.kem_pq[..] == l.leaf_kem_pq[..]
-            })
-            .unwrap_or(false);
-        if !leaf_ok {
-            return None;
+    // Every entry point I hold — the elected genesis's Welcome, and every SELF-CONTAINED Welcome (a
+    // mid-life Add or a re-entry) — walked forward along the chain; then the best end state wins.
+    //
+    // This used to take the highest-epoch self-contained Welcome UNCONDITIONALLY. A committer that
+    // re-Welcomes a divergent device does so toward ITS election winner at that moment — and when
+    // several creator devices race at circle birth, a committer's early winner can be a genesis that
+    // later LOSES (the chain grew on another one). The device then held a self-contained Welcome onto
+    // the dead branch, replayed from it forever, and froze at that branch's epoch while the fleet moved
+    // on (e2e: the phone and the tablet stuck at MLS epoch 1 on the desktop's genesis, friend and
+    // desktop at epoch 2 on the phone's — both directions parked).
+    let winner = keying_winning_genesis(shadow).map(|(h, _)| h);
+    let mut starts: Vec<KeyingState> = Vec::new();
+    for (tip_hash, welcome) in shadow.my_welcomes.iter().filter(|(_, w)| !w.tree_bytes.is_empty()) {
+        if let Some(k) = replay_start_self_contained(&gid, tip_hash, welcome) {
+            starts.push(k);
         }
-        let sched =
-            treekem::welcome_epoch_schedule(&welcome.joiner_secret, &gid, welcome.epoch, &th, &welcome.cth);
-        KeyingState {
-            epoch: welcome.epoch,
-            tree,
-            my_private: Some(treekem::TreePrivate::new(welcome.leaf_index, welcome.leaf_secret)),
-            sender_root: Some(sched.sender_root),
-            init_secret: Some(sched.init_secret),
-            joiner_secret: Some(sched.joiner_secret),
-            cth: welcome.cth,
-            tip_hash: *tip_hash,
-            removed_me: false,
-            removed_devices: std::collections::HashSet::new(),
+    }
+    if let Some(k) = replay_start_genesis(shadow, &gid) {
+        starts.push(k);
+    }
+    let mut best: Option<((bool, u64, [u8; 32]), KeyingState)> = None;
+    for start in starts {
+        let end = replay_walk(shadow, &gid, my_secret_root, start);
+        let on_winner = winner.is_some() && keying_genesis_of(shadow, end.tip_hash) == winner;
+        let rank = (on_winner, end.epoch, end.tip_hash);
+        if best.as_ref().map(|(r, _)| rank > *r).unwrap_or(true) {
+            best = Some((rank, end));
         }
-    } else {
-        let (gh, gbytes) = keying_winning_genesis(shadow)?;
-        let welcome = shadow.my_welcomes.get(&gh)?;
-        let gc = treekem::Commit::from_bytes(&gbytes).ok()?;
-        // Reconstruct the genesis tree from its Add proposals (add-only ⇒ from_leaves).
-        let mut leaves = Vec::new();
-        for p in &gc.proposals {
-            if let treekem::ProposalBody::Add { leaf_node } = &p.body {
-                leaves.push(leaf_node.clone());
-            }
+    }
+    best.map(|(_, k)| k)
+}
+
+/// The epoch-1 genesis a commit descends from, following parent links through the commits I hold.
+/// `None` when the chain leaves what I hold.
+fn keying_genesis_of(shadow: &ShadowTree, mut tip: [u8; 32]) -> Option<[u8; 32]> {
+    let parent0 = shadow_genesis_parent(&shadow.group_id);
+    for _ in 0..4096 {
+        let c = treekem::Commit::from_bytes(shadow.commits.get(&tip)?).ok()?;
+        if c.epoch == 1 && c.parent_commit_hash == parent0 {
+            return Some(tip);
         }
-        let tree = treekem::RatchetTree::from_leaves(leaves);
-        if treekem::tree_hash(&tree) != gc.tree_hash {
-            return None;
+        tip = c.parent_commit_hash;
+    }
+    None
+}
+
+/// Replay entry from a self-contained Welcome (tree blob + epoch context).
+fn replay_start_self_contained(gid: &[u8], tip_hash: &[u8; 32], welcome: &ShadowWelcome) -> Option<KeyingState> {
+    let gid = gid.to_vec();
+    let tree = treekem::RatchetTree::from_bytes(&welcome.tree_bytes).ok()?;
+    let th = treekem::tree_hash(&tree);
+    // FAIL CLOSED (§4.2 revoked-in-the-meantime): my leaf must be present AND its public key must
+    // match the delivered leaf secret. A removed device (blanked leaf) or a mismatched secret is
+    // rejected here — the tree refuses to admit it, no separate policy check to forget.
+    let leaf_ok = tree
+        .leaf(welcome.leaf_index)
+        .map(|l| {
+            let kp = treekem::node_keypair_from_path_secret(&welcome.leaf_secret);
+            kp.kem_x == l.leaf_kem_x && kp.kem_pq[..] == l.leaf_kem_pq[..]
+        })
+        .unwrap_or(false);
+    if !leaf_ok {
+        return None;
+    }
+    let sched =
+        treekem::welcome_epoch_schedule(&welcome.joiner_secret, &gid, welcome.epoch, &th, &welcome.cth);
+    Some(KeyingState {
+        epoch: welcome.epoch,
+        tree,
+        my_private: Some(treekem::TreePrivate::new(welcome.leaf_index, welcome.leaf_secret)),
+        sender_root: Some(sched.sender_root),
+        init_secret: Some(sched.init_secret),
+        joiner_secret: Some(sched.joiner_secret),
+        cth: welcome.cth,
+        tip_hash: *tip_hash,
+        removed_me: false,
+        removed_devices: std::collections::HashSet::new(),
+    })
+}
+
+/// Replay entry from the elected genesis via my genesis Welcome.
+fn replay_start_genesis(shadow: &ShadowTree, gid: &[u8]) -> Option<KeyingState> {
+    let gid = gid.to_vec();
+    let (gh, gbytes) = keying_winning_genesis(shadow)?;
+    let welcome = shadow.my_welcomes.get(&gh)?;
+    let gc = treekem::Commit::from_bytes(&gbytes).ok()?;
+    // Reconstruct the genesis tree from its Add proposals (add-only ⇒ from_leaves).
+    let mut leaves = Vec::new();
+    for p in &gc.proposals {
+        if let treekem::ProposalBody::Add { leaf_node } = &p.body {
+            leaves.push(leaf_node.clone());
         }
-        let cth1 = treekem::next_confirmed_transcript_hash(&shadow_genesis_cth(&gid), &gc);
-        let sched1 =
-            treekem::welcome_epoch_schedule(&welcome.joiner_secret, &gid, 1, &gc.tree_hash, &cth1);
-        KeyingState {
-            epoch: 1,
-            tree,
-            my_private: Some(treekem::TreePrivate::new(welcome.leaf_index, welcome.leaf_secret)),
-            sender_root: Some(sched1.sender_root),
-            init_secret: Some(sched1.init_secret),
-            joiner_secret: Some(sched1.joiner_secret),
-            cth: cth1,
-            tip_hash: gh,
-            removed_me: false,
-            removed_devices: std::collections::HashSet::new(),
-        }
-    };
+    }
+    let tree = treekem::RatchetTree::from_leaves(leaves);
+    if treekem::tree_hash(&tree) != gc.tree_hash {
+        return None;
+    }
+    let cth1 = treekem::next_confirmed_transcript_hash(&shadow_genesis_cth(&gid), &gc);
+    let sched1 =
+        treekem::welcome_epoch_schedule(&welcome.joiner_secret, &gid, 1, &gc.tree_hash, &cth1);
+    Some(KeyingState {
+        epoch: 1,
+        tree,
+        my_private: Some(treekem::TreePrivate::new(welcome.leaf_index, welcome.leaf_secret)),
+        sender_root: Some(sched1.sender_root),
+        init_secret: Some(sched1.init_secret),
+        joiner_secret: Some(sched1.joiner_secret),
+        cth: cth1,
+        tip_hash: gh,
+        removed_me: false,
+        removed_devices: std::collections::HashSet::new(),
+    })
+}
+
+/// Walk the commit chain forward from `cur` (the highest-hash child at each epoch), applying each.
+fn replay_walk(shadow: &ShadowTree, gid: &[u8], my_secret_root: Option<[u8; 32]>, mut cur: KeyingState) -> KeyingState {
+    let gid = gid.to_vec();
     loop {
         let next = cur.epoch + 1;
         // Children of the current tip at the next epoch (a §5 fork at this level is resolved by hash).
@@ -3645,7 +3694,7 @@ fn mls_replay_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) ->
             };
         }
     }
-    Some(cur)
+    cur
 }
 
 /// The §7.2 all-joined gate: every device leaf in the CURRENT tree has broadcast a join ack. A
@@ -4225,10 +4274,12 @@ fn mls_refresh_keying(st: &mut NetState, idx: usize) -> Option<u64> {
                 if st.shadow_trees.get(&cid).is_some_and(|sh| sh.rewelcomed.contains(&(did, announced))) {
                     continue; // already healed this sighting — its ack just repeated
                 }
-                if let Some(sh) = st.shadow_trees.get_mut(&cid) {
-                    sh.rewelcomed.insert((did, announced));
-                }
                 if mls_rewelcome_device(st, idx, &did) {
+                    // Recorded only once a Welcome was actually issued: a heal that could not be built
+                    // yet (the device not a leaf of my tree yet, my epoch not derivable) is retried.
+                    if let Some(sh) = st.shadow_trees.get_mut(&cid) {
+                        sh.rewelcomed.insert((did, announced));
+                    }
                     // Record the heal against the winning tip so we do not re-emit every refresh:
                     // point the device at the genesis we just welcomed it toward.
                     if let Some(sh) = st.shadow_trees.get_mut(&st.circles[idx].id.clone()) {
@@ -12844,6 +12895,230 @@ mod net_tests {
         assert!(after.is_subset(&sent), "and mints nothing new");
         let stale = relaunch(before_add);
         assert!(!sent.is_subset(&stale), "relaunching on the pre-Add save re-mints a different Add (why the save must come first)");
+    }
+
+    /// e2e `circle,post,…` topology: the creator ACCOUNT runs THREE devices (each validly builds its own
+    /// genesis — a real fork), and a friend joins after the circle is up (a chained Add). Every device
+    /// must end on ONE epoch and read every other device, whatever order the bundles arrive in.
+    #[test]
+    fn multi_device_creator_and_late_friend_converge_on_one_epoch() {
+        let _clk = clock_guard();
+        let a_seed = [1u8; 32];
+        let a_devs = [[11u8; 32], [21u8; 32], [31u8; 32]];
+        let (b_seed, b_dev) = ([2u8; 32], [12u8; 32]);
+        let a_acct = Identity::from_seed(&a_seed).public().node_id_bytes();
+        let cid = mint_owned_circle_id(&a_acct);
+        let a: Vec<Arc<HavenSocial>> = a_devs
+            .iter()
+            .map(|d| {
+                let s = HavenSocial::new(a_seed.to_vec()).unwrap();
+                assert!(s.use_device_identity(d.to_vec()));
+                s.create_circle(cid.clone(), "fleet".into());
+                s
+            })
+            .collect();
+        let dev_ids: Vec<Vec<u8>> =
+            a_devs.iter().map(|d| Identity::from_seed(d).public().node_id_bytes().to_vec()).collect();
+        let creds: Vec<Vec<u8>> = a
+            .iter()
+            .map(|s| crate::multidevice::issue_device_credential(a_seed.to_vec(), s.my_device_bundle(), "d".into(), 1).unwrap())
+            .collect();
+        let a_list = crate::multidevice::sign_device_list(a_seed.to_vec(), 1, 0, dev_ids.clone(), vec![]).unwrap();
+        let a_creator = hex(&a_acct);
+        for s in &a {
+            assert!(s.set_my_device_roster(a_list.clone(), creds.clone()));
+            assert!(s.set_circle_creator(cid.clone(), a_creator.clone()));
+            s.set_mls_keying(true);
+        }
+        let all_sync = |insts: &[&Arc<HavenSocial>], rounds: usize| {
+            for _ in 0..rounds {
+                for i in 0..insts.len() {
+                    for j in 0..insts.len() {
+                        if i != j {
+                            sync(insts[i], insts[j], &cid);
+                        }
+                    }
+                }
+            }
+        };
+        // e2e order: only the first device (the phone that created the circle) is up at first — it
+        // builds the 3-device genesis alone; its siblings have not built or heard anything yet.
+        let _ = a[0].sync_envelopes(cid.clone());
+
+        // The friend joins.
+        let b = HavenSocial::new(b_seed.to_vec()).unwrap();
+        assert!(b.use_device_identity(b_dev.to_vec()));
+        b.create_circle(cid.clone(), "fleet".into());
+        let b_roster = install_device_only_roster(&b, b_seed);
+        b.add_contact_bundle(cid.clone(), a[0].my_bundle()).unwrap();
+        assert!(b.ingest_device_roster(a[0].my_bundle(), a_list.clone(), creds.clone()));
+        b.profile_seed_drop_version(a[0].my_bundle(), card(&a[0], "a"));
+        assert!(b.set_circle_creator(cid.clone(), a_creator.clone()));
+        b.set_mls_keying(true);
+        for s in &a {
+            s.add_contact_bundle(cid.clone(), b.my_bundle()).unwrap();
+            assert!(s.ingest_device_roster(b.my_bundle(), b_roster.0.clone(), b_roster.1.clone()));
+            s.profile_seed_drop_version(b.my_bundle(), card(&b, "b"));
+        }
+        let mut every: Vec<&Arc<HavenSocial>> = a.iter().collect();
+        every.push(&b);
+        // The phone adds the friend (epoch-2 Add) and the friend enters; only THEN do the siblings
+        // (each now building a 4-device genesis of its own) and everyone else start exchanging.
+        for _ in 0..3 {
+            sync(&a[0], &b, &cid);
+            sync(&b, &a[0], &cid);
+        }
+        let _ = a[1].sync_envelopes(cid.clone());
+        let _ = a[2].sync_envelopes(cid.clone());
+        all_sync(&every, 10);
+
+        let epochs: Vec<(String, u64)> = every
+            .iter()
+            .map(|s| { let st = s.mls_keying_status(cid.clone()); (st.state, st.epoch) })
+            .collect();
+        assert!(epochs.iter().all(|e| e == &epochs[0]) && epochs[0].0 == "live", "one live epoch everywhere: {epochs:?}");
+        for (i, s) in every.iter().enumerate() {
+            s.post(cid.clone(), format!("from-{i}"), vec![], None, None, false, false, 10_000 + i as u64).unwrap();
+        }
+        all_sync(&every, 3);
+        for (i, s) in every.iter().enumerate() {
+            let feed = s.feed(cid.clone(), 20_000, None);
+            for j in 0..every.len() {
+                assert!(feed.iter().any(|m| m.body == format!("from-{j}")), "instance {i} cannot read instance {j}: {epochs:?}");
+            }
+        }
+    }
+
+    /// e2e run 4: the phone builds the circle's genesis alone and chains the friend's Add (epoch 2)
+    /// on it; the desktop — another creator device — builds its own later genesis, sees the phone's
+    /// JOIN ack before the phone's Add, elects its own (4-leaf) genesis, and re-Welcomes the phone
+    /// onto it. That self-contained Welcome must not pin the phone to the dead branch once the chain
+    /// grew elsewhere: everyone ends on one epoch and reads everyone.
+    #[test]
+    fn a_stale_rewelcome_onto_a_losing_genesis_does_not_pin_a_device() {
+        let _clk = clock_guard();
+        // Which creator device wins each early election, and whether the re-Welcome lands before the
+        // genesis Welcome it shares a slot with, hinge on hashes of fresh randomness — retry the setup
+        // until the phone holds the stale Welcome (the e2e state), then prove it is not pinned by it.
+        let mut attempt = 0;
+        let (a, b, cid) = loop {
+            attempt += 1;
+            let a_seed = [1u8; 32];
+            let a_devs = [[11u8; 32], [21u8; 32], [31u8; 32]];
+            let (b_seed, b_dev) = ([2u8; 32], [12u8; 32]);
+            let a_acct = Identity::from_seed(&a_seed).public().node_id_bytes();
+            let cid = mint_owned_circle_id(&a_acct);
+            let a: Vec<Arc<HavenSocial>> = a_devs
+                .iter()
+                .map(|d| {
+                    let s = HavenSocial::new(a_seed.to_vec()).unwrap();
+                    assert!(s.use_device_identity(d.to_vec()));
+                    s.create_circle(cid.clone(), "fleet".into());
+                    s
+                })
+                .collect();
+            let dev_ids: Vec<Vec<u8>> =
+                a_devs.iter().map(|d| Identity::from_seed(d).public().node_id_bytes().to_vec()).collect();
+            let creds: Vec<Vec<u8>> = a
+                .iter()
+                .map(|s| crate::multidevice::issue_device_credential(a_seed.to_vec(), s.my_device_bundle(), "d".into(), 1).unwrap())
+                .collect();
+            let a_list = crate::multidevice::sign_device_list(a_seed.to_vec(), 1, 0, dev_ids, vec![]).unwrap();
+            let a_creator = hex(&a_acct);
+            for s in &a {
+                assert!(s.set_my_device_roster(a_list.clone(), creds.clone()));
+                assert!(s.set_circle_creator(cid.clone(), a_creator.clone()));
+                s.set_mls_keying(true);
+            }
+            // The phone alone builds the 3-device genesis.
+            let _ = a[0].sync_envelopes(cid.clone());
+            // The friend joins; the phone chains its Add and the friend enters at epoch 2.
+            let b = HavenSocial::new(b_seed.to_vec()).unwrap();
+            assert!(b.use_device_identity(b_dev.to_vec()));
+            b.create_circle(cid.clone(), "fleet".into());
+            let b_roster = install_device_only_roster(&b, b_seed);
+            b.add_contact_bundle(cid.clone(), a[0].my_bundle()).unwrap();
+            assert!(b.ingest_device_roster(a[0].my_bundle(), a_list.clone(), creds.clone()));
+            b.profile_seed_drop_version(a[0].my_bundle(), card(&a[0], "a"));
+            assert!(b.set_circle_creator(cid.clone(), a_creator.clone()));
+            b.set_mls_keying(true);
+            for s in &a {
+                s.add_contact_bundle(cid.clone(), b.my_bundle()).unwrap();
+                assert!(s.ingest_device_roster(b.my_bundle(), b_roster.0.clone(), b_roster.1.clone()));
+                s.profile_seed_drop_version(b.my_bundle(), card(&b, "b"));
+            }
+            for _ in 0..3 {
+                sync(&a[0], &b, &cid);
+                sync(&b, &a[0], &cid);
+            }
+            let chained = |e: &Vec<u8>| {
+                e.first() == Some(&TAG_MLS_COMMIT)
+                    && treekem::Commit::from_bytes(&e[1..]).map(|c| c.epoch >= 2).unwrap_or(false)
+            };
+            assert!(a[0].sync_envelopes(cid.clone()).iter().any(chained), "the phone chained the friend's Add");
+            // The siblings build their own (4-device) geneses; the desktop hears the phone's JOIN ack and
+            // genesis — but not yet its Add — so it elects its own genesis and re-Welcomes the phone.
+            let _ = a[1].sync_envelopes(cid.clone());
+            sync(&a[1], &a[2], &cid);
+            let phone = a[0].sync_envelopes(cid.clone());
+            for e in phone.iter().chain(b.sync_envelopes(cid.clone()).iter()).filter(|e| !chained(e)) {
+                let _ = a[2].receive(cid.clone(), e.clone());
+            }
+            let _ = a[2].sync_envelopes(cid.clone()); // joins its own tree first
+            let _ = a[2].mls_keying_status(cid.clone()); // …and refreshes keying (the heal runs there)
+            let _ = a[2].sync_envelopes(cid.clone()); // the heal queues its re-Welcome for the NEXT bundle
+            let desktop = a[2].sync_envelopes(cid.clone());
+            // The heal's signature: the phone holds a SELF-CONTAINED epoch-1 Welcome onto a genesis that
+            // is not the one its chain grew on.
+            let stale = |s: &HavenSocial| -> bool {
+                let st = s.state.lock().unwrap();
+                st.shadow_trees.get(&cid).is_some_and(|t| t.my_welcomes.values().any(|w| !w.tree_bytes.is_empty() && w.epoch == 1))
+            };
+            // Mailbox order is a directory walk: the re-Welcome may land before the genesis Welcome it
+            // shares a key (the genesis hash) with — and the first one held wins that slot.
+            for e in desktop.into_iter().rev() {
+                let _ = a[0].receive(cid.clone(), e);
+            }
+            if stale(&a[0]) {
+                break (a, b, cid);
+            }
+            assert!(attempt < 24, "never reproduced the stale re-Welcome");
+        };
+        // Then everything flows.
+        let mut every: Vec<&Arc<HavenSocial>> = a.iter().collect();
+        every.push(&b);
+        for _ in 0..10 {
+            for i in 0..every.len() {
+                for j in 0..every.len() {
+                    if i != j {
+                        sync(every[i], every[j], &cid);
+                    }
+                }
+            }
+        }
+        let epochs: Vec<(String, u64)> = every
+            .iter()
+            .map(|s| { let st = s.mls_keying_status(cid.clone()); (st.state, st.epoch) })
+            .collect();
+        assert!(epochs.iter().all(|e| e == &epochs[0]) && epochs[0].0 == "live", "one live epoch everywhere: {epochs:?}");
+        for (i, s) in every.iter().enumerate() {
+            s.post(cid.clone(), format!("p{i}"), vec![], None, None, false, false, 10_000 + i as u64).unwrap();
+        }
+        for _ in 0..3 {
+            for i in 0..every.len() {
+                for j in 0..every.len() {
+                    if i != j {
+                        sync(every[i], every[j], &cid);
+                    }
+                }
+            }
+        }
+        for (i, s) in every.iter().enumerate() {
+            let feed = s.feed(cid.clone(), 20_000, None);
+            for j in 0..every.len() {
+                assert!(feed.iter().any(|m| m.body == format!("p{j}")), "instance {i} cannot read instance {j}: {epochs:?}");
+            }
+        }
     }
 
     /// §9 M4 proof — SLEEPER (§5.5): a device offline past the mailbox TTL, whose private tree state

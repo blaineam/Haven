@@ -1652,6 +1652,67 @@ fn manifest_chunks(blob: &[u8]) -> Option<usize> {
     digits.parse::<usize>().ok().filter(|n| *n > 0)
 }
 
+/// Most small keys (mailbox entries, media scope markers — a few KB each) one mesh pass pulls from
+/// one sibling, and most of everything else (media blobs and chunk windows, up to 8 MiB each).
+const MAX_MESH_SMALL_PULLS_PER_PASS: usize = 256;
+const MAX_MESH_PULLS_PER_PASS: usize = 24;
+
+/// Pull priority class (lower first). Mailbox and scope markers, then other small namespaces, then
+/// media windows, then media manifests.
+fn mesh_pull_rank(k: &str) -> u8 {
+    if k.starts_with("haven/mailbox/") || media_scope_marker(k).is_some() {
+        // Scope markers ride with the mailboxes: a media blob that lands here WITHOUT its
+        // marker would look unscoped (legacy) and be offered to every sibling of ours.
+        0
+    } else if k.starts_with("haven/media/") {
+        // Chunk WINDOWS before MANIFESTS. These are unrelated keys to this loop, and
+        // `haven/media/<ref>` sorts lexicographically before `haven/media/<ref>.p/0`, so the
+        // ~100-byte manifest was always pulled first and the 8 MiB windows came after — the
+        // ones most likely to be cut off by the per-pass cap or to fail outright over a
+        // cross-NAT dial. The reliable outcome was a manifest promising N chunks over a store
+        // holding fewer, which readers stall on forever and the author's backup probe reads
+        // as a finished upload. Windows first, and the manifest only once they are all here
+        // (see the completeness gate in the pull loop below).
+        if k.contains(".p/") {
+            2
+        } else {
+            3
+        }
+    } else {
+        1
+    }
+}
+
+/// What one mesh pass pulls from a sibling, in order: by class, then FRESHEST first, then key.
+///
+/// The pass used to take the first 24 keys in (class, key) order. The e2e mesh check went from
+/// intermittent to never: a member re-announces its relays under `…/__relay__/…` in every circle
+/// every few seconds, the sibling's backlog of those grew past the 24-key window, and because the
+/// window always started at the same lexicographic keys a fresh event whose name sorted late was
+/// starved forever ("R_A pulls a fresh key from R_C": never in 420 s; 102 keys behind at the end).
+/// Newest-first means a fresh write crosses on the next pass whatever the backlog, and the small
+/// keys get a window sized for them rather than for 8 MiB media.
+pub(crate) fn mesh_pass_selection(mut want: Vec<(String, u64)>) -> Vec<(String, u64)> {
+    want.sort_by(|a, b| {
+        mesh_pull_rank(&a.0)
+            .cmp(&mesh_pull_rank(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let (mut small, mut large) = (0usize, 0usize);
+    want.into_iter()
+        .filter(|(k, _)| {
+            if mesh_pull_rank(k) <= 1 {
+                small += 1;
+                small <= MAX_MESH_SMALL_PULLS_PER_PASS
+            } else {
+                large += 1;
+                large <= MAX_MESH_PULLS_PER_PASS
+            }
+        })
+        .collect()
+}
+
 pub(crate) async fn pull_missing_from_peer(
     root: &Path,
     client: &BlobClient,
@@ -1679,37 +1740,10 @@ pub(crate) async fn pull_missing_from_peer(
     // still answers LIST) loaded multi‑hundred‑MB blobs into RAM every tick — Mac host sample
     // 4.6 GB peak / unresponsive while serving. Remainder is picked up on later passes.
     // Prefer mailbox keys first so event history converges before multi‑MB media.
-    const MAX_MESH_PULLS_PER_PASS: usize = 24;
-    let mut want = keys_to_pull(root, &peer_keys, retention, serves_circle);
+    let want = keys_to_pull(root, &peer_keys, retention, serves_circle);
     let peer_scopes = peer_media_scopes(&peer_keys);
-    want.sort_by(|a, b| {
-        let rank = |k: &str| {
-            if k.starts_with("haven/mailbox/") || media_scope_marker(k).is_some() {
-                // Scope markers ride with the mailboxes: a media blob that lands here WITHOUT its
-                // marker would look unscoped (legacy) and be offered to every sibling of ours.
-                0
-            } else if k.starts_with("haven/media/") {
-                // Chunk WINDOWS before MANIFESTS. These are unrelated keys to this loop, and
-                // `haven/media/<ref>` sorts lexicographically before `haven/media/<ref>.p/0`, so the
-                // ~100-byte manifest was always pulled first and the 8 MiB windows came after — the
-                // ones most likely to be cut off by the per-pass cap or to fail outright over a
-                // cross-NAT dial. The reliable outcome was a manifest promising N chunks over a store
-                // holding fewer, which readers stall on forever and the author's backup probe reads
-                // as a finished upload. Windows first, and the manifest only once they are all here
-                // (see the completeness gate in the pull loop below).
-                if k.contains(".p/") {
-                    2
-                } else {
-                    3
-                }
-            } else {
-                1
-            }
-        };
-        rank(&a.0).cmp(&rank(&b.0)).then_with(|| a.0.cmp(&b.0))
-    });
     let mut pulled = 0usize;
-    for (key, age) in want.into_iter().take(MAX_MESH_PULLS_PER_PASS) {
+    for (key, age) in mesh_pass_selection(want) {
         let Ok(local) = safe_path(root, &key) else { continue };
         // Prefer mailbox / small keys first for liveness; still allow media within the cap.
         // `get` caps the read at MAX_BLOB, so an oversized body can't blow up memory.
@@ -3738,18 +3772,38 @@ mod tests {
     fn mesh_sync_ranks_chunk_windows_ahead_of_their_manifest() {
         // The ordering that stops a manifest landing before the windows it promises. Plain
         // lexicographic order puts `<ref>` before `<ref>.p/0`, which is exactly backwards.
-        let rank = |k: &str| {
-            if k.starts_with("haven/mailbox/") {
-                0
-            } else if k.starts_with("haven/media/") {
-                if k.contains(".p/") { 2 } else { 3 }
-            } else {
-                1
-            }
-        };
-        assert!(rank("haven/media/vid_a.p/0") < rank("haven/media/vid_a"));
-        assert!(rank("haven/mailbox/fam/e1") < rank("haven/media/vid_a.p/0"));
+        assert!(mesh_pull_rank("haven/media/vid_a.p/0") < mesh_pull_rank("haven/media/vid_a"));
+        assert!(mesh_pull_rank("haven/mailbox/fam/e1") < mesh_pull_rank("haven/media/vid_a.p/0"));
         assert!("haven/media/vid_a" < "haven/media/vid_a.p/0", "the order the rank has to override");
+        let pass = mesh_pass_selection(vec![
+            ("haven/media/vid_a".into(), 1),
+            ("haven/media/vid_a.p/0".into(), 1),
+            ("haven/mailbox/fam/e1".into(), 1),
+        ]);
+        let keys: Vec<&str> = pass.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["haven/mailbox/fam/e1", "haven/media/vid_a.p/0", "haven/media/vid_a"]);
+    }
+
+    /// e2e `multirelay` "R_A pulls a fresh key from R_C" went from intermittent to never: the
+    /// sibling's backlog of older `__relay__` announces outgrew the per-pass window, and the window
+    /// always started at the same lexicographic keys, so a fresh event whose name sorted late never
+    /// crossed. Freshest first, with a window sized for small keys.
+    #[test]
+    fn a_fresh_key_crosses_on_the_next_pass_whatever_the_backlog() {
+        let mut want: Vec<(String, u64)> = (0..300)
+            .map(|i| (format!("haven/mailbox/cs/__relay__/aa/{i:064x}"), 3_600 + i as u64))
+            .collect();
+        let fresh = format!("haven/mailbox/cs/{}", "f".repeat(64));
+        want.push((fresh.clone(), 2));
+        for i in 0..40 {
+            want.push((format!("haven/media/img_{i:04}"), 5));
+        }
+        let pass = mesh_pass_selection(want);
+        assert_eq!(pass.first().map(|(k, _)| k.as_str()), Some(fresh.as_str()), "the freshest key goes first");
+        let small = pass.iter().filter(|(k, _)| k.starts_with("haven/mailbox/")).count();
+        let media = pass.iter().filter(|(k, _)| k.starts_with("haven/media/")).count();
+        assert_eq!(small, MAX_MESH_SMALL_PULLS_PER_PASS);
+        assert_eq!(media, MAX_MESH_PULLS_PER_PASS, "big blobs keep their own, smaller window");
     }
 
     #[test]

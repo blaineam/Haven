@@ -5856,6 +5856,7 @@ final class FeedStore: ObservableObject {
                 let circleId: String
                 let hex: String
                 let members: [String]
+                let plain: Data
                 let payload: Data
             }
             let sealed: [SealedFrame] = await engine.run { s in
@@ -5867,7 +5868,7 @@ final class FeedStore: ObservableObject {
                     let n = UInt16(idBytes.count)
                     p.append(UInt8(n & 0xff)); p.append(UInt8(n >> 8)); p.append(idBytes)
                     p.append(sealed)
-                    out.append(SealedFrame(circleId: j.circleId, hex: j.hex, members: j.members, payload: p))
+                    out.append(SealedFrame(circleId: j.circleId, hex: j.hex, members: j.members, plain: j.plain, payload: p))
                 }
                 return out
             }
@@ -5880,7 +5881,7 @@ final class FeedStore: ObservableObject {
                 // learn the relay. Only the HOST (or Mac) should PUT these — every phone doing it
                 // each reannounce cycle was continuous HTTP put heat.
                 if hosting {
-                    Task { await SharedStore.putRelayAnnounce(circleId: f.circleId, nodeHex: f.hex, payload: f.payload) }
+                    Task { await SharedStore.putRelayAnnounce(circleId: f.circleId, nodeHex: f.hex, plain: f.plain, payload: f.payload) }
                 }
             }
         }
@@ -5908,7 +5909,10 @@ final class FeedStore: ObservableObject {
                 if !turnUser.isEmpty { obj["turnUser"] = turnUser }
                 if !turnPass.isEmpty { obj["turnPass"] = turnPass }
             }
-            if let json = try? JSONSerialization.data(withJSONObject: obj) { return json }
+            // Sorted keys: the announce is hashed into its mailbox key (`RelayAnnounceKey`), and a
+            // Dictionary's order differs per process — unsorted, one relay's unchanged announce got a
+            // new key after every relaunch.
+            if let json = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) { return json }
         }
         return Data(hex.utf8)
     }

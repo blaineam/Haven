@@ -201,6 +201,32 @@ final class RelayAuthPlanTests: XCTestCase {
     }
 }
 
+/// Durable relay announces are keyed by their plaintext (ReachPolicy.swift `RelayAnnounceKey`).
+final class RelayAnnounceKeyTests: XCTestCase {
+    let relay = String(repeating: "a", count: 64)
+    func announce(_ urls: [String]) -> Data {
+        try! JSONSerialization.data(withJSONObject: ["node": relay, "addedAt": 5, "urls": urls, "token": "t0k"],
+                                    options: [.sortedKeys])
+    }
+
+    /// One e2e run left 194 copies of one relay's announce in one circle: every re-announce was a
+    /// new mailbox entry. N announces of the same relay must leave ONE entry.
+    func testRepeatsOfTheSameAnnounceAreOneEntry() {
+        let keys = Set((0..<50).map { _ in RelayAnnounceKey.key(circleId: "cS", nodeHex: relay, plain: announce(["http://a"])) })
+        XCTAssertEqual(keys.count, 1)
+        XCTAssertEqual(RelayAnnounceKey.key(circleId: "cS", nodeHex: relay.uppercased(), plain: announce(["http://a"])), keys.first)
+        XCTAssertTrue(keys.first!.hasPrefix("haven/mailbox/cS/__relay__/\(relay)/"))
+    }
+
+    /// A real change (a rotated URL) is a NEW key, so no reader's seen-cursor hides it; another
+    /// circle's copy is its own entry.
+    func testAChangedAnnounceOrAnotherCircleIsANewEntry() {
+        let a = RelayAnnounceKey.key(circleId: "cS", nodeHex: relay, plain: announce(["http://a"]))
+        XCTAssertNotEqual(a, RelayAnnounceKey.key(circleId: "cS", nodeHex: relay, plain: announce(["http://b"])))
+        XCTAssertNotEqual(a, RelayAnnounceKey.key(circleId: "cR", nodeHex: relay, plain: announce(["http://a"])))
+    }
+}
+
 /// Sibling teaching is per circle (ReachPolicy.swift `SiblingTeachPlan`).
 final class SiblingTeachPlanTests: XCTestCase {
     let own = String(repeating: "b", count: 64)      // B's in-app relay

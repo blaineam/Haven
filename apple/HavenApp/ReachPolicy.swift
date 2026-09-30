@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// Pure policy for reaching peers and relays fast — no FeedStore, no FFI, so HavenLogicTests covers
 /// it host-less. Two rules live here because both were "serial by accident" slowness:
@@ -149,6 +150,31 @@ struct PendingEnrollment {
     func mayAttempt(_ relay: String, nowMs: UInt64) -> Bool {
         guard let until = holdUntilMs[relay.lowercased()] else { return true }
         return nowMs >= until || !isPending(relay, nowMs: nowMs)
+    }
+}
+
+/// The mailbox key of a durable frame-19 relay announce (`…/__relay__/<relay>/<id>`).
+///
+/// It used to be the hash of the SEALED payload — and sealing wraps under a fresh random key every
+/// time, so every re-announce (each sync cycle, each nearby connect, each relay change) minted a NEW
+/// mailbox entry for the same announcement: one e2e run left 194 copies of one relay's announce in
+/// one circle, on every relay of that circle, each re-listed by every member poll and re-replicated
+/// by every sibling (the backlog that starved the relay mesh). The id is now a hash of the circle,
+/// the relay and the announce's PLAINTEXT, so repeats of the same announcement land on one entry
+/// (re-PUT = overwrite) while a real change — a rotated URL, a new token — is still a new key that
+/// no reader's seen-cursor hides. The plaintext carries the relay's random token, so the id reveals
+/// nothing a relay could enumerate.
+enum RelayAnnounceKey {
+    static func key(circleId: String, nodeHex: String, plain: Data) -> String {
+        var h = SHA256()
+        h.update(data: Data("haven-relay-announce-v1".utf8))
+        for part in [Data(circleId.utf8), Data(nodeHex.lowercased().utf8), plain] {
+            var n = UInt32(part.count).littleEndian
+            h.update(data: Data(bytes: &n, count: 4))
+            h.update(data: part)
+        }
+        let id = h.finalize().map { String(format: "%02x", $0) }.joined()
+        return "haven/mailbox/\(circleId)/__relay__/\(nodeHex.lowercased())/\(id)"
     }
 }
 

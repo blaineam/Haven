@@ -2825,12 +2825,12 @@ enum SharedStore {
     }
 
     /// Publish a sealed frame-19 relay announce into the circle mailbox so friends who miss live
-    /// iroh still learn the relay over HTTP LIST/GET. Content-addressed (payload hash) so a rotated
-    /// free-CF URL is a new key rather than stuck behind a seen cursor.
-    static func putRelayAnnounce(circleId: String, nodeHex: String, payload: Data) async {
+    /// iroh still learn the relay over HTTP LIST/GET. Keyed by the announce's PLAINTEXT
+    /// (`RelayAnnounceKey`): a repeat of the same announcement is one entry, a rotated free-CF URL
+    /// is a new key rather than stuck behind a seen cursor.
+    static func putRelayAnnounce(circleId: String, nodeHex: String, plain: Data, payload: Data) async {
         guard !circleId.isEmpty, nodeHex.count == 64, !payload.isEmpty else { return }
-        let h = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
-        let key = "haven/mailbox/\(circleId)/__relay__/\(nodeHex.lowercased())/\(h)"
+        let key = RelayAnnounceKey.key(circleId: circleId, nodeHex: nodeHex, plain: plain)
         if seenContains(key) { return }   // this exact announce already landed
         var landed = false
         for node in relayNodes(circleId) {

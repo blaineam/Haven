@@ -9934,15 +9934,23 @@ final class FeedStore: ObservableObject {
         let me = myNodeHex
         var refs: [String] = []
         for item in items { refs.append(contentsOf: item.media); for c in item.comments { refs.append(contentsOf: c.media) } }
-        var budget = 2   // only a couple per pass — the link is slow; the rest follow on later ticks
-        for ref in refs {
-            if budget <= 0 { break }
-            if pushedNearby.contains(ref) || SharedLocation.parse(ref) != nil { continue }
-            guard let url = MediaStore.shared.storagePath(for: ref), FileManager.default.fileExists(atPath: url.path) else { continue }
-            pushedNearby.insert(ref)
+        // Only a couple per pass — the link is slow; the rest follow on later ticks. And only what the
+        // link may carry: on an ultra-constrained link, previews only; held originals stay unmarked and
+        // go on the first pass after the link improves (see `OwnMediaPush`).
+        let ultra = LowDataMonitor.shared.effective == .ultra
+        let picked = OwnMediaPush.pick(refs, alreadyPushed: &pushedNearby, budget: 2,
+            eligible: { ref in
+                guard SharedLocation.parse(ref) == nil, let url = MediaStore.shared.storagePath(for: ref) else { return false }
+                return FileManager.default.fileExists(atPath: url.path)
+            },
+            mayMoveOverLink: { ref in
+                HeavyWorkPolicy.mayMoveOverLink(ultraConstrained: ultra,
+                                                satelliteSafe: MediaStore.shared.maySendOnUltraConstrained(ref))
+            })
+        for ref in picked {
+            guard let url = MediaStore.shared.storagePath(for: ref) else { continue }
             guard shouldServeNearby(ref, requester: me) else { continue }
             sendMediaChunks(ref: ref, fileURL: url, to: me)
-            budget -= 1
         }
         if pushedNearby.count > 5000 { pushedNearby.removeAll() }
     }

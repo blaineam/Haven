@@ -192,3 +192,30 @@ enum HeavyWorkPolicy {
         !ultraConstrained || satelliteSafe
     }
 }
+
+/// Which of my media refs the unsolicited own-device push (`FeedStore.pushOwnMediaNearby`) sends
+/// this pass.
+///
+/// That push streams full originals to every one of my devices — over the nearby mesh AND iroh
+/// (`sendMediaChunks` mirrors own-device chunks to all my device ids) — and it was the one serve path
+/// the ultra-constrained gate never covered. On Android it put a 330 KB original on a sibling mid-
+/// satellite-pass; the sibling (on a normal link) backed it up as its own and the friend got the full
+/// photo (e2e `satellite holds back the full photo`). A ref the link may not carry is SKIPPED WITHOUT
+/// being marked pushed, so the first pass after the link improves sends it — deferred, never dropped.
+/// Mirrors Android's `OwnMediaPush.pick`.
+enum OwnMediaPush {
+    /// `alreadyPushed` gains every ref this pass sends; the budget counts only those.
+    static func pick<S: Sequence>(_ refs: S, alreadyPushed: inout Set<String>, budget: Int,
+                                  eligible: (String) -> Bool,
+                                  mayMoveOverLink: (String) -> Bool) -> [String] where S.Element == String {
+        var out: [String] = []
+        for ref in refs {
+            if out.count >= budget { break }
+            if alreadyPushed.contains(ref) || !eligible(ref) { continue }
+            if !mayMoveOverLink(ref) { continue }   // held for a better link — deliberately not marked
+            alreadyPushed.insert(ref)
+            out.append(ref)
+        }
+        return out
+    }
+}

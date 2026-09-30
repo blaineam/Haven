@@ -4,7 +4,7 @@ import {
   num, delta, parseUiNodes, findNode, center, CONSENT, isConsentSurface, fgsTypes, holdsMediaProjection,
   auditShareLog, longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields,
   persistExportAllowance, reactLatency, ingestedFirst, feedNotGatedOnDmWarm, PERF_FIELDS,
-  nonDecreasing, recordProgress, badgeTransitions,
+  nonDecreasing, recordProgress, badgeTransitions, adbDeviceGone, qemuCrashSince,
 } from './e2e-steps.mjs';
 
 test('num / delta treat missing and junk as zero', () => {
@@ -175,4 +175,26 @@ test('progress: the pill\'s transition log proves synced → syncing → synced'
   assert.equal(badgeTransitions(undefined).sawSending, false);
   // a syncing row with 0 pending is not a send
   assert.equal(badgeTransitions([{ circle: c, state: 'syncing', pending: 0, atMs: 5 }], { circle: c }).sawSending, false);
+});
+
+test('adbDeviceGone: a vanished emulator, not a failing command', () => {
+  assert.equal(adbDeviceGone('adb: error: failed to get feature set: no devices/emulators found'), true);
+  assert.equal(adbDeviceGone("error: device 'emulator-5554' not found"), true);
+  assert.equal(adbDeviceGone('adb: device offline'), true);
+  assert.equal(adbDeviceGone('run-as: package not debuggable: com.blaineam.haven'), false);
+  assert.equal(adbDeviceGone('exit 1: cat: files/qa/x: No such file or directory'), false);
+  assert.equal(adbDeviceGone(undefined), false);
+});
+
+test('qemuCrashSince: only a qemu report written during this run', () => {
+  const t0 = 1_000_000;
+  const reports = [
+    { name: 'qemu-system-aarch64-2026-09-30-023709.ips', mtimeMs: t0 - 5 },           // before the run
+    { name: 'Haven-2026-09-30-090000.ips', mtimeMs: t0 + 50 },                          // not qemu
+    { name: 'qemu-system-aarch64-2026-09-30-090434.ips', mtimeMs: t0 + 10 },
+    { name: 'qemu-system-aarch64-headless-2026-09-30-091000.ips', mtimeMs: t0 + 20 },
+  ];
+  assert.equal(qemuCrashSince(reports, t0), 'qemu-system-aarch64-headless-2026-09-30-091000.ips');
+  assert.equal(qemuCrashSince(reports.slice(0, 2), t0), null);
+  assert.equal(qemuCrashSince(undefined, t0), null);
 });

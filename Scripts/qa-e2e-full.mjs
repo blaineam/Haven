@@ -30,6 +30,7 @@ import {
   num, delta, parseUiNodes, findNode, center, CONSENT, isConsentSurface, holdsMediaProjection, auditShareLog,
   longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields, persistExportAllowance,
   reactLatency, ingestedFirst, feedNotGatedOnDmWarm, nonDecreasing, recordProgress, badgeTransitions,
+  adbDeviceGone, qemuCrashSince,
 } from './lib/e2e-steps.mjs';
 import {
   portPlan, collisionVerdict, decodeComp, eventKeys, mailboxCircles, holdsMedia, misplacedCircles, keyDiff,
@@ -275,7 +276,29 @@ function adbAttempt(args) {
     : r.error ? `${r.error.code || r.error.message}`
     : r.signal ? `killed by ${r.signal}` : `exit ${r.status}`;
   const err = String(r.stderr || r.stdout || '').trim().split('\n').slice(-2).join(' | ').slice(0, 200);
+  noteAndroidEmulatorGone(err);
   return err ? `${why}: ${err}` : why;
+}
+
+/// The android EMULATOR died (not the app) — see `adbDeviceGone` in lib/e2e-steps.mjs for the
+/// 2026-09-30 gate that read a qemu host abort as android product failures. Set once, on the first
+/// adb error that says the device itself is gone; names the host crash report when there is one.
+let androidEmulatorGone = null;
+function noteAndroidEmulatorGone(adbText) {
+  if (androidEmulatorGone || !adbDeviceGone(adbText)) return;
+  let crash = null;
+  try {
+    const dir = join(process.env.HOME, 'Library/Logs/DiagnosticReports');
+    crash = qemuCrashSince(readdirSync(dir).map((name) => {
+      try { return { name, mtimeMs: statSync(join(dir, name)).mtimeMs }; } catch { return null; }
+    }).filter(Boolean), RUN_NONCE);
+  } catch { /* no reports dir — the adb error alone is the evidence */ }
+  androidEmulatorGone = crash ? `host crash report ~/Library/Logs/DiagnosticReports/${crash}` : 'adb sees no device';
+  log('');
+  log(`ANDROID EMULATOR GONE — ${androidEmulatorGone}`);
+  log('  The emulator process itself died: this is the TEST RIG, not Haven. Every android check from');
+  log('  here reads RED without waiting out its budget; re-run with a freshly booted emulator.');
+  log('');
 }
 function androidQaWrite(src, name) {
   const d = ANDROID_QA_DIR;
@@ -322,6 +345,7 @@ function makeAndroid() {
   const dumpName = `qa-dump-${AND_PKG}.json`;
   return {
     label: 'android',
+    gone: () => androidEmulatorGone,
     qaWrite: (cmd) => {
       const tmp = join(OUT, 'and-cmd.json'); writeFileSync(tmp, JSON.stringify(cmd));
       if (!note(androidQaWrite(tmp, 'qa-cmd.json'))) log(`WARN android qaWrite '${cmd.op}' failed — this leg will read RED`);
@@ -374,6 +398,13 @@ function makeAndroid() {
       // Two questions before anything else: is the app even running, and is it FOREGROUNDED?
       // QaDriver polls the drop file only between onResume and onPause, so a backgrounded
       // activity is a dead dump channel.
+      // Before blaming the app: is there a device at all? A dead emulator answers every adb call
+      // with "no devices" and used to be reported as "the app process is GONE".
+      if (androidEmulatorGone || String(shOk('adb', ['get-state']) || '').trim() !== 'device') {
+        out.push(`emulator:   GONE — THIS IS THE CAUSE (${androidEmulatorGone || 'adb get-state is not "device"'}).`);
+        out.push('            The emulator process died; nothing on the device can be read or wiped.');
+        return out;
+      }
       const pid = String(shOk('adb', ['shell', 'pidof', AND_PKG]) || '').trim();
       out.push(pid ? `process:    ${AND_PKG} is RUNNING (pid ${pid})`
                    : `process:    ${AND_PKG} is GONE — THIS IS THE CAUSE. Nothing is writing the dump.`);
@@ -699,6 +730,8 @@ async function converge(dev, predicate, budgetMs, pollMs = 1500) {
   // liveness, and a stall is reported as what it is instead of being scored as a product failure.
   let firstSeq = null, lastSeq = null, seqStuckSince = null;
   while (Date.now() - t0 < budgetMs) {
+    // A leg whose emulator died can never converge — do not spend its budget proving it.
+    if (dev.gone?.()) return -1;
     const d = await freshDump(dev);
     if (d && predicate(d)) return Date.now() - t0;
     if (d && typeof d.dump_seq === 'number') {
@@ -2753,6 +2786,15 @@ async function main() {
                : 'preview only, as designed');
 
       // 4. Back in coverage — the deferred half must complete ON ITS OWN, with no further action.
+      //    Not measurable once the AUTHOR's emulator has died: nothing is left to send the full copy,
+      //    and waiting out every receiver's budget (900 s for desktop) only buried the real cause.
+      if (devices[author].gone?.()) {
+        for (const d of audience) {
+          score(`full photo completes on return (${author}→)${lane.label} → ${d}`, false,
+            `NOT MEASURED — ${author}'s emulator died (${devices[author].gone()})`);
+        }
+        continue;
+      }
       await op(devices[author], { op: 'link_constraint', level: 'auto' }, 3000);
       await convergeAll(audience, (j) => {
         const p = find(j, SAT); const v = parsePreview(p);

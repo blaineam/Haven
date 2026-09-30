@@ -234,3 +234,27 @@ export function feedNotGatedOnDmWarm(launch) {
   if (typeof f !== 'number') return false;
   return typeof w !== 'number' || f <= w;
 }
+
+// ── android emulator health ─────────────────────────────────────────────────────────────────
+//
+// The 2026-09-30 gate lost its android leg MID-RUN: qemu-system-aarch64 (emulator 36.6.11) aborted
+// in its own gRPC server (`__throw_bad_function_call` under `CallbackWithSuccessTag::StaticRun`)
+// 5h20m after boot, and the guest had stopped acking network frames minutes before. The harness then
+// scored every android-authored satellite lane "never", waited out a 900 s budget on content whose
+// author no longer existed, and diagnosed the corpse as "app process GONE". The same host abort is
+// on record five times in a week, each 2h49m–6h30m into an emulator's life — an EMULATOR failure,
+// not a product one, and it must read as one.
+
+/** adb stderr that means the device itself is gone (not a failing command on a live device). */
+export function adbDeviceGone(text) {
+  return /no devices\/emulators found|device offline|device '[^']*' not found|device not found/i.test(String(text || ''));
+}
+
+/** The qemu host crash report written during this run, if any: newest `qemu-system-*.ips` whose
+ *  mtime is at/after `sinceMs`. `reports` = [{ name, mtimeMs }]. */
+export function qemuCrashSince(reports, sinceMs) {
+  const hits = (reports || [])
+    .filter((r) => /^qemu-system-.*\.ips$/.test(r?.name || '') && num(r.mtimeMs) >= num(sinceMs))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return hits[0]?.name || null;
+}

@@ -301,6 +301,18 @@ boot_haven_emulator() {
     -crash-report-mode never \
     >"$OUT/emulator.log" 2>&1 &
 }
+# Kill the running emulator and cold-boot it again; sets booted=1 once sys.boot_completed answers.
+cold_reboot_haven_emulator() {
+  adb emu kill >/dev/null 2>&1 || true
+  for i in $(seq 1 30); do [[ "$(adb get-state 2>/dev/null || true)" != "device" ]] && break; sleep 1; done
+  boot_haven_emulator
+  for i in $(seq 1 160); do [[ "$(adb get-state 2>/dev/null || true)" == "device" ]] && break; sleep 3; done
+  booted=0
+  for i in $(seq 1 100); do
+    [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == "1" ]] && { booted=1; break; }
+    sleep 3
+  done
+}
 android_has_network() {
   adb shell dumpsys connectivity 2>/dev/null | grep -q "Active default network: [0-9]"
 }
@@ -342,15 +354,22 @@ elif command -v adb >/dev/null 2>&1; then
     # MediaStore dump channel then fail while the app itself looks healthy. Cold-reboot it once.
     if [[ "$booted" == "1" ]] && ! adb shell pm path android >/dev/null 2>&1; then
       log "android emulator is booted but its package manager is dead — cold-rebooting it"
-      adb emu kill >/dev/null 2>&1 || true
-      for i in $(seq 1 30); do [[ "$(adb get-state 2>/dev/null || true)" != "device" ]] && break; sleep 1; done
-      boot_haven_emulator
-      for i in $(seq 1 160); do [[ "$(adb get-state 2>/dev/null || true)" == "device" ]] && break; sleep 3; done
-      booted=0
-      for i in $(seq 1 100); do
-        [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == "1" ]] && { booted=1; break; }
-        sleep 3
-      done
+      cold_reboot_haven_emulator
+    fi
+    # A REUSED emulator past E2E_EMU_MAX_UPTIME_S (default 90 min) is cold-rebooted before the run.
+    # Emulator 36.6.11's qemu host process aborts in its own gRPC server (__throw_bad_function_call
+    # under grpc CallbackWithSuccessTag::StaticRun) 2h49m–6h30m into its life — five crash reports in
+    # a week. The 2026-09-30 gate reused a 5h20m-old emulator; it stopped acking network frames
+    # during the android satellite lane and died four minutes later, and every android-authored
+    # check read "never". A run is ~1 h, so starting under 90 min keeps it clear of that window.
+    # E2E_EMU_MAX_UPTIME_S=0 disables the check.
+    EMU_MAX_UPTIME_S="${E2E_EMU_MAX_UPTIME_S:-5400}"
+    if [[ "$booted" == "1" ]] && (( EMU_MAX_UPTIME_S > 0 )); then
+      emu_up="$(adb shell cat /proc/uptime 2>/dev/null | tr -d '\r' | cut -d. -f1 || true)"
+      if [[ "$emu_up" =~ ^[0-9]+$ ]] && (( emu_up > EMU_MAX_UPTIME_S )); then
+        log "android emulator has been up $((emu_up / 60)) min (> $((EMU_MAX_UPTIME_S / 60))) — cold-rebooting it before the run"
+        cold_reboot_haven_emulator
+      fi
     fi
     if [[ "$booted" != "1" ]]; then
       log "WARN: android emulator never finished booting — android leg skipped"

@@ -32,4 +32,12 @@ class MediaVariantsRoleTest {
         assertNull(MediaVariants.role("img_elsewhere", media))
         assertNull(MediaVariants.role("", media))
     }
+
+    /** Previews lead, companions only (never the content), each once — a receive loop that walks
+     *  `media` never asked for the preview a satellite sender uploads. */
+    @Test fun prefetch_companions_list_previews_first() {
+        val withDup = media + MediaVariants.previewMarker("img_photo", "img_prev")
+        assertEquals(listOf("img_prev", "img_thumb", "img_poster"), MediaVariants.prefetchCompanions(withDup))
+        assertEquals(emptyList<String>(), MediaVariants.prefetchCompanions(listOf("img_photo")))
+    }
 }

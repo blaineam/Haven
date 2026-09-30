@@ -878,6 +878,17 @@ enum SharedStore {
     /// case the seal-reuse guard below silently made permanent.
     static func backup(ref: String, circleId: String, engine: Engine, force: Bool = false,
                        reseal: Bool = false) async -> Bool {
+        // ULTRA-CONSTRAINED LINK: previews only, by EVERY upload path. The queue filters its own jobs
+        // (MediaBackupQueue.drain), but a friend's media-wanted ask, a direct-ask re-probe or a
+        // quarantine re-seal call this directly — and one of those put a 330 KB original on the relay
+        // while the link was forced to satellite (e2e `satellite holds back the full photo`). Not
+        // uploaded is not lost: the persisted queue re-offers it when the link improves, and an asker
+        // re-asks.
+        if !HeavyWorkPolicy.mayMoveOverLink(ultraConstrained: LowDataMonitor.shared.effective == .ultra,
+                                            satelliteSafe: MediaStore.shared.maySendOnUltraConstrained(ref)) {
+            HavenLog.sync("backup ref=\(ref.prefix(12)) held — link is ultra-constrained (previews only)")
+            return false
+        }
         if await backupOnce(ref: ref, circleId: circleId, engine: engine, force: force, reseal: reseal) { return true }
         // Nothing took the blob and at least one relay REFUSED it rather than being down: publish our
         // roster to the refusers and try once more, exactly as `restore` does for the read side. A

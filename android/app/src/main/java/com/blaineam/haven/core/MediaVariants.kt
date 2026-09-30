@@ -70,6 +70,13 @@ object MediaVariants {
     fun allPreviews(media: List<String>): List<String> =
         media.mapNotNull { parsePreview(it)?.second }
 
+    /** The small companions a receiver prefetches for a post or message, previews first: previews
+     *  (≤8 KB — the only media a satellite sender uploads at all), thumbs, then posters. None is
+     *  listed in `media` itself — each is named only inside its marker — so a fetch loop walking
+     *  `media` never asks for them; every receive path must add these explicitly. Apple parity. */
+    fun prefetchCompanions(media: List<String>): List<String> =
+        (allPreviews(media) + allThumbs(media) + media.mapNotNull { parsePoster(it)?.second }).distinct()
+
     /** The ONLY refs that may cross an ultra-constrained link. Everything heavier stays queued and
      *  uploads when service returns (docs/PREVIEW-TIER-DESIGN.md §4.1). */
     fun satelliteRefs(media: List<String>): List<String> = allPreviews(media)

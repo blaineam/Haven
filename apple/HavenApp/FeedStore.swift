@@ -6799,9 +6799,15 @@ final class FeedStore: ObservableObject {
         var budget = 4
         let dataSaver = SettingsStore.shared.dataSaverActive
         for item in recent {
-            let candidates = dataSaver
+            // Companions FIRST. A preview/thumb/poster is named only inside its marker and never
+            // listed in `item.media`, so walking the media alone never asked for one: a DM sent over
+            // a satellite link — whose preview is the ONLY blob its sender uploads — arrived with its
+            // preview on the relay and nothing requesting it (e2e `satellite preview blob [dm]`).
+            let content = dataSaver
                 ? MediaVariants.dataSaverPrefetchRefs(item.media)
                 : item.media.filter { !MediaStore.isSynthetic($0) }
+            var candidates = MediaVariants.prefetchCompanions(in: item.media)
+            for r in content where !candidates.contains(r) { candidates.append(r) }
             for ref in candidates where !MediaStore.shared.has(ref) {
                 guard budget > 0 else { return }
                 budget -= 1
@@ -9676,6 +9682,13 @@ final class FeedStore: ObservableObject {
         guard let (requesterHex, ref, claimed, bitmap) = ReassemblyStore.decodeResume(payload) else { return }
         guard let url = MediaStore.shared.storagePath(for: ref),
               FileManager.default.fileExists(atPath: url.path) else { return }
+        // Same ultra-constrained gate as a first request (frame 3): a resume is a serve too, and its
+        // relay-first branch can promote the full upload.
+        guard HeavyWorkPolicy.mayMoveOverLink(ultraConstrained: LowDataMonitor.shared.effective == .ultra,
+                                              satelliteSafe: MediaStore.shared.maySendOnUltraConstrained(ref)) else {
+            HavenLog.net("media RESUME ref=\(ref.prefix(12)) — refused, link is ultra-constrained")
+            return
+        }
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         let total = max(1, (size + Self.mediaChunkSize - 1) / Self.mediaChunkSize)
         // A total that disagrees with ours means their partial was built against different bytes —

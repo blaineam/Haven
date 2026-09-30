@@ -177,4 +177,18 @@ enum HeavyWorkPolicy {
         if c.suspendHeavyIO { return UploadBudget(priority: 1, backfill: 0) }
         return UploadBudget(priority: base, backfill: base)
     }
+
+    // MARK: - Ultra-constrained (satellite) link
+
+    /// May a blob leave this device over the current link (`docs/PREVIEW-TIER-DESIGN.md` §4.1)?
+    ///
+    /// On an ultra-constrained link only satellite-safe media (a preview, or anything already within
+    /// the preview budget) crosses — by EVERY path: the backup queue, a forced re-seal answering a
+    /// friend's media-wanted ask, a relay-hint's deferred upload, a resume serve. The queue was gated
+    /// and the ask-driven paths were not, so a friend's "can't find it on the relay" ask put the full
+    /// original on the relay mid-satellite-pass. Held work is deferred, not dropped: it re-runs when
+    /// the link improves.
+    static func mayMoveOverLink(ultraConstrained: Bool, satelliteSafe: Bool) -> Bool {
+        !ultraConstrained || satelliteSafe
+    }
 }

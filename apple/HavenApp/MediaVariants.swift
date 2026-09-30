@@ -187,6 +187,18 @@ enum MediaVariants {
         media.compactMap { parsePreview($0)?.preview }
     }
 
+    /// The small companions a receiver prefetches for a post or message, previews first: previews
+    /// (≤8 KB — the only media a satellite sender uploads at all), thumbs, then posters. None of them
+    /// is listed in `media` itself — each is named only inside its marker — so a fetch loop that walks
+    /// `media` never asks for them; every receive path must add these explicitly.
+    static func prefetchCompanions(in media: [String]) -> [String] {
+        var out: [String] = []
+        for r in allPreviews(in: media) + allThumbs(in: media) + allPosters(in: media) where !out.contains(r) {
+            out.append(r)
+        }
+        return out
+    }
+
     /// The ONLY refs that may cross an ultra-constrained link (`docs/PREVIEW-TIER-DESIGN.md` §4.1).
     ///
     /// Everything else in the post — the optimized copy, the original, thumbs, posters — stays

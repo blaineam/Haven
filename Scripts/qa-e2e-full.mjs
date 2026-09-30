@@ -278,6 +278,19 @@ function androidQaWrite(src, name) {
   return false;
 }
 
+/// What the android app is burning CPU on: the process's share of the emulator, its hottest
+/// threads, and two Java stack samples (debuggerd -j; the build is debuggable). The 2026-09-30 gate
+/// saw the app at 124 % CPU until system_server hit its watchdog — with nothing recorded to say why.
+function androidCpuSample(label) {
+  const pid = String(shOk('adb', ['shell', 'pidof', AND_PKG]) || '').trim();
+  if (!pid) { log(`android cpu [${label}]: app not running`); return; }
+  const top = shOk('adb', ['shell', `top -H -b -n 1 -p ${pid} | head -16`]) || '';
+  const proc = shOk('adb', ['shell', `top -b -n 1 -p ${pid} | tail -1`]) || '';
+  const stacks = [1, 2].map(() => shOk('adb', ['shell', `debuggerd -j ${pid}`]) || '(debuggerd failed)');
+  writeFileSync(join(OUT, `android-cpu-${label}.txt`), `${proc}\n\n${top}\n\n${stacks.join('\n\n==== sample 2 ====\n\n')}`);
+  log(`android cpu [${label}]: ${proc.trim().replace(/\s+/g, ' ').slice(0, 160)} (threads + stacks: android-cpu-${label}.txt)`);
+}
+
 function makeAndroid() {
   // Every adb interaction is best-effort: an emulator hiccup (adb restarts, a wedged shell) must
   // degrade this leg to RED checks, never crash the whole run.
@@ -1583,11 +1596,21 @@ async function main() {
       shOk('adb', ['shell', 'am', 'start', '-n', `${AND_PKG}/.MainActivity`]);
       channelFor(devices.android).reset('android relaunched by the launch step');
       await sleep(3000);
-      let LA = null;
+      let LA = null, lastLA = null;
       await converge(devices.android, (x) => {
+        if (num(x?.launch?.process_start_ms) >= t - 2000) lastLA = x.launch;
         const ok = num(x?.launch?.process_start_ms) >= t - 2000 && typeof x.launch?.first_feed_rendered_ms === 'number';
         if (ok) LA = x.launch; return ok;
       }, 60_000);
+      // WHERE the first feed waited (engine construct, state import, first non-empty decode…) —
+      // marks are ms since process start, phases are durations. Plus the app's logcat for the
+      // launch window and a CPU/stack sample, so a slow launch is diagnosable after the fleet has
+      // moved on. Logged BEFORE the gate: a targeted run fails fast on the RED.
+      log(`launch: android launch timings ${JSON.stringify(LA || lastLA)}`);
+      const lpid = String(shOk('adb', ['shell', 'pidof', AND_PKG]) || '').trim();
+      const lc = lpid ? shOk('adb', ['logcat', '-d', `--pid=${lpid}`]) : null;
+      if (lc) writeFileSync(join(OUT, 'android-launch-logcat.txt'), lc);
+      androidCpuSample('launch');
       perfGate('launch: launch → first feed rendered [android]', 'android',
         typeof LA?.first_feed_rendered_ms === 'number' ? LA.first_feed_rendered_ms : -1, BUDGET.launchAndroid);
     }

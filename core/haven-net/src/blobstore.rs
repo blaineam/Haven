@@ -1153,6 +1153,10 @@ pub fn gc_sweep_with(root: &Path, retention: &Retention, grace: std::time::Durat
     // backdated leftovers, a member's stale TOUCH set) as live.
     let mailbox_marker = root.join(".haven-gc-enabled");
     if !mailbox_marker.is_file() && local_list(root, MAILBOX_PREFIX).is_empty() {
+        // The store root may not exist yet (a headless relay's first start enables GC before
+        // anything is written) — without this the write failed silently and the fallback below
+        // planted a FRESH marker, i.e. the full 48 h grace (e2e `multirelay`, run 6).
+        let _ = std::fs::create_dir_all(root);
         let _ = std::fs::write(&mailbox_marker, b"");
         backdate(&mailbox_marker, grace.as_secs());
     }
@@ -3482,6 +3486,15 @@ mod tests {
         local_put(&fresh, "haven/media/m", b"x").unwrap(); // media doesn't count
         let _ = gc_sweep(&fresh, MAILBOX_TTL, GC_GRACE);
         assert!(idle_age_secs(&fresh.join(".haven-gc-enabled")) >= GC_GRACE.as_secs());
+        // A headless relay's first start: the store directory does not even exist yet.
+        let absent = std::env::temp_dir().join(format!("haven-gc-absent-{}", std::process::id())).join("store");
+        let _ = std::fs::remove_dir_all(absent.parent().unwrap());
+        let _ = gc_sweep(&absent, MAILBOX_TTL, GC_GRACE);
+        assert!(
+            idle_age_secs(&absent.join(".haven-gc-enabled")) >= GC_GRACE.as_secs(),
+            "a relay whose store did not exist yet must not start inside the grace"
+        );
+        let _ = std::fs::remove_dir_all(absent.parent().unwrap());
         let old = std::env::temp_dir().join(format!("haven-gc-upgraded-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&old);
         std::fs::create_dir_all(&old).unwrap();

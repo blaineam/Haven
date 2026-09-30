@@ -152,6 +152,31 @@ struct PendingEnrollment {
     }
 }
 
+/// What an in-app host teaches each relay about its siblings (`RelayHost.teachSiblingRelays`).
+/// PER CIRCLE: a relay taught a sibling for a circle lets that sibling replicate the circle's
+/// mailbox, so each circle's relays learn only each other. The flat pool (every relay we know, for
+/// every circle we are in) made a friend's relay adopted for ONE shared circle a mirror of the rest,
+/// and kept it mirroring a circle after the circle's creator removed us from it.
+enum SiblingTeachPlan {
+    /// target relay → [(circle, that circle's OTHER relays)]. A circle's relays are those it is
+    /// configured with that are live now, plus our own hosted relay (`myHex`, which serves every
+    /// circle we are in). A circle with a single relay teaches nothing. Deterministic order.
+    static func plan(circleIds: [String], relaysFor: (String) -> [String],
+                     live: Set<String>, myHex: String) -> [(String, [(String, [String])])] {
+        let live = Set(live.map { $0.lowercased() })
+        var byTarget: [String: [(String, [String])]] = [:]
+        for cid in Set(circleIds).sorted() {
+            var set = Set(relaysFor(cid).map { $0.lowercased() }).intersection(live)
+            if myHex.count == 64 { set.insert(myHex.lowercased()) }
+            guard set.count > 1 else { continue }
+            for target in set.sorted() {
+                byTarget[target, default: []].append((cid, set.subtracting([target]).sorted()))
+            }
+        }
+        return byTarget.keys.sorted().map { ($0, byTarget[$0] ?? []) }
+    }
+}
+
 /// What the in-process relay is told to serve, per circle (`RelayHost.authorizeMembership`).
 /// `authorize` REPLACES a circle's member set, so every circle must be authorized exactly once,
 /// with everything that belongs in it. The matrix QA stub used to authorize "default" a SECOND

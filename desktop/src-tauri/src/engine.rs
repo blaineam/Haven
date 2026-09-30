@@ -1895,24 +1895,23 @@ impl Engine {
         });
     }
 
-    /// If we're hosting a relay, pull from every sibling relay so the mailbox self-replicates
-    /// across the mesh — any relay can then join/leave freely without losing the circle's data.
-    /// Hand each relay the circle's full relay list so replication is symmetric. Best-effort and
-    /// silent: an older relay has no such verb and keeps whatever its operator configured.
-    async fn teach_sibling_relays(self: &Arc<Self>, pool: &[String]) {
-        if pool.len() < 2 {
+    /// Hand each relay of a circle THAT circle's other relays, so replication is symmetric. Per
+    /// circle, never the whole pool: a relay taught as a sibling may replicate that circle's
+    /// mailbox, so the flat pool made a friend's relay adopted for ONE shared circle a mirror of
+    /// every other circle we are in (and kept it mirroring one we were removed from). Best-effort
+    /// and silent: an older relay has no such verb. Apple/Android parity (`SiblingTeachPlan`).
+    async fn teach_sibling_relays(self: &Arc<Self>, pool: &[String], my_hex: &str) {
+        let live: std::collections::BTreeSet<String> =
+            pool.iter().filter(|h| h.len() == 64).map(|h| h.to_lowercase()).collect();
+        if live.len() < 2 {
             return; // nothing to teach when we're the only relay
         }
-        let circle_ids: Vec<String> =
-            self.social.circles().into_iter().map(|c| c.id).collect();
-        if circle_ids.is_empty() {
-            return;
-        }
-        for target in pool {
-            let Some(client) = self.relay_client_for(target).await else { continue };
-            let others: Vec<String> = pool.iter().filter(|h| *h != target).cloned().collect();
-            for cid in &circle_ids {
-                let _ = client.teach_relays(cid.clone(), others.clone()).await;
+        let circle_ids: Vec<String> = self.social.circles().into_iter().map(|c| c.id).collect();
+        let plan = sibling_teach_plan(&circle_ids, |c| self.relays_for(c), &live, my_hex);
+        for (target, lessons) in plan {
+            let Some(client) = self.relay_client_for(&target).await else { continue };
+            for (cid, siblings) in lessons {
+                let _ = client.teach_relays(cid, siblings).await;
             }
         }
     }
@@ -1932,7 +1931,7 @@ impl Engine {
             if my_hex.len() == 64 && !pool.contains(&my_hex) {
                 pool.push(my_hex.clone());
             }
-            self.teach_sibling_relays(&pool).await;
+            self.teach_sibling_relays(&pool, &my_hex).await;
         }
         for peer in peers {
             if peer == my_hex || !self.relay_available(&peer) {
@@ -12623,9 +12622,66 @@ mod companion_tests {
     }
 }
 
+/// What an in-app host teaches each relay about its siblings: target relay → [(circle, that
+/// circle's OTHER relays)]. A circle's relays are those it is configured with that are live now,
+/// plus our own hosted relay (`my_hex`, which serves every circle we are in); a circle with a single
+/// relay teaches nothing. Per circle — see `teach_sibling_relays`. Apple/Android parity.
+pub(crate) fn sibling_teach_plan(
+    circle_ids: &[String],
+    relays_for: impl Fn(&str) -> Vec<String>,
+    live: &std::collections::BTreeSet<String>,
+    my_hex: &str,
+) -> Vec<(String, Vec<(String, Vec<String>)>)> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut by_target: BTreeMap<String, Vec<(String, Vec<String>)>> = BTreeMap::new();
+    let circles: BTreeSet<&String> = circle_ids.iter().collect();
+    for cid in circles {
+        let mut set: BTreeSet<String> =
+            relays_for(cid).into_iter().map(|r| r.to_lowercase()).filter(|r| live.contains(r)).collect();
+        if my_hex.len() == 64 {
+            set.insert(my_hex.to_lowercase());
+        }
+        if set.len() < 2 {
+            continue;
+        }
+        for target in &set {
+            let others: Vec<String> = set.iter().filter(|r| *r != target).cloned().collect();
+            by_target.entry(target.clone()).or_default().push((cid.clone(), others));
+        }
+    }
+    by_target.into_iter().collect()
+}
+
 #[cfg(test)]
 mod multirelay_parity_tests {
-    use super::{interface_refresh_due, replace_member_set};
+    use super::{interface_refresh_due, replace_member_set, sibling_teach_plan};
+
+    /// multirelay: B's second relay is adopted for the shared circle only, so it is taught to A's
+    /// relay for C_S — never for C_R (which B was later removed from) or B's private circle.
+    #[test]
+    fn sibling_teaching_is_per_circle() {
+        let (own, ra, rc) = ("b".repeat(64), "a".repeat(64), "c".repeat(64));
+        let live: std::collections::BTreeSet<String> = [own.clone(), ra.clone(), rc.clone()].into_iter().collect();
+        let circles = vec!["cS".to_string(), "cR".to_string(), "cB".to_string()];
+        let relays_for = |c: &str| match c {
+            "cS" => vec![ra.clone(), rc.clone()],
+            "cR" => vec![ra.clone()],
+            _ => vec![],
+        };
+        let plan: std::collections::HashMap<String, std::collections::HashMap<String, Vec<String>>> =
+            sibling_teach_plan(&circles, relays_for, &live, &own)
+                .into_iter()
+                .map(|(t, l)| (t, l.into_iter().collect()))
+                .collect();
+        assert_eq!(plan[&ra]["cS"], vec![own.clone(), rc.clone()]);
+        assert_eq!(plan[&ra]["cR"], vec![own.clone()]);
+        assert!(!plan[&rc].contains_key("cR"), "B's second relay serves no C_R");
+        assert_eq!(plan[&rc]["cS"], vec![ra.clone(), own.clone()]);
+        assert!(!plan[&own].contains_key("cB"), "a circle with only our relay teaches nothing");
+        let dead = "d".repeat(64);
+        let only_me: std::collections::BTreeSet<String> = [own.clone()].into_iter().collect();
+        assert!(sibling_teach_plan(&circles, |_| vec![dead.clone()], &only_me, &own).is_empty());
+    }
 
     #[test]
     fn a_forced_interface_refresh_may_run_once_a_minute_the_speculative_one_every_five() {

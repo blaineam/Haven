@@ -5337,17 +5337,19 @@ object HavenNet : InboundListener {
      * nodeIdHex), so we invoke it reflectively: this compiles + runs against the current .so once
      * the bindings are regenerated (android/build-rust.sh), and no-ops harmlessly until then.
      */
-    /** Hand each relay the circle's full relay list so replication is symmetric. Best-effort and
-     *  silent: an older relay has no such verb and simply keeps its configured peer set. */
-    private suspend fun teachSiblingRelays(pool: List<String>) {
-        val hexes = pool.distinct().filter { it.length == 64 }
-        if (hexes.size < 2) return   // nothing to teach when we're the only relay
+    /** Hand each relay of a circle THAT circle's other relays, so replication is symmetric.
+     *  Per circle, never the whole pool: a relay taught as a sibling may replicate that circle's
+     *  mailbox, so the flat pool made a friend's relay adopted for ONE shared circle a mirror of
+     *  every other circle we are in (and kept it mirroring one we were removed from). Best-effort
+     *  and silent: an older relay has no such verb. Apple parity (`SiblingTeachPlan`). */
+    private suspend fun teachSiblingRelays(pool: List<String>, myHex: String) {
+        val live = pool.filter { it.length == 64 }.map { it.lowercase() }.toSet()
+        if (live.size < 2) return   // nothing to teach when we're the only relay
         val circleIds = runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
-        if (circleIds.isEmpty()) return
-        for (target in hexes) {
+        for ((target, lessons) in siblingTeachPlan(circleIds, { relaysFor(it) }, live, myHex)) {
             val client = relayClientFor(target) ?: continue
-            for (cid in circleIds) {
-                runCatching { client.teachRelays(cid, hexes.filter { it != target }) }
+            for ((cid, siblings) in lessons) {
+                runCatching { client.teachRelays(cid, siblings) }
             }
         }
     }
@@ -5365,7 +5367,7 @@ object HavenNet : InboundListener {
         // Teach every relay in the pool about the others. We already pull from all of them; a
         // HEADLESS relay knew only the `--peer` hexes its operator typed, so it never pulled back
         // and anything uploaded while it was offline stayed missing there. Apple parity.
-        teachSiblingRelays(allRelays().filter { it.length == 64 } + myHex)
+        teachSiblingRelays(allRelays().filter { it.length == 64 } + myHex, myHex)
         for (peer in allRelays()) {
             if (peer == myHex || !relayAvailable(peer)) continue
             val pulled = runCatching {

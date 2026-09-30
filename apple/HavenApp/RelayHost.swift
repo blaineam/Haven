@@ -1031,18 +1031,28 @@ final class RelayHost: ObservableObject {
     private var lastMeshSyncMs: UInt64 = 0
     private static let meshSyncMinIntervalMs: UInt64 = 300_000   // 5 minutes
 
-    /// Hand each relay the circle's full relay list so the mesh is symmetric. Throttled with the
-    /// mesh tick itself (≥5 min) — the list changes rarely and this is one round trip per relay.
-    private func teachSiblingRelays(pool: [String]) {
-        let hexes = pool.filter { $0.count == 64 }
-        guard hexes.count > 1 else { return }   // nothing to teach when we're the only relay
-        let circleIds = FeedStore.shared.circles.map(\.id)
-        guard !circleIds.isEmpty else { return }
+    /// Hand each relay of a circle THAT circle's other relays, so the mesh is symmetric. Per
+    /// circle, never the whole pool: a relay taught as a sibling may replicate that circle's
+    /// mailbox, and the flat pool made every relay we know a sibling for every circle we are in —
+    /// a friend's relay adopted for ONE shared circle ended up mirroring the others, and kept
+    /// mirroring a circle after its creator removed us from it.
+    /// Taught as soon as a circle's relay set changes (a relay adopted, an announce learned), and
+    /// again with every mesh pull — a relay that learns its sibling minutes late pulls minutes late.
+    private var lastTaughtTopology = ""
+
+    private func teachSiblingRelays(pool: [String], myHex: String) {
+        let live = Set(pool.filter { $0.count == 64 })
+        guard live.count > 1 else { return }   // nothing to teach when we're the only relay
+        let plan = SiblingTeachPlan.plan(
+            circleIds: FeedStore.shared.circles.map(\.id),
+            relaysFor: { RelayMailboxStore.shared.relays(forCircle: $0) },
+            live: live, myHex: myHex)
+        guard !plan.isEmpty else { return }
         Task.detached {
-            for target in hexes {
+            for (target, lessons) in plan {
                 guard let client = await RelayClients.client(target) else { continue }
-                for cid in circleIds {
-                    _ = await client.teachRelays(circleId: cid, relays: hexes.filter { $0 != target })
+                for (cid, siblings) in lessons {
+                    _ = await client.teachRelays(circleId: cid, relays: siblings)
                 }
             }
         }
@@ -1051,10 +1061,6 @@ final class RelayHost: ObservableObject {
     func meshSyncTick() {
         guard let handle, serving else { return }
         authorizeMembership() // keep the allow-list fresh as membership / relays change
-        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
-        // Cheap path every tick: membership only. Expensive pull is throttled hard.
-        guard nowMs &- lastMeshSyncMs >= Self.meshSyncMinIntervalMs else { return }
-        lastMeshSyncMs = nowMs
         let myHex = nodeId
         // Only peers we have recently proven OR that advertise a public HTTP front door.
         // `available` alone is true for never-tried / backoff-expired dead NAS → mesh dial timeouts
@@ -1066,12 +1072,25 @@ final class RelayHost: ObservableObject {
                     || (RelayMailboxStore.shared.httpInterface($0)?.urls
                         .contains(where: { RelayMailboxStore.urlReachableByOthers($0) }) ?? false)
             }
+        // Teach the moment a circle's relay set changes — cheap (one round trip per relay per
+        // circle) and it is what lets a headless relay start pulling from a new sibling now.
+        let topology = FeedStore.shared.circles.map(\.id).sorted().map { cid in
+            "\(cid)=" + Set(RelayMailboxStore.shared.relays(forCircle: cid)).intersection(peers).sorted().joined(separator: ",")
+        }.joined(separator: ";")
+        if topology != lastTaughtTopology, !peers.isEmpty {
+            lastTaughtTopology = topology
+            teachSiblingRelays(pool: peers + [myHex], myHex: myHex)
+        }
+        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+        // Cheap path every tick: membership only. Expensive pull is throttled hard.
+        guard nowMs &- lastMeshSyncMs >= Self.meshSyncMinIntervalMs else { return }
+        lastMeshSyncMs = nowMs
         guard !peers.isEmpty else { return }
         // Teach every relay in the pool about the others. We already pull from all of them; a
         // HEADLESS relay knew only the `--peer` hexes its operator typed, so it never pulled back
         // and anything uploaded while it was offline stayed missing there. Best-effort and silent —
         // an older relay has no such verb.
-        teachSiblingRelays(pool: peers + [myHex])
+        teachSiblingRelays(pool: peers + [myHex], myHex: myHex)
         Task {
             var anyPull = false
             for peer in peers {

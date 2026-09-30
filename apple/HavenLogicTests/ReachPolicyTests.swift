@@ -201,6 +201,35 @@ final class RelayAuthPlanTests: XCTestCase {
     }
 }
 
+/// Sibling teaching is per circle (ReachPolicy.swift `SiblingTeachPlan`).
+final class SiblingTeachPlanTests: XCTestCase {
+    let own = String(repeating: "b", count: 64)      // B's in-app relay
+    let ra = String(repeating: "a", count: 64)       // A's relay: C_S, C_R
+    let rc = String(repeating: "c", count: 64)       // B's second relay: C_S only
+    let dead = String(repeating: "d", count: 64)
+
+    /// multirelay: B's second relay is adopted for the shared circle only, so it is taught to A's
+    /// relay for C_S — never for C_R (which B was later removed from) or B's private circle.
+    func testEachCircleTeachesOnlyItsOwnRelays() {
+        let relays: [String: [String]] = ["cS": [ra, rc], "cR": [ra], "cB": []]
+        let plan = SiblingTeachPlan.plan(circleIds: ["cS", "cR", "cB"], relaysFor: { relays[$0] ?? [] },
+                                         live: [ra, rc, own], myHex: own)
+        let byTarget = Dictionary(uniqueKeysWithValues: plan.map { ($0.0, Dictionary(uniqueKeysWithValues: $0.1.map { ($0.0, $0.1) })) })
+        XCTAssertEqual(byTarget[ra]?["cS"], [own, rc].sorted())
+        XCTAssertEqual(byTarget[ra]?["cR"], [own])
+        XCTAssertNil(byTarget[rc]?["cR"], "B's second relay serves no C_R — it is never a C_R sibling")
+        XCTAssertEqual(byTarget[rc]?["cS"], [ra, own].sorted())
+        XCTAssertEqual(byTarget[own]?["cS"], [ra, rc].sorted())
+        XCTAssertNil(byTarget[own]?["cB"], "a circle with only our relay teaches nothing")
+    }
+
+    func testDeadRelaysAndSingleRelayCirclesTeachNothing() {
+        let plan = SiblingTeachPlan.plan(circleIds: ["solo", "x"], relaysFor: { $0 == "x" ? [dead] : [] },
+                                         live: [own], myHex: own)
+        XCTAssertTrue(plan.isEmpty)
+    }
+}
+
 /// Which circle a launch reopens and pulls first (ReachPolicy.swift `LaunchOrder`).
 final class LaunchOrderTests: XCTestCase {
     func testRelaunchReopensTheRememberedCircle() {

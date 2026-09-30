@@ -191,6 +191,14 @@ object QaDriver {
 
     private fun apply(cmd: JSONObject) {
         val op = cmd.optString("op").trim().lowercase()
+        // Call ops are CallManager (main-thread) state — see [QaOpThreads]. Hop, and wait so the
+        // op still completes before the next command is read, exactly as it did on this thread.
+        if (QaOpThreads.needsMain(op) && Looper.myLooper() != Looper.getMainLooper()) {
+            val done = java.util.concurrent.CountDownLatch(1)
+            handler.post { try { apply(cmd) } finally { done.countDown() } }
+            done.await(30, java.util.concurrent.TimeUnit.SECONDS)
+            return
+        }
         Log.i(TAG, "qa-cmd op=$op body=${cmd.optString("body").take(40)}")
         // A qa op represents a user ACTIVELY using the app. Mutating ops reset the adaptive idle
         // stretch exactly like the foreground hook (RootScreen → bumpActivity) and — once the

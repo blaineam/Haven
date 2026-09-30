@@ -1596,9 +1596,9 @@ async function main() {
       shOk('adb', ['shell', 'am', 'start', '-n', `${AND_PKG}/.MainActivity`]);
       channelFor(devices.android).reset('android relaunched by the launch step');
       await sleep(3000);
-      let LA = null, lastLA = null;
+      let LA = null, lastLA = null, lastPerf = null;
       await converge(devices.android, (x) => {
-        if (num(x?.launch?.process_start_ms) >= t - 2000) lastLA = x.launch;
+        if (num(x?.launch?.process_start_ms) >= t - 2000) { lastLA = x.launch; lastPerf = x.perf; }
         const ok = num(x?.launch?.process_start_ms) >= t - 2000 && typeof x.launch?.first_feed_rendered_ms === 'number';
         if (ok) LA = x.launch; return ok;
       }, 60_000);
@@ -1611,6 +1611,14 @@ async function main() {
       const lc = lpid ? shOk('adb', ['logcat', '-d', `--pid=${lpid}`]) : null;
       if (lc) writeFileSync(join(OUT, 'android-launch-logcat.txt'), lc);
       androidCpuSample('launch');
+      // The app's own busy-stack samples (QaPerf; debuggerd needs root): what the main thread did
+      // while its pings were overdue, and what every RUNNABLE thread was on — at first paint, and
+      // again 20 s later (the post-launch catch-up, where a CPU storm would show).
+      log(`launch: android busy stacks at first feed ${JSON.stringify({ main: lastPerf?.mainStallFramesTop, cpu: lastPerf?.cpuSamplesTop, ticks: lastPerf?.cpuSampleTicks })}`);
+      await sleep(20_000);
+      const later = (await freshDump(devices.android))?.perf;
+      log(`launch: android busy stacks +20s ${JSON.stringify({ main: later?.mainStallFramesTop, cpu: later?.cpuSamplesTop, ticks: later?.cpuSampleTicks })}`);
+      androidCpuSample('launch-20s');
       perfGate('launch: launch → first feed rendered [android]', 'android',
         typeof LA?.first_feed_rendered_ms === 'number' ? LA.first_feed_rendered_ms : -1, BUDGET.launchAndroid);
     }

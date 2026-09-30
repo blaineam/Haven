@@ -1638,7 +1638,12 @@ async function main() {
     } else score('launch: first mailbox pass recorded [ios]', false, 'no first_mailbox_pass_ms');
     if (devices.android) {
       shOk('adb', ['shell', 'am', 'force-stop', AND_PKG]);
-      const t = Date.now();
+      // The freshness cut-off is compared with process_start_ms, which the app computes from the
+      // EMULATOR's wall clock — so take it from that clock too. A starved emulator falls behind the
+      // host (11–13 s on 2026-09-30), and a host-clock cut-off then rejected every dump of the
+      // relaunched process as stale: "never / 8s" with launch timings null while the app was fine.
+      const devMs = Math.round(parseFloat(String(shOk('adb', ['shell', 'echo $EPOCHREALTIME']) || '').trim()) * 1000);
+      const t = Number.isFinite(devMs) && devMs > 0 ? devMs : Date.now();
       shOk('adb', ['shell', 'am', 'start', '-n', `${AND_PKG}/.MainActivity`]);
       channelFor(devices.android).reset('android relaunched by the launch step');
       await sleep(3000);

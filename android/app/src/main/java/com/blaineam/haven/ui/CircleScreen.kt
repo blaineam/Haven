@@ -166,7 +166,14 @@ fun CircleScreen(onAddFriend: () -> Unit) {
         circlesVersion, HavenNet.blocked.size, showHidden, hiddenCount))
     val feedRead by androidx.compose.runtime.produceState(initialValue = "" to emptyList<FeedItemFfi>()) {
         com.blaineam.haven.core.conflatedReads(androidx.compose.runtime.snapshotFlow { feedKey.value },
-            read = { key -> readFeed(key.circle, key.showHidden) },
+            read = { key ->
+                val t0 = android.os.SystemClock.uptimeMillis()
+                readFeed(key.circle, key.showHidden).also {
+                    // DEBUG launch timeline: how long the first feed decode that HAD posts took.
+                    if (it.isNotEmpty()) com.blaineam.haven.core.QaStats.phase("first_nonempty_feed_read",
+                        android.os.SystemClock.uptimeMillis() - t0)
+                }
+            },
             publish = { key, list -> value = key.circle to list })
     }
     val items: List<FeedItemFfi> = if (feedRead.first == active) feedRead.second else emptyList()

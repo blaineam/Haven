@@ -12,7 +12,7 @@ import android.provider.MediaStore
  * never writes the same item twice.
  */
 object MediaSaver {
-    private val savedHashes = HashSet<String>()   // session-level dedupe for auto-save
+    private val savedHashes = SharedCollections.set()   // session-level dedupe for auto-save (media lands on IO)
 
     /** Save [bytes] to the gallery. Returns true on success. */
     fun save(context: Context, bytes: ByteArray, isVideo: Boolean): Boolean = runCatching {

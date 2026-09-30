@@ -29,7 +29,7 @@ object NearbyTransport {
 
     private var client: ConnectionsClient? = null
     private var ctx: Context? = null
-    private val endpoints = mutableSetOf<String>()
+    private val endpoints = SharedCollections.set()   // Nearby callbacks write, IO sends iterate — see [SharedCollections]
 
     /** True if at least one nearby peer is currently connected (a post would reach them immediately). */
     fun hasConnectedPeers(): Boolean = endpoints.isNotEmpty()

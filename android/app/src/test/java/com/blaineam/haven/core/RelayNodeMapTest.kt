@@ -23,7 +23,7 @@ class RelayNodeMapTest {
                     val hex = (i % 50).toString().padStart(64, '0')
                     val list = map.getOrPut("c${i % 5}") { RelayNodeMap.newList() }
                     if (!list.contains(hex)) list.add(hex)
-                    if (i % 3 == 0) list.removeAll { it == hex }
+                    if (i % 3 == 0) RelayNodeMap.removeRelay(list, hex)
                     if (i % 7 == 0) map.entries.removeAll { it.value.isEmpty() }
                 }
             } catch (t: Throwable) { failure.compareAndSet(null, t) } finally { done.countDown() }
@@ -63,5 +63,44 @@ class RelayNodeMapTest {
         val other = "e".repeat(64)
         assertTrue(RelayNodeMap.supersededAccountRelays(listOf(acct, other), acct, setOf(acct)) { false }.isEmpty())
         assertTrue(RelayNodeMap.supersededAccountRelays(listOf(other), device, setOf(acct)) { false }.isEmpty())
+    }
+
+    /** The second crash: `saveRelayNodes` (called from `ensureRelayEntry` ← `handleRelayNode` on
+     *  Dispatchers.IO) serialising relay state while announces on other workers kept writing. Several
+     *  announce handlers + several savers at once, the way `onInbound` fans frames out. */
+    @Test
+    fun announceHandlersAndSaversRunConcurrentlyWithoutThrowing() {
+        val map = RelayNodeMap.newMap()
+        val suppressed: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+        val forgotAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+        val failure = AtomicReference<Throwable?>(null)
+        val threads = (0 until 6).map { t ->
+            thread {
+                try {
+                    repeat(5_000) { i ->
+                        if (t % 2 == 0) {
+                            // handleRelayNode: learn, supersede, suppress, forget
+                            val hex = ((i + t) % 40).toString().padStart(64, '0')
+                            val list = map.getOrPut("c${i % 4}") { RelayNodeMap.newList() }
+                            for (a in RelayNodeMap.supersededAccountRelays(list.toList(), hex, setOf("0".repeat(64))) { false }) {
+                                if (list.remove(a)) suppressed.add(a)
+                            }
+                            if (!list.contains(hex)) list.add(hex)
+                            if (i % 5 == 0) { RelayNodeMap.removeRelay(list, hex); forgotAt[hex] = i.toLong(); suppressed.remove(hex) }
+                            if (i % 11 == 0) map.entries.removeAll { it.value.isEmpty() }
+                        } else {
+                            // saveRelayNodes
+                            val o = org.json.JSONObject()
+                            for ((k, v) in RelayNodeMap.snapshot(map)) o.put(k, org.json.JSONArray().apply { v.forEach { put(it) } })
+                            org.json.JSONArray().apply { suppressed.toList().forEach { put(it) } }
+                            org.json.JSONObject().apply { forgotAt.toMap().forEach { (k, v) -> put(k, v) } }
+                            o.toString()
+                        }
+                    }
+                } catch (e: Throwable) { failure.compareAndSet(null, e) }
+            }
+        }
+        threads.forEach { it.join() }
+        assertTrue("concurrent announce/save threw: ${failure.get()}", failure.get() == null)
     }
 }

@@ -153,19 +153,19 @@ object HavenNet : InboundListener {
      *  not resurrect a *deactivated* relay passively, or Forget is a visible no-op. A deliberate
      *  re-announce DOES reactivate it (handleRelayNode). Cleared on explicit re-adoption / reactivation.
      *  Mirrors iOS `suppressed`. */
-    private val suppressedRelays = mutableSetOf<String>()
+    private val suppressedRelays: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()   // see [RelayNodeMap]
 
     /** When each relay was FORGOTTEN (unix ms), for LWW against a re-announce's addedAt. A re-add
      *  NEWER than the forget reactivates; a forget newer than the last add keeps it dead — so a relay's
      *  owner merely REOPENING the app (re-announcing the relay's older adoption time) can't resurrect a
      *  relay the user deleted. Mirrors iOS `forgotAt`. */
-    private val forgotAtRelays = HashMap<String, Long>()
+    private val forgotAtRelays = java.util.concurrent.ConcurrentHashMap<String, Long>()   // see [RelayNodeMap]
 
     /** Relays we deliberately RE-ADDED after a deletion (hex → re-add unix ms). Published via self-sync as
      *  a CLEAR so a sibling's stale deletion tombstone doesn't re-forget a relay we brought back — without
      *  it a grow-only relay tombstone would re-forget a re-added relay on every sibling's sync pass, forever
      *  (the "I delete a relay and it keeps coming back" bug in reverse). Mirrors iOS `clearedRelayForgets`. */
-    private val clearedRelayForgets = HashMap<String, Long>()
+    private val clearedRelayForgets = java.util.concurrent.ConcurrentHashMap<String, Long>()   // see [RelayNodeMap]
 
     private fun relayForgottenAtMs(hex: String): Long = forgotAtRelays[hex.lowercase()] ?: 0L
     private fun relayAddedAtMs(hex: String): Long = relayEntries[hex]?.addedAtMs ?: 0L
@@ -225,7 +225,7 @@ object HavenNet : InboundListener {
     private var defaultRelayHex: String = ""
     /** Erase inactive+unseen relay entries after this long (parity with iOS staleAfterMs). */
     private val RELAY_STALE_AFTER_MS = 7L * 24 * 3600 * 1000
-    private val relayClients = HashMap<String, RelayClient>()
+    private val relayClients = java.util.concurrent.ConcurrentHashMap<String, RelayClient>()   // see [RelayNodeMap]
     private val relayMutex = Mutex()
 
     // Mailbox keys already ingested or confirmed uploaded — PERSISTED (parity with iOS). In-memory
@@ -395,7 +395,7 @@ object HavenNet : InboundListener {
             const val MAX_BACKOFF_MS = 120_000L     // capped at 2 minutes
         }
     }
-    private val relayHealth = HashMap<String, RelayHealth>()
+    private val relayHealth = java.util.concurrent.ConcurrentHashMap<String, RelayHealth>()   // see [RelayNodeMap]
 
     // node ids we initiated a connect to (scanned their QR) → expected verify hash.
     //
@@ -4878,7 +4878,7 @@ object HavenNet : InboundListener {
         val hex = if (nodeHex.startsWith("s3:")) nodeHex else nodeHex.trim().lowercase()
         scope.launch {
             val servedCircles = relayNodes.filterValues { it.contains(hex) }.keys.toList()
-            for (list in relayNodes.values) list.removeAll { it == hex }
+            for (list in relayNodes.values) RelayNodeMap.removeRelay(list, hex)
             relayNodes.entries.removeAll { it.value.isEmpty() }
             // Archive BEFORE the entry and its associations are gone — afterwards there is nothing
             // left to reconstruct it from. Note relayNodes was already swept above, so the circle list
@@ -4927,7 +4927,7 @@ object HavenNet : InboundListener {
             val list = relayNodes.getOrPut(circleId) { RelayNodeMap.newList() }
             if (!list.contains(hex)) list.add(hex)
         } else {
-            relayNodes[circleId]?.removeAll { it == hex }
+            relayNodes[circleId]?.let { RelayNodeMap.removeRelay(it, hex) }
             if (relayNodes[circleId]?.isEmpty() == true) relayNodes.remove(circleId)
         }
         saveRelayNodes(); bumpRelays()
@@ -5011,7 +5011,7 @@ object HavenNet : InboundListener {
 
     data class ErasedRelay(val entry: RelayEntry, val circles: List<String>, val wasDefault: Boolean, val erasedAt: Long)
 
-    private val erasedRelays = LinkedHashMap<String, ErasedRelay>()
+    private val erasedRelays = java.util.concurrent.ConcurrentHashMap<String, ErasedRelay>()   // see [RelayNodeMap]
     private const val ERASED_KEEP_MAX = 12
     private const val ERASED_TTL_MS = 30L * 24 * 60 * 60 * 1000
 
@@ -9302,9 +9302,11 @@ object HavenNet : InboundListener {
 
     private fun saveRelayNodes() {
         val o = JSONObject()
-        relayNodes.forEach { (k, v) -> o.put(k, JSONArray().apply { v.forEach { put(it) } }) }
+        // Snapshot every relay collection before walking it: this runs on whatever thread mutated
+        // relay state (handleRelayNode on Dispatchers.IO included) while others keep writing.
+        for ((k, v) in RelayNodeMap.snapshot(relayNodes)) o.put(k, JSONArray().apply { v.forEach { put(it) } })
         val entriesArr = JSONArray()
-        relayEntries.values.forEach { e ->
+        relayEntries.values.toList().forEach { e ->
             entriesArr.put(JSONObject().apply {
                 put("hex", e.hex); put("name", e.name); put("active", e.active)
                 put("lastSeenMs", e.lastSeenMs); put("isS3", e.isS3)
@@ -9318,7 +9320,7 @@ object HavenNet : InboundListener {
             })
         }
         val erasedArr = JSONArray()
-        erasedRelays.values.forEach { r ->
+        erasedRelays.values.toList().forEach { r ->
             erasedArr.put(JSONObject().apply {
                 put("hex", r.entry.hex); put("name", r.entry.name); put("isS3", r.entry.isS3)
                 put("erasedAt", r.erasedAt); put("wasDefault", r.wasDefault)
@@ -9328,12 +9330,12 @@ object HavenNet : InboundListener {
                 if (r.entry.derpUrl.isNotEmpty()) put("derpUrl", r.entry.derpUrl)
             })
         }
-        val forgotAtJson = JSONObject().apply { forgotAtRelays.forEach { (k, v) -> put(k, v) } }
-        val clearedForgotJson = JSONObject().apply { clearedRelayForgets.forEach { (k, v) -> put(k, v) } }
+        val forgotAtJson = JSONObject().apply { forgotAtRelays.toMap().forEach { (k, v) -> put(k, v) } }
+        val clearedForgotJson = JSONObject().apply { clearedRelayForgets.toMap().forEach { (k, v) -> put(k, v) } }
         // Write the new format and clear the legacy key (completes the migration).
         prefs.edit()
             .putString("relays", o.toString())
-            .putString("relaysSuppressed", JSONArray().apply { suppressedRelays.forEach { put(it) } }.toString())
+            .putString("relaysSuppressed", JSONArray().apply { suppressedRelays.toList().forEach { put(it) } }.toString())
             .putString("relaysForgotAt", forgotAtJson.toString())
             .putString("relaysClearedForgot", clearedForgotJson.toString())
             .putString("relayEntries", entriesArr.toString())

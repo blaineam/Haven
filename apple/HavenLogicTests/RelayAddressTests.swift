@@ -99,4 +99,25 @@ final class RelayAddressTests: XCTestCase {
         XCTAssertEqual(RelayAddress.urlsToForgive(held: nil, announced: ["https://x.example"], token: "t"),
                        ["https://x.example"], "a relay we never held")
     }
+
+    private let acct = String(repeating: "f", count: 64)
+    private let device = String(repeating: "d", count: 64)
+
+    func testADeadAccountIdEntryIsSupersededByALearnedDeviceRelay() {
+        XCTAssertEqual(RelayAddress.supersededAccountRelays(entries: [acct], learned: device, accountIds: [acct]) { _ in false },
+                       [acct])
+    }
+
+    func testALiveAccountIdRelayIsNeverSuperseded() {
+        // The flip-flop: a Mac hosts relay `acct`; learning `device` must not evict it, or its next
+        // announce re-adds it (backfill + media re-upload) and the two evict each other forever.
+        XCTAssertEqual(RelayAddress.supersededAccountRelays(entries: [acct, device], learned: device, accountIds: [acct]) { $0 == self.acct },
+                       [])
+    }
+
+    func testTheLearnedRelayAndNonAccountEntriesStay() {
+        let other = String(repeating: "e", count: 64)
+        XCTAssertEqual(RelayAddress.supersededAccountRelays(entries: [acct, other], learned: acct, accountIds: [acct]) { _ in false }, [])
+        XCTAssertEqual(RelayAddress.supersededAccountRelays(entries: [other], learned: device, accountIds: [acct]) { _ in false }, [])
+    }
 }

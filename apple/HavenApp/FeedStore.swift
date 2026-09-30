@@ -8117,6 +8117,10 @@ final class FeedStore: ObservableObject {
         adoptRelayNode(nodeHex, circleIds: circles.map(\.id), setDefault: true)
     }
 
+    /// Relay node ids announced TO us as relays this process (frame 19) — never superseded as stale
+    /// account ids (see `RelayAddress.supersededAccountRelays`).
+    private var announcedRelayNodes: Set<String> = []
+
     private func handleRelayNode(_ payload: Data) async {
         guard let engine else { return }
         var off = 0
@@ -8202,6 +8206,7 @@ final class FeedStore: ObservableObject {
         }
         // A contact advertised their circle relay → ADD it to our redundant set for this circle, so
         // members automatically pool relays (more redundancy, no manual setup) — desktop parity.
+        announcedRelayNodes.insert(lower)
         let wasNew = !RelayMailboxStore.shared.relays(forCircle: circleId).contains(lower)
         // Propagate the announced adoption stamp (not now()) so the freshest legit re-add flows across
         // the circle without any echo fabricating a new timestamp.
@@ -8237,7 +8242,14 @@ final class FeedStore: ObservableObject {
         // them so the reachable device relay is what gets dialed. (Safe under the all-devices-on-154 cutover.)
         var staleAccounts = Set(read.members.map { $0.lowercased() })
         staleAccounts.insert(AccountStore.currentNodeHex().lowercased())
-        for a in staleAccounts where a != lower && a.count == 64 {
+        let superseded = RelayAddress.supersededAccountRelays(
+            entries: RelayMailboxStore.shared.relays(forCircle: circleId).map { $0.lowercased() },
+            learned: lower, accountIds: staleAccounts
+        ) { a in
+            // Live evidence: announced to us as a relay, or it announced an HTTP interface.
+            announcedRelayNodes.contains(a) || !(RelayMailboxStore.shared.httpInterface(a)?.urls ?? []).isEmpty
+        }
+        for a in superseded {
             RelayMailboxStore.shared.remove(circleId: circleId, nodeHex: a)
         }
         // New relay OR first time we learn a public HTTPS media URL (LAN-only → trycloudflare

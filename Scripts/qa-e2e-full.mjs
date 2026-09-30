@@ -114,8 +114,16 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 let androidLogcatOn = false;
 function saveAndroidLogcat(label) {
   if (!androidLogcatOn) return;
-  const txt = shOk('adb', ['logcat', '-d', '-v', 'threadtime']);
-  if (txt) { try { writeFileSync(join(OUT, `android-logcat-${label}.txt`), txt); } catch (_) { /* best effort */ } }
+  // Straight to a file descriptor: a 16 MB ring through spawnSync's default 1 MB stdout buffer
+  // failed with ENOBUFS, and shOk turned that into "no output" — the missing android-logcat-final.txt
+  // (run 2026-09-30-07-12). The crash buffer is appended so a FATAL survives even a wrapped ring.
+  let fd;
+  try {
+    fd = openSync(join(OUT, `android-logcat-${label}.txt`), 'w');
+    for (const buf of [['-b', 'main,system'], ['-b', 'crash']]) {
+      spawnSync('adb', ['logcat', '-d', '-v', 'threadtime', ...buf], { stdio: ['ignore', fd, 'ignore'], timeout: 120_000 });
+    }
+  } catch (_) { /* best effort — diagnostics must never fail the run */ } finally { if (fd !== undefined) try { closeSync(fd); } catch (_) {} }
 }
 // FAIL FAST (E2E_FAIL_FAST=1, on by default for the satellite step — see below).
 //
@@ -2913,6 +2921,7 @@ if (invokedDirectly) {
   takeRunLock();
   mkdirSync(OUT, { recursive: true });
   process.on('exit', releaseRunLock);
+  process.on('exit', () => saveAndroidLogcat('final'));   // every exit: early RED, fail-fast, abort, crash
   process.on('exit', mrKillAll);   // FAIL-FAST / abort / crash: the relays this run started go too
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.on(sig, () => { releaseRunLock(); process.exit(2); });

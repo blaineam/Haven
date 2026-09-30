@@ -87,4 +87,15 @@ enum RelayAddress {
         let old = Set(held.urls)
         return announced.filter { !old.contains($0) }
     }
+
+    /// Which of a circle's relay entries a newly learned relay SUPERSEDES: entries equal to a member's
+    /// (or my own) ACCOUNT id — pre-device-seed leftovers nothing serves. Never one that is a live
+    /// relay (announced to us as a relay, or with an announced HTTP interface): a Mac hosting its
+    /// relay under its account id is real, and superseding it made two relays evict each other on
+    /// every announce — each re-add re-exporting history and re-uploading media. Android parity
+    /// (`RelayNodeMap.supersededAccountRelays`).
+    static func supersededAccountRelays(entries: [String], learned: String, accountIds: Set<String>,
+                                        isLiveRelay: (String) -> Bool) -> [String] {
+        entries.filter { a in a.count == 64 && a != learned && accountIds.contains(a) && !isLiveRelay(a) }
+    }
 }

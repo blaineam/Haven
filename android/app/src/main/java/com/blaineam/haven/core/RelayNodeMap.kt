@@ -17,6 +17,16 @@ object RelayNodeMap {
     fun newMap(): ConcurrentHashMap<String, MutableList<String>> = ConcurrentHashMap()
     fun newList(from: Collection<String> = emptyList()): MutableList<String> = CopyOnWriteArrayList(from)
 
+    /** Remove `hex` from a relay list ATOMICALLY. Kotlin's `MutableList.removeAll { }` is an
+     *  index-walking extension (size read once, then get/removeAt) — on a list another thread is
+     *  shrinking it throws IndexOutOfBounds; the stress test caught exactly that. `removeIf` is the
+     *  CopyOnWriteArrayList member, which swaps the array under its lock. */
+    fun removeRelay(list: MutableList<String>, hex: String): Boolean = list.removeIf { it == hex }
+
+    /** A point-in-time copy to iterate (persistence, UI, logs) — never walk the live map while others write. */
+    fun snapshot(map: Map<String, List<String>>): Map<String, List<String>> =
+        map.entries.associate { (k, v) -> k to v.toList() }
+
     /**
      * Which of a circle's relay entries a newly learned relay SUPERSEDES: entries equal to a member's
      * (or my own) ACCOUNT id — pre-device-seed leftovers nothing serves. Never one that has announced

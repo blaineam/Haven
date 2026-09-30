@@ -153,6 +153,31 @@ struct PendingEnrollment {
     }
 }
 
+/// When the in-app host pulls from its sibling relays (`RelayHost.meshSyncTick`). The pull is
+/// expensive (a sibling's whole inventory), so it is throttled to once per `intervalMs` — but a host
+/// that was OFF missed everything posted meanwhile, and waiting out whatever was left of that window
+/// made its catch-up land anywhere from 0 s to 5 min after it came back (e2e `multirelay`, "R_B
+/// backfilled what it missed while down": 0.0 s one run, 150 s the next). `restarted` makes the next
+/// tick due at once.
+struct MeshPullGate {
+    let intervalMs: UInt64
+    private(set) var lastMs: UInt64 = 0
+    private var dueNow = true
+
+    init(intervalMs: UInt64) { self.intervalMs = intervalMs }
+
+    /// Hosting (re)started: the next tick pulls immediately.
+    mutating func restarted() { dueNow = true }
+
+    /// Whether this tick should pull; stamps the pull when it does.
+    mutating func take(nowMs: UInt64) -> Bool {
+        guard dueNow || nowMs &- lastMs >= intervalMs else { return false }
+        dueNow = false
+        lastMs = nowMs
+        return true
+    }
+}
+
 /// The mailbox key of a durable frame-19 relay announce (`…/__relay__/<relay>/<id>`).
 ///
 /// It used to be the hash of the SEALED payload — and sealing wraps under a fresh random key every

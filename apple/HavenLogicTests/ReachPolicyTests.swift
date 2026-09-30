@@ -201,6 +201,21 @@ final class RelayAuthPlanTests: XCTestCase {
     }
 }
 
+/// The in-app host's mesh pull throttle (ReachPolicy.swift `MeshPullGate`).
+final class MeshPullGateTests: XCTestCase {
+    /// multirelay "R_B backfilled what it missed while down": 0 s one run, 150 s the next — the
+    /// restarted host waited out what was left of the 5-minute window. A restart pulls at once.
+    func testARestartedHostPullsOnItsNextTick() {
+        var g = MeshPullGate(intervalMs: 300_000)
+        XCTAssertTrue(g.take(nowMs: 1_000), "first tick pulls")
+        XCTAssertFalse(g.take(nowMs: 60_000), "then throttled")
+        g.restarted()
+        XCTAssertTrue(g.take(nowMs: 61_000), "hosting came back: pull now")
+        XCTAssertFalse(g.take(nowMs: 62_000), "…once; the throttle resumes")
+        XCTAssertTrue(g.take(nowMs: 61_000 + 300_000))
+    }
+}
+
 /// Durable relay announces are keyed by their plaintext (ReachPolicy.swift `RelayAnnounceKey`).
 final class RelayAnnounceKeyTests: XCTestCase {
     let relay = String(repeating: "a", count: 64)

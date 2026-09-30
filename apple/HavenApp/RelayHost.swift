@@ -171,6 +171,7 @@ final class RelayHost: ObservableObject {
         serving = true
         updateSleepAssertion()
         authorizeMembership()
+        catchUpAfterStart()
         // HTTP only — tunnels/DERP already running from the original start.
         // CRITICAL: re-publish the *live tunnel* media URL. reachableHttpUrls() without the
         // free/named front door is LAN-only — fabric rebind used to wipe https://…trycloudflare
@@ -246,6 +247,7 @@ final class RelayHost: ObservableObject {
         RelayMailboxStore.shared.unforget(nodeId)   // hosting is an explicit adoption of our own relay
         // Lock the mailbox down to circle members before announcing it (audit transport-F4).
         authorizeMembership()
+        catchUpAfterStart()
         // Tell my circles to use this device (its account node id) as their mailbox.
         FeedStore.shared.broadcastRelayNode(nodeId)
         HavenLog.relay("hosting relay=\(nodeId.prefix(10)) serving=\(serving) gen=\(gen)")
@@ -1028,8 +1030,17 @@ final class RelayHost: ObservableObject {
     /// Last mesh anti-entropy pass (ms). Field: host Macs ran this every sync tick (~20s),
     /// listing every sibling's full `haven/*` store and pulling ≤256 MB blobs into RAM — friend's
     /// Mac sample hit **4.6 GB peak** and stayed unresponsive while "just hosting a relay."
-    private var lastMeshSyncMs: UInt64 = 0
-    private static let meshSyncMinIntervalMs: UInt64 = 300_000   // 5 minutes
+    private var meshGate = MeshPullGate(intervalMs: 300_000)   // ≥5 min between pulls
+
+    /// Hosting just (re)started: everything posted while we were off is on our siblings — pull it
+    /// now instead of whenever the 5-minute window would have come round.
+    private func catchUpAfterStart() {
+        meshGate.restarted()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)   // let authorize + the HTTP door settle
+            self?.meshSyncTick()
+        }
+    }
 
     /// Hand each relay of a circle THAT circle's other relays, so the mesh is symmetric. Per
     /// circle, never the whole pool: a relay taught as a sibling may replicate that circle's
@@ -1083,8 +1094,7 @@ final class RelayHost: ObservableObject {
         }
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         // Cheap path every tick: membership only. Expensive pull is throttled hard.
-        guard nowMs &- lastMeshSyncMs >= Self.meshSyncMinIntervalMs else { return }
-        lastMeshSyncMs = nowMs
+        guard meshGate.take(nowMs: nowMs) else { return }
         guard !peers.isEmpty else { return }
         // Teach every relay in the pool about the others. We already pull from all of them; a
         // HEADLESS relay knew only the `--peer` hexes its operator typed, so it never pulled back

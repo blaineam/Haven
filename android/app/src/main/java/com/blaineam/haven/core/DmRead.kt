@@ -22,7 +22,7 @@ object DmRead {
     /** Bumped on every watermark change so composables showing unread counts recompose. */
     val version = mutableIntStateOf(0)
 
-    private val lastRead = HashMap<String, Long>()
+    private val lastRead = SharedCollections.map<Long>()   // UI marks read, background unread counts — see [SharedCollections]
 
     /** Watermark for conversations with no entry yet. Stamped ONCE at first run so the day this
      *  feature ships, pre-existing history doesn't light every conversation up as unread — only

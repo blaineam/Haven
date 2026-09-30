@@ -167,8 +167,10 @@ object QaDriver {
         exec.execute {
             runCatching { apply(cmd) }
                 .onFailure { Log.w(TAG, "qa-cmd ${cmd.optString("op")} failed: ${it.message}") }
+            // Building the dump reads the engine and a dozen stores; a throw there (not just in the
+            // file write) freezes the channel, so it is logged with its stack, not just a message.
             runCatching { writeDump() }
-                .onFailure { Log.w(TAG, "qa-dump write failed: ${it.message}") }
+                .onFailure { Log.w(TAG, "qa-dump write failed: $it", it) }
         }
     }
 
@@ -422,6 +424,7 @@ object QaDriver {
             Log.i(TAG, "qa-device-hex written account=${account.take(12)} device=${device.take(12)}")
         }.onFailure { Log.w(TAG, "qa-device-hex write failed: ${it.message}") }
         runCatching { writeDump() }   // a startup dump so the orchestrator's sanity check has one
+            .onFailure { Log.w(TAG, "qa-dump write failed (startup): $it", it) }
     }
 
     /** The v2 dump: posts (with media presence), DMs by peer, profile, circles — same reads the
@@ -539,12 +542,13 @@ object QaDriver {
         writeAtomically(dumpFile, o.toString())
     }
 
-    /** tmp + rename in the SAME internal dir — a reader (`run-as cat`) sees the old file or the new
-     *  one, never half of one. No MediaProvider in the path, so the rename cannot be refused. */
+    /** tmp + rename in the SAME internal dir, retried, every failure logged WITH its exception
+     *  (the harness greps `qa-dump write failed` out of logcat when a channel freezes) — see [QaFiles]. */
     private fun writeAtomically(dest: File, text: String) {
-        val tmp = File(dest.parentFile, dest.name + ".tmp")
-        tmp.writeText(text)
-        if (!tmp.renameTo(dest)) { dest.writeText(text); tmp.delete() }
+        val err = QaFiles.writeAtomically(dest, text) { attempt, e ->
+            Log.w(TAG, "qa-dump write failed (${dest.name}, attempt $attempt): $e", e)
+        }
+        if (err != null) throw err
     }
 
     private fun postRow(item: uniffi.haven_ffi.FeedItemFfi, circleId: String): JSONObject {

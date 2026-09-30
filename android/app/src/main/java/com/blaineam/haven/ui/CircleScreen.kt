@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.rememberUpdatedState
 import uniffi.haven_ffi.TrackRefFfi
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -158,31 +159,22 @@ fun CircleScreen(onAddFriend: () -> Unit) {
     // ingest burst, media landing, periodic tick — decoded the whole circle on the UI thread.
     // produceState keeps the last list while a re-read runs (no flash on a version bump); it is
     // tagged with its circle so switching circles never shows the previous circle's posts.
-    val feedRead by androidx.compose.runtime.produceState(
-        initialValue = "" to emptyList<FeedItemFfi>(),
-        version, active, profile.retentionDays, circleSettingsVersion, circlesVersion, HavenNet.blocked.size, showHidden, hiddenCount,
-    ) {
-        val circle = active
-        val showHiddenNow = showHidden
-        value = circle to kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-            // Per-circle auto-delete override (falls back to the app-wide retention default).
-            val raw = runCatching { HavenNet.engine.feed(circle, nowMs(), com.blaineam.haven.core.CircleSettings.retentionSecs(circle)) }.getOrDefault(emptyList())
-            // Hide posts from blocked people and from anyone no longer in this circle (removed members),
-            // so a removal actually clears their content even if a later sync re-ingests their old events.
-            // null = the lookup failed (don't blank the feed); empty list = a genuine solo circle (hide
-            // everyone else). My own posts always stay.
-            val memberHexes: List<String>? = runCatching { HavenNet.membersOf(circle).map { it.idHex } }.getOrNull()
-            raw.filter { fi ->
-                val allowedAuthor = when {
-                    fi.isMe -> true
-                    HavenNet.blocked.any { it.startsWith(fi.authorShort) } -> false
-                    memberHexes == null -> true   // membership lookup failed — don't hide everything
-                    else -> memberHexes.any { it.startsWith(fi.authorShort) }
+    // The keys feed ONE conflated reader (see conflatedReads): a version bump mid-read queues a
+    // single follow-up read instead of cancelling this one — a cancelled feed() kept decoding in
+    // JNI anyway, its result was dropped, and during a backlog nothing was ever published.
+    val feedKey = rememberUpdatedState(FeedReadKey(version, active, profile.retentionDays, circleSettingsVersion,
+        circlesVersion, HavenNet.blocked.size, showHidden, hiddenCount))
+    val feedRead by androidx.compose.runtime.produceState(initialValue = "" to emptyList<FeedItemFfi>()) {
+        com.blaineam.haven.core.conflatedReads(androidx.compose.runtime.snapshotFlow { feedKey.value },
+            read = { key ->
+                val t0 = android.os.SystemClock.uptimeMillis()
+                readFeed(key.circle, key.showHidden).also {
+                    // DEBUG launch timeline: how long the first feed decode that HAD posts took.
+                    if (it.isNotEmpty()) com.blaineam.haven.core.QaStats.phase("first_nonempty_feed_read",
+                        android.os.SystemClock.uptimeMillis() - t0)
                 }
-                // Personal per-post hide (reversible via the "show hidden" toggle).
-                allowedAuthor && (showHiddenNow || !com.blaineam.haven.core.HiddenStore.isHidden(fi.id))
-            }
-        }
+            },
+            publish = { key, list -> value = key.circle to list })
     }
     val items: List<FeedItemFfi> = if (feedRead.first == active) feedRead.second else emptyList()
     // DEBUG qa dump (e2e `launch` step): the first composition that has feed items to show.
@@ -2811,3 +2803,32 @@ private fun copyPostLink(context: android.content.Context, url: String) {
         .setPrimaryClip(android.content.ClipData.newPlainText("haven post link", url))
     android.widget.Toast.makeText(context, context.getString(R.string.circle_link_copied), android.widget.Toast.LENGTH_SHORT).show()
 }
+
+/** Everything a feed read depends on — one value, so the conflated reader sees one change per bump. */
+private data class FeedReadKey(
+    val version: Int, val circle: String, val retentionDays: Int, val circleSettingsVersion: Int,
+    val circlesVersion: Int, val blockedCount: Int, val showHidden: Boolean, val hiddenCount: Int,
+)
+
+/** The feed read (`engine.feed` decodes + re-opens every envelope in the circle) — OFF the main
+ *  thread, and only ever one at a time (CircleScreen's conflated reader). */
+private suspend fun readFeed(circle: String, showHiddenNow: Boolean): List<FeedItemFfi> =
+    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+        // Per-circle auto-delete override (falls back to the app-wide retention default).
+        val raw = runCatching { HavenNet.engine.feed(circle, nowMs(), com.blaineam.haven.core.CircleSettings.retentionSecs(circle)) }.getOrDefault(emptyList())
+        // Hide posts from blocked people and from anyone no longer in this circle (removed members),
+        // so a removal actually clears their content even if a later sync re-ingests their old events.
+        // null = the lookup failed (don't blank the feed); empty list = a genuine solo circle (hide
+        // everyone else). My own posts always stay.
+        val memberHexes: List<String>? = runCatching { HavenNet.membersOf(circle).map { it.idHex } }.getOrNull()
+        raw.filter { fi ->
+            val allowedAuthor = when {
+                fi.isMe -> true
+                HavenNet.blocked.any { it.startsWith(fi.authorShort) } -> false
+                memberHexes == null -> true   // membership lookup failed — don't hide everything
+                else -> memberHexes.any { it.startsWith(fi.authorShort) }
+            }
+            // Personal per-post hide (reversible via the "show hidden" toggle).
+            allowedAuthor && (showHiddenNow || !com.blaineam.haven.core.HiddenStore.isHidden(fi.id))
+        }
+    }

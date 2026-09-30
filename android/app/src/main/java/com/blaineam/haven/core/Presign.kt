@@ -18,7 +18,7 @@ import java.net.URL
 object Presign {
     private const val TAG = "Presign"
     private lateinit var prefs: android.content.SharedPreferences
-    private val pools = HashMap<String, Pool>()
+    private val pools = SharedCollections.map<Pool>()   // mailbox polls (IO) + settings — see [SharedCollections]
 
     class Pool(val expires: Double, val puts: Map<String, List<String>>, val gets: Map<String, String>, val listURL: String)
 

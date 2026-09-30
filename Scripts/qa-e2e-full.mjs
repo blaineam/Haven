@@ -243,12 +243,52 @@ function androidQaRead(name) {
 /// copy it to `<name>.tmp` in the SAME dir, then `mv` (a rename — the driver sees the old file or
 /// the whole new one, never half). The shell tmp is removed in the same round trip. Returns true on
 /// success. `run-as` reading /data/local/tmp is what the bootstrap's seed staging has always used.
+//
+// A failed attempt is LOGGED WITH ITS CAUSE (exit status / signal / timeout + stderr) and retried:
+// the 2026-09-30 gate lost its android leg to one bare "qaWrite 'dump' failed" with nothing saying
+// why (it was a 60 s hang — the emulator's system_server wedged under an app CPU storm). A single
+// hiccup must not RED a leg, and a persistent one must name itself.
+const AND_QA_WRITE_ATTEMPTS = +(process.env.E2E_AND_QA_WRITE_ATTEMPTS || 3);
+function adbAttempt(args) {
+  const r = spawnSync('adb', args, { encoding: 'utf8', timeout: ADB_TIMEOUT_MS });
+  if (r.status === 0 && !r.error) return null;
+  const why = r.error?.code === 'ETIMEDOUT' ? `hung ${ADB_TIMEOUT_MS / 1000}s — killed`
+    : r.error ? `${r.error.code || r.error.message}`
+    : r.signal ? `killed by ${r.signal}` : `exit ${r.status}`;
+  const err = String(r.stderr || r.stdout || '').trim().split('\n').slice(-2).join(' | ').slice(0, 200);
+  return err ? `${why}: ${err}` : why;
+}
 function androidQaWrite(src, name) {
-  const tmp = `/data/local/tmp/haven-qa-${process.pid}-${++andPushSeq}-${name}`;
-  if (shOk('adb', ['push', src, tmp]) === null) return false;
   const d = ANDROID_QA_DIR;
-  const inner = `umask 077 && mkdir -p ${d} && cat ${tmp} > ${d}/${name}.tmp && mv -f ${d}/${name}.tmp ${d}/${name}`;
-  return shOk('adb', ['shell', `run-as ${AND_PKG} sh -c '${inner}'; rc=$?; rm -f ${tmp}; exit $rc`]) !== null;
+  for (let attempt = 1; attempt <= AND_QA_WRITE_ATTEMPTS; attempt++) {
+    const tmp = `/data/local/tmp/haven-qa-${process.pid}-${++andPushSeq}-${name}`;
+    // The in-dir tmp is unique per attempt too: a retry must not race a half-finished `cat` from a
+    // killed attempt into the same `<name>.tmp`.
+    const dtmp = `${d}/${name}.${process.pid}-${andPushSeq}.tmp`;
+    const inner = `umask 077 && mkdir -p ${d} && cat ${tmp} > ${dtmp} && mv -f ${dtmp} ${d}/${name}`;
+    const why = adbAttempt(['push', src, tmp])
+      ?? adbAttempt(['shell', `run-as ${AND_PKG} sh -c '${inner}'; rc=$?; rm -f ${tmp}; run-as ${AND_PKG} rm -f ${dtmp}; exit $rc`]);
+    if (why === null) {
+      if (attempt > 1) log(`android qaWrite '${name}' landed on attempt ${attempt}`);
+      return true;
+    }
+    log(`WARN android qaWrite '${name}' attempt ${attempt}/${AND_QA_WRITE_ATTEMPTS} failed — ${why}`);
+    if (attempt < AND_QA_WRITE_ATTEMPTS) spawnSync('sleep', [String(attempt)]);
+  }
+  return false;
+}
+
+/// What the android app is burning CPU on: the process's share of the emulator, its hottest
+/// threads, and two Java stack samples (debuggerd -j; the build is debuggable). The 2026-09-30 gate
+/// saw the app at 124 % CPU until system_server hit its watchdog — with nothing recorded to say why.
+function androidCpuSample(label) {
+  const pid = String(shOk('adb', ['shell', 'pidof', AND_PKG]) || '').trim();
+  if (!pid) { log(`android cpu [${label}]: app not running`); return; }
+  const top = shOk('adb', ['shell', `top -H -b -n 1 -p ${pid} | head -16`]) || '';
+  const proc = shOk('adb', ['shell', `top -b -n 1 -p ${pid} | tail -1`]) || '';
+  const stacks = [1, 2].map(() => shOk('adb', ['shell', `debuggerd -j ${pid}`]) || '(debuggerd failed)');
+  writeFileSync(join(OUT, `android-cpu-${label}.txt`), `${proc}\n\n${top}\n\n${stacks.join('\n\n==== sample 2 ====\n\n')}`);
+  log(`android cpu [${label}]: ${proc.trim().replace(/\s+/g, ' ').slice(0, 160)} (threads + stacks: android-cpu-${label}.txt)`);
 }
 
 function makeAndroid() {
@@ -303,7 +343,9 @@ function makeAndroid() {
     // Drop the dump + any half-staged drop so the driver mints them again on its next op.
     wipe: () => {
       const d = ANDROID_QA_DIR;
-      const out = shOk('adb', ['shell', `run-as ${AND_PKG} rm -f ${d}/${dumpName} ${d}/${dumpName}.tmp ${cmdPath} ${cmdPath}.tmp 2>&1`]);
+      // `*.tmp` covers every writer's per-attempt tmp names (QaFiles on the app side, androidQaWrite
+      // here); the glob must expand INSIDE run-as — the shell user cannot list the app's dir.
+      const out = shOk('adb', ['shell', `run-as ${AND_PKG} sh -c 'rm -f ${d}/${dumpName} ${cmdPath} ${d}/*.tmp' 2>&1`]);
       if (out === null) return ['adb shell run-as rm failed outright (app not installed / not debuggable?)'];
       // `rm -f` exits 0 even when the unlink is refused, so its OUTPUT is the only signal.
       return String(out).trim() ? [String(out).trim()] : [];
@@ -1554,11 +1596,29 @@ async function main() {
       shOk('adb', ['shell', 'am', 'start', '-n', `${AND_PKG}/.MainActivity`]);
       channelFor(devices.android).reset('android relaunched by the launch step');
       await sleep(3000);
-      let LA = null;
+      let LA = null, lastLA = null, lastPerf = null;
       await converge(devices.android, (x) => {
+        if (num(x?.launch?.process_start_ms) >= t - 2000) { lastLA = x.launch; lastPerf = x.perf; }
         const ok = num(x?.launch?.process_start_ms) >= t - 2000 && typeof x.launch?.first_feed_rendered_ms === 'number';
         if (ok) LA = x.launch; return ok;
       }, 60_000);
+      // WHERE the first feed waited (engine construct, state import, first non-empty decode…) —
+      // marks are ms since process start, phases are durations. Plus the app's logcat for the
+      // launch window and a CPU/stack sample, so a slow launch is diagnosable after the fleet has
+      // moved on. Logged BEFORE the gate: a targeted run fails fast on the RED.
+      log(`launch: android launch timings ${JSON.stringify(LA || lastLA)}`);
+      const lpid = String(shOk('adb', ['shell', 'pidof', AND_PKG]) || '').trim();
+      const lc = lpid ? shOk('adb', ['logcat', '-d', `--pid=${lpid}`]) : null;
+      if (lc) writeFileSync(join(OUT, 'android-launch-logcat.txt'), lc);
+      androidCpuSample('launch');
+      // The app's own busy-stack samples (QaPerf; debuggerd needs root): what the main thread did
+      // while its pings were overdue, and what every RUNNABLE thread was on — at first paint, and
+      // again 20 s later (the post-launch catch-up, where a CPU storm would show).
+      log(`launch: android busy stacks at first feed ${JSON.stringify({ main: lastPerf?.mainStallFramesTop, cpu: lastPerf?.cpuSamplesTop, ticks: lastPerf?.cpuSampleTicks })}`);
+      await sleep(20_000);
+      const later = (await freshDump(devices.android))?.perf;
+      log(`launch: android busy stacks +20s ${JSON.stringify({ main: later?.mainStallFramesTop, cpu: later?.cpuSamplesTop, ticks: later?.cpuSampleTicks })}`);
+      androidCpuSample('launch-20s');
       perfGate('launch: launch → first feed rendered [android]', 'android',
         typeof LA?.first_feed_rendered_ms === 'number' ? LA.first_feed_rendered_ms : -1, BUDGET.launchAndroid);
     }

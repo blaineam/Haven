@@ -90,4 +90,11 @@ class HeavyWorkPolicyTest {
         assertEquals("hints-exhausted", HeavyWorkPolicy.streamReason(friend(onRelay = true, hints = HeavyWorkPolicy.MAX_RELAY_HINTS), circleKnown = true))
         assertEquals("not-on-relay-nor-queued", HeavyWorkPolicy.streamReason(friend(), circleKnown = true))
     }
+
+    /** On a satellite link only satellite-safe media leaves, by ANY path. */
+    @Test fun ultra_constrained_link_moves_only_satellite_safe_media() {
+        assertTrue(HeavyWorkPolicy.mayMoveOverLink(ultraConstrained = false, satelliteSafe = false))
+        assertTrue(HeavyWorkPolicy.mayMoveOverLink(ultraConstrained = true, satelliteSafe = true))
+        assertFalse(HeavyWorkPolicy.mayMoveOverLink(ultraConstrained = true, satelliteSafe = false))
+    }
 }

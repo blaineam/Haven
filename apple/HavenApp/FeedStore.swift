@@ -1407,7 +1407,7 @@ final class FeedStore: ObservableObject {
         guard let engine, let new = await engine.run({ $0.upgradeCircle(legacyCircleId: circleId) }),
               self.engine === engine else { return nil }
         CircleCreatorStore.markCreated(new)   // re-pin the owner on every launch, like any circle I made
-        persist(); await reloadCircles()
+        persistUserAction(); await reloadCircles()
         activeCircleId = new
         refresh()
         return new
@@ -1418,7 +1418,7 @@ final class FeedStore: ObservableObject {
     func followCircleUpgrade(_ circleId: String, to newId: String) async -> Bool {
         guard let engine, await engine.run({ $0.acceptCircleUpgrade(circleId: circleId, newCircleId: newId) }),
               self.engine === engine else { return false }
-        persist(); await reloadCircles()
+        persistUserAction(); await reloadCircles()
         activeCircleId = newId
         refresh()
         return true
@@ -1444,7 +1444,7 @@ final class FeedStore: ObservableObject {
         // Switch-Flip §2: record it so the pin is re-applied on every launch.
         CircleCreatorStore.markCreated(id)
         for m in memberIds { forceHelloNextSync(m, circleId: id) }   // the grant rides the hello — never warm-skip it
-        persist(); await reloadCircles()
+        persistUserAction(); await reloadCircles()
         activeCircleId = id
         refresh()
         if !memberIds.isEmpty { syncWithContacts(force: true) }   // new members: greet now
@@ -1475,7 +1475,7 @@ final class FeedStore: ObservableObject {
                 try? s.addExistingToCircle(circleId: cid, nodeHex: idHex)
             }
             guard let self, self.engine === engine else { return }
-            self.persist(); await self.reloadCircles()
+            self.persistUserAction(); await self.reloadCircles()
             self.syncWithContacts()
             self.nudgeSelfSyncSoon()   // membership change → my other devices
         }
@@ -1496,7 +1496,7 @@ final class FeedStore: ObservableObject {
             await engine.run { $0.removeFromCircle(circleId: circleId, nodeHex: idHex) }  // purges their events + rotates epoch
             guard let self, self.engine === engine else { return }
             self.invalidateMessagesCache(circleId)   // their events are gone from the thread too
-            self.persist(); await self.reloadCircles(); self.refresh()
+            self.persistUserAction(); await self.reloadCircles(); self.refresh()
             self.nudgeSelfSyncSoon()   // the removal tombstone reaches my other devices in seconds
             // …and the circle's RELAYS lose them too. A relay only ever added members, so a removed
             // friend kept listing and fetching this circle's mailbox on every relay that had been
@@ -1526,7 +1526,7 @@ final class FeedStore: ObservableObject {
             ConnectionsStore.shared.removeFromCircle(idHex, circleId: cid)  // LWW client tombstone (now())
             invalidateMessagesCache(cid)
         }
-        persist(); await reloadCircles(); refresh()
+        persistUserAction(); await reloadCircles(); refresh()
         if !removed.isEmpty { nudgeSelfSyncSoon() }   // fan the tombstones out to my other devices now
         return removed.count
     }
@@ -1543,7 +1543,7 @@ final class FeedStore: ObservableObject {
         Task { @MainActor [weak self] in
             await engine.run { $0.renameCircle(id: circleId, name: trimmed) }
             guard let self, self.engine === engine else { return }
-            self.persist(); await self.reloadCircles()
+            self.persistUserAction(); await self.reloadCircles()
             self.syncWithContacts()
             self.nudgeSelfSyncSoon()   // the new name reaches my other devices in seconds
         }
@@ -1753,7 +1753,7 @@ final class FeedStore: ObservableObject {
         Task { @MainActor [weak self] in
             await engine.run { try? $0.addExistingToCircle(circleId: "default", nodeHex: idHex) }
             guard let self, self.engine === engine else { return }
-            self.persist(); await self.reloadCircles(); self.syncWithContacts()
+            self.persistUserAction(); await self.reloadCircles(); self.syncWithContacts()
             self.nudgeSelfSyncSoon()   // membership + contact change → my other devices
         }
     }
@@ -1778,7 +1778,7 @@ final class FeedStore: ObservableObject {
             await engine.run { $0.leaveCircle(id: cid) }
             guard let self, self.engine === engine else { return }
             self.invalidateMessagesCache(cid)
-            self.persist(); await self.reloadCircles()
+            self.persistUserAction(); await self.reloadCircles()
             self.activeCircleId = "default"
             self.refresh()
             self.nudgeSelfSyncSoon()   // the deletion tombstone reaches my other devices in seconds
@@ -1830,7 +1830,7 @@ final class FeedStore: ObservableObject {
             guard let self else { return }
             self.pendingCircleOps[id] = nil
             guard self.engine === engine else { return }
-            self.persist(); await self.reloadCircles(); self.syncWithContacts()
+            self.persistUserAction(); await self.reloadCircles(); self.syncWithContacts()
             self.nudgeSelfSyncSoon()   // the (re-)opened DM reaches my other devices in seconds
         }
         return id
@@ -1860,7 +1860,7 @@ final class FeedStore: ObservableObject {
             guard let self else { return }
             self.pendingCircleOps[id] = nil
             guard self.engine === engine else { return }
-            self.persist(); await self.reloadCircles(); self.syncWithContacts()
+            self.persistUserAction(); await self.reloadCircles(); self.syncWithContacts()
             self.nudgeSelfSyncSoon()   // the (re-)opened group DM reaches my other devices in seconds
         }
         return id
@@ -1937,7 +1937,7 @@ final class FeedStore: ObservableObject {
         bumpActivity()
         pendingForcedHellos.insert("\(req.idHex.lowercased())|default")
         SharedStore.clearRosterPullBackoff(req.idHex)
-        persist(); await reloadCircles()
+        persistUserAction(); await reloadCircles()
         if let hello = helloPayload(circleId: "default", circleName: "Your circle") {
             sendIroh(0, hello, to: req.idHex); nearbyBroadcast(0, hello)
             let meHex = myNodeHex
@@ -1988,7 +1988,7 @@ final class FeedStore: ObservableObject {
             await engine.run { $0.blockMember(nodeHex: idHex) }
             guard let self, self.engine === engine else { return }
             self.invalidateMessagesCache()
-            self.persist(); await self.reloadCircles(); self.refresh()
+            self.persistUserAction(); await self.reloadCircles(); self.refresh()
         }
     }
 
@@ -2238,7 +2238,7 @@ final class FeedStore: ObservableObject {
             await engine.run { $0.leaveCircle(id: circleId) }
             guard let self, self.engine === engine else { return }
             self.messagesCache.removeValue(forKey: circleId)
-            self.persist(); await self.reloadCircles(); self.refresh()
+            self.persistUserAction(); await self.reloadCircles(); self.refresh()
             self.nudgeSelfSyncSoon()   // the deletion tombstone reaches my other devices in seconds
         }
         #if os(iOS)
@@ -3968,7 +3968,7 @@ final class FeedStore: ObservableObject {
                     try? s.addExistingToCircle(circleId: cid, nodeHex: hex)
                 }
                 forceHelloNextSync(hex, circleId: cid)   // invite rides the hello — never warm-skip
-                persist(); await reloadCircles()
+                persistUserAction(); await reloadCircles()
                 syncWithContacts()
             } else {
                 HavenLog.net("matrix-qa v2 circle_invite: bad args circle=\(cid.prefix(24)) hex=\(hex.prefix(8))")
@@ -6085,12 +6085,45 @@ final class FeedStore: ObservableObject {
     /// `banner` is the lock-screen copy the recipient's NSE will show after decrypting. The NSE has
     /// the seed alone and cannot open circle events, so richness (reaction vs story vs DM preview)
     /// MUST be decided here at send time. Nil falls back to the legacy generic line.
+    /// Hand a freshly authored event to every transport — but only once the engine state that sealed
+    /// it is ON DISK.
+    ///
+    /// Authoring advances the sender's ratchet / epoch state. That state used to reach disk only via
+    /// the 2.5 s persist debounce (b2ebc188 moved the mailbox drain's immediate export onto it), so a
+    /// kill inside that window — a crash, jetsam, the e2e `launch` step's terminate ~3 s after a post
+    /// — relaunched on OLDER sender state while the event had already gone out. The next events then
+    /// re-used key material the recipients had consumed, and B silently never saw A's posts again in
+    /// that circle (gate `multirelay: A's shared photo readable by B`). Now: local bookkeeping at once
+    /// (the UI shows the post immediately), the export awaited, THEN the sends — in authoring order.
     private func broadcastEvent(_ circleId: String, _ authored: Authored, silent: Bool = false,
                                 banner: PushBanner? = nil) {
         bumpActivity()   // I just posted/messaged → keep sync tight
-        QaMediaStats.broadcast(eventId: authored.eventId)
         invalidateMessagesCache(circleId)   // own send must not wait for the next ingest to re-read
         invalidateSyncBundle(circleId)      // the cached history bundle no longer has this event
+        afterAuthoredStateDurable { [weak self] in
+            self?.sendAuthored(circleId, authored, silent: silent, banner: banner)
+        }
+    }
+
+    /// See `SaveThenSendChain`.
+    private let authoredSendChain = SaveThenSendChain()
+    private func afterAuthoredStateDurable(_ send: @escaping @MainActor () -> Void) {
+        guard !DemoEnv.isDemo, let engine else { send(); return }
+        let destination: @Sendable () async -> URL? = { [weak self] in await self?.persistDestination(for: engine) }
+        authoredSendChain.enqueue(save: {
+            _ = await StatePersister.shared.persist(engine: engine, reason: "authored", to: destination)
+        }, send: send)
+    }
+
+    /// A USER-initiated engine mutation (circle create/rename/leave/invite, DM start, approve, block,
+    /// delete…): export now, not on the 2.5 s debounce — a kill right after the tap must not undo it.
+    /// The debounce stays for network-driven and background changes.
+    private func persistUserAction(_ why: String = #function, line: Int = #line) {
+        persistNow(why, line: line)
+    }
+
+    private func sendAuthored(_ circleId: String, _ authored: Authored, silent: Bool, banner: PushBanner?) {
+        QaMediaStats.broadcast(eventId: authored.eventId)
         let env = authored.env
         let payload = eventPayload(circleId, env)
         let members = authored.members
@@ -6148,7 +6181,7 @@ final class FeedStore: ObservableObject {
             BackgroundUploader.shared.enqueue(circleId: circleId, env: head, maintenance: true)
         }
         BackgroundUploader.shared.enqueue(circleId: circleId, env: env)
-        persist()   // we just authored something — save it
+        // No persist here: `broadcastEvent` already exported the authored state before calling this.
     }
 
     /// Poll the shared mailbox and ingest any envelopes uploaded while we (or the sender)
@@ -6799,9 +6832,15 @@ final class FeedStore: ObservableObject {
         var budget = 4
         let dataSaver = SettingsStore.shared.dataSaverActive
         for item in recent {
-            let candidates = dataSaver
+            // Companions FIRST. A preview/thumb/poster is named only inside its marker and never
+            // listed in `item.media`, so walking the media alone never asked for one: a DM sent over
+            // a satellite link — whose preview is the ONLY blob its sender uploads — arrived with its
+            // preview on the relay and nothing requesting it (e2e `satellite preview blob [dm]`).
+            let content = dataSaver
                 ? MediaVariants.dataSaverPrefetchRefs(item.media)
                 : item.media.filter { !MediaStore.isSynthetic($0) }
+            var candidates = MediaVariants.prefetchCompanions(in: item.media)
+            for r in content where !candidates.contains(r) { candidates.append(r) }
             for ref in candidates where !MediaStore.shared.has(ref) {
                 guard budget > 0 else { return }
                 budget -= 1
@@ -7496,7 +7535,7 @@ final class FeedStore: ObservableObject {
     func promoteToCircleAdmin(_ memberHex: String, in circleId: String) async -> Bool {
         guard let engine else { return false }
         let ok = await engine.run { $0.grantCircleAdmin(circleId: circleId, adminHex: memberHex) }
-        if ok, self.engine === engine { persist() }
+        if ok, self.engine === engine { persistUserAction() }
         return ok
     }
 
@@ -9688,6 +9727,13 @@ final class FeedStore: ObservableObject {
         guard let (requesterHex, ref, claimed, bitmap) = ReassemblyStore.decodeResume(payload) else { return }
         guard let url = MediaStore.shared.storagePath(for: ref),
               FileManager.default.fileExists(atPath: url.path) else { return }
+        // Same ultra-constrained gate as a first request (frame 3): a resume is a serve too, and its
+        // relay-first branch can promote the full upload.
+        guard HeavyWorkPolicy.mayMoveOverLink(ultraConstrained: LowDataMonitor.shared.effective == .ultra,
+                                              satelliteSafe: MediaStore.shared.maySendOnUltraConstrained(ref)) else {
+            HavenLog.net("media RESUME ref=\(ref.prefix(12)) — refused, link is ultra-constrained")
+            return
+        }
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         let total = max(1, (size + Self.mediaChunkSize - 1) / Self.mediaChunkSize)
         // A total that disagrees with ours means their partial was built against different bytes —

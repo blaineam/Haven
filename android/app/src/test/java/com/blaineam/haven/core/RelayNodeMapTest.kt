@@ -82,7 +82,7 @@ class RelayNodeMapTest {
                             // handleRelayNode: learn, supersede, suppress, forget
                             val hex = ((i + t) % 40).toString().padStart(64, '0')
                             val list = map.getOrPut("c${i % 4}") { RelayNodeMap.newList() }
-                            for (a in RelayNodeMap.supersededAccountRelays(list.toList(), hex, setOf("0".repeat(64))) { false }) {
+                            for (a in RelayNodeMap.supersededAccountRelays(RelayNodeMap.copy(list), hex, setOf("0".repeat(64))) { false }) {
                                 if (list.remove(a)) suppressed.add(a)
                             }
                             if (!list.contains(hex)) list.add(hex)
@@ -91,9 +91,10 @@ class RelayNodeMapTest {
                         } else {
                             // saveRelayNodes
                             val o = org.json.JSONObject()
-                            for ((k, v) in RelayNodeMap.snapshot(map)) o.put(k, org.json.JSONArray().apply { v.forEach { put(it) } })
-                            org.json.JSONArray().apply { suppressed.toList().forEach { put(it) } }
-                            org.json.JSONObject().apply { forgotAt.toMap().forEach { (k, v) -> put(k, v) } }
+                            map.forEach { (k, v) -> o.put(k, org.json.JSONArray().apply { v.forEach { put(it) } }) }   // saveRelayNodes' exact walk
+                            map.keys.forEach { k -> map[k]?.let { RelayNodeMap.copy(it) } }   // explicitRelaysForCircle
+                            org.json.JSONArray().apply { suppressed.forEach { put(it) } }
+                            org.json.JSONObject().apply { forgotAt.forEach { (k, v) -> put(k, v) } }
                             o.toString()
                         }
                     }

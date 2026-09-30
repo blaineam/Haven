@@ -23,9 +23,11 @@ object RelayNodeMap {
      *  CopyOnWriteArrayList member, which swaps the array under its lock. */
     fun removeRelay(list: MutableList<String>, hex: String): Boolean = list.removeIf { it == hex }
 
-    /** A point-in-time copy to iterate (persistence, UI, logs) — never walk the live map while others write. */
-    fun snapshot(map: Map<String, List<String>>): Map<String, List<String>> =
-        map.entries.associate { (k, v) -> k to v.toList() }
+    /** A point-in-time copy of one relay list. NOT Kotlin's `toList()`: that reads `size` and then
+     *  `get(0)` / `first()` as separate steps, so a list emptied in between throws
+     *  IndexOutOfBounds / NoSuchElement (the stress test hit both). `ArrayList(c)` takes one atomic
+     *  `toArray()` of the copy-on-write array. */
+    fun copy(list: List<String>): List<String> = ArrayList(list)
 
     /**
      * Which of a circle's relay entries a newly learned relay SUPERSEDES: entries equal to a member's

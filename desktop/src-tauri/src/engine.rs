@@ -8689,10 +8689,7 @@ impl Engine {
         // PREFETCH-BEFORE-NOTIFY: pull the item's small companions (thumbs, posters, images) so
         // that by the time the user acts on the banner the card has real pixels, not placeholders.
         // Bounded + time-capped; videos never prefetch here.
-        let mut prefetch: Vec<String> = Self::thumb_refs(&newest.media);
-        prefetch.extend(
-            newest.media.iter().filter_map(|m| haven_p2p::mediavariants::parse_poster(m).map(|(_, p)| p.to_string())),
-        );
+        let mut prefetch: Vec<String> = Self::small_companion_refs(&newest.media);
         prefetch.extend(
             haven_p2p::mediavariants::display_refs(&newest.media)
                 .into_iter()
@@ -8737,6 +8734,39 @@ impl Engine {
     /// Every thumb image ref a media list declares (≤32KB by contract — prefetched everywhere).
     fn thumb_refs(media: &[String]) -> Vec<String> {
         media.iter().filter_map(|r| Self::parse_thumb_marker(r).map(|(_, t)| t.to_string())).collect()
+    }
+
+    /// `preview:<content>:<preview>` → (content, preview) — the 512px preview tier
+    /// (docs/PREVIEW-TIER-DESIGN.md). Same shape as `thumb:`; Apple/Android `MediaVariants.parsePreview`.
+    fn parse_preview_marker(r: &str) -> Option<(&str, &str)> {
+        let rest = r.strip_prefix("preview:")?;
+        let colon = rest.rfind(':')?;
+        let (content, preview) = rest.split_at(colon);
+        let preview = &preview[1..];
+        if content.is_empty() || preview.is_empty() {
+            None
+        } else {
+            Some((content, preview))
+        }
+    }
+
+    /// The small companions a receiver prefetches for an item, previews first: previews (≤8 KB — the
+    /// only media a satellite sender uploads at all), thumbs, then posters. Each is named only inside
+    /// its marker, never listed bare, so a loop over `media` never asks for one. Previews were missing
+    /// from every desktop fetch path, so a satellite post's preview sat on the relay unrequested
+    /// (e2e `satellite preview blob (stub→) → desktop`). Apple/Android `MediaVariants.prefetchCompanions`.
+    fn small_companion_refs(media: &[String]) -> Vec<String> {
+        let previews = media.iter().filter_map(|r| Self::parse_preview_marker(r).map(|(_, p)| p.to_string()));
+        let posters = media
+            .iter()
+            .filter_map(|r| haven_p2p::mediavariants::parse_poster(r).map(|(_, p)| p.to_string()));
+        let mut out: Vec<String> = Vec::new();
+        for r in previews.chain(Self::thumb_refs(media)).chain(posters) {
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+        out
     }
 
     /// Relay-upload order for a fresh post's media: thumbs FIRST (tiny — they unblock every
@@ -9013,7 +9043,8 @@ impl Engine {
                 // by contract), so backfilled history renders as browsable tiles and the full
                 // photo/video downloads when it is actually opened. Fresh posts are untouched.
                 let backfill = now.saturating_sub(item.created_at) > BACKFILL_LAZY_MS;
-                for t in Self::thumb_refs(&item.media) {
+                // Small companions (previews, thumbs, posters) ride the no-lane prefetch below.
+                for t in Self::small_companion_refs(&item.media) {
                     if !self.media.has(&t) && !unopenable.contains(&t) && !thumbs.iter().any(|(tt, _)| tt == &t) {
                         thumbs.push((t, c.id.clone()));
                     }
@@ -9480,11 +9511,7 @@ impl Engine {
             .find(|i| {
                 i.is_me
                     && (i.media.iter().any(|m| m == reference)
-                        || Self::thumb_refs(&i.media).iter().any(|t| t == reference)
-                        || i.media
-                            .iter()
-                            .filter_map(|m| haven_p2p::mediavariants::parse_poster(m))
-                            .any(|(_, po)| po == reference))
+                        || Self::small_companion_refs(&i.media).iter().any(|t| t == reference))
             })
             .map(|i| i.id)
             .unwrap_or_default();
@@ -11440,6 +11467,15 @@ impl Engine {
         });
     }
 
+    /// Quit: a coalesced (network-driven) write still waiting out its 3 s delay lands now, so the
+    /// last few seconds of ingested state survive a Cmd-Q. User actions never wait on it — they
+    /// persist synchronously before anything is sent (`after_author_inner`).
+    pub fn flush_pending_persist(&self) {
+        if self.persist_pending.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.persist();
+        }
+    }
+
     fn persist(&self) {
         if let Err(e) = store::write_state(&self.paths, &self.social.export_state()) {
             log::error!("persist failed: {e}");
@@ -12557,6 +12593,33 @@ pub(crate) mod qa_media {
             "media_requests_from_friends": g(&REQUESTS_FROM_FRIENDS),
             "serve_declined": g(&DECLINED),
         })
+    }
+}
+
+#[cfg(test)]
+mod companion_tests {
+    use super::Engine;
+
+    /// Previews lead, companions only (never the content), each once — every desktop fetch path
+    /// walked `media` plus thumbs/posters, so a satellite post's preview was never requested.
+    #[test]
+    fn small_companions_list_previews_first_and_never_the_content() {
+        let media: Vec<String> = [
+            "img_a",
+            "vid_b",
+            "thumb:img_a:img_ta",
+            "poster:vid_b:img_pb",
+            "preview:img_a:img_va",
+            "preview:img_a:img_va",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(Engine::small_companion_refs(&media), vec!["img_va", "img_ta", "img_pb"]);
+        assert!(Engine::small_companion_refs(&["img_a".to_string()]).is_empty());
+        assert_eq!(Engine::parse_preview_marker("preview:img_a:img_va"), Some(("img_a", "img_va")));
+        assert_eq!(Engine::parse_preview_marker("preview::img_va"), None);
+        assert_eq!(Engine::parse_preview_marker("thumb:img_a:img_ta"), None);
     }
 }
 

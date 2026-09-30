@@ -632,8 +632,16 @@ pub fn run() {
             commands::set_foreground,
             commands::reset,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Haven");
+        .build(tauri::generate_context!())
+        .expect("error while building Haven")
+        .run(|app, event| {
+            // Quit (tray Quit / Cmd-Q): land any coalesced state write before the process goes.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(engine) = app.try_state::<Arc<Engine>>() {
+                    engine.flush_pending_persist();
+                }
+            }
+        });
 }
 
 /// Run with no window. Serves the circle relay/mailbox (E2E-sealed blobs it can never read) AND

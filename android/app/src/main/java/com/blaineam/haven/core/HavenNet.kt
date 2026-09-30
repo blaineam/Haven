@@ -148,24 +148,24 @@ object HavenNet : InboundListener {
     private val relayNodes = RelayNodeMap.newMap()
     /** Relay node ids announced TO us as relays this process (frame 19) — never superseded as stale
      *  account ids; see [RelayNodeMap.supersededAccountRelays]. */
-    private val announcedRelayNodes: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private val announcedRelayNodes: MutableSet<String> = SharedCollections.set()
     /** Relays the user explicitly FORGOT/deactivated — auto-learn (frame-19 announce / SelfSync) must
      *  not resurrect a *deactivated* relay passively, or Forget is a visible no-op. A deliberate
      *  re-announce DOES reactivate it (handleRelayNode). Cleared on explicit re-adoption / reactivation.
      *  Mirrors iOS `suppressed`. */
-    private val suppressedRelays: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()   // see [RelayNodeMap]
+    private val suppressedRelays = SharedCollections.set()
 
     /** When each relay was FORGOTTEN (unix ms), for LWW against a re-announce's addedAt. A re-add
      *  NEWER than the forget reactivates; a forget newer than the last add keeps it dead — so a relay's
      *  owner merely REOPENING the app (re-announcing the relay's older adoption time) can't resurrect a
      *  relay the user deleted. Mirrors iOS `forgotAt`. */
-    private val forgotAtRelays = java.util.concurrent.ConcurrentHashMap<String, Long>()   // see [RelayNodeMap]
+    private val forgotAtRelays = SharedCollections.map<Long>()
 
     /** Relays we deliberately RE-ADDED after a deletion (hex → re-add unix ms). Published via self-sync as
      *  a CLEAR so a sibling's stale deletion tombstone doesn't re-forget a relay we brought back — without
      *  it a grow-only relay tombstone would re-forget a re-added relay on every sibling's sync pass, forever
      *  (the "I delete a relay and it keeps coming back" bug in reverse). Mirrors iOS `clearedRelayForgets`. */
-    private val clearedRelayForgets = java.util.concurrent.ConcurrentHashMap<String, Long>()   // see [RelayNodeMap]
+    private val clearedRelayForgets = SharedCollections.map<Long>()
 
     private fun relayForgottenAtMs(hex: String): Long = forgotAtRelays[hex.lowercase()] ?: 0L
     private fun relayAddedAtMs(hex: String): Long = relayEntries[hex]?.addedAtMs ?: 0L
@@ -225,14 +225,14 @@ object HavenNet : InboundListener {
     private var defaultRelayHex: String = ""
     /** Erase inactive+unseen relay entries after this long (parity with iOS staleAfterMs). */
     private val RELAY_STALE_AFTER_MS = 7L * 24 * 3600 * 1000
-    private val relayClients = java.util.concurrent.ConcurrentHashMap<String, RelayClient>()   // see [RelayNodeMap]
+    private val relayClients = HashMap<String, RelayClient>()
     private val relayMutex = Mutex()
 
     // Mailbox keys already ingested or confirmed uploaded — PERSISTED (parity with iOS). In-memory
     // only, every cold start treated the whole mailbox as new and re-downloaded + re-verified every
     // envelope (a real circle had accumulated ~6700 entries for 88 events → a 30-second cold start,
     // all burned on crypto for duplicates the engine then dropped). Loaded lazily, saved debounced.
-    private val seenMailbox = HashSet<String>()
+    private val seenMailbox = SharedCollections.set()
     private var seenMailboxLoaded = false
     private var seenMailboxSavePending = false
     private val seenMailboxFile: File get() = File(appContext.filesDir, "haven_mailbox_seen.txt")
@@ -395,7 +395,7 @@ object HavenNet : InboundListener {
             const val MAX_BACKOFF_MS = 120_000L     // capped at 2 minutes
         }
     }
-    private val relayHealth = java.util.concurrent.ConcurrentHashMap<String, RelayHealth>()   // see [RelayNodeMap]
+    private val relayHealth = SharedCollections.map<RelayHealth>()
 
     // node ids we initiated a connect to (scanned their QR) → expected verify hash.
     //
@@ -412,8 +412,8 @@ object HavenNet : InboundListener {
     // by link records a CONTACT immediately, which enrols it in the every-tick hello sweep; Android
     // deliberately waits for the hello-back before creating one, so it fell out of every retry path.
     // Re-sending keeps punching an outbound hole so their delayed answer has somewhere to land.
-    private val initiated = HashMap<String, String>()
-    private val initiatedAt = HashMap<String, Long>()
+    private val initiated = SharedCollections.map<String>()
+    private val initiatedAt = SharedCollections.map<Long>()
     /** Stop re-dialling a handshake nobody ever answered (they declined, or the link went stale). */
     private val initiatedTtlMs = 48L * 60 * 60 * 1000
 
@@ -454,6 +454,7 @@ object HavenNet : InboundListener {
     @Synchronized
     fun init(context: Context) {
         if (ready) return   // atomic: never expose half-initialized state to a concurrent caller
+        QaStats.mark("engine_init_start")   // DEBUG launch timeline (e2e `launch`); no-op in release
         appContext = context.applicationContext
         // Must run before any iroh/TLS networking, or the node panics on Android.
         NativeBridge.ensureAndroidContext(appContext)
@@ -464,10 +465,12 @@ object HavenNet : InboundListener {
         // engine from the account PUBLIC bundle + its own device seed (the device identity is baked in),
         // and NEVER registers a device or registers for push (the primary owns those). A seeded/legacy
         // device keeps today's path: engine over the account seed, then adopt the device identity.
-        social = if (core.seedless) {
-            HavenSocial.newSeedless(core.bundle, DeviceKeyStore.deviceAccount().secretSeed())
-        } else {
-            HavenSocial(core.seed)
+        social = QaStats.timed("engine_construct") {
+            if (core.seedless) {
+                HavenSocial.newSeedless(core.bundle, DeviceKeyStore.deviceAccount().secretSeed())
+            } else {
+                HavenSocial(core.seed)
+            }
         }
         LocalMedia.init(appContext)
         // Calls (Haven + any other), thermal, Battery Saver → the heavy-media-I/O gate.
@@ -503,7 +506,7 @@ object HavenNet : InboundListener {
         InstagramImporter.init(appContext)
         ReassemblyStore.init(appContext)    // half-finished media transfers, so they resume not restart
         restoreReassemblies()
-        restoreState()
+        QaStats.timed("restore_state") { restoreState() }
         if (core.seedless) {
             // A seedless device cannot mint a roster or an account-signed profile card. Install the
             // primary's grant: the roster wire VERBATIM (incl. capability trailer — A3) so the engine
@@ -518,8 +521,10 @@ object HavenNet : InboundListener {
             // revocation of our own device id in the persisted roster could never be cleared. Registering
             // against the imported roster makes the re-authorization a version-bumped update that
             // propagates (see DeviceList::merge).
-            social.registerDevice(DeviceKeyStore.deviceBundle(), DeviceKeyStore.deviceName,
-                                  (System.currentTimeMillis() / 1000).toULong())
+            QaStats.timed("register_device") {
+                social.registerDevice(DeviceKeyStore.deviceBundle(), DeviceKeyStore.deviceName,
+                                      (System.currentTimeMillis() / 1000).toULong())
+            }
         }
         loadContacts()
         loadDeviceHints()
@@ -549,8 +554,9 @@ object HavenNet : InboundListener {
         // are up (docs/SWITCH-FLIP-1.0.7.md). These switches are NOT persisted in the engine, so this runs
         // on EVERY launch. Everything is gated in core — inert (byte-identical to 1.0.6) until a circle /
         // the own-device fleet is fully capable.
-        applyCryptoSwitches()
+        QaStats.timed("apply_crypto_switches") { applyCryptoSwitches() }
         ready = true
+        QaStats.mark("engine_ready")
         // Tell the UI the engine exists now.
         //
         // init() is driven from a LaunchedEffect, so it necessarily runs AFTER the first composition:
@@ -1870,7 +1876,7 @@ object HavenNet : InboundListener {
     // ---- Frame-9 mesh relay (internet live-forward; wire parity with iOS emitRelay) --------
     //   [16B msgId][1B ttl][1B destCount][32B × dest][inner frame]
 
-    private val seenRelay = LinkedHashSet<String>()
+    private val seenRelay = SharedCollections.set()
 
     private fun hexToBytes32(hex: String): ByteArray? {
         if (hex.length != 64) return null
@@ -2453,7 +2459,7 @@ object HavenNet : InboundListener {
     /** Device ids learned from a contact's INVITE LINK (`?d=` — see InviteHints). The only dialable
      *  ids for a device-seed friend until their signed roster (frame 27) arrives — which the hint
      *  itself makes possible. Keyed by lowercased account hex; persisted as JSON. */
-    private val deviceHints = HashMap<String, List<String>>()
+    private val deviceHints = SharedCollections.map<List<String>>()
     private fun loadDeviceHints() {
         val raw = prefs.getString("deviceHints", null) ?: return
         runCatching {
@@ -2498,7 +2504,7 @@ object HavenNet : InboundListener {
 
     /** Accounts we have asked the directory about recently, so a sync tick does not re-query a
      *  contact who simply has not published (every pre-discovery install - the common case). */
-    private val discoveryAskedAt = HashMap<String, Long>()
+    private val discoveryAskedAt = SharedCollections.map<Long>()
 
     /** Look up device ids for contacts we have NO way to dial - no signed roster, no invite hint,
      *  just an account id that is not a transport address. Without this such a contact is only
@@ -2708,7 +2714,7 @@ object HavenNet : InboundListener {
     //   working for old links during the transition.
 
     /** Single-use enrollment tickets this primary is currently offering, keyed by secret hex. */
-    private val pendingTickets = HashMap<String, uniffi.haven_ffi.EnrollTicketFfi>()
+    private val pendingTickets = SharedCollections.map<uniffi.haven_ffi.EnrollTicketFfi>()
     /** The ticket secret hex the pending (confirm-gated) request matched. */
     private var pendingRequestSecret: String? = null
     /** The ticket the new device is currently linking against (null = not linking). */
@@ -3233,7 +3239,7 @@ object HavenNet : InboundListener {
     // starved the rest of sync. Content is what matters, so key on the wire's hash: an unchanged
     // roster is re-sent only after ROSTER_REPUBLISH_MS as liveness, and any CHANGE republishes
     // immediately. iOS SharedStore.rosterPublished parity.
-    private val rosterPublished = HashMap<String, Pair<Int, Long>>()   // node → (wire hash, confirmed at)
+    private val rosterPublished = SharedCollections.map<Pair<Int, Long>>()   // node → (wire hash, confirmed at)
     private val rosterRepublishMs = 1_800_000L   // 30 min
 
     private suspend fun publishDeviceRoster(force: Boolean = false) {
@@ -3767,6 +3773,14 @@ object HavenNet : InboundListener {
             persistPending = false
             persist()
         }
+    }
+
+    /** Backgrounding (MainActivity.onStop): land a coalesced import write that is still waiting out
+     *  its delay. Every other mutation already persists synchronously before anything is sent. */
+    fun flushPendingPersist() {
+        if (!ready || !persistPending) return
+        persistPending = false
+        scope.launch(Dispatchers.IO) { persist() }
     }
 
     /** Last coalesced import bump, and whether one is already pending. */
@@ -4585,7 +4599,7 @@ object HavenNet : InboundListener {
         val staleAccounts = (runCatching { social.contactNodeIds(circleId) }.getOrDefault(emptyList()) +
                              listOf(runCatching { social.myNodeHex() }.getOrDefault(""))).map { it.lowercase() }.toSet()
         var supersededAny = false
-        val superseded = RelayNodeMap.supersededAccountRelays(list.toList(), nodeHex, staleAccounts) { a ->
+        val superseded = RelayNodeMap.supersededAccountRelays(RelayNodeMap.copy(list), nodeHex, staleAccounts) { a ->
             // Live evidence it's a real relay: it was itself announced as a relay, or announced an
             // HTTP interface. A dead pre-device-seed leftover never is.
             a in announcedRelayNodes || relayEntries[a]?.httpUrls?.isNotEmpty() == true
@@ -4935,7 +4949,7 @@ object HavenNet : InboundListener {
     }
 
     /** The relays EXPLICITLY associated with this circle (no default fallback, INCLUDING inactive). */
-    fun explicitRelaysForCircle(circleId: String): List<String> = relayNodes[circleId]?.toList() ?: emptyList()
+    fun explicitRelaysForCircle(circleId: String): List<String> = relayNodes[circleId]?.let { RelayNodeMap.copy(it) } ?: emptyList()
 
     // ---- RelayEntry bookkeeping (deactivate-not-erase model) ----
 
@@ -5011,7 +5025,7 @@ object HavenNet : InboundListener {
 
     data class ErasedRelay(val entry: RelayEntry, val circles: List<String>, val wasDefault: Boolean, val erasedAt: Long)
 
-    private val erasedRelays = java.util.concurrent.ConcurrentHashMap<String, ErasedRelay>()   // see [RelayNodeMap]
+    private val erasedRelays = SharedCollections.map<ErasedRelay>()
     private const val ERASED_KEEP_MAX = 12
     private const val ERASED_TTL_MS = 30L * 24 * 60 * 60 * 1000
 
@@ -5053,7 +5067,7 @@ object HavenNet : InboundListener {
 
     private fun pruneErasedRelays() {
         val cutoff = relayNow() - ERASED_TTL_MS
-        erasedRelays.entries.removeAll { it.value.erasedAt <= cutoff }
+        erasedRelays.entries.removeIf { it.value.erasedAt <= cutoff }
         while (erasedRelays.size > ERASED_KEEP_MAX) {
             val oldest = erasedRelays.values.minByOrNull { it.erasedAt } ?: break
             erasedRelays.remove(oldest.entry.hex)
@@ -5901,11 +5915,12 @@ object HavenNet : InboundListener {
         // parity). Marking inline put the seen file ahead of the engine save; a kill in that gap
         // durably marked keys whose events -- including friends' KEY COMMITS -- never landed, and
         // all content beneath the push layer went dark fleet-wide.
-        for (k in pendingSeenMarks) markMailboxSeen(k)
-        pendingSeenMarks.clear()
+        // Drained, not iterated + cleared: two mailbox passes can overlap, and an add from one
+        // during the other's flush threw ConcurrentModificationException (or was cleared unmarked).
+        while (true) markMailboxSeen(pendingSeenMarks.poll() ?: break)
     }
 
-    private val pendingSeenMarks = mutableListOf<String>()
+    private val pendingSeenMarks = java.util.concurrent.ConcurrentLinkedQueue<String>()
 
     // ---- Cross-device media bytes (frame 3 request / frame 5 sealed chunks), like iOS ----
 
@@ -5928,10 +5943,10 @@ object HavenNet : InboundListener {
     /** Refs with a frame-33 fallback timer already armed — one per ref, never one per inbound request,
      *  so a peer cannot make us spawn coroutines. Guarded by [incomingLock]. */
     private val resumeFallbackPending = HashSet<String>()
-    private val requestedRefs = HashSet<String>()
-    private val mediaReqAt = HashMap<String, Long>()   // ref -> last direct-request ms (5-min throttle)
-    private val servedAt = HashMap<String, Long>()      // ref -> last nearby-serve ms (25s rate-limit)
-    private val pushedNearby = HashSet<String>()        // refs already pushed to nearby siblings this session
+    private val requestedRefs = SharedCollections.set()
+    private val mediaReqAt = SharedCollections.map<Long>()   // ref -> last direct-request ms (5-min throttle)
+    private val servedAt = SharedCollections.map<Long>()      // ref -> last nearby-serve ms (25s rate-limit)
+    private val pushedNearby = SharedCollections.set()        // refs already pushed to nearby siblings this session
 
     private fun mediaKey(ref: String) = "haven/media/$ref"
     // Chunks live in a SIBLING dir "<ref>.p/", not nested under the manifest key "haven/media/<ref>":
@@ -6115,6 +6130,12 @@ object HavenNet : InboundListener {
 
     private fun jobKey(job: MediaJob) =
         (if (job is MediaJob.Backup) (if (job.force) "BF|" else "B|") else "R|") + job.ref + "|" + job.circleId
+
+    /** May [ref] leave this device over the current link? Only satellite-safe media while ULTRA. */
+    private fun linkMayMove(ref: String): Boolean = HeavyWorkPolicy.mayMoveOverLink(
+        ultraConstrained = LowDataMonitor.effective.value == uniffi.haven_ffi.LinkConstraint.ULTRA,
+        satelliteSafe = LocalMedia.maySendOnUltraConstrained(ref),
+    )
 
     /** Enqueue a media blob to mirror to the circle's relays — serialized (one in RAM at a time).
      *  [force] = the 1.0.8 recovery overwrite (bypass the "already held?" probe + ledger).
@@ -6863,25 +6884,20 @@ object HavenNet : InboundListener {
                 val backfill = now >= item.createdAt &&
                     (now - item.createdAt) > BACKFILL_LAZY_MS.toULong()
                 if (!backfill) item.media.forEach { consider(it) }
-                // Thumb companions: remember the pairing (feeds the blurred placeholder) and
-                // prefetch for EVERY post regardless of lane/data saver — ≤32KB by contract.
+                // Thumb companions: remember the pairing (feeds the blurred placeholder).
                 for (m in item.media) {
-                    MediaVariants.parseThumb(m)?.let { (content, thumb) ->
-                        thumbOfContent[content] = thumb
-                        if (!LocalMedia.has(thumb) && !unopenableMedia.contains(thumb)) thumbs[thumb] = c.id
-                    }
-                    // POSTERS ride the same lane as thumbs — a poster is a small still, not a video.
-                    // Left in the general `missing` map it queues behind full-size clips, so a video
-                    // tile has no poster for as long as the backlog takes and falls back to
-                    // generating one locally: expensive (a decode session per attempt) and pointless,
-                    // because the sender already cut one and shipped it. iOS parity.
-                    for (m in item.media) {
-                        MediaVariants.parsePoster(m)?.let { (_, poster) ->
-                            if (!LocalMedia.has(poster) && !unopenableMedia.contains(poster)) {
-                                thumbs[poster] = c.id
-                            }
-                        }
-                    }
+                    MediaVariants.parseThumb(m)?.let { (content, thumb) -> thumbOfContent[content] = thumb }
+                }
+                // Small companions — previews, thumbs, posters — prefetch for EVERY post regardless of
+                // lane/data saver (≤32 KB by contract). Each is named only inside its marker, so the
+                // content walk above never asks for one. PREVIEWS lead: on a satellite link the preview
+                // is the only blob its sender uploads, and it used to be fetched only from the
+                // background-notification path, so a foreground receiver never asked for it (e2e
+                // `satellite preview blob (stub→) → android`). POSTERS ride here too rather than in
+                // `missing`, where a video tile waited behind full-size clips and generated its own
+                // poster instead. iOS parity.
+                for (small in MediaVariants.prefetchCompanions(item.media)) {
+                    if (!LocalMedia.has(small) && !unopenableMedia.contains(small)) thumbs[small] = c.id
                 }
                 // Same lazy rule as the post — a backfilled thread's attachments load on tap.
                 if (!backfill) item.comments.forEach { cm ->
@@ -7065,7 +7081,7 @@ object HavenNet : InboundListener {
     // The seed MUST be the one HavenNode.start binds the transport to (DeviceKeyStore's per-device
     // seed), or the relay sees a node id in no roster and answers 403.
 
-    private val httpUrlBad = HashMap<String, Long>()   // url -> retry-after epoch ms (2-min backoff)
+    private val httpUrlBad = SharedCollections.map<Long>()   // url -> retry-after epoch ms (2-min backoff)
 
     /**
      * The relay's usable HTTP URLs from where WE are — empty means "iroh-only", which is the honest
@@ -7574,6 +7590,15 @@ object HavenNet : InboundListener {
      *  answering their ask with the old seal reports success while fixing nothing. */
     suspend fun uploadMedia(circleId: String, ref: String, force: Boolean = false,
                             reseal: Boolean = false): Boolean {
+        // ULTRA-CONSTRAINED LINK: previews only, by EVERY upload path. enqueueBackup gates the queue,
+        // but a friend's media-wanted ask (forced re-seal), a relay hint's promoted upload and the
+        // quarantine repair call this directly — and the media-wanted path put a 330 KB original on
+        // the relay while the link was forced to satellite (e2e `satellite holds back the full photo
+        // (android→)`). A held non-force job stays persisted and re-runs when the link improves.
+        if (!linkMayMove(ref)) {
+            Log.i("MediaSync", "upload ${ref.take(12)} held — link is ultra-constrained (previews only)")
+            return false
+        }
         if (uploadMediaOnce(circleId, ref, force, reseal)) return true
         // Nothing took the blob and at least one relay REFUSED it rather than being down: publish our
         // roster to the refusers and try once more, exactly as the Restore job does for the read side. A
@@ -7857,7 +7882,7 @@ object HavenNet : InboundListener {
      * write or two to a kill is harmless in the only direction that matters: it UNDERSTATES progress,
      * costing a re-sent window, and can never overstate it.
      */
-    private val uploadProgress = HashMap<String, String>()
+    private val uploadProgress = SharedCollections.map<String>()
     private var uploadProgressLoaded = false
     private fun uploadPrefs() = appContext.getSharedPreferences("haven.mediabackup", Context.MODE_PRIVATE)
     private fun ensureUploadProgress() {
@@ -8823,6 +8848,12 @@ object HavenNet : InboundListener {
     private fun handleMediaResumeRequest(body: ByteArray) {
         val req = MediaResume.decode(body) ?: return
         if (!LocalMedia.has(req.ref)) return
+        // Same ultra-constrained gate as a first request (frame 3): a resume is a serve too, and its
+        // relay-first branch can promote the full upload.
+        if (!linkMayMove(req.ref)) {
+            Log.i(TAG, "media RESUME ${req.ref.take(12)} — refused, link is ultra-constrained")
+            return
+        }
         // Same relay-first / heavy-I/O gate as a first request; the bitmap is honoured in streamServe.
         relayFirstServe(req.ref, req.requesterHex, resume = req)
     }
@@ -8943,7 +8974,7 @@ object HavenNet : InboundListener {
     // ---- Persistence ---------------------------------------------------------------------
 
     private fun persist() {
-        runCatching { stateFile.writeBytes(social.exportState()) }
+        runCatching { StateFiles.writeAtomic(stateFile, social.exportState()) }
             .onSuccess { QaPerf.notePersistExport() }   // the QA dump's perf.persistExportCount
             .onFailure { Log.e(TAG, "persist failed", it) }
     }
@@ -8953,7 +8984,7 @@ object HavenNet : InboundListener {
         // the shared file so no future identity can pick it up.
         if (!stateFile.exists() && legacyStateFile.exists()) {
             runCatching { social.importState(legacyStateFile.readBytes()) }
-            runCatching { stateFile.writeBytes(social.exportState()) }
+            runCatching { StateFiles.writeAtomic(stateFile, social.exportState()) }
             runCatching { legacyStateFile.delete() }
             return
         }
@@ -9302,11 +9333,9 @@ object HavenNet : InboundListener {
 
     private fun saveRelayNodes() {
         val o = JSONObject()
-        // Snapshot every relay collection before walking it: this runs on whatever thread mutated
-        // relay state (handleRelayNode on Dispatchers.IO included) while others keep writing.
-        for ((k, v) in RelayNodeMap.snapshot(relayNodes)) o.put(k, JSONArray().apply { v.forEach { put(it) } })
+        relayNodes.forEach { (k, v) -> o.put(k, JSONArray().apply { v.forEach { put(it) } }) }
         val entriesArr = JSONArray()
-        relayEntries.values.toList().forEach { e ->
+        relayEntries.values.forEach { e ->
             entriesArr.put(JSONObject().apply {
                 put("hex", e.hex); put("name", e.name); put("active", e.active)
                 put("lastSeenMs", e.lastSeenMs); put("isS3", e.isS3)
@@ -9320,7 +9349,7 @@ object HavenNet : InboundListener {
             })
         }
         val erasedArr = JSONArray()
-        erasedRelays.values.toList().forEach { r ->
+        erasedRelays.values.forEach { r ->
             erasedArr.put(JSONObject().apply {
                 put("hex", r.entry.hex); put("name", r.entry.name); put("isS3", r.entry.isS3)
                 put("erasedAt", r.erasedAt); put("wasDefault", r.wasDefault)
@@ -9330,12 +9359,12 @@ object HavenNet : InboundListener {
                 if (r.entry.derpUrl.isNotEmpty()) put("derpUrl", r.entry.derpUrl)
             })
         }
-        val forgotAtJson = JSONObject().apply { forgotAtRelays.toMap().forEach { (k, v) -> put(k, v) } }
-        val clearedForgotJson = JSONObject().apply { clearedRelayForgets.toMap().forEach { (k, v) -> put(k, v) } }
+        val forgotAtJson = JSONObject().apply { forgotAtRelays.forEach { (k, v) -> put(k, v) } }
+        val clearedForgotJson = JSONObject().apply { clearedRelayForgets.forEach { (k, v) -> put(k, v) } }
         // Write the new format and clear the legacy key (completes the migration).
         prefs.edit()
             .putString("relays", o.toString())
-            .putString("relaysSuppressed", JSONArray().apply { suppressedRelays.toList().forEach { put(it) } }.toString())
+            .putString("relaysSuppressed", JSONArray().apply { suppressedRelays.forEach { put(it) } }.toString())
             .putString("relaysForgotAt", forgotAtJson.toString())
             .putString("relaysClearedForgot", clearedForgotJson.toString())
             .putString("relayEntries", entriesArr.toString())

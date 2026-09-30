@@ -175,8 +175,8 @@ private fun MainScaffold() {
             com.blaineam.haven.core.CallManager.init(context, HavenNet.nodeIdHex)
             HavenNet.presentDemoConnected()
         } else {
-            HavenNet.init(context)
-            HavenNet.start()
+            com.blaineam.haven.core.QaStats.timed("root_init") { HavenNet.init(context) }
+            com.blaineam.haven.core.QaStats.timed("root_start") { HavenNet.start() }
             com.blaineam.haven.core.CallManager.init(context, HavenNet.nodeIdHex)
             com.blaineam.haven.core.ConnectionService.restoreIfEnabled(context)
             HavenNet.restoreNearbyIfWanted()   // default-on; auto-starts when perms already granted

@@ -5530,6 +5530,51 @@ pub struct HavenSocial {
     /// LOCK per envelope. Session-scoped ON PURPOSE (never persisted): a restart re-ingests each
     /// envelope once, so a cleared circle or imported state can never be wedged by a stale set.
     seen_envelopes: Mutex<std::collections::HashMap<String, std::collections::HashSet<[u8; 32]>>>,
+    /// [`key_state_digest`] as of the last `export_state` — what `key_state_unsaved` compares against.
+    saved_key_digest: Mutex<Option<[u8; 32]>>,
+}
+
+/// A digest of every piece of engine state that AUTHORS key material other devices build on: each
+/// circle's epoch + cached key commit, and its TreeKEM tree (commits, Welcomes, my genesis, the
+/// cached tree re-emissions, the fork-heal record). All of it is minted with fresh randomness, so if
+/// its envelopes leave before it is on disk and the process dies, the relaunch mints DIFFERENT bytes
+/// for the same role — a second genesis, a competing Add, a re-sealed Welcome — and the devices that
+/// already took the first ones fork away. Callers compare it via [`HavenSocial::key_state_unsaved`].
+fn key_state_digest(st: &NetState) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    let mut circles: Vec<&Circle> = st.circles.iter().collect();
+    circles.sort_by(|a, b| a.id.cmp(&b.id));
+    for c in circles {
+        h.update(c.id.as_bytes());
+        h.update(&c.my_epoch.to_le_bytes());
+        if let Some((ctx, bytes)) = &c.cached_commit {
+            h.update(ctx);
+            h.update(blake3::hash(bytes).as_bytes());
+        }
+    }
+    let mut trees: Vec<(&String, &ShadowTree)> = st.shadow_trees.iter().collect();
+    trees.sort_by(|a, b| a.0.cmp(b.0));
+    for (id, t) in trees {
+        h.update(id.as_bytes());
+        h.update(&t.my_genesis.unwrap_or([0u8; 32]));
+        for k in t.commits.keys() {
+            h.update(k);
+        }
+        for k in t.my_welcomes.keys() {
+            h.update(k);
+        }
+        h.update(&(t.emit_cache.len() as u64).to_le_bytes());
+        for w in &t.emit_cache {
+            h.update(blake3::hash(w).as_bytes());
+        }
+        let mut rw: Vec<&([u8; 32], [u8; 32])> = t.rewelcomed.iter().collect();
+        rw.sort();
+        for (d, g) in rw {
+            h.update(d);
+            h.update(g);
+        }
+    }
+    *h.finalize().as_bytes()
 }
 
 #[uniffi::export]
@@ -5580,6 +5625,7 @@ impl HavenSocial {
                 live_lane_circles: std::collections::HashSet::new(),
             }),
             seen_envelopes: Mutex::new(std::collections::HashMap::new()),
+            saved_key_digest: Mutex::new(None),
         }))
     }
 
@@ -5636,6 +5682,7 @@ impl HavenSocial {
                 live_lane_circles: std::collections::HashSet::new(),
             }),
             seen_envelopes: Mutex::new(std::collections::HashMap::new()),
+            saved_key_digest: Mutex::new(None),
         }))
     }
 
@@ -7785,16 +7832,32 @@ have_seed={} have_device={} members={}",
         ok
     }
 
+    /// True when key / tree state was authored since the last `export_state` — an epoch rotation, a
+    /// key commit, a genesis, an Add/Remove/Update commit, a (re-)Welcome. The apps call this after
+    /// anything that produces envelopes to send (`sync_envelopes`, `sync_envelopes_page`,
+    /// `export_my_envelopes`, a bundle) and EXPORT BEFORE SENDING when it is true: the envelopes carry
+    /// material minted with fresh randomness, and a kill between the send and a debounced save
+    /// relaunched on state that had never minted them — so it minted different ones, and the devices
+    /// that took the first set forked away (e2e `launch` → `multirelay`).
+    pub fn key_state_unsaved(&self) -> bool {
+        let now = key_state_digest(&self.state.lock().unwrap());
+        *self.saved_key_digest.lock().unwrap() != Some(now)
+    }
+
     /// Serialize all circles (members + events) for on-disk persistence.
     pub fn export_state(&self) -> Vec<u8> {
         // Snapshot under the lock, serialize with it released: the JSON encode of a large store (every
         // event, and every 32-byte key as a decimal array) was most of the hold — 2.7 s for a 170 KB
         // state on the loaded e2e desktop, parking every receive and feed behind a routine save.
-        let ps = {
+        let (ps, digest) = {
             let st = self.state.lock().unwrap();
-            Self::persist_snapshot(&st)
+            (Self::persist_snapshot(&st), key_state_digest(&st))
         };
-        serde_json::to_vec(&ps).unwrap_or_default()
+        let out = serde_json::to_vec(&ps).unwrap_or_default();
+        // Recorded when the bytes are handed over: the caller writes them next (atomically), and a
+        // caller that fails to write asks again — `key_state_unsaved` is a hint to save, never a skip.
+        *self.saved_key_digest.lock().unwrap() = Some(digest);
+        out
     }
 }
 
@@ -12740,6 +12803,47 @@ mod net_tests {
         assert!(c.feed(cid.clone(), 7_000, None).iter().any(|m| m.body == "after-restart"), "C reads the restarted creator");
         assert!(a2.feed(cid.clone(), 7_000, None).iter().any(|m| m.body == "b-after-restart"), "the restarted creator reads B");
         assert!(tree_wires(&a2).is_subset(&before), "a full sync after the restart still minted nothing new");
+    }
+
+    /// The save-before-send contract for AUTHORED key material: the creator authors a mid-life Add
+    /// while building a bundle. `key_state_unsaved` must say so, so the app exports BEFORE the Add
+    /// leaves; a kill right after the send then relaunches on state that already holds that Add and
+    /// re-emits the SAME bytes. Relaunching on the save from before the Add (the old debounce race)
+    /// mints a DIFFERENT Add — the fork this contract exists to prevent.
+    #[test]
+    fn an_authored_add_survives_a_kill_between_authoring_and_the_debounce() {
+        let _clk = clock_guard();
+        let (base, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+        let a = base[0].clone();
+        flip_and_join(&base, &cid);
+        let before_add = a.export_state();
+        assert!(!a.key_state_unsaved(), "nothing authored since the export");
+        let c = HavenSocial::new([3u8; 32].to_vec()).unwrap();
+        assert!(c.use_device_identity([13u8; 32].to_vec()));
+        wire_new_member(&base, &[[1u8; 32], [2u8; 32]], &c, [3u8; 32], [1u8; 32], &cid);
+        let is_tree = |e: &Vec<u8>| matches!(e.first(), Some(&TAG_MLS_COMMIT) | Some(&TAG_MLS_WELCOME));
+        // Building the bundle authors the Add + C's Welcome …
+        let sent: std::collections::BTreeSet<Vec<u8>> = a.sync_envelopes(cid.clone()).into_iter().filter(is_tree).collect();
+        assert!(a.key_state_unsaved(), "an authored Add must be reported unsaved before it is sent");
+        // … so the app saves before sending.
+        let saved = a.export_state();
+        assert!(!a.key_state_unsaved());
+        let relaunch = |state: Vec<u8>| {
+            let r = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+            assert!(r.use_device_identity([11u8; 32].to_vec()));
+            r.set_mls_keying(true);
+            r.import_state(state);
+            for (i, p) in [&base[1], &c].into_iter().enumerate() {
+                r.profile_seed_drop_version(p.my_bundle(), card(p, &format!("k{i}")));
+            }
+            let wires: std::collections::BTreeSet<Vec<u8>> = r.sync_envelopes(cid.clone()).into_iter().filter(is_tree).collect();
+            wires
+        };
+        let after = relaunch(saved);
+        assert!(sent.is_subset(&after), "the relaunch re-emits exactly the Add it had already sent");
+        assert!(after.is_subset(&sent), "and mints nothing new");
+        let stale = relaunch(before_add);
+        assert!(!sent.is_subset(&stale), "relaunching on the pre-Add save re-mints a different Add (why the save must come first)");
     }
 
     /// §9 M4 proof — SLEEPER (§5.5): a device offline past the mailbox TTL, whose private tree state

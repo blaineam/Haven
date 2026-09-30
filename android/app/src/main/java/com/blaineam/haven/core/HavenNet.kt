@@ -3002,6 +3002,7 @@ object HavenNet : InboundListener {
                 if (circleId.startsWith("dm:")) social.syncEnvelopes(circleId)
                 else social.syncEnvelopesPage(circleId, 0uL, HISTORY_PAGE_SIZE)
             }.getOrDefault(emptyList())
+            durableKeyState()
             for (env in envs) sendFrame(Wire.EVENT, Wire.eventPayload(circleId, env), toNodeHex)
         }
         // Tell this peer about the circle relays WE have proof of life for (a successful op within
@@ -3173,6 +3174,7 @@ object HavenNet : InboundListener {
                         val envs = runCatching {
                             social.exportRecentEnvelopes(cid, OWN_DEVICE_CATCHUP_LIMIT)
                         }.getOrDefault(emptyList())
+                        durableKeyState()
                         if (envs.isNotEmpty()) {
                             liveDeliverManyToMyDevices(Wire.EVENT, envs.map { Wire.eventPayload(cid, it) })
                         }
@@ -4038,6 +4040,7 @@ object HavenNet : InboundListener {
         val page = runCatching {
             social.syncEnvelopesPage(req.circleId, req.beforeMs, HISTORY_PAGE_SIZE)
         }.getOrDefault(emptyList())
+        durableKeyState()
         Log.d(TAG, "history: serving ${page.size} envelopes before ${req.beforeMs} in ${req.circleId}")
         for (env in page) sendFrame(Wire.EVENT, Wire.eventPayload(req.circleId, env), req.requesterHex)
     }
@@ -4172,7 +4175,9 @@ object HavenNet : InboundListener {
                 var delaySecs = 5L
                 while (true) {
                     var ok = true
-                    for (head in runCatching { social.exportEpochHead(circleId) }.getOrDefault(emptyList())) {
+                    val heads = runCatching { social.exportEpochHead(circleId) }.getOrDefault(emptyList())
+                    durableKeyState()
+                    for (head in heads) {
                         ok = uploadEvent(circleId, head) && ok
                     }
                     ok = uploadEvent(circleId, env) && ok
@@ -4303,7 +4308,9 @@ object HavenNet : InboundListener {
         bumpActivity()   // a peer just appeared → sync tight for the catch-up burst
         val hello = helloPayload(DEFAULT_CIRCLE) ?: return
         NearbyTransport.broadcast(Wire.frame(Wire.HELLO, hello))
-        for (env in runCatching { social.syncEnvelopes(DEFAULT_CIRCLE) }.getOrDefault(emptyList())) {
+        val defaultEnvs = runCatching { social.syncEnvelopes(DEFAULT_CIRCLE) }.getOrDefault(emptyList())
+        durableKeyState()
+        for (env in defaultEnvs) {
             NearbyTransport.broadcast(Wire.frame(Wire.EVENT, Wire.eventPayload(DEFAULT_CIRCLE, env)))
         }
         reannounceOwnRelay()                 // a freshly-connected sibling/friend immediately learns this host's relay
@@ -5543,6 +5550,7 @@ object HavenNet : InboundListener {
         if (!hasRelay && !Presign.hasBootstrap(circleId)) return
         if (eventsToo) {
             val envs = runCatching { social.exportMyEnvelopes(circleId) }.getOrDefault(emptyList())
+            durableKeyState()
             for (env in envs) uploadEvent(circleId, env)
             // TOUCH the same refs on every relay so mailbox GC keeps them (uploadEvent is
             // seen-set-skipped once an envelope landed ONCE — without this, nothing would ever
@@ -5592,7 +5600,9 @@ object HavenNet : InboundListener {
      *  the relay — no fragmented posts. Parity with iOS backfillMailboxMedia. No-op without a mailbox. */
     private suspend fun backfillHistoryToRelay(circleId: String) {
         if (relaysFor(circleId).isEmpty() && !Presign.hasBootstrap(circleId)) return
-        for (env in runCatching { social.syncEnvelopes(circleId) }.getOrDefault(emptyList())) {
+        val history = runCatching { social.syncEnvelopes(circleId) }.getOrDefault(emptyList())
+        durableKeyState()
+        for (env in history) {
             uploadEvent(circleId, env)
         }
         val refs = LinkedHashSet<String>()
@@ -5658,7 +5668,9 @@ object HavenNet : InboundListener {
         // commit + per-(relay,key) upload marks make repeats a no-op.
         if (launchHeadsPublished.compareAndSet(false, true)) {
             for (cid in runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())) {
-                for (head in runCatching { social.exportEpochHead(cid) }.getOrDefault(emptyList())) {
+                val heads = runCatching { social.exportEpochHead(cid) }.getOrDefault(emptyList())
+                durableKeyState()
+                for (head in heads) {
                     uploadEvent(cid, head)
                 }
             }
@@ -8957,6 +8969,15 @@ object HavenNet : InboundListener {
     }
 
     // ---- Persistence ---------------------------------------------------------------------
+
+    /** Save-before-send for key material authored OUTSIDE a post (iOS `durableKeyState` parity):
+     *  building a bundle / head / backfill can rotate an epoch or author a key commit, a genesis, an
+     *  Add/Remove/Update commit or a (re-)Welcome — minted with fresh randomness. Called after
+     *  producing envelopes and BEFORE sending them, so a kill after the send can never relaunch on
+     *  state that minted different ones (the fork the e2e `launch` kill exposed). */
+    private fun durableKeyState() {
+        if (runCatching { social.keyStateUnsaved() }.getOrDefault(false)) persist()
+    }
 
     private fun persist() {
         runCatching { StateFiles.writeAtomic(stateFile, social.exportState()) }

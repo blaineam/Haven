@@ -1075,6 +1075,7 @@ final class FeedStore: ObservableObject {
                 let heads: [(String, [Data])] = await engine.run { s in
                     cids.map { ($0, s.exportEpochHead(circleId: $0)) }
                 }
+                await self.durableKeyState(engine)   // a head can carry a freshly rotated key commit
                 for (cid, envs) in heads {
                     for head in envs { BackgroundUploader.shared.enqueue(circleId: cid, env: head, maintenance: true) }
                 }
@@ -1925,6 +1926,7 @@ final class FeedStore: ObservableObject {
             _ = try? s.addContactBundle(circleId: "default", bundle: req.bundle)
             return (vhex, s.syncEnvelopes(circleId: "default"))
         }
+        await durableKeyState(engine)   // anything that re-seal authored is on disk before it leaves
         guard self.engine === engine else { return }
         ContactsStore.shared.add(name: req.name, idHex: req.idHex, verificationHex: vhex)
         dialTargetsCache.removeAll()   // the new friend must be dialable now, not when the 10s cache expires
@@ -5498,6 +5500,7 @@ final class FeedStore: ObservableObject {
                     toSeal.map { ($0.cid, $0.gen, s.syncEnvelopes(circleId: $0.cid)) }
                 }
                 guard let self, self.engine === engine else { return }
+                await self.durableKeyState(engine)
                 for s in freshSealed {
                     // Cache only if the circle didn't change while sealing, and keep it bounded
                     // (history envelopes are small event JSON, but a huge circle stays uncached).
@@ -5741,6 +5744,7 @@ final class FeedStore: ObservableObject {
                     return work
                 }
                 guard let self, self.engine === engine else { return }
+                await self.durableKeyState(engine)
                 var pushed = 0
                 for (cid, envs) in workFinal {
                     self.liveDeliverManyToMyDevices(1, envs.suffix(catchupLimit).map { self.eventPayload(cid, $0) })
@@ -5942,6 +5946,7 @@ final class FeedStore: ObservableObject {
                 circleSnap.map { ($0.id, s.exportRecentEnvelopes(circleId: $0.id, limit: nearbyCatchupLimit)) }
             }
             guard let self, self.engine === engine else { return }
+            await self.durableKeyState(engine)
             if let slot { self.nearbyBroadcast(23, slot, class: .control) }
             for circle in circleSnap {
                 guard let hello = self.helloPayload(circleId: circle.id, circleName: circle.name) else { continue }
@@ -6103,6 +6108,19 @@ final class FeedStore: ObservableObject {
         afterAuthoredStateDurable { [weak self] in
             self?.sendAuthored(circleId, authored, silent: silent, banner: banner)
         }
+    }
+
+    /// Save-before-send for key material authored OUTSIDE a post: building a bundle / re-seal /
+    /// backfill can rotate an epoch, author a key commit, a genesis, an Add/Remove/Update commit or a
+    /// (re-)Welcome — all minted with fresh randomness. If those envelopes leave and the process dies
+    /// before the 2.5 s debounce, the relaunch mints DIFFERENT ones and every device that took the
+    /// first set forks away (e2e `launch` kill → `multirelay`). Call after producing envelopes and
+    /// before sending them: exports now when the engine says key state is unsaved, else returns.
+    func durableKeyState(_ engine: Engine) async {
+        guard !DemoEnv.isDemo else { return }
+        guard await engine.run({ $0.keyStateUnsaved() }) else { return }
+        let destination: @Sendable () async -> URL? = { [weak self] in await self?.persistDestination(for: engine) }
+        _ = await StatePersister.shared.persist(engine: engine, reason: "key-state", to: destination)
     }
 
     /// See `SaveThenSendChain`.
@@ -7224,6 +7242,7 @@ final class FeedStore: ObservableObject {
     func exportHistoryPage(circleId: String, before: UInt64, limit: UInt32) async -> HistoryPageFfi? {
         guard let engine else { return nil }
         let page = await engine.run { $0.exportHistoryPage(circleId: circleId, beforeMs: before, limit: limit) }
+        await durableKeyState(engine)
         return self.engine === engine ? page : nil
     }
 
@@ -7417,6 +7436,7 @@ final class FeedStore: ObservableObject {
             // The page re-seals what I authored — a signature per event, on the engine actor.
             let page = await engine.run { $0.syncEnvelopesPage(circleId: cid, beforeMs: before, limit: Self.historyPageSize) }
             guard let self, self.engine === engine else { return }
+            await self.durableKeyState(engine)
             HavenLog.sync("history: serving \(page.count) envelopes before \(before) in \(cid) to \(requesterHex.prefix(8))")
             for env in page { self.sendIroh(1, self.eventPayload(cid, env), to: requesterHex) }
         }
@@ -7794,6 +7814,7 @@ final class FeedStore: ObservableObject {
                 circleIds.map { ($0, s.syncEnvelopes(circleId: $0)) }
             }
             guard let self, self.engine === engine else { return }
+            await self.durableKeyState(engine)
             if let slot { self.sendToMyDevices(23, slot) }
             let myHex = self.myNodeHex
             for (cid, envs) in history {
@@ -8006,6 +8027,7 @@ final class FeedStore: ObservableObject {
         Task.detached(priority: .utility) {
             for cid in ids {
                 let envs = await engine.run { $0.exportMyEnvelopes(circleId: cid) }
+                await FeedStore.shared.durableKeyState(engine)
                 for env in envs {
                     await SharedStore.uploadEvent(circleId: cid, env: env)
                 }
@@ -8046,6 +8068,7 @@ final class FeedStore: ObservableObject {
         Task.detached(priority: .utility) {
             for cid in cids {
                 let envs = await engine.run { $0.exportMyEnvelopes(circleId: cid) }
+                await FeedStore.shared.durableKeyState(engine)
                 for env in envs { _ = await SharedStore.uploadEvent(circleId: cid, env: env) }
             }
         }
@@ -10454,6 +10477,7 @@ final class FeedStore: ObservableObject {
             isDM ? s.syncEnvelopes(circleId: circleId)
                  : s.syncEnvelopesPage(circleId: circleId, beforeMs: 0, limit: Self.historyPageSize)
         }
+        await durableKeyState(engine)
         guard self.engine === engine else { return (true, "applied") }
         for env in firstPage {
             sendIroh(1, eventPayload(circleId, env), to: idHex)

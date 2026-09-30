@@ -3964,6 +3964,7 @@ impl Engine {
             return;
         }
         let page = self.social.sync_envelopes_page(cid.clone(), before_ms, wire::HISTORY_PAGE);
+        self.durable_key_state();
         log::info!("history: serving {} envelopes before {} in {}", page.len(), before_ms, cid);
         for env in page {
             self.send_frame(wire::EVENT, &wire::event_payload(&cid, &env), &requester);
@@ -4225,7 +4226,9 @@ impl Engine {
             let mut delay_secs = 5u64;
             loop {
                 let mut ok = true;
-                for head in me.social.export_epoch_head(cid.clone()) {
+                let heads = me.social.export_epoch_head(cid.clone());
+                me.durable_key_state();
+                for head in heads {
                     ok &= me.upload_event(&cid, &head).await;
                 }
                 ok &= me.upload_event(&cid, &env).await;
@@ -4647,7 +4650,9 @@ impl Engine {
         if !has_relay && !has_s3 {
             return;
         }
-        for env in self.social.sync_envelopes(circle_id.to_string()) {
+        let history = self.social.sync_envelopes(circle_id.to_string());
+        self.durable_key_state();
+        for env in history {
             self.upload_event(circle_id, &env).await;
         }
         let feed = self.social.feed(circle_id.to_string(), now_ms(), None);
@@ -4842,6 +4847,7 @@ impl Engine {
         } else {
             self.social.sync_envelopes_page(circle_id.to_string(), 0, wire::HISTORY_PAGE)
         };
+        self.durable_key_state();
         for env in first_page {
             self.send_frame(wire::EVENT, &wire::event_payload(circle_id, &env), to_node_hex);
         }
@@ -5009,6 +5015,7 @@ impl Engine {
                         let envs = me
                             .social
                             .export_recent_envelopes(c.id.clone(), OWN_DEVICE_CATCHUP_LIMIT);
+                        me.durable_key_state();
                         if !envs.is_empty() {
                             let payloads: Vec<Vec<u8>> =
                                 envs.iter().map(|e| wire::event_payload(&c.id, e)).collect();
@@ -7976,6 +7983,7 @@ impl Engine {
             return;
         }
         let envs = self.social.export_my_envelopes(circle_id.to_string());
+        self.durable_key_state();
         for env in &envs {
             self.upload_event(circle_id, env).await;
         }
@@ -8097,7 +8105,9 @@ impl Engine {
         if !LAUNCH_HEADS_PUBLISHED.swap(true, std::sync::atomic::Ordering::SeqCst) {
             let cids: Vec<String> = self.social.circles().into_iter().map(|c| c.id).collect();
             for cid in cids {
-                for head in self.social.export_epoch_head(cid.clone()) {
+                let heads = self.social.export_epoch_head(cid.clone());
+                self.durable_key_state();
+                for head in heads {
                     self.upload_event(&cid, &head).await;
                 }
             }
@@ -11471,6 +11481,17 @@ impl Engine {
     /// persist synchronously before anything is sent (`after_author_inner`).
     pub fn flush_pending_persist(&self) {
         if self.persist_pending.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.persist();
+        }
+    }
+
+    /// Save-before-send for key material authored OUTSIDE a post (Apple/Android parity): building a
+    /// bundle / head / backfill can rotate an epoch or author a key commit, a genesis, an
+    /// Add/Remove/Update commit or a (re-)Welcome — minted with fresh randomness. Called after
+    /// producing envelopes and BEFORE sending them, so a kill after the send can never relaunch on
+    /// state that minted different ones (the fork the e2e `launch` kill exposed).
+    fn durable_key_state(&self) {
+        if self.social.key_state_unsaved() {
             self.persist();
         }
     }

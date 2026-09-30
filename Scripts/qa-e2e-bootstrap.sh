@@ -145,7 +145,18 @@ fi
 # confusing "failed to launch" three steps later instead of naming the actual problem here.
 [[ -d "$IOS_APP" ]] || { echo "error: no iOS app at $IOS_APP after build — see $OUT/ios-build.log"; exit 1; }
 xcrun simctl install "$SIM" "$IOS_APP" || { echo "error: simctl install failed for $IOS_APP"; exit 1; }
-SIMCTL_CHILD_HAVEN_SKIP_ONBOARDING=1 xcrun simctl launch "$SIM" "$IOS_BUNDLE" >/dev/null 2>&1 || true
+# The iOS 27 simulator sometimes registers a fresh install with installd but not FrontBoard, so
+# every launch fails "Application … is unknown to FrontBoard" and the run dies at "iOS seed dump
+# missing". A reboot of the simulator plus a reinstall clears it; do that once automatically.
+if ! SIMCTL_CHILD_HAVEN_SKIP_ONBOARDING=1 xcrun simctl launch "$SIM" "$IOS_BUNDLE" >/dev/null 2>&1; then
+  log "iOS launch failed (FrontBoard lost the install?) — rebooting the simulator and reinstalling"
+  xcrun simctl shutdown "$SIM" >/dev/null 2>&1 || true
+  xcrun simctl boot "$SIM" >/dev/null 2>&1 || true
+  xcrun simctl bootstatus "$SIM" -b >/dev/null 2>&1 || true
+  xcrun simctl install "$SIM" "$IOS_APP" || { echo "error: simctl install failed for $IOS_APP"; exit 1; }
+  SIMCTL_CHILD_HAVEN_SKIP_ONBOARDING=1 xcrun simctl launch "$SIM" "$IOS_BUNDLE" >/dev/null 2>&1 \
+    || log "WARN: iOS launch still failing after a simulator reboot"
+fi
 
 # ── 1b. Stage account A's contact bundle for the stub BEFORE its (only) launch —
 # DEBUG builds ingest qa-peer-bundle.bin at startup, and mutual addContactBundle is
@@ -407,7 +418,23 @@ elif command -v adb >/dev/null 2>&1; then
         && APK="$ROOT/android/app/build/outputs/apk/debug/app-universal-debug.apk"
     fi
     if [[ -f "$APK" ]]; then
-      adb install -r "$APK" >/dev/null 2>&1 || log "WARN: apk install failed"
+      if ! adb install -r "$APK" >/dev/null 2>&1; then
+        # A long-lived emulator's system_server can lose the package service between the boot check
+        # and the install ("Can't find service: package" / broken pipe). Cold-reboot once and retry.
+        log "apk install failed — cold-rebooting the emulator and retrying once"
+        adb emu kill >/dev/null 2>&1 || true
+        for i in $(seq 1 30); do [[ "$(adb get-state 2>/dev/null || true)" != "device" ]] && break; sleep 1; done
+        boot_haven_emulator
+        for i in $(seq 1 160); do [[ "$(adb get-state 2>/dev/null || true)" == "device" ]] && break; sleep 3; done
+        for i in $(seq 1 100); do
+          [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == "1" ]] && break
+          sleep 3
+        done
+        adb shell cmd connectivity airplane-mode disable >/dev/null 2>&1 || true
+        adb shell svc wifi enable >/dev/null 2>&1 || true
+        wait_android_network 45 || log "WARN: android emulator has NO default network after reboot"
+        adb install -r "$APK" >/dev/null 2>&1 || log "WARN: apk install failed"
+      fi
       # Start every run with an empty qa channel (the app's internal files/qa/). The channel used
       # to be /sdcard/Download, where a reinstall orphaned MediaProvider's rows (owner UID change)
       # and every dump rename failed ("MediaProvider: Database update failed") — the harness then

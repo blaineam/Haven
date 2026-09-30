@@ -12,6 +12,13 @@ use haven_p2p::identity::Identity;
 
 use crate::config::{Config, StoreBackend};
 
+/// Mesh anti-entropy cadence: every sibling is pulled from this often (and at once whenever a
+/// member teaches us a new one).
+const MESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// Longest one sibling's pull may take before the pass stops waiting for it (it resumes next pass;
+/// a pull is capped at a few dozen blobs, so a live sibling finishes well inside this).
+const MESH_PULL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// A guard that kills the rclone child on drop.
 struct RcloneChild(Child);
 impl Drop for RcloneChild {
@@ -163,6 +170,7 @@ pub async fn run(cfg: Config, probation: bool) -> Result<bool> {
                 let mesh_node = node.clone();
                 let configured = cfg.peers.clone();
                 let me = my_hex.clone();
+                let kick = node.relay_mesh_kick();
                 tokio::spawn(async move {
                     loop {
                         let mut peers = configured.clone();
@@ -171,13 +179,29 @@ pub async fn run(cfg: Config, probation: bool) -> Result<bool> {
                                 peers.push(learned);
                             }
                         }
-                        for peer in &peers {
-                            if peer == &me {
-                                continue; // never dial ourselves (self-connect guard)
-                            }
-                            let _ = mesh_node.relay_sync_from(peer).await;
+                        // Every sibling at once, each bounded. One after another, a single dead
+                        // entry (a sibling that is down, or an id a member taught that is no relay
+                        // at all) cost its full dial timeout in front of every live sibling, every
+                        // pass — the mesh's latency was the sum of everyone's failures.
+                        let mut pulls = tokio::task::JoinSet::new();
+                        for peer in peers.into_iter().filter(|p| p != &me) {
+                            // (never dial ourselves — self-connect guard)
+                            let n = mesh_node.clone();
+                            pulls.spawn(async move {
+                                let _ = tokio::time::timeout(MESH_PULL_TIMEOUT, n.relay_sync_from(&peer)).await;
+                            });
                         }
-                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        while pulls.join_next().await.is_some() {}
+                        // Next pass on the tick — or at once when a member teaches us a new sibling.
+                        match &kick {
+                            Some(k) => {
+                                tokio::select! {
+                                    _ = tokio::time::sleep(MESH_INTERVAL) => {}
+                                    _ = k.notified() => {}
+                                }
+                            }
+                            None => tokio::time::sleep(MESH_INTERVAL).await,
+                        }
                     }
                 });
             }

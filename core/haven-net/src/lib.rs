@@ -471,6 +471,14 @@ impl Node {
             .unwrap_or_default()
     }
 
+    /// Fires when a member teaches this relay a sibling it did not already replicate with — the
+    /// headless daemon's mesh loop waits on it next to its 30 s tick, so the first pull from a
+    /// newly taught sibling happens at once (not on the next tick, or after a dial cooldown).
+    /// None when no relay is hosted here.
+    pub fn relay_mesh_kick(&self) -> Option<Arc<tokio::sync::Notify>> {
+        lock(&self.relay).as_ref().map(|c| lock(&c.auth).mesh_kick())
+    }
+
     pub fn relay_learned_grants(&self) -> Vec<(String, Vec<String>)> {
         lock(&self.relay)
             .as_ref()
@@ -534,6 +542,11 @@ impl Node {
         // Reuse the CACHED client — see `blob_clients`. Building a fresh one per tick, and closing it
         // at the end, restarted the connection cold on the DERP relay path every cycle.
         let Ok(client) = self.blob_client_cached(peer_node_hex).await else { return 0 };
+        // Fresh evidence the sibling is reachable (a member just taught it to us, or it just
+        // connected to us): dial now, whatever earlier failures armed the cooldown.
+        if lock(&auth).take_fresh(peer_node_hex) {
+            client.reset_dial_backoff();
+        }
         // Age-preserving pull (shared with BlobServer::sync_pull_from): entries past OUR
         // retention (mailbox TTL; media under the operator's own limits) are never pulled
         // back, and pulled files keep the peer's idle age — so a GC'd entry can't ping-pong
@@ -997,6 +1010,11 @@ async fn accept_loop(
                     return; // relay not hosted here → ignore
                 }
                 let peer = hex(conn.remote_id().as_bytes());
+                // A sibling relay that reaches us is reachable: our next pull from it must not wait
+                // out a dial cooldown left over from before its address was published.
+                if let Some((_, auth)) = store(&relay) {
+                    lock(&auth).note_contact(&peer);
+                }
                 loop {
                     match conn.accept_bi().await {
                         Ok((send, recv)) => {

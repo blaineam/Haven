@@ -655,6 +655,25 @@ pub struct RelayAuth {
     /// a HAS must not revive it (see [`local_touch`]). `None` (a bare `BlobServer`, tests) = no
     /// expiry check, today's behavior.
     mailbox_ttl: Option<MailboxExpiry>,
+    /// Wakes the headless relay's mesh loop the moment a member teaches it a sibling it did not
+    /// already replicate with (see [`Self::teach_siblings`]). Before, a taught sibling waited for
+    /// the loop's next 30 s tick, and — with every earlier dial to it parked in the blob client's
+    /// escalating cooldown — the first pull landed anywhere from seconds to many minutes later
+    /// (e2e `multirelay`, "R_A pulls a fresh key from R_C": 10 s one run, never the next).
+    mesh_kick: Arc<tokio::sync::Notify>,
+    /// Siblings with FRESH evidence of reachability (a member just taught them, or they just
+    /// connected to us): the next mesh pass drops their client's dial cooldown instead of honoring
+    /// a stale one. A dial that failed while a sibling's address was still unpublished used to
+    /// park the pull for up to 15 minutes even after that sibling had dialed US successfully.
+    fresh_siblings: HashSet<String>,
+    /// circle → sibling relay → the members who TAUGHT us that relay for that circle. A relay is
+    /// a sibling only on a member's word, so when the circle's creator removes that member, every
+    /// sibling that ONLY they vouched for stops replicating the circle too. Before, removing B
+    /// closed B's own relay's door (its id is B's device id) but left every other relay B had
+    /// taught — B's second, headless relay — mirroring the circle B was just removed from.
+    /// Siblings named by the operator (`--peer`, a host's own plan) carry no teacher and are
+    /// never dropped this way.
+    sibling_teachers: HashMap<String, HashMap<String, HashSet<String>>>,
 }
 
 /// What a relay needs to call a mailbox entry dead: its GC's idle TTL, and the first-enable grace
@@ -699,7 +718,85 @@ impl RelayAuth {
         if self.revoked.get(circle).is_some_and(|r| r.contains(&relay)) {
             return;
         }
+        // …and neither is one that only removed members vouched for (see `sibling_teachers`).
+        if self.taught_only_by_removed(circle, &relay) {
+            return;
+        }
         self.relays.entry(relay).or_default().insert(circle.to_string());
+    }
+
+    /// Every id the creator removed from `circle`, plus the verified devices of removed accounts.
+    fn removed_ids(&self, circle: &str) -> HashSet<String> {
+        let Some(r) = self.revoked.get(circle) else { return HashSet::new() };
+        let mut gone = r.clone();
+        for acct in r {
+            if let Some(devs) = self.account_devices.get(acct) {
+                gone.extend(devs.iter().cloned());
+            }
+        }
+        gone
+    }
+
+    /// Was `relay` taught for `circle` ONLY by members since removed from it?
+    fn taught_only_by_removed(&self, circle: &str, relay: &str) -> bool {
+        let Some(teachers) = self.sibling_teachers.get(circle).and_then(|m| m.get(relay)) else { return false };
+        if teachers.is_empty() {
+            return false;
+        }
+        let gone = self.removed_ids(circle);
+        teachers.iter().all(|t| gone.contains(t))
+    }
+
+    /// Record that `teacher` vouched for `relays` as siblings for `circle` (persisted alongside
+    /// the learned siblings; replayed on restart before they are re-added).
+    pub(crate) fn record_teacher(&mut self, circle: &str, relays: &[String], teacher: &str) {
+        let by_relay = self.sibling_teachers.entry(circle.to_string()).or_default();
+        for r in relays {
+            by_relay.entry(r.to_lowercase()).or_default().insert(teacher.to_lowercase());
+        }
+    }
+
+    /// A member taught us that `relays` also serve `circle` (VERB_ENROLL_RELAYS, already
+    /// authorized). Records them as siblings for the circle, marks them fresh (their dial cooldown
+    /// is lifted on the next pass) and, when any of them is NEW for this circle, wakes the mesh
+    /// loop so the first pull happens now rather than on the next tick. Returns whether anything
+    /// was new.
+    pub(crate) fn teach_siblings(&mut self, circle: &str, relays: &[String], teacher: &str) -> bool {
+        self.record_teacher(circle, relays, teacher);
+        let mut new = false;
+        for r in relays {
+            let r = r.to_lowercase();
+            if !self.is_sibling_for(&r, circle) {
+                self.add_sibling(&r, circle);
+                new |= self.is_sibling_for(&r, circle);
+            }
+            if self.is_sibling(&r) {
+                self.fresh_siblings.insert(r);
+            }
+        }
+        if new {
+            self.mesh_kick.notify_one();
+        }
+        new
+    }
+
+    /// `peer` just connected to us. If it is a sibling, that is proof it is reachable right now —
+    /// the next mesh pass must not skip it because an earlier OUTBOUND dial failed.
+    pub(crate) fn note_contact(&mut self, peer: &str) {
+        let p = peer.to_lowercase();
+        if self.is_sibling(&p) {
+            self.fresh_siblings.insert(p);
+        }
+    }
+
+    /// Consume `peer`'s freshness mark (see `fresh_siblings`).
+    pub(crate) fn take_fresh(&mut self, peer: &str) -> bool {
+        self.fresh_siblings.remove(&peer.to_lowercase())
+    }
+
+    /// The mesh loop's wake-up (see `mesh_kick`).
+    pub(crate) fn mesh_kick(&self) -> Arc<tokio::sync::Notify> {
+        self.mesh_kick.clone()
     }
 
     /// Is `peer` a sibling relay for at least one circle?
@@ -1034,8 +1131,15 @@ impl RelayAuth {
         if let Some(set) = self.members.get_mut(circle_id) {
             set.retain(|m| !gone.contains(m));
         }
-        // …and a revoked id is no longer a SIBLING for the circle either (see `add_sibling`).
-        for id in &gone {
+        // …and a revoked id is no longer a SIBLING for the circle either (see `add_sibling`) —
+        // nor is any relay that only removed members vouched for (see `sibling_teachers`).
+        let vouched_by_removed: Vec<String> = self
+            .relays
+            .iter()
+            .filter(|(r, circles)| circles.contains(circle_id) && self.taught_only_by_removed(circle_id, r))
+            .map(|(r, _)| r.clone())
+            .collect();
+        for id in gone.iter().chain(vouched_by_removed.iter()) {
             if let Some(circles) = self.relays.get_mut(id) {
                 circles.remove(circle_id);
             }
@@ -1502,6 +1606,7 @@ impl BlobServer {
                 // ownership and circle-membership authorization (audit F3/transport-F4). Equals the
                 // peer's Haven node hex (same key).
                 let peer = hex(conn.remote_id().as_bytes());
+                auth.lock().unwrap().note_contact(&peer);
                 loop {
                     match conn.accept_bi().await {
                         Ok((send, recv)) => {
@@ -2233,6 +2338,71 @@ pub fn save_learned_siblings(root: &Path, circle: Option<&str>, relays: &[String
     let _ = std::fs::write(path, bytes);
 }
 
+fn sibling_teachers_path(root: &Path) -> PathBuf {
+    root.join("sibling-teachers.json")
+}
+
+/// `(circle, relay, teachers)` — who vouched for each learned sibling (see
+/// `RelayAuth::sibling_teachers`). Re-validated on read; a missing file means "no teacher known",
+/// which keeps a sibling forever, exactly the behavior before teachers were recorded.
+pub fn load_sibling_teachers(root: &Path) -> Vec<(String, String, Vec<String>)> {
+    let Ok(bytes) = std::fs::read(sibling_teachers_path(root)) else { return Vec::new() };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return Vec::new() };
+    let Some(map) = v.get("by_circle").and_then(|m| m.as_object()) else { return Vec::new() };
+    let is_hex = |r: &str| r.len() == 64 && r.bytes().all(|b| b.is_ascii_hexdigit());
+    let mut out = Vec::new();
+    for (c, relays) in map.iter().filter(|(c, _)| !c.is_empty() && c.len() <= MAX_CIRCLE_ID).take(MAX_LEARNED_CIRCLES) {
+        let Some(relays) = relays.as_object() else { continue };
+        for (r, ts) in relays.iter().filter(|(r, _)| is_hex(r)).take(MAX_LEARNED_RELAYS) {
+            let ts: Vec<String> = ts
+                .as_array()
+                .map(|a| a.iter().filter_map(|t| t.as_str()).filter(|t| is_hex(t)).map(|t| t.to_lowercase()).take(MAX_ENROLL_MEMBERS).collect())
+                .unwrap_or_default();
+            if !ts.is_empty() {
+                out.push((c.clone(), r.to_lowercase(), ts));
+            }
+        }
+    }
+    out
+}
+
+/// Union `teacher` into the teachers of each of `relays` for `circle` (capped, atomic).
+pub fn save_sibling_teacher(root: &Path, circle: &str, relays: &[String], teacher: &str) {
+    if circle.is_empty() || circle.len() > MAX_CIRCLE_ID {
+        return;
+    }
+    let mut map: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Vec<String>>> =
+        std::collections::BTreeMap::new();
+    for (c, r, ts) in load_sibling_teachers(root) {
+        map.entry(c).or_default().insert(r, ts);
+    }
+    if !map.contains_key(circle) && map.len() >= MAX_LEARNED_CIRCLES {
+        return;
+    }
+    let by_relay = map.entry(circle.to_string()).or_default();
+    let teacher = teacher.to_lowercase();
+    for r in relays {
+        let r = r.to_lowercase();
+        if r.len() != 64 || (!by_relay.contains_key(&r) && by_relay.len() >= MAX_LEARNED_RELAYS) {
+            continue;
+        }
+        let ts = by_relay.entry(r).or_default();
+        if !ts.contains(&teacher) && ts.len() < MAX_ENROLL_MEMBERS {
+            ts.push(teacher.clone());
+        }
+    }
+    let doc = serde_json::json!({ "v": 1, "by_circle": map });
+    let Ok(bytes) = serde_json::to_vec(&doc) else { return };
+    let path = sibling_teachers_path(root);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("part");
+    if std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 /// Cap on remembered siblings. A circle's relay pool is a handful of hosts; the cap exists only so
 /// a compromised member can't grow the file (and our dial loop) without bound.
 const MAX_LEARNED_RELAYS: usize = 32;
@@ -2241,6 +2411,7 @@ pub(crate) fn rehydrate_learned_grants(root: &Path, auth: &Arc<Mutex<RelayAuth>>
     let grants = load_learned_grants(root);
     let siblings = load_learned_siblings(root);
     let revocations = load_learned_revocations(root);
+    let teachers = load_sibling_teachers(root);
     if grants.is_empty() && siblings.is_empty() && revocations.is_empty() {
         return;
     }
@@ -2249,6 +2420,13 @@ pub(crate) fn rehydrate_learned_grants(root: &Path, auth: &Arc<Mutex<RelayAuth>>
         a.merge_members(&circle, &members);
     }
     // After every union (the link's roster included): the creator's removals win.
+    // Who vouched for each learned sibling — before the siblings are re-added, so one that only
+    // removed members vouched for stays out (see `RelayAuth::sibling_teachers`).
+    for (circle, relay, ts) in teachers {
+        for t in ts {
+            a.record_teacher(&circle, std::slice::from_ref(&relay), &t);
+        }
+    }
     for (circle, revoked) in revocations {
         a.apply_revocations(&circle, &revoked);
     }
@@ -2740,12 +2918,10 @@ pub(crate) async fn handle_request(
                 && auth.lock().unwrap().is_member_of(&circle, &peer);
             if ok {
                 save_learned_siblings(&root, Some(&circle), &relays);
-                {
-                    let mut a = auth.lock().unwrap();
-                    for r in &relays {
-                        a.add_sibling(r, &circle);
-                    }
-                }
+                save_sibling_teacher(&root, &circle, &relays, &peer);
+                // Records the siblings (and who vouched for them), lifts their dial cooldown and —
+                // for a sibling new to this circle — pulls from it NOW (the mesh loop wakes).
+                auth.lock().unwrap().teach_siblings(&circle, &relays, &peer);
                 let _ = send.write_all(b"OK").await;
             } else {
                 let _ = send.write_all(b"ERR forbidden").await;
@@ -2930,6 +3106,16 @@ impl BlobClient {
                 let _ = self.dial_fails.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Err(e)
             }
+        }
+    }
+
+    /// Forget earlier dial failures to `dest`, so the next op dials at once. For callers holding
+    /// FRESH evidence the peer is reachable (it was just taught to us, or it just connected to us);
+    /// the escalating cooldown exists for peers with no such evidence.
+    pub fn reset_dial_backoff(&self) {
+        self.dial_fails.store(0, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut g) = self.last_dial_fail.lock() {
+            *g = None;
         }
     }
 
@@ -3845,6 +4031,83 @@ mod tests {
         let sibling = "ee".repeat(32);
         auth.lock().unwrap().add_sibling(&sibling, "fam");
         assert!(!blob_forbidden(&auth, &sibling, VERB_LIST, "haven/self/"), "mesh anti-entropy still replicates");
+    }
+
+    /// e2e `multirelay` ("R_A pulls a fresh key from R_C": 10 s one run, never inside 420 s the
+    /// next): a taught sibling waited for the mesh loop's next tick AND for whatever dial cooldown
+    /// earlier failures had armed. Teaching a NEW sibling wakes the loop at once; every taught or
+    /// inbound sibling is marked fresh so its cooldown is lifted on the very next pass.
+    #[tokio::test]
+    async fn teaching_a_new_sibling_wakes_the_mesh_and_lifts_its_cooldown() {
+        let mut a = RelayAuth::default();
+        let (b, rc, stranger) = ("bb".repeat(32), "cc".repeat(32), "dd".repeat(32));
+        a.authorize("shared", vec![b.clone()], vec![]);
+        let kick = a.mesh_kick();
+        assert!(a.teach_siblings("shared", std::slice::from_ref(&rc), &b), "new sibling");
+        tokio::time::timeout(std::time::Duration::from_millis(50), kick.notified())
+            .await
+            .expect("a newly taught sibling wakes the mesh loop");
+        assert!(a.take_fresh(&rc), "its dial cooldown is lifted on the next pass");
+        assert!(!a.take_fresh(&rc), "once");
+        // Re-teaching a known sibling is not news (no wake), but it is fresh evidence again.
+        assert!(!a.teach_siblings("shared", std::slice::from_ref(&rc), &b));
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), kick.notified()).await.is_err());
+        assert!(a.take_fresh(&rc));
+        // A sibling that connects to us is reachable; a stranger's connection proves nothing.
+        a.note_contact(&rc);
+        a.note_contact(&stranger);
+        assert!(a.take_fresh(&rc));
+        assert!(!a.take_fresh(&stranger));
+    }
+
+    /// Removing B from C_R must also end the replication of C_R by every relay ONLY B vouched for
+    /// (B's second relay) — and nothing else: C_R's other siblings, and that relay's other
+    /// circles, are untouched. Survives a restart.
+    #[test]
+    fn a_removal_drops_the_siblings_only_the_removed_member_vouched_for() {
+        let (a_acct, b_acct, b_dev) = ("aa".repeat(32), "bb".repeat(32), "b1".repeat(32));
+        let (rc, ra2, both) = ("cc".repeat(32), "a2".repeat(32), "ab".repeat(32));
+        let dir = std::env::temp_dir().join(format!("haven-sib-teachers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut a = RelayAuth::default();
+        a.authorize("cR", vec![a_acct.clone(), b_acct.clone()], vec![]);
+        a.authorize("cS", vec![a_acct.clone(), b_acct.clone()], vec![]);
+        a.authorize_devices(&b_acct, std::slice::from_ref(&b_dev));
+        let teach = |a: &mut RelayAuth, c: &str, r: &str, t: &str| {
+            let rs = vec![r.to_string()];
+            save_learned_siblings(&dir, Some(c), &rs);
+            save_sibling_teacher(&dir, c, &rs, t);
+            a.teach_siblings(c, &rs, t);
+        };
+        teach(&mut a, "cR", &rc, &b_dev); // B's device vouched for its second relay
+        teach(&mut a, "cS", &rc, &b_dev);
+        teach(&mut a, "cR", &ra2, &a_acct);
+        teach(&mut a, "cR", &both, &b_dev);
+        teach(&mut a, "cR", &both, &a_acct);
+        a.apply_revocations("cR", std::slice::from_ref(&b_acct));
+        save_learned_grant_with(&dir, "cR", &[a_acct.clone()], Some(std::slice::from_ref(&b_acct)));
+        assert!(!a.is_sibling_for(&rc, "cR"), "only the removed member vouched for it");
+        assert!(a.is_sibling_for(&rc, "cS"), "its other circle is untouched");
+        assert!(a.is_sibling_for(&ra2, "cR") && a.is_sibling_for(&both, "cR"), "others vouched for these");
+        // The removed member can't re-teach it (not a member any more → refused upstream), and the
+        // relay's own replay keeps it out after a restart.
+        let auth = Arc::new(Mutex::new(RelayAuth::default()));
+        auth.lock().unwrap().authorize("cR", vec![a_acct.clone(), b_acct.clone()], vec![]);
+        auth.lock().unwrap().authorize("cS", vec![a_acct.clone(), b_acct.clone()], vec![]);
+        auth.lock().unwrap().authorize_devices(&b_acct, std::slice::from_ref(&b_dev));
+        rehydrate_learned_grants(&dir, &auth);
+        let r = auth.lock().unwrap();
+        assert!(!r.is_sibling_for(&rc, "cR"), "still out after a restart");
+        assert!(r.is_sibling_for(&rc, "cS"));
+        assert!(r.is_sibling_for(&ra2, "cR") && r.is_sibling_for(&both, "cR"));
+        drop(r);
+        // A remaining member vouching for it again brings it back.
+        let mut a2 = auth.lock().unwrap();
+        a2.teach_siblings("cR", std::slice::from_ref(&rc), &a_acct);
+        assert!(a2.is_sibling_for(&rc, "cR"));
+        drop(a2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Friends who each run their own relay and share ONE circle must not mirror each other's

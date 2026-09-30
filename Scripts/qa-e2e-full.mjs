@@ -25,6 +25,7 @@ import { randomBytes } from 'node:crypto';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ChannelFreshness, DumpStats, judgeDump, fmtDuration, FRESHNESS_DEFAULTS } from './lib/dump-freshness.mjs';
+import { judgeShareFlow, SHARE_FLOW } from './lib/screenshare-flow.mjs';
 import {
   num, delta, parseUiNodes, findNode, center, CONSENT, isConsentSurface, holdsMediaProjection, auditShareLog,
   longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields, persistExportAllowance,
@@ -106,6 +107,24 @@ function shOk(cmd, args, opts = {}) {
   return r.status === 0 ? (r.stdout || '') : null;
 }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+// Android logcat into the run dir. The emulator's default ring buffer holds only a few minutes of a
+// busy run, so a red from early in the matrix used to be undiagnosable by the time anyone looked
+// (the android→stub hangup red, 2026-09-30). The buffer is enlarged when the leg boots, snapshotted
+// before anything clears it (the screenshare step does), and saved again with every report.
+let androidLogcatOn = false;
+function saveAndroidLogcat(label) {
+  if (!androidLogcatOn) return;
+  // Straight to a file descriptor: a 16 MB ring through spawnSync's default 1 MB stdout buffer
+  // failed with ENOBUFS, and shOk turned that into "no output" — the missing android-logcat-final.txt
+  // (run 2026-09-30-07-12). The crash buffer is appended so a FATAL survives even a wrapped ring.
+  let fd;
+  try {
+    fd = openSync(join(OUT, `android-logcat-${label}.txt`), 'w');
+    for (const buf of [['-b', 'main,system'], ['-b', 'crash']]) {
+      spawnSync('adb', ['logcat', '-d', '-v', 'threadtime', ...buf], { stdio: ['ignore', fd, 'ignore'], timeout: 120_000 });
+    }
+  } catch (_) { /* best effort — diagnostics must never fail the run */ } finally { if (fd !== undefined) try { closeSync(fd); } catch (_) {} }
+}
 // FAIL FAST (E2E_FAIL_FAST=1, on by default for the satellite step — see below).
 //
 // The satellite legs are SLOW ON PURPOSE: they model a link that is genuinely slow in the real
@@ -243,12 +262,52 @@ function androidQaRead(name) {
 /// copy it to `<name>.tmp` in the SAME dir, then `mv` (a rename — the driver sees the old file or
 /// the whole new one, never half). The shell tmp is removed in the same round trip. Returns true on
 /// success. `run-as` reading /data/local/tmp is what the bootstrap's seed staging has always used.
+//
+// A failed attempt is LOGGED WITH ITS CAUSE (exit status / signal / timeout + stderr) and retried:
+// the 2026-09-30 gate lost its android leg to one bare "qaWrite 'dump' failed" with nothing saying
+// why (it was a 60 s hang — the emulator's system_server wedged under an app CPU storm). A single
+// hiccup must not RED a leg, and a persistent one must name itself.
+const AND_QA_WRITE_ATTEMPTS = +(process.env.E2E_AND_QA_WRITE_ATTEMPTS || 3);
+function adbAttempt(args) {
+  const r = spawnSync('adb', args, { encoding: 'utf8', timeout: ADB_TIMEOUT_MS });
+  if (r.status === 0 && !r.error) return null;
+  const why = r.error?.code === 'ETIMEDOUT' ? `hung ${ADB_TIMEOUT_MS / 1000}s — killed`
+    : r.error ? `${r.error.code || r.error.message}`
+    : r.signal ? `killed by ${r.signal}` : `exit ${r.status}`;
+  const err = String(r.stderr || r.stdout || '').trim().split('\n').slice(-2).join(' | ').slice(0, 200);
+  return err ? `${why}: ${err}` : why;
+}
 function androidQaWrite(src, name) {
-  const tmp = `/data/local/tmp/haven-qa-${process.pid}-${++andPushSeq}-${name}`;
-  if (shOk('adb', ['push', src, tmp]) === null) return false;
   const d = ANDROID_QA_DIR;
-  const inner = `umask 077 && mkdir -p ${d} && cat ${tmp} > ${d}/${name}.tmp && mv -f ${d}/${name}.tmp ${d}/${name}`;
-  return shOk('adb', ['shell', `run-as ${AND_PKG} sh -c '${inner}'; rc=$?; rm -f ${tmp}; exit $rc`]) !== null;
+  for (let attempt = 1; attempt <= AND_QA_WRITE_ATTEMPTS; attempt++) {
+    const tmp = `/data/local/tmp/haven-qa-${process.pid}-${++andPushSeq}-${name}`;
+    // The in-dir tmp is unique per attempt too: a retry must not race a half-finished `cat` from a
+    // killed attempt into the same `<name>.tmp`.
+    const dtmp = `${d}/${name}.${process.pid}-${andPushSeq}.tmp`;
+    const inner = `umask 077 && mkdir -p ${d} && cat ${tmp} > ${dtmp} && mv -f ${dtmp} ${d}/${name}`;
+    const why = adbAttempt(['push', src, tmp])
+      ?? adbAttempt(['shell', `run-as ${AND_PKG} sh -c '${inner}'; rc=$?; rm -f ${tmp}; run-as ${AND_PKG} rm -f ${dtmp}; exit $rc`]);
+    if (why === null) {
+      if (attempt > 1) log(`android qaWrite '${name}' landed on attempt ${attempt}`);
+      return true;
+    }
+    log(`WARN android qaWrite '${name}' attempt ${attempt}/${AND_QA_WRITE_ATTEMPTS} failed — ${why}`);
+    if (attempt < AND_QA_WRITE_ATTEMPTS) spawnSync('sleep', [String(attempt)]);
+  }
+  return false;
+}
+
+/// What the android app is burning CPU on: the process's share of the emulator, its hottest
+/// threads, and two Java stack samples (debuggerd -j; the build is debuggable). The 2026-09-30 gate
+/// saw the app at 124 % CPU until system_server hit its watchdog — with nothing recorded to say why.
+function androidCpuSample(label) {
+  const pid = String(shOk('adb', ['shell', 'pidof', AND_PKG]) || '').trim();
+  if (!pid) { log(`android cpu [${label}]: app not running`); return; }
+  const top = shOk('adb', ['shell', `top -H -b -n 1 -p ${pid} | head -16`]) || '';
+  const proc = shOk('adb', ['shell', `top -b -n 1 -p ${pid} | tail -1`]) || '';
+  const stacks = [1, 2].map(() => shOk('adb', ['shell', `debuggerd -j ${pid}`]) || '(debuggerd failed)');
+  writeFileSync(join(OUT, `android-cpu-${label}.txt`), `${proc}\n\n${top}\n\n${stacks.join('\n\n==== sample 2 ====\n\n')}`);
+  log(`android cpu [${label}]: ${proc.trim().replace(/\s+/g, ' ').slice(0, 160)} (threads + stacks: android-cpu-${label}.txt)`);
 }
 
 function makeAndroid() {
@@ -303,7 +362,9 @@ function makeAndroid() {
     // Drop the dump + any half-staged drop so the driver mints them again on its next op.
     wipe: () => {
       const d = ANDROID_QA_DIR;
-      const out = shOk('adb', ['shell', `run-as ${AND_PKG} rm -f ${d}/${dumpName} ${d}/${dumpName}.tmp ${cmdPath} ${cmdPath}.tmp 2>&1`]);
+      // `*.tmp` covers every writer's per-attempt tmp names (QaFiles on the app side, androidQaWrite
+      // here); the glob must expand INSIDE run-as — the shell user cannot list the app's dir.
+      const out = shOk('adb', ['shell', `run-as ${AND_PKG} sh -c 'rm -f ${d}/${dumpName} ${cmdPath} ${d}/*.tmp' 2>&1`]);
       if (out === null) return ['adb shell run-as rm failed outright (app not installed / not debuggable?)'];
       // `rm -f` exits 0 even when the unlink is refused, so its OUTPUT is the only signal.
       return String(out).trim() ? [String(out).trim()] : [];
@@ -852,6 +913,8 @@ async function main() {
     log('android leg SKIPPED by E2E_ANDROID=0 (emulator untouched)');
   } else if (shOk('adb', ['get-state'])?.trim() === 'device') {
     devices.android = makeAndroid();
+    androidLogcatOn = true;
+    shOk('adb', ['logcat', '-G', '16M']);   // keep the whole run, not the last few minutes
     // Prove the command channel before anything depends on it — a leg that cannot be TOLD anything
     // reports its state cheerfully and ignores every instruction.
     assertAndroidCommandChannel();
@@ -1229,11 +1292,13 @@ async function main() {
   }
   const projectionHeld = () => holdsMediaProjection(adbText(['shell', 'dumpsys', 'activity', 'services', AND_PKG]));
   const androidAlive = () => adbText(['shell', 'pidof', AND_PKG]).trim().length > 0;
+  const androidPid = () => adbText(['shell', 'pidof', AND_PKG]).trim();
 
   async function stepScreenShare() {
     const and = devices.android, stub = devices.stub;
     if (!and || !B) { score('screenshare (needs the android leg and B)', false, !and ? 'no android device' : 'B unknown'); return; }
     shOk('adb', ['shell', 'appops', 'set', AND_PKG, 'PROJECT_MEDIA', 'default']);   // real consent only
+    saveAndroidLogcat('before-screenshare');   // the clear below would otherwise lose the call matrix
     shOk('adb', ['logcat', '-c']);
     await op(and, { op: 'call', dm_to: B });
     await converge(stub, (j) => j.call?.ringing || j.call?.in_call, BUDGET.text);
@@ -1245,6 +1310,7 @@ async function main() {
     const cam0 = remoteSlots((await freshDump(stub))?.call).find((s) => s.camera)?.camera || null;
     log(`screenshare: stub camera slot before any share: ${JSON.stringify(cam0)}`);
     const shareState = async () => (await freshDump(and))?.screen_share || {};
+    const sharePid0 = androidPid();
     const noScreenOnStub = (j) => !sharedScreen(j?.call);
     let granted = 0;
 
@@ -1272,11 +1338,25 @@ async function main() {
         `${st.capture_w}x${st.capture_h}`);
       gate(`screenshare: share start → first frame decoded on the peer [${label}]`, 'stub',
         await convergeSince(stub, (j) => num(sharedScreen(j?.call)?.screen?.frames_decoded) > 0, BUDGET.shareFrame, t0), BUDGET.shareFrame);
-      const s1 = sharedScreen((await freshDump(stub))?.call);
-      await sleep(5000);
-      const s2 = sharedScreen((await freshDump(stub))?.call);
-      score(`screenshare: peer's screen frames keep growing [${label}]`,
-        num(s2?.screen?.frames_decoded) > num(s1?.screen?.frames_decoded), `${s1?.screen?.frames_decoded} → ${s2?.screen?.frames_decoded}`);
+      // Frame flow over a fixed window, with the screen made to change on purpose: capture only
+      // emits a frame when pixels change, so a still call screen used to read "6 → 6" and fail with
+      // nothing wrong. Both ends are sampled so a failure says WHICH half stopped (judgeShareFlow).
+      await op(and, { op: 'screen_perturb', on: true }, 2000);
+      const pidA = androidPid();
+      const [a1, j1] = await Promise.all([shareState(), freshDump(stub)]);
+      await sleep(SHARE_FLOW.windowMs);
+      const [a2, j2] = await Promise.all([shareState(), freshDump(stub)]);
+      const pidB = androidPid();
+      await op(and, { op: 'screen_perturb', on: false }, 2000);
+      const s2 = sharedScreen(j2?.call);
+      const flow = judgeShareFlow({
+        capturedStart: a1.frames_captured, capturedEnd: a2.frames_captured,
+        decodedStart: sharedScreen(j1?.call)?.screen?.frames_decoded, decodedEnd: s2?.screen?.frames_decoded,
+        senderPidStart: pidA, senderPidEnd: pidB,
+      });
+      score(`screenshare: sender keeps capturing while the screen changes [${label}]`,
+        flow.verdict !== 'capture stalled' && flow.verdict !== 'sender died', `${flow.verdict} — ${flow.detail}`);
+      score(`screenshare: peer's screen frames keep growing [${label}]`, flow.ok, `${flow.verdict} — ${flow.detail}`);
       score(`screenshare: routed by stream id "screen" [${label}]`, (s2?.screen?.stream_ids || []).includes('screen'), JSON.stringify(s2?.screen));
       score(`screenshare: peer frame long side ≤ 1280 [${label}]`,
         longSide(s2?.screen?.width, s2?.screen?.height) > 0 && longSide(s2?.screen?.width, s2?.screen?.height) <= 1280,
@@ -1342,6 +1422,14 @@ async function main() {
     score('screenshare: logcat — no "screen share start failed" / SecurityException', audit.failures.length === 0,
       audit.failures.slice(0, 3).join(' | '));
     score('screenshare: app alive at the end', androidAlive());
+    // Alive is not enough: a crash mid-share restarts the app, which then passes `pidof` while every
+    // later sub-case cascades (the [again] ConcurrentModificationException looked like a stop bug,
+    // a missing camera slot and a vanished consent dialog). Same process start to finish, or say why.
+    const pidEnd = androidPid();
+    const crash = pidEnd === sharePid0 ? '' : adbText(['logcat', '-d', '-b', 'crash']).split('\n')
+      .filter((l) => /FATAL EXCEPTION|Exception|\bat com\.blaineam\./.test(l)).slice(0, 6).join(' | ');
+    score('screenshare: android app never restarted during the step', pidEnd === sharePid0,
+      `pid ${sharePid0} → ${pidEnd || 'gone'}${crash ? ` — ${crash}` : ''}`);
     await op(and, { op: 'call_end' }, 6000);
     await convergeAll(['android', 'stub'], callOver, BUDGET.text, 'screenshare: call ended');
   }
@@ -1554,11 +1642,29 @@ async function main() {
       shOk('adb', ['shell', 'am', 'start', '-n', `${AND_PKG}/.MainActivity`]);
       channelFor(devices.android).reset('android relaunched by the launch step');
       await sleep(3000);
-      let LA = null;
+      let LA = null, lastLA = null, lastPerf = null;
       await converge(devices.android, (x) => {
+        if (num(x?.launch?.process_start_ms) >= t - 2000) { lastLA = x.launch; lastPerf = x.perf; }
         const ok = num(x?.launch?.process_start_ms) >= t - 2000 && typeof x.launch?.first_feed_rendered_ms === 'number';
         if (ok) LA = x.launch; return ok;
       }, 60_000);
+      // WHERE the first feed waited (engine construct, state import, first non-empty decode…) —
+      // marks are ms since process start, phases are durations. Plus the app's logcat for the
+      // launch window and a CPU/stack sample, so a slow launch is diagnosable after the fleet has
+      // moved on. Logged BEFORE the gate: a targeted run fails fast on the RED.
+      log(`launch: android launch timings ${JSON.stringify(LA || lastLA)}`);
+      const lpid = String(shOk('adb', ['shell', 'pidof', AND_PKG]) || '').trim();
+      const lc = lpid ? shOk('adb', ['logcat', '-d', `--pid=${lpid}`]) : null;
+      if (lc) writeFileSync(join(OUT, 'android-launch-logcat.txt'), lc);
+      androidCpuSample('launch');
+      // The app's own busy-stack samples (QaPerf; debuggerd needs root): what the main thread did
+      // while its pings were overdue, and what every RUNNABLE thread was on — at first paint, and
+      // again 20 s later (the post-launch catch-up, where a CPU storm would show).
+      log(`launch: android busy stacks at first feed ${JSON.stringify({ main: lastPerf?.mainStallFramesTop, cpu: lastPerf?.cpuSamplesTop, ticks: lastPerf?.cpuSampleTicks })}`);
+      await sleep(20_000);
+      const later = (await freshDump(devices.android))?.perf;
+      log(`launch: android busy stacks +20s ${JSON.stringify({ main: later?.mainStallFramesTop, cpu: later?.cpuSamplesTop, ticks: later?.cpuSampleTicks })}`);
+      androidCpuSample('launch-20s');
       perfGate('launch: launch → first feed rendered [android]', 'android',
         typeof LA?.first_feed_rendered_ms === 'number' ? LA.first_feed_rendered_ms : -1, BUDGET.launchAndroid);
     }
@@ -2748,6 +2854,7 @@ async function main() {
 /// The markdown report, split out of `finish` so a FAIL-FAST exit still leaves one behind —
 /// a run that stopped early is exactly when you want the partial matrix on disk.
 function writeReport() {
+  saveAndroidLogcat('final');
   const pass = REPORT.filter((r) => r.ok).length, fail = REPORT.length - pass;
   const md = [
     `# Haven full E2E — ${MARKER}`, '',
@@ -2874,6 +2981,7 @@ if (invokedDirectly) {
   takeRunLock();
   mkdirSync(OUT, { recursive: true });
   process.on('exit', releaseRunLock);
+  process.on('exit', () => saveAndroidLogcat('final'));   // every exit: early RED, fail-fast, abort, crash
   process.on('exit', mrKillAll);   // FAIL-FAST / abort / crash: the relays this run started go too
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.on(sig, () => { releaseRunLock(); process.exit(2); });

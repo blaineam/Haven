@@ -314,8 +314,11 @@ class WebRTCPeer(
         }.onFailure { onResult(0.0, 0.0) }
     }
 
+    private val closer = CloseOnce()
+
+    /** Idempotent and thread-safe: a second dispose of a PeerConnection is a native crash. */
     fun close() {
-        runCatching { pc?.dispose() }
+        closer.close { runCatching { pc?.dispose() } }
     }
 
     private fun mediaConstraints() = MediaConstraints().apply {

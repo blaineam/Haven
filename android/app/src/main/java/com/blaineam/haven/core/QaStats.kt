@@ -105,8 +105,26 @@ object QaStats {
         synchronized(lock) { if (name !in marks) marks[name] = t }
     }
 
+    /** How long a named launch phase took (first occurrence only), e.g. `restore_state`. */
+    private val phaseMs = HashMap<String, Long>()
+
+    fun phase(name: String, ms: Long) {
+        if (!BuildConfig.DEBUG) return
+        synchronized(lock) { if (name !in phaseMs) phaseMs[name] = ms }
+    }
+
+    /** Time [block] as launch phase [name] (DEBUG bookkeeping only; the block always runs). */
+    inline fun <T> timed(name: String, block: () -> T): T {
+        val t0 = android.os.SystemClock.uptimeMillis()
+        try { return block() } finally { phase(name, android.os.SystemClock.uptimeMillis() - t0) }
+    }
+
     fun launch(): JSONObject = synchronized(lock) {
         JSONObject()
+            // Every mark (ms since process start) and every phase duration — where a slow first
+            // feed actually waited (engine boot, state import, the first feed decode…).
+            .put("marks", JSONObject(HashMap<String, Any>(marks)))
+            .put("phases_ms", JSONObject(HashMap<String, Any>(phaseMs)))
             .put("first_feed_rendered_ms", marks["first_feed_rendered"] ?: JSONObject.NULL)
             .put("process_start_ms", System.currentTimeMillis() -
                 (android.os.SystemClock.uptimeMillis() - android.os.Process.getStartUptimeMillis()))

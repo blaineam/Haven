@@ -47,6 +47,17 @@ class MainActivity : FragmentActivity() {
         }
         handleShare(intent)
         maybeRequestNearby()
+        // Build the identity core — EncryptedSharedPreferences + Tink + the keystore master key,
+        // seconds on a cold or busy device — OFF the main thread while the first frame composes.
+        // HavenNet.init (a LaunchedEffect, i.e. main) then finds it built instead of building it
+        // there: an ANR on the e2e emulator (2026-09-29 23:22) caught launch's main thread 12 s into
+        // CPU inside Tink's class init under HavenCore.get, and the first feed waits on init.
+        // Onboarded installs only (before onboarding the first get() mints the account — that stays
+        // on the onboarding path), and after the QA seed pre-seed above, which must precede the build.
+        if (!DemoEnv.isDemo && com.blaineam.haven.core.ProfileStore.get(this).onboarded) {
+            val app = applicationContext
+            Thread({ runCatching { com.blaineam.haven.core.HavenCore.get(app) } }, "haven-core-warmup").start()
+        }
         setContent {
             HavenAppTheme {
                 RootScreen()

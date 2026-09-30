@@ -88,8 +88,9 @@ object DeviceRosterManager {
     private lateinit var appContext: Context
 
     private data class Entry(val bundle: ByteArray, val name: String, val isPrimary: Boolean)
-    private val entries = HashMap<String, Entry>()
-    private val revoked = HashSet<String>()
+    // Read by inbound roster/sealing paths on IO while the UI links/revokes — see [SharedCollections].
+    private val entries = SharedCollections.map<Entry>()
+    private val revoked = SharedCollections.set()
     private var version: ULong = 0u
     private var primaryHex = ""
 

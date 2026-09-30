@@ -65,6 +65,11 @@ object QaDriver {
      *  MediaProjection consent prompt its share button does. */
     val screenShareAsk = androidx.compose.runtime.mutableIntStateOf(0)
 
+    /** Set by the `screen_perturb` op: CallUI's InCall repaints a counter every 200ms, so a screen
+     *  share has changing pixels to capture — MediaProjection only emits a frame when the screen
+     *  changes, and a still call screen made "frames keep growing" a coincidence of repaints. */
+    val screenPerturb = androidx.compose.runtime.mutableStateOf(false)
+
     /** The whole harness channel: `filesDir/qa/` (see the class doc for why not /sdcard). */
     private fun qaDir(context: Context): File = File(context.filesDir, "qa").apply { mkdirs() }
     private val dumpFile get() = File(qaDir(appContext), "qa-dump-${BuildConfig.APPLICATION_ID}.json")
@@ -167,8 +172,10 @@ object QaDriver {
         exec.execute {
             runCatching { apply(cmd) }
                 .onFailure { Log.w(TAG, "qa-cmd ${cmd.optString("op")} failed: ${it.message}") }
+            // Building the dump reads the engine and a dozen stores; a throw there (not just in the
+            // file write) freezes the channel, so it is logged with its stack, not just a message.
             runCatching { writeDump() }
-                .onFailure { Log.w(TAG, "qa-dump write failed: ${it.message}") }
+                .onFailure { Log.w(TAG, "qa-dump write failed: $it", it) }
         }
     }
 
@@ -184,6 +191,14 @@ object QaDriver {
 
     private fun apply(cmd: JSONObject) {
         val op = cmd.optString("op").trim().lowercase()
+        // Call ops are CallManager (main-thread) state — see [QaOpThreads]. Hop, and wait so the
+        // op still completes before the next command is read, exactly as it did on this thread.
+        if (QaOpThreads.needsMain(op) && Looper.myLooper() != Looper.getMainLooper()) {
+            val done = java.util.concurrent.CountDownLatch(1)
+            handler.post { try { apply(cmd) } finally { done.countDown() } }
+            done.await(30, java.util.concurrent.TimeUnit.SECONDS)
+            return
+        }
         Log.i(TAG, "qa-cmd op=$op body=${cmd.optString("body").take(40)}")
         // A qa op represents a user ACTIVELY using the app. Mutating ops reset the adaptive idle
         // stretch exactly like the foreground hook (RootScreen → bumpActivity) and — once the
@@ -256,6 +271,10 @@ object QaDriver {
             "screen_share" -> {
                 if (cmd.optBoolean("on", true)) handler.post { screenShareAsk.intValue++ }
                 else handler.post { CallManager.stopScreenShare() }
+            }
+            "screen_perturb" -> {
+                val on = cmd.optBoolean("on", true)
+                handler.post { screenPerturb.value = on }
             }
             // Force HeavyWorkPolicy's suspendHeavyIO (as a call / Battery Saver / heat would) so the
             // e2e can prove the serve gate without a real call. {"suspend":false} lifts it.
@@ -422,6 +441,7 @@ object QaDriver {
             Log.i(TAG, "qa-device-hex written account=${account.take(12)} device=${device.take(12)}")
         }.onFailure { Log.w(TAG, "qa-device-hex write failed: ${it.message}") }
         runCatching { writeDump() }   // a startup dump so the orchestrator's sanity check has one
+            .onFailure { Log.w(TAG, "qa-dump write failed (startup): $it", it) }
     }
 
     /** The v2 dump: posts (with media presence), DMs by peer, profile, circles — same reads the
@@ -539,12 +559,13 @@ object QaDriver {
         writeAtomically(dumpFile, o.toString())
     }
 
-    /** tmp + rename in the SAME internal dir — a reader (`run-as cat`) sees the old file or the new
-     *  one, never half of one. No MediaProvider in the path, so the rename cannot be refused. */
+    /** tmp + rename in the SAME internal dir, retried, every failure logged WITH its exception
+     *  (the harness greps `qa-dump write failed` out of logcat when a channel freezes) — see [QaFiles]. */
     private fun writeAtomically(dest: File, text: String) {
-        val tmp = File(dest.parentFile, dest.name + ".tmp")
-        tmp.writeText(text)
-        if (!tmp.renameTo(dest)) { dest.writeText(text); tmp.delete() }
+        val err = QaFiles.writeAtomically(dest, text) { attempt, e ->
+            Log.w(TAG, "qa-dump write failed (${dest.name}, attempt $attempt): $e", e)
+        }
+        if (err != null) throw err
     }
 
     private fun postRow(item: uniffi.haven_ffi.FeedItemFfi, circleId: String): JSONObject {

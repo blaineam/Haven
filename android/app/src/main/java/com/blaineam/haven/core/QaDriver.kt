@@ -65,6 +65,11 @@ object QaDriver {
      *  MediaProjection consent prompt its share button does. */
     val screenShareAsk = androidx.compose.runtime.mutableIntStateOf(0)
 
+    /** Set by the `screen_perturb` op: CallUI's InCall repaints a counter every 200ms, so a screen
+     *  share has changing pixels to capture — MediaProjection only emits a frame when the screen
+     *  changes, and a still call screen made "frames keep growing" a coincidence of repaints. */
+    val screenPerturb = androidx.compose.runtime.mutableStateOf(false)
+
     /** The whole harness channel: `filesDir/qa/` (see the class doc for why not /sdcard). */
     private fun qaDir(context: Context): File = File(context.filesDir, "qa").apply { mkdirs() }
     private val dumpFile get() = File(qaDir(appContext), "qa-dump-${BuildConfig.APPLICATION_ID}.json")
@@ -256,6 +261,10 @@ object QaDriver {
             "screen_share" -> {
                 if (cmd.optBoolean("on", true)) handler.post { screenShareAsk.intValue++ }
                 else handler.post { CallManager.stopScreenShare() }
+            }
+            "screen_perturb" -> {
+                val on = cmd.optBoolean("on", true)
+                handler.post { screenPerturb.value = on }
             }
             // Force HeavyWorkPolicy's suspendHeavyIO (as a call / Battery Saver / heat would) so the
             // e2e can prove the serve gate without a real call. {"suspend":false} lifts it.

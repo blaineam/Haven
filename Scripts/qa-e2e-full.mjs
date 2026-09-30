@@ -25,6 +25,7 @@ import { randomBytes } from 'node:crypto';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ChannelFreshness, DumpStats, judgeDump, fmtDuration, FRESHNESS_DEFAULTS } from './lib/dump-freshness.mjs';
+import { judgeShareFlow, SHARE_FLOW } from './lib/screenshare-flow.mjs';
 import {
   num, delta, parseUiNodes, findNode, center, CONSENT, isConsentSurface, holdsMediaProjection, auditShareLog,
   longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields, persistExportAllowance,
@@ -1272,11 +1273,22 @@ async function main() {
         `${st.capture_w}x${st.capture_h}`);
       gate(`screenshare: share start → first frame decoded on the peer [${label}]`, 'stub',
         await convergeSince(stub, (j) => num(sharedScreen(j?.call)?.screen?.frames_decoded) > 0, BUDGET.shareFrame, t0), BUDGET.shareFrame);
-      const s1 = sharedScreen((await freshDump(stub))?.call);
-      await sleep(5000);
-      const s2 = sharedScreen((await freshDump(stub))?.call);
-      score(`screenshare: peer's screen frames keep growing [${label}]`,
-        num(s2?.screen?.frames_decoded) > num(s1?.screen?.frames_decoded), `${s1?.screen?.frames_decoded} → ${s2?.screen?.frames_decoded}`);
+      // Frame flow over a fixed window, with the screen made to change on purpose: capture only
+      // emits a frame when pixels change, so a still call screen used to read "6 → 6" and fail with
+      // nothing wrong. Both ends are sampled so a failure says WHICH half stopped (judgeShareFlow).
+      await op(and, { op: 'screen_perturb', on: true }, 2000);
+      const [a1, j1] = await Promise.all([shareState(), freshDump(stub)]);
+      await sleep(SHARE_FLOW.windowMs);
+      const [a2, j2] = await Promise.all([shareState(), freshDump(stub)]);
+      await op(and, { op: 'screen_perturb', on: false }, 2000);
+      const s2 = sharedScreen(j2?.call);
+      const flow = judgeShareFlow({
+        capturedStart: a1.frames_captured, capturedEnd: a2.frames_captured,
+        decodedStart: sharedScreen(j1?.call)?.screen?.frames_decoded, decodedEnd: s2?.screen?.frames_decoded,
+      });
+      score(`screenshare: sender keeps capturing while the screen changes [${label}]`,
+        flow.verdict !== 'capture stalled', `${flow.verdict} — ${flow.detail}`);
+      score(`screenshare: peer's screen frames keep growing [${label}]`, flow.ok, `${flow.verdict} — ${flow.detail}`);
       score(`screenshare: routed by stream id "screen" [${label}]`, (s2?.screen?.stream_ids || []).includes('screen'), JSON.stringify(s2?.screen));
       score(`screenshare: peer frame long side ≤ 1280 [${label}]`,
         longSide(s2?.screen?.width, s2?.screen?.height) > 0 && longSide(s2?.screen?.width, s2?.screen?.height) <= 1280,

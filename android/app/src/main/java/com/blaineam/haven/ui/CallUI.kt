@@ -314,6 +314,19 @@ private fun InCall() {
                 RoundButton(Icons.Filled.CallEnd, Color(0xFFEF4444), stringResource(R.string.call_end)) { CallManager.hangup() }
             }
         }
+
+        // DEBUG qa `screen_perturb` op (never set in release — QaDriver only runs in DEBUG): a
+        // counter that changes every 200ms, so a screen share always has new pixels to capture.
+        val qaPerturb by com.blaineam.haven.core.QaDriver.screenPerturb
+        if (qaPerturb) {
+            var tick by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+            androidx.compose.runtime.LaunchedEffect(Unit) {
+                while (true) { kotlinx.coroutines.delay(200); tick++ }
+            }
+            Text("QA $tick", color = Color.White, fontSize = 28.sp,
+                modifier = Modifier.align(Alignment.CenterStart).padding(16.dp)
+                    .background(if (tick % 2 == 0) Color(0xFFEF4444) else Color(0xFF3B82F6)).padding(8.dp))
+        }
     }
 }
 

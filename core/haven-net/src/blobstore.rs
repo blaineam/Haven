@@ -509,6 +509,19 @@ fn touch_now(path: &Path) {
         .and_then(|f| f.set_modified(std::time::SystemTime::now()));
 }
 
+/// Is this stored MAILBOX entry dead — idle past the relay's TTL with the GC past its first-enable
+/// grace, i.e. the next sweep deletes it? Inside the grace nothing is dead: that window exists so
+/// members' TOUCH traffic can stamp the live entries of a relay that just started sweeping, and a
+/// TOUCH there must still revive. Only the mailbox ages out; every other namespace is permanent.
+pub(crate) fn mailbox_expired(root: &Path, key: &str, path: &Path, expiry: Option<MailboxExpiry>) -> bool {
+    let Some(MailboxExpiry { ttl, grace }) = expiry else { return false };
+    if !key.starts_with(MAILBOX_PREFIX) || idle_age_secs(path) <= ttl.as_secs() {
+        return false;
+    }
+    let marker = root.join(".haven-gc-enabled");
+    marker.is_file() && idle_age_secs(&marker) >= grace.as_secs()
+}
+
 /// Back-date a just-pulled blob's mtime by the peer's reported idle age, so replication
 /// preserves age instead of resetting it (resetting is what resurrected dead entries).
 fn backdate(path: &Path, age_secs: u64) {
@@ -637,9 +650,30 @@ pub struct RelayAuth {
     /// relay that had ever been taught about them (e2e `multirelay`, "removal revokes"). Only the
     /// creator can revoke, and nothing but the creator can bring a revoked id back.
     revoked: HashMap<String, HashSet<String>>,
+    /// This relay's mailbox idle TTL (its GC's `Retention::mailbox_ttl`), when it runs a sweep.
+    /// A mailbox entry idle past it is DEAD — the sweep just hasn't reached it yet — so a TOUCH or
+    /// a HAS must not revive it (see [`local_touch`]). `None` (a bare `BlobServer`, tests) = no
+    /// expiry check, today's behavior.
+    mailbox_ttl: Option<MailboxExpiry>,
+}
+
+/// What a relay needs to call a mailbox entry dead: its GC's idle TTL, and the first-enable grace
+/// during which nothing counts as dead yet (see [`mailbox_expired`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MailboxExpiry {
+    pub ttl: std::time::Duration,
+    pub grace: std::time::Duration,
 }
 
 impl RelayAuth {
+    /// Record the mailbox TTL + grace this relay's GC sweeps with (see the field).
+    pub(crate) fn set_mailbox_ttl(&mut self, expiry: Option<MailboxExpiry>) {
+        self.mailbox_ttl = expiry;
+    }
+    pub(crate) fn mailbox_ttl(&self) -> Option<MailboxExpiry> {
+        self.mailbox_ttl
+    }
+
     /// Authorize a circle's mailbox to exactly `members` + the circle's sibling `relays`. Idempotent.
     /// Member / relay hexes are lowercased so HTTP-signed peers (always lowercase) match file-driven
     /// QA authorize lists and mixed-case account dumps (matrix: device id present but still REFUSED).
@@ -1068,10 +1102,18 @@ pub(crate) fn local_list_ages(root: &Path, prefix: &str) -> Vec<(String, u64)> {
 /// keys it does NOT hold so the caller can re-PUT them (refresh doubles as repair). The
 /// in-process host calls this directly for its own store (no iroh self-dial); remote
 /// clients reach it via the TOUCH verb / `POST /t/`.
-pub(crate) fn local_touch(root: &Path, keys: &[String]) -> Vec<String> {
+///
+/// `mailbox_ttl`: a mailbox entry already idle past it is expired — only not yet swept — and is
+/// reported as a MISS without being touched. Otherwise any member that had merely LISTED a key
+/// (clients TOUCH every mailbox key they have seen, to keep friends' posts alive) resurrected an
+/// entry the relay considered dead, and the mesh then replicated it to every sibling as fresh
+/// (e2e `multirelay`: "an expired key on R_C is never pulled into R_A"). The author, who holds
+/// the bytes, still revives it the legitimate way: the miss makes it re-PUT.
+pub(crate) fn local_touch(root: &Path, keys: &[String], mailbox_ttl: Option<MailboxExpiry>) -> Vec<String> {
     let mut misses = Vec::new();
     for key in keys {
         match safe_path(root, key) {
+            Ok(p) if p.is_file() && mailbox_expired(root, key, &p, mailbox_ttl) => misses.push(key.clone()),
             Ok(p) if p.is_file() => touch_now(&p),
             Ok(_) => misses.push(key.clone()),
             Err(_) => {} // unsafe key: neither touched nor reported (don't invite a re-PUT)
@@ -1105,7 +1147,20 @@ pub fn gc_sweep_with(root: &Path, retention: &Retention, grace: std::time::Durat
     let mut stats = GcStats::default();
 
     // --- mailbox TTL sweep (unchanged semantics) -----------------------------------
-    if marker_past_grace(&root.join(".haven-gc-enabled"), grace) {
+    // The grace protects entries that predate the sweep. A store with no mailbox at all when the
+    // marker is first planted has nothing to protect, so its marker starts already past the grace
+    // — otherwise a brand-new relay spent its first 48 h treating long-dead entries (a sibling's
+    // backdated leftovers, a member's stale TOUCH set) as live.
+    let mailbox_marker = root.join(".haven-gc-enabled");
+    if !mailbox_marker.is_file() && local_list(root, MAILBOX_PREFIX).is_empty() {
+        // The store root may not exist yet (a headless relay's first start enables GC before
+        // anything is written) — without this the write failed silently and the fallback below
+        // planted a FRESH marker, i.e. the full 48 h grace (e2e `multirelay`, run 6).
+        let _ = std::fs::create_dir_all(root);
+        let _ = std::fs::write(&mailbox_marker, b"");
+        backdate(&mailbox_marker, grace.as_secs());
+    }
+    if marker_past_grace(&mailbox_marker, grace) {
         if let Ok(mailbox_root) = safe_path(root, MAILBOX_PREFIX) {
             let mut freed = 0u64; // mailbox bytes aren't reported; media accounting only
             sweep_dir(&mailbox_root, retention.mailbox_ttl.as_secs(), &mut stats.mailbox_deleted, &mut freed, &|_| false);
@@ -2530,7 +2585,10 @@ pub(crate) async fn handle_request(
             let _ = send.finish();
         }
         VERB_HAS => {
+            let ttl = auth.lock().map(|a| a.mailbox_ttl()).unwrap_or(None);
             let exists = match safe_path(&root, &key) {
+                // Expired-but-unswept: a MISS, never a revival (see `local_touch`).
+                Ok(p) if p.is_file() && mailbox_expired(&root, &key, &p, ttl) => false,
                 Ok(p) if p.is_file() => {
                     // A HAS hit is proof the caller still cares about this entry —
                     // refresh its liveness stamp so mailbox GC keeps it.
@@ -2561,7 +2619,8 @@ pub(crate) async fn handle_request(
                 .filter(|k| k.starts_with(&want))
                 .map(|k| k.to_string())
                 .collect();
-            let misses = local_touch(&root, &keys);
+            let ttl = auth.lock().map(|a| a.mailbox_ttl()).unwrap_or(None);
+            let misses = local_touch(&root, &keys, ttl);
             let mut reply = String::from("OK");
             for m in &misses {
                 reply.push('\n');
@@ -3289,6 +3348,7 @@ mod tests {
                 "haven/mailbox/fam/gone".to_string(),
                 "../etc/passwd".to_string(),
             ],
+            None,
         );
         assert_eq!(misses, vec!["haven/mailbox/fam/gone".to_string()]);
         assert!(idle_age_secs(&path) < 60, "touch resets the liveness clock");
@@ -3373,6 +3433,78 @@ mod tests {
         dir
     }
 
+    /// e2e `multirelay` ("an expired key on R_C is never pulled into R_A"): a member TOUCHes every
+    /// mailbox key it has ever LISTed, so an entry already idle past the TTL — dead, only not yet
+    /// swept — came back to life, and the mesh then replicated it to every sibling as fresh.
+    #[test]
+    fn touch_and_has_never_revive_an_expired_mailbox_entry() {
+        let ttl = std::time::Duration::from_secs(3600);
+        let expiry = Some(MailboxExpiry { ttl, grace: GC_GRACE });
+        let dir = retention_store(
+            "touch-expired",
+            &[
+                ("haven/mailbox/fam/dead", b"x", 2 * 3600),
+                ("haven/mailbox/fam/live", b"x", 60),
+                ("haven/media/old", b"x", 2 * 3600),
+            ],
+        );
+        let keys: Vec<String> =
+            ["haven/mailbox/fam/dead", "haven/mailbox/fam/live", "haven/media/old"].iter().map(|k| k.to_string()).collect();
+        let misses = local_touch(&dir, &keys, expiry);
+        assert_eq!(misses, vec!["haven/mailbox/fam/dead".to_string()], "a dead entry answers as a miss");
+        let dead = safe_path(&dir, "haven/mailbox/fam/dead").unwrap();
+        assert!(idle_age_secs(&dead) > ttl.as_secs(), "…and keeps its age, so the sweep and the mesh still see it dead");
+        assert!(idle_age_secs(&safe_path(&dir, "haven/mailbox/fam/live").unwrap()) < 5, "live entries are refreshed");
+        assert!(idle_age_secs(&safe_path(&dir, "haven/media/old").unwrap()) < 5, "media never expires here");
+        // The mesh agrees: a sibling pulling from this store is told the dead entry's real age.
+        let ages: HashMap<String, u64> = local_list_ages(&dir, "haven/mailbox/").into_iter().collect();
+        assert!(ages["haven/mailbox/fam/dead"] > ttl.as_secs());
+        // No expiry configured (a bare BlobServer) = today's behavior: everything held is touched.
+        assert!(local_touch(&dir, &keys, None).is_empty());
+    }
+
+    /// Inside the first-enable grace nothing is dead yet: that window is how members stamp the live
+    /// entries of a relay that just started sweeping, so a TOUCH there must still revive.
+    #[test]
+    fn inside_the_grace_a_touch_still_revives() {
+        let ttl = std::time::Duration::from_secs(3600);
+        let dir = retention_store("touch-grace", &[("haven/mailbox/fam/old", b"x", 2 * 3600)]);
+        touch_now(&dir.join(".haven-gc-enabled")); // grace just started
+        let misses =
+            local_touch(&dir, &["haven/mailbox/fam/old".to_string()], Some(MailboxExpiry { ttl, grace: GC_GRACE }));
+        assert!(misses.is_empty());
+        assert!(idle_age_secs(&safe_path(&dir, "haven/mailbox/fam/old").unwrap()) < 5);
+    }
+
+    /// The grace protects entries that PREDATE the sweep. A relay whose store has no mailbox when it
+    /// first enables GC has none, so it starts past the grace; one that already holds entries waits.
+    #[test]
+    fn only_a_store_with_existing_mailbox_entries_waits_out_the_grace() {
+        let fresh = std::env::temp_dir().join(format!("haven-gc-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fresh);
+        std::fs::create_dir_all(&fresh).unwrap();
+        local_put(&fresh, "haven/media/m", b"x").unwrap(); // media doesn't count
+        let _ = gc_sweep(&fresh, MAILBOX_TTL, GC_GRACE);
+        assert!(idle_age_secs(&fresh.join(".haven-gc-enabled")) >= GC_GRACE.as_secs());
+        // A headless relay's first start: the store directory does not even exist yet.
+        let absent = std::env::temp_dir().join(format!("haven-gc-absent-{}", std::process::id())).join("store");
+        let _ = std::fs::remove_dir_all(absent.parent().unwrap());
+        let _ = gc_sweep(&absent, MAILBOX_TTL, GC_GRACE);
+        assert!(
+            idle_age_secs(&absent.join(".haven-gc-enabled")) >= GC_GRACE.as_secs(),
+            "a relay whose store did not exist yet must not start inside the grace"
+        );
+        let _ = std::fs::remove_dir_all(absent.parent().unwrap());
+        let old = std::env::temp_dir().join(format!("haven-gc-upgraded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&old);
+        std::fs::create_dir_all(&old).unwrap();
+        local_put(&old, "haven/mailbox/fam/k", b"x").unwrap();
+        let _ = gc_sweep(&old, MAILBOX_TTL, GC_GRACE);
+        assert!(idle_age_secs(&old.join(".haven-gc-enabled")) < 5, "an upgraded relay still gets the grace");
+        let _ = std::fs::remove_dir_all(&fresh);
+        let _ = std::fs::remove_dir_all(&old);
+    }
+
     #[test]
     fn media_age_sweep_deletes_stale_spares_touched_and_fresh() {
         let day = 24 * 3600;
@@ -3387,7 +3519,7 @@ mod tests {
         );
         // The TOUCH discipline: a client refreshing a ref resets its liveness clock, exactly
         // like the mailbox sweep honors.
-        assert!(local_touch(&dir, &["haven/media/touched".to_string()]).is_empty());
+        assert!(local_touch(&dir, &["haven/media/touched".to_string()], None).is_empty());
         let ret = Retention {
             media_max_age: Some(std::time::Duration::from_secs(7 * day)),
             ..Retention::default()

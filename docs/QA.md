@@ -310,14 +310,19 @@ Product bugs this step found (fixed with regression tests unless noted):
   (before, two headless relays never meshed without `--peer`) — `blobstore` unit test +
   `tests/relay_enroll.rs::a_taught_sibling_replicates_that_circle_and_only_that_circle`.
 - **"Stop hosting" didn't stop** — the path proxy outlived its handle and old keep-alive
-  connections kept being served (`tests/relay_host_stop.rs`; fixed). STILL OPEN: on the Mac host
-  the media listener (:8674) keeps answering after the toggle is switched off — until the next
-  fabric rebind restarts the messaging node — although `disable_relay` frees it in every Rust-level
-  test. The step scores it (`nothing answers on R_B's port once hosting is off`) and logs the stub's
-  listeners after the toggle.
+  connections kept being served (`tests/relay_host_stop.rs`; fixed). Then, on the Mac host, :8674
+  kept answering after the toggle until the next fabric rebind: the node's accept loop cloned the
+  whole relay config — HTTP listener included — into every inbound iroh blob connection, so each
+  member's warm connection kept the "stopped" interface alive (and kept reading the store). Fixed:
+  the loop reads root+auth per request and closes the connection once the relay is disabled
+  (`an_open_iroh_blob_connection_does_not_keep_a_stopped_relay_serving`). Two concurrent HTTP
+  starts (host start + fabric reattach) also no longer put the relay on an ephemeral port
+  (`concurrent_http_starts_share_the_fixed_port`). The step requires a REFUSED connect within
+  2.5 s (a 401 or a hang both fail it) and logs the stub's listeners when it fails.
 - **A rotated relay token was never re-learned** — a 401 was folded into "not a member", the roster
   re-publish can't fix it, and the interface self-heal only ran for BAD urls. Apple + Android now
-  fetch the relay's self-published interface over iroh on a 401 (desktop: not yet).
+  fetch the relay's self-published interface over iroh on a 401 (desktop too: forced refreshes
+  once a minute, speculative ones every five).
 - **Removing a member did not revoke them on a relay** — learned grants only ever unioned (and
   a CLI relay re-applies its link roster on every restart), so a removed member kept LIST/GET on
   the circle's mailbox. The circle's CREATOR now states the whole set after a removal (ENROLL with
@@ -327,12 +332,16 @@ Product bugs this step found (fixed with regression tests unless noted):
   roster re-authorize), and refuses to let an ordinary member's stale ENROLL re-add them. A revoked
   id also stops being a SIBLING for the circle — an in-app host's relay id is its owner's device
   id, so the first fix left the removed member in through the sibling door
-  (`tests/relay_enroll.rs::the_creator_removing_a_member_revokes_them_on_the_relay`). Not yet:
-  desktop doesn't send the replace.
-- **Desktop never authorized itself on a new CLI relay** (open, desktop only) — its mailbox PUTs to
-  R_A were refused (403) for the whole run and its devroster publish to R_A timed out over iroh, so
-  A's private-circle post never reached the Tauri leg. Before the sibling fix this was masked: the
-  desktop read C_A off B's relay, which had been mirroring it.
+  (`tests/relay_enroll.rs::the_creator_removing_a_member_revokes_them_on_the_relay`). Desktop
+  sends the replace from `remove_from_circle` too.
+- **Desktop reached a relay adopted on the phone ~10 min late** — my own devices get no frame-19
+  announce (that goes to circle MEMBERS), so the desktop learns a sibling's new relay through
+  self-sync, and its self-sync ran in series after the mailbox poll: passes landed 5–11 min apart,
+  and A's private post reached the Tauri leg in 584 s or never (Android: 2.6 s). Self-sync now has
+  its own loop, and learning a relay's HTTP interface queues a devroster publish to it (before, a
+  publish that had failed over an unreachable iroh dial was retried only on a refusal or the
+  2-minute tick). Before the sibling fix all of this was masked: the desktop read C_A off B's
+  relay, which had been mirroring it.
 
 `E2E_STEPS=multirelay` runs it alone (it creates the shared circle itself).
 

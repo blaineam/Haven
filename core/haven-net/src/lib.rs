@@ -78,7 +78,8 @@ impl<T, E: std::fmt::Debug> IntoAnyhow<T> for std::result::Result<T, E> {
 /// Optional in-process relay (blob mailbox) attached to THIS node's endpoint. Hosting a relay used to
 /// spin up a SECOND iroh node in the same process, which made iroh's per-remote path manager churn
 /// unboundedly (tens-of-GB leak). Now ONE endpoint serves both the social ALPN and the blob ALPN.
-#[derive(Clone)]
+/// Deliberately NOT `Clone`: `http` owns the HTTP interface's listener, and every extra owner is a
+/// "stopped" relay that keeps serving (see `accept_loop`). Copy out the fields you need instead.
 struct RelayCfg {
     root: std::path::PathBuf,
     auth: Arc<Mutex<blobstore::RelayAuth>>,
@@ -144,6 +145,11 @@ pub struct Node {
     conns: Conns,
     handler: InboundHandler,
     relay: Arc<Mutex<Option<RelayCfg>>>,
+    /// Serializes [`Self::relay_serve_http`]: the check for an existing interface and the bind that
+    /// creates one must be ONE step, or two concurrent starts (the Mac host's start + its fabric
+    /// reattach) both find none, the loser's fixed-port bind fails, and it falls back to an
+    /// EPHEMERAL port — moving the relay's URL out from under every member.
+    serve_http_lock: Arc<tokio::sync::Mutex<()>>,
     dial_gate: Arc<Mutex<HashMap<EndpointId, DialGate>>>,
     /// Single-flight per-peer dial locks (see `conn_for`). The gate alone can't stop a burst:
     /// it's checked BEFORE `endpoint.connect` and only updated when a dial FINISHES — a dead id
@@ -219,6 +225,7 @@ impl Node {
             conns,
             handler,
             relay,
+            serve_http_lock: Arc::new(tokio::sync::Mutex::new(())),
             dial_gate: Arc::new(Mutex::new(HashMap::new())),
             dialing: Arc::new(Mutex::new(HashMap::new())),
             dial_attempts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -331,9 +338,15 @@ impl Node {
     pub fn enable_relay_with_retention(&self, root: std::path::PathBuf, retention: blobstore::Retention) {
         let mut g = lock(&self.relay);
         if g.is_none() {
+            let mut auth = blobstore::RelayAuth::default();
+            // TOUCH / HAS must not revive a mailbox entry this relay's GC already considers dead.
+            auth.set_mailbox_ttl(Some(blobstore::MailboxExpiry {
+                ttl: retention.mailbox_ttl,
+                grace: retention.gc_grace,
+            }));
             *g = Some(RelayCfg {
                 root: root.clone(),
-                auth: Arc::new(Mutex::new(blobstore::RelayAuth::default())),
+                auth: Arc::new(Mutex::new(auth)),
                 http: None,
                 retention,
             });
@@ -400,6 +413,9 @@ impl Node {
     /// port. Idempotent while already serving (returns the existing port). Errors if no relay is
     /// hosted here.
     pub async fn relay_serve_http(&self, bind: &str, token: &str) -> Result<u16> {
+        // Single-flight: a second caller waits for the first bind, then finds it and returns its
+        // port (see `serve_http_lock`).
+        let _serving = self.serve_http_lock.lock().await;
         let (root, auth) = {
             let g = lock(&self.relay);
             let Some(cfg) = g.as_ref() else { return Err(anyhow!("relay not hosted")) };
@@ -495,10 +511,12 @@ impl Node {
     /// store does NOT hold so the caller re-PUTs them; all keys back if not hosting (caller treats
     /// that like an unreachable relay and skips).
     pub fn relay_local_touch(&self, keys: &[String]) -> Vec<String> {
-        let Some(root) = lock(&self.relay).as_ref().map(|c| c.root.clone()) else {
+        let Some((root, expiry)) =
+            lock(&self.relay).as_ref().map(|c| (c.root.clone(), lock(&c.auth).mailbox_ttl()))
+        else {
             return keys.to_vec();
         };
-        blobstore::local_touch(&root, keys)
+        blobstore::local_touch(&root, keys, expiry)
     }
 
     /// Mesh anti-entropy: pull every sealed blob a SIBLING relay holds that our in-process relay lacks,
@@ -965,12 +983,28 @@ async fn accept_loop(
             // Dispatch by negotiated ALPN: the blob mailbox vs social messaging — ONE endpoint, two
             // protocols, so the relay needs no second iroh node.
             if conn.alpn() == blobstore::BLOB_ALPN {
-                let Some(cfg) = lock(&relay).clone() else { return }; // relay not hosted here → ignore
+                // Read the relay config PER REQUEST, and only the store half of it. This used to clone
+                // the whole `RelayCfg` once per connection and hold it for the connection's life —
+                // including the `Arc` that owns the HTTP interface — so every member with a warm blob
+                // connection kept a "stopped" relay's :8674 listening and serving, and kept this
+                // connection reading the store, until the connection happened to die (on the Mac
+                // host: the next fabric rebind; e2e `multirelay`, B's host toggle). A relay that is
+                // disabled mid-connection now closes it on the next request.
+                let store = |relay: &Arc<Mutex<Option<RelayCfg>>>| {
+                    lock(relay).as_ref().map(|c| (c.root.clone(), c.auth.clone()))
+                };
+                if store(&relay).is_none() {
+                    return; // relay not hosted here → ignore
+                }
                 let peer = hex(conn.remote_id().as_bytes());
                 loop {
                     match conn.accept_bi().await {
                         Ok((send, recv)) => {
-                            let (root, peer, auth) = (cfg.root.clone(), peer.clone(), cfg.auth.clone());
+                            let Some((root, auth)) = store(&relay) else {
+                                conn.close(0u32.into(), b"relay stopped");
+                                break;
+                            };
+                            let peer = peer.clone();
                             tokio::spawn(async move {
                                 let _ = blobstore::handle_request(root, peer, auth, send, recv).await;
                             });

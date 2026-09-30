@@ -45,4 +45,16 @@ class RelayUrlsTest {
     @Test fun `prefixes ignores anything that is not a dotted quad`() {
         assertEquals(setOf("10.0.0"), RelayUrls.prefixes(listOf("10.0.0.7", "fe80::1", "garbage")))
     }
+
+    @Test fun aReAnnounceOfADeadRelayKeepsItsCoolDown() {
+        val held = listOf("http://127.0.0.1:8684", "http://10.0.0.4:18684")
+        assertEquals(emptyList<String>(), RelayUrls.urlsToForgive(held, "t1", held, "t1"))
+    }
+
+    @Test fun aNewDoorOrARotatedTokenIsForgiven() {
+        val held = listOf("http://127.0.0.1:8684")
+        assertEquals(listOf("http://127.0.0.1:8686"), RelayUrls.urlsToForgive(held, "t1", listOf("http://127.0.0.1:8686"), "t1"))
+        assertEquals(held, RelayUrls.urlsToForgive(held, "t1", held, "t2"))
+        assertEquals(listOf("https://x.example"), RelayUrls.urlsToForgive(null, null, listOf("https://x.example"), "t"))
+    }
 }

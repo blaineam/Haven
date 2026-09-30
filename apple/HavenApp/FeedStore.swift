@@ -8212,9 +8212,14 @@ final class FeedStore: ObservableObject {
             return prev.contains { $0.hasPrefix("https://") }
         }()
         if !announcedUrls.isEmpty, !announcedToken.isEmpty {
+            let held = RelayMailboxStore.shared.httpInterface(lower)
             RelayMailboxStore.shared.setHttpInterface(lower, urls: announcedUrls, token: announcedToken)
-            // New/rotated free CF hostname — stop skipping the old cool-down window.
-            for u in announcedUrls { SharedStore.clearHttpUrlBad(u) }
+            // New/rotated free CF hostname — stop skipping the old cool-down window. ONLY for a
+            // changed interface: a plain re-announce of a relay that just died must not send us
+            // straight back to its dead door (see `RelayAddress.urlsToForgive`).
+            for u in RelayAddress.urlsToForgive(held: held, announced: announcedUrls, token: announcedToken) {
+                SharedStore.clearHttpUrlBad(u)
+            }
         }
         let nowPublicHttp = announcedUrls.contains { $0.hasPrefix("https://") }
         // Haven fabric: DERP URL so peers prefer this box over n0 for live NAT.

@@ -4537,13 +4537,16 @@ object HavenNet : InboundListener {
         // Record the relay's announced HTTP media interface (the reliable cross-NAT path).
         if (announcedUrls.isNotEmpty() && announcedToken.isNotEmpty()) {
             val e = relayEntries[nodeHex]
+            // Only a CHANGED interface earns its URLs a skip of the cool-down: members re-announce a
+            // relay for 5 min after it dies, and clearing on each one sent us straight back to the
+            // dead door (e2e `multirelay` herd check). iOS `RelayAddress.urlsToForgive` parity.
+            val forgive = RelayUrls.urlsToForgive(e?.httpUrls, e?.httpToken, announcedUrls, announcedToken)
             if (e != null && (e.httpUrls != announcedUrls || e.httpToken != announcedToken)) {
                 relayEntries[nodeHex] = e.copy(httpUrls = announcedUrls, httpToken = announcedToken)
                 saveRelayNodes()
                 Log.i(TAG, "learned relay http interface for ${nodeHex.take(8)}: ${announcedUrls.size} url(s)")
             }
-            // New/rotated free CF hostname — stop skipping the old cool-down window (iOS parity).
-            for (u in announcedUrls) httpUrlBad.remove(u)
+            for (u in forgive) httpUrlBad.remove(u)
         }
         // Haven fabric: DERP URL so peers prefer this box over n0 for live NAT.
         if (announcedDerp != null) {

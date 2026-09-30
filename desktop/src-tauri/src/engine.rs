@@ -205,6 +205,8 @@ struct DynState {
     last_activity_ms: u64,
     next_sync_due_ms: u64,
     next_poll_due_ms: u64,
+    /// Self-sync has its OWN due time and loop (see `start_self_sync_loop`), same adaptive cadence.
+    next_self_sync_due_ms: u64,
     /// #4 local-limit sweep throttle: last run (ms) + in-flight guard, so the age/size cap enforcement
     /// runs at most ~every 10 min off the sync tick (a `force` from a settings change bypasses the
     /// throttle). iOS `FeedStore.lastLimitSweepAt` / `limitSweepInFlight`.
@@ -500,6 +502,56 @@ struct FabricRebindState {
 enum RelayErr {
     Unreachable,
     Forbidden,
+}
+
+/// May a relay's self-published interface be fetched again? `last` = the previous fetch for that
+/// relay. The speculative path (no usable URL held) waits 5 minutes between fetches; a caller that
+/// watched the front door refuse to VERIFY us (`force`, a 401 on a rotated token) may ask once a
+/// minute — at 5 minutes for both, a token rotated right after an unrelated refresh stayed refused
+/// for up to five minutes (e2e `multirelay`: 305 s). iOS/Android parity.
+fn interface_refresh_due(last: Option<u64>, now: u64, force: bool) -> bool {
+    let min_gap: u64 = if force { 60_000 } else { 300_000 };
+    last.map_or(true, |t| now.saturating_sub(t) >= min_gap)
+}
+
+/// The member set a circle's creator states to a relay after a removal (`!replace` ENROLL): the
+/// remaining members' ACCOUNT ids (the relay re-expands each account's verified devices), their
+/// known device ids, and OURSELVES — account and device, or the relay declines by rule (2).
+/// Lower-cased, de-duplicated, sorted; blanks dropped.
+fn replace_member_set(my_account: &str, my_device: &str, accounts: &[String], devices: &[String]) -> Vec<String> {
+    let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for id in std::iter::once(my_account)
+        .chain(std::iter::once(my_device))
+        .chain(accounts.iter().map(String::as_str))
+        .chain(devices.iter().map(String::as_str))
+    {
+        let id = id.trim().to_lowercase();
+        if !id.is_empty() {
+            set.insert(id);
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// Claim the one scheduled state write of a burst: true for the first caller, false while a write
+/// is already pending (the writer clears the flag just before it snapshots, so a later mutation
+/// schedules the next one).
+fn claim_coalesced_write(pending: &std::sync::atomic::AtomicBool) -> bool {
+    !pending.swap(true, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Does a live relay announce say anything new — the relay joined this circle's list, came back
+/// from inactive, or its HTTP interface changed? Only then is a backfill of my history worth it.
+fn relay_announce_is_news(new_for_circle: bool, reactivated: bool, iface_changed: bool) -> bool {
+    new_for_circle || reactivated || iface_changed
+}
+
+/// Is a self-sync pass due, and when is the next periodic one? A pass runs when the periodic
+/// deadline passed OR an armed nudge (`nudge_at` ≠ 0, a local edit of synced state) expired; either
+/// way the pass snapshots everything, so both are consumed and the periodic clock restarts.
+fn self_sync_schedule(now: u64, nudge_at: u64, next_due: u64, interval: u64) -> (bool, u64) {
+    let due = now >= next_due || (nudge_at != 0 && now >= nudge_at);
+    (due, if due { now + interval } else { next_due })
 }
 
 /// Peer-to-peer iroh frame chunk — 32 KB, matching iOS/Android (`HavenNet.kt:2173`). Theirs is the
@@ -1628,6 +1680,44 @@ impl Engine {
         }
     }
 
+    /// Self-sync on its OWN clock, never queued behind the mailbox poll and the sync fan-out.
+    ///
+    /// It used to run in the heartbeat right after `poll_mailbox`, in series — and a poll over a fat
+    /// mailbox (or one stuck behind the engine lock) took minutes, so self-sync passes on the e2e
+    /// desktop leg landed 5 and 11 minutes apart. Self-sync is how this device learns what my OTHER
+    /// devices changed — above all a relay adopted on the phone (my own devices get no frame-19
+    /// announce: that goes to circle MEMBERS), so the desktop sat on its old relays and missed
+    /// everything posted to a private circle on the new one for ~10 minutes (e2e `multirelay`: A's
+    /// private post never / 584 s on desktop; Android, whose self-sync has its own clock, 2.6 s).
+    /// Same adaptive cadence as the poll (30 s base) and the same debounced nudge; `poll_self_sync`
+    /// is single-flight, so a slow pass is skipped over, never stacked.
+    fn start_self_sync_loop(self: &Arc<Self>) {
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let now = now_ms();
+                let due = {
+                    let mut st = me.dyn_state.lock();
+                    let (due, next) = self_sync_schedule(
+                        now,
+                        st.selfsync_nudge_at_ms,
+                        st.next_self_sync_due_ms,
+                        Self::adaptive_interval(now, st.last_activity_ms, 30_000),
+                    );
+                    if due {
+                        st.selfsync_nudge_at_ms = 0;
+                        st.next_self_sync_due_ms = next;
+                    }
+                    due
+                };
+                if due {
+                    me.poll_self_sync().await;
+                }
+            }
+        });
+    }
+
     /// Base cadence stretched by how long the app has sat idle. Idle <3min = base; <15min = ×3; else ×6.
     fn adaptive_interval(now: u64, last_activity_ms: u64, base: u64) -> u64 {
         let idle = now.saturating_sub(last_activity_ms);
@@ -1646,6 +1736,7 @@ impl Engine {
         st.last_activity_ms = now_ms();
         st.next_sync_due_ms = 0;
         st.next_poll_due_ms = 0;
+        st.next_self_sync_due_ms = 0;
     }
 
     /// qa-cmd v2 cadence contract (DEBUG driver only — see `qa.rs`): a qa op represents a user
@@ -1673,6 +1764,7 @@ impl Engine {
             // Base cadences from start_mailbox_loop: poll 30s, sync 20s.
             st.next_poll_due_ms = st.next_poll_due_ms.min(now + 30_000);
             st.next_sync_due_ms = st.next_sync_due_ms.min(now + 20_000);
+            st.next_self_sync_due_ms = st.next_self_sync_due_ms.min(now + 30_000);
         }
     }
 
@@ -1694,6 +1786,7 @@ impl Engine {
     // source). Any real activity resets it to the tight base cadence (see bump_activity), and pushes
     // still wake the app for immediacy either way. iOS FeedStore parity: sync base 20s, poll base 30s.
     fn start_mailbox_loop(self: &Arc<Self>) {
+        self.start_self_sync_loop();
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -1714,23 +1807,9 @@ impl Engine {
                         false
                     }
                 };
-                // Debounced "self-sync now" nudge (see nudge_self_sync): a local edit of synced
-                // state armed a deadline — honor it here, off-schedule, so the edit reaches the
-                // user's other devices in seconds. A due poll bucket clears any pending nudge too
-                // (its own pass snapshots the same mutation), so a burst never runs twice.
-                let nudge_due = {
-                    let mut st = me.dyn_state.lock();
-                    let due = st.selfsync_nudge_at_ms != 0 && now >= st.selfsync_nudge_at_ms;
-                    if due || poll_due {
-                        st.selfsync_nudge_at_ms = 0;
-                    }
-                    due
-                };
+                // Self-sync is NOT run from here any more — see `start_self_sync_loop`.
                 if poll_due {
                     me.poll_mailbox().await;
-                    me.poll_self_sync().await;
-                } else if nudge_due {
-                    me.poll_self_sync().await;
                 }
 
                 // Sync bucket (base 20s): the network fan-out that runs the radio hot, so it backs off
@@ -2805,11 +2884,50 @@ impl Engine {
             p.mark_circle_member_removed(&entry);
             let _ = p.save(&self.paths);
         }
-        self.social.remove_from_circle(circle_id, contact_id_hex);
+        self.social.remove_from_circle(circle_id.clone(), contact_id_hex);
         self.persist();
         self.nudge_self_sync(); // the severance rides a prompt pass so no sibling re-adds them meanwhile
         self.authorize_membership();
+        // …and every OTHER relay serving the circle loses them too. A relay only ever ADDED members,
+        // so a removed friend kept listing and fetching this circle's mailbox on every relay they
+        // had been enrolled on (e2e `multirelay`). Only the creator may shrink the set (the relay
+        // checks), so this is for owned circles only. iOS/Android parity.
+        if circle_id.starts_with(OWNED_CIRCLE_PREFIX) {
+            self.replace_circle_members_on_relays(circle_id);
+        }
         self.emit_changed();
+    }
+
+    /// Tell each relay serving `circle_id` its WHOLE member set (`!replace` ENROLL), so members that
+    /// dropped out are revoked there. iOS `enrollMembers(replace: true)` / Android
+    /// `replaceCircleMembersOnRelays` parity.
+    fn replace_circle_members_on_relays(self: &Arc<Self>, circle_id: String) {
+        let relays: Vec<String> = self
+            .relays_for(&circle_id)
+            .into_iter()
+            .filter(|h| !h.starts_with("s3:") && h.len() == 64)
+            .collect();
+        if relays.is_empty() {
+            return;
+        }
+        let accounts = self.social.contact_node_ids(circle_id.clone());
+        let devices: Vec<String> =
+            accounts.iter().flat_map(|a| self.social.device_node_ids_for(a.clone())).collect();
+        let list = replace_member_set(&self.social.my_node_hex(), &self.node_id_hex(), &accounts, &devices);
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            for hex in relays {
+                let Some(client) = me.relay_client_for(&hex).await else { continue };
+                if client.enroll_members_replace(circle_id.clone(), list.clone()).await {
+                    log::info!(
+                        "replaced {} members of {} at {}",
+                        list.len(),
+                        circle_id,
+                        &hex[..8.min(hex.len())]
+                    );
+                }
+            }
+        });
     }
 
     /// Was this member explicitly removed from this circle? (Blocks their unsolicited handshake rejoin.)
@@ -5196,7 +5314,7 @@ impl Engine {
                 "hello from {} is an engine-known circle member — adopted as contact, handshake continues",
                 &id_hex.chars().take(8).collect::<String>()
             );
-            self.persist();
+            self.persist_coalesced(); // network-driven: coalesce (see persist_coalesced)
             return;
         }
         if !hello.circle_id.starts_with("dm:") {
@@ -5255,7 +5373,7 @@ impl Engine {
                 self.live_deliver_to_my_devices(wire::EVENT, payload);
             }
             self.bump_activity(); // a live event arrived → keep sync tight while the conversation is active
-            self.persist();
+            self.persist_coalesced(); // network-driven: coalesce (see persist_coalesced)
             self.emit_changed();
             self.request_missing_media();
             // Freshness + persisted dedupe: a re-delivered / re-sealed old envelope (history
@@ -5267,7 +5385,17 @@ impl Engine {
     // ---- relay / mailbox ----------------------------------------------------------------
 
     async fn handle_relay_node(self: &Arc<Self>, body: &[u8]) {
-        let Some(circle_id) = self.ingest_relay_announce(body) else { return };
+        let Some((circle_id, news)) = self.ingest_relay_announce(body) else { return };
+        if !news {
+            // A RE-announce of a relay we already hold for this circle, unchanged. Members send
+            // these every sync tick for every relay of every circle; each one used to re-export this
+            // device's ENTIRE history into the circle (backfill_mailbox → export_my_envelopes, a full
+            // epoch bundle under the engine lock) and run a poll. With three relays in play the
+            // desktop spent the multirelay e2e inside those exports — engine lock held 20 s, 34 s,
+            // 144 s, dumps taking 150 s — and never got to the private post it was waiting for. iOS
+            // backfills only for a NEW relay (`wasNew`); so does this now.
+            return;
+        }
         self.refresh_haven_fabric();
         self.backfill_mailbox(&circle_id).await;
         self.poll_mailbox().await;
@@ -5277,7 +5405,9 @@ impl Engine {
     /// mailbox blob — the bytes are identical). Pure state: learns/reactivates the relay, records
     /// its HTTP/DERP/TURN interface. Returns the circle id on success so the LIVE path can chase
     /// it with a backfill+poll; the mailbox path must NOT (it is already inside a poll).
-    fn ingest_relay_announce(&self, body: &[u8]) -> Option<String> {
+    /// The bool is "news": the relay was new for this circle, reactivated, or its HTTP interface
+    /// changed — the only cases worth a backfill (see [`relay_announce_is_news`]).
+    fn ingest_relay_announce(&self, body: &[u8]) -> Option<(String, bool)> {
         let mut r = wire::Reader::new(body);
         let cid = r.lp()?;
         let circle_id = String::from_utf8_lossy(&cid).into_owned();
@@ -5335,6 +5465,7 @@ impl Engine {
         if node_hex.len() != 64 {
             return None;
         }
+        let news;
         {
             // A contact RE-ANNOUNCED a circle relay. Reactivating a deactivated/forgotten entry is
             // allowed ONLY when the announce comes from the relay's OWNER — the announced id is one of
@@ -5383,13 +5514,18 @@ impl Engine {
             p.set_relay_added_at(&node_hex, announced_added_at);
             let was_suppressed_or_inactive = was_reactivated;
             let list = p.relays.entry(circle_id.clone()).or_default();
-            if !list.contains(&node_hex) {
+            let new_for_circle = !list.contains(&node_hex);
+            if new_for_circle {
                 list.push(node_hex.clone());
             }
             // Record the relay's announced HTTP media interface (the reliable cross-NAT path).
-            if !announced_urls.is_empty() && !announced_token.is_empty() {
-                p.set_relay_http(&node_hex, announced_urls.clone(), announced_token.clone());
+            let iface_changed = !announced_urls.is_empty()
+                && !announced_token.is_empty()
+                && p.set_relay_http(&node_hex, announced_urls.clone(), announced_token.clone());
+            if iface_changed {
+                self.roster_on_new_interface(&node_hex);
             }
+            news = relay_announce_is_news(new_for_circle, was_reactivated, iface_changed);
             if let Some(derp) = announced_derp {
                 p.set_relay_derp(&node_hex, &derp);
             }
@@ -5408,7 +5544,7 @@ impl Engine {
                 self.relay_health.lock().remove(&node_hex);
             }
         }
-        Some(circle_id)
+        Some((circle_id, news))
     }
 
     /// Fetch a relay's SELF-PUBLISHED interface (`haven/relay/__interface__` — its current public
@@ -5420,23 +5556,33 @@ impl Engine {
     /// only ever ran once at adopt time. After adopting we re-announce, so members with no iroh
     /// reach — including builds older than this one — learn the URL from the mailbox.
     /// iOS `FeedStore.refreshRelayInterfaceIfNeeded` parity.
-    fn refresh_relay_interface_if_needed(self: &Arc<Self>, node_hex: &str) {
+    ///
+    /// `force`: the caller WATCHED the front door fail in a way only a fresh interface can fix (a
+    /// 401 — the relay's token rotated), so fetch even though we hold usable-looking URLs, and
+    /// allow it once a minute instead of the speculative path's five (iOS/Android parity).
+    fn refresh_relay_interface_if_needed(self: &Arc<Self>, node_hex: &str, force: bool) {
         let lower = node_hex.to_lowercase();
         // Only when we hold no usable HTTP interface, or every URL we hold is in its bad window.
-        if let Some((urls, _)) = self.relay_http_reachable(&lower) {
-            if urls.iter().any(|u| !self.http_url_bad(u)) {
-                return;
+        if !force {
+            if let Some((urls, _)) = self.relay_http_reachable(&lower) {
+                if urls.iter().any(|u| !self.http_url_bad(u)) {
+                    return;
+                }
             }
         }
         let now = now_ms();
         {
             let mut m = self.relay_interface_refresh_ms.lock();
-            if let Some(&last) = m.get(&lower) {
-                if now.saturating_sub(last) < 300_000 {
-                    return;
-                }
+            if !interface_refresh_due(m.get(&lower).copied(), now, force) {
+                return;
             }
             m.insert(lower.clone(), now);
+        }
+        if force {
+            log::info!(
+                "relay {} could not verify us (401) — its token rotated? re-learning its interface over iroh",
+                &lower.chars().take(8).collect::<String>()
+            );
         }
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
@@ -5483,7 +5629,9 @@ impl Engine {
             );
             let circles: Vec<String> = {
                 let mut p = me.prefs.lock();
-                p.set_relay_http(&lower, urls.clone(), token);
+                if p.set_relay_http(&lower, urls.clone(), token) {
+                    me.roster_on_new_interface(&lower);
+                }
                 if let Some(d) = &derp {
                     p.set_relay_derp(&lower, d);
                 }
@@ -6446,7 +6594,7 @@ impl Engine {
     /// parity — without this a friend's device-seed phone stays "forbidden" at this relay).
     fn handle_device_roster_announce(self: &Arc<Self>, body: &[u8]) {
         if self.social.ingest_roster_wire(body.to_vec()) {
-            self.persist();
+            self.persist_coalesced(); // network-driven: coalesce (see persist_coalesced)
             self.authorize_membership();
         }
     }
@@ -6711,6 +6859,14 @@ impl Engine {
             }
             // Plain-HTTP interface first (the reliable cross-NAT path), else the iroh dial.
             let http_iface = self.relay_http_reachable(&node_hex);
+            let short = node_hex.chars().take(8).collect::<String>();
+            match &http_iface {
+                None => log::info!("devroster relay={short} no HTTP interface — dialing"),
+                Some((urls, _)) if urls.iter().all(|u| self.http_url_bad(u)) => {
+                    log::info!("devroster relay={short} every HTTP url backed off — dialing")
+                }
+                _ => {}
+            }
             if let Some((urls, token)) = http_iface {
                 let mut done = false;
                 let mut refused = false;
@@ -6719,6 +6875,7 @@ impl Engine {
                         Ok(()) => {
                             self.mark_relay_ok(&node_hex);
                             self.roster_published.lock().insert(node_hex.clone(), (wire_hash, now_ms()));
+                            log::info!("devroster http-put OK relay={short} ({} B)", wire.len());
                             done = true;
                             break;
                         }
@@ -8085,7 +8242,7 @@ impl Engine {
                 // exactly the state a restarted CLI relay (rotated free-tunnel URL) leaves every
                 // client in, where mailbox flows and MEDIA silently dies (the blob dial drops
                 // cross-NAT). Fetch its self-published interface and adopt + re-announce.
-                self.refresh_relay_interface_if_needed(&node_hex);
+                self.refresh_relay_interface_if_needed(&node_hex, false);
             }
             if !keys.is_empty() {
                 self.dyn_state.lock().relay_active = true;
@@ -9100,7 +9257,7 @@ impl Engine {
     /// GET one key. `Ok(Some)` = bytes, `Ok(None)` = reachable but 404 (a real MISS — the iroh path
     /// serves the same store, so skip dialing it), `Err(Unreachable)` = dead endpoint,
     /// `Err(Forbidden)` = the relay REFUSED us.
-    async fn http_get(&self, base: &str, token: &str, key: &str) -> Result<Option<Vec<u8>>, RelayErr> {
+    async fn http_get(self: &Arc<Self>, base: &str, token: &str, key: &str) -> Result<Option<Vec<u8>>, RelayErr> {
         if crate::netgate::offline() {
             return Err(RelayErr::Unreachable);
         }
@@ -9115,7 +9272,11 @@ impl Engine {
         match resp.status().as_u16() {
             200..=299 => Ok(Some(resp.bytes().await.map_err(|_| RelayErr::Unreachable)?.to_vec())),
             404 => Ok(None),
-            401 | 403 => Err(RelayErr::Forbidden),
+            401 => {
+                self.note_unverified(base);
+                Err(RelayErr::Forbidden)
+            }
+            403 => Err(RelayErr::Forbidden),
             _ => Err(RelayErr::Unreachable),
         }
     }
@@ -9125,7 +9286,7 @@ impl Engine {
     /// again. A 200 carries the fresh keys plus the digest to echo next time. A relay that doesn't
     /// speak the header simply never answers 204 and never hands us a digest — today's behavior.
     async fn http_list_delta(
-        &self,
+        self: &Arc<Self>,
         base: &str,
         token: &str,
         prefix: &str,
@@ -9163,7 +9324,11 @@ impl Engine {
                     resp_digest,
                 ))
             }
-            401 | 403 => Err(RelayErr::Forbidden),
+            401 => {
+                self.note_unverified(base);
+                Err(RelayErr::Forbidden)
+            }
+            403 => Err(RelayErr::Forbidden),
             _ => Err(RelayErr::Unreachable),
         }
     }
@@ -9183,6 +9348,17 @@ impl Engine {
             "relay {} REFUSED {what} — not an outage; our device id isn't authorized there yet",
             &node_hex.chars().take(8).collect::<String>()
         );
+    }
+
+    /// A relay's HTTP interface was just learned or changed (announce, interface refresh): queue a
+    /// roster publish to it. The devroster PUT is what authorizes this device on a headless relay,
+    /// and its only other triggers are a refusal (`note_refused`) or the 2-minute backfill tick — so
+    /// a relay learned over HTTP after the publish already failed over an unreachable iroh dial
+    /// stayed unauthorized until one of those came round. Rides the next `heal_forbidden_relays`
+    /// (end of every self-sync pass; rate-limited to one publish per 30 s).
+    fn roster_on_new_interface(&self, node_hex: &str) {
+        self.roster_published.lock().remove(node_hex);
+        self.roster_needed.lock().insert(node_hex.to_string());
     }
 
     /// Re-publish our device roster to every relay that refused us, so the next attempt is allowed.
@@ -9213,7 +9389,7 @@ impl Engine {
     /// authorized cannot upload at all, and a 403 read as an outage backs off the very relay the write
     /// needs — so the blob never lands, and the damage surfaces much later as a fetch that genuinely
     /// 404s. A real absence, manufactured by a permissions problem.
-    async fn http_put(&self, base: &str, token: &str, key: &str, body: Vec<u8>) -> Result<(), RelayErr> {
+    async fn http_put(self: &Arc<Self>, base: &str, token: &str, key: &str, body: Vec<u8>) -> Result<(), RelayErr> {
         // HAVEN_NO_NET backstop. `relay_http_reachable` already refuses, so no live caller reaches
         // here — but these three primitives are the only place our own bytes hit the relay wire, and
         // a future route built from a base and token some other way must not slip past.
@@ -9233,9 +9409,26 @@ impl Engine {
             .map_err(|_| RelayErr::Unreachable)?;
         match resp.status().as_u16() {
             200..=299 => Ok(()),
-            401 | 403 => Err(RelayErr::Forbidden),
+            401 => {
+                self.note_unverified(base);
+                Err(RelayErr::Forbidden)
+            }
+            403 => Err(RelayErr::Forbidden),
             _ => Err(RelayErr::Unreachable),
         }
+    }
+
+    /// The relay could not VERIFY our request (401) — unlike a 403, where it verified us and refused
+    /// a non-member. The usual cause is a token we no longer share: the operator rotated the relay's
+    /// `http_token` (or reinstalled it), our signatures fold in the old one, and every request is
+    /// unverifiable. A roster re-publish (the 403 remedy) cannot fix that, and nothing else ever
+    /// re-learned the token — the interface self-heal only ran when we held NO usable URL, and a 401
+    /// never marks one bad — so the relay stayed refused forever (e2e `multirelay`, token rotation).
+    /// Fetch the relay's self-published interface over iroh (not token-gated) and adopt it; rate
+    /// limited per relay (see [`interface_refresh_due`]). iOS `SharedStore.noteUnverified` parity.
+    fn note_unverified(self: &Arc<Self>, base: &str) {
+        let Some(hex) = self.prefs.lock().relay_hex_for_http_url(base) else { return };
+        self.refresh_relay_interface_if_needed(&hex, true);
     }
 
     async fn upload_media(self: &Arc<Self>, circle_id: &str, reference: &str) -> bool {
@@ -9883,7 +10076,7 @@ impl Engine {
             // if one lands, the retry path finds the blob and the URL gets re-announced. (Our own
             // hosted relay is skipped by relay_client_for's self-guard; media_dests excludes s3.)
             for node_hex in self.media_dests(circle_id) {
-                self.refresh_relay_interface_if_needed(&node_hex);
+                self.refresh_relay_interface_if_needed(&node_hex, false);
             }
         } else {
             log::info!("media restore {short}: REFUSED by {refused} relay(s) — not missing; re-publishing our roster so the retry is allowed");
@@ -11224,13 +11417,19 @@ impl Engine {
 
     // ---- persistence --------------------------------------------------------------------
 
-    /// Write the engine state at most once every few seconds instead of once per authored post.
+    /// Write the engine state at most once every few seconds instead of once per call.
     ///
-    /// Only ever used for bulk authoring — see `after_author_inner`. The flag is the whole
-    /// mechanism: a write is already scheduled, so this call is a no-op rather than another
-    /// full serialisation of a state that is growing with every post.
+    /// Bulk authoring (`after_author_inner`) and every NETWORK-driven mutation — a live event, a
+    /// hello, a roster announce, a self-sync apply — go through here. Each `persist()` is a full
+    /// clone + serialisation of every circle's events under the ONE engine lock (and on a tokio
+    /// worker, which blocks the runtime while it waits); run once per inbound frame, the desktop
+    /// spent the multirelay e2e in `export_state` — 13 holds totalling 356 s, one of 180 s — with
+    /// its self-sync loop and mailbox poll parked behind it for ten minutes, so it never read the
+    /// post it was waiting for. Everything these paths ingest is re-fetchable from the mailbox (the
+    /// poll path, whose seen-set makes a key permanent, still persists synchronously). The flag is
+    /// the whole mechanism: a write is already scheduled, so this call is a no-op.
     fn persist_coalesced(self: &Arc<Self>) {
-        if self.persist_pending.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if !claim_coalesced_write(&self.persist_pending) {
             return;
         }
         let me = self.clone();
@@ -11527,7 +11726,7 @@ impl Engine {
             applied
         };
         if applied {
-            self.persist();
+            self.persist_coalesced(); // network-driven: coalesce (see persist_coalesced)
             self.emit_changed();
         }
         log::info!(
@@ -12358,5 +12557,70 @@ pub(crate) mod qa_media {
             "media_requests_from_friends": g(&REQUESTS_FROM_FRIENDS),
             "serve_declined": g(&DECLINED),
         })
+    }
+}
+
+#[cfg(test)]
+mod multirelay_parity_tests {
+    use super::{interface_refresh_due, replace_member_set};
+
+    #[test]
+    fn a_forced_interface_refresh_may_run_once_a_minute_the_speculative_one_every_five() {
+        let t0 = 1_000_000u64;
+        assert!(interface_refresh_due(None, t0, false), "never fetched → due");
+        assert!(interface_refresh_due(None, t0, true));
+        assert!(!interface_refresh_due(Some(t0), t0 + 59_999, true));
+        assert!(interface_refresh_due(Some(t0), t0 + 60_000, true), "401 self-heal: 60 s gap");
+        assert!(!interface_refresh_due(Some(t0), t0 + 299_999, false));
+        assert!(interface_refresh_due(Some(t0), t0 + 300_000, false), "speculative: 5 min gap");
+        // A clock that stepped backwards reads as "just fetched" (saturating), never as overdue.
+        assert!(!interface_refresh_due(Some(t0), t0 - 5, true));
+    }
+
+    #[test]
+    fn self_sync_runs_on_its_deadline_or_an_expired_nudge_and_restarts_the_clock() {
+        use super::self_sync_schedule;
+        // First tick after launch: next_due = 0 → due at once.
+        assert_eq!(self_sync_schedule(1_000, 0, 0, 30_000), (true, 31_000));
+        // Not due, no nudge → untouched.
+        assert_eq!(self_sync_schedule(10_000, 0, 31_000, 30_000), (false, 31_000));
+        // An armed nudge that has not expired yet waits…
+        assert_eq!(self_sync_schedule(10_000, 12_000, 31_000, 30_000), (false, 31_000));
+        // …and fires once it has, restarting the periodic clock.
+        assert_eq!(self_sync_schedule(12_000, 12_000, 31_000, 30_000), (true, 42_000));
+        // Periodic deadline with an idle-stretched interval.
+        assert_eq!(self_sync_schedule(31_000, 0, 31_000, 180_000), (true, 211_000));
+    }
+
+    #[test]
+    fn a_burst_of_network_mutations_schedules_one_state_write() {
+        use super::claim_coalesced_write;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let pending = AtomicBool::new(false);
+        let claimed = (0..500).filter(|_| claim_coalesced_write(&pending)).count();
+        assert_eq!(claimed, 1, "500 inbound frames must cost ONE full export, not 500");
+        pending.store(false, Ordering::SeqCst); // the writer takes its snapshot
+        assert!(claim_coalesced_write(&pending), "a mutation after the snapshot schedules the next write");
+    }
+
+    #[test]
+    fn only_a_new_reactivated_or_rewired_relay_announce_is_news() {
+        use super::relay_announce_is_news;
+        assert!(!relay_announce_is_news(false, false, false), "a plain re-announce must not backfill");
+        assert!(relay_announce_is_news(true, false, false));
+        assert!(relay_announce_is_news(false, true, false));
+        assert!(relay_announce_is_news(false, false, true));
+    }
+
+    #[test]
+    fn the_replace_set_names_me_and_every_remaining_member_once() {
+        let me = "A".repeat(64);
+        let dev = "d".repeat(64);
+        let accounts = vec!["b".repeat(64), me.to_lowercase()];
+        let devices = vec!["C".repeat(64), " ".into(), dev.clone()];
+        let got = replace_member_set(&me, &dev, &accounts, &devices);
+        assert_eq!(got, vec!["a".repeat(64), "b".repeat(64), "c".repeat(64), dev]);
+        // A removed member is simply absent — nothing else in the set speaks for them.
+        assert!(!got.contains(&"e".repeat(64)));
     }
 }

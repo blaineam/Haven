@@ -36,4 +36,16 @@ object RelayUrls {
         if (!isPrivate) return true
         return ourPrefixes.contains(parts.take(3).joinToString("."))
     }
+
+    /**
+     * Which announced URLs may skip their failure cool-down: only NEW ones — a URL we did not hold,
+     * or every URL when the token changed (a restarted / re-keyed relay). A plain re-announce of the
+     * interface we already hold is not evidence the door works (members keep announcing a relay for
+     * 5 min after it dies). `heldUrls == null` = a relay we never held. iOS `urlsToForgive` parity.
+     */
+    fun urlsToForgive(heldUrls: List<String>?, heldToken: String?, announced: List<String>, token: String): List<String> {
+        if (heldUrls == null || heldUrls.isEmpty() || heldToken != token) return announced
+        val old = heldUrls.toSet()
+        return announced.filter { it !in old }
+    }
 }

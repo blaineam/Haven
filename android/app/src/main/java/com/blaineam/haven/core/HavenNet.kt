@@ -4375,12 +4375,12 @@ object HavenNet : InboundListener {
             val feed = runCatching { social.feed(c.id, nowMs(), null) }.getOrDefault(emptyList())
             for (item in feed) { refs.addAll(item.media); item.comments.forEach { refs.addAll(it.media) } }
         }
-        var budget = 10   // a few per pass — paced so the nearby link isn't flooded; the rest follow next tick
-        for (ref in refs) {
-            if (budget <= 0) break
-            if (pushedNearby.contains(ref) || LocationShare.isLocation(ref)) continue
-            if (!LocalMedia.has(ref)) continue
-            pushedNearby.add(ref)
+        // A few per pass — paced so the nearby link isn't flooded; the rest follow next tick. Only
+        // what the link may carry: on an ultra-constrained link, previews only (see [OwnMediaPush]).
+        val picked = OwnMediaPush.pick(refs, pushedNearby, budget = 10,
+            eligible = { !LocationShare.isLocation(it) && LocalMedia.has(it) },
+            mayMoveOverLink = ::linkMayMove)
+        for (ref in picked) {
             if (!shouldServeNearby(ref)) continue
             // Guarded like the request-driven serves: this runs off a TICK, so without it a slow push
             // that hasn't finished by the next pass gets a second copy of itself started on top.
@@ -4388,7 +4388,6 @@ object HavenNet : InboundListener {
                 val sf = LocalMedia.openForServing(ref) ?: return@serveOnce
                 try { sendMediaChunks(ref, sf.file, me) } finally { sf.release() }
             }
-            budget--
         }
         if (pushedNearby.size > 5000) pushedNearby.clear()
     }
@@ -9004,7 +9003,7 @@ object HavenNet : InboundListener {
     }
 
     private fun persist() {
-        runCatching { StateFiles.writeAtomic(stateFile, social.exportState()) }
+        runCatching { StateFiles.writeAtomicFrom(stateFile) { social.exportState() } }
             .onSuccess { QaPerf.notePersistExport() }   // the QA dump's perf.persistExportCount
             .onFailure { Log.e(TAG, "persist failed", it) }
     }

@@ -6053,10 +6053,7 @@ final class FeedStore: ObservableObject {
     /// What one `receive` did. `quietRoster`: a byte-identical REPEAT of a device roster that landed
     /// no events — handled exactly like an applied envelope (fan-out, activity, refresh: the fleet's
     /// cadence and delivery timing lean on those) EXCEPT that it owes no engine export.
-    enum ReceiveOutcome: Equatable, Sendable {
-        case none, changed, quietRoster
-        var applied: Bool { self != .none }
-    }
+    typealias ReceiveOutcome = MailboxIngest.Outcome
 
     /// `receive`, telling a roster repeat apart from a change.
     ///
@@ -6362,10 +6359,11 @@ final class FeedStore: ObservableObject {
         for item in ingested { SharedStore.markSeenPublic(item.key) }
         if results.contains(where: { $0.outcome == .changed }) { persist() }
         bumpActivity()
-        for item in ingested {
+        for r in results where r.outcome.applied {
+            let item = r.item
             invalidateMessagesCache(item.cid)
             invalidateSyncBundle(item.cid)
-            liveDeliverToMyDevices(1, eventPayload(item.cid, item.env))
+            if r.outcome == .changed { liveDeliverToMyDevices(1, eventPayload(item.cid, item.env)) }   // repeats: they have it
             scheduleCircleSideEffects(item.cid)
         }
         refresh(); requestMissingMedia()
@@ -6635,7 +6633,7 @@ final class FeedStore: ObservableObject {
                     controlKeys: [String: [String]],
                     unlockedCircles: Set<String>,
                     processedKeys: [String],
-                    realChange: Bool) = await Task.detached(priority: .utility) {
+                    realChanged: [(circleId: String, envelope: Data)]) = await Task.detached(priority: .utility) {
             // SLICED, with real suspension points between engine holds. One monolithic
             // engine pass re-acquired the (barging, unfair) engine mutex back-to-back
             // for the whole backlog, so any main-thread social.* touch during the drain —
@@ -6649,15 +6647,15 @@ final class FeedStore: ObservableObject {
             var controlKeys: [String: [String]] = [:]
             var unlocked = Set<String>()
             var processed: [String] = []
-            var anyRealChange = false
+            var realChanged: [(String, Data)] = []
             var sliceStart = 0
             while sliceStart < content.count {
                 let slice = Array(content[sliceStart..<min(sliceStart + 6, content.count)])
                 if sliceStart > 0 { try? await Task.sleep(nanoseconds: 3_000_000) }
                 sliceStart += 6
-                let part: ([(String, Data)], [String: [String]], Set<String>, [String], Bool)
+                let part: ([(String, Data)], [String: [String]], Set<String>, [String], [(String, Data)])
                 part = await engine.run { s in
-                var realChange = false
+                var outcomes: [((String, Data), ReceiveOutcome)] = []
                 var changed: [(String, Data)] = []
                 var controlKeys: [String: [String]] = [:]
                 var unlocked = Set<String>()
@@ -6665,7 +6663,7 @@ final class FeedStore: ObservableObject {
                 for (cid, key, env) in slice {
                     let outcome = FeedStore.receiveOutcome(s, circleId: cid, envelope: env)
                     let applied = outcome.applied
-                    if outcome == .changed { realChange = true }
+                    outcomes.append(((cid, env), outcome))
                     // Every processed envelope is marked seen — `false` means "duplicate" or
                     // "buffered until its key/roster arrives" and the pending buffer is durable,
                     // so the mailbox copy is redundant either way (marking only on `true` melted
@@ -6687,15 +6685,15 @@ final class FeedStore: ObservableObject {
                         }
                     }
                 }
-                return (changed, controlKeys, unlocked, processed, realChange)
+                return (changed, controlKeys, unlocked, processed, MailboxIngest.fanOut(outcomes))
                 }
-                if part.4 { anyRealChange = true }
+                realChanged += part.4
                 changed += part.0
                 for (k, v) in part.1 { controlKeys[k, default: []] += v }
                 unlocked.formUnion(part.2)
                 processed += part.3
             }
-            return (changed, controlKeys, unlocked, processed, anyRealChange)
+            return (changed, controlKeys, unlocked, processed, realChanged)
         }.value
         guard self.engine === engine else { return 0 }
         let ingested = batch.ingested
@@ -6788,21 +6786,28 @@ final class FeedStore: ObservableObject {
         // an export of its own: its marks ride the next one that happens anyway (new content, the
         // background flush, teardown). Until then the keys are held in memory, so a kill re-fetches
         // them — the invariant is the same, only the forced export per idle poll is gone.
-        if !processed.isEmpty {
-            SharedStore.holdAwaitingPersist(processed)
+        //
+        // Only marks this pass OWES count: a relay host re-offers up to 48 already-seen control keys
+        // every poll, and counting those toward `maxDeferredMarkKeys` forced an export every couple
+        // of idle polls for marks that were already on disk (MailboxIngest.marksOwed).
+        let owed = MailboxIngest.marksOwed(processed, durablySeen: SharedStore.isDurablySeen)
+        if !owed.isEmpty {
+            SharedStore.holdAwaitingPersist(owed)
             let marks: @MainActor (Bool) -> Void = { saved in
-                if saved { for k in processed { SharedStore.markSeenPublic(k) } }
-                SharedStore.releaseAwaitingPersist(processed)
+                if saved { for k in owed { SharedStore.markSeenPublic(k) } }
+                SharedStore.releaseAwaitingPersist(owed)
             }
             // Bounded: past `maxDeferredMarkKeys` deferred keys the pass asks for the export after
             // all, so a kill that skips the background flush re-fetches at most that many.
             // (Roster repeats count as applied for everything else, but owe no export.)
-            if !batch.realChange, batch.unlockedCircles.isEmpty,
-               deferredMarkKeys + processed.count <= Self.maxDeferredMarkKeys {
-                deferredMarkKeys += processed.count
-                afterNextPersist(marks)
-            } else {
+            if MailboxIngest.owesExport(changed: !batch.realChanged.isEmpty,
+                                        unlockedCircle: !batch.unlockedCircles.isEmpty,
+                                        deferred: deferredMarkKeys, owed: owed.count,
+                                        cap: Self.maxDeferredMarkKeys) {
                 persist(then: marks)
+            } else {
+                deferredMarkKeys += owed.count
+                afterNextPersist(marks)
             }
         }
         if helloIngested { refresh(); syncWithContacts() }
@@ -6814,10 +6819,16 @@ final class FeedStore: ObservableObject {
         // (Stale feed reads were dropped above, before the paint — a cold messages() per envelope
         // was the beachball: N × feed() on main while utility workers still held the engine mutex.)
         // Batch fan-out: one Task for many envelopes (same shape as own-device catch-up).
-        liveDeliverManyToMyDevices(1, ingested.map { eventPayload($0.circleId, $0.envelope) })
+        //
+        // Fan-out and pushes carry only envelopes that CHANGED this engine. A roster repeat (every
+        // hello reply resends one; the relay host also re-offers up to 48 already-seen control keys
+        // per poll by design) is `quietRoster`: my other devices already hold it, and pushing it
+        // made a relay-hosting stub fire 200–500 silent /notify pushes a minute, forever.
+        let fanOut = batch.realChanged   // MailboxIngest.fanOut of this pass's outcomes
+        liveDeliverManyToMyDevices(1, fanOut.map { eventPayload($0.circleId, $0.envelope) })
         // Multipeer siblings that share no good internet path still need a hop — sealed, so only
         // members (and my other devices with the seed) open it.
-        for item in ingested {
+        for item in fanOut {
             nearbyBroadcast(1, eventPayload(item.circleId, item.envelope), class: .bulk)
         }
         // APNs silent self-sync for LINKED devices. Own-authored events already call syncSelf in
@@ -6830,7 +6841,7 @@ final class FeedStore: ObservableObject {
         // (heat + battery). The push's job is waking the device and painting the newest message;
         // the woken device drains the rest from the mailbox itself.
         var syncSelfSent: [String: Int] = [:]
-        for item in ingested.reversed() where syncSelfSent[item.circleId, default: 0] < 3 {
+        for item in fanOut.reversed() where syncSelfSent[item.circleId, default: 0] < 3 {
             syncSelfSent[item.circleId, default: 0] += 1
             PushManager.shared.syncSelf(event: item.envelope.base64EncodedString())
         }
@@ -10557,7 +10568,8 @@ final class FeedStore: ObservableObject {
             // iPhone, which was left waiting on a mailbox poll (and got nothing at all if the
             // relay refused it). The send path has always done this for my OWN posts via
             // liveDeliverToMyDevices; the receive path must for CONTACT posts too.
-            if !fromOwnDevice {
+            // Only a real change fans out / pushes — a roster repeat is already on my other devices.
+            if !fromOwnDevice, outcome == .changed {
                 self.liveDeliverToMyDevices(1, payload)
                 // Internet/relay path only: Multipeer already flooded the local mesh, so
                 // re-broadcasting nearby would amplify. Off-mesh siblings still need iroh above.

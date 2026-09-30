@@ -258,3 +258,25 @@ export function qemuCrashSince(reports, sinceMs) {
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
   return hits[0]?.name || null;
 }
+
+/**
+ * The relay-hosting stub's self-push rate over a window of its stdout (`[haven.call] push /notify …`
+ * — every PushManager /notify sender funnels through one log line) plus its own-relay poll tallies.
+ * Release gate 2026-09-30: an idle stub fired ~200–580 /notify a minute because each poll's re-offered
+ * (already-seen) device rosters were fanned out and pushed again. Lines are `YYYY-MM-DD HH:MM:SS.mmm`
+ * in local time; lines outside [sinceMs, untilMs] (or without a timestamp) are ignored.
+ */
+export function stubIdleRates(text, sinceMs, untilMs) {
+  let notify = 0, polls = 0, pollsWithNew = 0;
+  for (const line of String(text || '').split('\n')) {
+    const m = line.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}\.\d{3})/);
+    if (!m) continue;
+    const t = new Date(`${m[1]}T${m[2]}`).getTime();
+    if (!(t >= sinceMs && t <= untilMs)) continue;
+    if (line.includes('push /notify')) notify++;
+    const p = line.match(/poll OWN relay .*?: \d+ keys, (\d+) new/);
+    if (p) { polls++; if (+p[1] > 0) pollsWithNew++; }
+  }
+  const minutes = Math.max(untilMs - sinceMs, 1) / 60_000;
+  return { notify, perMin: notify / minutes, polls, pollsWithNew };
+}

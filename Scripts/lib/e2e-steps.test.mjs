@@ -4,7 +4,7 @@ import {
   num, delta, parseUiNodes, findNode, center, CONSENT, isConsentSurface, fgsTypes, holdsMediaProjection,
   auditShareLog, longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields,
   persistExportAllowance, reactLatency, ingestedFirst, feedNotGatedOnDmWarm, PERF_FIELDS,
-  nonDecreasing, recordProgress, badgeTransitions, adbDeviceGone, qemuCrashSince,
+  nonDecreasing, recordProgress, badgeTransitions, adbDeviceGone, qemuCrashSince, stubIdleRates,
 } from './e2e-steps.mjs';
 
 test('num / delta treat missing and junk as zero', () => {
@@ -197,4 +197,23 @@ test('qemuCrashSince: only a qemu report written during this run', () => {
   assert.equal(qemuCrashSince(reports, t0), 'qemu-system-aarch64-headless-2026-09-30-091000.ips');
   assert.equal(qemuCrashSince(reports.slice(0, 2), t0), null);
   assert.equal(qemuCrashSince(undefined, t0), null);
+});
+
+test('stubIdleRates: /notify per minute and own-relay polls inside the window only', () => {
+  const at = (hms) => new Date(`2026-09-30T${hms}`).getTime();
+  const log = [
+    '2026-09-30 11:15:36.197 Haven[1:2] [haven.call] push /notify ok',                 // before
+    '2026-09-30 11:15:39.011 Haven[1:2] [haven.relay] poll OWN relay default: 104 keys, 17 new',
+    '2026-09-30 11:15:39.050 Haven[1:2] [haven.call] push /notify ok',
+    '2026-09-30 11:15:40.050 Haven[1:2] [haven.call] push /notify HTTP 500: nope',
+    '2026-09-30 11:16:00.000 Haven[1:2] [haven.relay] poll OWN relay dm:a-b: 75 keys, 0 new, 8 control re-offered',
+    'garbage line push /notify ok',
+    '2026-09-30 11:17:00.000 Haven[1:2] [haven.call] push /notify ok',                 // after
+  ].join('\n');
+  const r = stubIdleRates(log, at('11:15:38.000'), at('11:16:38.000'));
+  assert.equal(r.notify, 2);
+  assert.equal(r.perMin, 2);
+  assert.equal(r.polls, 2);
+  assert.equal(r.pollsWithNew, 1);
+  assert.equal(stubIdleRates(undefined, 0, 1).notify, 0);
 });

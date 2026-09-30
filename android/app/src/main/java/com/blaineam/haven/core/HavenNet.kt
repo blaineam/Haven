@@ -472,6 +472,7 @@ object HavenNet : InboundListener {
         // engine from the account PUBLIC bundle + its own device seed (the device identity is baked in),
         // and NEVER registers a device or registers for push (the primary owns those). A seeded/legacy
         // device keeps today's path: engine over the account seed, then adopt the device identity.
+        RosterEcho.clear()   // a new engine: nothing it holds has been fanned out yet
         social = QaStats.timed("engine_construct") {
             if (core.seedless) {
                 HavenSocial.newSeedless(core.bundle, DeviceKeyStore.deviceAccount().secretSeed())
@@ -2344,7 +2345,9 @@ object HavenNet : InboundListener {
             // resolves — often just one — so a DM delivered straight to my tablet never reached my
             // phone. The send path has always done this for my OWN posts; the receive path must for
             // CONTACT posts too. Volume is bounded by real new-event traffic.
-            if (!fromOwnDevice) {
+            // A roster REPEAT (every hello reply resends one) is already on my other devices:
+            // no fan-out, no push — it was a steady silent-push stream (RosterEcho).
+            if (!fromOwnDevice && !RosterEcho.isRepeatRoster(ev.envelope)) {
                 liveDeliverToMyDevices(Wire.EVENT, payload)
                 // …and a silent push with the inline envelope for my POCKETED devices — live
                 // delivery only reaches siblings that are online right now (iOS parity).
@@ -5910,20 +5913,22 @@ object HavenNet : InboundListener {
         if (receiveRan && !changed) persist()
         if (changed) {
             // Fan out friend content that only this device pulled from the mailbox.
-            if (newlyIngested.isNotEmpty()) {
+            // Roster repeats are already on my other devices — never fan them out or push them.
+            val fanOut = newlyIngested.filterNot { (_, env) -> RosterEcho.isRepeatRoster(env) }
+            if (fanOut.isNotEmpty()) {
                 liveDeliverManyToMyDevices(
                     Wire.EVENT,
-                    newlyIngested.map { (cid, env) -> Wire.eventPayload(cid, env) },
+                    fanOut.map { (cid, env) -> Wire.eventPayload(cid, env) },
                 )
                 if (NearbyTransport.active) {
-                    for ((cid, env) in newlyIngested) {
+                    for ((cid, env) in fanOut) {
                         NearbyTransport.broadcast(Wire.frame(Wire.EVENT, Wire.eventPayload(cid, env)))
                     }
                 }
                 // Multi-device: a silent content-available push carries each envelope to my OWN
                 // other devices' tokens, so a pocketed sibling ingests without waiting out its
                 // next mailbox poll (Apple PushManager.syncSelf parity).
-                for ((_, env) in newlyIngested.take(20)) pushSyncSelf(env)
+                for ((_, env) in fanOut.take(20)) pushSyncSelf(env)
             }
             bumpActivity()   // a message arrived → keep sync tight while the conversation is live
             persist()

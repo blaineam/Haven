@@ -30,7 +30,7 @@ import {
   num, delta, parseUiNodes, findNode, center, CONSENT, isConsentSurface, holdsMediaProjection, auditShareLog,
   longSide, remoteSlots, sharedScreen, suspendedFor, liftedFrom, missingPerfFields, persistExportAllowance,
   reactLatency, ingestedFirst, feedNotGatedOnDmWarm, nonDecreasing, recordProgress, badgeTransitions,
-  adbDeviceGone, qemuCrashSince,
+  adbDeviceGone, qemuCrashSince, stubIdleRates,
 } from './lib/e2e-steps.mjs';
 import {
   portPlan, collisionVerdict, decodeComp, eventKeys, mailboxCircles, holdsMedia, misplacedCircles, keyDiff,
@@ -87,6 +87,8 @@ const BUDGET = {
   engineP95: +(process.env.E2E_BUDGET_ENGINE_P95 || 300),
   react: +(process.env.E2E_BUDGET_REACT || 500),
   idle: +(process.env.E2E_IDLE_MS || 60_000),
+  // Relay-hosting stub self-pushes per minute while idle (own-device catch-up is ≤ 4 per 3 min).
+  idleNotifyPerMin: +(process.env.E2E_IDLE_NOTIFY_PER_MIN || 10),
 };
 /** How long the newfriend step holds the inviter's approval (so pre-enrollment 403s happen). */
 const NF_HOLD_MS = +(process.env.E2E_NF_HOLD_MS || 20_000);
@@ -1763,8 +1765,19 @@ async function main() {
     await converge(ios, (j) => burstMedia.every((t) => hasPost(t)(j)), BUDGET.mediaBlob);
     await sleep(3000);   // one debounce window: the save for that last arrival is not "idle"
     const c0 = num((await freshDump(ios))?.perf?.persistExportCount);
+    const idleFrom = Date.now();
     await sleep(BUDGET.idle);
+    const idleTo = Date.now();
     const idlePerf = (await freshDump(ios))?.perf || {};
+    // The relay-hosting stub's own /notify pushes while nothing is happening (release gate 3: ~5,700
+    // in 15 min — re-offered device rosters were pushed to my devices on every own-relay poll).
+    const stubLog = join(OUT, 'stub-stdout.log');
+    if (existsSync(stubLog)) {
+      const r = stubIdleRates(readFileSync(stubLog, 'utf8'), idleFrom, idleTo);
+      log(`responsive: stub idle — ${r.notify} /notify (${r.perMin.toFixed(1)}/min), ${r.polls} own-relay polls, ${r.pollsWithNew} with new keys`);
+      score(`responsive: stub /notify pushes while idle ≤ ${BUDGET.idleNotifyPerMin}/min`, r.perMin <= BUDGET.idleNotifyPerMin,
+        `${r.notify} in ${((idleTo - idleFrom) / 1000).toFixed(0)}s`);
+    }
     const c1 = num(idlePerf.persistExportCount);
     // persistReasons / engineDirtiedBy (Apple): what asked for each export and which engine calls
     // made it non-empty — the attribution a red here needs.

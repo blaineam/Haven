@@ -2522,6 +2522,9 @@ enum SharedStore {
     /// Record a key as seen and schedule a debounced save (one write per burst, off the caller).
     /// Public so FeedStore can mark HELLO/event keys after successful ingest only.
     nonisolated static func markSeenPublic(_ key: String) { markSeen(key) }
+    /// Durably seen (on the persisted seen-set, not merely held awaiting a persist). A re-offered
+    /// control key is: its mark was paid long ago, so a pass that re-ingests it owes none.
+    nonisolated static func isDurablySeen(_ key: String) -> Bool { withSeen { $0.contains(key) } }
 
     /// Drop seen-cursor entries under a mailbox circle prefix so a later poll re-GETs them.
     /// Used when a newly-opened key commit must re-drain epoch events that were marked seen while
@@ -3279,23 +3282,14 @@ enum SharedStore {
             // duplicates and we stop thrashing.
             let scan: (all: Int, want: [String], reoffered: Int) = await Task.detached(priority: .utility) {
                 let all = host.localList(prefix).filter { !$0.contains("/__live__/") }
-                var want = all.filter { !seenContains($0) && helloKeyClaimable($0, myIds: myHelloIds) }
-                let unseenOnly = want.count
-                // Re-probe seen control-plane keys (bounded). Prefer unread first.
-                // Cap both hits and files inspected so a fat circle (thousands of
-                // already-seen event blobs) does not re-read the whole store every poll.
-                var controlBudget = 48
-                var seenScanned = 0
-                for key in all where seenContains(key) && controlBudget > 0 && seenScanned < 300 {
-                    seenScanned += 1
-                    guard let data = host.localGet(key), let tag = data.first else { continue }
-                    // 0x03 = key commit, 0x04 = device roster — must land before events.
-                    if tag == 0x03 || tag == 0x04 {
-                        want.append(key)
-                        controlBudget -= 1
-                    }
-                }
-                return (all.count, want, want.count - unseenOnly)
+                // Re-probe seen control-plane keys (bounded) after every unseen one — see
+                // MailboxIngest.planOwnRelayScan. Cap both hits and files inspected so a fat circle
+                // (thousands of already-seen event blobs) does not re-read the whole store every poll.
+                let plan = MailboxIngest.planOwnRelayScan(
+                    keys: all, isSeen: { seenContains($0) },
+                    claimable: { helloKeyClaimable($0, myIds: myHelloIds) },
+                    controlTag: { host.localGet($0)?.first })
+                return (all.count, plan.unseen + plan.reoffered, plan.reoffered.count)
             }.value
             var fresh = scan.want
             let localKeys = scan.all
@@ -3314,7 +3308,9 @@ enum SharedStore {
             // `fresh` nonzero forever and permanently blocked parked re-opens.
             noteBacklog(node, cid, keys: localKeys,
                         fresh: max(0, fresh.count - scan.reoffered), deferred: deferred)
-            HavenLog.relay("poll OWN relay \(cid): \(localKeys) keys, \(fresh.count) new\(deferred > 0 ? " (+\(deferred) next poll)" : "")")
+            // "new" = genuinely unseen; the constant control re-offer is counted apart, so a steady
+            // state reads "0 new" (it used to read "17 new" forever and look like a stuck seen-set).
+            HavenLog.relay("poll OWN relay \(cid): \(localKeys) keys, \(max(0, fresh.count - scan.reoffered)) new, \(scan.reoffered) control re-offered\(deferred > 0 ? " (+\(deferred) next poll)" : "")")
             // Read OFF the main actor — RelayHost's accessors are nonisolated precisely so
             // this file I/O doesn't have to happen on the thread drawing the UI.
             let read: [(String, Data)] = await Task.detached(priority: .utility) {

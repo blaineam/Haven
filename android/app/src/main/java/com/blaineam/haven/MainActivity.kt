@@ -54,16 +54,18 @@ class MainActivity : FragmentActivity() {
         // CPU inside Tink's class init under HavenCore.get, and the first feed waits on init.
         // Onboarded installs only (before onboarding the first get() mints the account — that stays
         // on the onboarding path), and after the QA seed pre-seed above, which must precede the build.
-        //
-        // The whole engine boot starts here too, not just the identity: RootScreen's init is a
-        // LaunchedEffect, which only runs once the FIRST FRAME has composed — on a cold, loaded
-        // emulator that first frame alone took 17 s (runtime dex verification), and the engine sat
-        // idle behind it. Booting in parallel lets the first feed paint with the first frames;
-        // RootScreen's init then finds the engine ready (init is idempotent and lock-free once up).
         if (!DemoEnv.isDemo && com.blaineam.haven.core.ProfileStore.get(this).onboarded) {
             val app = applicationContext
-            com.blaineam.haven.core.EngineBoot.background { com.blaineam.haven.core.HavenNet.init(app) }
+            Thread({ runCatching { com.blaineam.haven.core.HavenCore.get(app) } }, "haven-core-warmup").start()
         }
+        // Class-initialize the objects that HOLD Compose state on main, before the first composition.
+        // The engine can boot on a background thread (ConnectionService, EngineBoot) and would
+        // otherwise be the first to touch them — creating their mutableStateOf()s after composition
+        // took its snapshot, which Compose rejects: "Reading a state that was created after the
+        // snapshot was taken" crashed the e2e launch in CallOverlay and MainScaffold (2026-10-01).
+        val stateHolders = listOf<Any>(com.blaineam.haven.core.HavenNet.feedVersion,
+            com.blaineam.haven.core.CallManager.inCall, com.blaineam.haven.core.InstagramImporter.showSheet)
+        android.util.Log.v("Haven", "compose state holders ready: ${stateHolders.size}")
         setContent {
             HavenAppTheme {
                 RootScreen()

@@ -96,17 +96,25 @@ object LowDataMonitor {
                 apply(LinkConstraint.NORMAL)
             }
         }
-        runCatching {
-            if (Build.VERSION.SDK_INT >= 31) {
-                manager.registerBestMatchingNetworkCallback(request, callback, android.os.Handler(ctx.mainLooper))
-            } else {
-                manager.registerNetworkCallback(request, callback)
+        // Both the registration and the seed are binder calls into ConnectivityService, and this runs
+        // from Application.onCreate on main: the e2e gate (2026-10-01) caught a process that "failed
+        // to complete startup" with main parked in registerBestMatchingNetworkCallback while
+        // system_server was stalled. Off main they cost the launch nothing; callbacks still land on
+        // main through the handler, and the seed is applied there too.
+        val main = android.os.Handler(ctx.mainLooper)
+        Thread({
+            runCatching {
+                if (Build.VERSION.SDK_INT >= 31) {
+                    manager.registerBestMatchingNetworkCallback(request, callback, main)
+                } else {
+                    manager.registerNetworkCallback(request, callback, main)
+                }
             }
-        }
-
-        // Seed from whatever is active right now, so nothing sends before the first callback.
-        val active = runCatching { manager.getNetworkCapabilities(manager.activeNetwork) }.getOrNull()
-        apply(if (active != null) classify(active, manager) else LinkConstraint.NORMAL)
+            // Seed from whatever is active right now, so nothing sends long before the first callback.
+            val active = runCatching { manager.getNetworkCapabilities(manager.activeNetwork) }.getOrNull()
+            val seed = if (active != null) classify(active, manager) else LinkConstraint.NORMAL
+            main.post { apply(seed) }
+        }, "haven-link-monitor").apply { isDaemon = true }.start()
     }
 
     /**

@@ -16,6 +16,23 @@ AND_PKG="${HAVEN_AND_PKG:-com.blaineam.haven}"
 
 log() { echo "[e2e-boot] $*"; }
 
+# ── Host audio preflight. The iOS simulator and the macOS stub use the HOST's default output
+#    device. When that device is stuck (seen with a virtual remote-desktop output while its client
+#    is disconnected), every audio start blocks ~15s and WebRTC's AURemoteIO::Initialize aborts on
+#    the RPC timeout — the call steps crash the iOS app an hour into a run. Fail fast instead.
+#    E2E_SKIP_AUDIO_PREFLIGHT=1 to bypass.
+if [[ "${E2E_SKIP_AUDIO_PREFLIGHT:-0}" != "1" ]] && command -v afplay >/dev/null 2>&1; then
+  afplay -v 0 -t 0.2 /System/Library/Sounds/Tink.aiff >/dev/null 2>&1 & _ap=$!
+  for _i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$_ap" 2>/dev/null || break; sleep 0.5; done
+  if kill -0 "$_ap" 2>/dev/null; then
+    kill "$_ap" 2>/dev/null || true
+    _dev="$(system_profiler SPAudioDataType 2>/dev/null | grep -B3 'Default Output Device: Yes' | head -1 | sed 's/^ *//; s/:$//')"
+    echo "error: host audio output '${_dev:-unknown}' is not playing (afplay hung >5s) — calls would crash the iOS sim."
+    echo "       Set System Settings → Sound → Output to a real device, then rerun (E2E_SKIP_AUDIO_PREFLIGHT=1 to bypass)."
+    exit 1
+  fi
+fi
+
 # E2E_PREFRIEND=0 (set by qa-e2e-full.mjs when the `newfriend` step runs): A and B start as
 # STRANGERS. No contact bundles are exchanged and A's devices are NOT pre-authorized on B's relay,
 # so the step can measure a genuinely fresh friendship through the real invite → accept → approve

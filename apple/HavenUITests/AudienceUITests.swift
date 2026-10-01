@@ -66,6 +66,17 @@ final class AudienceUITests: XCTestCase {
         XCTAssertTrue(field.waitForExistence(timeout: 20))
         field.tap()
         field.typeText(text)
+        // Under heavy host load the simulator drops synthesized keystrokes: gate-4 sent "aud" for
+        // "audience first …" (3/3 green on a quiet host), and the Cancel-keeps-draft assertion then
+        // compared the dropped draft. Finish what was lost so each test checks the app, not the
+        // keyboard. Only ever APPENDS the missing tail — a field holding anything else still fails.
+        for _ in 0..<2 {
+            let now = field.value as? String ?? ""
+            guard now != text, text.hasPrefix(now) else { break }
+            field.tap()
+            field.typeText(String(text.dropFirst(now.count)))
+        }
+        XCTAssertEqual(field.value as? String, text, "the composer should hold exactly what was typed")
         return field
     }
 

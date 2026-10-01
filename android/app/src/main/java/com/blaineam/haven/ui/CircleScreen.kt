@@ -195,7 +195,8 @@ fun CircleScreen(onAddFriend: () -> Unit) {
         if (last != null && last == computedPosts) last else { postsHolder[0] = computedPosts; computedPosts }
     }
     // Reports filed by ANY member — the circle's shared moderation signal, grouped per post.
-    val reportsByTarget = remember(version, active) { HavenNet.reports(active) }
+    val reportsRead = rememberOffMain(version to active, emptyMap<String, List<uniffi.haven_ffi.ReportFfi>>()) { (_, c) -> HavenNet.reports(c) }
+    val reportsByTarget = if (reportsRead.first?.second == active) reportsRead.second else emptyMap()
     var viewingStory by remember { mutableStateOf<Int?>(null) }
     var showStoryCamera by remember { mutableStateOf(false) }
     var showPostCamera by remember { mutableStateOf(false) }   // in-app camera capture for a post
@@ -205,18 +206,17 @@ fun CircleScreen(onAddFriend: () -> Unit) {
     // Composer audience (see ComposerAudience): who a post here reaches, the one-time per-circle
     // "this goes to everyone" check, and the "Send privately…" DM picker (draft carried over).
     val audienceName = remember(active, circlesVersion) { HavenNet.circleName(active) }
-    val audienceCount = remember(active, circlesVersion, HavenNet.contacts.size, HavenNet.blocked.size) {
-        ComposerAudience.othersCount(active)
-    }
+    // Member resolution reads the engine — off main; the default circle (contacts only) is exact meanwhile.
+    val audienceCount = rememberOffMain(listOf<Any>(active, circlesVersion, HavenNet.contacts.size, HavenNet.blocked.size),
+        if (active == com.blaineam.haven.core.DEFAULT_CIRCLE) HavenNet.contacts.size else 0) { k ->
+        ComposerAudience.othersCount(k[0] as String)
+    }.second
     fun postNow() {
-        val actionsBefore = com.blaineam.haven.support.RatingManager.significantActions(context)
-        HavenNet.post(active, draft.trim(), pendingMedia.toList(), pendingMusic, retentionSecs = disappearSecs)
+        // The publish itself runs off main (HavenNet's author lane); the rating ask follows only a
+        // post the engine actually accepted, back on main.
+        HavenNet.post(active, draft.trim(), pendingMedia.toList(), pendingMusic, retentionSecs = disappearSecs,
+            onPublished = { com.blaineam.haven.support.RatingManager.maybeAskAfterPublish(context) })
         draft = ""; pendingMedia.clear(); pendingMusic = null; disappearSecs = null
-        // HavenNet.post records a significant action only when the engine accepted the
-        // post — so "the count moved" is exactly "a publish just succeeded".
-        if (com.blaineam.haven.support.RatingManager.significantActions(context) > actionsBefore) {
-            com.blaineam.haven.support.RatingManager.maybeAskAfterPublish(context)
-        }
     }
     var cameraForPost by remember { mutableStateOf(false) }
     val camPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
@@ -542,8 +542,20 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
     // The REAL name — this field renames the circle for everyone, so it must never be seeded with my
     // private nickname (which would silently push my name for it onto the whole circle on Done).
     var name by remember { mutableStateOf(HavenNet.realCircleName(circleId)) }
+    // On main that is the cached list (see HavenNet.circlesSnapshot) — re-read it live off main and
+    // reseed, unless the user already started typing, so a stale cache can never be renamed back.
+    LaunchedEffect(circleId) {
+        val seeded = name
+        val live = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { HavenNet.realCircleName(circleId) }
+        if (name == seeded) name = live
+    }
     var nick by remember { mutableStateOf(com.blaineam.haven.core.CircleSettings.nickname(circleId) ?: "") }
-    val members = remember(circlesVersion, version, circleId) { HavenNet.membersOf(circleId) }
+    // Member resolution reads the engine — off main.
+    val membersRead = rememberOffMain(Triple(circlesVersion, version, circleId), emptyList<com.blaineam.haven.core.Contact>()) { (_, _, c) ->
+        HavenNet.membersOf(c)
+    }
+    val membersLoaded = membersRead.first?.third == circleId
+    val members = if (membersLoaded) membersRead.second else emptyList()
     val isDefault = circleId == com.blaineam.haven.core.DEFAULT_CIRCLE
     val cs = com.blaineam.haven.core.CircleSettings
     val csVersion by cs.version
@@ -594,7 +606,7 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
                 // removing relays lives under Settings ▸ Relays — not here.
                 CircleRelaySection(circleId)
                 Text(stringResource(R.string.circle_members_count, members.size), color = HavenTheme.textSecondary, fontSize = 12.sp)
-                if (members.isEmpty()) {
+                if (members.isEmpty() && membersLoaded) {
                     Text(stringResource(R.string.circle_no_members), color = HavenTheme.textSecondary, fontSize = 13.sp)
                 }
                 members.forEach { m ->
@@ -809,7 +821,12 @@ private fun CircleUpgradeBanner(circleId: String) {
     // Following an offer stands up a new circle (circles); an offer ARRIVING is inbound traffic (feed).
     val circlesV by HavenNet.circlesVersion
     val feedV by HavenNet.feedVersion
-    val offers = remember(circleId, circlesV, feedV) { HavenNet.pendingCircleUpgrades(circleId) }
+    // Both reads go through the engine and re-run on every feed bump — off main.
+    val upgradeRead = rememberOffMain(Triple(circleId, circlesV, feedV), emptyList<CircleUpgradeOffer>() to false) { (c, _, _) ->
+        HavenNet.pendingCircleUpgrades(c) to HavenNet.circleIsUpgradable(c)
+    }
+    val upgradeState = if (upgradeRead.first?.first == circleId) upgradeRead.second else emptyList<CircleUpgradeOffer>() to false
+    val offers = upgradeState.first
     // Offers from OTHER people — mine need no confirmation (I made the offer).
     val theirs = offers.filter { !it.mine }
 
@@ -821,8 +838,7 @@ private fun CircleUpgradeBanner(circleId: String) {
     // member (no device records who made a pre-1.0.7 circle), and the core refuses to author one on a
     // circle that already names its creator. (Previously this required a per-device created-circles
     // record that legacy circles never had, so the offer never appeared at all.)
-    val iCanOffer = remember(circleId, circlesV, feedV) { HavenNet.circleIsUpgradable(circleId) } &&
-        offers.none { it.mine }
+    val iCanOffer = upgradeState.second && offers.none { it.mine }
     if (iCanOffer) OfferUpgradeCard(circleId)
 }
 

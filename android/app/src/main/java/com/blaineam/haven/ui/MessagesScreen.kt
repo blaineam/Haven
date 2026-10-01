@@ -163,8 +163,10 @@ private fun ThreadList(onOpen: (String, Contact) -> Unit) {
     // Real CONVERSATIONS, not the address book: every dm: circle that actually exists (iOS
     // `store.dmCircles`). Listing a row per contact turned Messages into a second contact list and
     // buried the two threads you actually have. Sorted newest-first; pinned (max 6) float to the top.
-    val conversations = remember(version, readTick, circlesVersion, contacts, pins.toList()) {
-        val all = runCatching { HavenNet.engine.circles() }.getOrDefault(emptyList())
+    // Every row decodes its thread through the engine (preview, last activity, unread) — off main.
+    val conversations = rememberOffMain(listOf<Any>(version, readTick, circlesVersion, contacts.toList(), pins.toList()),
+        emptyList<Conversation>() to emptyList<Conversation>()) { _ ->
+        val all = HavenNet.circlesSnapshot()
             .filter { it.id.startsWith("dm:") }
             .map { c ->
                 val partner = if (HavenNet.isGroupDm(c.id)) null else dmPartner(c.id)
@@ -177,7 +179,7 @@ private fun ThreadList(onOpen: (String, Contact) -> Unit) {
         val pinned = pins.mapNotNull { byId[it] }   // pin order, still-present only
         val rest = all.filter { !pins.contains(it.circleId) }.sortedByDescending { it.lastActivity }
         pinned to rest
-    }
+    }.second
     val pinnedConvos = conversations.first
     val restConvos = conversations.second
 
@@ -417,7 +419,15 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
     var editingId by remember { mutableStateOf<String?>(null) }
     var showOptions by remember { mutableStateOf(false) }
     val version by HavenNet.feedVersion
-    val msgs = remember(version, circleId) { HavenNet.messages(circleId) }
+    // The thread decode goes through the engine — off main; tagged so a switch never shows the
+    // previous thread's messages.
+    val msgsRead = rememberOffMain(version to circleId, emptyList<uniffi.haven_ffi.FeedItemFfi>()) { (_, c) -> HavenNet.messages(c) }
+    val msgs = if (msgsRead.first?.second == circleId) msgsRead.second else emptyList()
+    // Live stories a reply bubble may point at: a feed decode of EVERY circle. Once per thread view
+    // and off main — each bubble used to redo it during composition on every feed bump.
+    val liveStories = rememberOffMain(version, emptyList<Triple<String, String, com.blaineam.haven.core.DeepLink.LiveStory>>()) { _ ->
+        liveStoriesForReplies()
+    }.second
     // The user is viewing this thread: advance its read watermark on open AND whenever a message
     // arrives while it's open (keyed on version), plus once more on the way out — so backing out
     // never leaves a stale badge for a conversation the user just watched. iOS parity
@@ -507,7 +517,7 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(msgs, key = { it.id }) { m ->
-                    Bubble(m, circleId = circleId, isGroup = isGroup, relayReachable = relayReachable,
+                    Bubble(m, liveStories, circleId = circleId, isGroup = isGroup, relayReachable = relayReachable,
                         peerHex = if (!isGroup) partner.idHex.ifBlank { null } else null,
                         onEdit = { msg ->
                         editingId = msg.id; secretMode = com.blaineam.haven.core.SecretMessages.isSecret(msg.body)
@@ -662,10 +672,29 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
     }
 }
 
+/** Every live story with media, across the feed circles — engine decodes, so OFF main only. */
+private fun liveStoriesForReplies(): List<Triple<String, String, com.blaineam.haven.core.DeepLink.LiveStory>> = buildList {
+    for (c in HavenNet.feedCircles()) {
+        if (c.id.startsWith("dm:")) continue
+        val items = runCatching {
+            HavenNet.engine.feed(c.id, com.blaineam.haven.core.nowMs(),
+                com.blaineam.haven.core.CircleSettings.retentionSecs(c.id))
+        }.getOrDefault(emptyList())
+        for (s in items) {
+            if (!s.story || s.unsent || s.media.isEmpty()) continue
+            add(Triple(c.id, s.id, com.blaineam.haven.core.DeepLink.LiveStory(
+                authorShort = s.authorShort, isMe = s.isMe,
+                createdAtMs = s.createdAt.toLong(), hasMedia = s.media.isNotEmpty(),
+            )))
+        }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Bubble(
     m: uniffi.haven_ffi.FeedItemFfi,
+    liveStories: List<Triple<String, String, com.blaineam.haven.core.DeepLink.LiveStory>>,
     circleId: String,
     isGroup: Boolean = false,
     relayReachable: Boolean = false,
@@ -678,24 +707,9 @@ private fun Bubble(
     val version by HavenNet.feedVersion
     @Suppress("UNUSED_EXPRESSION") com.blaineam.haven.core.KeptStoriesStore.version.intValue
     // Explicit deep link or retroactive match to a live/kept story (legacy media-only replies).
-    val storyTarget = remember(version, m.id, m.body, m.media, m.createdAt, peerHex,
+    val storyTarget = remember(version, m.id, m.body, m.media, m.createdAt, peerHex, liveStories,
         com.blaineam.haven.core.KeptStoriesStore.version.intValue) {
-        val live = buildList {
-            for (c in HavenNet.feedCircles()) {
-                if (c.id.startsWith("dm:")) continue
-                val items = runCatching {
-                    HavenNet.engine.feed(c.id, com.blaineam.haven.core.nowMs(),
-                        com.blaineam.haven.core.CircleSettings.retentionSecs(c.id))
-                }.getOrDefault(emptyList())
-                for (s in items) {
-                    if (!s.story || s.unsent || s.media.isEmpty()) continue
-                    add(Triple(c.id, s.id, com.blaineam.haven.core.DeepLink.LiveStory(
-                        authorShort = s.authorShort, isMe = s.isMe,
-                        createdAtMs = s.createdAt.toLong(), hasMedia = s.media.isNotEmpty(),
-                    )))
-                }
-            }
-        }
+        val live = liveStories
         val kept = com.blaineam.haven.core.KeptStoriesStore.all()
             .map { it.id to it.createdAt }
         com.blaineam.haven.core.DeepLink.storyReplyTarget(

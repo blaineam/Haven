@@ -108,8 +108,29 @@ object HavenNet : InboundListener {
     private lateinit var core: HavenCore
     private lateinit var profile: ProfileStore
     private lateinit var social: HavenSocial
-    private var node: HavenNode? = null
+    @Volatile private var node: HavenNode? = null
+    private val nodeStartLock = Any()
+    private var nodeStarting = false
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * The UI's author actions (post, DM, react, comment, edit, unsend) run HERE when called from
+     * main. Each one signs through the engine (waiting on its lock behind any background ingest),
+     * exports the whole state to disk and fans the envelope out — seconds on a loaded device, which
+     * a tap on main turned into an "Input dispatching timed out" ANR. One serial lane, so a user's
+     * actions still land in the order they were made (a post before the reaction to it). Callers
+     * already off main (the QA driver, importers, workers) keep running inline.
+     */
+    private val authorLane = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "haven-author").apply { isDaemon = true }
+    }
+    private fun onMainThread(): Boolean = android.os.Looper.myLooper() == android.os.Looper.getMainLooper()
+    /** Run [block] on [authorLane] when called from main, inline otherwise. True = it was handed off. */
+    private fun authorOffMain(block: () -> Unit): Boolean {
+        if (!onMainThread()) return false
+        authorLane.execute { runCatching(block).onFailure { Log.w(TAG, "author action failed", it) } }
+        return true
+    }
     /** DERP URLs the live messaging node was bound with (fabric soft-rebind). */
     @Volatile private var fabricBoundUrls: List<String> = emptyList()
     @Volatile private var fabricRebindGen: Long = 0
@@ -576,8 +597,12 @@ object HavenNet : InboundListener {
         // either key, so that empty feed was final — the circle stayed blank until some unrelated
         // event bumped the version, or until the user left the tab and came back and the remember
         // was rebuilt from scratch. (Which is exactly the "tap Messages, tap Circle, now it loads"
-        // workaround testers found.) One bump at the end of boot re-reads everything.
-        scope.launch(Dispatchers.Main) { feedVersion.value++; circlesVersion.value++ }
+        // workaround testers found.) One bump at the end of boot re-reads everything — after main's
+        // circle-list cache is primed (see [circlesSnapshot]).
+        scope.launch {
+            runCatching { social.circles() }.getOrNull()?.let { circlesCache = it }
+            withContext(Dispatchers.Main) { feedVersion.value++; circlesVersion.value++ }
+        }
     }
 
     /**
@@ -709,7 +734,13 @@ object HavenNet : InboundListener {
         // now the least of it — every lane below refuses on its own — but the node still must not
         // bind, and the sync/poll heartbeats this arms still must not be scheduled.
         if (HavenOffline.enabled) return
-        if (node != null) return
+        // Claimed atomically: start() is entered from main (RootScreen) AND the engine-boot thread
+        // (ConnectionService), and `node` is only assigned once the async bind finishes — a check of
+        // `node` alone let both callers through to bind two nodes.
+        synchronized(nodeStartLock) {
+            if (node != null || nodeStarting) return
+            nodeStarting = true
+        }
         bumpActivity()   // seed activity NOW so launch starts at tight cadence (idle=huge would else max-back-off)
         // DIAGNOSTIC: capture iroh/noq connection-level logs to filesDir/iroh-trace.log BEFORE the node starts.
         runCatching { uniffi.haven_ffi.initLogging(appContext.filesDir.path) }
@@ -721,7 +752,11 @@ object HavenNet : InboundListener {
                 refreshHavenFabric()
                 // TRANSPORT = per-DEVICE seed → unique per-device relay/node id (never the account id). The
                 // self-connect leak is defended at the haven-net core (Node refuses to dial our own node id).
-                node = HavenNode.start(DeviceKeyStore.deviceAccount().secretSeed(), this@HavenNet)
+                node = try {
+                    HavenNode.start(DeviceKeyStore.deviceAccount().secretSeed(), this@HavenNet)
+                } finally {
+                    synchronized(nodeStartLock) { nodeStarting = false }
+                }
                 fabricBoundUrls = activeFabricUrls()
                 withContext(Dispatchers.Main) { started.value = true }
                 Log.i(TAG, "node started: ${node?.nodeIdHex()}")
@@ -759,6 +794,7 @@ object HavenNet : InboundListener {
                 drainPersistedBackups() // finish any of MY media uploads killed mid-flight last session
                 runCatching { publishDeviceRoster() } // authorize this device on HTTP mailbox relays
             } catch (e: Throwable) {
+                synchronized(nodeStartLock) { nodeStarting = false }   // a failed start may be retried
                 Log.e(TAG, "node start failed", e)
             }
         }
@@ -1292,9 +1328,41 @@ object HavenNet : InboundListener {
     /** Non-DM circles, for the feed switcher. Filters any tombstone-deleted circle (belt-and-suspenders:
      *  a sync race can re-materialize one before its `circle-deleted:` record applies). */
     fun feedCircles(): List<uniffi.haven_ffi.CircleInfoFfi> =
-        runCatching {
-            social.circles().filter { !it.id.startsWith("dm:") && !CircleDeletion.isDeleted(it.id) }
-        }.getOrDefault(emptyList())
+        circlesSnapshot().filter { !it.id.startsWith("dm:") && !CircleDeletion.isDeleted(it.id) }
+
+    /**
+     * The engine's circle list, safe to read from composition.
+     *
+     * `circles()` takes the engine lock, and composition reads it for every circle-name label and the
+     * switcher — so on main it waited behind whatever background ingest/export held the lock (an ANR
+     * when that is seconds). Off main this reads the engine and refreshes the cache; ON main it
+     * returns the last list read and refreshes it in the background, bumping [circlesVersion] when
+     * it changed so composition re-reads. Empty until the first read lands (labels fall back).
+     */
+    fun circlesSnapshot(): List<uniffi.haven_ffi.CircleInfoFfi> {
+        if (onMainThread()) {
+            refreshCirclesCacheAsync()
+            return circlesCache ?: emptyList()
+        }
+        val fresh = runCatching { social.circles() }.getOrNull() ?: return circlesCache ?: emptyList()
+        circlesCache = fresh
+        return fresh
+    }
+    @Volatile private var circlesCache: List<uniffi.haven_ffi.CircleInfoFfi>? = null
+    private val circlesRefreshQueued = java.util.concurrent.atomic.AtomicBoolean(false)
+    private fun refreshCirclesCacheAsync() {
+        if (!circlesRefreshQueued.compareAndSet(false, true)) return
+        scope.launch {
+            try {
+                val fresh = runCatching { social.circles() }.getOrNull() ?: return@launch
+                val changed = fresh != circlesCache
+                circlesCache = fresh
+                if (changed) withContext(Dispatchers.Main) { circlesVersion.value++ }
+            } finally {
+                circlesRefreshQueued.set(false)
+            }
+        }
+    }
 
     /**
      * Collapse any SUPERSEDED legacy circle (one carried onto a creator-bound successor via upgrade or
@@ -1327,7 +1395,7 @@ object HavenNet : InboundListener {
     /** The circle's name as it actually is on the wire — for the rename field (which edits the shared
      *  name) and for anything that PUTS a name on the wire, where a private nickname must not leak. */
     fun realCircleName(id: String): String =
-        runCatching { social.circles().firstOrNull { it.id == id }?.name }.getOrNull() ?: "My Circle"
+        circlesSnapshot().firstOrNull { it.id == id }?.name ?: "My Circle"
 
     fun createCircle(name: String): String {
         // Mint a creator-BOUND id: it commits to this account, so every member establishes the circle's
@@ -1431,7 +1499,13 @@ object HavenNet : InboundListener {
         prefs.edit().putString("activeCircle", id).apply()   // survive relaunch
     }
 
-    private fun bumpCircles() { scope.launch(Dispatchers.Main) { circlesVersion.value++ } }
+    private fun bumpCircles() {
+        // Re-read the list for main's cache FIRST, so the recomposition this bump triggers sees it.
+        scope.launch {
+            runCatching { social.circles() }.getOrNull()?.let { circlesCache = it }
+            withContext(Dispatchers.Main) { circlesVersion.value++ }
+        }
+    }
 
     /** Resolve a feed item's short author id (8 hex) to the contact's FULL node id, or null if we
      *  don't hold them. The short id is all a feed item carries, but anything addressed to a person
@@ -1499,13 +1573,17 @@ object HavenNet : InboundListener {
                 // 35 must be routed too, or the handler added for it never runs and an established
                 // call ended on another device leaves THIS one in a dead call.
                 CallWire.ENDED_ELSEWHERE,
+                // The router opens + verifies the frame HERE, off main (an engine call that waits on
+                // the engine lock), and hops to main only for CallManager's signaling state.
                 CallWire.CAMERA ->
-                    withContext(Dispatchers.Main) { callRouter?.invoke(type, body) }
+                    callRouter?.invoke(type, body)
                 // 31/32 are media frames, not call signaling, so they're handled here rather than in
                 // CallManager — but they borrow the call path's sealing because one asks an author to
                 // spend upload bandwidth and the other triggers a notification and a fetch.
                 Wire.MEDIA_WANTED -> handleMediaWanted(body)
-                Wire.MEDIA_AVAILABLE -> withContext(Dispatchers.Main) { handleMediaAvailable(body) }
+                // Off main: opening is an engine call, and the handler decrypt-checks and deletes
+                // blobs. Only its Compose-state edits hop to main (see handleMediaAvailable).
+                Wire.MEDIA_AVAILABLE -> handleMediaAvailable(body)
                 Wire.HISTORY_REQ -> handleHistoryRequest(body)
                 else -> Log.d(TAG, "ignoring frame type $type (not yet handled)")
             }
@@ -1513,7 +1591,7 @@ object HavenNet : InboundListener {
     }
 
     /** CallManager registers here to receive call frames (kept as a hook to avoid a hard dependency). */
-    var callRouter: ((type: Int, body: ByteArray) -> Unit)? = null
+    var callRouter: (suspend (type: Int, body: ByteArray) -> Unit)? = null
 
     /** Send a call signaling frame to one node (used by CallManager): direct AND live-forwarded
      *  through the circle relays (frame 9 — the relay host unwraps + sends it onward over its own
@@ -1632,7 +1710,7 @@ object HavenNet : InboundListener {
                             val type = env[0].toInt() and 0xFF
                             val body = env.copyOfRange(1, env.size)
                             if (type in callTypes) {
-                                withContext(Dispatchers.Main) { callRouter?.invoke(type, body) }
+                                callRouter?.invoke(type, body)   // opens off main, handles on main
                                 Log.i(TAG, "live-call http-ingest type=$type key=${key.substringAfterLast('/').take(12)}")
                                 changed = true
                             }
@@ -1841,7 +1919,7 @@ object HavenNet : InboundListener {
                 if (announcedMediaAt.size > 500) announcedMediaAt.clear()
             }
             synchronized(fastReq) { fastReq.remove(f.ref) }   // it's on a relay NOW — restart the lane
-            waitingForSenderMedia.remove(f.ref)
+            scope.launch(Dispatchers.Main) { waitingForSenderMedia.remove(f.ref) }
             val cid = if (runCatching { social.circles() }.getOrDefault(emptyList())
                     .any { it.id == f.circleId }) f.circleId else activeCircle.value
             enqueueRestore(cid, f.ref)
@@ -1849,8 +1927,7 @@ object HavenNet : InboundListener {
             return
         }
         MediaWantedStore.clear(f.ref)
-        unavailableMedia.remove(f.ref)
-        waitingForSenderMedia.remove(f.ref)
+        scope.launch(Dispatchers.Main) { unavailableMedia.remove(f.ref); waitingForSenderMedia.remove(f.ref) }
         synchronized(fastReq) { fastReq.remove(f.ref) }
         EvictedMediaStore.clear(f.ref)
         // A blob we HOLD but cannot open must be dropped before the pull, or nothing happens:
@@ -2208,6 +2285,15 @@ object HavenNet : InboundListener {
     /** The user is viewing a DM thread: advance its read watermark past the newest visible message
      *  (clears its badge here and, via self-sync, on the user's other devices). */
     fun markThreadRead(circleId: String) {
+        // The newest time is an engine feed decode — never on main (the thread view calls this
+        // from composition effects). The watermark itself is applied back on main.
+        if (onMainThread()) {
+            scope.launch {
+                val newest = messages(circleId).maxOfOrNull { it.createdAt } ?: 0UL
+                withContext(Dispatchers.Main) { DmRead.markRead(circleId, newest) }
+            }
+            return
+        }
         DmRead.markRead(circleId, messages(circleId).maxOfOrNull { it.createdAt } ?: 0UL)
     }
 
@@ -2250,6 +2336,7 @@ object HavenNet : InboundListener {
     fun sendDm(circleId: String, body: String, media: List<String> = emptyList(),
                music: uniffi.haven_ffi.TrackRefFfi? = null, retentionSecs: ULong? = null) {
         if (body.isBlank() && media.isEmpty() && music == null) return
+        if (authorOffMain { sendDm(circleId, body, media, music, retentionSecs) }) return
         val withThumbs = withPreviewMarkers(withThumbMarkers(media))
         val ts = nowMs()
         // retentionSecs != null → a disappearing message (auto-expires in the feed reducer, iOS parity).
@@ -3711,8 +3798,10 @@ object HavenNet : InboundListener {
 
     /** Author a post in a circle and broadcast the sealed event to its members. */
     fun post(circleId: String, body: String, media: List<String> = emptyList(),
-             music: uniffi.haven_ffi.TrackRefFfi? = null, retentionSecs: ULong? = null) {
+             music: uniffi.haven_ffi.TrackRefFfi? = null, retentionSecs: ULong? = null,
+             onPublished: (() -> Unit)? = null) {
         if (body.isBlank() && media.isEmpty() && music == null) return
+        if (authorOffMain { post(circleId, body, media, music, retentionSecs, onPublished) }) return
         val withThumbs = withPreviewMarkers(withThumbMarkers(media))
         val ts = nowMs()
         val env = runCatching {
@@ -3732,6 +3821,7 @@ object HavenNet : InboundListener {
             PushBanner.forPost(circleId, circleName(circleId), body, withThumbs, story = false, postId = postId))
         // A post the engine accepted is Haven's one "significant action" for the rating gates.
         com.blaineam.haven.support.RatingManager.recordSignificantAction(appContext)
+        if (onPublished != null) scope.launch(Dispatchers.Main) { onPublished() }
         // "Save my posts to Photos" (per-circle override, falling back to the app-wide default).
         if (media.isNotEmpty() && CircleSettings.saveOwn(circleId))
             scope.launch { media.forEach { MediaSaver.autoSave(appContext, it) } }
@@ -3864,6 +3954,7 @@ object HavenNet : InboundListener {
     fun postStory(body: String, mediaId: String?, music: uniffi.haven_ffi.TrackRefFfi? = null,
                   circleId: String = DEFAULT_CIRCLE) {
         if (body.isBlank() && mediaId == null && music == null) return
+        if (authorOffMain { postStory(body, mediaId, music, circleId) }) return
         val media = withPosterCompanions(circleId, withPreviewMarkers(withThumbMarkers(listOfNotNull(mediaId))))
         val ts = nowMs()
         val env = runCatching {
@@ -3877,11 +3968,13 @@ object HavenNet : InboundListener {
 
     /** React / unreact / comment on a post — author + broadcast, same as a post. */
     fun react(circleId: String, postId: String, emoji: String) {
+        if (authorOffMain { react(circleId, postId, emoji) }) return
         val env = runCatching { social.react(circleId, postId, emoji, nowMs()) }.getOrNull() ?: return
         afterAuthor(circleId, env, PushBanner.forReaction(emoji, circleId, postId))
     }
 
     fun unreact(circleId: String, postId: String, emoji: String) {
+        if (authorOffMain { unreact(circleId, postId, emoji) }) return
         val env = runCatching { social.unreact(circleId, postId, emoji, nowMs()) }.getOrNull() ?: return
         afterAuthor(circleId, env)   // retracting carries no news — silent wake only
     }
@@ -3889,6 +3982,7 @@ object HavenNet : InboundListener {
     fun comment(circleId: String, postId: String, body: String, media: List<String> = emptyList()) {
         // A media-only reply (a photo or a voice note with no text) is valid — iOS allows it too.
         if (body.isBlank() && media.isEmpty()) return
+        if (authorOffMain { comment(circleId, postId, body, media) }) return
         val env = runCatching { social.comment(circleId, postId, body, media, nowMs()) }.getOrNull() ?: return
         authoredMediaQueued(circleId, media)
         media.forEach { enqueueBackup(circleId, it, priority = true) }   // before the broadcast; a fresh reply's media beats backfill
@@ -3921,7 +4015,7 @@ object HavenNet : InboundListener {
      * them, and it is explicit for the same reason: passing every field is what makes "this edit
      * intends to replace the media" a statement rather than an oversight.
      *
-     * Blocking, like every other author path here.
+     * Blocking off main, like every other author path here; from main it is handed to the author lane.
      */
     fun editPostFull(
         circleId: String,
@@ -3931,6 +4025,7 @@ object HavenNet : InboundListener {
         music: TrackRefFfi?,
         muteVideo: Boolean,
     ) {
+        if (authorOffMain { editPostFull(circleId, postId, body, media, music, muteVideo) }) return
         val env = runCatching {
             social.edit(circleId, postId, body, media, music, muteVideo, nowMs())
         }.getOrNull() ?: return
@@ -3938,6 +4033,7 @@ object HavenNet : InboundListener {
     }
 
     fun editPost(circleId: String, postId: String, body: String) {
+        if (authorOffMain { editPost(circleId, postId, body) }) return
         // viewerRetentionSecs null: retention only hides items from MY feed. Resolving through a
         // filtered feed would miss an item the viewer can no longer see and fall back to "wipe".
         val feed = runCatching { social.feed(circleId, nowMs(), null) }.getOrDefault(emptyList())
@@ -4121,6 +4217,7 @@ object HavenNet : InboundListener {
     }
 
     fun unsendPost(circleId: String, postId: String) {
+        if (authorOffMain { unsendPost(circleId, postId) }) return
         val env = runCatching { social.unsend(circleId, postId, nowMs()) }.getOrNull() ?: return
         afterAuthor(circleId, env)
     }
@@ -4330,6 +4427,13 @@ object HavenNet : InboundListener {
     /** A nearby peer just connected — greet over the mesh + back-fill the open circle. */
     fun onNearbyConnected() {
         bumpActivity()   // a peer just appeared → sync tight for the catch-up burst
+        // Nearby Connections delivers its callbacks on MAIN; everything below seals through the
+        // engine (hello, the circle's envelopes, relay announces, the media push) and waits on the
+        // engine lock behind any background ingest — the e2e launch sampled main parked here.
+        scope.launch { greetNearbyPeer() }
+    }
+
+    private fun greetNearbyPeer() {
         val hello = helloPayload(DEFAULT_CIRCLE) ?: return
         NearbyTransport.broadcast(Wire.frame(Wire.HELLO, hello))
         val defaultEnvs = runCatching { social.syncEnvelopes(DEFAULT_CIRCLE) }.getOrDefault(emptyList())
@@ -6802,6 +6906,12 @@ object HavenNet : InboundListener {
         synchronized(fastReq) { fastReq.remove(ref) }
         if (LocalMedia.has(ref)) return
         if (!downloadingMedia.contains(ref)) downloadingMedia.add(ref)
+        // The rest decodes every circle's feed to find the ref — a Download tap is on main.
+        if (onMainThread()) { scope.launch { startEvictedDownload(ref) }; return }
+        startEvictedDownload(ref)
+    }
+
+    private fun startEvictedDownload(ref: String) {
         // Find the circle that references this ref (for the relay restore key + a scoped direct ask).
         val circleId = runCatching {
             social.circles().firstOrNull { c ->

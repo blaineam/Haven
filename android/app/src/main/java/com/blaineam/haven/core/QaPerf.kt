@@ -71,7 +71,7 @@ object QaPerf {
     // The 2026-09-30 gate saw the app at 124 % CPU until the emulator's system_server hit its
     // watchdog, and a later launch with the main thread burning 10 s of CPU before the engine even
     // started — with nothing recorded to say on what. `adb shell debuggerd -j` needs root, so the
-    // app samples itself: every 500 ms, every RUNNABLE thread's app-relevant top frames, counted.
+    // app samples itself: every second, every RUNNABLE app thread's app-relevant top frames, counted.
     // Also, while a main-thread ping is overdue, the main thread's stack every 250 ms.
 
     private val cpuSamples = HashMap<String, Int>()
@@ -100,14 +100,37 @@ object QaPerf {
         return o
     }
 
+    /**
+     * Runtime threads the sampler must never walk. Walking a thread SUSPENDS it: the e2e gate
+     * (2026-10-01 08:43) had this sampler suspend "Signal Catcher" while it was writing the ANR
+     * trace, the suspend timed out, and ART aborted the whole process. Main is excluded too — the
+     * stall watchdog samples it only while it is actually stalled.
+     */
+    private val UNSAMPLED = setOf(
+        "main", "Signal Catcher", "HeapTaskDaemon", "FinalizerDaemon", "FinalizerWatchdogDaemon",
+        "ReferenceQueueDaemon", "Jit thread pool", "Profile Saver", "ADB-JDWP Connection Control Thread",
+        "perfetto_hprof_listener", "Runtime worker thread 0", "Metrics Background Reporting Thread",
+    )
+    internal fun sampleable(name: String): Boolean = name !in UNSAMPLED
+
+    /** Every live thread, WITHOUT walking any stack (getAllStackTraces suspends them all). */
+    private fun liveThreads(): List<Thread> {
+        var g: ThreadGroup = Thread.currentThread().threadGroup ?: return emptyList()
+        while (true) g = g.parent ?: break
+        val arr = arrayOfNulls<Thread>(g.activeCount() * 2 + 16)
+        val n = g.enumerate(arr, true)
+        return arr.take(n).filterNotNull()
+    }
+
     private fun sampleCpu(self: Thread) {
-        val all = runCatching { Thread.getAllStackTraces() }.getOrNull() ?: return
+        // Pick RUNNABLE app threads first (state reads don't suspend), then walk only those.
+        val picked = liveThreads().filter { it !== self && sampleable(it.name) && it.state == Thread.State.RUNNABLE }
+        val stacks = picked.mapNotNull { t -> runCatching { t.name to t.stackTrace }.getOrNull() }
         synchronized(lock) {
             cpuSampleTicks++
-            for ((t, frames) in all) {
-                if (t === self || t.state != Thread.State.RUNNABLE) continue
+            for ((name, frames) in stacks) {
                 val k = stackKey(frames) ?: continue
-                bump(cpuSamples, "${t.name.take(16)}: $k")
+                bump(cpuSamples, "${name.take(16)}: $k")
             }
             if (cpuSamples.size > 400) {   // bound the table: keep the heavy hitters
                 val keep = cpuSamples.entries.sortedByDescending { it.value }.take(200).associate { it.key to it.value }
@@ -166,14 +189,20 @@ object QaPerf {
                 }
                 if (ran && foreground) noteMainStall(SystemClock.uptimeMillis() - sentAt)
             }
-        }, "haven-qa-stall-watchdog").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }.start()
+            // NORMAL priority, not MIN: this thread takes main's MessageQueue lock to post its ping
+            // and suspends main to sample it. At nice 19 on a loaded host it was descheduled while
+            // holding either, and main sat waiting on it (e2e logcat: "Long monitor contention with
+            // owner haven-qa-stall-watchdog … in MessageQueue.next() for 2.791s").
+        }, "haven-qa-stall-watchdog").apply { isDaemon = true; priority = Thread.NORM_PRIORITY }.start()
         Thread({
             val self = Thread.currentThread()
             while (true) {
-                try { Thread.sleep(500) } catch (_: InterruptedException) { return@Thread }
+                try { Thread.sleep(1_000) } catch (_: InterruptedException) { return@Thread }
                 if (foreground) sampleCpu(self)
             }
-        }, "haven-qa-cpu-sampler").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }.start()
+            // Same reason as the watchdog: a walked thread stays suspended until the walk ends, so a
+            // starved MIN-priority walker held app threads frozen for as long as it was off-CPU.
+        }, "haven-qa-cpu-sampler").apply { isDaemon = true; priority = Thread.NORM_PRIORITY }.start()
     }
 
     @Volatile var foreground = false

@@ -19,4 +19,19 @@ import kotlinx.coroutines.withContext
 object EngineBoot {
     suspend fun <T> offMain(worker: CoroutineDispatcher = Dispatchers.Default, block: () -> T): T =
         withContext(worker) { block() }
+
+    /** One serial thread for fire-and-forget boots from non-suspending main-thread entry points
+     *  (a Service's onStartCommand): repeated starts queue behind each other instead of racing,
+     *  and `HavenNet.init` is idempotent, so a second boot finds the engine ready and returns. */
+    private val bootExec = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "haven-engine-boot").apply { isDaemon = true }
+    }
+
+    /** Run [block] on the boot thread and return immediately. Failures are logged, never thrown
+     *  into the caller — a boot that fails here is retried by the next start, like a failed init. */
+    fun background(block: () -> Unit) {
+        bootExec.execute {
+            runCatching(block).onFailure { android.util.Log.w("EngineBoot", "background boot failed", it) }
+        }
+    }
 }

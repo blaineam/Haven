@@ -274,7 +274,8 @@ private fun MainScaffold() {
                 // which self-sync also bumps when another device reads a thread).
                 val feedTick by HavenNet.feedVersion
                 val readTick by com.blaineam.haven.core.DmRead.version
-                val unreadDms = remember(feedTick, readTick) { HavenNet.unreadDmConversations() }
+                // Decodes every DM thread through the engine — off main (see rememberOffMain).
+                val unreadDms = rememberOffMain(feedTick to readTick, 0) { HavenNet.unreadDmConversations() }.second
                 Tab.entries.forEach { t ->
                     // Badge the Circle tab with the number of pending connection requests (parity with
                     // iOS, which badges the circle tab). `pending` is a SnapshotStateList so this updates live.

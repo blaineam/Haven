@@ -48,16 +48,20 @@ fun PostLinkScreen(circleId: String, postId: String, onDone: () -> Unit) {
     // An id that names a COMMENT resolves to the post that CARRIES it (iOS `FeedStore.post`). Comments
     // are not top-level feed items, so reacting to or replying to one produced an activity row and a
     // push whose target matched nothing here — every one of those taps said "post not found".
-    val post = remember(version, circleId, postId) {
-        runCatching {
-            val items = HavenNet.engine.feed(circleId, nowMs(), CircleSettings.retentionSecs(circleId))
-            items.firstOrNull { it.id == postId }
-                ?: items.firstOrNull { item -> item.comments.any { it.id == postId } }
+    // Both are engine reads (a whole-circle decode) — off main; "not found" only once a read for
+    // THIS link has landed, never while it is still in flight.
+    val read = rememberOffMain(Triple(version, circleId, postId),
+        null as uniffi.haven_ffi.FeedItemFfi? to emptyList<uniffi.haven_ffi.ReportFfi>()) { (_, c, p) ->
+        val found = runCatching {
+            val items = HavenNet.engine.feed(c, nowMs(), CircleSettings.retentionSecs(c))
+            items.firstOrNull { it.id == p }
+                ?: items.firstOrNull { item -> item.comments.any { it.id == p } }
         }.getOrNull()
+        found to runCatching { HavenNet.reports(c)[p].orEmpty() }.getOrDefault(emptyList())
     }
-    val reports = remember(version, circleId, postId) {
-        runCatching { HavenNet.reports(circleId)[postId].orEmpty() }.getOrDefault(emptyList())
-    }
+    val loaded = read.first?.let { it.second == circleId && it.third == postId } == true
+    val post = if (loaded) read.second.first else null
+    val reports = if (loaded) read.second.second else emptyList()
 
     HavenBackground {
         Column(Modifier.fillMaxSize()) {
@@ -85,7 +89,7 @@ fun PostLinkScreen(circleId: String, postId: String, onDone: () -> Unit) {
                             highlightCommentId = if (post.id == postId) null else postId)
                     }
                 }
-            } else {
+            } else if (loaded) {
                 // Not in the circle, unsent, or simply not synced to this device yet — all of which
                 // are indistinguishable from here, and none of which are worth guessing about.
                 Column(

@@ -55,12 +55,25 @@ class ConnectionService : Service() {
             // ForegroundServiceStartNotAllowedException. Don't crash — keep the node running as a plain
             // background service; the WorkManager periodic sync still catches up every ~15 min.
             Log.w(TAG, "foreground start blocked, running in background: ${e.message}")
-            HavenNet.init(applicationContext); HavenNet.start()
+            bootEngine()
             return START_STICKY
         }
-        HavenNet.init(applicationContext)
-        HavenNet.start()
+        bootEngine()
         return START_STICKY
+    }
+
+    /**
+     * Bring the engine up OFF the main thread. onStartCommand runs on main, and a sticky restart
+     * (the process came back after a crash, or the system relaunched the service) reaches here
+     * before anything else has booted the engine — so `HavenNet.init` ran its whole cold boot
+     * (identity keystore, engine construct, state import) on main, parked behind the warm-up
+     * thread's HavenCore monitor for 23.6 s on the e2e emulator (2026-10-01 08:45), and the input
+     * dispatch / SystemJobService starts queued behind it timed out as ANRs. `start()` only arms
+     * async lanes, so it is safe from the boot thread.
+     */
+    private fun bootEngine() {
+        val app = applicationContext
+        EngineBoot.background { HavenNet.init(app); HavenNet.start() }
     }
 
     /**

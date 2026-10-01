@@ -231,7 +231,28 @@ object CallManager {
             PeerConnectionFactory.InitializationOptions.builder(appContext)
                 .createInitializationOptions()
         )
-        HavenNet.callRouter = { type, body -> handle(type, body) }
+        HavenNet.callRouter = { type, body -> receive(type, body) }
+    }
+
+    /**
+     * Inbound call frame, called OFF main by HavenNet. Opening + verifying it is an engine call
+     * that waits on the engine lock — on main that parked the UI behind any background ingest or
+     * state export for as long as it ran. So it opens HERE, and only the verified plaintext hops to
+     * main, where all of CallManager's signaling state lives. Each caller suspends until main has
+     * handled its frame, so frames from one lane keep their arrival order.
+     */
+    private suspend fun receive(type: Int, sealedBody: ByteArray) {
+        val body = openCallFrame(type, sealedBody)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { handle(type, body) }
+    }
+
+    /**
+     * Outbound signaling leaves main the same way: sealing is an engine call, and the transport fans
+     * the frame out through the engine's device roster. ONE serial lane, so frames reach the wire in
+     * the order the signaling state machine produced them (an offer before its ICE candidates).
+     */
+    private val sendLane = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "haven-call-send").apply { isDaemon = true }
     }
 
     private fun ensureFactory(): PeerConnectionFactory =
@@ -252,6 +273,10 @@ object CallManager {
      *  proves the sender). No plaintext fallback: if sealing fails we send NOTHING, so a relay can't
      *  force a downgrade to the old spoofable form. Mirrors iOS `FeedStore.sendCallFrame`. */
     private fun send(type: Int, body: ByteArray, to: String) {
+        sendLane.execute { runCatching { sendNow(type, body, to) }.onFailure { Log.w(TAG, "call frame type=$type send failed", it) } }
+    }
+
+    private fun sendNow(type: Int, body: ByteArray, to: String) {
         // seal_media can only seal to a recipient it can RESOLVE to a bundle: our own account, a circle
         // member, or a known device bundle. If none match it throws and this drops the frame silently —
         // nothing is transmitted and nothing is recorded. For an ACCEPT that is indistinguishable from
@@ -371,11 +396,16 @@ object CallManager {
      */
     private fun notifyOwnDevicesHandled(ended: Boolean = false) {
         if (sessionId.isEmpty()) return
-        val others = runCatching { HavenNet.myOtherDeviceHexes() }.getOrDefault(emptyList())
-        if (others.isEmpty()) return
-        Log.i(TAG, "call ${sessionId.take(8)} handled here — standing down ${others.size} other device(s) of mine")
-        val frame = CallWire.handledElsewhere(myHex, sessionId)
-        others.forEach { send(if (ended) CallWire.ENDED_ELSEWHERE else CallWire.HANDLED_ELSEWHERE, frame, it) }
+        val sid = sessionId
+        val frame = CallWire.handledElsewhere(myHex, sid)
+        val type = if (ended) CallWire.ENDED_ELSEWHERE else CallWire.HANDLED_ELSEWHERE
+        // Resolving my other devices reads the engine roster — on the send lane, not main.
+        sendLane.execute {
+            val others = runCatching { HavenNet.myOtherDeviceHexes() }.getOrDefault(emptyList())
+            if (others.isEmpty()) return@execute
+            Log.i(TAG, "call ${sid.take(8)} handled here — standing down ${others.size} other device(s) of mine")
+            others.forEach { runCatching { sendNow(type, frame, it) } }
+        }
     }
 
     /**
@@ -443,7 +473,7 @@ object CallManager {
         teardown()
     }
 
-    // ---- Inbound signaling (from HavenNet.callRouter, on main) ----
+    // ---- Inbound signaling (opened off main by [receive], handled on main) ----
 
     /** Open + verify a sealed+signed call frame (audit R1) BEFORE any signaling logic sees it: reject
      *  anything we can't decrypt or whose Ed25519 signature doesn't verify against the carried sender
@@ -469,8 +499,8 @@ object CallManager {
         return plaintext
     }
 
-    private fun handle(type: Int, sealedBody: ByteArray) {
-        val body = openCallFrame(type, sealedBody) ?: run {
+    private fun handle(type: Int, opened: ByteArray?) {
+        val body = opened ?: run {
             // A frame that arrives and CANNOT BE OPENED is invisible otherwise — it looks identical
             // to one that never arrived, which is precisely the ambiguity that made the stuck-call
             // bug unreadable from the outside.

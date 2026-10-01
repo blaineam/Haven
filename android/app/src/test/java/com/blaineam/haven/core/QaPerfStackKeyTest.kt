@@ -1,6 +1,8 @@
 package com.blaineam.haven.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -34,5 +36,17 @@ class QaPerfStackKeyTest {
     fun frameworkOnlyStacksFallBackToTheTop() {
         val frames = arrayOf(f("androidx.compose.runtime.Recomposer", "compose", 5), f("android.view.Choreographer", "doFrame", 7))
         assertEquals("Recomposer.compose:5 < Choreographer.doFrame:7", QaPerf.stackKey(frames))
+    }
+
+    /** Walking a thread suspends it. The sampler suspended "Signal Catcher" mid ANR dump and ART
+     *  aborted the process (e2e 2026-10-01), so runtime threads — and main — are never walked. */
+    @Test
+    fun runtimeThreadsAndMainAreNeverSampled() {
+        for (n in listOf("Signal Catcher", "main", "HeapTaskDaemon", "FinalizerDaemon", "Jit thread pool")) {
+            assertFalse(n, QaPerf.sampleable(n))
+        }
+        for (n in listOf("DefaultDispatcher-worker-3", "haven-qa", "haven-author", "OkHttp ConnectionPool")) {
+            assertTrue(n, QaPerf.sampleable(n))
+        }
     }
 }

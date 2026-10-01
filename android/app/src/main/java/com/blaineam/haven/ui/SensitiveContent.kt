@@ -32,6 +32,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.blaineam.haven.core.HavenNet
+import kotlinx.coroutines.launch
 
 /**
  * Honors the circle's federated sensitive-content flags.
@@ -47,16 +48,48 @@ import com.blaineam.haven.core.HavenNet
  */
 object SensitiveFlags {
     /** refs per circle, cached like FeedStore.sensitiveCache — the FFI call walks the event log. */
-    private val cache = HashMap<String, Set<String>>()
-    private var version = -1
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, Set<String>>()
+    /** The feedVersion each circle's entry was read at. */
+    private val readAt = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val refreshing: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    /** Bumped when a background refresh changed a set, so composition re-reads [refs]. */
+    private val changed = androidx.compose.runtime.mutableIntStateOf(0)
+    private val refreshScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
 
-    /** Flagged refs for [circleId]. Cheap + cached; recomputed when the feed changes. */
+    private fun read(circleId: String): Set<String> =
+        runCatching { HavenNet.engine.sensitiveRefs(circleId).toSet() }.getOrDefault(emptySet())
+
+    /**
+     * Flagged refs for [circleId]. Cheap + cached; recomputed when the feed changes.
+     *
+     * Composition calls this per media tile, and the read takes the engine lock — so after the
+     * first read of a circle, a stale entry is served on main while the refresh runs off main
+     * (flags only accumulate, so the stale set never un-blurs anything that was flagged). Only a
+     * circle's very first read blocks, so nothing renders unblurred before its flags are known.
+     */
     fun refs(circleId: String): Set<String> {
         val v = HavenNet.feedVersion.value
-        if (v != version) { cache.clear(); version = v }   // a new event may BE a flag
-        return cache.getOrPut(circleId) {
-            runCatching { HavenNet.engine.sensitiveRefs(circleId).toSet() }.getOrDefault(emptySet())
+        @Suppress("UNUSED_VARIABLE") val observe = changed.intValue   // recompose when a refresh lands
+        val have = cache[circleId]
+        if (have != null && readAt[circleId] == v) return have
+        val onMain = android.os.Looper.myLooper() == android.os.Looper.getMainLooper()
+        if (have != null && onMain) {
+            if (refreshing.add(circleId)) refreshScope.launch {
+                try {
+                    val fresh = read(circleId)
+                    readAt[circleId] = v
+                    if (cache.put(circleId, fresh) != fresh) {
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { changed.intValue++ }
+                    }
+                } finally { refreshing.remove(circleId) }
+            }
+            return have
         }
+        val fresh = read(circleId)
+        cache[circleId] = fresh
+        readAt[circleId] = v
+        return fresh
     }
 
     fun isSensitive(circleId: String, ref: String): Boolean = refs(circleId).contains(ref)

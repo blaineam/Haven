@@ -62,7 +62,7 @@ fun ShareRouteSheet(payload: ShareInbox.Payload, onDone: () -> Unit) {
     // locked — a stale shortcut (thread since deleted, circle since locked) falls back to the sheet.
     val preselected = remember(payload.targetCircleId) {
         payload.targetCircleId?.takeIf { id ->
-            runCatching { HavenNet.engine.circles() }.getOrDefault(emptyList()).any { it.id == id } &&
+            HavenNet.circlesSnapshot().any { it.id == id } &&
                 !CircleLock.isLocked(id)
         }
     }
@@ -363,7 +363,7 @@ private fun PickRow(title: String, selected: Boolean, onClick: () -> Unit) {
  * "Recent" strip does not.
  */
 private fun recentThreads(includeQuiet: Boolean = false): List<String> {
-    val ranked = runCatching { HavenNet.engine.circles() }.getOrDefault(emptyList())
+    val ranked = HavenNet.circlesSnapshot()
         .map { it.id }
         .filter { it.startsWith("dm:") && !CircleLock.isLocked(it) }
         .map { it to HavenNet.lastActivity(it) }

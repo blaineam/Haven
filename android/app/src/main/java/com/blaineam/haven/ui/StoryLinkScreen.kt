@@ -55,16 +55,19 @@ fun StoryLinkScreen(circleId: String, postId: String, onDone: () -> Unit) {
     @Suppress("UNUSED_EXPRESSION") KeptStoriesStore.version.intValue
     var settled by remember { mutableStateOf(false) }
 
-    val resolved = remember(version, circleId, postId, KeptStoriesStore.version.intValue) {
-        resolveStory(circleId, postId)
-    }
+    // resolveStory decodes the circle through the engine — off main (see rememberOffMain).
+    val resolvedRead = rememberOffMain(listOf<Any>(version, circleId, postId, KeptStoriesStore.version.intValue),
+        null as FeedItemFfi?) { k -> resolveStory(k[1] as String, k[2] as String) }
+    val resolved = if (resolvedRead.first?.let { it[1] == circleId && it[2] == postId } == true) resolvedRead.second else null
 
     LaunchedEffect(circleId, postId) {
         if (resolved != null) { settled = true; return@LaunchedEffect }
         var grace = 4.0
         var ticks = 0
         while (grace > 0 && ticks < 80) {
-            if (resolveStory(circleId, postId) != null) { settled = true; return@LaunchedEffect }
+            if (kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { resolveStory(circleId, postId) } != null) {
+                settled = true; return@LaunchedEffect
+            }
             delay(250)
             ticks++
             grace -= 0.25
@@ -80,7 +83,7 @@ fun StoryLinkScreen(circleId: String, postId: String, onDone: () -> Unit) {
             items = listOf(resolved),
         )
         StoryViewer(groups = listOf(group), startGroup = 0, onClose = onDone)
-    } else if (!settled) {
+    } else if (!settled || resolvedRead.first == null) {
         Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = HavenTheme.pink)
         }
@@ -126,9 +129,10 @@ fun StoryReplyCard(circleId: String, postId: String, modifier: Modifier = Modifi
     val version by HavenNet.feedVersion
     @Suppress("UNUSED_EXPRESSION") KeptStoriesStore.version.intValue
     var settled by remember { mutableStateOf(false) }
-    val story = remember(version, circleId, postId, KeptStoriesStore.version.intValue) {
-        resolveStory(circleId, postId)
-    }
+    // One per story-reply bubble — the engine decode runs off main.
+    val storyRead = rememberOffMain(listOf<Any>(version, circleId, postId, KeptStoriesStore.version.intValue),
+        null as FeedItemFfi?) { k -> resolveStory(k[1] as String, k[2] as String) }
+    val story = if (storyRead.first?.let { it[1] == circleId && it[2] == postId } == true) storyRead.second else null
     LaunchedEffect(circleId, postId) {
         if (story != null) { settled = true; return@LaunchedEffect }
         delay(1500)
@@ -167,7 +171,7 @@ fun StoryReplyCard(circleId: String, postId: String, modifier: Modifier = Modifi
                 )
                 Text("▶", color = Color.White, fontSize = 22.sp)
             }
-            !settled -> CircularProgressIndicator(color = HavenTheme.pink, modifier = Modifier.width(24.dp))
+            !settled || storyRead.first == null -> CircularProgressIndicator(color = HavenTheme.pink, modifier = Modifier.width(24.dp))
             else -> Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.padding(10.dp),

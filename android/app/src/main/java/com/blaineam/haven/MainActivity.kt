@@ -36,6 +36,7 @@ class MainActivity : FragmentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        com.blaineam.haven.core.QaStats.mark("activity_create")   // DEBUG launch timeline
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         DemoEnv.configure(intent)   // DEBUG-only: arms demo mode from launch-intent extras
@@ -45,27 +46,24 @@ class MainActivity : FragmentActivity() {
             com.blaineam.haven.core.QaDriver.adoptSeedIfPresent(this)
             com.blaineam.haven.core.QaDriver.start(this)
         }
-        handleShare(intent)
-        maybeRequestNearby()
-        // Build the identity core — EncryptedSharedPreferences + Tink + the keystore master key,
-        // seconds on a cold or busy device — OFF the main thread while the first frame composes.
-        // HavenNet.init (a LaunchedEffect, i.e. main) then finds it built instead of building it
-        // there: an ANR on the e2e emulator (2026-09-29 23:22) caught launch's main thread 12 s into
-        // CPU inside Tink's class init under HavenCore.get, and the first feed waits on init.
-        // Onboarded installs only (before onboarding the first get() mints the account — that stays
-        // on the onboarding path), and after the QA seed pre-seed above, which must precede the build.
+        // Every object holding Compose state is created HERE, on main, before the engine boot below
+        // can touch it from its own thread — see ComposeStateHolders for the crash that prevents.
+        com.blaineam.haven.core.ComposeStateHolders.initOnMain()
+        // Boot the whole engine NOW, on its own thread, in parallel with the first frame. It used to
+        // start from RootScreen's LaunchedEffect, which only runs once the first frame has composed —
+        // on the e2e emulator that put engine_init_start ~11.8 s after process start, behind work it
+        // does not depend on. Onboarded, non-demo installs only (onboarding mints the identity on its
+        // own path; demo boots its synthetic engine itself), and after the QA seed pre-seed above,
+        // which must precede the identity build. RootScreen's init then finds it booted or booting
+        // (init is idempotent; a late caller waits off main).
         if (!DemoEnv.isDemo && com.blaineam.haven.core.ProfileStore.get(this).onboarded) {
             val app = applicationContext
-            Thread({ runCatching { com.blaineam.haven.core.HavenCore.get(app) } }, "haven-core-warmup").start()
+            com.blaineam.haven.core.QaStats.mark("engine_boot_queued")
+            com.blaineam.haven.core.EngineBoot.background { HavenNet.init(app) }
         }
-        // Class-initialize the objects that HOLD Compose state on main, before the first composition.
-        // The engine can boot on a background thread (ConnectionService, EngineBoot) and would
-        // otherwise be the first to touch them — creating their mutableStateOf()s after composition
-        // took its snapshot, which Compose rejects: "Reading a state that was created after the
-        // snapshot was taken" crashed the e2e launch in CallOverlay and MainScaffold (2026-10-01).
-        val stateHolders = listOf<Any>(com.blaineam.haven.core.HavenNet.feedVersion,
-            com.blaineam.haven.core.CallManager.inCall, com.blaineam.haven.core.InstagramImporter.showSheet)
-        android.util.Log.v("Haven", "compose state holders ready: ${stateHolders.size}")
+        handleShare(intent)
+        maybeRequestNearby()
+        com.blaineam.haven.core.QaStats.mark("set_content")
         setContent {
             HavenAppTheme {
                 RootScreen()

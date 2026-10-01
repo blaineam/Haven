@@ -63,6 +63,7 @@ private fun demoTab(): Tab? = when (DemoEnv.tab) {
 @Composable
 fun RootScreen() {
     val context = LocalContext.current
+    androidx.compose.runtime.SideEffect { com.blaineam.haven.core.QaStats.mark("first_composition") }   // DEBUG launch timeline
     val profile = remember { ProfileStore.get(context) }
 
     // DEBUG-only demo mode: seed the synthetic dataset once and jump straight into the app

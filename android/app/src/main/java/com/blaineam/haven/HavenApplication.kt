@@ -8,6 +8,7 @@ import com.blaineam.haven.core.SyncWorker
 class HavenApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        com.blaineam.haven.core.QaStats.mark("app_create")   // DEBUG launch timeline
         Notifications.ensureChannel(this)
         com.blaineam.haven.core.CircleLock.init(this)   // cheap; avoids an uninit access during first compose
         com.blaineam.haven.core.AvatarStore.init(this)  // photo avatars for feed/people/story-tray
@@ -18,5 +19,6 @@ class HavenApplication : Application() {
         com.blaineam.haven.core.LowDataMonitor.init(this)  // classify the link before anything sends
         com.blaineam.haven.support.RatingManager.recordLaunch(this)  // rating gates: one cold start
         SyncWorker.schedule(this)
+        com.blaineam.haven.core.QaStats.mark("app_created")
     }
 }

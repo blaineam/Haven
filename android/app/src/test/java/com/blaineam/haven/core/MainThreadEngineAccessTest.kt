@@ -134,4 +134,25 @@ class MainThreadEngineAccessTest {
         val init = block(ldm, ldm.indexOf('{', ldm.indexOf("fun init(ctx: Context)")))
         assertTrue("network registration must run off main", init.contains("\"haven-link-monitor\""))
     }
+
+    @Test
+    fun `every core object holding compose state is initialized on main before composition`() {
+        // The engine boots on its own thread from MainActivity.onCreate; an object it touches first
+        // would create its Compose state after composition's snapshot and crash the launch.
+        val stateCtor = Regex("""\bmutable(State|StateList|StateMap|IntState|LongState|FloatState|DoubleState)Of\b""")
+        val objectDecl = Regex("""(?m)^(?:internal |private )?object (\w+)""")
+        val missing = mutableListOf<String>()
+        File(src, "core").listFiles { f -> f.extension == "kt" }!!.forEach { f ->
+            val text = f.readText()
+            if (!stateCtor.containsMatchIn(text)) return@forEach
+            for (m in objectDecl.findAll(text)) {
+                val name = m.groupValues[1]
+                if (name != "ComposeStateHolders" && name !in ComposeStateHolders.CLASSES) missing += "${f.name}: $name"
+            }
+        }
+        assertTrue("add these to ComposeStateHolders.CLASSES:\n" + missing.joinToString("\n"), missing.isEmpty())
+        val main = File(src, "MainActivity.kt").readText()
+        assertTrue("state holders must be initialized before the engine boot is queued",
+            main.indexOf("ComposeStateHolders.initOnMain()") in 0 until main.indexOf("EngineBoot.background"))
+    }
 }

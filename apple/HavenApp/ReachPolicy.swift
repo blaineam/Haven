@@ -36,6 +36,31 @@ enum BoundedFanOut {
     }
 }
 
+/// One step of the per-relay exponential backoff (`RelayHealth`): 5s, 10s, 20s … capped at 5m.
+///
+/// ONE OUTAGE, ONE STRIKE. A failure that lands while the relay is already parked in a window does
+/// not escalate it: every op that was in flight when the relay went quiet (a fan-out of mailbox
+/// lists, a media probe, a self-sync slot, a hello) fails a moment later, and each used to count as
+/// its own consecutive failure. Seven of them in one burst jumped a relay straight from 5 s to the
+/// 5-minute cap — the e2e `newfriend` step watched the inviter's relay parked for 300 s within 80 s
+/// of approval (gate-4), though sequential strikes cannot reach that cap in under ~5 minutes. Only
+/// a failure AFTER the window has expired (a real retry that failed again) escalates.
+enum RelayBackoffStep {
+    static let baseMs: UInt64 = 5_000
+    static let maxMs: UInt64 = 300_000
+
+    /// The next state after a failure at `now`, or nil when it falls inside the armed window and so
+    /// changes nothing.
+    static func next(fails: UInt32, nextRetryMs: UInt64, now: UInt64)
+        -> (fails: UInt32, nextRetryMs: UInt64, backoffMs: UInt64)? {
+        if fails > 0, now < nextRetryMs { return nil }
+        let f = fails == UInt32.max ? fails : fails + 1
+        let shift = UInt64(min(f - 1, 6))   // cap the exponent so the shift never overflows
+        let backoff = min(baseMs * (1 << shift), maxMs)
+        return (f, now + backoff, backoff)
+    }
+}
+
 enum DialOrder {
     /// The dial set for one account, best-first: invite-link hints (the ids a brand-new friend
     /// actually answers on), then roster device ids, then the bare ACCOUNT id.

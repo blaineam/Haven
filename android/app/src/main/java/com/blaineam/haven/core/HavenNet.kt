@@ -380,6 +380,9 @@ object HavenNet : InboundListener {
         fun provenAlive(nowMs: Long, withinMs: Long): Boolean =
             lastSuccessMs > 0 && nowMs - lastSuccessMs <= withinMs
         fun recordFailure(nowMs: Long) {
+            // ONE OUTAGE, ONE STRIKE: a failure inside an already-armed window is another in-flight op
+            // seeing the same outage — don't escalate on it (iOS RelayBackoffStep / desktop relayhealth.rs).
+            if (fails > 0 && nowMs < nextRetryMs) return
             fails += 1
             // Don't park a relay on the FIRST failure — a single transient miss/timeout mid-transfer (common
             // over a DERP relay for a large chunked video) shouldn't lock the relay out for the rest of the

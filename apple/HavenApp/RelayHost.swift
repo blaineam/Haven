@@ -1979,8 +1979,6 @@ final class RelayHealth: ObservableObject {
     private struct Health { var fails: UInt32 = 0; var nextRetryMs: UInt64 = 0; var lastSuccessMs: UInt64 = 0 }
     private var byNode: [String: Health] = [:]
 
-    private static let baseBackoffMs: UInt64 = 5_000     // first failure → 5s cool-off
-    private static let maxBackoffMs: UInt64 = 300_000    // capped at 5 minutes
     private func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
 
     /// Is the relay usable right now (not inside a backoff window)? Unknown relays are available.
@@ -2007,12 +2005,15 @@ final class RelayHealth: ObservableObject {
     /// or one cold dial used to zero `lastSuccessMs` and paint the relay orange, then the next
     /// HTTP poll greened it again — the iPhone "cycling unreachable / reachable" UI. One blip
     /// still backs off retries; two in a row drop proven-alive.
+    ///
+    /// A failure inside an already-armed window is the same outage seen by another in-flight op and
+    /// does not escalate — see `RelayBackoffStep`.
     func recordFailure(_ nodeHex: String) {
         var h = byNode[nodeHex] ?? Health()
-        h.fails = h.fails == UInt32.max ? h.fails : h.fails + 1
-        let shift = UInt64(min(h.fails - 1, 6))   // cap the exponent so the shift never overflows
-        let backoff = min(Self.baseBackoffMs * (1 << shift), Self.maxBackoffMs)
-        h.nextRetryMs = nowMs() + backoff
+        guard let step = RelayBackoffStep.next(fails: h.fails, nextRetryMs: h.nextRetryMs, now: nowMs()) else { return }
+        h.fails = step.fails
+        let backoff = step.backoffMs
+        h.nextRetryMs = step.nextRetryMs
         if h.fails >= 2 {
             h.lastSuccessMs = 0   // no longer proven alive after repeated failure
         }

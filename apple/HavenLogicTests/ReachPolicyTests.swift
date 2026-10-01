@@ -291,3 +291,42 @@ final class LaunchOrderTests: XCTestCase {
         XCTAssertEqual(LaunchOrder.mailboxPhases(["default", "c2"], active: "c1"), [["default", "c2"]])
     }
 }
+
+final class RelayBackoffStepTests: XCTestCase {
+    /// Sequential failures, each AFTER the previous window expired, escalate 5s → 10s → … → 5m.
+    func testSequentialRetriesEscalateToTheCap() {
+        var fails: UInt32 = 0, next: UInt64 = 0, now: UInt64 = 1_000
+        var windows: [UInt64] = []
+        for _ in 0..<8 {
+            guard let s = RelayBackoffStep.next(fails: fails, nextRetryMs: next, now: now) else {
+                return XCTFail("a failure after the window expired must escalate")
+            }
+            (fails, next) = (s.fails, s.nextRetryMs)
+            windows.append(s.backoffMs)
+            now = next   // the retry happens when the window opens
+        }
+        XCTAssertEqual(windows, [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000])
+    }
+
+    /// gate-4 `newfriend`: seven ops in flight against the inviter's relay all failed together and
+    /// parked it for 300 s. A burst inside one window is ONE strike.
+    func testBurstInsideOneWindowIsOneStrike() {
+        guard let first = RelayBackoffStep.next(fails: 0, nextRetryMs: 0, now: 10_000) else { return XCTFail() }
+        XCTAssertEqual(first.backoffMs, 5_000)
+        for dt in [1, 50, 900, 4_999] as [UInt64] {
+            XCTAssertNil(RelayBackoffStep.next(fails: first.fails, nextRetryMs: first.nextRetryMs, now: 10_000 + dt))
+        }
+        // The window expired, the retry failed: now (and only now) it escalates.
+        let second = RelayBackoffStep.next(fails: first.fails, nextRetryMs: first.nextRetryMs, now: 15_000)
+        XCTAssertEqual(second?.fails, 2)
+        XCTAssertEqual(second?.backoffMs, 10_000)
+    }
+
+    /// A relay that recorded a success (fails reset to 0) starts again at 5 s even if a stale
+    /// window stamp were left behind.
+    func testFirstFailureAlwaysArms() {
+        let s = RelayBackoffStep.next(fails: 0, nextRetryMs: 999_999, now: 1)
+        XCTAssertEqual(s?.fails, 1)
+        XCTAssertEqual(s?.backoffMs, 5_000)
+    }
+}

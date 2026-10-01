@@ -47,7 +47,15 @@ impl RelayHealth {
     }
 
     /// A failure grows the backoff exponentially (5s, 10s, 20s … capped at 5m).
+    ///
+    /// ONE OUTAGE, ONE STRIKE: a failure that lands while the relay is already parked is another
+    /// in-flight op seeing the same outage, and does not escalate. Counting each one is how a burst
+    /// of concurrent failures jumped a relay from 5 s straight to the 5-minute cap (e2e `newfriend`,
+    /// gate-4, iOS — same policy, iOS `RelayBackoffStep`).
     pub fn record_failure(&mut self, now_ms: u64) {
+        if self.fails > 0 && now_ms < self.next_retry_ms {
+            return;
+        }
         self.fails = self.fails.saturating_add(1);
         let shift = (self.fails - 1).min(6); // cap the exponent so the shift never overflows
         let backoff = BASE_BACKOFF_MS.saturating_mul(1u64 << shift).min(MAX_BACKOFF_MS);
@@ -182,22 +190,43 @@ mod tests {
 
     #[test]
     fn backoff_grows_exponentially() {
+        // Each retry fails when its window opens.
         let mut h = RelayHealth::default();
         h.record_failure(0); // 5s
         assert_eq!(h.next_retry_ms, 5_000);
-        h.record_failure(0); // 10s
-        assert_eq!(h.next_retry_ms, 10_000);
-        h.record_failure(0); // 20s
-        assert_eq!(h.next_retry_ms, 20_000);
+        h.record_failure(5_000); // 10s
+        assert_eq!(h.next_retry_ms, 15_000);
+        h.record_failure(15_000); // 20s
+        assert_eq!(h.next_retry_ms, 35_000);
     }
 
     #[test]
     fn backoff_is_capped() {
         let mut h = RelayHealth::default();
+        let mut now = 0;
         for _ in 0..30 {
-            h.record_failure(0);
+            h.record_failure(now);
+            now = h.next_retry_ms;
         }
-        assert_eq!(h.next_retry_ms, MAX_BACKOFF_MS); // never grows past the cap (no overflow)
+        h.record_failure(now);
+        assert_eq!(h.next_retry_ms - now, MAX_BACKOFF_MS); // never grows past the cap (no overflow)
+    }
+
+    /// gate-4 `newfriend`: every op in flight when the relay went quiet fails a moment later.
+    /// A burst inside one armed window is ONE strike, not seven (5 s → 5 min in one go).
+    #[test]
+    fn burst_inside_one_window_is_one_strike() {
+        let mut h = RelayHealth::default();
+        h.record_failure(10_000);
+        for dt in [1, 50, 900, 4_999] {
+            h.record_failure(10_000 + dt);
+        }
+        assert_eq!(h.fails, 1);
+        assert_eq!(h.next_retry_ms, 15_000);
+        // The window opened, the retry failed: now it escalates.
+        h.record_failure(15_000);
+        assert_eq!(h.fails, 2);
+        assert_eq!(h.next_retry_ms, 25_000);
     }
 
     #[test]

@@ -345,10 +345,30 @@ elif command -v adb >/dev/null 2>&1; then
     # any failure degrades to a WARN, never kills the fleet.
     log "waiting for android boot_completed…"
     booted=0
+    gone=0
+    reborn=0
     for i in $(seq 1 100); do
       [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" == "1" ]] && { booted=1; break; }
+      # The "device" we saw can be an emulator ANOTHER suite is tearing down (the release gate's
+      # android step boots haven_phone for its connected tests and kills it after): adb still says
+      # "device" for a moment, then the emulator is gone and this loop used to burn its whole 5-minute
+      # window polling nothing — gate-4 lost the android leg (call matrix, screenshare) that way.
+      # Gone for 15 s → boot our own once and keep waiting on it.
+      if [[ "$(adb get-state 2>/dev/null || true)" != "device" ]]; then gone=$((gone + 1)); else gone=0; fi
+      if (( gone >= 5 && reborn == 0 )); then
+        reborn=1
+        log "android emulator vanished while we waited for it to boot — booting a fresh one"
+        boot_haven_emulator
+        for j in $(seq 1 160); do [[ "$(adb get-state 2>/dev/null || true)" == "device" ]] && break; sleep 3; done
+        gone=0
+      fi
       sleep 3
     done
+    # Still not booted but present: a wedged boot. One cold reboot (bounded) before giving the leg up.
+    if [[ "$booted" != "1" && "$(adb get-state 2>/dev/null || true)" == "device" ]]; then
+      log "android emulator never reported boot_completed — cold-rebooting it once"
+      cold_reboot_haven_emulator
+    fi
     # A long-lived emulator can finish "booted" with core system services dead (seen: package
     # manager gone — "Can't find service: package" — after rild/bluetooth aborts). Installs and the
     # MediaStore dump channel then fail while the app itself looks healthy. Cold-reboot it once.

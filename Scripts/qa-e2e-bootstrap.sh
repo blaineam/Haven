@@ -474,6 +474,13 @@ elif command -v adb >/dev/null 2>&1; then
         wait_android_network 45 || log "WARN: android emulator has NO default network after reboot"
         adb install -r "$APK" >/dev/null 2>&1 || log "WARN: apk install failed"
       fi
+      # Compile the freshly installed debug APK ahead of time. A debug install runs interpreted /
+      # JIT-only on the emulator; on a loaded host Android spent ~24s verifying and interpreting the
+      # app's code before Application.onCreate even ran, so `launch` read "failed to complete
+      # startup" and a 33s first feed. Real devices get AOT-compiled installs (baseline profiles /
+      # Play), so measure the same thing here. Best-effort, bounded.
+      adb shell cmd package compile -m speed -f "$AND_PKG" >/dev/null 2>&1 \
+        && log "android apk AOT-compiled (speed)" || log "WARN: android AOT compile failed — launch timing will include interpretation"
       # Start every run with an empty qa channel (the app's internal files/qa/). The channel used
       # to be /sdcard/Download, where a reinstall orphaned MediaProvider's rows (owner UID change)
       # and every dump rename failed ("MediaProvider: Database update failed") — the harness then

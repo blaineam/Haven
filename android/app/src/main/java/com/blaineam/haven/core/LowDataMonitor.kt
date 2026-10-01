@@ -161,6 +161,19 @@ object LowDataMonitor {
     private fun publish(resolved: LinkConstraint) {
         val previous = effective.value
         effective.value = resolved
+        // The core call (and the catch-up below) runs on one serial lane, never the caller's thread:
+        // init runs from Application.onCreate on main, and this was the FIRST uniffi call of the
+        // process — UniffiLib's class init JNA-registers every native method. The e2e gate's
+        // /data/anr trace for a "failed to complete startup" ANR had main inside exactly that.
+        // Serial, so constraints reach the core in the order they were resolved.
+        publishLane.execute { publishToCore(resolved, previous) }
+    }
+
+    private val publishLane = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "haven-link-constraint").apply { isDaemon = true }
+    }
+
+    private fun publishToCore(resolved: LinkConstraint, previous: LinkConstraint) {
         runCatching { setLinkConstraint(resolved) }
 
         // The link just got BETTER — complete the media that was held back, now, rather than when

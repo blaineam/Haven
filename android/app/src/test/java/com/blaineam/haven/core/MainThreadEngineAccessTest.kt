@@ -120,4 +120,18 @@ class MainThreadEngineAccessTest {
         assertTrue("ShareShortcuts.refresh must offload when called on main",
             shortcuts.contains("refreshLane.execute"))
     }
+
+    @Test
+    fun `process start makes no ffi call on main`() {
+        // Application.onCreate -> LowDataMonitor.init -> publish was the process's first uniffi call,
+        // so UniffiLib's class init (JNA registering every native) ran on main: "failed to complete
+        // startup". The core call and the network registration must stay off the caller's thread.
+        val ldm = File(src, "core/LowDataMonitor.kt").readText()
+        val start = ldm.indexOf("private fun publish(resolved: LinkConstraint)")
+        val body = block(ldm, ldm.indexOf('{', start))
+        assertTrue("publish must hand the core call to its lane",
+            body.contains("publishLane.execute") && !body.contains("setLinkConstraint("))
+        val init = block(ldm, ldm.indexOf('{', ldm.indexOf("fun init(ctx: Context)")))
+        assertTrue("network registration must run off main", init.contains("\"haven-link-monitor\""))
+    }
 }

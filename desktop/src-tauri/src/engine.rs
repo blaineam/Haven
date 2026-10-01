@@ -568,6 +568,40 @@ const MEDIA_CHUNK_BYTES: usize = crate::mediaresume::UPLOAD_CHUNK_BYTES;
 /// 9-byte ASCII magic marking a chunk manifest blob. A sealed envelope is JSON starting with '{',
 /// so it can never collide. Must be byte-identical across iOS/macOS + Android.
 const MEDIA_MANIFEST_MAGIC: &[u8] = b"HVCHUNK1\n";
+/// Ceilings for ONE request to a relay's plain-HTTP interface (mailbox LIST, blob GET, blob PUT).
+///
+/// The client only ever had a 4 s CONNECT timeout, so a relay that accepted the connection and then
+/// never answered held the request — and whatever awaited it — forever. That is exactly how the e2e
+/// desktop leg went dark for ~3 h (gate-4): one mailbox LIST and one self-sync LIST to the matrix
+/// stub never came back, the 10 s heartbeat awaits `poll_mailbox` inline and `poll_self_sync` is
+/// single-flight, so neither loop ran again; every post to and from the desktop missed its budget.
+/// The request finally completed with a 401 — its signature timestamp was by then hours old. iOS
+/// (URLSession, 60 s) and Android (OkHttp read timeouts) were never exposed to this. A timeout is
+/// mapped to `RelayErr::Unreachable` like any other transport failure, so the URL's bad-window and
+/// the iroh rung take over exactly as they do for a refused connection.
+const HTTP_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// A GET returns at most one relay chunk (`MEDIA_CHUNK_BYTES`, 8 MB) or a mailbox envelope.
+const HTTP_GET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// PUT ceiling scaled to the body: 30 s plus one second per 128 KiB (a ~1 Mbit/s floor), so an
+/// 8 MB media chunk on a slow uplink is not cut off while a silent relay still frees the caller.
+fn http_put_timeout(len: usize) -> std::time::Duration {
+    std::time::Duration::from_secs(30 + (len as u64) / (128 * 1024))
+}
+
+/// The engine's shared HTTP client. Per-request ceilings live on each relay request (above); the
+/// client adds TCP keepalive so a half-open socket to a vanished relay is noticed by the kernel,
+/// and a short idle-pool lifetime so a pooled keep-alive connection to a relay whose front door
+/// restarted is not handed to the next request.
+fn engine_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(4))
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .pool_idle_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default()
+}
+
 /// The marker an owned circle's id carries. The core mints and verifies these ids — nothing here
 /// should ever try to construct one; this only tells "already owned" from "still legacy".
 const OWNED_CIRCLE_PREFIX: &str = "c1";
@@ -802,10 +836,7 @@ impl Engine {
             relay_clients: TokioMutex::new(HashMap::new()),
             relay_health: StdMutex::new(HashMap::new()),
             s3: TokioMutex::new(None),
-            http: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(4))
-                .build()
-                .unwrap_or_default(),
+            http: engine_http_client(),
             http_url_bad: StdMutex::new(HashMap::new()),
             relay_interface_refresh_ms: StdMutex::new(HashMap::new()),
             app_activity: StdMutex::new(app_activity),
@@ -924,10 +955,7 @@ impl Engine {
             relay_clients: TokioMutex::new(HashMap::new()),
             relay_health: StdMutex::new(HashMap::new()),
             s3: TokioMutex::new(None),
-            http: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(4))
-                .build()
-                .unwrap_or_default(),
+            http: engine_http_client(),
             http_url_bad: StdMutex::new(HashMap::new()),
             relay_interface_refresh_ms: StdMutex::new(HashMap::new()),
             app_activity: StdMutex::new(app_activity),
@@ -1157,6 +1185,7 @@ impl Engine {
             let _ = http
                 .post(format!("{PUSH_RELAY}/notify"))
                 .header("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(15))
                 .body(body.to_string())
                 .send()
                 .await;
@@ -4099,6 +4128,7 @@ impl Engine {
             let _ = http
                 .post(format!("{PUSH_RELAY}/flag"))
                 .header("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(15))
                 .body(body.to_string())
                 .send()
                 .await;
@@ -9306,6 +9336,7 @@ impl Engine {
             .http
             .get(Self::http_key_url(base, key))
             .header("authorization", auth)
+            .timeout(HTTP_GET_TIMEOUT)
             .send()
             .await
             .map_err(|_| RelayErr::Unreachable)?;
@@ -9339,7 +9370,8 @@ impl Engine {
         let mut req = self
             .http
             .get(Self::http_list_url(base, prefix))
-            .header("authorization", auth);
+            .header("authorization", auth)
+            .timeout(HTTP_LIST_TIMEOUT);
         if let Some(d) = digest.filter(|d| !d.is_empty()) {
             req = req.header(haven_net::httprelay::LIST_DIGEST_HEADER, d);
         }
@@ -9443,6 +9475,7 @@ impl Engine {
             .put(Self::http_key_url(base, key))
             .header("authorization", auth)
             .header("content-type", "application/octet-stream")
+            .timeout(http_put_timeout(body.len()))
             .body(body)
             .send()
             .await
@@ -12762,5 +12795,50 @@ mod multirelay_parity_tests {
         assert_eq!(got, vec!["a".repeat(64), "b".repeat(64), "c".repeat(64), dev]);
         // A removed member is simply absent — nothing else in the set speaks for them.
         assert!(!got.contains(&"e".repeat(64)));
+    }
+}
+
+#[cfg(test)]
+mod relay_http_timeout_tests {
+    use super::{engine_http_client, http_put_timeout, HTTP_GET_TIMEOUT, HTTP_LIST_TIMEOUT};
+    use std::time::{Duration, Instant};
+
+    /// gate-4: a relay that ACCEPTS the connection and never answers held the desktop's mailbox
+    /// LIST for ~3 h, wedging the heartbeat and the single-flight self-sync. With a per-request
+    /// ceiling the same silent server yields an error (→ `RelayErr::Unreachable`) promptly.
+    #[tokio::test]
+    async fn silent_relay_frees_the_caller_instead_of_hanging() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accept and hold every connection open without ever writing a byte.
+        let _hold = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = listener.accept().await {
+                held.push(s);
+            }
+        });
+        let http = engine_http_client();
+        let started = Instant::now();
+        let out = tokio::time::timeout(
+            Duration::from_secs(10),
+            http.get(format!("http://{addr}/l/haven%2Fmailbox%2Fdefault"))
+                .timeout(Duration::from_millis(300))
+                .send(),
+        )
+        .await
+        .expect("a request with a ceiling must not outlive it");
+        assert!(out.is_err(), "a silent relay must surface as a transport error");
+        assert!(out.unwrap_err().is_timeout());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn ceilings_are_bounded_and_scale_with_the_body() {
+        assert!(HTTP_LIST_TIMEOUT <= Duration::from_secs(30));
+        assert!(HTTP_GET_TIMEOUT <= Duration::from_secs(180));
+        assert_eq!(http_put_timeout(0), Duration::from_secs(30));
+        // An 8 MB relay chunk gets a ~1 Mbit/s floor (94 s), never an unbounded wait.
+        let chunk = http_put_timeout(8 * 1024 * 1024);
+        assert!(chunk >= Duration::from_secs(90) && chunk <= Duration::from_secs(120), "{chunk:?}");
     }
 }

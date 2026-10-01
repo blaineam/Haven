@@ -3149,6 +3149,9 @@ object HavenNet : InboundListener {
         // that work for a lane that would drop it.
         if (HavenOffline.enabled) return
         if (!ready) return
+        // A hybrid-PQ seal per member per circle: never on main. RootScreen calls this on every
+        // ON_RESUME, and the e2e launch sampled main parked in sendHello → sealCircleMedia.
+        if (onMainThread()) { scope.launch { syncWithContacts() }; return }
         val nowMs = System.currentTimeMillis()
         val resendHistory = nowMs - lastHistoryResendMs > 180_000   // ~3 min, not every tick
         val snapshot = dialTargets(DEFAULT_CIRCLE)   // account id (handle) + device ids (actual reach)
@@ -6971,6 +6974,8 @@ object HavenNet : InboundListener {
     /** Fetch missing feed media: try the circle relay (haven/media/<ref>) first, then ask contacts. */
     fun requestMissingMedia() {
         if (!ready) return
+        // It walks every circle's feed through the engine — off main, like the probe below.
+        if (onMainThread()) { scope.launch { requestMissingMedia() }; return }
         // OFF-THREAD, always. requestMissingMedia is called from the main thread (foreground
         // resume, feed refresh), and an open-probe is real crypto over real bytes — on a mid-range
         // phone with a 167 MB blob that is a visible UI freeze. It also decrypts file→file for a

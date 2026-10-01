@@ -42,8 +42,18 @@ object ShareShortcuts {
      * Rank matters: the system shows shortcuts in the order they were pushed, so pushing
      * oldest-first leaves the most recent conversation at the end of the row.
      */
+    /** One serial background lane, so overlapping refreshes publish in order. */
+    private val refreshLane = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "haven-share-shortcuts").apply { isDaemon = true }
+    }
+
     fun refresh(context: Context) {
         val ctx = context.applicationContext
+        // Decodes every DM thread (last activity) through the engine — never on main (ON_RESUME).
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            refreshLane.execute { runCatching { refresh(ctx) } }
+            return
+        }
         if (!ProfileStore.get(ctx).shareSuggestions) { removeAll(ctx); return }
         val threads = runCatching { HavenNet.engine.circles() }.getOrDefault(emptyList())
             .map { it.id }

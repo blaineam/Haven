@@ -104,4 +104,20 @@ class MainThreadEngineAccessTest {
         assertTrue("the Nearby callback is on main — the greeting must be launched off it",
             body.contains("scope.launch { greetNearbyPeer() }") && !body.contains("helloPayload("))
     }
+
+    @Test
+    fun `resume-time fan-outs hand themselves off main`() {
+        // RootScreen calls these from ON_RESUME (main); each seals or decodes through the engine.
+        val net = File(src, "core/HavenNet.kt").readText()
+        for ((fn, self) in listOf("fun syncWithContacts()" to "syncWithContacts()", "fun requestMissingMedia()" to "requestMissingMedia()")) {
+            val start = net.indexOf(fn)
+            assertTrue(fn, start >= 0)
+            val body = block(net, net.indexOf('{', start))
+            assertTrue("$fn must offload when called on main",
+                body.contains("if (onMainThread()) { scope.launch { $self }; return }"))
+        }
+        val shortcuts = File(src, "core/ShareShortcuts.kt").readText()
+        assertTrue("ShareShortcuts.refresh must offload when called on main",
+            shortcuts.contains("refreshLane.execute"))
+    }
 }

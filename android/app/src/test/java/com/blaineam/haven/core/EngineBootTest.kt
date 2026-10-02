@@ -24,6 +24,9 @@ class EngineBootTest {
     @Test
     fun mainStaysResponsiveWhileBootWaitsOnAHeldInitLock() = runBlocking {
         val mainExec = Executors.newSingleThreadExecutor { r -> Thread(r, "fake-main") }
+        // Compare thread IDENTITY, never names: with coroutine debug mode on (the default under -ea)
+        // a running coroutine renames its thread "fake-main @coroutine#N".
+        val mainThread = mainExec.submit<Thread> { Thread.currentThread() }.get(5, TimeUnit.SECONDS)
         val main = mainExec.asCoroutineDispatcher()
         val workerExec = Executors.newSingleThreadExecutor { r -> Thread(r, "fake-worker") }
         val worker = workerExec.asCoroutineDispatcher()
@@ -36,12 +39,15 @@ class EngineBootTest {
         }.apply { start() }
         assertTrue(lockHeld.await(5, TimeUnit.SECONDS))
         try {
-            val bootThread = CompletableDeferred<String>()
+            val bootThread = CompletableDeferred<Thread>()
+            val resumedOn = CompletableDeferred<Thread>()
             val scope = CoroutineScope(main)
             // "RootScreen LaunchedEffect": boots via EngineBoot, then continues on main.
             val boot = scope.launch {
-                EngineBoot.offMain(worker) { synchronized(initLock) { bootThread.complete(Thread.currentThread().name) } }
-                assertEquals("fake-main", Thread.currentThread().name)
+                EngineBoot.offMain(worker) { synchronized(initLock) { bootThread.complete(Thread.currentThread()) } }
+                // Record, don't assert, in here: a throw inside this scope is an UNCAUGHT exception
+                // that kotlinx-coroutines-test pins on whichever runTest happens to run next.
+                resumedOn.complete(Thread.currentThread())
             }
             // A frame / input event posted to main while the boot is parked on the lock must run now.
             val frame = CompletableDeferred<Unit>()
@@ -50,7 +56,8 @@ class EngineBootTest {
             assertTrue("boot must still be waiting on the held lock", boot.isActive)
             release.countDown()
             withTimeout(5_000) { boot.join() }
-            assertNotEquals("fake-main", bootThread.await())
+            assertNotEquals(mainThread, bootThread.await())
+            assertEquals("the caller resumes on its own dispatcher", mainThread, resumedOn.await())
         } finally {
             release.countDown(); holder.join(5_000)
             main.close(); worker.close()

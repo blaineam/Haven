@@ -5166,6 +5166,7 @@ object HavenNet : InboundListener {
     private val relaySaveLock = Any()
     /** The relay table as last WRITTEN, minus last-seen stamps (see [saveRelayNodes]). */
     private var lastRelayShape: String? = null
+    private var lastRelayEntryShapes: Map<String, RelayEntry> = emptyMap()
 
     /** Ensure every relay referenced by relayNodes / the default has a RelayEntry (legacy migration). */
     private fun migrateRelayEntries() {
@@ -9587,9 +9588,15 @@ object HavenNet : InboundListener {
         val o = JSONObject()
         relayNodes.forEach { (k, v) -> o.put(k, JSONArray().apply { v.forEach { put(it) } }) }
         val entriesArr = JSONArray()
-        val entriesShape = StringBuilder()   // the same, minus lastSeenMs
+        // The same, minus the two LWW STAMPS: lastSeenMs, and addedAtMs (max-merged from every
+        // re-announce — a host that re-announces its own relay with a fresh adoption stamp moved it
+        // on every echo). Losing ≤1 min of either on a crash changes no decision.
+        val entriesShape = StringBuilder()
+        val shapes = HashMap<String, RelayEntry>()
         relayEntries.values.forEach { e ->
-            entriesShape.append(e.copy(lastSeenMs = 0L).toString()).append('\n')
+            val bare = e.copy(lastSeenMs = 0L, addedAtMs = 0L)
+            shapes[e.hex] = bare
+            entriesShape.append(bare.toString()).append('\n')
             entriesArr.put(JSONObject().apply {
                 put("hex", e.hex); put("name", e.name); put("active", e.active)
                 put("lastSeenMs", e.lastSeenMs); put("isS3", e.isS3)
@@ -9625,6 +9632,20 @@ object HavenNet : InboundListener {
                 else -> { scope.launch { delay(waitMs); saveRelayNodes(stampFlush = true) }; return@synchronized }
             }
         }
+        if (com.blaineam.haven.BuildConfig.DEBUG && lastRelayShape != null) {
+            // PrefsChurn evidence: say WHAT moved (relay + field names; never values — tokens).
+            val moved = (shapes.keys + lastRelayEntryShapes.keys).mapNotNull { hex ->
+                val a = lastRelayEntryShapes[hex]; val b = shapes[hex]
+                when {
+                    a == b -> null
+                    a == null || b == null -> "${hex.take(8)}:${if (a == null) "added" else "removed"}"
+                    else -> "${hex.take(8)}:" + RelayEntry::class.java.declaredFields.filter { f ->
+                        f.isAccessible = true; f.get(a) != f.get(b) }.joinToString(",") { it.name }
+                }
+            }
+            Log.d(TAG, "relay table write (structural): ${moved.ifEmpty { listOf("non-entry state") }.joinToString(" ")}")
+        }
+        lastRelayEntryShapes = shapes
         lastRelayShape = shape
         relaySeenSaves.wrote(now)
         // Write the new format and clear the legacy key (completes the migration).

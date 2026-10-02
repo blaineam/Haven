@@ -649,8 +649,13 @@ final class CallManager: NSObject, ObservableObject {
 
     #if !os(macOS)
     /// Throwaway call UUIDs reported only to satisfy PushKit. A CallKit action that names one of
-    /// them (a tap in the instant before it ends) must never reach the real call.
-    private var pushKitPlaceholders: Set<UUID> = []
+    /// them must never reach the real call. They are REMEMBERED, not dropped when we end them:
+    /// CallKit defers the end until a minimum ring duration and meanwhile sends its own
+    /// CXEndCallAction for the placeholder (seen ~70 ms after our reportCall) — forgetting the
+    /// UUID first let that action fall through to reallyEnd() and hang up the real ringing call.
+    /// Bounded: oldest dropped past `pushKitPlaceholderCap` (a few hundred bytes at most).
+    private var pushKitPlaceholders: [UUID] = []
+    private static let pushKitPlaceholderCap = 32
     #endif
 
     /// PushKit's mandatory report for a push that must not ring: report a throwaway call, then
@@ -662,7 +667,8 @@ final class CallManager: NSObject, ObservableObject {
             return
         }
         let uuid = UUID()
-        pushKitPlaceholders.insert(uuid)
+        pushKitPlaceholders.append(uuid)
+        if pushKitPlaceholders.count > Self.pushKitPlaceholderCap { pushKitPlaceholders.removeFirst() }
         let update = CXCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: "Haven")
         update.localizedCallerName = "Haven"
@@ -671,7 +677,6 @@ final class CallManager: NSObject, ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.provider?.reportCall(with: uuid, endedAt: nil, reason: .remoteEnded)
-                self.pushKitPlaceholders.remove(uuid)
             }
         }
         #endif
@@ -2062,13 +2067,17 @@ extension CallManager: CXProviderDelegate {
     }
     nonisolated func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         Task { @MainActor in
-            if self.isPushKitPlaceholder(action.callUUID) { action.fulfill(); return }
+            if self.isPushKitPlaceholder(action.callUUID) {
+                HavenLog.call("CXAnswerCallAction for a PushKit placeholder — ignored"); action.fulfill(); return
+            }
             self.reallyAccept(); action.fulfill()
         }
     }
     nonisolated func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
         Task { @MainActor in
-            if self.isPushKitPlaceholder(action.callUUID) { action.fulfill(); return }
+            if self.isPushKitPlaceholder(action.callUUID) {
+                HavenLog.call("CXEndCallAction for a PushKit placeholder — ignored"); action.fulfill(); return
+            }
             self.reallyEnd(); action.fulfill()
         }
     }

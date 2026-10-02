@@ -13,13 +13,16 @@ package com.blaineam.haven.core
  *
  * [request] answers how long to wait before writing: 0 = write now, > 0 = arm ONE deferred write
  * for then, [ALREADY_ARMED] = one is already armed and will pick this change up. [wrote] records a
- * write from ANY path (a structural save flushes pending stamps too), so a deferred write that finds
- * nothing older than the last write simply re-saves identical content — a no-op for
- * SharedPreferences, which skips the disk when nothing changed.
+ * write from ANY path (a structural save flushes pending stamps too) and DISARMS the deferred one:
+ * the deferred task must call [takeDeferred] with the generation it was armed under and skip when
+ * it returns false. (Without that, every structural write left its predecessor's deferred write
+ * still scheduled, and each orphan became a self-perpetuating once-a-minute chain — gate-8 verify
+ * run: three relay-table writes a minute from three such chains.)
  */
 class WriteCoalescer(private val minIntervalMs: Long) {
     private var lastWriteMs: Long? = null
     private var armedForMs: Long? = null
+    private var generation = 0L
 
     @Synchronized
     fun request(nowMs: Long): Long {
@@ -29,7 +32,22 @@ class WriteCoalescer(private val minIntervalMs: Long) {
         if (last == null || nowMs < last || nowMs - last >= minIntervalMs) return 0L
         val due = last + minIntervalMs
         armedForMs = due
+        generation++
         return due - nowMs
+    }
+
+    /** The generation the most recent positive [request] armed. Read it right after [request]
+     *  (same thread, before yielding) and hand it to [takeDeferred]. */
+    @Synchronized
+    fun armedGeneration(): Long = generation
+
+    /** A deferred write armed under [gen] is due: true = do it now; false = a write already
+     *  happened since (and carried the change), so skip. */
+    @Synchronized
+    fun takeDeferred(gen: Long): Boolean {
+        if (armedForMs == null || gen != generation) return false
+        armedForMs = null
+        return true
     }
 
     /** A write happened (deferred or not, from this path or a structural save). */

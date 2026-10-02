@@ -8150,7 +8150,10 @@ object HavenNet : InboundListener {
         when (val waitMs = c.request(System.currentTimeMillis())) {
             0L -> { c.wrote(System.currentTimeMillis()); runCatching(write) }
             WriteCoalescer.ALREADY_ARMED -> Unit
-            else -> scope.launch { delay(waitMs); c.wrote(System.currentTimeMillis()); runCatching(write) }
+            else -> {
+                val gen = c.armedGeneration()
+                scope.launch { delay(waitMs); if (c.takeDeferred(gen)) { c.wrote(System.currentTimeMillis()); runCatching(write) } }
+            }
         }
     }
     private const val UPLOAD_PROGRESS_SAVE_MS = 10_000L
@@ -9629,10 +9632,14 @@ object HavenNet : InboundListener {
             when (val waitMs = relaySeenSaves.request(now)) {
                 0L -> Unit
                 WriteCoalescer.ALREADY_ARMED -> return@synchronized
-                else -> { scope.launch { delay(waitMs); saveRelayNodes(stampFlush = true) }; return@synchronized }
+                else -> {
+                    val gen = relaySeenSaves.armedGeneration()
+                    scope.launch { delay(waitMs); if (relaySeenSaves.takeDeferred(gen)) saveRelayNodes(stampFlush = true) }
+                    return@synchronized
+                }
             }
         }
-        if (com.blaineam.haven.BuildConfig.DEBUG && lastRelayShape != null) {
+        if (com.blaineam.haven.BuildConfig.DEBUG && lastRelayShape != null && shape != lastRelayShape) {
             // PrefsChurn evidence: say WHAT moved (relay + field names; never values — tokens).
             val moved = (shapes.keys + lastRelayEntryShapes.keys).mapNotNull { hex ->
                 val a = lastRelayEntryShapes[hex]; val b = shapes[hex]

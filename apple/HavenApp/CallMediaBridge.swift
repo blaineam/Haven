@@ -120,7 +120,23 @@ final class CallMediaBridge {
     /// How many times [startAudio] has deferred waiting for a usable input format.
     private var audioStartAttempts = 0
 
+    /// The call's audio gate cleared (see CallAudioGate.swift): start the relay's engine if a relay
+    /// is running and its audio was held back.
+    func audioBecameAvailable() {
+        guard !activePeers.isEmpty, audioEngine == nil else { return }
+        startAudio()
+    }
+
     private func startAudio() {
+        // `AVAudioEngine.start()` reaches RemoteIO, which ABORTS the process when the audio server
+        // doesn't answer (a field crash: `AURemoteIO::Start` → `_ReportRPCTimeout`). Only start it
+        // once the call's audio gate has seen the device answer; until then the relay carries video
+        // only and `audioBecameAvailable` starts the engine later.
+        guard CallManager.shared.callAudioAvailable else {
+            HavenLog.call("hairpin audio: waiting for the audio gate — relaying video only for now")
+            CallManager.shared.requestCallAudio(reason: "hairpin")
+            return
+        }
         let engine = AVAudioEngine()
         let input = engine.inputNode
 

@@ -56,6 +56,74 @@ final class CallManager: NSObject, ObservableObject {
     /// start audio" instead of sitting on "Connecting…" forever — and, more to the point, so this
     /// state is a message rather than the `fatalError` it used to be.
     @Published private(set) var mediaFailed = false
+    /// The device's audio I/O would not start (wedged audio server, broken route) — the call runs on
+    /// without audio while `audioGate` keeps re-probing. Drives the in-call "Audio isn't available"
+    /// banner. Video and screen share are unaffected.
+    @Published private(set) var audioUnavailable = false
+
+    /// Decides when call audio may actually start. Apple's RemoteIO aborts the process when the
+    /// audio server doesn't answer, so nothing switches call audio on without this gate's say-so —
+    /// see CallAudioGate.swift for the crash it prevents.
+    private lazy var audioGate: CallAudioGate = {
+        let g = CallAudioGate(probe: AVAudioOutputProbe(),
+                              otherStartInFlight: { CallTones.shared.startInFlight })
+        g.onStateChange = { [weak self] _ in
+            guard let self else { return }
+            let show = self.audioGate.showsUnavailableBanner
+            if self.audioUnavailable != show { self.audioUnavailable = show }
+        }
+        g.onAvailable = { [weak self] in self?.callAudioBecameAvailable() }
+        return g
+    }()
+
+    /// Parks audio-unit STOPS (closing the last peer connection, disabling WebRTC audio, stopping the
+    /// hairpin engine) behind a fresh probe while call audio is running — a server that wedged
+    /// mid-call aborts the process on `AURemoteIO::Stop` just as it does on start.
+    private lazy var audioCloser = CallAudioCloser(
+        gate: CallAudioGate(probe: AVAudioOutputProbe(), otherStartInFlight: { CallTones.shared.startInFlight }))
+
+    /// Whether WebRTC's audio unit (iOS) is live, i.e. whether a stop would reach RemoteIO.
+    private var webRTCAudioLive: Bool {
+        #if os(iOS)
+        return RTCAudioSession.sharedInstance().isAudioEnabled
+        #else
+        return false   // native macOS: HAL device, no RemoteIO abort on stop
+        #endif
+    }
+
+    /// Run an audio-unit stop now, or once the audio server is known to answer (see `audioCloser`).
+    func retireCallAudio(_ what: String, audioLive: Bool, _ action: @escaping () -> Void) {
+        audioCloser.close(what, audioLive: audioLive, action)
+    }
+
+    /// Release a connection's camera/tracks now; close the connection (an audio-unit stop when it is
+    /// the last one) through the closer.
+    private func retire(_ call: WebRTCCall) {
+        call.releaseLocalMedia()
+        audioCloser.close("peer connection", audioLive: webRTCAudioLive) { call.closeConnection() }
+    }
+
+    /// Whether call audio I/O may run right now (the hairpin bridge checks before starting its engine).
+    var callAudioAvailable: Bool { audioGate.isAvailable }
+
+    /// Ask the gate for audio; `callAudioBecameAvailable` fires once it is safe.
+    func requestCallAudio(reason: String) { audioGate.request(reason: reason) }
+
+    /// The banner's Retry: probe again now rather than waiting out the backoff.
+    func retryCallAudio() { audioGate.retryNow() }
+
+    /// The gate saw the device answer: switch on whatever audio the call wants.
+    private func callAudioBecameAvailable() {
+        guard active else { return }
+        #if os(iOS)
+        let rtc = RTCAudioSession.sharedInstance()
+        if !rtc.isAudioEnabled {
+            HavenLog.call("WebRTC audio enable (audio gate cleared)")
+            rtc.isAudioEnabled = true
+        }
+        #endif
+        CallMediaBridge.shared.audioBecameAvailable()
+    }
     /// Collapsed to a floating pill so the user can use the rest of the app mid-call.
     @Published var minimized = false
     /// Per-peer remote video tracks for the grid (nil tile = audio-only / no camera).
@@ -122,8 +190,11 @@ final class CallManager: NSObject, ObservableObject {
     /// so it can't disturb a working direct call.
     func setNativeAudioSuspendedForHairpin(_ suspended: Bool) {
         #if os(iOS)
-        let rtc = RTCAudioSession.sharedInstance()
-        rtc.isAudioEnabled = !suspended
+        if suspended {
+            RTCAudioSession.sharedInstance().isAudioEnabled = false
+        } else {
+            enableWebRTCAudio(reason: "hairpin-released")
+        }
         #endif
     }
     /// One pairwise connection per OTHER participant.
@@ -1280,7 +1351,7 @@ final class CallManager: NSObject, ObservableObject {
 
     /// Remove a peer from the roster + tear down its connection + its remote tile.
     private func dropPeer(_ peer: String) {
-        peers[peer]?.call.close()
+        if let c = peers[peer]?.call { retire(c) }
         peers[peer] = nil
         if hairpinPeers.remove(peer) != nil { CallMediaBridge.shared.deactivate(remote: peer) }
         remoteVideoTracks[peer] = nil
@@ -1315,6 +1386,11 @@ final class CallManager: NSObject, ObservableObject {
                 }
             }
         }
+        #else
+        // Native macOS: WebRTC drives the HAL device itself (no RemoteIO, no manual-audio switch),
+        // but the probe still tells the user when the output device is hung and gates the hairpin
+        // bridge's AVAudioEngine.
+        audioGate.request(reason: "startMesh")
         #endif
     }
 
@@ -1337,17 +1413,33 @@ final class CallManager: NSObject, ObservableObject {
         try? rtc.overrideOutputAudioPort(.speaker)
         rtc.unlockForConfiguration()
         guard forceEnable else { return }
+        // Bounce only on recovery paths — not every ICE "connected" tick.
+        enableWebRTCAudio(reason: reason,
+                          bounce: reason.contains("recover") || reason.contains("Deactivate") || reason.contains("reset"))
+        #endif
+    }
+
+    #if os(iOS)
+    /// The ONLY place WebRTC's audio unit is switched on. Under `useManualAudio` WebRTC initializes
+    /// RemoteIO the instant `isAudioEnabled` goes true, and on a hung audio server that
+    /// initialization aborts the process. So it goes true only once `audioGate` has seen the
+    /// device answer; until then the request is parked and `callAudioBecameAvailable` finishes it.
+    private func enableWebRTCAudio(reason: String, bounce: Bool = false) {
+        guard audioGate.isAvailable else {
+            audioGate.request(reason: reason)
+            return
+        }
+        let rtc = RTCAudioSession.sharedInstance()
         if !rtc.isAudioEnabled {
             HavenLog.call("WebRTC audio enable (\(reason))")
             rtc.isAudioEnabled = true
-        } else if reason.contains("recover") || reason.contains("Deactivate") || reason.contains("reset") {
-            // Bounce only on recovery paths — not every ICE "connected" tick.
+        } else if bounce {
             rtc.isAudioEnabled = false
             rtc.isAudioEnabled = true
             HavenLog.call("WebRTC audio bounce (\(reason))")
         }
-        #endif
     }
+    #endif
 
     #if os(iOS)
     // MARK: - Audio-session recovery
@@ -1364,7 +1456,13 @@ final class CallManager: NSObject, ObservableObject {
         audioObserversInstalled = true
         let nc = NotificationCenter.default
         nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { _ in
-            Task { @MainActor in CallManager.shared.recoverCallAudio(reason: "media services reset") }
+            Task { @MainActor in
+                // The audio server just restarted under us: what the gate knew is stale, and
+                // WebRTC's unit is dead. Switch it off and re-probe before it is rebuilt.
+                RTCAudioSession.sharedInstance().isAudioEnabled = false
+                CallManager.shared.audioGate.invalidate(reason: "media services reset")
+                CallManager.shared.recoverCallAudio(reason: "media services reset")
+            }
         }
         nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { note in
             guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
@@ -1388,9 +1486,9 @@ final class CallManager: NSObject, ObservableObject {
         try? rtc.setActive(true)
         try? rtc.overrideOutputAudioPort(speakerOn ? .speaker : .none)
         rtc.unlockForConfiguration()
-        // Bounce the audio unit so WebRTC tears down + rebuilds capture/playout on the new session.
-        rtc.isAudioEnabled = false
-        rtc.isAudioEnabled = true
+        // Bounce the audio unit so WebRTC tears down + rebuilds capture/playout on the new session —
+        // through the gate, so a session that came back broken can't take the app down with it.
+        enableWebRTCAudio(reason: "recover: \(reason)", bounce: true)
     }
 
     private func syncSpeakerState() {
@@ -1726,6 +1824,8 @@ final class CallManager: NSObject, ObservableObject {
             "video_on": videoOn,
             "participants": participants,
             "hairpin_peers": Array(hairpinPeers),
+            "audio_unavailable": audioUnavailable,
+            "audio_gate": "\(audioGate.state)",
             "remote_video_tracks": Array(remoteVideoTracks.keys),
             "inbound_audio_bytes": audioTotal,
             "inbound_video_bytes": videoTotal,
@@ -1799,6 +1899,8 @@ final class CallManager: NSObject, ObservableObject {
         }
         ringTimeoutTimer?.invalidate(); ringTimeoutTimer = nil
         mediaFailed = false   // per-attempt, never carried into the next call
+        audioGate.reset()
+        audioUnavailable = false
         CallTones.shared.stop()
         stopInAppRinging()
         stopSpeakerDetection()
@@ -1809,14 +1911,16 @@ final class CallManager: NSObject, ObservableObject {
         if screenShareOn { ScreenShareManager.shared.stop() }
         ScreenShareManager.shared.onFrame = nil
         ScreenShareManager.shared.onStop = nil
-        for conn in peers.values { conn.call.close() }
+        let wasLive = webRTCAudioLive
+        for conn in peers.values { retire(conn.call) }
         peers.removeAll()
         #if os(iOS)
-        let audio = RTCAudioSession.sharedInstance()
-        audio.isAudioEnabled = false
-        #if targetEnvironment(macCatalyst)
-        audio.lockForConfiguration(); try? audio.setActive(false); audio.unlockForConfiguration()
-        #endif
+        // Behind the connection closes (same closer, same order). Skipped if a NEW call has started
+        // by the time a parked stop runs — that call owns the unit now.
+        audioCloser.close("WebRTC audio", audioLive: wasLive) { [weak self] in
+            guard self?.active != true else { return }
+            RTCAudioSession.sharedInstance().isAudioEnabled = false
+        }
         #endif
         remoteVideoTracks.removeAll(); remoteScreenTracks.removeAll(); remoteCameraOff.removeAll(); participants = []
         localVideoTrack = nil; videoOn = false; screenShareOn = false
@@ -1889,9 +1993,10 @@ extension CallManager: CXProviderDelegate {
     nonisolated func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
         let rtc = RTCAudioSession.sharedInstance()
         rtc.audioSessionDidActivate(audioSession)
-        rtc.isAudioEnabled = true
         // Re-assert call category after CallKit hands us the session (otherwise we can stay in
-        // a silent/playback-only route and "Connected" with no hearable audio).
+        // a silent/playback-only route and "Connected" with no hearable audio). WebRTC's unit is
+        // switched on THERE, through the audio gate — never directly here: on a hung audio server
+        // its initialization aborts the process.
         Task { @MainActor in
             self.ensureWebRTCAudioLive(reason: "callkit-didActivate", forceEnable: true)
         }
@@ -2185,6 +2290,7 @@ struct CallOverlay: View {
                 }
                 .padding(.top, 8)
                 .padding(.horizontal, 20)
+                if call.audioUnavailable { audioUnavailableBanner }
                 Spacer()
                 controls.padding(.bottom, 16)
             }
@@ -2203,6 +2309,30 @@ struct CallOverlay: View {
             ScreenPickerSheet()
         }
         #endif
+    }
+
+    /// The device's audio I/O would not start, so the call is running without it (video and screen
+    /// share still work). The gate is already re-probing with backoff; Retry just probes now.
+    private var audioUnavailableBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "speaker.slash.fill")
+            Text("Audio isn't available — trying again")
+                .font(.footnote.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Retry") { CallManager.shared.retryCallAudio() }
+                .font(.footnote.weight(.bold))
+                .buttonStyle(.plain)
+                .padding(.horizontal, 10).padding(.vertical, 4)
+                .background(.white.opacity(0.25), in: Capsule())
+                .accessibilityIdentifier("callAudioRetry")
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .background(.black.opacity(0.55), in: Capsule())
+        .padding(.horizontal, 20)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("callAudioUnavailable")
+        .transition(.opacity)
     }
 
     /// A peer's shared screen filling the stage, with a thin filmstrip of participant tiles below.

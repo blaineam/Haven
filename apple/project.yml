@@ -447,6 +447,9 @@ targets:
       - path: HavenApp/MailboxIngest.swift
       # Call ringback/ringtone start off the main actor. AVFoundation only.
       - path: HavenApp/CallTones.swift
+      # Whether call audio may start (RemoteIO aborts on a hung audio server) — the probe/decide/
+      # retry state machine. AVFoundation only; the probe is injected in tests.
+      - path: HavenApp/CallAudioGate.swift
       # Which self-sync merges owe an engine export (a circle record's relays do not).
       - path: HavenApp/SelfSyncEngineDiff.swift
       # Whether the bell's list/watermark persist (a demo launch pulls its fresh engine from 0).

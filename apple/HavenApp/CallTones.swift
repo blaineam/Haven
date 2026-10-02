@@ -32,6 +32,10 @@ final class CallTones {
         driver.stop()
     }
 
+    /// True while a tone's `play()` is still inside AudioToolbox — possibly stuck on a wedged
+    /// device. `CallAudioGate` must not let RemoteIO start while it is (see CallAudioGate.swift).
+    var startInFlight: Bool { driver.startInFlight }
+
     private func start(_ tone: CallTone) {
         guard !sounding else { return }
         sounding = true
@@ -74,6 +78,13 @@ final class CallToneDriver: @unchecked Sendable {
     private let lock = NSLock()
     private var generation: UInt64 = 0     // guarded by `lock`; bumped by every start and stop
     private var player: CallTonePlayer?    // confined to `queue`
+    private var starting = false           // guarded by `lock`; true while `play()` runs
+
+    /// Whether a `play()` is executing right now (thread-safe).
+    var startInFlight: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return starting
+    }
 
     init(makePlayer: @escaping @Sendable (Data, Float) -> CallTonePlayer?) {
         self.makePlayer = makePlayer
@@ -87,7 +98,9 @@ final class CallToneDriver: @unchecked Sendable {
             player = nil
             guard let wav = tone.wav, let p = makePlayer(wav, tone.volume) else { return }
             player = p
+            setStarting(true)
             p.play()
+            setStarting(false)
             if !isCurrent(gen) {
                 p.stop()
                 if player === p { player = nil }
@@ -105,6 +118,10 @@ final class CallToneDriver: @unchecked Sendable {
 
     /// Blocks until every start/stop queued so far has run. Tests only.
     func drain() { queue.sync {} }
+
+    private func setStarting(_ on: Bool) {
+        lock.lock(); starting = on; lock.unlock()
+    }
 
     private func bump() -> UInt64 {
         lock.lock(); defer { lock.unlock() }

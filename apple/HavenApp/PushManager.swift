@@ -221,23 +221,24 @@ extension PushManager: PKPushRegistryDelegate {
     }
     nonisolated func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {}
 
-    /// A VoIP push arrived — we MUST report a new incoming call synchronously (iOS kills the app
-    /// otherwise). The registry runs on the main queue, so we're already main-isolated here.
+    /// A VoIP push arrived — we MUST report a call to CallKit before `completion()` on EVERY path,
+    /// ringing or not (iOS terminates the app otherwise). `handleVoipPush` guarantees the report;
+    /// a push that shouldn't ring becomes a placeholder call that's ended immediately. The registry
+    /// runs on the main queue, so we're already main-isolated here (and CallManager.shared — which
+    /// owns the CXProvider — is created synchronously on this thread if this push launched us).
     nonisolated func pushRegistry(_ registry: PKPushRegistry,
                                   didReceiveIncomingPushWith payload: PKPushPayload,
                                   for type: PKPushType,
                                   completion: @escaping () -> Void) {
         MainActor.assumeIsolated {
-            var name = "Someone", peerHex = ""
+            var caller: VoipPushCaller?
             if let e = payload.dictionaryPayload["e"] as? String, e != "_",
                let sealed = Data(base64Encoded: e), let seed = SharedSeed.read(),
                // Authenticated open: only a validly-signed caller payload rings the phone (audit H2).
-               let opened = openSignedNotificationWithSeed(seed: seed, blob: sealed),
-               let obj = try? JSONSerialization.jsonObject(with: opened.data) as? [String: String] {
-                name = obj["t"] ?? name
-                peerHex = obj["h"] ?? ""
+               let opened = openSignedNotificationWithSeed(seed: seed, blob: sealed) {
+                caller = VoipPushCaller.parse(opened: opened.data)
             }
-            CallManager.shared.reportIncomingFromPush(name: name, peerHex: peerHex)
+            CallManager.shared.handleVoipPush(caller: caller)
             completion()
         }
     }

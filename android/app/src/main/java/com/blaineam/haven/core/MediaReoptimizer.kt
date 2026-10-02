@@ -136,6 +136,15 @@ object MediaReoptimizer {
     @Volatile private var cancelRequested = false
 
     /**
+     * "Is the engine up?" as [scan] asks it. Production answers from [HavenNet.isReady]; the seam
+     * exists because the instrumented-test process is SHARED — any earlier test that calls
+     * `HavenNet.init` boots the real engine against whatever identity the device carries (a QA
+     * emulator holds a live circle with real shared media), so "before the engine is up" cannot be
+     * reached by test ordering. A test pins this to `false` to drive the pre-engine path for real.
+     */
+    @Volatile internal var engineReady: () -> Boolean = { HavenNet.isReady }
+
+    /**
      * THE single-flight latch — "one encode in flight" is a hard requirement of this feature, not a
      * nicety, and [running] alone cannot enforce it: it is a Compose state read on one thread and
      * written on another, so two taps landing together can both observe `false` and both proceed.
@@ -219,6 +228,14 @@ object MediaReoptimizer {
         // report a stale/empty remaining count. The Stop control only exists while a run is in flight.
         cancelRequested = false
         try {
+            // Before the engine is up there is nothing of mine to judge: measured, and empty. Said
+            // here rather than left to HavenNet's own not-ready early return, so this driver's
+            // pre-engine contract does not hang on a guard in another file.
+            if (!engineReady()) {
+                candidates.value = emptyList()
+                hasScanned.value = true
+                return@withContext
+            }
             val firstShared = HashMap<String, Long>()
             val circleOf = HashMap<String, String>()
             val needsPoster = HashSet<String>()

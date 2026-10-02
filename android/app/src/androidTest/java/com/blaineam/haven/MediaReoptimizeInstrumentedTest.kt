@@ -130,22 +130,49 @@ class MediaReoptimizeInstrumentedTest {
         // Boot order, and the BOUNDING promise. `MediaReoptimizer.init` is wired into HavenNet's
         // startup purely to read the persisted skip set; it must not touch the engine, must not
         // throw when nothing else is initialised, and above all must not start any work of its own.
-        // A scan against a not-yet-ready HavenNet has to come back cleanly with nothing to do.
-        com.blaineam.haven.core.MediaReoptimizer.init(ctx)
-        assertFalse("init must not start a run", com.blaineam.haven.core.MediaReoptimizer.running.value)
-        assertFalse("init must not start a scan", com.blaineam.haven.core.MediaReoptimizer.scanning.value)
+        // A scan against a not-yet-ready engine has to come back cleanly with nothing to do.
+        //
+        // "Not yet ready" is PINNED, not hoped for: this process is shared with every other
+        // instrumented class, and `CoreInstrumentedTest` boots the real HavenNet against the
+        // device's persisted identity. On a QA emulator that identity has a live circle full of
+        // shared media, so an unpinned scan here found real candidates whenever that class ran
+        // first — the gate-9 red.
+        val reoptimizer = com.blaineam.haven.core.MediaReoptimizer
+        val savedReady = reoptimizer.engineReady
+        val savedCandidates = reoptimizer.candidates.value
+        reoptimizer.engineReady = { false }
+        try {
+            reoptimizer.init(ctx)
+            assertFalse("init must not start a run", reoptimizer.running.value)
+            assertFalse("init must not start a scan", reoptimizer.scanning.value)
 
-        com.blaineam.haven.core.MediaReoptimizer.scan()
+            // Stale candidates from an earlier measurement must not survive a pre-engine scan.
+            reoptimizer.candidates.value = listOf(
+                com.blaineam.haven.core.MediaReoptimizer.Candidate(
+                    ref = "img_stale", circleId = "c",
+                    work = com.blaineam.haven.core.MediaReoptimizer.Work.REENCODE,
+                    shape = MediaOptimizationTarget.Shape(5_000_000, 4000, "image/jpeg", 0, 0.0, "test"),
+                    firstSharedMs = 0, legacyByAge = false,
+                )
+            )
+            reoptimizer.hasScanned.value = false
 
-        assertTrue("a completed scan must say so, even when it found nothing",
-            com.blaineam.haven.core.MediaReoptimizer.hasScanned.value)
-        assertTrue(com.blaineam.haven.core.MediaReoptimizer.candidates.value.isEmpty())
-        assertFalse(com.blaineam.haven.core.MediaReoptimizer.scanning.value)
-        assertEquals(0L, com.blaineam.haven.core.MediaReoptimizer.pendingBytes)
+            reoptimizer.scan()
 
-        // And run() with nothing queued is a no-op rather than a crash.
-        com.blaineam.haven.core.MediaReoptimizer.run()
-        assertFalse(com.blaineam.haven.core.MediaReoptimizer.running.value)
+            assertTrue("a completed scan must say so, even when it found nothing",
+                reoptimizer.hasScanned.value)
+            assertTrue("a pre-engine scan must find nothing, found: ${reoptimizer.candidates.value}",
+                reoptimizer.candidates.value.isEmpty())
+            assertFalse(reoptimizer.scanning.value)
+            assertEquals(0L, reoptimizer.pendingBytes)
+
+            // And run() with nothing queued is a no-op rather than a crash.
+            reoptimizer.run()
+            assertFalse(reoptimizer.running.value)
+        } finally {
+            reoptimizer.engineReady = savedReady
+            reoptimizer.candidates.value = savedCandidates
+        }
     }
 
     /**
@@ -173,6 +200,9 @@ class MediaReoptimizeInstrumentedTest {
         // this test would encode instead of stopping.
         com.blaineam.haven.core.LocalMedia.init(ctx)
         val saved = com.blaineam.haven.core.MediaReoptimizer.candidates.value
+        // The trailing re-scan must not wander into the device's real library (see the test above).
+        val savedReady = com.blaineam.haven.core.MediaReoptimizer.engineReady
+        com.blaineam.haven.core.MediaReoptimizer.engineReady = { false }
         try {
             // Bigger than any disk, so hasDiskHeadroom refuses it before anything is encoded.
             com.blaineam.haven.core.MediaReoptimizer.candidates.value = listOf(
@@ -193,6 +223,7 @@ class MediaReoptimizeInstrumentedTest {
                 "Stopped — not enough free space to re-encode safely.",
                 com.blaineam.haven.core.MediaReoptimizer.lastWarning.value)
         } finally {
+            com.blaineam.haven.core.MediaReoptimizer.engineReady = savedReady
             com.blaineam.haven.core.MediaReoptimizer.candidates.value = saved
             com.blaineam.haven.core.MediaReoptimizer.lastWarning.value = null
         }

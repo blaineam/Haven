@@ -12,9 +12,11 @@ use haven_p2p::identity::Identity;
 
 use crate::config::{Config, StoreBackend};
 
-/// Mesh anti-entropy cadence: every sibling is pulled from this often (and at once whenever a
-/// member teaches us a new one).
-const MESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// Mesh anti-entropy cadence: every sibling is pulled from this often, ON ITS OWN CLOCK (and at
+/// once whenever a member teaches us a new one) — see [`spawn_mesh`]. A pass against a live
+/// sibling is one LIST plus whatever it lacks, so 15 s keeps a fresh key's worst case well under
+/// half a minute without turning the LIST into a hot loop.
+const MESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 /// Longest one sibling's pull may take before the pass stops waiting for it (it resumes next pass;
 /// a pull is capped at a few dozen blobs, so a live sibling finishes well inside this).
 const MESH_PULL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -152,7 +154,7 @@ pub async fn run(cfg: Config, probation: bool) -> Result<bool> {
                 learned.len()
             );
 
-            // Mesh replication: pull from each sibling relay every 30s so the mailbox
+            // Mesh replication: pull from each sibling relay every MESH_INTERVAL so the mailbox
             // self-heals across the mesh (peers do the same in reverse → eventual set-union).
             // Configured `--peer` hexes UNION whatever members have taught us
             // (`VERB_ENROLL_RELAYS`). Re-read every cycle, so a relay added to the circle after
@@ -169,41 +171,30 @@ pub async fn run(cfg: Config, probation: bool) -> Result<bool> {
                 }
                 let mesh_node = node.clone();
                 let configured = cfg.peers.clone();
-                let me = my_hex.clone();
                 let kick = node.relay_mesh_kick();
-                tokio::spawn(async move {
-                    loop {
+                spawn_mesh(
+                    my_hex.clone(),
+                    move || {
                         let mut peers = configured.clone();
                         for learned in mesh_node.relay_learned_relays() {
                             if !peers.contains(&learned) {
                                 peers.push(learned);
                             }
                         }
-                        // Every sibling at once, each bounded. One after another, a single dead
-                        // entry (a sibling that is down, or an id a member taught that is no relay
-                        // at all) cost its full dial timeout in front of every live sibling, every
-                        // pass — the mesh's latency was the sum of everyone's failures.
-                        let mut pulls = tokio::task::JoinSet::new();
-                        for peer in peers.into_iter().filter(|p| p != &me) {
-                            // (never dial ourselves — self-connect guard)
-                            let n = mesh_node.clone();
-                            pulls.spawn(async move {
+                        peers
+                    },
+                    {
+                        let n = node.clone();
+                        move |peer: String| {
+                            let n = n.clone();
+                            async move {
                                 let _ = tokio::time::timeout(MESH_PULL_TIMEOUT, n.relay_sync_from(&peer)).await;
-                            });
-                        }
-                        while pulls.join_next().await.is_some() {}
-                        // Next pass on the tick — or at once when a member teaches us a new sibling.
-                        match &kick {
-                            Some(k) => {
-                                tokio::select! {
-                                    _ = tokio::time::sleep(MESH_INTERVAL) => {}
-                                    _ = k.notified() => {}
-                                }
                             }
-                            None => tokio::time::sleep(MESH_INTERVAL).await,
                         }
-                    }
-                });
+                    },
+                    kick,
+                    MESH_INTERVAL,
+                );
             }
 
             // Plain-HTTP blob interface — the DEFAULT cross-NAT media transport (the iroh blob
@@ -876,4 +867,154 @@ fn derive_subseed(seed: &[u8; 32], label: &[u8]) -> [u8; 32] {
     h.update(seed);
     h.update(label);
     h.finalize().into()
+}
+
+/// The mesh scheduler: ONE independent pull loop per sibling, plus a supervisor that keeps the set
+/// of loops in step with who our siblings are (`peers`, re-read every `interval` and at once on
+/// `kick`).
+///
+/// It used to be a single loop that pulled from every sibling in parallel and then waited for ALL
+/// of them before sleeping. That made the mesh's cadence the cadence of its SLOWEST sibling: one
+/// pull that crawled — a sibling a member taught that is no relay at all, an in-app relay on a
+/// busy phone, a dial walking out its timeout — held every healthy sibling's next pull hostage
+/// for up to the full pull timeout. e2e `multirelay` ("R_A pulls a fresh key from its sibling
+/// R_C") measured it: 72 s against a run-over-run median of 17 s for a key sitting on a local
+/// sibling. Now a slow sibling only ever delays itself.
+///
+/// `kick` (a member taught us a sibling new for some circle) re-reads the sibling set at once —
+/// a brand-new sibling's loop starts with an immediate pull — and wakes every existing loop, since
+/// teaching also lifts their dial cooldowns. A sibling that drops out of `peers` has its loop
+/// aborted on the next supervisor pass.
+fn spawn_mesh<P, F, Fut>(
+    me: String,
+    peers: P,
+    pull: F,
+    kick: Option<std::sync::Arc<tokio::sync::Notify>>,
+    interval: std::time::Duration,
+) -> tokio::task::JoinHandle<()>
+where
+    P: Fn() -> Vec<String> + Send + 'static,
+    F: Fn(String) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    struct SiblingLoop {
+        task: tokio::task::JoinHandle<()>,
+        wake: Arc<Notify>,
+    }
+    impl Drop for SiblingLoop {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    tokio::spawn(async move {
+        let mut loops: HashMap<String, SiblingLoop> = HashMap::new();
+        loop {
+            let mut want = peers();
+            want.retain(|p| p != &me); // never dial ourselves — self-connect guard
+            loops.retain(|p, _| want.contains(p)); // drop → abort
+            for peer in want {
+                if loops.contains_key(&peer) {
+                    continue;
+                }
+                let wake = Arc::new(Notify::new());
+                let (w, pull) = (wake.clone(), pull.clone());
+                let p = peer.clone();
+                let task = tokio::spawn(async move {
+                    loop {
+                        pull(p.clone()).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(interval) => {}
+                            _ = w.notified() => {}
+                        }
+                    }
+                });
+                loops.insert(peer, SiblingLoop { task, wake });
+            }
+            match &kick {
+                Some(k) => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(interval) => {}
+                        _ = k.notified() => {
+                            for l in loops.values() {
+                                l.wake.notify_one();
+                            }
+                        }
+                    }
+                }
+                None => tokio::time::sleep(interval).await,
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod mesh_tests {
+    use super::spawn_mesh;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    type Counts = Arc<Mutex<HashMap<String, usize>>>;
+
+    fn counting_pull(counts: Counts, slow: &'static str) -> impl Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync + Clone + 'static {
+        move |peer: String| {
+            let counts = counts.clone();
+            Box::pin(async move {
+                *counts.lock().unwrap().entry(peer.clone()).or_default() += 1;
+                if peer == slow {
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                }
+            })
+        }
+    }
+
+    /// The gate-9 regression: a sibling whose pull never finishes must not stop a healthy
+    /// sibling being pulled on its own cadence.
+    #[tokio::test]
+    async fn a_slow_sibling_never_delays_a_healthy_one() {
+        let counts: Counts = Arc::default();
+        let h = spawn_mesh(
+            "me".into(),
+            || vec!["me".to_string(), "slow".to_string(), "fast".to_string()],
+            counting_pull(counts.clone(), "slow"),
+            None,
+            Duration::from_millis(40),
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        h.abort();
+        let c = counts.lock().unwrap().clone();
+        assert!(c.get("fast").copied().unwrap_or(0) >= 5, "healthy sibling starved: {c:?}");
+        assert_eq!(c.get("slow").copied(), Some(1), "the stuck pull is still the first one: {c:?}");
+        assert_eq!(c.get("me"), None, "never dials itself: {c:?}");
+    }
+
+    /// A newly taught sibling is pulled at once on the kick, not on the next tick.
+    #[tokio::test]
+    async fn a_kick_pulls_a_newly_taught_sibling_at_once() {
+        let counts: Counts = Arc::default();
+        let siblings = Arc::new(Mutex::new(vec!["a".to_string()]));
+        let kick = Arc::new(tokio::sync::Notify::new());
+        let s = siblings.clone();
+        let h = spawn_mesh(
+            "me".into(),
+            move || s.lock().unwrap().clone(),
+            counting_pull(counts.clone(), ""),
+            Some(kick.clone()),
+            Duration::from_secs(3600),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(counts.lock().unwrap().get("a").copied(), Some(1));
+        siblings.lock().unwrap().push("b".into());
+        kick.notify_one();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let c = counts.lock().unwrap().clone();
+        h.abort();
+        assert_eq!(c.get("b").copied(), Some(1), "taught sibling pulled on the kick: {c:?}");
+        assert_eq!(c.get("a").copied(), Some(2), "the kick also wakes existing siblings: {c:?}");
+    }
 }

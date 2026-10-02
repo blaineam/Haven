@@ -8559,31 +8559,70 @@ final class FeedStore: ObservableObject {
                 Self.mediaProbed.insert(r.ref)
                 candidates.append((r.cid, r.postId, r.authorShort, r.ref, url))
             }
+            // 3. Apple holds PLAINTEXT, not the seal (see HeldMediaProbe): a content-addressed ref
+            //    whose digest matches is readable by definition, with no crypto. Only what fails
+            //    that (or has no digest to check) is read and handed to the engine below. Probing
+            //    plaintext with `openCircleMedia` failed for EVERY held ref, so this sweep used to
+            //    report the whole library "held-but-unreadable" and set peers re-sealing it.
             let toRead = candidates
-            let picked: [(cid: String, postId: String, authorShort: String, ref: String, sealed: Data)] =
+            let picked: [(cid: String, postId: String, authorShort: String, ref: String,
+                          digestMatches: Bool?, bytes: Data)] =
                 await Task.detached(priority: .utility) {
                     toRead.compactMap { c in
-                        // Bounded: a multi-hundred-MB clip must not be pulled into RAM just to probe it.
+                        // Bounded: a multi-hundred-MB clip must not be hashed or pulled into RAM to probe it.
                         let size = (try? c.url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                        guard size > 0, size <= Self.verifyHeldMediaMaxBytes,
-                              let data = try? Data(contentsOf: c.url) else { return nil }
-                        return (c.cid, c.postId, c.authorShort, c.ref, data)
+                        guard size > 0, size <= Self.verifyHeldMediaMaxBytes else { return nil }
+                        let digestMatches: Bool? = MediaStore.isVerifiable(c.ref)
+                            ? MediaStore.verify(c.ref, fileAt: c.url) : nil
+                        if digestMatches == true { return nil }   // the plaintext the ref names
+                        guard let data = try? Data(contentsOf: c.url) else { return nil }
+                        return (c.cid, c.postId, c.authorShort, c.ref, digestMatches, data)
                     }
                 }.value
-            // 3. The actual crypto, off-main.
+            // 4. The crypto, off-main — only for bytes that are not provably the right plaintext.
             let toOpen = picked
-            let unreadable: [(cid: String, postId: String, authorShort: String, ref: String)] = await engine.run(readOnly: true) { s in
-                toOpen.filter { s.openCircleMedia(circleId: $0.cid, sealed: $0.sealed) == nil }
-                      .map { ($0.cid, $0.postId, $0.authorShort, $0.ref) }
-            }
+            let allCircles = circleIds
+            let verdicts: [(cid: String, postId: String, authorShort: String, ref: String,
+                            verdict: HeldMediaVerdict, plaintext: Data?)] = toOpen.isEmpty ? [] :
+                await engine.run(readOnly: true) { s in
+                    toOpen.map { c in
+                        var plaintext: Data?
+                        let verdict = HeldMediaProbe.classify(
+                            digestMatches: c.digestMatches,
+                            opensAsSeal: {
+                                plaintext = s.openCircleMedia(circleId: c.cid, sealed: c.bytes)
+                                    ?? allCircles.lazy.compactMap { s.openCircleMedia(circleId: $0, sealed: c.bytes) }.first
+                                return plaintext != nil
+                            },
+                            parsesAsEnvelope: {
+                                HeldMediaProbe.diagnosisSaysEnvelope(s.mediaOpenDiagnosis(circleId: c.cid, sealed: c.bytes))
+                            })
+                        return (c.cid, c.postId, c.authorShort, c.ref, verdict, plaintext)
+                    }
+                }
             guard let self else { return }
             self.verifyHeldMediaInFlight = false
             guard self.engine === engine else { return }
-            for u in unreadable {
-                guard !Self.mediaAskedForReseal.contains(u.ref) else { continue }
-                Self.mediaAskedForReseal.insert(u.ref)
-                HavenLog.sync("held-but-unreadable \(u.ref.prefix(10)) — asking \(u.authorShort.prefix(8)) to re-seal")
-                self.requestMediaWhenAvailable(ref: u.ref, circleId: u.cid, postId: u.postId, authorShort: u.authorShort)
+            for v in verdicts {
+                switch v.verdict {
+                case .readable:
+                    continue
+                case .sealedAtRest:
+                    // Our own store, our own repair: keep the plaintext the seal opened to.
+                    if let p = v.plaintext, await MediaStore.shared.storeAsync(v.ref, p) {
+                        HavenLog.sync("held media \(v.ref.prefix(10)) was sealed at rest — stored its plaintext")
+                    }
+                case .corrupt:
+                    // Not the bytes the ref names — re-sealing them would only spread them. Drop the
+                    // local copy; the missing-media sweep fetches the real one like any other gap.
+                    HavenLog.sync("held media \(v.ref.prefix(10)) does not match its content address — dropping it to re-fetch")
+                    MediaStore.shared.delete(v.ref)
+                case .sealedUnopenable:
+                    guard !Self.mediaAskedForReseal.contains(v.ref) else { continue }
+                    Self.mediaAskedForReseal.insert(v.ref)
+                    HavenLog.sync("held-but-unreadable \(v.ref.prefix(10)) — asking \(v.authorShort.prefix(8)) to re-seal")
+                    self.requestMediaWhenAvailable(ref: v.ref, circleId: v.cid, postId: v.postId, authorShort: v.authorShort)
+                }
             }
         }
     }

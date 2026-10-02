@@ -437,6 +437,8 @@ targets:
       # `Engine` wraps the executor around the FFI handle in the app.
       - path: HavenApp/EngineLanes.swift
       - path: HavenApp/HeldMediaIndex.swift
+      # Whether a held (plaintext-at-rest) media file is readable, sealed, or corrupt.
+      - path: HavenApp/HeldMediaProbe.swift
       # The sync pill / media spinner / "media waiting" decisions — pure state, Foundation only.
       - path: HavenApp/SyncProgress.swift
       # Byte-identical device-roster re-deliveries (receive() reports a known roster as applied).

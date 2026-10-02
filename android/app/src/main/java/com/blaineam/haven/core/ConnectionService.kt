@@ -166,8 +166,7 @@ class ConnectionService : Service() {
 
         /** Drop the mic type when the call ends — holding it idle is a standing privacy indicator. */
         fun endCall(ctx: Context) {
-            projectionWanted = false
-            projectionCallback = null
+            onMain { projectionWanted = false; projectionCallback = null }
             if (!micWanted) return
             micWanted = false
             // Only re-assert the plain service if the user actually wants it running; otherwise a
@@ -179,9 +178,15 @@ class ConnectionService : Service() {
         /** True while a screen share holds the projection type. Sticky — see onStartCommand. */
         @Volatile private var projectionWanted = false
 
-        /** Waiting for [onStartCommand] to finish the mediaProjection promotion. Main thread only. */
+        /** Waiting for [onStartCommand] to finish the mediaProjection promotion. Main thread only —
+         *  CallManager calls in from its own call thread, so every projection entry point below
+         *  re-posts itself to main IN ORDER via [onMain] (a start followed by a stop must not land
+         *  as stop-then-start). */
         private var projectionCallback: ((Boolean) -> Unit)? = null
         private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        private fun onMain(block: () -> Unit) {
+            if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) block() else mainHandler.post(block)
+        }
         private val projectionTimeout = Runnable { projectionReady(false) }
         /** onStartCommand runs on the main thread, but it is QUEUED behind whatever posted the
          *  start — normally it lands within a frame or two. Past this, give up waiting. */
@@ -207,7 +212,7 @@ class ConnectionService : Service() {
          * silently never started. [onReady] gets `false` if the promotion was refused or timed
          * out; the caller may still try (pre-14 does not need it).
          */
-        fun startForProjection(ctx: Context, onReady: (Boolean) -> Unit) {
+        fun startForProjection(ctx: Context, onReady: (Boolean) -> Unit) = onMain {
             projectionWanted = true
             projectionCallback?.invoke(false)   // a stale waiter never hangs
             projectionCallback = onReady
@@ -224,7 +229,9 @@ class ConnectionService : Service() {
         }
 
         /** Drop the mediaProjection type when the share ends, keeping the call's own service. */
-        fun stopProjection(ctx: Context) {
+        fun stopProjection(ctx: Context) = onMain { stopProjectionOnMain(ctx) }
+
+        private fun stopProjectionOnMain(ctx: Context) {
             if (!projectionWanted) return
             projectionWanted = false
             mainHandler.removeCallbacks(projectionTimeout)

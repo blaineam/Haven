@@ -110,6 +110,7 @@ object QaDriver {
         if (!BuildConfig.DEBUG) return
         appContext = context.applicationContext
         QaPerf.startWatchdog()   // the dump's perf.mainStall* — DEBUG only
+        PrefsChurn.start(appContext)   // per-minute SharedPreferences write rates — DEBUG only
     }
 
     /** 1.5s drop-file poll — runs only while the app is foregrounded (MainActivity.onResume). */
@@ -191,12 +192,10 @@ object QaDriver {
 
     private fun apply(cmd: JSONObject) {
         val op = cmd.optString("op").trim().lowercase()
-        // Call ops are CallManager (main-thread) state — see [QaOpThreads]. Hop, and wait so the
+        // Call ops are CallManager (call-thread) state — see [QaOpThreads]. Hop, and wait so the
         // op still completes before the next command is read, exactly as it did on this thread.
-        if (QaOpThreads.needsMain(op) && Looper.myLooper() != Looper.getMainLooper()) {
-            val done = java.util.concurrent.CountDownLatch(1)
-            handler.post { try { apply(cmd) } finally { done.countDown() } }
-            done.await(30, java.util.concurrent.TimeUnit.SECONDS)
+        if (QaOpThreads.needsCallThread(op) && !CallManager.isOnCallThread()) {
+            CallManager.runOnCallThreadAndWait(30_000) { apply(cmd) }
             return
         }
         Log.i(TAG, "qa-cmd op=$op body=${cmd.optString("body").take(40)}")

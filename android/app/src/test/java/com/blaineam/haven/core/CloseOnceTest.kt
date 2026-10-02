@@ -32,11 +32,11 @@ class CloseOnceTest {
     }
 
     @Test
-    fun everyCallOpRunsOnMain() {
+    fun everyCallOpRunsOnTheCallThread() {
         for (op in listOf("call", "call_accept", "call_end", "call_speaker", "CALL_END ")) {
-            assertTrue(op, QaOpThreads.needsMain(op))
+            assertTrue(op, QaOpThreads.needsCallThread(op))
         }
-        assertFalse(QaOpThreads.needsMain("dump"))
-        assertFalse(QaOpThreads.needsMain("post"))
+        assertFalse(QaOpThreads.needsCallThread("dump"))
+        assertFalse(QaOpThreads.needsCallThread("post"))
     }
 }

@@ -449,6 +449,8 @@ targets:
       - path: HavenApp/SelfSyncEngineDiff.swift
       # Whether the bell's list/watermark persist (a demo launch pulls its fresh engine from 0).
       - path: HavenApp/ActivityPersistence.swift
+      # The hosted relay keeps its well-known HTTP port across a restart (bounded retry first).
+      - path: HavenApp/RelayPortBind.swift
       - path: Shared/SharedNotificationPrivacy.swift
       - path: HavenLogicTests
     settings:

@@ -180,10 +180,9 @@ final class RelayHost: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             let token = self.httpToken()
-            var port: UInt16?
-            do { port = try await h.serveHttp(bind: "0.0.0.0:8674", token: token) }
-            catch { port = try? await h.serveHttp(bind: "0.0.0.0:0", token: token) }
-            guard let port else { HavenLog.relay("reattach http FAILED"); return }
+            let bound = await RelayPortBind.bind(serve: { try await h.serveHttp(bind: $0, token: token) })
+            guard let port = bound?.port else { HavenLog.relay("reattach http FAILED"); return }
+            if bound?.preferred == false { HavenLog.relay("relay http: :\(RelayPortBind.preferredPort) stayed taken — ephemeral :\(port)") }
             self.mediaHttpPort = port
             let urls = Self.announceHttpUrls(mediaPort: port)
             if !urls.isEmpty, !self.nodeId.isEmpty {
@@ -265,10 +264,11 @@ final class RelayHost: ObservableObject {
     private func startHttpInterface(_ h: RelayServerHandle, generation: UInt64) {
         let token = httpToken()
         Task { [weak self] in
-            var port: UInt16?
-            do { port = try await h.serveHttp(bind: "0.0.0.0:8674", token: token) }
-            catch { port = try? await h.serveHttp(bind: "0.0.0.0:0", token: token) }   // port taken → ephemeral
-            guard let self, let port else { HavenLog.relay("relay http serve FAILED"); return }
+            // Well-known port, retried while our own previous listener lets go; ephemeral only if
+            // it stays taken (RelayPortBind).
+            let bound = await RelayPortBind.bind(serve: { try await h.serveHttp(bind: $0, token: token) })
+            guard let self, let port = bound?.port else { HavenLog.relay("relay http serve FAILED"); return }
+            if bound?.preferred == false { HavenLog.relay("relay http: :\(RelayPortBind.preferredPort) stayed taken — ephemeral :\(port)") }
             guard self.startGeneration == generation, self.enabled, self.handle != nil else {
                 HavenLog.relay("relay http start aborted (stale gen=\(generation))")
                 return

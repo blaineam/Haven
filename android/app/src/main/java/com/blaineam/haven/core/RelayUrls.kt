@@ -48,4 +48,28 @@ object RelayUrls {
         val old = heldUrls.toSet()
         return announced.filter { it !in old }
     }
+
+    /** How long an interface we moved AWAY from stays a known-stale echo. Outlasts the 5-minute
+     *  re-announce tail members keep up for a relay, plus mailbox replays of older frame-19s. */
+    const val REVERT_GUARD_MS = 10 * 60_000L
+
+    /** The interface (urls + token) we replaced, and when. */
+    data class Replaced(val urls: List<String>, val token: String, val atMs: Long)
+
+    /**
+     * Is a frame-19 announce of [announced]/[token] just a STALE ECHO of the interface we moved off?
+     *
+     * Announces carry no generation, and every member re-announces whatever URLs it holds — and the
+     * mailbox re-delivers older frame-19 copies — so for a while after a relay moves its door the
+     * old and new interfaces arrive interleaved. Adopting whichever spoke last flip-flopped a member
+     * between them (gate-8: Android "learned" R_A's interface 7 times in 8 s and kept hitting the
+     * abandoned port). Only an exact revert to the set we replaced, inside [REVERT_GUARD_MS], is
+     * refused; the relay's own self-published interface doc (fetched over iroh when the current
+     * door fails) is authoritative and bypasses this, so a relay that really did move back heals.
+     */
+    fun isStaleRevert(replaced: Replaced?, announced: List<String>, token: String, nowMs: Long): Boolean {
+        if (replaced == null) return false
+        if (nowMs < replaced.atMs || nowMs - replaced.atMs >= REVERT_GUARD_MS) return false
+        return replaced.token == token && replaced.urls.toSet() == announced.toSet()
+    }
 }

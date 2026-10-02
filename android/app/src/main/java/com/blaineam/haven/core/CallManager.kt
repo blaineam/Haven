@@ -7,6 +7,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
+import kotlinx.coroutines.android.asCoroutineDispatcher
 import org.webrtc.AudioTrack
 import org.webrtc.Camera2Enumerator
 import org.webrtc.CameraVideoCapturer
@@ -108,7 +109,7 @@ object CallManager {
      * (QaDriver), as LowDataMonitor.debugForced. Re-routes on set so a flip mid-call takes effect.
      */
     @Volatile var qaForceLegacyRoute = false
-        set(v) { field = v; if (mediaStarted) applySpeaker() }
+        set(v) { field = v; onCall { if (mediaStarted) applySpeaker() } }
 
     /// QA visibility ONLY. What the OS says audio is routed to RIGHT NOW, read back from the
     /// platform rather than from [speakerOn]. The toggle's own flag cannot catch a route that was
@@ -156,7 +157,46 @@ object CallManager {
      *  ~135s where a retransmit found no tombstone and re-opened the call screen on its own, over
      *  and over. A tombstone that does not outlive the thing it suppresses suppresses nothing. */
     private const val ENDED_TOMBSTONE_MS = (INVITE_MAX_AGE_SECS + 30L) * 1000L
-    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    /**
+     * The thread ALL call state lives on — deliberately NOT main.
+     *
+     * Every WebRTC construction step blocks its caller on WebRTC's own threads or on system services:
+     * the factory starts its threads and audio device module, `createAudioSource` / `createPeerConnection`
+     * block on the signaling and network threads (the first peer starts the network monitor, which
+     * makes ConnectivityManager binder calls), and the camera enumerator and the audio router are
+     * binder calls to cameraserver / audioserver. On the loaded e2e emulator (gate-8, 2026-10-01
+     * 21:00) an accept parked MAIN in that chain for 61 s ("Skipped 4338 frames"); the call's own
+     * `startForCall` foreground-service start was queued behind it and the process was killed for it
+     * ("executing service … ConnectionService, waited 47031ms" → ForegroundServiceDidNotStartInTime),
+     * taking the call, the ring-clear and the screen share that followed down with it.
+     *
+     * One serial thread keeps the old single-threaded invariant (`peers`, `roster`, `hairpinPeers` are
+     * plain collections) without ever making main wait: every public entry point hops here via
+     * [onCall], inbound frames are handled here, and WebRTC callbacks post here. Compose state written
+     * from here is ordinary snapshot state, which is safe to write off main.
+     */
+    private val callThread = android.os.HandlerThread("haven-call").apply { start() }
+    private val callHandler = android.os.Handler(callThread.looper)
+    private val callDispatcher = callHandler.asCoroutineDispatcher("haven-call")
+    /** Main — ONLY for the genuinely main-thread APIs (the UI music player). */
+    private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    fun isOnCallThread(): Boolean = android.os.Looper.myLooper() == callThread.looper
+
+    /** Run [block] on the call thread: inline when already there (nested entry points stay in
+     *  order), otherwise queued in arrival order. Never blocks the caller. */
+    private fun onCall(block: () -> Unit) {
+        if (isOnCallThread()) block() else callHandler.post(block)
+    }
+
+    /** QA only: run [block] on the call thread and wait (bounded) for it, so a driver op completes
+     *  before the next command is read. Never call from main. */
+    fun runOnCallThreadAndWait(timeoutMs: Long, block: () -> Unit): Boolean {
+        if (isOnCallThread()) { block(); return true }
+        val done = java.util.concurrent.CountDownLatch(1)
+        callHandler.post { try { block() } finally { done.countDown() } }
+        return done.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
     private val ringTimeoutRunnable = Runnable { ringTimedOut() }
     /** Sessions that already ended locally (declined / hung up / timed out / completed), with when.
      *  A caller retransmits the invite every 2.5s and relay hops can replay copies late — none of
@@ -178,7 +218,7 @@ object CallManager {
     private val speakerRunnable = object : Runnable {
         override fun run() {
             pollAudioLevels()
-            if (speakerPolling) mainHandler.postDelayed(this, 1_000)
+            if (speakerPolling) callHandler.postDelayed(this, 1_000)
         }
     }
     /** How long a RELAYED peer may go completely silent before we treat it as gone. ICE cannot tell
@@ -238,12 +278,12 @@ object CallManager {
      * Inbound call frame, called OFF main by HavenNet. Opening + verifying it is an engine call
      * that waits on the engine lock — on main that parked the UI behind any background ingest or
      * state export for as long as it ran. So it opens HERE, and only the verified plaintext hops to
-     * main, where all of CallManager's signaling state lives. Each caller suspends until main has
-     * handled its frame, so frames from one lane keep their arrival order.
+     * the call thread, where all of CallManager's signaling state lives. Each caller suspends until
+     * that thread has handled its frame, so frames from one lane keep their arrival order.
      */
     private suspend fun receive(type: Int, sealedBody: ByteArray) {
         val body = openCallFrame(type, sealedBody)
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { handle(type, body) }
+        kotlinx.coroutines.withContext(callDispatcher) { handle(type, body) }
     }
 
     /**
@@ -308,7 +348,9 @@ object CallManager {
     private fun rosterCsv(): String = roster.sorted().joinToString(",")
 
     /** Start (or join) a call with the given OTHER participant hexes. 1:1 = [partnerHex]. */
-    fun startCall(others: List<String>, name: String, session: String? = null) {
+    fun startCall(others: List<String>, name: String, session: String? = null) = onCall { startCallOnCall(others, name, session) }
+
+    private fun startCallOnCall(others: List<String>, name: String, session: String?) {
         if (inCall.value || ringing.value || connecting.value) {
             // Already in a call → treat as adding people.
             others.forEach { roster.add(it) }
@@ -323,7 +365,7 @@ object CallManager {
         peerName.value = name
         isCaller = true
         connecting.value = true
-        com.blaineam.haven.ui.MusicPlayer.stop()   // call audio owns the stage from the first dial
+        uiHandler.post { com.blaineam.haven.ui.MusicPlayer.stop() }   // call audio owns the stage from the first dial
         refreshParticipants()
         // Frame 21 group invite to everyone.
         val frame = CallWire.groupInvite(myHex, sessionId, name, rosterCsv())
@@ -333,7 +375,9 @@ object CallManager {
 
     /** Add people to the IN-PROGRESS call: invite the newcomers and re-broadcast the updated roster so
      *  everyone (old + new) meshes together. No-op for anyone already in or not in a call. */
-    fun addToCall(hexes: List<String>) {
+    fun addToCall(hexes: List<String>) = onCall { addToCallOnCall(hexes) }
+
+    private fun addToCallOnCall(hexes: List<String>) {
         if (!(inCall.value || connecting.value)) return
         val fresh = hexes.filter { it != myHex && !roster.contains(it) }
         if (fresh.isEmpty()) return
@@ -346,9 +390,12 @@ object CallManager {
         if (mediaStarted) fresh.forEach { connectPeerIfNeeded(it) }
     }
 
-    /** Contacts still addable to the current call (not already in it, not blocked). */
-    fun addableContacts(): List<Contact> =
-        HavenNet.contacts.filter { !roster.contains(it.idHex) && !HavenNet.blocked.contains(it.idHex) }
+    /** Contacts still addable to the current call (not already in it, not blocked). Called from the
+     *  UI, so it reads the [participants] SNAPSHOT — `roster` belongs to the call thread. */
+    fun addableContacts(): List<Contact> {
+        val inCall = participants.toSet()
+        return HavenNet.contacts.filter { it.idHex != myHex && it.idHex !in inCall && !HavenNet.blocked.contains(it.idHex) }
+    }
 
     /**
      * Answer the ringing call.
@@ -362,14 +409,16 @@ object CallManager {
      * a green accept for a call that had never rung. The already-answered guard is iOS
      * `reallyAccept` parity (CallKit echoes the answer back).
      */
-    fun accept() {
+    fun accept() = onCall { acceptOnCall() }
+
+    private fun acceptOnCall() {
         if (inCall.value) { Log.i(TAG, "accept ignored — already in the call"); return }
         if (sessionId.isEmpty() || !ringing.value) {
             Log.i(TAG, "accept ignored — nothing ringing (session=${sessionId.take(8)} ringing=${ringing.value})")
             return
         }
         runCatching { Notifications.clearIncomingCall(appContext) }
-        mainHandler.removeCallbacks(ringTimeoutRunnable)
+        callHandler.removeCallbacks(ringTimeoutRunnable)
         ringing.value = false
         inCall.value = true
         ConnectionService.startForCall(appContext)   // same mic claim as the outbound path
@@ -451,7 +500,9 @@ object CallManager {
         teardown()
     }
 
-    fun hangup() {
+    fun hangup() = onCall { hangupOnCall() }
+
+    private fun hangupOnCall() {
         // Declining counts as handling it: silence my other devices too, or they keep ringing after I
         // have dismissed the call here.
         // Stand down my OTHER devices on any end, not just a decline. The hangup below goes to
@@ -465,7 +516,7 @@ object CallManager {
         // ICE timeout (~seconds) instead of ending promptly. Send it a few times — it's idempotent on
         // receipt. Capture targets before teardown clears the roster.
         val targets = invitees().toList()
-        val h = android.os.Handler(android.os.Looper.getMainLooper())
+        val h = callHandler
         repeat(3) { i ->
             val sid = sessionId
             h.postDelayed({ targets.forEach { send(CallWire.HANGUP, CallWire.hangup(myHex, sid), it) } }, 90L * i)
@@ -473,7 +524,7 @@ object CallManager {
         teardown()
     }
 
-    // ---- Inbound signaling (opened off main by [receive], handled on main) ----
+    // ---- Inbound signaling (opened off main by [receive], handled on the call thread) ----
 
     /** Open + verify a sealed+signed call frame (audit R1) BEFORE any signaling logic sees it: reject
      *  anything we can't decrypt or whose Ed25519 signature doesn't verify against the carried sender
@@ -527,7 +578,7 @@ object CallManager {
                     val b = from.lowercase()
                     sessionId = "glare:" + minOf(a, b) + "-" + maxOf(a, b)
                     isCaller = a < b
-                    mainHandler.removeCallbacks(ringTimeoutRunnable)
+                    callHandler.removeCallbacks(ringTimeoutRunnable)
                     ringing.value = false
                     connecting.value = false
                     inCall.value = true
@@ -607,14 +658,14 @@ object CallManager {
         // Ring the PHONE, not just the app. Without this the call existed only inside a screen the
         // callee had to already be looking at — the process knew, and said nothing.
         runCatching { Notifications.showIncomingCall(appContext, name) }
-        com.blaineam.haven.ui.MusicPlayer.stop()   // stop the song preview before the ring
+        uiHandler.post { com.blaineam.haven.ui.MusicPlayer.stop() }   // stop the song preview before the ring
         refreshParticipants()
     }
 
     /** Arm the callee-side bounded ring. Cleared by accept and by teardown (decline, hangup, end). */
     private fun startRingTimeout() {
-        mainHandler.removeCallbacks(ringTimeoutRunnable)
-        mainHandler.postDelayed(ringTimeoutRunnable, RING_TIMEOUT_MS)
+        callHandler.removeCallbacks(ringTimeoutRunnable)
+        callHandler.postDelayed(ringTimeoutRunnable, RING_TIMEOUT_MS)
     }
 
     /** Nobody answered and no hangup ever arrived — stop ringing and record a missed call. */
@@ -733,7 +784,7 @@ object CallManager {
             // what "speaker on" means on a device where only one of the two paths was updated.
             applySpeaker()
             // Re-assert after a beat — some devices ignore the first speakerphone flip at start.
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            callHandler.postDelayed({
                 if (mediaStarted) applySpeaker()
             }, 400)
         }
@@ -877,15 +928,15 @@ object CallManager {
      * media over `/webrtc/hairpin` for this exact case all along.
      */
     private fun onPeerIceState(peer: String, s: PeerConnection.IceConnectionState) {
-        // Hop to the main thread before touching ANY call state. This callback arrives on WebRTC's
+        // Hop to the call thread before touching ANY call state. This callback arrives on WebRTC's
         // signalling thread, while `peers`, `roster` and `hairpinPeers` are plain unsynchronised
         // collections that the frame handler mutates from its own thread — every other entry point
-        // in this file (handleAccept, handleHangup, the ring timeout) is already main-thread-driven.
+        // in this file (handleAccept, handleHangup, the ring timeout) is call-thread-driven.
         // Racing a HashMap from two threads corrupts it, and the corruption surfaces far from here.
-        mainHandler.post { onPeerIceStateOnMain(peer, s) }
+        callHandler.post { onPeerIceStateOnCall(peer, s) }
     }
 
-    private fun onPeerIceStateOnMain(peer: String, s: PeerConnection.IceConnectionState) {
+    private fun onPeerIceStateOnCall(peer: String, s: PeerConnection.IceConnectionState) {
         when (s) {
             PeerConnection.IceConnectionState.CONNECTED,
             PeerConnection.IceConnectionState.COMPLETED -> {
@@ -914,7 +965,7 @@ object CallManager {
                 // Give it a grace period, then drop — but NEVER drop a peer whose media is riding the
                 // hairpin: when the relay carries the call, ICE legitimately sits failed. That is the
                 // whole reason we relayed. The relay's own inbound clock is the liveness signal.
-                mainHandler.postDelayed({
+                callHandler.postDelayed({
                     if (peers[peer] == null) return@postDelayed
                     if (CallMediaBridge.isRelaying(peer)) {
                         val quiet = CallMediaBridge.silenceSecs(peer)
@@ -938,12 +989,12 @@ object CallManager {
     private fun startSpeakerDetection() {
         if (speakerPolling) return
         speakerPolling = true
-        mainHandler.postDelayed(speakerRunnable, 1_000)
+        callHandler.postDelayed(speakerRunnable, 1_000)
     }
 
     private fun stopSpeakerDetection() {
         speakerPolling = false
-        mainHandler.removeCallbacks(speakerRunnable)
+        callHandler.removeCallbacks(speakerRunnable)
         speakerStreak.clear()
         activeSpeaker.value = null
     }
@@ -967,7 +1018,7 @@ object CallManager {
         var myLevel = 0.0
         for ((hex, peer) in conns) {
             peer.audioLevels { inbound, outbound ->
-                mainHandler.post {
+                callHandler.post {
                     if (inbound > bestRemote) { bestRemote = inbound; bestPeer = hex }
                     if (outbound > myLevel) myLevel = outbound
                     remaining -= 1
@@ -1022,7 +1073,9 @@ object CallManager {
      * path is silenced; restored if ICE recovers. Only ever reached on the failed path, so it cannot
      * disturb a working direct call. Apple parity (`setNativeAudioSuspendedForHairpin`).
      */
-    fun setNativeAudioSuspendedForHairpin(suspended: Boolean) {
+    fun setNativeAudioSuspendedForHairpin(suspended: Boolean) = onCall { setNativeAudioSuspendedForHairpinOnCall(suspended) }
+
+    private fun setNativeAudioSuspendedForHairpinOnCall(suspended: Boolean) {
         audioTrack?.setEnabled(!suspended && micOn.value)
     }
 
@@ -1031,11 +1084,11 @@ object CallManager {
      * renders, so relayed video appears with no view changes.
      */
     fun adoptHairpinRemoteVideo(peer: String, track: VideoTrack) {
-        mainHandler.post { remoteVideo[peer] = track }
+        callHandler.post { remoteVideo[peer] = track }
     }
 
     fun dropHairpinRemoteVideo(peer: String) {
-        mainHandler.post { if (remoteVideo[peer]?.id()?.startsWith("hairpin-") == true) remoteVideo.remove(peer) }
+        callHandler.post { if (remoteVideo[peer]?.id()?.startsWith("hairpin-") == true) remoteVideo.remove(peer) }
     }
 
     /** When the current call last had at least one live peer. Drives [checkStuckCall]. */
@@ -1055,7 +1108,7 @@ object CallManager {
      * hairpin's own silence drop is 20s), so this only ever fires on a call that is already dead.
      */
     /** Called from the 2s live-call lane. Main-thread hop: call state is main-only. */
-    fun noticeStuckCall() { mainHandler.post { checkStuckCall() } }
+    fun noticeStuckCall() = onCall { checkStuckCall() }
 
     private fun checkStuckCall() {
         if (!inCall.value) { lastPeerSeenMs = 0L; return }
@@ -1084,8 +1137,8 @@ object CallManager {
 
     // ---- Controls ----
 
-    fun toggleMic() { micOn.value = !micOn.value; audioTrack?.setEnabled(micOn.value) }
-    fun toggleSpeaker() { speakerOn.value = !speakerOn.value; applySpeaker() }
+    fun toggleMic() = onCall { micOn.value = !micOn.value; audioTrack?.setEnabled(micOn.value) }
+    fun toggleSpeaker() = onCall { speakerOn.value = !speakerOn.value; applySpeaker() }
 
     private fun audioManager(): android.media.AudioManager =
         appContext.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -1193,7 +1246,9 @@ object CallManager {
     /** True while the camera hardware is actually open. */
     private var capturing = false
 
-    fun toggleCamera() {
+    fun toggleCamera() = onCall { toggleCameraOnCall() }
+
+    private fun toggleCameraOnCall() {
         cameraOn.value = !cameraOn.value
         // If the track is missing the camera never came up — say so instead of no-opping in silence,
         // and try once more now (permission may have been granted since, or the camera may have been
@@ -1216,7 +1271,7 @@ object CallManager {
         val on = cameraOn.value
         invitees().forEach { send(CallWire.CAMERA, CallWire.cameraState(myHex, sessionId, on), it) }
     }
-    fun switchCamera() { if (!screenShare.value) capturer?.switchCamera(null) }
+    fun switchCamera() = onCall { if (!screenShare.value) capturer?.switchCamera(null) }
 
     /**
      * Begin sharing the screen as a SECOND video track ("screen0", stream "screen"), added alongside
@@ -1228,7 +1283,9 @@ object CallManager {
      * Capture only starts once the mediaProjection foreground promotion has actually landed — see
      * [ConnectionService.startForProjection] for why that ordering is the whole bug on Android 14+.
      */
-    fun startScreenShare(resultCode: Int, data: android.content.Intent) {
+    fun startScreenShare(resultCode: Int, data: android.content.Intent) = onCall { startScreenShareOnCall(resultCode, data) }
+
+    private fun startScreenShareOnCall(resultCode: Int, data: android.content.Intent) {
         if (screenShare.value || screenShareStarting) return
         if (sessionId.isEmpty()) return
         screenShareStarting = true
@@ -1237,19 +1294,22 @@ object CallManager {
         val t0 = android.os.SystemClock.elapsedRealtime()
         Log.i(ScreenSharePolicy.LOG_TAG, "consent ok (result=$resultCode, sdk=${android.os.Build.VERSION.SDK_INT}) — " +
             "promoting FGS to mediaProjection")
-        ConnectionService.startForProjection(appContext) { ready ->
-            screenShareStarting = false
-            val waited = android.os.SystemClock.elapsedRealtime() - t0
-            QaStats.shareFgsReady = ready; QaStats.shareFgsWaitMs = waited
-            QaStats.shareFgsReadyAtMs = System.currentTimeMillis()
-            Log.i(ScreenSharePolicy.LOG_TAG, "FGS mediaProjection ready=$ready after ${waited}ms")
-            if (sessionId != session || screenShare.value) {
-                Log.i(ScreenSharePolicy.LOG_TAG, "call ended/changed while promoting — not capturing")
-                ConnectionService.stopProjection(appContext)
-                return@startForProjection
-            }
-            beginScreenCapture(data)
+        // The promotion callback lands on MAIN (onStartCommand) — hop back before touching state.
+        ConnectionService.startForProjection(appContext) { ready -> onCall { projectionPromoted(ready, session, t0, data) } }
+    }
+
+    private fun projectionPromoted(ready: Boolean, session: String, t0: Long, data: android.content.Intent) {
+        screenShareStarting = false
+        val waited = android.os.SystemClock.elapsedRealtime() - t0
+        QaStats.shareFgsReady = ready; QaStats.shareFgsWaitMs = waited
+        QaStats.shareFgsReadyAtMs = System.currentTimeMillis()
+        Log.i(ScreenSharePolicy.LOG_TAG, "FGS mediaProjection ready=$ready after ${waited}ms")
+        if (sessionId != session || screenShare.value) {
+            Log.i(ScreenSharePolicy.LOG_TAG, "call ended/changed while promoting — not capturing")
+            ConnectionService.stopProjection(appContext)
+            return
         }
+        beginScreenCapture(data)
     }
 
     private fun beginScreenCapture(data: android.content.Intent) {
@@ -1265,7 +1325,7 @@ object CallManager {
             val cap = org.webrtc.ScreenCapturerAndroid(data, object : android.media.projection.MediaProjection.Callback() {
                 override fun onStop() {
                     Log.i(ScreenSharePolicy.LOG_TAG, "MediaProjection stopped by the system/user")
-                    mainHandler.post { stopScreenShare() }
+                    callHandler.post { stopScreenShare() }
                 }
             })
             screenCapturer = cap
@@ -1285,7 +1345,7 @@ object CallManager {
             screenShare.value = true
             // Proof of life for the field log: a projection that granted but never produces frames
             // shows up here as 0, distinguishing "capture dead" from "encode/transport dead".
-            mainHandler.postDelayed({
+            callHandler.postDelayed({
                 (screenCapturer as? org.webrtc.ScreenCapturerAndroid)?.let {
                     Log.i(ScreenSharePolicy.LOG_TAG, "frames captured after 3s: ${it.numCapturedFrames}")
                 }
@@ -1334,7 +1394,7 @@ object CallManager {
                     .onFailure { Log.w(ScreenSharePolicy.LOG_TAG, "capture resize failed", it) }
             }
         }
-        dmgr.registerDisplayListener(l, mainHandler)
+        dmgr.registerDisplayListener(l, callHandler)
         screenDisplayListener = l
     }
 
@@ -1362,7 +1422,9 @@ object CallManager {
         get() = ((screenCapturer as? org.webrtc.ScreenCapturerAndroid)?.numCapturedFrames ?: 0L).toInt()
 
     /** Stop screen sharing: remove the screen track from every peer (renegotiate) and tear it down. */
-    fun stopScreenShare() {
+    fun stopScreenShare() = onCall { stopScreenShareOnCall() }
+
+    private fun stopScreenShareOnCall() {
         if (!screenShare.value && screenTrack == null) return
         Log.i(ScreenSharePolicy.LOG_TAG, "stopping screen share")
         screenShare.value = false
@@ -1374,8 +1436,8 @@ object CallManager {
         ConnectionService.stopProjection(appContext)
     }
 
-    fun toggleScreenShare(resultCode: Int, data: android.content.Intent) {
-        if (screenShare.value) stopScreenShare() else startScreenShare(resultCode, data)
+    fun toggleScreenShare(resultCode: Int, data: android.content.Intent) = onCall {
+        if (screenShare.value) stopScreenShareOnCall() else startScreenShareOnCall(resultCode, data)
     }
 
     private fun teardown() {
@@ -1393,7 +1455,7 @@ object CallManager {
                 endedSessions.entries.removeAll { now - it.value >= ENDED_TOMBSTONE_MS }
             }
         }
-        mainHandler.removeCallbacks(ringTimeoutRunnable)
+        callHandler.removeCallbacks(ringTimeoutRunnable)
         stopSpeakerDetection()
         // Tear the relay down BEFORE the peers: it holds a microphone, two codecs and a WebSocket
         // per remote, none of which any other path releases.

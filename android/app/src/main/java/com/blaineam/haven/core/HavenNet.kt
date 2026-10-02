@@ -2522,12 +2522,34 @@ object HavenNet : InboundListener {
 
     /** Record a notification dedupe key; false if already notified. Persisted (capped — the
      *  10-minute recency guard above is what really stops ancient items from re-notifying). */
-    private fun markNotified(key: String): Boolean {
-        val cur = prefs.getStringSet("notifiedIds", emptySet())?.toMutableSet() ?: mutableSetOf()
+    private fun markNotified(key: String): Boolean = synchronized(notifiedLock) {
+        val np = notifiedPrefs()
+        val cur = np.getStringSet("notifiedIds", emptySet())?.toMutableSet() ?: mutableSetOf()
         if (!cur.add(key)) return false
         if (cur.size > 800) { cur.clear(); cur.add(key) }
-        prefs.edit().putStringSet("notifiedIds", cur).apply()
+        np.edit().putStringSet("notifiedIds", cur).apply()
         return true
+    }
+
+    /**
+     * The notification dedupe set lives in its OWN file. It is up to 800 "circle:post" keys (tens of
+     * KB), and in `haven.contacts` it was rewritten + fsynced along with every relay-table, invite or
+     * contact save — and those are what `QueuedWork.waitToFinish()` drains on main at each service
+     * start / activity stop (gate-8 ANR). One-time move of the legacy key on first use.
+     */
+    private val notifiedLock = Any()
+    @Volatile private var notifiedMigrated = false
+    private fun notifiedPrefs(): android.content.SharedPreferences {
+        val np = appContext.getSharedPreferences("haven.notified", Context.MODE_PRIVATE)
+        if (!notifiedMigrated) {
+            notifiedMigrated = true
+            val legacy = prefs.getStringSet("notifiedIds", null)
+            if (legacy != null) {
+                if (!np.contains("notifiedIds")) np.edit().putStringSet("notifiedIds", HashSet(legacy)).apply()
+                prefs.edit().remove("notifiedIds").apply()
+            }
+        }
+        return np
     }
 
     // ---- Outbound ------------------------------------------------------------------------
@@ -4687,12 +4709,18 @@ object HavenNet : InboundListener {
             // relay for 5 min after it dies, and clearing on each one sent us straight back to the
             // dead door (e2e `multirelay` herd check). iOS `RelayAddress.urlsToForgive` parity.
             val forgive = RelayUrls.urlsToForgive(e?.httpUrls, e?.httpToken, announcedUrls, announcedToken)
-            if (e != null && (e.httpUrls != announcedUrls || e.httpToken != announcedToken)) {
+            val stale = RelayUrls.isStaleRevert(replacedInterfaces[nodeHex], announcedUrls, announcedToken, System.currentTimeMillis())
+            if (stale) {
+                Log.i(TAG, "relay ${nodeHex.take(8)}: ignoring a stale echo of the http interface it moved off")
+            } else if (e != null && (e.httpUrls != announcedUrls || e.httpToken != announcedToken)) {
+                if (e.httpUrls.isNotEmpty()) {
+                    replacedInterfaces[nodeHex] = RelayUrls.Replaced(e.httpUrls, e.httpToken, System.currentTimeMillis())
+                }
                 relayEntries[nodeHex] = e.copy(httpUrls = announcedUrls, httpToken = announcedToken)
                 saveRelayNodes()
                 Log.i(TAG, "learned relay http interface for ${nodeHex.take(8)}: ${announcedUrls.size} url(s)")
             }
-            for (u in forgive) httpUrlBad.remove(u)
+            if (!stale) for (u in forgive) httpUrlBad.remove(u)
         }
         // Haven fabric: DERP URL so peers prefer this box over n0 for live NAT.
         if (announcedDerp != null) {
@@ -4744,6 +4772,10 @@ object HavenNet : InboundListener {
     }
 
     // ---- Relay interface self-heal (rotated/never-learned HTTP front doors) ----------------------
+
+    /** Per relay: the HTTP interface we last moved OFF, so a stale frame-19 echo of it is not
+     *  re-adopted ([RelayUrls.isStaleRevert]). In memory only — a restart re-learns from scratch. */
+    private val replacedInterfaces = java.util.concurrent.ConcurrentHashMap<String, RelayUrls.Replaced>()
 
     /** Last self-heal fetch attempt per relay (unix ms), so a media-miss storm can't hammer the
      *  same relay. Mirrors iOS `relayInterfaceRefreshMs`. */
@@ -4799,7 +4831,16 @@ object HavenNet : InboundListener {
             if (urls.isEmpty() || token.isEmpty()) return@launch
             Log.i(TAG, "relay interface ${lower.take(10)}: learned ${urls.size} url(s) over iroh — adopting + re-announcing")
             ensureRelayEntry(lower, isS3 = false, activate = true)
-            relayEntries[lower]?.let { relayEntries[lower] = it.copy(httpUrls = urls, httpToken = token) }
+            relayEntries[lower]?.let { held ->
+                // The relay's OWN doc is authoritative: it lifts any stale-echo guard, and the door it
+                // replaces becomes the one an echo must not bring back.
+                if (held.httpUrls.isNotEmpty() && (held.httpUrls != urls || held.httpToken != token)) {
+                    replacedInterfaces[lower] = RelayUrls.Replaced(held.httpUrls, held.httpToken, System.currentTimeMillis())
+                } else if (held.httpUrls == urls && held.httpToken == token) {
+                    replacedInterfaces.remove(lower)
+                }
+                relayEntries[lower] = held.copy(httpUrls = urls, httpToken = token)
+            }
             // Rotated hostname — stop skipping the old cool-down window.
             for (u in urls) httpUrlBad.remove(u)
             val derp = o.optString("derp", "").trim()
@@ -5118,8 +5159,16 @@ object HavenNet : InboundListener {
         // relay table each time was an fsync storm that froze main via QueuedWork (RelaySeenStamp).
         if (!RelaySeenStamp.shouldRestamp(e.lastSeenMs, now)) return
         relayEntries[hex] = e.copy(lastSeenMs = now)
-        saveRelayNodes()
+        // ...and N relays restamping on their own minute clocks were still N whole-file fsyncs a
+        // minute: coalesce every relay's stamp into at most ONE relay-table save a minute.
+        when (val waitMs = relaySeenSaves.request(now)) {
+            0L -> saveRelayNodes()
+            WriteCoalescer.ALREADY_ARMED -> Unit
+            else -> scope.launch { delay(waitMs); saveRelayNodes() }
+        }
     }
+
+    private val relaySeenSaves = WriteCoalescer(RelaySeenStamp.MIN_INTERVAL_MS)
 
     /** Ensure every relay referenced by relayNodes / the default has a RelayEntry (legacy migration). */
     private fun migrateRelayEntries() {
@@ -9495,6 +9544,7 @@ object HavenNet : InboundListener {
     }
 
     private fun saveRelayNodes() {
+        relaySeenSaves.wrote(relayNow())   // any table save carries every pending last-seen stamp
         val o = JSONObject()
         relayNodes.forEach { (k, v) -> o.put(k, JSONArray().apply { v.forEach { put(it) } }) }
         val entriesArr = JSONArray()
@@ -9553,6 +9603,7 @@ object HavenNet : InboundListener {
         relayActive.value = false
         activeCircle.value = DEFAULT_CIRCLE
         prefs.edit().clear().apply()
+        runCatching { appContext.getSharedPreferences("haven.notified", Context.MODE_PRIVATE).edit().clear().apply() }
         runCatching { stateFile.delete() }
         runCatching { legacyStateFile.delete() }
         feedVersion.value++

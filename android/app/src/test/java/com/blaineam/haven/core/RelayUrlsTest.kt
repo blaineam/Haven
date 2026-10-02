@@ -57,4 +57,43 @@ class RelayUrlsTest {
         assertEquals(held, RelayUrls.urlsToForgive(held, "t1", held, "t2"))
         assertEquals(listOf("https://x.example"), RelayUrls.urlsToForgive(null, null, listOf("https://x.example"), "t"))
     }
+
+    private val oldDoor = listOf("http://127.0.0.1:8684", "http://10.0.0.86:18684")
+    private val newDoor = listOf("http://127.0.0.1:8686", "http://10.0.0.86:18686")
+
+    @Test fun anEchoOfTheDoorWeMovedOffIsStale() {
+        val r = RelayUrls.Replaced(oldDoor, "t", atMs = 1_000)
+        assertTrue(RelayUrls.isStaleRevert(r, oldDoor, "t", nowMs = 2_000))
+        assertTrue("order does not matter", RelayUrls.isStaleRevert(r, oldDoor.reversed(), "t", nowMs = 2_000))
+    }
+
+    @Test fun theNewDoorAndAnythingElseStillLand() {
+        val r = RelayUrls.Replaced(oldDoor, "t", atMs = 1_000)
+        assertFalse(RelayUrls.isStaleRevert(r, newDoor, "t", 2_000))
+        assertFalse("a re-keyed old door is a real change", RelayUrls.isStaleRevert(r, oldDoor, "t2", 2_000))
+        assertFalse("a third door", RelayUrls.isStaleRevert(r, listOf("http://127.0.0.1:8690"), "t", 2_000))
+        assertFalse("nothing replaced yet", RelayUrls.isStaleRevert(null, oldDoor, "t", 2_000))
+    }
+
+    @Test fun theGuardExpires() {
+        val r = RelayUrls.Replaced(oldDoor, "t", atMs = 0)
+        assertTrue(RelayUrls.isStaleRevert(r, oldDoor, "t", RelayUrls.REVERT_GUARD_MS - 1))
+        assertFalse(RelayUrls.isStaleRevert(r, oldDoor, "t", RelayUrls.REVERT_GUARD_MS))
+        assertFalse("a backwards clock never pins it", RelayUrls.isStaleRevert(r, oldDoor, "t", -5))
+    }
+
+    @Test fun interleavedAnnouncesSettleOnTheNewDoor() {
+        // The gate-8 shape: old and new arrive interleaved after R_A moves. Simulate handleRelayNode.
+        var held = oldDoor
+        var replaced: RelayUrls.Replaced? = null
+        var flips = 0
+        var t = 0L
+        for (announced in listOf(newDoor, oldDoor, newDoor, oldDoor, oldDoor, newDoor, oldDoor)) {
+            t += 1_000
+            if (RelayUrls.isStaleRevert(replaced, announced, "t", t)) continue
+            if (announced != held) { replaced = RelayUrls.Replaced(held, "t", t); held = announced; flips++ }
+        }
+        assertEquals(newDoor, held)
+        assertEquals(1, flips)
+    }
 }

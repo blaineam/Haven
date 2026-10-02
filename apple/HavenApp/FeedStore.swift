@@ -981,7 +981,7 @@ final class FeedStore: ObservableObject {
                 let t = TempSweep.sweep()
                 if t.removed > 0 { HavenLog.sync("tmp sweep: freed \(t.bytes / 1_048_576) MB across \(t.removed) items") }
             }
-            Self.removeAbandonedKithData()
+            Self.migrateLegacyKithData()
         }
         #if DEBUG
         CallManager.shared.debugSimulateIncomingRing()   // HAVEN_RING_TEST=1 only — bounded-ring self-test
@@ -2867,16 +2867,15 @@ final class FeedStore: ObservableObject {
         return (out, events)
     }
 
-    /// The pre-rename (Kith) data — `kith-media/`, `kith-feed.json`, `kith-avatar.jpg` — has had no
-    /// reader since the rename dropped its migration (1a96c5cd, 2026-06-21; the crypto salts changed
-    /// with it, so the old state cannot be opened by this engine anyway). ~200 MB of dead weight on
-    /// the owner's phone; nothing in any client reads these paths.
-    nonisolated static func removeAbandonedKithData() {
+    /// Pre-rename (Kith) media: migrate into the current store, then drop the legacy folder — once.
+    /// See `LegacyKithMigration`. Runs on the launch sweep's detached task (never main).
+    nonisolated static func migrateLegacyKithData() {
         let fm = FileManager.default
         guard let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
-        for name in ["kith-media", "kith-feed.json", "kith-avatar.jpg"] {
-            let url = dir.appendingPathComponent(name)
-            if fm.fileExists(atPath: url.path) { try? fm.removeItem(at: url) }
+        guard let out = LegacyKithMigration.runOnce(appSupport: dir, storeDir: MediaStore.storageDir) else { return }
+        for name in out.movedNames { HeldMediaIndex.shared.insert(name) }
+        if out.moved + out.alreadyPresent + out.failed > 0 || !out.legacyRemoved {
+            HavenLog.sync("legacy kith migration: moved \(out.moved), already held \(out.alreadyPresent), failed \(out.failed), legacy folder \(out.legacyRemoved ? "removed" : "KEPT")")
         }
     }
 

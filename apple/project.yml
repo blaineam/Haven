@@ -459,6 +459,7 @@ targets:
       - path: HavenApp/PersistCadence.swift
       - path: HavenApp/TempSweep.swift
       - path: HavenApp/SpilledDefaults.swift
+      - path: HavenApp/LegacyKithMigration.swift
       - path: Shared/SharedNotificationPrivacy.swift
       - path: HavenLogicTests
     settings:

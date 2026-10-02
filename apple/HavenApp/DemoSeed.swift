@@ -34,6 +34,7 @@ enum DemoScene: String {
     case identity    // the identity switcher / backup sheet
     case call        // an in-progress group call overlay
     case transfer    // UI test: a media placeholder fed simulated peer chunks (QATransferScene)
+    case handoff     // UI test: a history handoff waiting on the other device, to cancel
 }
 
 enum DemoEnv {

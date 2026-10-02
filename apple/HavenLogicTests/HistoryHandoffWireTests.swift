@@ -93,4 +93,117 @@ final class HistoryHandoffWireTests: XCTestCase {
         let r = try JSONDecoder().decode(HistoryHandoffWire.Request.self, from: Data(#"{"v":1,"device":"d","at":1}"#.utf8))
         XCTAssertNil(r.done)
     }
+
+    // MARK: - Cancelling a transfer (HandoffCancelLedger)
+
+    private let acct = String(repeating: "a", count: 64)
+    private let target = String(repeating: "b", count: 64)
+    private let source = String(repeating: "c", count: 64)
+
+    private func run(at: UInt64) -> HandoffCancelLedger.Run {
+        .init(device: target, requestAt: at, run: "900", pages: 4, totalEvents: 500, servedEvents: 480)
+    }
+    private func request(at: UInt64, cancelled: Bool? = nil, done: Bool? = nil) -> HistoryHandoffWire.Request {
+        HistoryHandoffWire.Request(device: target, at: at, done: done, cancelled: cancelled)
+    }
+
+    /// Cancel on the NEW device: the request is never written back (no auto-resume), a stop record
+    /// for the source is queued on the request key, and the source drops the run when it reads it.
+    func testCancelFromReceiverStopsBothSides() throws {
+        var t = HandoffCancelLedger()
+        t.cancelAsTarget(account: acct, me: target, requestAt: 100, remote: false)
+        XCTAssertFalse(t.acceptsWant(at: 100), "an in-flight pull must not persist the cancelled request")
+        XCTAssertEqual(t.banner, .byThisDevice)
+        XCTAssertEqual(t.pending.count, 1)
+        XCTAssertEqual(t.pending[0].key, HistoryHandoffWire.requestKey(acct, target))
+        let sent = try JSONDecoder().decode(HistoryHandoffWire.Request.self, from: t.pending[0].body)
+        XCTAssertEqual(sent.cancelled, true)
+        XCTAssertEqual(sent.at, 100)
+
+        // The source reads that record on its next pass.
+        var s = HandoffCancelLedger()
+        XCTAssertEqual(s.verdict(device: target, request: sent), .cancelledByTarget)
+        s.cancelAsSource(account: acct, me: source, runs: [run(at: 100)], remote: true, now: 1)
+        XCTAssertFalse(s.acceptsServe(device: target, requestAt: 100))
+        XCTAssertEqual(s.verdict(device: target, request: sent), .declined, "seen once is enough")
+        XCTAssertEqual(s.banner, .byOtherDevice, "the old device says the transfer was cancelled")
+        XCTAssertTrue(s.pending.isEmpty, "a remote cancel publishes nothing back")
+    }
+
+    /// Cancel on the OLD device: a cancelled manifest is queued; the target stops on reading it and
+    /// no other source takes the request over.
+    func testCancelFromSenderStopsTheReceiver() throws {
+        var s = HandoffCancelLedger()
+        s.cancelAsSource(account: acct, me: source, runs: [run(at: 100)], remote: false, now: 5)
+        XCTAssertEqual(s.banner, .byThisDevice)
+        XCTAssertFalse(s.acceptsServe(device: target, requestAt: 100))
+        XCTAssertEqual(s.verdict(device: target, request: request(at: 100)), .declined,
+                       "the still-open request is never served again here")
+        XCTAssertEqual(s.pending.map(\.key), [HistoryHandoffWire.manifestKey(acct, target, source)])
+        let m = try JSONDecoder().decode(HistoryHandoffWire.Manifest.self, from: s.pending[0].body)
+        XCTAssertEqual(m.cancelled, true)
+        XCTAssertEqual(m.forRequest, 100)
+
+        XCTAssertTrue(HandoffCancelLedger.sourceCancelled([m], requestAt: 100))
+        var t = HandoffCancelLedger()
+        t.cancelAsTarget(account: acct, me: target, requestAt: 100, remote: true)
+        XCTAssertFalse(t.acceptsWant(at: 100))
+        XCTAssertEqual(t.banner, .byOtherDevice)
+        XCTAssertTrue(t.pending.isEmpty)
+    }
+
+    /// The other device is offline: the local cancel takes effect at once and the stop waits in the
+    /// ledger (persisted) until a relay takes it; a second cancel replaces, never duplicates, it.
+    func testCancelWhileOfflineQueuesUntilPublished() throws {
+        var t = HandoffCancelLedger()
+        t.cancelAsTarget(account: acct, me: target, requestAt: 100, remote: false)
+        t.cancelAsTarget(account: acct, me: target, requestAt: 100, remote: false)
+        XCTAssertEqual(t.pending.count, 1)
+        // Survives a relaunch (the ledger is what HistoryHandoff persists).
+        let back = try JSONDecoder().decode(HandoffCancelLedger.self, from: JSONEncoder().encode(t))
+        XCTAssertEqual(back, t)
+        XCTAssertFalse(back.acceptsWant(at: 100), "no auto-resume after a relaunch")
+        var published = back
+        published.published(back.pending[0])
+        XCTAssertTrue(published.pending.isEmpty)
+        XCTAssertFalse(published.acceptsWant(at: 100))
+    }
+
+    /// Stale records never stop a NEW transfer: an old cancelled manifest doesn't match a fresh request.
+    func testOldCancelDoesNotStopANewRequest() {
+        let old = HistoryHandoffWire.Manifest(run: "1", source: source, forRequest: 100, pages: 2, complete: false,
+                                              updatedAt: 1, cancelled: true)
+        XCTAssertFalse(HandoffCancelLedger.sourceCancelled([old], requestAt: 200))
+        let live = HistoryHandoffWire.Manifest(run: "2", source: source, forRequest: 200, pages: 2, complete: false,
+                                               updatedAt: 1)
+        XCTAssertFalse(HandoffCancelLedger.sourceCancelled([live], requestAt: 200))
+    }
+
+    /// After a cancel a new transfer may start, on either end, and the banner clears.
+    func testRestartAllowedAfterCancel() {
+        var t = HandoffCancelLedger()
+        t.cancelAsTarget(account: acct, me: target, requestAt: 100, remote: false)
+        t.startedAgain()
+        XCTAssertNil(t.banner)
+        XCTAssertTrue(t.acceptsWant(at: 250), "a fresh request is followed")
+        XCTAssertFalse(t.acceptsWant(at: 100), "the old one still can't be written back by a late pull")
+
+        var s = HandoffCancelLedger()
+        s.cancelAsSource(account: acct, me: source, runs: [run(at: 100)], remote: false, now: 5)
+        XCTAssertEqual(s.verdict(device: target, request: request(at: 250)), .serve, "a new ask is served")
+        XCTAssertEqual(s.verdict(device: target.uppercased(), request: request(at: 100)), .declined,
+                       "device ids compare case-insensitively")
+        XCTAssertEqual(s.verdict(device: target, request: request(at: 250, done: true)), .finished)
+    }
+
+    /// Records from builds before cancelling existed still decode (and mean "not cancelled").
+    func testPreCancelRecordsStillDecode() throws {
+        let req = try JSONDecoder().decode(HistoryHandoffWire.Request.self,
+                                           from: Data(#"{"v":1,"device":"d","at":7}"#.utf8))
+        XCTAssertNil(req.cancelled)
+        XCTAssertEqual(HandoffCancelLedger().verdict(device: "d", request: req), .serve)
+        let m = try JSONDecoder().decode(HistoryHandoffWire.Manifest.self,
+                                         from: Data(#"{"v":1,"run":"1","source":"s","forRequest":7,"pages":0,"complete":false}"#.utf8))
+        XCTAssertNil(m.cancelled)
+    }
 }

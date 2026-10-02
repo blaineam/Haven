@@ -196,4 +196,32 @@ final class HavenUITests: XCTestCase {
         XCTAssertTrue(kiln.waitForExistence(timeout: 20),
                       "the Activity row must open the conversation, not a blank page")
     }
+
+    /// A history handoff can be stopped from its banner: Cancel transfer → confirm → "Transfer
+    /// cancelled", and it stays cancelled (no auto-resume) until dismissed or started again.
+    /// `HAVEN_SCENE=handoff` asks for history with the network off, so the other device never
+    /// answers and the banner sits on "Waiting for your other device".
+    func testHistoryHandoffCanBeCancelled() {
+        let app = app(tab: "circle")
+        app.launchEnvironment["HAVEN_DEMO"] = "1"
+        app.launchEnvironment["HAVEN_SCENE"] = "handoff"
+        app.launch()
+
+        let cancel = app.buttons["historyHandoffCancel"].firstMatch
+        XCTAssertTrue(cancel.waitForExistence(timeout: 60), "a running handoff should offer Cancel transfer")
+        cancel.tap()
+
+        let stop = app.alerts.buttons["Stop transfer"].firstMatch
+        XCTAssertTrue(stop.waitForExistence(timeout: 5), "cancelling asks first")
+        XCTAssertTrue(app.alerts.buttons["Keep going"].exists)
+        stop.tap()
+
+        let done = app.staticTexts["Transfer cancelled"].firstMatch
+        XCTAssertTrue(done.waitForExistence(timeout: 10), "the banner should say the transfer was cancelled")
+        XCTAssertFalse(app.buttons["historyHandoffCancel"].exists, "nothing left to cancel")
+        XCTAssertFalse(app.staticTexts["Waiting for your other device"].exists, "and it must not resume")
+
+        app.buttons["Dismiss"].firstMatch.tap()
+        XCTAssertTrue(done.waitForNonExistence(timeout: 5), "dismiss clears the banner")
+    }
 }

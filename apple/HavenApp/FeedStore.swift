@@ -1046,6 +1046,8 @@ final class FeedStore: ObservableObject {
         online = true
         internetActive = true
         relayReachable = true
+        // UI test: a handoff waiting on "my other device" (offline, so it never answers) to cancel.
+        if DemoEnv.scene == .handoff { HistoryHandoff.shared.requestHistory(reason: "demo scene") }
     }
 
     private var liveCallTimer: Timer?
@@ -3734,6 +3736,9 @@ final class FeedStore: ObservableObject {
         case "history_request":
             HistoryHandoff.shared.requestHistory(reason: "qa")
             return
+        case "history_cancel":
+            HistoryHandoff.shared.cancelTransfer()
+            return
         case "history_status":
             let st = HistoryHandoff.shared.status
             HavenLog.net("matrix-qa v2 history_status: \(st.phase) \(st.done)/\(st.total)")
@@ -4151,6 +4156,7 @@ final class FeedStore: ObservableObject {
         case .received: role = "target"; hState = "received"
         case .noAnswer: role = "target"; hState = "noAnswer"
         case .sending: role = "source"; hState = "sending"
+        case .cancelled: role = "none"; hState = "cancelled"
         }
         return [
             "sync_badge": [

@@ -55,8 +55,13 @@ final class HistoryHandoff: ObservableObject {
             /// Asked, and no device has answered for `noAnswerMs`. Android can't serve a handoff yet,
             /// and an older Haven build doesn't know the request — waiting forever helped nobody.
             case noAnswer
+            /// The transfer was stopped — here or on the other device (`cancelledRemotely`). Shown
+            /// until dismissed or a new transfer starts; nothing resumes on its own.
+            case cancelled
         }
         var phase: Phase = .idle
+        /// `.cancelled` only: the OTHER device stopped it.
+        var cancelledRemotely = false
         /// Events received (target) or sent (source) so far.
         var done = 0
         /// Total events expected; 0 = not known yet.
@@ -203,6 +208,9 @@ final class HistoryHandoff: ObservableObject {
             st.mediaTotal = m.refs.count
         } else if needsPending || HistoryHandoffWire.nowMs() &- lastSendingAt < 120_000 {
             st.phase = .sending   // posts are across; media is still going until the target says done
+        } else if let b = ledger.banner {
+            st.phase = .cancelled
+            st.cancelledRemotely = b == .byOtherDevice
         } else if receivedBanner {
             st.phase = .received
         }
@@ -215,6 +223,9 @@ final class HistoryHandoff: ObservableObject {
     /// itself (Settings ▸ Devices can ask again).
     func dismissReceived() {
         receivedBanner = false
+        if status.phase == .cancelled {
+            var l = ledger; l.banner = nil; ledger = l
+        }
         if status.phase == .noAnswer {
             HavenLog.sync("history handoff: request dismissed after no answer")
             want = nil
@@ -223,6 +234,126 @@ final class HistoryHandoff: ObservableObject {
     }
     /// Ask again after `.noAnswer` — re-publishes the request and waits another `noAnswerMs`.
     func retryRequest() { requestHistory(reason: "retry after no answer") }
+
+    // MARK: - Cancelling
+
+    /// The cancel bookkeeping (HistoryHandoffWire.swift): which request was stopped, which this
+    /// device won't serve, and any stop signal still to publish. Persisted, so a cancelled transfer
+    /// never resumes on the next launch.
+    private static let cancelKey = "haven.historyHandoff.cancel.v1"
+    private var ledgerCache: HandoffCancelLedger?
+    private var ledger: HandoffCancelLedger {
+        get {
+            if let c = ledgerCache { return c }
+            let l = UserDefaults.standard.data(forKey: Self.cancelKey)
+                .flatMap { try? JSONDecoder().decode(HandoffCancelLedger.self, from: $0) } ?? HandoffCancelLedger()
+            ledgerCache = l
+            return l
+        }
+        set {
+            ledgerCache = newValue
+            if let d = try? JSONEncoder().encode(newValue) { UserDefaults.standard.set(d, forKey: Self.cancelKey) }
+            refreshStatus()
+        }
+    }
+
+    /// "Cancel transfer" on THIS device, whichever role it plays: stop now, keep what was copied,
+    /// tell the other device over the account lane (+ a nudge), and never resume this request.
+    /// Works offline — the stop signal waits in the ledger and goes out on a later tick.
+    func cancelTransfer() {
+        let acct = AccountStore.currentNodeHex()
+        let me = DeviceKeyStore.deviceNodeHex().lowercased()
+        var l = ledger
+        let w = want
+        if let w {
+            l.cancelAsTarget(account: w.account, me: me, requestAt: w.at, remote: false)
+            HavenLog.sync("history handoff: cancelled here (target, request \(w.at))")
+        }
+        let open = serves
+        if !open.isEmpty {
+            l.cancelAsSource(account: acct, me: me, runs: open.values.map(Self.ledgerRun), remote: false,
+                             now: HistoryHandoffWire.nowMs())
+            HavenLog.sync("history handoff: cancelled here (source, \(open.count) run(s))")
+        }
+        // Only the media tail was still going out (no run, no ask): just stop and say so.
+        if w == nil && open.isEmpty { l.banner = .byThisDevice }
+        ledger = l
+        stopTarget()
+        stopSource(open.values, account: acct, me: me)
+        Task { await publishPendingCancels() }
+    }
+
+    private static func ledgerRun(_ s: Serve) -> HandoffCancelLedger.Run {
+        HandoffCancelLedger.Run(device: s.device, requestAt: s.requestAt, run: s.run, pages: s.pages,
+                                totalEvents: s.totalEvents, servedEvents: s.servedEvents)
+    }
+
+    /// Target side: forget the request (persisted) and every in-flight ask. What arrived stays.
+    private func stopTarget() {
+        want = nil
+        directAsked.removeAll(); directWindowSince = 0
+        liveLanded.removeAll()
+        receivedBanner = false
+        refreshActive()   // releases the screen hold + handoffBoost now, not after the driver's sleep
+        #if os(iOS)
+        if !transferActive { endBackgroundTask() }
+        #endif
+    }
+
+    /// Source side: drop the runs (the ledger declines them, so a pass in flight can't write them
+    /// back), their media bookkeeping, and — best effort — the media already parked on the relay.
+    private func stopSource<S: Sequence>(_ runs: S, account: String, me: String) where S.Element == Serve {
+        var blank: [String] = []
+        var files: [URL] = []
+        for r in runs {
+            let rm = Self.loadRunMedia(device: r.device, run: r.run)
+            for (ref, chunks) in rm.uploaded {
+                for c in 0..<chunks { blank.append(HistoryHandoffWire.mediaChunkKey(account, r.device, me, r.run, ref, c)) }
+            }
+            for n in Set(rm.relayed) { blank.append(HistoryHandoffWire.mediaReadyKey(account, r.device, me, r.run, n)) }
+            files.append(Self.runMediaURL(device: r.device, run: r.run))
+            lastManifestTouch[r.device] = nil
+        }
+        serves = serves   // the setter drops every declined run
+        lastSendingAt = 0
+        needsPending = false
+        sourceMediaCache = nil
+        refreshActive()
+        #if os(iOS)
+        if !transferActive { endBackgroundTask() }
+        #endif
+        Task { @MainActor in
+            // After any serve pass in flight has ended (it may still save the run's media file).
+            for _ in 0..<120 where self.serving { try? await Task.sleep(nanoseconds: 250_000_000) }
+            for f in files { try? FileManager.default.removeItem(at: f) }
+            for k in blank { _ = await SelfSyncCoordinator.shared.accountLanePut(k, Data()) }
+        }
+    }
+
+    /// Publish queued stop signals, then nudge (and push-wake) my devices so they read them now.
+    private var publishingCancels = false
+    private var announcing = false
+    func publishPendingCancels() async {
+        guard !publishingCancels, !ledger.pending.isEmpty else { return }
+        publishingCancels = true
+        defer { publishingCancels = false }
+        // A pass already in flight could land its manifest / request AFTER the stop: let it end
+        // (its loops check the ledger after every await, so this is short).
+        for _ in 0..<120 where serving || pulling || announcing { try? await Task.sleep(nanoseconds: 250_000_000) }
+        var sent = false
+        for sig in ledger.pending {
+            guard await SelfSyncCoordinator.shared.accountLanePut(sig.key, sig.body) else { continue }
+            var l = ledger; l.published(sig); ledger = l
+            sent = true
+        }
+        if sent {
+            HavenLog.sync("history handoff: cancel published")
+            FeedStore.shared.nudgeMyDevicesForHistory()
+            PushManager.shared.wakeMyDevices()
+        } else {
+            HavenLog.sync("history handoff: cancel queued (no reachable relay) — retried on the next tick")
+        }
+    }
 
     // MARK: - Live progress
 
@@ -330,6 +461,8 @@ final class HistoryHandoff: ObservableObject {
             return try? JSONDecoder().decode(Want.self, from: d)
         }
         set {
+            // A pull still in flight when the request was cancelled must not write it back.
+            if let newValue, !ledger.acceptsWant(at: newValue.at) { return }
             if let newValue, let d = try? JSONEncoder().encode(newValue) {
                 UserDefaults.standard.set(d, forKey: Self.wantKey)
             } else {
@@ -351,6 +484,7 @@ final class HistoryHandoff: ObservableObject {
     func requestHistory(reason: String) {
         let acct = AccountStore.currentNodeHex()
         guard !acct.isEmpty else { return }
+        var l = ledger; l.startedAgain(); ledger = l   // a cancelled transfer may always start again
         want = Want(account: acct, at: HistoryHandoffWire.nowMs())
         HavenLog.sync("history handoff: requested (\(reason))")
         Task { await announce(force: true); startDriver() }
@@ -362,6 +496,8 @@ final class HistoryHandoff: ObservableObject {
         guard var w = want else { return }
         let now = HistoryHandoffWire.nowMs()
         guard force || now - w.lastNudgeAt > 10 * 60 * 1000 else { return }
+        announcing = true
+        defer { announcing = false }
         // A link reconfigures the engine right before asking: wait for the new one (the roster below
         // needs it), rather than failing the first ask and waiting a whole tick for the retry.
         for _ in 0..<60 where !FeedStore.shared.engineReady { try? await Task.sleep(nanoseconds: 250_000_000) }
@@ -371,6 +507,8 @@ final class HistoryHandoff: ObservableObject {
         await FeedStore.shared.publishOwnRosterNow()
         let roster = await FeedStore.shared.ownRosterWire()
         let req = HistoryHandoffWire.Request(device: me, at: w.at, roster: roster?.base64EncodedString())
+        // Cancelled while this waited for the engine: never re-publish a live ask over the stop.
+        guard want?.at == w.at, ledger.acceptsWant(at: w.at) else { return }
         guard let body = try? JSONEncoder().encode(req),
               await SelfSyncCoordinator.shared.accountLanePut(HistoryHandoffWire.requestKey(w.account, me), body) else {
             HavenLog.sync("history handoff: request not published yet (no reachable relay)")
@@ -390,7 +528,17 @@ final class HistoryHandoff: ObservableObject {
         pulling = true
         defer { pulling = false }
         let me = DeviceKeyStore.deviceNodeHex()
-        guard let m = await pickManifest(account: w.account, target: me, want: w) else {
+        let manifests = await listManifests(account: w.account, target: me, want: w)
+        if HandoffCancelLedger.sourceCancelled(manifests, requestAt: w.at), ledger.acceptsWant(at: w.at) {
+            // My other device stopped sending: stop here too — and don't ask again on our own.
+            HavenLog.sync("history handoff: cancelled by the other device (request \(w.at))")
+            var l = ledger
+            l.cancelAsTarget(account: w.account, me: me, requestAt: w.at, remote: true)
+            ledger = l
+            stopTarget()
+            return false
+        }
+        guard ledger.acceptsWant(at: w.at), let m = pickManifest(manifests, want: w) else {
             await announce()   // no answer to THIS request yet — keep the ask alive
             return false
         }
@@ -400,7 +548,7 @@ final class HistoryHandoff: ObservableObject {
         w.totalEvents = max(m.totalEvents ?? 0, w.receivedEvents)
         want = w
         var progressed = false
-        while w.nextPage < m.pages, Date() < deadline {
+        while w.nextPage < m.pages, Date() < deadline, ledger.acceptsWant(at: w.at) {
             guard let blob = await SelfSyncCoordinator.shared.accountLaneGet(HistoryHandoffWire.pageKey(w.account, me, m.source, m.run, w.nextPage)) else {
                 break   // not on any reachable relay yet — the source may still be uploading it
             }
@@ -432,11 +580,12 @@ final class HistoryHandoff: ObservableObject {
             want = w
             progressed = true
         }
+        guard ledger.acceptsWant(at: w.at) else { return progressed }   // cancelled mid-pass
         if Date() < deadline, !w.mediaQueue.isEmpty {
             if await pullMedia(&w, account: w.account, me: me, manifest: m, until: deadline) { progressed = true }
             want = w
         }
-        if m.complete && w.nextPage >= m.pages && w.mediaQueue.isEmpty {
+        if m.complete && w.nextPage >= m.pages && w.mediaQueue.isEmpty && ledger.acceptsWant(at: w.at) {
             HavenLog.sync("history handoff: complete — \(w.received) envelopes over \(m.pages) pages, \(w.mediaDone)/\(w.mediaTotal) media")
             receivedBanner = true
             want = nil
@@ -680,7 +829,7 @@ final class HistoryHandoff: ObservableObject {
     /// The manifest to follow for this request: the source already being followed while it is still
     /// live, otherwise the live one furthest along. (Several of my devices may answer; following one
     /// keeps the page cursor meaningful.)
-    private func pickManifest(account: String, target: String, want w: Want) async -> HistoryHandoffWire.Manifest? {
+    private func listManifests(account: String, target: String, want w: Want) async -> [HistoryHandoffWire.Manifest] {
         var found: [HistoryHandoffWire.Manifest] = []
         for key in await SelfSyncCoordinator.shared.accountLaneList(HistoryHandoffWire.manifestPrefix(account, target)) {
             guard let raw = await SelfSyncCoordinator.shared.accountLaneGet(key),
@@ -688,6 +837,11 @@ final class HistoryHandoff: ObservableObject {
                   m.forRequest >= w.at else { continue }
             found.append(m)
         }
+        return found
+    }
+
+    private func pickManifest(_ all: [HistoryHandoffWire.Manifest], want w: Want) -> HistoryHandoffWire.Manifest? {
+        let found = all.filter { $0.cancelled != true }
         let now = HistoryHandoffWire.nowMs()
         if let current = found.first(where: { $0.source == w.source && $0.run == w.run }), current.isLive(now: now) {
             return current
@@ -744,7 +898,10 @@ final class HistoryHandoff: ObservableObject {
             return (try? JSONDecoder().decode([String: Serve].self, from: d)) ?? [:]
         }
         set {
-            if let d = try? JSONEncoder().encode(newValue) { UserDefaults.standard.set(d, forKey: Self.serveKey) }
+            // A serve pass still in flight when the run was cancelled must not write it back.
+            let l = ledger
+            let kept = newValue.filter { l.acceptsServe(device: $0.key, requestAt: $0.value.requestAt) }
+            if let d = try? JSONEncoder().encode(kept) { UserDefaults.standard.set(d, forKey: Self.serveKey) }
             refreshStatus()
         }
     }
@@ -785,13 +942,30 @@ final class HistoryHandoff: ObservableObject {
             guard device.count == 64, device != me,
                   let raw = await SelfSyncCoordinator.shared.accountLaneGet(key),
                   let req = try? JSONDecoder().decode(HistoryHandoffWire.Request.self, from: raw) else { continue }
-            if req.done == true {
+            switch ledger.verdict(device: device, request: req) {
+            case .finished:
                 // The target has everything: drop this run's bookkeeping.
                 if let old = serves[device] {
                     try? FileManager.default.removeItem(at: Self.runMediaURL(device: device, run: old.run))
                     serves[device] = nil
                 }
                 continue
+            case .declined:
+                continue
+            case .cancelledByTarget:
+                // The new device stopped the transfer: stop serving it, and say so here.
+                var l = ledger
+                if let old = serves[device] {
+                    HavenLog.sync("history handoff: \(device.prefix(8)) cancelled — stopped serving")
+                    l.cancelAsSource(account: acct, me: me, runs: [Self.ledgerRun(old)], remote: true,
+                                     now: HistoryHandoffWire.nowMs())
+                }
+                l.declined[device] = max(l.declined[device] ?? 0, req.at)
+                ledger = l
+                if let old = serves[device] { stopSource([old], account: acct, me: me) }
+                continue
+            case .serve:
+                break
             }
             var s = serves[device]
             if s == nil || s!.requestAt != req.at {
@@ -809,7 +983,7 @@ final class HistoryHandoff: ObservableObject {
                           totalEvents: await FeedStore.shared.historyEventCount(circleIds: order))
                 HavenLog.sync("history handoff: serving \(device.prefix(8)) — \(s!.order.count) circles")
             }
-            guard var run = s else { continue }
+            guard var run = s, ledger.acceptsServe(device: device, requestAt: run.requestAt) else { continue }
             if !run.complete, await serveRun(&run, account: acct, source: me, until: deadline) { did = true }
             if run.complete, run.keptSent != true, Date() < deadline,
                await serveKeptStories(&run, account: acct, source: me) { did = true }
@@ -837,8 +1011,9 @@ final class HistoryHandoff: ObservableObject {
         for key in await SelfSyncCoordinator.shared.accountLaneList(HistoryHandoffWire.manifestPrefix(account, target)) {
             guard let raw = await SelfSyncCoordinator.shared.accountLaneGet(key),
                   let m = try? JSONDecoder().decode(HistoryHandoffWire.Manifest.self, from: raw),
-                  m.source.lowercased() != me, m.forRequest >= request, m.isLive(now: now) else { continue }
-            return true
+                  m.source.lowercased() != me, m.forRequest >= request else { continue }
+            // Cancelled on another of my devices: nobody serves this ask (a new one starts over).
+            if m.cancelled == true || m.isLive(now: now) { return true }
         }
         return false
     }
@@ -847,7 +1022,7 @@ final class HistoryHandoff: ObservableObject {
     /// recent content across all circles before it sees any circle's distant past.
     private func serveRun(_ run: inout Serve, account: String, source: String, until deadline: Date) async -> Bool {
         var did = false
-        while !run.complete, Date() < deadline {
+        while !run.complete, Date() < deadline, ledger.acceptsServe(device: run.device, requestAt: run.requestAt) {
             let pending = run.order.filter { !run.finished.contains($0) }
             if pending.isEmpty {
                 run.complete = true
@@ -856,7 +1031,7 @@ final class HistoryHandoff: ObservableObject {
                 break
             }
             for cid in pending {
-                guard Date() < deadline else { break }
+                guard Date() < deadline, ledger.acceptsServe(device: run.device, requestAt: run.requestAt) else { break }
                 let before = run.cursors[cid] ?? 0
                 guard let page = await FeedStore.shared.exportHistoryPage(circleId: cid, before: before, limit: Self.pageEvents) else {
                     return did   // engine went away (identity switch / teardown)
@@ -924,6 +1099,8 @@ final class HistoryHandoff: ObservableObject {
     }
 
     private func putManifest(_ run: Serve, account: String, source: String) async {
+        // Cancelled: the stop manifest (ledger) is the last word — never overwrite it with a live one.
+        guard ledger.acceptsServe(device: run.device, requestAt: run.requestAt) else { return }
         let m = HistoryHandoffWire.Manifest(run: run.run, source: source, forRequest: run.requestAt, pages: run.pages,
                                             complete: run.complete, updatedAt: HistoryHandoffWire.nowMs(),
                                             totalEvents: run.totalEvents, servedEvents: run.servedEvents)
@@ -943,6 +1120,7 @@ final class HistoryHandoff: ObservableObject {
         var did = false
         let ordered = keys.sorted { (Int($0.split(separator: "/").last ?? "") ?? .max) < (Int($1.split(separator: "/").last ?? "") ?? .max) }
         for key in ordered {
+            guard ledger.acceptsServe(device: run.device, requestAt: run.requestAt) else { break }
             guard let n = Int(key.split(separator: "/").last ?? ""), !rm.relayed.contains(n) else { continue }
             // A withdrawn need (empty body): the target got this page's media directly after all.
             if let body = await SelfSyncCoordinator.shared.accountLaneGet(key), body.isEmpty {
@@ -954,6 +1132,7 @@ final class HistoryHandoff: ObservableObject {
             for ref in pm?.refs ?? [] {
                 if let c = rm.uploaded[ref] { ready.append(.init(ref: ref, chunks: c)); continue }
                 guard Date() < deadline else { Self.saveRunMedia(rm, device: run.device, run: run.run); return did }
+                guard ledger.acceptsServe(device: run.device, requestAt: run.requestAt) else { return did }   // cancelled
                 guard MediaStore.shared.hasLocalFile(ref) else { continue }   // evicted since — not ours to send
                 guard let chunks = await uploadMedia(ref: ref, circle: pm!.circle, account: account,
                                                      target: run.device, source: source, run: run.run) else {
@@ -1004,6 +1183,8 @@ final class HistoryHandoff: ObservableObject {
     /// True if either role moved data.
     @discardableResult
     func tick(budget: TimeInterval) async -> Bool {
+        // A stop that couldn't be published when the user cancelled (tiny; not heavy I/O).
+        await publishPendingCancels()
         // Both roles are real crypto per envelope; a hot phone waits (the work resumes where it was).
         // A call or Low Power Mode parks it too (`ThermalPolicy.suspendHeavyIO`).
         guard !ThermalPolicy.suspendHeavyIO else { return false }
@@ -1018,6 +1199,7 @@ final class HistoryHandoff: ObservableObject {
     func reset() {
         want = nil
         receivedBanner = false
+        ledger = HandoffCancelLedger()
         UserDefaults.standard.removeObject(forKey: Self.serveKey)
         sourceMediaCache = nil
         refreshStatus()

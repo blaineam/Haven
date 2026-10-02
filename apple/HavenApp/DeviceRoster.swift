@@ -358,7 +358,8 @@ struct AuthorizedDevicesView: View {
         Section {
             if handoff.status.phase != .idle {
                 HistoryHandoffProgress(status: handoff.status, onDismiss: { handoff.dismissReceived() },
-                                       onRetry: { handoff.retryRequest() })
+                                       onRetry: { handoff.retryRequest() },
+                                       onCancel: { handoff.cancelTransfer() })
                     .padding(.vertical, 4)
             }
             if handoff.status.phase != .waitingForSource && handoff.status.phase != .receiving {

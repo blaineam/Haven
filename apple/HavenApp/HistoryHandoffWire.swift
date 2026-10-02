@@ -36,6 +36,10 @@ enum HistoryHandoffWire {
         /// exporting: a circle whose members are all current seals its key to known DEVICE ids only,
         /// so a source that has never seen the new device would export pages it can't open.
         var roster: String?
+        /// The target stopped this request (Cancel transfer on the new device). Sources drop the run
+        /// and never serve this `at` again; a fresh request (a new `at`) starts over. Optional, so
+        /// older builds decode it — they ignore it and simply keep serving until the request is done.
+        var cancelled: Bool?
     }
     struct Manifest: Codable {
         var v = 1
@@ -51,6 +55,9 @@ enum HistoryHandoffWire {
         /// progress bar. Optional: older manifests just show an indeterminate bar.
         var totalEvents: Int?
         var servedEvents: Int?
+        /// The source stopped serving this request (Cancel transfer on the old device). The target
+        /// stops pulling; no other source takes the request over. Optional for older builds.
+        var cancelled: Bool?
 
         func isLive(now: UInt64) -> Bool { complete || now &- (updatedAt ?? 0) < HistoryHandoffWire.staleSourceMs }
     }
@@ -176,5 +183,114 @@ enum HistoryHandoffWire {
             }
         }
         return (cid, envs, media)
+    }
+
+    // MARK: cancelling
+    //
+    // Either device may cancel. The stop travels on the same account lane the handoff uses — the
+    // TARGET rewrites its request with `cancelled`, a SOURCE rewrites its manifest with `cancelled` —
+    // followed by a frame-36 nudge (mesh / Multipeer / iroh) so an awake peer reads it at once. The
+    // nudge carries no authority of its own: only my own devices can write the lane. A peer that is
+    // offline reads the record on its next wake; a cancel that couldn't be published yet (no relay)
+    // stays queued here and is retried on every tick.
+}
+
+/// The cancel bookkeeping of a history handoff — persisted by `HistoryHandoff`, Foundation-only so
+/// `HavenLogicTests` drives the state machine without the engine.
+struct HandoffCancelLedger: Codable, Equatable {
+    /// TARGET: the request (`Want.at`) that was cancelled here or by the source. A pull still in
+    /// flight when the cancel lands must never write that request back (no auto-resume).
+    var cancelledRequestAt: UInt64?
+    /// SOURCE: per target device, the newest request this device will not serve.
+    var declined: [String: UInt64] = [:]
+    /// Lane records not published yet (the relay was unreachable when the user cancelled).
+    var pending: [Signal] = []
+    /// "Transfer cancelled", shown until dismissed or a new transfer starts.
+    var banner: Banner?
+
+    enum Banner: String, Codable, Equatable { case byThisDevice, byOtherDevice }
+    struct Signal: Codable, Equatable { var key: String; var body: Data }
+
+    /// What a source does with a request it finds on the lane.
+    enum SourceVerdict: Equatable {
+        case serve
+        /// The target has everything.
+        case finished
+        /// The target cancelled it: drop the run, say so.
+        case cancelledByTarget
+        /// Cancelled earlier (on either end) — ignore it.
+        case declined
+    }
+
+    /// May the target persist (or keep following) the request made at `at`?
+    func acceptsWant(at: UInt64) -> Bool { cancelledRequestAt != at }
+
+    /// May this source keep serving `device`'s request made at `requestAt`?
+    func acceptsServe(device: String, requestAt: UInt64) -> Bool {
+        guard let d = declined[device.lowercased()] else { return true }
+        return requestAt > d
+    }
+
+    func verdict(device: String, request: HistoryHandoffWire.Request) -> SourceVerdict {
+        if request.done == true { return .finished }
+        guard acceptsServe(device: device, requestAt: request.at) else { return .declined }
+        return request.cancelled == true ? .cancelledByTarget : .serve
+    }
+
+    /// The TARGET's view: did any source cancel the request made at `requestAt`?
+    static func sourceCancelled(_ manifests: [HistoryHandoffWire.Manifest], requestAt: UInt64) -> Bool {
+        manifests.contains { $0.cancelled == true && $0.forRequest >= requestAt }
+    }
+
+    /// TARGET cancels the request made at `requestAt`. `remote`: a source cancelled it — nothing to
+    /// tell anyone (the source already knows), the request just stops here.
+    mutating func cancelAsTarget(account: String, me: String, requestAt: UInt64, remote: Bool) {
+        cancelledRequestAt = requestAt
+        banner = remote ? .byOtherDevice : .byThisDevice
+        guard !remote else { return }
+        let req = HistoryHandoffWire.Request(device: me.lowercased(), at: requestAt, cancelled: true)
+        if let body = try? JSONEncoder().encode(req) {
+            enqueue(Signal(key: HistoryHandoffWire.requestKey(account, me), body: body))
+        }
+    }
+
+    /// One run a SOURCE is stopping.
+    struct Run: Equatable {
+        var device: String
+        var requestAt: UInt64
+        var run: String
+        var pages: Int
+        var totalEvents: Int
+        var servedEvents: Int
+    }
+
+    /// SOURCE stops serving `runs`. `remote`: the target cancelled — decline it, publish nothing.
+    mutating func cancelAsSource(account: String, me: String, runs: [Run], remote: Bool, now: UInt64) {
+        for r in runs {
+            let dev = r.device.lowercased()
+            declined[dev] = max(declined[dev] ?? 0, r.requestAt)
+            guard !remote else { continue }
+            let m = HistoryHandoffWire.Manifest(run: r.run, source: me.lowercased(), forRequest: r.requestAt,
+                                                pages: r.pages, complete: false, updatedAt: now,
+                                                totalEvents: r.totalEvents, servedEvents: r.servedEvents,
+                                                cancelled: true)
+            if let body = try? JSONEncoder().encode(m) {
+                enqueue(Signal(key: HistoryHandoffWire.manifestKey(account, dev, me), body: body))
+            }
+        }
+        if !runs.isEmpty { banner = remote ? .byOtherDevice : .byThisDevice }
+    }
+
+    /// A new transfer starts (this device asks again): its `at` is fresh, so the old cancel doesn't
+    /// apply to it — but `cancelledRequestAt` stays, so a pull of the OLD request still in flight
+    /// can't write it back. Only the banner goes.
+    mutating func startedAgain() { banner = nil }
+
+    mutating func published(_ s: Signal) { pending.removeAll { $0 == s } }
+
+    /// One record per key: a newer cancel for the same key replaces the queued one.
+    private mutating func enqueue(_ s: Signal) {
+        pending.removeAll { $0.key == s.key }
+        pending.append(s)
     }
 }

@@ -9,7 +9,8 @@ struct HistoryHandoffBanner: View {
     var body: some View {
         if handoff.status.phase != .idle {
             HistoryHandoffProgress(status: handoff.status, onDismiss: { handoff.dismissReceived() },
-                                   onRetry: { handoff.retryRequest() })
+                                   onRetry: { handoff.retryRequest() },
+                                   onCancel: { handoff.cancelTransfer() })
                 .padding(14)
                 .background(HavenTheme.brandHorizontal, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .foregroundStyle(.white)
@@ -23,12 +24,23 @@ struct HistoryHandoffProgress: View {
     let status: HistoryHandoff.Status
     var onDismiss: (() -> Void)? = nil
     var onRetry: (() -> Void)? = nil
+    /// "Cancel transfer" (with a confirmation) while one is running in either direction.
+    var onCancel: (() -> Void)? = nil
+    @State private var confirmingCancel = false
+
+    private var cancellable: Bool {
+        switch status.phase {
+        case .waitingForSource, .receiving, .sending: return true
+        default: return false
+        }
+    }
 
     private var icon: String {
         switch status.phase {
         case .received: return "checkmark.circle.fill"
         case .sending: return "arrow.up.circle"
         case .noAnswer: return "exclamationmark.circle"
+        case .cancelled: return "xmark.circle"
         default: return "clock.arrow.2.circlepath"
         }
     }
@@ -40,6 +52,7 @@ struct HistoryHandoffProgress: View {
         case .received: return "Your history is here"
         case .sending: return "Sending history to your new device"
         case .noAnswer: return "No answer from your other device"
+        case .cancelled: return "Transfer cancelled"
         case .idle: return ""
         }
     }
@@ -65,6 +78,10 @@ struct HistoryHandoffProgress: View {
             return "\(status.done) posts and messages so far"
         case .received:
             return "Everything from your other device has arrived."
+        case .cancelled where status.cancelledRemotely:
+            return "Your other device stopped the transfer. Anything already copied stays."
+        case .cancelled:
+            return "Anything already copied stays; you can start again later."
         case .idle:
             return ""
         }
@@ -80,7 +97,7 @@ struct HistoryHandoffProgress: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
-                if status.phase == .received || status.phase == .noAnswer, let onDismiss {
+                if status.phase == .received || status.phase == .noAnswer || status.phase == .cancelled, let onDismiss {
                     Button(action: onDismiss) { Image(systemName: "xmark").font(.caption.weight(.bold)) }
                         .buttonStyle(.plain)
                         .accessibilityLabel(Text("Dismiss"))
@@ -96,6 +113,13 @@ struct HistoryHandoffProgress: View {
                 Button(action: onRetry) { Text("Retry").font(.caption.weight(.semibold)) }
                     .buttonStyle(.bordered).tint(.white)
             }
+            if cancellable, onCancel != nil {
+                Button { confirmingCancel = true } label: {
+                    Text("Cancel transfer").font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.bordered).tint(.white)
+                .accessibilityIdentifier("historyHandoffCancel")
+            }
             switch status.phase {
             case .receiving, .sending:
                 if let f = status.fraction {
@@ -108,6 +132,12 @@ struct HistoryHandoffProgress: View {
             default:
                 EmptyView()
             }
+        }
+        .alert("Stop moving your history?", isPresented: $confirmingCancel) {
+            Button("Stop transfer", role: .destructive) { onCancel?() }
+            Button("Keep going", role: .cancel) {}
+        } message: {
+            Text("Anything already copied stays; you can start again later.")
         }
     }
 }

@@ -2615,8 +2615,14 @@ async function main() {
     await converge(devices.stub, (j) => j.call?.ringing, BUDGET.text);
     await callOps.stub.accept();
     await converge(devices.desktop, (j) => j.call?.in_call === true, BUDGET.mediaEvent);
+    // The call screen mounts AFTER in_call flips (the webview renders on its next frame), and a
+    // loaded host can starve that frame for seconds — gate-7 scored a one-shot probe RED with no
+    // evidence while the very next probes showed the full screen. Re-probe for a bounded window
+    // and record what was actually seen, so a red says WHICH part never rendered.
     let p = await dprobe();
-    score('desktop call screen renders (solo + pip + controls)', !!(p.screen && p.pip && p.rounds >= 4));
+    const callScreenOk = (x) => !!(x.screen && x.pip && x.rounds >= 4);
+    for (const t0 = Date.now(); !callScreenOk(p) && Date.now() - t0 < 20_000;) p = await dprobe();
+    score('desktop call screen renders (solo + pip + controls)', callScreenOk(p), JSON.stringify(p));
     await dclick('.call-chip'); p = await dprobe();
     score('minimize TAP docks into the Call tab', !p.screen && p.calltab === true && p.minimized === true, JSON.stringify(p));
     await dclick('#tab-call'); p = await dprobe();

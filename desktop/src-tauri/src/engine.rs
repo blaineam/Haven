@@ -77,8 +77,8 @@ struct DynState {
     /// only, every cold start re-pulled + re-verified the ENTIRE mailbox — thousands of
     /// duplicate envelopes on a mature circle, all burned on crypto the engine then dropped.
     seen_mailbox: HashSet<String>,
-    /// seen_mailbox holds keys not yet flushed to disk.
-    seen_mailbox_dirty: bool,
+    /// What the next flush owes the on-disk journal (append-only; a rewrite only after removals).
+    seen_journal: crate::seenjournal::SeenJournal,
     /// Half-finished chunked media transfers — which chunks of which ref are already on disk.
     /// PERSISTED to `media-reassembly.txt` (see `mediaresume`), so a 99%-complete transfer resumes
     /// where it stopped instead of restarting at chunk 0. This replaced an in-memory
@@ -270,9 +270,14 @@ fn load_app_activity(paths: &Paths) -> Vec<ActivityRow> {
 /// them, so they were never marked seen.) Latch v2: installs that latched v1 under the
 /// account-only claim filter must forget once more.
 fn load_seen_mailbox(paths: &Paths) -> HashSet<String> {
-    let mut set: HashSet<String> = std::fs::read_to_string(paths.root.join("mailbox-seen.txt"))
-        .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
-        .unwrap_or_default();
+    let (mut set, compact) = crate::seenjournal::load(&paths.root.join("mailbox-seen.txt"));
+    if compact {
+        // Duplicate-heavy journal (appends survived a crash before their bookkeeping): one rewrite.
+        let _ = crate::seenjournal::perform(
+            &crate::seenjournal::SeenWrite::Rewrite(set.iter().cloned().collect()),
+            &paths.root.join("mailbox-seen.txt"),
+        );
+    }
     let latch = paths.root.join("seen-hello-repair-2.done");
     if !latch.exists() {
         let before = set.len();
@@ -7657,20 +7662,23 @@ impl Engine {
     /// (call it once after a poll/backfill pass) so the cursor survives restarts.
     fn mark_mailbox_seen(&self, key: String) {
         let mut st = self.dyn_state.lock();
-        if st.seen_mailbox.insert(key) {
-            st.seen_mailbox_dirty = true;
+        if st.seen_mailbox.insert(key.clone()) {
+            st.seen_journal.note_inserted(&key);
         }
     }
+    /// Append the marks since the last flush (the whole set used to be re-joined and rewritten
+    /// after every pass — 20+ MB on a mature account); a full rewrite only after removals.
     fn flush_seen_mailbox(&self) {
-        let snapshot = {
+        let _w = crate::seenjournal::WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let write = {
             let mut st = self.dyn_state.lock();
-            if !st.seen_mailbox_dirty {
-                return;
-            }
-            st.seen_mailbox_dirty = false;
-            st.seen_mailbox.iter().cloned().collect::<Vec<_>>().join("\n")
+            let st = &mut *st;
+            st.seen_journal.take(&st.seen_mailbox)
         };
-        let _ = std::fs::write(self.paths.root.join("mailbox-seen.txt"), snapshot);
+        let Some(write) = write else { return };
+        if !crate::seenjournal::perform(&write, &self.paths.root.join("mailbox-seen.txt")) {
+            self.dyn_state.lock().seen_journal.requeue();
+        }
     }
 
     /// Is `reference` confirmed present on `dest` (relay node hex, or "s3")? See DynState docs.
@@ -8148,7 +8156,7 @@ impl Engine {
                 let mut st = self.dyn_state.lock();
                 let before = st.seen_mailbox.len();
                 st.seen_mailbox.retain(|k| k.contains("/__live__/"));
-                st.seen_mailbox_dirty = true;
+                st.seen_journal.note_removed();
                 before - st.seen_mailbox.len()
             };
             let _ = std::fs::write(&repair_marker, b"1");
@@ -8569,6 +8577,7 @@ impl Engine {
                     });
                     let dropped = before.saturating_sub(st.seen_mailbox.len());
                     if dropped > 0 {
+                        st.seen_journal.note_removed();
                         requeued_any = true;
                         log::info!(
                             "key commit unlocked circle={} — re-queued {dropped} mailbox keys",

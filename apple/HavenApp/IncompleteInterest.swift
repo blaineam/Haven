@@ -28,7 +28,7 @@ final class IncompleteInterestStore: ObservableObject {
 
     private static let key = "haven.incompleteInterest.v1"
     private var interests: [String: Interest] = {
-        guard let raw = UserDefaults.standard.data(forKey: IncompleteInterestStore.key),
+        guard let raw = SpilledDefaults.shared.data(forKey: IncompleteInterestStore.key),
               let decoded = try? JSONDecoder().decode([String: Interest].self, from: raw)
         else { return [:] }
         return decoded
@@ -82,6 +82,6 @@ final class IncompleteInterestStore: ObservableObject {
 
     private func save() {
         guard let data = try? JSONEncoder().encode(interests) else { return }
-        UserDefaults.standard.set(data, forKey: Self.key)
+        SpilledDefaults.shared.set(data, forKey: Self.key)
     }
 }

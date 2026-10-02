@@ -27,6 +27,7 @@ mod reoptimize;
 mod roster;
 mod scheduled;
 mod secret;
+mod seenjournal;
 mod selfsync;
 mod selfsyncrot;
 mod songsuggest;

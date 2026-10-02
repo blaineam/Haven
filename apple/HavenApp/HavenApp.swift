@@ -313,6 +313,7 @@ struct HavenApp: App {
                 // rest of the app's life; foregrounding again re-asserts it if a call really is up.
                 CallManager.shared.syncIdleTimer()
                 SharedStore.flushSeenMailbox()     // persist the ingestion cursor NOW (survive a kill)
+                SpilledDefaults.shared.flush()     // per-media maps (aspects, backoff, evictions…)
                 // One short flush of authored envelopes still in the queue — then suspend. Media
                 // backup does its own single budgeted pass (no 2s re-arm while pocketed).
                 Task { await BackgroundUploader.shared.flush() }

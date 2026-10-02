@@ -104,6 +104,7 @@ struct MediaPicker: UIViewControllerRepresentable {
                     try? FileManager.default.copyItem(at: url, to: dest)
                     Task { @MainActor in
                         let bundle = await MediaStore.shared.prepareVideo(url: dest)
+                        TempSweep.discardIfTemp(dest)   // the copy is consumed (it used to live in tmp forever)
                         completion(bundle.isEmpty ? [] : bundle.mediaRefs)
                     }
                 }
@@ -164,6 +165,7 @@ struct MediaPicker: NSViewControllerRepresentable {
                         }
                         if let dest {
                             let bundle = await MediaStore.shared.prepareVideo(url: dest)
+                            TempSweep.discardIfTemp(dest)   // the copy is consumed
                             if !bundle.isEmpty { refs.append(contentsOf: bundle.mediaRefs) }
                         }
                     } else if provider.canLoadObject(ofClass: PlatformImage.self) {

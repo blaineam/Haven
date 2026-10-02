@@ -1670,13 +1670,34 @@ final class RelayMailboxStore: ObservableObject {
         RelayAddress.reachableByOthers(url)
     }
 
-    /// Stamp a relay as just-seen (a successful op). Cheap; persisted so "last seen" survives a restart.
+    /// Stamp a relay as just-seen (a successful op). Persisted so "last seen" survives a restart.
+    ///
+    /// Coarse on purpose. This runs after EVERY successful relay operation — each mailbox GET/PUT,
+    /// each media chunk — and used to re-publish `entries` (re-rendering every view observing the
+    /// store), JSON-encode every entry into UserDefaults (cfprefsd then rewrote the whole 1.1 MB
+    /// preferences plist) and rebuild the App Group relay directory, per op. Field heat report,
+    /// 2026-10-02. "Last seen" only feeds a days-scale staleness sweep and a coarse UI label, so a
+    /// stamp younger than `seenStampGranularityMs` is left alone and the stamp itself is persisted
+    /// on a debounce (the directory mirror is untouched: it carries no timestamps).
     func markSeen(_ hex: String) {
         guard var e = entries[hex] else { return }
-        e.lastSeenMs = nowMs()
+        let now = nowMs()
+        guard now &- e.lastSeenMs >= Self.seenStampGranularityMs || e.lastSeenMs > now else { return }
+        e.lastSeenMs = now
         entries[hex] = e
-        persistEntries()
+        guard !seenStampPersistPending else { return }
+        seenStampPersistPending = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard let self else { return }
+            self.seenStampPersistPending = false
+            if let data = try? JSONEncoder().encode(self.entries) {
+                UserDefaults.standard.set(data, forKey: self.entriesKey)
+            }
+        }
     }
+    private static let seenStampGranularityMs: UInt64 = 60_000
+    private var seenStampPersistPending = false
 
     /// Rename a relay (user-facing label only).
     func rename(_ hex: String, to name: String) {

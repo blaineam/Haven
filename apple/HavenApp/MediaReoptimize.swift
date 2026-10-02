@@ -123,11 +123,11 @@ final class MediaReoptimizer: ObservableObject {
     // scan forever — that would burn minutes of CPU per tap re-deciding the same thing. Persisted so
     // it survives a relaunch, and bounded so it cannot itself become the leak.
     private let skipKey = "haven.reoptimize.skip"
-    private lazy var skipped: Set<String> = Set(UserDefaults.standard.stringArray(forKey: skipKey) ?? [])
+    private lazy var skipped: Set<String> = Set(SpilledDefaults.shared.stringArray(forKey: skipKey) ?? [])
     private func skip(_ ref: String) {
         skipped.insert(ref)
         if skipped.count > 500 { skipped = Set(skipped.prefix(500)) }
-        UserDefaults.standard.set(Array(skipped), forKey: skipKey)
+        SpilledDefaults.shared.set(Array(skipped), forKey: skipKey)
     }
 
     // MARK: - Scan

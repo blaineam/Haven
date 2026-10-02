@@ -40,6 +40,8 @@ actor StatePersister {
         do {
             try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
             await engine.markPersisted(generation)
+            // Export + write cost sets how soon the next network-driven export may run.
+            PersistCadence.record(bytes: data.count, duration: Double(HavenPerf.nowMs() &- startedAtMs) / 1000)
             return true
         } catch {
             // Left dirty: the next persist exports again.

@@ -277,6 +277,7 @@ struct CameraCaptureRepresentable: View {
         guard let url else { return }
         Task { @MainActor in
             let ref = await MediaStore.shared.addVideo(url: url)
+            TempSweep.discardIfTemp(url)   // the raw recording is consumed
             guard !ref.isEmpty else { return }   // "" = refused (over the length limit)
             onCaptured([ref])
         }
@@ -870,6 +871,7 @@ final class CameraViewController: UIViewController,
                     from connections: [AVCaptureConnection], error: Error?) {
         Task { @MainActor in
             let ref = await MediaStore.shared.addVideo(url: url)
+            TempSweep.discardIfTemp(url)   // the raw recording is consumed (it used to stay in tmp forever)
             finish([ref])
         }
     }

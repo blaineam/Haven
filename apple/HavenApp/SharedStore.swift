@@ -2489,15 +2489,26 @@ enum SharedStore {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("haven-mailbox-seen.txt")
     }
+    /// The on-disk form: append-only (see `SeenJournal`). Guarded by `seenLock` like the set; its
+    /// file writes are serialized by `seenWriteLock` so an append never races a rewrite.
+    nonisolated private static let seenJournal = SeenJournal(url: seenURL)
+    nonisolated private static let seenWriteLock = NSLock()
     nonisolated private static func withSeen<T>(_ body: (inout Set<String>) -> T) -> T {
         seenLock.lock(); defer { seenLock.unlock() }
         if !seenLoaded {
             seenLoaded = true
-            if let text = try? String(contentsOf: seenURL, encoding: .utf8) {
-                seenMailbox = Set(text.split(separator: "\n").map(String.init))
-            }
+            seenMailbox = seenJournal.load()
         }
         return body(&seenMailbox)
+    }
+    /// Run `body` on the set and tell the journal keys may have LEFT it (any removal → one rewrite).
+    nonisolated private static func withSeenRemoving<T>(_ body: (inout Set<String>) -> T) -> T {
+        withSeen { set in
+            let before = set.count
+            let r = body(&set)
+            if set.count != before { seenJournal.noteRemoved() }
+            return r
+        }
     }
     nonisolated private static func seenContains(_ key: String) -> Bool {
         withSeen { $0.contains(key) } || awaitingPersist.withLock { $0[key] != nil }
@@ -2530,7 +2541,7 @@ enum SharedStore {
     /// Used when a newly-opened key commit must re-drain epoch events that were marked seen while
     /// unopenable (linked-host recovery: Mac had the blobs on disk but never the peer epoch key).
     nonisolated static func forgetSeenPrefix(_ prefix: String) {
-        let removed: Int = withSeen { set in
+        let removed: Int = withSeenRemoving { set in
             let before = set.count
             set = set.filter { !$0.hasPrefix(prefix) || $0.contains("/__live__/") }
             return before - set.count
@@ -2552,7 +2563,7 @@ enum SharedStore {
         let flag = "haven.repair.linkedHostMailbox.v1"
         guard !UserDefaults.standard.bool(forKey: flag) else { return }
         UserDefaults.standard.set(true, forKey: flag)
-        let removed: Int = withSeen { set in
+        let removed: Int = withSeenRemoving { set in
             let before = set.count
             set = set.filter { key in
                 // Keep non-DM and live-call frames; drop DM content + hellos so commits re-apply.
@@ -2586,7 +2597,7 @@ enum SharedStore {
         let flag = "haven.repair.helloSeen.v2"
         guard !UserDefaults.standard.bool(forKey: flag) else { return }
         UserDefaults.standard.set(true, forKey: flag)
-        let removed: Int = withSeen { set in
+        let removed: Int = withSeenRemoving { set in
             let before = set.count
             set = set.filter { !$0.contains("/__hello__/") }
             return before - set.count
@@ -2611,7 +2622,7 @@ enum SharedStore {
         let flag = "haven.repair.stormBurnedSeen.v1"
         guard !UserDefaults.standard.bool(forKey: flag) else { return }
         UserDefaults.standard.set(true, forKey: flag)
-        let removed: Int = withSeen { set in
+        let removed: Int = withSeenRemoving { set in
             let before = set.count
             set = set.filter { $0.contains("/__live__/") }
             return before - set.count
@@ -2631,16 +2642,30 @@ enum SharedStore {
         }
         guard schedule else { return }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
-            let snapshot: String = withSeen { set in
-                seenSavePending = false
-                return set.joined(separator: "\n")
-            }
-            try? snapshot.write(to: seenURL, atomically: true, encoding: .utf8)
+            writeSeenJournal(clearingPending: true)
+        }
+    }
+
+    /// Bring the journal file up to date with the set: normally an append of the new marks, a full
+    /// rewrite only after removals / for compaction. Serialized with every other journal write.
+    nonisolated private static func writeSeenJournal(clearingPending: Bool) {
+        seenWriteLock.lock(); defer { seenWriteLock.unlock() }
+        let write: SeenJournal.Write? = withSeen { set in
+            if clearingPending { seenSavePending = false }
+            return seenJournal.takeWrite(current: set)
+        }
+        guard let write else { return }
+        if !SeenJournal.perform(write, at: seenURL) {
+            withSeen { _ in seenJournal.requeue(write) }
         }
     }
 
     nonisolated private static func markSeen(_ key: String) {
-        let inserted: Bool = withSeen { set in set.insert(key).inserted }
+        let inserted: Bool = withSeen { set in
+            let fresh = set.insert(key).inserted
+            if fresh { seenJournal.noteInserted(key) }
+            return fresh
+        }
         if inserted { scheduleSeenSave() }
     }
 
@@ -2692,8 +2717,10 @@ enum SharedStore {
     /// Wipe the persisted seen-set — identity reset/adoption must not inherit the old identity's
     /// ingestion cursor (its keys are meaningless to the new engine state).
     static func resetSeenMailbox() {
-        withSeen { $0.removeAll() }
+        seenWriteLock.lock()
+        withSeen { set in set.removeAll(); seenJournal.noteReset() }
         try? FileManager.default.removeItem(at: seenURL)
+        seenWriteLock.unlock()
         mailboxListDigests.removeAll()   // a fresh cursor must re-list everything
     }
 
@@ -2702,13 +2729,15 @@ enum SharedStore {
     /// wrote it, so the next launch treated the WHOLE mailbox as new and re-downloaded + re-verified
     /// every envelope (the "redownloads old posts on every launch" heat report). A synchronous flush
     /// on the way to the background closes that window.
+    ///
+    /// Append-only since 2026-10-02: the flush writes only the marks since the last save (it used to
+    /// rewrite the whole 20+ MB set on every trip to the background).
     static func flushSeenMailbox() {
-        let snapshot: String? = withSeen { set in
-            guard seenLoaded, !set.isEmpty else { return nil }
-            seenSavePending = false
-            return set.joined(separator: "\n")
-        }
-        if let snapshot { try? snapshot.write(to: seenURL, atomically: true, encoding: .utf8) }
+        seenLock.lock()
+        let loaded = seenLoaded
+        seenLock.unlock()
+        guard loaded else { return }   // never read → nothing new to write (and no 20 MB load on the way out)
+        writeSeenJournal(clearingPending: false)
     }
 
     /// Nonisolated + a table hex encode: this used to be `String(format: "%02x")` × 32 on the main

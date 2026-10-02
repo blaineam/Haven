@@ -749,7 +749,7 @@ final class MediaStore: ObservableObject {
 
     private static let thumbCompanionKey = "haven.media.thumbCompanions"
     private var thumbCompanions: [String: String] = {
-        (UserDefaults.standard.dictionary(forKey: MediaStore.thumbCompanionKey) as? [String: String]) ?? [:]
+        (SpilledDefaults.shared.dictionary(forKey: MediaStore.thumbCompanionKey) as? [String: String]) ?? [:]
     }()
 
     /// The thumb companion ref minted for a photo at compose time, if one exists.
@@ -759,7 +759,7 @@ final class MediaStore: ObservableObject {
 
     private static let previewCompanionKey = "haven.media.previewCompanions"
     private var previewCompanions: [String: String] = {
-        (UserDefaults.standard.dictionary(forKey: MediaStore.previewCompanionKey) as? [String: String]) ?? [:]
+        (SpilledDefaults.shared.dictionary(forKey: MediaStore.previewCompanionKey) as? [String: String]) ?? [:]
     }()
 
     /// The 512px AVIF preview minted for a photo at attach time, if one exists.
@@ -790,7 +790,7 @@ final class MediaStore: ObservableObject {
     /// rather than a linear scan of the dictionary's values, because the upload queue asks this for
     /// every job in every pass.
     private var previewRefs: Set<String> = {
-        let map = (UserDefaults.standard.dictionary(forKey: MediaStore.previewCompanionKey) as? [String: String]) ?? [:]
+        let map = (SpilledDefaults.shared.dictionary(forKey: MediaStore.previewCompanionKey) as? [String: String]) ?? [:]
         return Set(map.values)
     }()
 
@@ -834,7 +834,7 @@ final class MediaStore: ObservableObject {
             previewCompanions = Dictionary(uniqueKeysWithValues: Array(previewCompanions.suffix(1000)))
             previewRefs = Set(previewCompanions.values)
         }
-        UserDefaults.standard.set(previewCompanions, forKey: Self.previewCompanionKey)
+        SpilledDefaults.shared.set(previewCompanions, forKey: Self.previewCompanionKey)
     }
 
     /// Encode + store a ≤32KB, ~256px JPEG companion for `ref` and remember the pairing. Skipped
@@ -864,7 +864,7 @@ final class MediaStore: ObservableObject {
         if thumbCompanions.count > 2000 {   // bound: old pairings only matter until the post is sealed
             thumbCompanions = Dictionary(uniqueKeysWithValues: Array(thumbCompanions.suffix(1000)))
         }
-        UserDefaults.standard.set(thumbCompanions, forKey: Self.thumbCompanionKey)
+        SpilledDefaults.shared.set(thumbCompanions, forKey: Self.thumbCompanionKey)
     }
 
     /// Async because optimizing transcodes the video (AVAssetExportSession). Without
@@ -2149,7 +2149,7 @@ final class KeptStoriesStore: ObservableObject {
     /// sibling's copy quietly re-adding it. Absence is not removal; this codebase has already paid
     /// for that lesson once with additive-only self-sync.
     private(set) var removed: [String: UInt64]
-    private let d = UserDefaults.standard
+    private let d = SpilledDefaults.shared
     private let key = "haven.stories.kept"
     private let removedKey = "haven.stories.kept.removed"
 
@@ -2258,7 +2258,7 @@ final class KeptStoriesStore: ObservableObject {
 final class PinnedMediaStore: ObservableObject {
     static let shared = PinnedMediaStore()
     @Published private(set) var refs: Set<String>
-    private let d = UserDefaults.standard
+    private let d = SpilledDefaults.shared
     private let key = "haven.media.pinned"
 
     private init() { refs = Set(d.stringArray(forKey: key) ?? []) }
@@ -2320,7 +2320,7 @@ final class MediaWantedStore: ObservableObject {
     /// manual ask that stops earning its notification because the app restarted is the same bug
     /// from the other side.
     @Published private(set) var manuallyWanted: Set<String>
-    private let d = UserDefaults.standard
+    private let d = SpilledDefaults.shared
     private let key = "haven.media.wanted"
     private let manualKey = "haven.media.wanted.manual"
 
@@ -2373,7 +2373,7 @@ final class MediaWantedStore: ObservableObject {
 final class EvictedMediaStore: ObservableObject {
     static let shared = EvictedMediaStore()
     @Published private(set) var sizes: [String: Int64]
-    private let d = UserDefaults.standard
+    private let d = SpilledDefaults.shared
     private let key = "haven.media.evicted"
 
     private init() {

@@ -29,7 +29,10 @@ final class MediaAspectStore {
     private var saveScheduled = false
 
     private init() {
-        aspects = (UserDefaults.standard.dictionary(forKey: Self.key) as? [String: Double]) ?? [:]
+        aspects = (SpilledDefaults.shared.dictionary(forKey: Self.key) as? [String: Double]) ?? [:]
+        // The v1 map was superseded but never deleted — up to 4000 refs still riding in the
+        // preferences plist, re-written with every unrelated defaults write.
+        UserDefaults.standard.removeObject(forKey: "haven.media.aspects")
     }
 
     func aspect(_ ref: String) -> CGFloat? {
@@ -56,7 +59,7 @@ final class MediaAspectStore {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             saveScheduled = false
-            UserDefaults.standard.set(aspects, forKey: Self.key)
+            SpilledDefaults.shared.set(aspects, forKey: Self.key)
         }
     }
 }

@@ -23,7 +23,7 @@ enum MediaFetchBackoff {
     private static let defaultsKey = "haven.media.reqBackoff.v1"
     private struct Entry: Codable { var n: Int; var due: UInt64 }
     private static var map: [String: Entry] = {
-        guard let d = UserDefaults.standard.data(forKey: defaultsKey),
+        guard let d = SpilledDefaults.shared.data(forKey: defaultsKey),
               let m = try? JSONDecoder().decode([String: Entry].self, from: d) else { return [:] }
         return m
     }()
@@ -34,7 +34,7 @@ enum MediaFetchBackoff {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             savePending = false
-            if let d = try? JSONEncoder().encode(map) { UserDefaults.standard.set(d, forKey: defaultsKey) }
+            if let d = try? JSONEncoder().encode(map) { SpilledDefaults.shared.set(d, forKey: defaultsKey) }
         }
     }
     private static func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
@@ -969,6 +969,19 @@ final class FeedStore: ObservableObject {
         Task.detached(priority: .utility) {
             let f = MediaStore.sweepStaleScratch()
             if f.files > 0 { HavenLog.sync("media scratch sweep: freed \(f.bytes)B across \(f.files) files") }
+            // tmp/ leaked every picked video, recording and export for months (49.5 GB on the
+            // owner's phone, 2026-10-02) — reclaim anything a previous process left > 24h ago.
+            // macOS: only inside the sandbox container (a non-sandboxed tmp is shared per user).
+            #if os(macOS)
+            let sweepTmp = ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
+            #else
+            let sweepTmp = true
+            #endif
+            if sweepTmp {
+                let t = TempSweep.sweep()
+                if t.removed > 0 { HavenLog.sync("tmp sweep: freed \(t.bytes / 1_048_576) MB across \(t.removed) items") }
+            }
+            Self.migrateLegacyKithData()
         }
         #if DEBUG
         CallManager.shared.debugSimulateIncomingRing()   // HAVEN_RING_TEST=1 only — bounded-ring self-test
@@ -2856,6 +2869,18 @@ final class FeedStore: ObservableObject {
         return (out, events)
     }
 
+    /// Pre-rename (Kith) media: migrate into the current store, then drop the legacy folder — once.
+    /// See `LegacyKithMigration`. Runs on the launch sweep's detached task (never main).
+    nonisolated static func migrateLegacyKithData() {
+        let fm = FileManager.default
+        guard let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        guard let out = LegacyKithMigration.runOnce(appSupport: dir, storeDir: MediaStore.storageDir) else { return }
+        for name in out.movedNames { HeldMediaIndex.shared.insert(name) }
+        if out.moved + out.alreadyPresent + out.failed > 0 || !out.legacyRemoved {
+            HavenLog.sync("legacy kith migration: moved \(out.moved), already held \(out.alreadyPresent), failed \(out.failed), legacy folder \(out.legacyRemoved ? "removed" : "KEPT")")
+        }
+    }
+
     /// Factory reset: no identity's state may survive, shelved or live.
     nonisolated static func deleteAllShelvedState() {
         let fm = FileManager.default
@@ -2904,8 +2929,11 @@ final class FeedStore: ObservableObject {
         persistDebouncePending = true
         persistDebounceToken &+= 1
         let token = persistDebounceToken
+        // 2.5 s for a small state; longer once the last export showed the state is large/slow
+        // (see PersistCadence — a 55 MB state re-exported every few seconds was the field heat).
+        let delay = PersistCadence.currentDelay()
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             // Satisfied by a persistNow() meanwhile — or re-armed after one, by a newer timer that
             // owns the next export (this one firing early would cut its window short).
             guard let self, self.persistDebouncePending, self.persistDebounceToken == token else { return }

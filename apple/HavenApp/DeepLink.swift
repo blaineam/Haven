@@ -554,7 +554,7 @@ final class StoryReplyAssociationStore {
     private var map: [String: String] = [:] // messageId → "circleId\u{1f}postId"
 
     private init() {
-        if let data = UserDefaults.standard.dictionary(forKey: key) as? [String: String] {
+        if let data = SpilledDefaults.shared.dictionary(forKey: key) as? [String: String] {
             map = data
         }
     }
@@ -568,7 +568,7 @@ final class StoryReplyAssociationStore {
         if map.count > 2000 {
             map = Dictionary(uniqueKeysWithValues: map.suffix(1500))
         }
-        UserDefaults.standard.set(map, forKey: key)
+        SpilledDefaults.shared.set(map, forKey: key)
     }
 
     func lookup(messageId: String) -> (circleId: String, postId: String)? {

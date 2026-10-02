@@ -135,6 +135,53 @@ final class CallAudioGateTests: XCTestCase {
         XCTAssertEqual(enabled, 1)
     }
 
+    /// Every ICE tick / recovery path asks again; while a retry is scheduled that must not re-probe
+    /// early and defeat the backoff.
+    func testRequestWhileUnavailableWaitsForBackoff() {
+        gate.request(reason: "t")
+        probe.answer(.failed)
+        gate.request(reason: "ice-connected")
+        gate.request(reason: "recover")
+        XCTAssertEqual(probe.runs, 1)
+        clock.advance(2)
+        XCTAssertEqual(probe.runs, 2)
+    }
+
+    // MARK: Closer
+
+    func testCloserRunsAtOnceWhenNoAudioIsLive() {
+        let closer = CallAudioCloser(gate: gate)
+        var ran: [String] = []
+        closer.close("pc", audioLive: false) { ran.append("pc") }
+        XCTAssertEqual(ran, ["pc"])
+        XCTAssertEqual(probe.runs, 0, "nothing reaches RemoteIO, so no probe is needed")
+    }
+
+    /// The mid-call wedge: hangup's AURemoteIO::Stop aborts on a stuck server. Stops wait for a
+    /// probe to answer, keep their order, and a never-answering server just leaves them parked.
+    func testCloserParksStopsUntilServerAnswers() {
+        let closer = CallAudioCloser(gate: gate)
+        var ran: [String] = []
+        closer.close("pc", audioLive: true) { ran.append("pc") }
+        closer.close("disable", audioLive: false) { ran.append("disable") }   // queued behind, in order
+        XCTAssertEqual(ran, [])
+        XCTAssertEqual(closer.pendingCount, 2)
+        clock.advance(CallAudioPolicy.probeTimeout)          // probe hangs: still parked
+        clock.advance(60)                                    // stuck probe blocks every retry
+        XCTAssertEqual(ran, [])
+        let runsWhileStuck = probe.runs
+        XCTAssertEqual(runsWhileStuck, 1, "no new probe piles onto the stuck one")
+        probe.answer(.failed)                                // the stuck start finally returns (stale)
+        clock.advance(12)                                    // the scheduled retry (t=74) probes afresh
+        XCTAssertEqual(probe.runs, 2)
+        probe.answer(.healthy)
+        XCTAssertEqual(ran, ["pc", "disable"])
+        XCTAssertEqual(closer.pendingCount, 0)
+        XCTAssertEqual(gate.state, .unknown, "the next teardown re-probes")
+        closer.close("later", audioLive: false) { ran.append("later") }
+        XCTAssertEqual(ran.last, "later")
+    }
+
     func testBlockedToneDefersProbeAndEnable() {
         toneBusy = true
         gate.request(reason: "t")
@@ -176,7 +223,7 @@ final class CallAudioGateTests: XCTestCase {
     func testResetDropsLateResultsAndClearsBanner() {
         gate.request(reason: "t")
         probe.answer(.failed)
-        gate.request(reason: "retry")  // unavailable → probes again
+        gate.retryNow()  // unavailable → probes again
         gate.reset()
         XCTAssertEqual(gate.state, .unknown)
         XCTAssertFalse(gate.showsUnavailableBanner)

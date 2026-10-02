@@ -508,6 +508,21 @@ final class WebRTCCall: NSObject {
     }
 
     func close() {
+        releaseLocalMedia()
+        closeConnection()
+    }
+
+    /// Closing the peer connection tears down its audio streams, and closing the LAST one stops
+    /// WebRTC's RemoteIO unit — which aborts the process on a wedged audio server. Split out so the
+    /// caller can park it behind `CallAudioCloser` while everything else is released at once.
+    func closeConnection() {
+        pc.close()
+    }
+
+    /// Release everything that is NOT the audio unit, immediately: camera (and its "in use"
+    /// indicator), local tracks (the mic track is muted so a parked connection sends silence).
+    func releaseLocalMedia() {
+        audioTrack.isEnabled = false
         // Fully release the camera so the iOS "in use" (green) indicator goes off on hangup/decline.
         // stopCapture tears down the capturer's internal AVCaptureSession; dropping our references
         // releases the capturer + source + track so the device isn't retained.
@@ -524,7 +539,6 @@ final class WebRTCCall: NSObject {
         videoSource = nil
         screenTrack = nil
         screenSource = nil
-        pc.close()
     }
 }
 

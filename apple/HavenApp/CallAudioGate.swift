@@ -154,15 +154,14 @@ final class CallAudioGate {
         }
     }
 
-    /// Ask for audio. No-op if it is already available or a probe is underway; otherwise starts
-    /// one. Call audio is switched on from `onAvailable`, never by the caller directly.
+    /// Ask for audio. Starts a probe only from `.unknown`: when audio is already up, a probe is
+    /// underway, or a retry is already scheduled (`.unavailable` — every ICE tick and recovery path
+    /// asks again, and those must not defeat the backoff), it is a no-op. Call audio is switched on
+    /// from `onAvailable`, never by the caller directly.
     func request(reason: String) {
-        switch state {
-        case .available, .probing: return
-        case .unknown, .unavailable:
-            HavenLog.call("audio gate: probing (\(reason))")
-            begin()
-        }
+        guard state == .unknown else { return }
+        HavenLog.call("audio gate: probing (\(reason))")
+        begin()
     }
 
     /// The user tapped Retry (or something suggests the device is back): probe now instead of
@@ -269,6 +268,50 @@ final class CallAudioGate {
         guard state != s else { return }
         state = s
         onStateChange?(s)
+    }
+}
+
+/// Stopping call audio is as dangerous as starting it. If the audio server wedges MID-call — seen on
+/// the simulator when the host's input format changed under a running call: RemoteIO's server
+/// thread stuck in a reconnect waiting for an IO cycle — then the hangup's `AURemoteIO::Stop` (from
+/// closing the last peer connection, `isAudioEnabled = false`, or `AVAudioEngine.stop()`) times
+/// out and aborts exactly like a start does. The pre-call gate cannot see a wedge that begins later.
+///
+/// So audio-touching teardown goes through here. When no call audio is running it executes at once
+/// (nothing reaches RemoteIO). When it is, it is parked until a fresh probe — its own gate, with the
+/// same deadline, backoff and "never while another start is blocked" rule — sees the server answer;
+/// then every parked action runs in order. A server that never recovers costs a leaked peer
+/// connection, never the process. Everything the user sees (call UI, camera light) is torn down
+/// immediately by the caller; only the audio stop waits.
+@MainActor
+final class CallAudioCloser {
+    private let gate: CallAudioGate
+    private var pending: [(String, () -> Void)] = []
+
+    /// Actions parked behind an unanswered probe (QA / tests).
+    var pendingCount: Int { pending.count }
+
+    init(gate: CallAudioGate) {
+        self.gate = gate
+        gate.onAvailable = { [weak self] in self?.flush() }
+    }
+
+    /// Run `action` (which stops something on the audio unit) now if `audioLive` is false and
+    /// nothing is already parked — order is preserved — else once the audio server answers.
+    func close(_ what: String, audioLive: Bool, _ action: @escaping () -> Void) {
+        guard audioLive || !pending.isEmpty else { action(); return }
+        pending.append((what, action))
+        gate.request(reason: "stop \(what)")
+    }
+
+    private func flush() {
+        let run = pending
+        pending = []
+        gate.reset()   // the next teardown re-probes: a later wedge must be seen afresh
+        if !run.isEmpty {
+            HavenLog.call("audio closer: server answered — running \(run.count) parked stop(s): \(run.map(\.0).joined(separator: ", "))")
+        }
+        for (_, action) in run { action() }
     }
 }
 

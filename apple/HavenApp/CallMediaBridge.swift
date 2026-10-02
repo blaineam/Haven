@@ -199,8 +199,14 @@ final class CallMediaBridge {
 
     private func stopAudio() {
         audioEngine?.inputNode.removeTap(onBus: 0)
-        playerNode?.stop()
-        audioEngine?.stop()
+        // `AVAudioEngine.stop()` reaches `AURemoteIO::Stop`, which aborts on an audio server that
+        // wedged mid-call — park it behind the call's audio closer (no-op wait when it's healthy).
+        if let engine = audioEngine, let player = playerNode {
+            CallManager.shared.retireCallAudio("hairpin engine", audioLive: true) {
+                player.stop()
+                engine.stop()
+            }
+        }
         audioEngine = nil; playerNode = nil
         captureConverter = nil; playbackConverter = nil
         jitter.reset()

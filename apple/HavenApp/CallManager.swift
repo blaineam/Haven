@@ -76,6 +76,33 @@ final class CallManager: NSObject, ObservableObject {
         return g
     }()
 
+    /// Parks audio-unit STOPS (closing the last peer connection, disabling WebRTC audio, stopping the
+    /// hairpin engine) behind a fresh probe while call audio is running — a server that wedged
+    /// mid-call aborts the process on `AURemoteIO::Stop` just as it does on start.
+    private lazy var audioCloser = CallAudioCloser(
+        gate: CallAudioGate(probe: AVAudioOutputProbe(), otherStartInFlight: { CallTones.shared.startInFlight }))
+
+    /// Whether WebRTC's audio unit (iOS) is live, i.e. whether a stop would reach RemoteIO.
+    private var webRTCAudioLive: Bool {
+        #if os(iOS)
+        return RTCAudioSession.sharedInstance().isAudioEnabled
+        #else
+        return false   // native macOS: HAL device, no RemoteIO abort on stop
+        #endif
+    }
+
+    /// Run an audio-unit stop now, or once the audio server is known to answer (see `audioCloser`).
+    func retireCallAudio(_ what: String, audioLive: Bool, _ action: @escaping () -> Void) {
+        audioCloser.close(what, audioLive: audioLive, action)
+    }
+
+    /// Release a connection's camera/tracks now; close the connection (an audio-unit stop when it is
+    /// the last one) through the closer.
+    private func retire(_ call: WebRTCCall) {
+        call.releaseLocalMedia()
+        audioCloser.close("peer connection", audioLive: webRTCAudioLive) { call.closeConnection() }
+    }
+
     /// Whether call audio I/O may run right now (the hairpin bridge checks before starting its engine).
     var callAudioAvailable: Bool { audioGate.isAvailable }
 
@@ -1324,7 +1351,7 @@ final class CallManager: NSObject, ObservableObject {
 
     /// Remove a peer from the roster + tear down its connection + its remote tile.
     private func dropPeer(_ peer: String) {
-        peers[peer]?.call.close()
+        if let c = peers[peer]?.call { retire(c) }
         peers[peer] = nil
         if hairpinPeers.remove(peer) != nil { CallMediaBridge.shared.deactivate(remote: peer) }
         remoteVideoTracks[peer] = nil
@@ -1884,14 +1911,16 @@ final class CallManager: NSObject, ObservableObject {
         if screenShareOn { ScreenShareManager.shared.stop() }
         ScreenShareManager.shared.onFrame = nil
         ScreenShareManager.shared.onStop = nil
-        for conn in peers.values { conn.call.close() }
+        let wasLive = webRTCAudioLive
+        for conn in peers.values { retire(conn.call) }
         peers.removeAll()
         #if os(iOS)
-        let audio = RTCAudioSession.sharedInstance()
-        audio.isAudioEnabled = false
-        #if targetEnvironment(macCatalyst)
-        audio.lockForConfiguration(); try? audio.setActive(false); audio.unlockForConfiguration()
-        #endif
+        // Behind the connection closes (same closer, same order). Skipped if a NEW call has started
+        // by the time a parked stop runs — that call owns the unit now.
+        audioCloser.close("WebRTC audio", audioLive: wasLive) { [weak self] in
+            guard self?.active != true else { return }
+            RTCAudioSession.sharedInstance().isAudioEnabled = false
+        }
         #endif
         remoteVideoTracks.removeAll(); remoteScreenTracks.removeAll(); remoteCameraOff.removeAll(); participants = []
         localVideoTrack = nil; videoOn = false; screenShareOn = false

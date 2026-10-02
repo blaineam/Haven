@@ -7,7 +7,7 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 2.0.0 — release candidate 1 (2026-09-29)
+## 2.0.0 — release candidate 1 (2026-10-02)
 
 Haven 2.0 is a reliability and performance release built from field reports: a phone getting hot
 on a call while it streamed media to a friend, sync progress that never moved, Android screen share
@@ -16,6 +16,44 @@ whole circle without realizing it. It also brings friends who each run their own
 automated QA suite, which found and fixed several relay-mesh bugs. Everything below is covered by the
 Soren release gate, including new cross-device e2e steps (`relayfirst`, `newfriend`, `screenshare`,
 `callgate`, `audience`, `launch`, `responsive`, `progress`, `multirelay`).
+
+### Fixed — nothing you write is lost when the app is closed
+
+On iPhone a new post appears at once but is only sent after the state it depends on is on disk, and
+circle, DM, approve, block and delete actions save immediately. Android and desktop now write their
+state atomically (temp file, fsync, rename): a kill mid-write used to be able to wipe the account
+state. The circle's group-key tree is now saved too — after a kill, a creator could start a second,
+competing key history and friends stopped being able to read new posts. Key and tree state is always
+on disk before the envelopes that depend on it leave the device, and a device that briefly sees a
+stale branch now converges on the circle's agreed one.
+
+### Fixed — no more silent-push storms or idle churn
+
+A relay host re-offers already-seen control messages on every poll; each one was being forwarded to
+your other devices with a silent push — thousands an hour. Only real changes now fan out or push.
+Relay announcements are stored once per relay instead of a fresh copy each time (one relay held 194
+copies of the same announcement). Android no longer rewrites its relay table on every successful
+request, which caused the long disk stalls behind several Android freezes.
+
+### Fixed — Android stays responsive
+
+Engine start-up, call handling, screen-share start/stop, resume-time sync and every engine read during
+drawing moved off the main thread; the engine boots on its own thread the moment the app opens (first
+feed in ~6 s on a loaded emulator, down from never/33 s). Two Android crashes from relay lists being
+changed while read, and one from a call being torn down twice at once, are fixed.
+
+### Fixed — relays that work together
+
+A member removed from one circle is revoked only for that circle; relays pull fresh posts from each
+other promptly (newest first, one sync loop per sibling, immediately when introduced); an expired post
+can't be revived and copied back; a relay that is down isn't hammered; a hosted relay comes back on its
+usual port after a restart; and the desktop's network requests can no longer hang for hours.
+
+### Fixed — satellite links
+
+Full-size photos and videos stay held on a satellite (ultra-constrained) link — including the copies a
+phone sends to your own other devices — while previews still go out, and the held originals follow as
+soon as the link improves.
 
 ### Changed — your relay does the heavy lifting for photos and videos
 

@@ -7,6 +7,54 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 2.0.0 — release candidate 2 (2026-10-02)
+
+Follow-ups from rc.1 testing. Soren release gate green (all 11 suites; e2e 442/0).
+
+### Fixed — the iPhone no longer runs hot
+
+Measured on a real iPhone: every sync rewrote a ~22 MB "already seen" list in full and re-exported the
+~55 MB app state 2.5 s after each burst of incoming posts, and a 1.2 MB settings file was rewritten
+constantly. The seen list is now append-only, the state export is paced by its size (≥27 s for a large
+account; your own actions still save immediately), and large per-media data moved out of the settings
+file. The desktop app gets the same append-only seen list.
+
+### Fixed — up to tens of gigabytes of leftover video freed
+
+Videos you picked, dropped in or recorded for stories were never deleted after they were processed —
+one phone held 49.5 GB of them. They're now removed once used, and a sweep on launch clears anything
+older than a day. Media from before the app's rename is moved into the current store first, then the
+old folder is removed.
+
+### Fixed — calls survive a stuck audio system
+
+If the phone's (or Mac's) audio system stops responding, starting or ending a call used to crash the
+app. Haven now checks audio first, keeps the call going with video and screen share, shows "Audio isn't
+available — trying again" with Retry, and turns audio on as soon as it recovers.
+
+### Fixed — a crash on incoming call notifications
+
+iOS terminates an app that gets a call notification without showing the incoming-call screen. Haven
+skipped that for a call it already knew about (the invite often arrives before the notification). Every
+call notification is now reported; ones that shouldn't ring are reported and ended at once.
+
+### Added — cancel a device-to-device transfer
+
+Moving your history to a new iPhone or Mac can be cancelled from either device ("Cancel transfer" on the
+banner and in Settings ▸ Devices). Both devices stop, nothing already copied is lost, it won't resume on
+its own, and you can start again any time.
+
+### Fixed — fewer wasted re-uploads
+
+iPhone and Mac checked their saved photos the way Android stores them, flagged every one as unreadable,
+re-encrypted their own media and asked friends' devices to re-upload theirs. The check now matches how
+Apple devices store media.
+
+### Fixed — Android: linking a new device never freezes setup
+
+Linking this phone to an existing account during first-run setup now runs in the background with
+progress, an error message and Retry.
+
 ## 2.0.0 — release candidate 1 (2026-10-02)
 
 Haven 2.0 is a reliability and performance release built from field reports: a phone getting hot

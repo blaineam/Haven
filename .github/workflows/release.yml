@@ -512,7 +512,6 @@ jobs:
           path: out/*
           if-no-files-found: error
           retention-days: 1
-          retention-days: 7
 
   # Separate from the build ON PURPOSE: environmental failures here retry in ~2 minutes via
   # `gh run rerun --failed` (or the msix_run_id dispatch) without rebuilding anything.

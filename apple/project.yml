@@ -453,6 +453,12 @@ targets:
       - path: HavenApp/ActivityPersistence.swift
       # The hosted relay keeps its well-known HTTP port across a restart (bounded retry first).
       - path: HavenApp/RelayPortBind.swift
+      # Heat fixes (2026-10-02): the append-only mailbox seen journal, the size-aware engine-export
+      # cadence, the tmp sweep, and the per-media maps moved out of UserDefaults. Foundation only.
+      - path: HavenApp/SeenJournal.swift
+      - path: HavenApp/PersistCadence.swift
+      - path: HavenApp/TempSweep.swift
+      - path: HavenApp/SpilledDefaults.swift
       - path: Shared/SharedNotificationPrivacy.swift
       - path: HavenLogicTests
     settings:

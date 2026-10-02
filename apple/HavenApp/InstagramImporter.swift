@@ -542,7 +542,7 @@ final class InstagramImporter: ObservableObject {
 
         private static func load() -> Set<String> {
             if let c = cache { return c }
-            let c = Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+            let c = Set(SpilledDefaults.shared.stringArray(forKey: key) ?? [])
             cache = c
             return c
         }
@@ -557,7 +557,7 @@ final class InstagramImporter: ObservableObject {
             var c = load()
             guard c.insert(id).inserted else { return }
             cache = c
-            UserDefaults.standard.set(Array(c), forKey: key)
+            SpilledDefaults.shared.set(Array(c), forKey: key)
         }
 
         /// How many of these the device has already published — what the preview screen reports so
@@ -574,7 +574,7 @@ final class InstagramImporter: ObservableObject {
             var c = load()
             for id in ids { c.remove(id) }
             cache = c
-            UserDefaults.standard.set(Array(c), forKey: key)
+            SpilledDefaults.shared.set(Array(c), forKey: key)
         }
     }
 

@@ -23,7 +23,7 @@ enum MediaFetchBackoff {
     private static let defaultsKey = "haven.media.reqBackoff.v1"
     private struct Entry: Codable { var n: Int; var due: UInt64 }
     private static var map: [String: Entry] = {
-        guard let d = UserDefaults.standard.data(forKey: defaultsKey),
+        guard let d = SpilledDefaults.shared.data(forKey: defaultsKey),
               let m = try? JSONDecoder().decode([String: Entry].self, from: d) else { return [:] }
         return m
     }()
@@ -34,7 +34,7 @@ enum MediaFetchBackoff {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             savePending = false
-            if let d = try? JSONEncoder().encode(map) { UserDefaults.standard.set(d, forKey: defaultsKey) }
+            if let d = try? JSONEncoder().encode(map) { SpilledDefaults.shared.set(d, forKey: defaultsKey) }
         }
     }
     private static func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
@@ -969,6 +969,19 @@ final class FeedStore: ObservableObject {
         Task.detached(priority: .utility) {
             let f = MediaStore.sweepStaleScratch()
             if f.files > 0 { HavenLog.sync("media scratch sweep: freed \(f.bytes)B across \(f.files) files") }
+            // tmp/ leaked every picked video, recording and export for months (49.5 GB on the
+            // owner's phone, 2026-10-02) — reclaim anything a previous process left > 24h ago.
+            // macOS: only inside the sandbox container (a non-sandboxed tmp is shared per user).
+            #if os(macOS)
+            let sweepTmp = ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
+            #else
+            let sweepTmp = true
+            #endif
+            if sweepTmp {
+                let t = TempSweep.sweep()
+                if t.removed > 0 { HavenLog.sync("tmp sweep: freed \(t.bytes / 1_048_576) MB across \(t.removed) items") }
+            }
+            Self.removeAbandonedKithData()
         }
         #if DEBUG
         CallManager.shared.debugSimulateIncomingRing()   // HAVEN_RING_TEST=1 only — bounded-ring self-test
@@ -2854,6 +2867,19 @@ final class FeedStore: ObservableObject {
         return (out, events)
     }
 
+    /// The pre-rename (Kith) data — `kith-media/`, `kith-feed.json`, `kith-avatar.jpg` — has had no
+    /// reader since the rename dropped its migration (1a96c5cd, 2026-06-21; the crypto salts changed
+    /// with it, so the old state cannot be opened by this engine anyway). ~200 MB of dead weight on
+    /// the owner's phone; nothing in any client reads these paths.
+    nonisolated static func removeAbandonedKithData() {
+        let fm = FileManager.default
+        guard let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        for name in ["kith-media", "kith-feed.json", "kith-avatar.jpg"] {
+            let url = dir.appendingPathComponent(name)
+            if fm.fileExists(atPath: url.path) { try? fm.removeItem(at: url) }
+        }
+    }
+
     /// Factory reset: no identity's state may survive, shelved or live.
     nonisolated static func deleteAllShelvedState() {
         let fm = FileManager.default
@@ -2902,8 +2928,11 @@ final class FeedStore: ObservableObject {
         persistDebouncePending = true
         persistDebounceToken &+= 1
         let token = persistDebounceToken
+        // 2.5 s for a small state; longer once the last export showed the state is large/slow
+        // (see PersistCadence — a 55 MB state re-exported every few seconds was the field heat).
+        let delay = PersistCadence.currentDelay()
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             // Satisfied by a persistNow() meanwhile — or re-armed after one, by a newer timer that
             // owns the next export (this one firing early would cut its window short).
             guard let self, self.persistDebouncePending, self.persistDebounceToken == token else { return }

@@ -881,6 +881,7 @@ struct FeedView: View {
                     try? FileManager.default.copyItem(at: url, to: tmp)
                     Task { @MainActor in
                         let bundle = await MediaStore.shared.prepareVideo(url: tmp)
+                        TempSweep.discardIfTemp(tmp)   // the dropped copy is consumed
                         // prepareVideo returns empty mediaRefs when it REFUSES the clip (over the
                         // 15-minute limit). Appending nothing is correct — never attach an empty ref.
                         guard !bundle.isEmpty else { return }

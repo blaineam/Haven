@@ -46,7 +46,7 @@ final class ReassemblyStore {
     private static let saveInterval: TimeInterval = 2
 
     private init() {
-        if let d = UserDefaults.standard.data(forKey: Self.key),
+        if let d = SpilledDefaults.shared.data(forKey: Self.key),
            let list = try? JSONDecoder().decode([String: ReassemblyRecord].self, from: d) {
             records = list
         } else {
@@ -174,7 +174,7 @@ final class ReassemblyStore {
     /// this only ever decides the fate of a partial that is STALLED, which by definition has no
     /// in-flight write to race with.
     nonisolated static func liveParts() -> [String: Double] {
-        guard let d = UserDefaults.standard.data(forKey: key),
+        guard let d = SpilledDefaults.shared.data(forKey: key),
               let list = try? JSONDecoder().decode([String: ReassemblyRecord].self, from: d) else { return [:] }
         var out: [String: Double] = [:]
         for r in list.values { out[r.part] = r.updated }
@@ -183,6 +183,6 @@ final class ReassemblyStore {
 
     private func save() {
         lastSaveAt = Date()
-        if let d = try? JSONEncoder().encode(records) { UserDefaults.standard.set(d, forKey: Self.key) }
+        if let d = try? JSONEncoder().encode(records) { SpilledDefaults.shared.set(d, forKey: Self.key) }
     }
 }

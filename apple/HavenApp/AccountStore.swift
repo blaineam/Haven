@@ -871,6 +871,7 @@ final class AccountStore: ObservableObject {
         // a couple of keys, so half the app stayed populated.
         let d = UserDefaults.standard
         for key in d.dictionaryRepresentation().keys where key.hasPrefix("haven.") { d.removeObject(forKey: key) }
+        SpilledDefaults.shared.removeAll()   // the per-media maps that moved out of UserDefaults
         SharedLockedCircles.write([])
         _ = SharedInbox.drain()
         #if os(iOS)

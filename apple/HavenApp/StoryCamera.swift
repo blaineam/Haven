@@ -1021,6 +1021,7 @@ struct StoryCameraView: View {
             // segment that also poisons `remaining` and dead-locks the shutter (the "won't record" bug).
             let raw = (try? await AVURLAsset(url: url).load(.duration).seconds) ?? 0
             guard raw.isFinite, raw >= 0.3 else {
+                TempSweep.discardIfTemp(url)   // the fumbled clip is never used
                 // A sub-0.3s fumble — but if the user is still holding with room left, resume the next
                 // segment so a brief hiccup doesn't abandon a continuous hold.
                 if pressing, !capture.isFull { cam.startRecording(maxSeconds: capture.nextClipCap) { u in finishVideo(u) } }
@@ -1031,6 +1032,7 @@ struct StoryCameraView: View {
             // segment thumbnail is never a black placeholder while the final blob re-encodes.
             let poster = await Task.detached { MediaStore.poster(for: url) }.value
             let ref = await MediaStore.shared.addVideo(url: url)
+            TempSweep.discardIfTemp(url)   // the raw recording is consumed (it used to stay in tmp forever)
             guard !ref.isEmpty else { return }   // "" = refused (over the length limit)
             capture.add(ref: ref, duration: raw, thumb: poster ?? MediaStore.shared.item(ref)?.image)   // add clamps to 15s
             // Continuous hold auto-splits: if the finger is still down and a cap isn't hit, immediately
@@ -1214,11 +1216,12 @@ struct StoryCameraView: View {
             // hold that barely started yields a sub-0.3s clip — SKIP it rather than add a 0-second black
             // segment that also poisons `remaining` and dead-locks the shutter (the "won't record" bug).
             let raw = (try? await AVURLAsset(url: url).load(.duration).seconds) ?? 0
-            guard raw.isFinite, raw >= 0.3 else { return }
+            guard raw.isFinite, raw >= 0.3 else { TempSweep.discardIfTemp(url); return }
             // Grab a poster from the recorded file NOW (one fast frame, off the slow transcode path) so the
             // segment thumbnail is never a black placeholder while the final blob re-encodes.
             let poster = await Task.detached { MediaStore.poster(for: url) }.value
             let ref = await MediaStore.shared.addVideo(url: url)
+            TempSweep.discardIfTemp(url)   // the raw recording is consumed
             // Clamp so a long take can't push the total past the 90s cap (belt for isFull).
             let dur = min(raw, max(0.3, capture.remaining))
             capture.add(ref: ref, duration: dur, thumb: poster ?? MediaStore.shared.item(ref)?.image)

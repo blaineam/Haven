@@ -5113,7 +5113,11 @@ object HavenNet : InboundListener {
     /** Stamp a relay as just-seen (a successful op) — persisted so "last seen" survives a restart. */
     private fun markRelaySeen(hex: String) {
         val e = relayEntries[hex] ?: return
-        relayEntries[hex] = e.copy(lastSeenMs = relayNow())
+        val now = relayNow()
+        // Throttled: this runs on every relay op (2s live polls, call-frame PUTs); re-saving the
+        // relay table each time was an fsync storm that froze main via QueuedWork (RelaySeenStamp).
+        if (!RelaySeenStamp.shouldRestamp(e.lastSeenMs, now)) return
+        relayEntries[hex] = e.copy(lastSeenMs = now)
         saveRelayNodes()
     }
 
@@ -7881,7 +7885,9 @@ object HavenNet : InboundListener {
                     if (resolved) continue
                 }
             }
-            val client = relayClientFor(nodeHex) ?: continue   // honors backoff — skip WITHOUT reading
+            // Honors backoff — skip WITHOUT reading. Bounded: a wedged dial must not hold the
+            // serialized media lane (RelayDialBound).
+            val client = RelayDialBound.bounded { relayClientFor(nodeHex) } ?: continue
             if (!scopedOverHttp) {
                 // No HTTP door took it, so the marker goes over the dial (same gate, same meaning).
                 val sr = runCatching { client.put(scopeKey, mediaScopeBody) }
@@ -8424,9 +8430,11 @@ object HavenNet : InboundListener {
             }
             if (httpDone) return true
             if (httpMiss) { android.util.Log.i("MediaSync", "  node=${nodeHex.take(12)} http MISS — skipping iroh dial"); continue }
-            val client = relayClientFor(nodeHex)
-            if (client == null) { android.util.Log.i("MediaSync", "  node=${nodeHex.take(12)} client=NULL (self-dial guard / backoff / connect-fail)"); continue }
-            val head = runCatching { client.get(key) }.getOrNull()
+            // BOUNDED: this runs on the serialized media lane, so an unbounded dial/GET stalls every
+            // restore AND upload behind it (RelayDialBound).
+            val client = RelayDialBound.bounded { relayClientFor(nodeHex) }
+            if (client == null) { android.util.Log.i("MediaSync", "  node=${nodeHex.take(12)} client=NULL (self-dial guard / backoff / connect-fail / timeout)"); continue }
+            val head = RelayDialBound.bounded { client.get(key) }
             android.util.Log.i("MediaSync", "  node=${nodeHex.take(12)} got=${head?.size ?: -1}")
             if (head == null) { relayFailed(nodeHex); continue }
             val ok = reassembleInto(ref, head) { i -> runCatching { client.get(mediaChunkKey(ref, i)) }.getOrNull() }

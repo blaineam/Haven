@@ -585,6 +585,8 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="onb_link_to_other_device_title">Lier à votre autre appareil</string>
     <string name="onb_seedless_instructions">Sur votre appareil actuel : Réglages ▸ Identité et appareils ▸ Lier un nouvel appareil, puis scannez le code affiché. Cet appareil reçoit sa propre clé révocable — jamais votre clé maîtresse.</string>
     <string name="onb_invalid_link_code">Ce code de liaison n\'est pas valide.</string>
+    <string name="onb_seedless_preparing">Préparation de cet appareil…</string>
+    <string name="onb_seedless_start_failed">Impossible de lancer la liaison sur cet appareil. Vérifiez votre connexion et réessayez.</string>
     <string name="onb_link_button">Lier</string>
     <string name="onb_linking_title">Liaison…</string>
     <string name="onb_linking_wait_message">Confirmez « lier cet appareil » sur votre autre téléphone. Gardez les deux téléphones à proximité et déverrouillés.</string>

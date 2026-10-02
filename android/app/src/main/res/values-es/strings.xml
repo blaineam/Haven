@@ -591,6 +591,8 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="onb_link_to_other_device_title">Vincular con tu otro dispositivo</string>
     <string name="onb_seedless_instructions">En tu dispositivo actual: Ajustes ▸ Identidad &amp; dispositivos ▸ Vincular un dispositivo nuevo y luego escanea el código que aparece. Este dispositivo recibe su propia clave revocable — nunca tu clave maestra.</string>
     <string name="onb_invalid_link_code">Ese código de vinculación no es válido.</string>
+    <string name="onb_seedless_preparing">Preparando este dispositivo…</string>
+    <string name="onb_seedless_start_failed">No se pudo iniciar la vinculación en este dispositivo. Revisa tu conexión e inténtalo de nuevo.</string>
     <string name="onb_link_button">Vincular</string>
     <string name="onb_linking_title">Vinculando…</string>
     <string name="onb_linking_wait_message">Confirma “vincular este dispositivo” en tu otro teléfono. Mantén los dos teléfonos cerca y desbloqueados.</string>

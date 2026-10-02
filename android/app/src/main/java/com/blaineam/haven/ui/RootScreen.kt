@@ -70,7 +70,7 @@ fun RootScreen() {
     // (skip onboarding), without ever requiring the live P2P node.
     if (DemoEnv.isDemo) {
         LaunchedEffect(Unit) {
-            HavenNet.init(context)
+            com.blaineam.haven.core.EngineBoot.offMain { HavenNet.init(context) }
             DemoSeeder.seed(context)
             // Demo implies offline (a synthetic cast must never reach a real peer), so `start()` is
             // a no-op — but the hero shots should still show a healthy circle, not "Connecting".

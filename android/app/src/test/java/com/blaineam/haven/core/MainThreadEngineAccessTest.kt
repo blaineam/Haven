@@ -16,7 +16,9 @@ import java.io.File
  *  - no `remember { … }` block in the UI may make an engine-backed read (use `rememberOffMain`);
  *  - `ConnectionService.onStartCommand` (main) must not call `HavenNet.init` itself;
  *  - HavenNet must not hop to main to hand a call frame to the router (it opens there, off main);
- *  - the Nearby callback must not run the greeting (engine seals) on its own thread.
+ *  - the Nearby callback must not run the greeting (engine seals) on its own thread;
+ *  - no UI code may boot the engine inline — including the first-run seedless link, the last
+ *    holdout, which now boots through SeedlessLinkStarter.
  */
 class MainThreadEngineAccessTest {
 
@@ -84,6 +86,34 @@ class MainThreadEngineAccessTest {
         val body = block(text, text.indexOf('{', start))
         assertTrue("onStartCommand runs on main — boot via EngineBoot.background",
             !body.contains("HavenNet.init(") && body.contains("bootEngine()"))
+    }
+
+    @Test
+    fun `no ui code boots the engine on main`() {
+        // Every UI caller is main (composition, click handlers, LaunchedEffect without a hop). The
+        // only allowed shape is a hop: `EngineBoot.offMain { HavenNet.init(…) }`.
+        val offenders = mutableListOf<String>()
+        File(src, "ui").walkTopDown().filter { it.isFile && it.extension == "kt" }.forEach { f ->
+            f.readLines().forEachIndexed { i, line ->
+                val code = line.substringBefore("//")
+                if (code.contains("HavenNet.init(") && !code.contains("EngineBoot.offMain { HavenNet.init(")) {
+                    offenders += "${f.name}:${i + 1} ${line.trim()}"
+                }
+                if (code.contains("HavenNet.beginSeedlessLink(")) offenders += "${f.name}:${i + 1} ${line.trim()}"
+            }
+        }
+        assertTrue("engine boot on main (use EngineBoot / SeedlessLinkStarter):\n" + offenders.joinToString("\n"),
+            offenders.isEmpty())
+    }
+
+    @Test
+    fun `the seedless onboarding link boots through the off-main starter`() {
+        val onb = File(src, "ui/Onboarding.kt").readText()
+        assertTrue("onboarding must link via SeedlessLinkStarter", onb.contains("SeedlessLinkStarter.forApp("))
+        val starter = File(src, "core/SeedlessLinkStarter.kt").readText()
+        val begin = block(starter, starter.indexOf('{', starter.indexOf("fun begin(text: String)")))
+        assertTrue("SeedlessLinkStarter.begin must run the link on its worker",
+            begin.contains("EngineBoot.offMain(worker) { link("))
     }
 
     @Test

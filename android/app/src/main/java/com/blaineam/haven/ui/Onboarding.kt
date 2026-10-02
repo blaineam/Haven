@@ -30,9 +30,12 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,6 +53,7 @@ import com.blaineam.haven.R
 import com.blaineam.haven.core.HavenCore
 import com.blaineam.haven.core.HavenNet
 import com.blaineam.haven.core.ProfileStore
+import com.blaineam.haven.core.SeedlessLinkStarter
 import com.blaineam.haven.core.loadAvatarB64
 import com.blaineam.haven.core.restartApp
 
@@ -102,11 +106,25 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
 
     // Seedless link: bring up the transient engine + node (under a throwaway identity discarded on
     // enrollment), then send the frame-28 request. The grant handler flips this device into seedless
-    // mode and restarts. Returns false if the text isn't a `haven-enroll:` ticket.
+    // mode and restarts. The boot takes seconds, so it runs OFF main (SeedlessLinkStarter) while the
+    // dialog shows progress; the outcome comes back as a state handled below.
+    val linkScope = rememberCoroutineScope()
+    val seedlessStarter = remember { SeedlessLinkStarter.forApp(context, linkScope) }
+    val seedlessState by seedlessStarter.state.collectAsState()
+    val seedlessBooting = seedlessState == SeedlessLinkStarter.State.BOOTING
     val beginSeedless = { text: String ->
-        HavenNet.init(context)
-        HavenNet.start()
-        HavenNet.beginSeedlessLink(text.trim())
+        enrollCode = text.trim()
+        enrollError = false
+        showSeedless = true   // the dialog carries the progress + any error for paste AND scan
+        seedlessStarter.begin(text)
+    }
+    LaunchedEffect(seedlessState) {
+        when (seedlessState) {
+            // Sent: HavenNet.seedlessLinking's overlay takes over from here.
+            SeedlessLinkStarter.State.SENT -> { showSeedless = false; seedlessStarter.reset() }
+            SeedlessLinkStarter.State.INVALID_CODE -> { enrollError = true; seedlessStarter.reset() }
+            else -> Unit   // IDLE / BOOTING; FAILED stays until the next attempt or dismissal
+        }
     }
 
     HavenBackground {
@@ -228,7 +246,7 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
             OnboardingChoice(
                 title = stringResource(R.string.onb_add_device_title),
                 subtitle = stringResource(R.string.onb_add_device_subtitle),
-            ) { enrollCode = ""; enrollError = false; showSeedless = true }
+            ) { enrollCode = ""; enrollError = false; seedlessStarter.reset(); showSeedless = true }
             Spacer(Modifier.height(10.dp))
             OnboardingChoice(
                 title = stringResource(R.string.onb_move_account_title),
@@ -296,7 +314,8 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
         // Seedless link — scan/paste the `haven-enroll:` code the OTHER device shows.
         if (showSeedless) {
             AlertDialog(
-                onDismissRequest = { showSeedless = false },
+                // Not dismissable mid-boot: the result must land on a visible dialog.
+                onDismissRequest = { if (!seedlessBooting) { showSeedless = false; seedlessStarter.reset() } },
                 title = { Text(stringResource(R.string.onb_link_to_other_device_title)) },
                 text = {
                     Column {
@@ -309,6 +328,7 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
                         OutlinedTextField(
                             value = enrollCode,
                             onValueChange = { enrollCode = it; enrollError = false },
+                            enabled = !seedlessBooting,
                             label = { Text("haven-enroll:…") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
@@ -322,15 +342,33 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
                             Spacer(Modifier.height(6.dp))
                             Text(stringResource(R.string.onb_invalid_link_code), color = HavenTheme.pink, fontSize = 12.sp)
                         }
+                        if (seedlessState == SeedlessLinkStarter.State.FAILED) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(stringResource(R.string.onb_seedless_start_failed), color = HavenTheme.pink, fontSize = 12.sp)
+                        }
+                        if (seedlessBooting) {
+                            Spacer(Modifier.height(12.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                androidx.compose.material3.CircularProgressIndicator(
+                                    color = HavenTheme.pink, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.size(10.dp))
+                                Text(stringResource(R.string.onb_seedless_preparing),
+                                    color = HavenTheme.textSecondary, fontSize = 13.sp)
+                            }
+                        }
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = {
-                        if (beginSeedless(enrollCode)) showSeedless = false else enrollError = true
-                    }) { Text(stringResource(R.string.onb_link_button), color = HavenTheme.pink) }
+                    TextButton(enabled = !seedlessBooting, onClick = { beginSeedless(enrollCode) }) {
+                        val retry = seedlessState == SeedlessLinkStarter.State.FAILED
+                        Text(stringResource(if (retry) R.string.common_retry else R.string.onb_link_button),
+                            color = if (seedlessBooting) HavenTheme.textSecondary else HavenTheme.pink)
+                    }
                 },
                 dismissButton = {
-                    TextButton(onClick = { showSeedless = false; showSeedlessScan = true }) { Text(stringResource(R.string.onb_scan_qr_button)) }
+                    TextButton(enabled = !seedlessBooting, onClick = {
+                        showSeedless = false; seedlessStarter.reset(); showSeedlessScan = true
+                    }) { Text(stringResource(R.string.onb_scan_qr_button)) }
                 },
             )
         }

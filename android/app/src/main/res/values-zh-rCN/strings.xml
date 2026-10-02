@@ -584,6 +584,8 @@
     <string name="onb_link_to_other_device_title">关联你的另一台设备</string>
     <string name="onb_seedless_instructions">在你当前的设备上：设置 ▸ 身份与设备 ▸ 关联新设备，然后扫描它显示的代码。这台设备会获得自己的可撤销密钥——绝不会用到你的主密钥。</string>
     <string name="onb_invalid_link_code">这不是有效的关联码。</string>
+    <string name="onb_seedless_preparing">正在准备此设备…</string>
+    <string name="onb_seedless_start_failed">无法在此设备上开始关联。请检查网络连接后重试。</string>
     <string name="onb_link_button">关联</string>
     <string name="onb_linking_title">正在关联…</string>
     <string name="onb_linking_wait_message">在另一部手机上确认“关联这台设备”。让两部手机都放在近处并保持解锁。</string>

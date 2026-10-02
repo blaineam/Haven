@@ -585,6 +585,8 @@
     <string name="onb_link_to_other_device_title">Collegati all\'altro tuo dispositivo</string>
     <string name="onb_seedless_instructions">Sul dispositivo che usi adesso: Impostazioni ▸ Identità &amp; dispositivi ▸ Collega un nuovo dispositivo, poi scansiona il codice che compare. Questo dispositivo riceve una sua chiave revocabile — mai la tua chiave principale.</string>
     <string name="onb_invalid_link_code">Questo non è un codice di collegamento valido.</string>
+    <string name="onb_seedless_preparing">Preparazione di questo dispositivo…</string>
+    <string name="onb_seedless_start_failed">Impossibile avviare il collegamento su questo dispositivo. Controlla la connessione e riprova.</string>
     <string name="onb_link_button">Collega</string>
     <string name="onb_linking_title">Collegamento…</string>
     <string name="onb_linking_wait_message">Conferma “collega questo dispositivo” sull\'altro telefono. Tieni i due telefoni vicini e sbloccati.</string>

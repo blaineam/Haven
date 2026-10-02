@@ -585,6 +585,8 @@
     <string name="onb_link_to_other_device_title">다른 기기와 연결하기</string>
     <string name="onb_seedless_instructions">지금 쓰는 기기에서 설정 ▸ 신원 &amp; 기기 ▸ 새 기기 연결을 열고, 화면에 나온 코드를 스캔하세요. 이 기기는 언제든 취소할 수 있는 자체 키를 받아요. 마스터 키는 절대 넘어가지 않아요.</string>
     <string name="onb_invalid_link_code">올바른 연결 코드가 아니에요.</string>
+    <string name="onb_seedless_preparing">이 기기를 준비하는 중…</string>
+    <string name="onb_seedless_start_failed">이 기기에서 연결을 시작하지 못했습니다. 네트워크 연결을 확인한 후 다시 시도하세요.</string>
     <string name="onb_link_button">연결</string>
     <string name="onb_linking_title">연결 중…</string>
     <string name="onb_linking_wait_message">다른 휴대폰에서 “이 기기 연결”을 확인해 주세요. 두 휴대폰을 가까이 두고 잠금을 풀어 두세요.</string>

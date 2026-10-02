@@ -585,6 +585,8 @@
     <string name="onb_link_to_other_device_title">Mit deinem anderen Gerät verknüpfen</string>
     <string name="onb_seedless_instructions">Auf deinem aktuellen Gerät: Einstellungen ▸ Identität &amp; Geräte ▸ Neues Gerät verknüpfen, dann den angezeigten Code scannen. Dieses Gerät bekommt einen eigenen, widerrufbaren Schlüssel — nie deinen Hauptschlüssel.</string>
     <string name="onb_invalid_link_code">Das ist kein gültiger Verknüpfungscode.</string>
+    <string name="onb_seedless_preparing">Dieses Gerät wird vorbereitet…</string>
+    <string name="onb_seedless_start_failed">Verknüpfen konnte auf diesem Gerät nicht gestartet werden. Prüfe deine Verbindung und versuche es erneut.</string>
     <string name="onb_link_button">Verknüpfen</string>
     <string name="onb_linking_title">Wird verknüpft…</string>
     <string name="onb_linking_wait_message">Bestätige auf deinem anderen Handy „dieses Gerät verknüpfen“. Lass beide Handys nah beieinander und entsperrt.</string>

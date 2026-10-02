@@ -585,6 +585,8 @@
     <string name="onb_link_to_other_device_title">もう一方の端末とリンクする</string>
     <string name="onb_seedless_instructions">今お使いの端末で 設定 ▸ ID &amp; 端末 ▸ 新しい端末をリンク を開き、表示されたコードを読み取ってください。この端末には、いつでも取り消せる専用の鍵が発行されます。マスターキーが渡ることはありません。</string>
     <string name="onb_invalid_link_code">有効なリンクコードではありません。</string>
+    <string name="onb_seedless_preparing">この端末を準備しています…</string>
+    <string name="onb_seedless_start_failed">この端末でリンクを開始できませんでした。接続を確認して、もう一度お試しください。</string>
     <string name="onb_link_button">リンク</string>
     <string name="onb_linking_title">リンクしています…</string>
     <string name="onb_linking_wait_message">もう一方のスマホで「この端末をリンク」を確認してください。2 台とも近くに置いて、ロックを解除したままにしてください。</string>

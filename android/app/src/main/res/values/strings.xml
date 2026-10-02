@@ -627,6 +627,8 @@
     <string name="onb_link_to_other_device_title">Link to your other device</string>
     <string name="onb_seedless_instructions">On your current device: Settings ▸ Identity &amp; devices ▸ Link a new device, then scan the code it shows. This device gets its own revocable key — never your master key.</string>
     <string name="onb_invalid_link_code">That isn\'t a valid link code.</string>
+    <string name="onb_seedless_preparing">Preparing this device…</string>
+    <string name="onb_seedless_start_failed">Couldn\'t start linking on this device. Check your connection and try again.</string>
     <string name="onb_link_button">Link</string>
     <string name="onb_linking_title">Linking…</string>
     <string name="onb_linking_wait_message">Confirm “link this device” on your other phone. Keep both phones nearby and unlocked.</string>

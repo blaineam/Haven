@@ -620,6 +620,8 @@ O que já tentei:
     <string name="onb_link_to_other_device_title">Vincular ao seu outro aparelho</string>
     <string name="onb_seedless_instructions">No aparelho que você usa hoje: Configurações ▸ Identidade &amp; aparelhos ▸ Vincular um novo aparelho e escaneie o código que aparecer. Este aparelho ganha a própria chave revogável — nunca a sua chave mestra.</string>
     <string name="onb_invalid_link_code">Esse não é um código de vínculo válido.</string>
+    <string name="onb_seedless_preparing">Preparando este aparelho…</string>
+    <string name="onb_seedless_start_failed">Não foi possível iniciar a vinculação neste aparelho. Verifique sua conexão e tente novamente.</string>
     <string name="onb_link_button">Vincular</string>
     <string name="onb_linking_title">Vinculando…</string>
     <string name="onb_linking_wait_message">Confirme “vincular este aparelho” no seu outro celular. Deixe os dois celulares por perto e desbloqueados.</string>

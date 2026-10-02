@@ -5159,16 +5159,13 @@ object HavenNet : InboundListener {
         // relay table each time was an fsync storm that froze main via QueuedWork (RelaySeenStamp).
         if (!RelaySeenStamp.shouldRestamp(e.lastSeenMs, now)) return
         relayEntries[hex] = e.copy(lastSeenMs = now)
-        // ...and N relays restamping on their own minute clocks were still N whole-file fsyncs a
-        // minute: coalesce every relay's stamp into at most ONE relay-table save a minute.
-        when (val waitMs = relaySeenSaves.request(now)) {
-            0L -> saveRelayNodes()
-            WriteCoalescer.ALREADY_ARMED -> Unit
-            else -> scope.launch { delay(waitMs); saveRelayNodes() }
-        }
+        saveRelayNodes()   // stamp-only change → coalesced to ≤1 table write a minute
     }
 
     private val relaySeenSaves = WriteCoalescer(RelaySeenStamp.MIN_INTERVAL_MS)
+    private val relaySaveLock = Any()
+    /** The relay table as last WRITTEN, minus last-seen stamps (see [saveRelayNodes]). */
+    private var lastRelayShape: String? = null
 
     /** Ensure every relay referenced by relayNodes / the default has a RelayEntry (legacy migration). */
     private fun migrateRelayEntries() {
@@ -6414,6 +6411,7 @@ object HavenNet : InboundListener {
             pendingBackupsLoaded = true
         }
     }
+    private val pendingBackupSaves = WriteCoalescer(30_000L)
     private fun savePendingBackupsLocked() {
         runCatching { pendingBackupPrefs().edit().putStringSet("pending", HashSet(pendingBackups)).apply() }
     }
@@ -6428,9 +6426,10 @@ object HavenNet : InboundListener {
     }
     private fun clearPendingBackup(ref: String, cid: String) {
         ensurePendingBackups()
-        synchronized(pendingBackupsLock) {
-            if (pendingBackups.remove(pbKey(ref, cid))) savePendingBackupsLocked()
-        }
+        val removed = synchronized(pendingBackupsLock) { pendingBackups.remove(pbKey(ref, cid)) }
+        // An ADD is written at once (it is the crash-durable promise to upload). A removal may lag:
+        // a finished item still on disk after a crash is just re-checked — the upload is idempotent.
+        if (removed) coalescedWrite(pendingBackupSaves) { synchronized(pendingBackupsLock) { savePendingBackupsLocked() } }
         authoredMediaLanded(ref, cid)
     }
 
@@ -7743,12 +7742,25 @@ object HavenNet : InboundListener {
         runCatching { backedUp.addAll(appContext.getSharedPreferences("haven.mediabackup", Context.MODE_PRIVATE).getStringSet("done", emptySet()) ?: emptySet()) }
         backedUpLoaded = true
     }
+    /**
+     * The backup ledger is up to 20,000 "node|ref" entries, and it was rewritten + fsynced per
+     * confirmed upload (PrefsChurn: up to 10 a minute in the e2e). A lagging ledger only means a
+     * destination is re-probed after a crash — the upload path is idempotent — so ≤1 write per
+     * [BACKUP_LEDGER_SAVE_MS].
+     */
+    private fun saveBackedUpLedger(): Unit = coalescedWrite(backedUpSaves) {
+        val snap = synchronized(backedUp) { HashSet(backedUp) }
+        appContext.getSharedPreferences("haven.mediabackup", Context.MODE_PRIVATE).edit().putStringSet("done", snap).apply()
+    }
+    private const val BACKUP_LEDGER_SAVE_MS = 30_000L
+    private val backedUpSaves = WriteCoalescer(BACKUP_LEDGER_SAVE_MS)
+
     private fun isBackedUp(node: String, ref: String): Boolean { ensureLedger(); return backedUp.contains("$node|$ref") }
     private fun markBackedUp(node: String, ref: String) {
         ensureLedger()
         if (backedUp.add("$node|$ref")) {
             while (backedUp.size > 20_000) { val it = backedUp.iterator(); it.next(); it.remove() }
-            runCatching { appContext.getSharedPreferences("haven.mediabackup", Context.MODE_PRIVATE).edit().putStringSet("done", HashSet(backedUp)).apply() }
+            saveBackedUpLedger()
         }
     }
     /**
@@ -7763,7 +7775,7 @@ object HavenNet : InboundListener {
     private fun forgetBackedUpRef(ref: String) {
         ensureLedger()
         if (backedUp.removeAll { it.endsWith("|$ref") }) {
-            runCatching { appContext.getSharedPreferences("haven.mediabackup", Context.MODE_PRIVATE).edit().putStringSet("done", HashSet(backedUp)).apply() }
+            saveBackedUpLedger()
         }
     }
 
@@ -7771,7 +7783,7 @@ object HavenNet : InboundListener {
     private fun forgetBackedUp(node: String) {
         ensureLedger()
         if (backedUp.removeAll { it.startsWith("$node|") }) {
-            runCatching { appContext.getSharedPreferences("haven.mediabackup", Context.MODE_PRIVATE).edit().putStringSet("done", HashSet(backedUp)).apply() }
+            saveBackedUpLedger()
         }
     }
 
@@ -8109,20 +8121,39 @@ object HavenNet : InboundListener {
         // Bounded like every other durable record here. Eviction only costs a full re-upload of a
         // long-idle ref (the safe direction — see MediaUploadPlan), never correctness.
         while (uploadProgress.size > 2_000) { val it = uploadProgress.keys.iterator(); it.next(); it.remove() }
-        runCatching {
-            uploadPrefs().edit()
-                .putStringSet("resume", uploadProgress.entries.map { "${it.key}=${it.value}" }.toHashSet()).apply()
-        }
+        saveUploadProgress()
     }
     /** A finished upload needs no resume record; drop it rather than let it age out of the cap. */
     private fun clearUploaded(node: String, ref: String) {
         ensureUploadProgress()
         if (uploadProgress.remove("$node|$ref") == null) return
-        runCatching {
-            uploadPrefs().edit()
-                .putStringSet("resume", uploadProgress.entries.map { "${it.key}=${it.value}" }.toHashSet()).apply()
+        saveUploadProgress()
+    }
+
+    /**
+     * Persist the resume records, at most once per [UPLOAD_PROGRESS_SAVE_MS]. They are recorded per
+     * WINDOW, so a single video upload was dozens of whole-set (≤2,000 entries) rewrites + fsyncs in
+     * seconds — every one of them a pending apply() that main drains at the next service start or
+     * activity stop. A lagging record only ever under-states progress (fewer windows, or an older
+     * fingerprint that no longer matches), which costs a re-send, never a skipped window
+     * (MediaUploadPlan.trustedPrefix). The flush always writes the CURRENT map.
+     */
+    private fun saveUploadProgress(): Unit = coalescedWrite(uploadProgressSaves) {
+        uploadPrefs().edit()
+            .putStringSet("resume", uploadProgress.entries.map { "${it.key}=${it.value}" }.toHashSet()).apply()
+    }
+
+    /** [write] now, or once at the end of [c]'s window if one ran recently. [write] must snapshot
+     *  CURRENT state when it runs, so a deferred write always carries the latest. */
+    private fun coalescedWrite(c: WriteCoalescer, write: () -> Unit) {
+        when (val waitMs = c.request(System.currentTimeMillis())) {
+            0L -> { c.wrote(System.currentTimeMillis()); runCatching(write) }
+            WriteCoalescer.ALREADY_ARMED -> Unit
+            else -> scope.launch { delay(waitMs); c.wrote(System.currentTimeMillis()); runCatching(write) }
         }
     }
+    private const val UPLOAD_PROGRESS_SAVE_MS = 10_000L
+    private val uploadProgressSaves = WriteCoalescer(UPLOAD_PROGRESS_SAVE_MS)
 
     /**
      * How many leading windows to SKIP for one destination: the ones we ourselves wrote there from
@@ -9543,12 +9574,22 @@ object HavenNet : InboundListener {
         pollMailboxNow()
     }
 
-    private fun saveRelayNodes() {
-        relaySeenSaves.wrote(relayNow())   // any table save carries every pending last-seen stamp
+    /**
+     * Persist the relay table — but a save whose only difference from the last one written is
+     * last-seen STAMPS goes through [relaySeenSaves] (≤1 write a minute). N relays restamping on
+     * their own clocks, and the ~30 call sites that "save" after a no-op ensureRelayEntry (every
+     * frame-19 echo), each used to rewrite + fsync all of haven.contacts: PrefsChurn measured 3–11
+     * relay-table writes a minute AFTER the per-relay stamp throttle. Any structural change writes
+     * at once and carries every pending stamp with it.
+     */
+    private fun saveRelayNodes(stampFlush: Boolean = false): Unit = synchronized(relaySaveLock) {
+        val now = relayNow()
         val o = JSONObject()
         relayNodes.forEach { (k, v) -> o.put(k, JSONArray().apply { v.forEach { put(it) } }) }
         val entriesArr = JSONArray()
+        val entriesShape = StringBuilder()   // the same, minus lastSeenMs
         relayEntries.values.forEach { e ->
+            entriesShape.append(e.copy(lastSeenMs = 0L).toString()).append('\n')
             entriesArr.put(JSONObject().apply {
                 put("hex", e.hex); put("name", e.name); put("active", e.active)
                 put("lastSeenMs", e.lastSeenMs); put("isS3", e.isS3)
@@ -9574,10 +9615,22 @@ object HavenNet : InboundListener {
         }
         val forgotAtJson = JSONObject().apply { forgotAtRelays.forEach { (k, v) -> put(k, v) } }
         val clearedForgotJson = JSONObject().apply { clearedRelayForgets.forEach { (k, v) -> put(k, v) } }
+        val suppressedJson = JSONArray().apply { suppressedRelays.forEach { put(it) } }.toString()
+        val shape = listOf(o.toString(), suppressedJson, forgotAtJson.toString(), clearedForgotJson.toString(),
+            entriesShape.toString(), erasedArr.toString(), defaultRelayHex).joinToString("\u0000")
+        if (!stampFlush && shape == lastRelayShape) {
+            when (val waitMs = relaySeenSaves.request(now)) {
+                0L -> Unit
+                WriteCoalescer.ALREADY_ARMED -> return@synchronized
+                else -> { scope.launch { delay(waitMs); saveRelayNodes(stampFlush = true) }; return@synchronized }
+            }
+        }
+        lastRelayShape = shape
+        relaySeenSaves.wrote(now)
         // Write the new format and clear the legacy key (completes the migration).
         prefs.edit()
             .putString("relays", o.toString())
-            .putString("relaysSuppressed", JSONArray().apply { suppressedRelays.forEach { put(it) } }.toString())
+            .putString("relaysSuppressed", suppressedJson)
             .putString("relaysForgotAt", forgotAtJson.toString())
             .putString("relaysClearedForgot", clearedForgotJson.toString())
             .putString("relayEntries", entriesArr.toString())

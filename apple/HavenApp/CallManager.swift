@@ -603,17 +603,103 @@ final class CallManager: NSObject, ObservableObject {
         reportIncoming(name: peerName)
     }
 
-    /// A VoIP push woke us for an incoming call — set up state + show the system call screen.
-    func reportIncomingFromPush(name: String, peerHex: String) {
-        guard !active else { return }
-        peerName = name
-        if peerHex.count == 64 {
-            sessionId = "push:\(peerHex)"; roster = [peerHex, myHex]
+    /// A VoIP push woke us. EVERY path out of here reports a call to CallKit before returning —
+    /// PushKit aborts the app otherwise (see VoipPushPolicy.swift). `caller` is nil when the sealed
+    /// payload was missing, undecryptable or unauthenticated. Must run on the main queue (the
+    /// registry's queue), synchronously inside the PushKit delegate, before its completion.
+    func handleVoipPush(caller: VoipPushCaller?) {
+        let state = VoipPushCallState(
+            active: active,
+            roster: roster,
+            myHex: myHex,
+            myDeviceHex: myDeviceHex,
+            reportedToCallKit: useCallKit && callUUID != nil,
+            recentlyEndedPeers: recentlyEndedPeers())
+        let action = VoipPushPolicy.decide(caller: caller, state: state)
+        switch action {
+        case .ring(let c):
+            HavenLog.call("VoIP push — ringing for \(c.peerHex.prefix(8))")
+            peerName = c.name
+            sessionId = "push:\(c.peerHex)"; roster = [c.peerHex, myHex]
+            isCaller = false; active = true
+            refreshParticipants()
+            reportIncoming(name: c.name)
+            // Where the in-app overlay rings instead of CallKit (the simulator), CallKit still
+            // has to hear about the push.
+            if !useCallKit { reportPushKitPlaceholder(reason: "in-app ring") }
+        case .reReportExisting:
+            HavenLog.call("VoIP push — duplicate of the live call, re-reporting its UUID")
+            reReportLiveCall()
+        case .reportAndEnd(let reason):
+            HavenLog.call("VoIP push — not ringing (\(reason.rawValue)); report+end placeholder")
+            reportPushKitPlaceholder(reason: reason.rawValue)
         }
-        isCaller = false; active = true
-        refreshParticipants()
-        reportIncoming(name: name)
     }
+
+    /// Peers whose push-/legacy-keyed session we ended within the tombstone window.
+    private func recentlyEndedPeers() -> Set<String> {
+        var out = Set<String>()
+        for (sid, _) in endedSessions where recentlyEnded(sid) {
+            for prefix in ["push:", "legacy:"] where sid.hasPrefix(prefix) {
+                out.insert(String(sid.dropFirst(prefix.count)))
+            }
+        }
+        return out
+    }
+
+    #if !os(macOS)
+    /// Throwaway call UUIDs reported only to satisfy PushKit. A CallKit action that names one of
+    /// them must never reach the real call. They are REMEMBERED, not dropped when we end them:
+    /// CallKit defers the end until a minimum ring duration and meanwhile sends its own
+    /// CXEndCallAction for the placeholder (seen ~70 ms after our reportCall) — forgetting the
+    /// UUID first let that action fall through to reallyEnd() and hang up the real ringing call.
+    /// Bounded: oldest dropped past `pushKitPlaceholderCap` (a few hundred bytes at most).
+    private var pushKitPlaceholders: [UUID] = []
+    private static let pushKitPlaceholderCap = 32
+    #endif
+
+    /// PushKit's mandatory report for a push that must not ring: report a throwaway call, then
+    /// end it at once. Never touches `callUUID` or any live-call state.
+    private func reportPushKitPlaceholder(reason: String) {
+        #if !os(macOS)
+        guard let provider else {
+            HavenLog.call("VoIP push (\(reason)) — no CXProvider on this platform; cannot report")
+            return
+        }
+        let uuid = UUID()
+        pushKitPlaceholders.append(uuid)
+        if pushKitPlaceholders.count > Self.pushKitPlaceholderCap { pushKitPlaceholders.removeFirst() }
+        let update = CXCallUpdate()
+        update.remoteHandle = CXHandle(type: .generic, value: "Haven")
+        update.localizedCallerName = "Haven"
+        update.hasVideo = false
+        provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.provider?.reportCall(with: uuid, endedAt: nil, reason: .remoteEnded)
+            }
+        }
+        #endif
+    }
+
+    /// The push is for the call CallKit already shows. Re-reporting its UUID satisfies PushKit
+    /// (CallKit replies `callUUIDAlreadyExists`) without a second call screen — and that error is
+    /// expected here, so unlike `reportIncoming` it must not tear the call down.
+    private func reReportLiveCall() {
+        #if !os(macOS)
+        guard let provider, let uuid = callUUID else { reportPushKitPlaceholder(reason: "duplicate"); return }
+        let update = CXCallUpdate()
+        update.remoteHandle = CXHandle(type: .generic, value: peerName)
+        update.localizedCallerName = peerName
+        update.hasVideo = false
+        provider.reportNewIncomingCall(with: uuid, update: update) { _ in }
+        #endif
+    }
+
+    #if !os(macOS)
+    /// True when a CallKit action names a PushKit placeholder — fulfil it and leave the real call be.
+    fileprivate func isPushKitPlaceholder(_ uuid: UUID) -> Bool { pushKitPlaceholders.contains(uuid) }
+    #endif
 
     func reportIncoming(name: String) {
         AudioCoordinator.shared.silenceForCall()   // stop feed music/video audio before the ring
@@ -1980,10 +2066,20 @@ extension CallManager: CXProviderDelegate {
         Task { @MainActor in self.beginOutgoing(); action.fulfill() }
     }
     nonisolated func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
-        Task { @MainActor in self.reallyAccept(); action.fulfill() }
+        Task { @MainActor in
+            if self.isPushKitPlaceholder(action.callUUID) {
+                HavenLog.call("CXAnswerCallAction for a PushKit placeholder — ignored"); action.fulfill(); return
+            }
+            self.reallyAccept(); action.fulfill()
+        }
     }
     nonisolated func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
-        Task { @MainActor in self.reallyEnd(); action.fulfill() }
+        Task { @MainActor in
+            if self.isPushKitPlaceholder(action.callUUID) {
+                HavenLog.call("CXEndCallAction for a PushKit placeholder — ignored"); action.fulfill(); return
+            }
+            self.reallyEnd(); action.fulfill()
+        }
     }
     nonisolated func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
         // The system mute button (or our own toggle, routed through CallKit) lands here — apply it

@@ -463,6 +463,8 @@ targets:
       - path: HavenApp/TempSweep.swift
       - path: HavenApp/SpilledDefaults.swift
       - path: HavenApp/LegacyKithMigration.swift
+      # Every VoIP push → ring / re-report / report-and-end (PushKit aborts on an unreported push).
+      - path: HavenApp/VoipPushPolicy.swift
       - path: Shared/SharedNotificationPrivacy.swift
       - path: HavenLogicTests
     settings:

@@ -89,6 +89,12 @@ struct RelayCfg {
     /// Operator-chosen retention. Defaults to today's behavior (30d mailbox TTL, media
     /// never deleted) — app-embedded relays never set it, so they change nothing.
     retention: blobstore::Retention,
+    /// Liveness token for THIS attachment's GC thread. The thread holds only a `Weak` to it, so it
+    /// exits as soon as this config is dropped (disable) or replaced (disable → re-enable inside one
+    /// tick, which the app's fabric rebind does). Before, the thread only checked "is SOME relay
+    /// configured", so every detach/reattach inside a minute left the old thread running alongside
+    /// the new one — N rebinds, N concurrent full-store sweeps.
+    gc_token: Arc<()>,
 }
 
 /// Per-peer dial backoff after failed connects. Without it the app's 20s sync loop re-dials every
@@ -344,11 +350,13 @@ impl Node {
                 ttl: retention.mailbox_ttl,
                 grace: retention.gc_grace,
             }));
+            let gc_token = Arc::new(());
             *g = Some(RelayCfg {
                 root: root.clone(),
                 auth: Arc::new(Mutex::new(auth)),
                 http: None,
                 retention,
+                gc_token: gc_token.clone(),
             });
             // Replay the circles paired members taught this relay BEFORE any link grant is applied,
             // so a relay whose link grants nothing (or whose operator never re-pastes) still serves
@@ -360,8 +368,17 @@ impl Node {
                 blobstore::rehydrate_learned_grants(&root, &cfg.auth);
                 blobstore::rehydrate_device_rosters(&root, &cfg.auth);
             }
-            // Stamp the GC-enabled marker(s) now so the 48h first-enable grace clock starts.
-            let _ = blobstore::gc_sweep_with(&root, &retention, retention.gc_grace);
+            // Stamp the GC-enabled marker(s) now so the 48h first-enable grace clock starts — cheap
+            // (a stat or two; the mailbox emptiness probe only runs while the marker is missing).
+            blobstore::plant_gc_markers(&root, &retention, retention.gc_grace);
+            // The first full sweep runs on the GC thread, NEVER inline here. `enable_relay` is
+            // reached synchronously from `RelayServerHandle.attach*`, which the app calls on its
+            // MAIN thread (RelayHost start / reattach after every fabric rebind). Inline, a full
+            // sweep stat()s every file of the store (the media pass walks it three times): on a Mac
+            // hosting a 13 GB library that pinned the main thread for seconds per rebind, and a
+            // stream of rebinds (DERP set churn while ingesting a backlog of relay announces) kept it
+            // pinned — Haven 2.0.0 (629) at 150% CPU with a beachballing UI.
+            //
             // Hourly GC for the in-process store. A plain thread (not a tokio task):
             // `RelayServerHandle.attach` calls this from outside any async runtime on the app
             // platforms. Wakes every minute (or every `gc_interval`, when a DEBUG relay under the
@@ -370,17 +387,27 @@ impl Node {
                 .gc_interval
                 .clamp(std::time::Duration::from_secs(1), std::time::Duration::from_secs(60));
             let holder = Arc::downgrade(&self.relay);
+            let alive = Arc::downgrade(&gc_token);
+            drop(gc_token);
             std::thread::spawn(move || {
+                // Current config for THIS attachment, or None once it was disabled / replaced.
+                let current = || -> Option<(std::path::PathBuf, blobstore::Retention)> {
+                    let relay = holder.upgrade()?;
+                    let g = lock(&relay);
+                    let c = g.as_ref()?;
+                    // Identity, not "some relay is configured": a re-enable installs a NEW token. The
+                    // Weak keeps our token's allocation alive, so its address can't be reused.
+                    std::ptr::eq(alive.as_ptr(), Arc::as_ptr(&c.gc_token))
+                        .then(|| (c.root.clone(), c.retention))
+                };
+                // Deferred first-enable sweep (see above) — silent, like the old inline one.
+                let Some((root, retention)) = current() else { return };
+                let _ = blobstore::gc_sweep_with(&root, &retention, retention.gc_grace);
                 let mut slept = std::time::Duration::ZERO;
                 loop {
                     std::thread::sleep(tick);
                     slept += tick;
-                    let Some(relay) = holder.upgrade() else { return };
-                    let Some((root, retention)) =
-                        lock(&relay).as_ref().map(|c| (c.root.clone(), c.retention))
-                    else {
-                        return;
-                    };
+                    let Some((root, retention)) = current() else { return };
                     if slept >= retention.gc_interval {
                         slept = std::time::Duration::ZERO;
                         let stats = blobstore::gc_sweep_with(&root, &retention, retention.gc_grace);

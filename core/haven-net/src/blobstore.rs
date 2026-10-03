@@ -1249,21 +1249,10 @@ pub fn gc_sweep(root: &Path, ttl: std::time::Duration, grace: std::time::Duratio
 ///   stamp live media before anything may be deleted.
 pub fn gc_sweep_with(root: &Path, retention: &Retention, grace: std::time::Duration) -> GcStats {
     let mut stats = GcStats::default();
+    plant_gc_markers(root, retention, grace);
 
     // --- mailbox TTL sweep (unchanged semantics) -----------------------------------
-    // The grace protects entries that predate the sweep. A store with no mailbox at all when the
-    // marker is first planted has nothing to protect, so its marker starts already past the grace
-    // — otherwise a brand-new relay spent its first 48 h treating long-dead entries (a sibling's
-    // backdated leftovers, a member's stale TOUCH set) as live.
     let mailbox_marker = root.join(".haven-gc-enabled");
-    if !mailbox_marker.is_file() && local_list(root, MAILBOX_PREFIX).is_empty() {
-        // The store root may not exist yet (a headless relay's first start enables GC before
-        // anything is written) — without this the write failed silently and the fallback below
-        // planted a FRESH marker, i.e. the full 48 h grace (e2e `multirelay`, run 6).
-        let _ = std::fs::create_dir_all(root);
-        let _ = std::fs::write(&mailbox_marker, b"");
-        backdate(&mailbox_marker, grace.as_secs());
-    }
     if marker_past_grace(&mailbox_marker, grace) {
         if let Ok(mailbox_root) = safe_path(root, MAILBOX_PREFIX) {
             let mut freed = 0u64; // mailbox bytes aren't reported; media accounting only
@@ -1301,6 +1290,35 @@ pub fn gc_sweep_with(root: &Path, retention: &Retention, grace: std::time::Durat
     }
     stats.media_bytes_total = media_files(&media_root).iter().map(|(_, _, len)| len).sum();
     stats
+}
+
+/// Plant the first-enable grace markers WITHOUT sweeping — what a relay attach must do
+/// synchronously so the 48h grace clock starts at enable time, while the expensive full sweep
+/// runs on the GC thread (see `Node::enable_relay_with_retention`). Cheap: a stat per marker, plus
+/// a mailbox emptiness probe only on the store's very first enable (marker missing). Idempotent;
+/// [`gc_sweep_with`] calls it too, so the semantics are unchanged whichever runs first.
+pub fn plant_gc_markers(root: &Path, retention: &Retention, grace: std::time::Duration) {
+    // The grace protects entries that predate the sweep. A store with no mailbox at all when the
+    // marker is first planted has nothing to protect, so its marker starts already past the grace
+    // — otherwise a brand-new relay spent its first 48 h treating long-dead entries (a sibling's
+    // backdated leftovers, a member's stale TOUCH set) as live.
+    let mailbox_marker = root.join(".haven-gc-enabled");
+    if !mailbox_marker.is_file() {
+        if local_list(root, MAILBOX_PREFIX).is_empty() {
+            // The store root may not exist yet (a headless relay's first start enables GC before
+            // anything is written) — without this the write failed silently and the fallback
+            // planted a FRESH marker, i.e. the full 48 h grace (e2e `multirelay`, run 6).
+            let _ = std::fs::create_dir_all(root);
+            let _ = std::fs::write(&mailbox_marker, b"");
+            backdate(&mailbox_marker, grace.as_secs());
+        } else {
+            let _ = marker_past_grace(&mailbox_marker, grace); // plants a fresh (full-grace) marker
+        }
+    }
+    // The media marker only exists once a media limit is active (see `gc_sweep_with`).
+    if retention.media_limited() && safe_path(root, MEDIA_PREFIX).is_ok() {
+        let _ = marker_past_grace(&root.join(".haven-media-gc-enabled"), grace);
+    }
 }
 
 /// Delete `.part` temp files older than `max_age_secs` anywhere under `root`. Returns the count.

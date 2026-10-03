@@ -118,6 +118,9 @@ final class HavenAppDelegate: NSObject, UIApplicationDelegate {
 /// orientation lock (irrelevant on Mac); no background-fetch completion handler on macOS.
 final class HavenAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before anything can start the relay's tunnel: reap a cloudflared a previous run left
+        // behind, and make sure this run's connectors die with the app (quit or crash).
+        MainActor.assumeIsolated { CloudflaredTunnel.shared.installLifecycleGuards() }
         Task { @MainActor in FeedStore.shared.configureForCurrentIdentity() }   // seeded or seedless (S4)
         // Resume serving as a circle relay if the user left it on (mirrors iOS startIfEnabled).
         Task { @MainActor in RelayHost.shared.startIfEnabled() }

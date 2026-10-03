@@ -563,6 +563,15 @@ Why A wins:
 | **HavenMac (App Store / Xcode Cloud)** | `ci_post_clone` fetches → `apple/Helpers/cloudflared`; HavenMac **post-build** copies to `Contents/Helpers/` and **codesigns** with `EXPANDED_CODE_SIGN_IDENTITY` (`apple/Scripts/embed-cloudflared.sh`) | ON when hosting and no `haven.relay.publicURL` (`CloudflaredTunnel`) |
 | **`haven-relay` CLI** | First tunnel use downloads official binary **next to** the CLI (or into `<data>/bin`) | ON by default when no `--http-url`; `--no-tunnel` / `--tunnel` |
 
+**HavenMac connector lifetime.** The helper is a child process, and macOS has no parent-death
+signal, so `CloudflaredTunnel` ties it to the app three ways: `NSApplication.willTerminateNotification`
+SIGTERMs (then SIGKILLs after 1 s) every connector; crash/termination signal handlers
+(`CloudflaredChildGuard`) SIGKILL tracked connectors before the original signal ends the app; and
+`applicationDidFinishLaunching` sweeps a stale connector from a previous run (Force Quit, jetsam)
+before the relay can start a new one. A process counts as Haven's only if it runs this bundle's
+helper **and** passes `--logfile` into Haven's own logs directory (`CloudflaredOrphans`, covered by
+`CloudflaredOrphansTests`).
+
 Pinned version: `2026.7.2` (see `haven_net::cfquicktunnel::CLOUDFLARED_VERSION` and the fetch script).
 
 ### Updating the pin (and signing — fully automatic)

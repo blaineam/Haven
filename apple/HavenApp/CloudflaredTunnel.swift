@@ -26,10 +26,16 @@ final class CloudflaredTunnel: ObservableObject {
     // Foundation.Process (subprocess spawn) exists on macOS only — never declare it on iOS
     // or Xcode Cloud's Haven iOS archive fails with "Cannot find type 'Process' in scope".
     #if os(macOS)
-    private var process: Process?
+    // Both connectors mirror their PID into `CloudflaredChildGuard`, which the quit hook and the
+    // crash signal handlers read — a signal handler cannot touch the main actor.
+    private var process: Process? {
+        didSet { CloudflaredChildGuard.set(slot: 0, pid: process?.processIdentifier ?? 0) }
+    }
     /// Second free trycloudflare for the embedded DERP fabric bind (one origin per process).
     /// Prefer path-router single-tunnel mode; dual free tunnels are fallback only.
-    private var derpProcess: Process?
+    private var derpProcess: Process? {
+        didSet { CloudflaredChildGuard.set(slot: 1, pid: derpProcess?.processIdentifier ?? 0) }
+    }
     /// Local origin we last pointed the *main* tunnel at (e.g. `http://127.0.0.1:8675`).
     private(set) var lastLocalHTTP: String?
     /// Persisted so a crash / lost Process ref still gets cleaned on next start/stop.
@@ -901,80 +907,111 @@ final class CloudflaredTunnel: ObservableObject {
         UserDefaults.standard.set(pids.map { Int($0) }, forKey: pidDefaultsKey)
     }
 
-    /// Kill every Haven-owned cloudflared we can find: persisted PIDs + Helpers path scan.
-    /// Safe to call often; skips PIDs in `except` (currently live connectors). Prefer a
-    /// background queue — may briefly sleep while reaping.
+    /// Kill every cloudflared this install spawned that is not a live connector: the `ps` scan
+    /// (our helper binary + our logs dir, see `CloudflaredOrphans`), or the persisted PIDs when
+    /// `ps` is unavailable. Safe to call often; skips PIDs in `except` and whatever connectors are
+    /// currently tracked. Prefer a background queue — may briefly sleep while reaping.
     nonisolated static func killOrphanCloudflareds(except: Set<Int32>) {
-        var targets = Set<Int32>()
-        // 1) Persisted from prior spawns (survives lost Process refs / crash).
         let key = "haven.relay.cloudflaredPids"
-        let saved = UserDefaults.standard.array(forKey: key) as? [Int] ?? []
-        for n in saved {
-            let pid = Int32(n)
-            if pid > 1, !except.contains(pid) { targets.insert(pid) }
-        }
-        // 2) Live processes whose argv points at Haven's bundled helper (or known stub path).
-        for pid in scanHavenCloudflaredPids() where !except.contains(pid) {
-            targets.insert(pid)
-        }
-        guard !targets.isEmpty else {
-            UserDefaults.standard.set(except.map { Int($0) }, forKey: key)
-            return
-        }
+        let keep = except.union(CloudflaredChildGuard.livePids())
+        defer { UserDefaults.standard.set(keep.map { Int($0) }, forKey: key) }
+        guard let bin = findBinary()?.path else { return }
+        let saved = (UserDefaults.standard.array(forKey: key) as? [Int] ?? []).map { Int32($0) }
+        let targets = CloudflaredOrphans.sweepTargets(
+            psOutput: processListing(),
+            saved: saved,
+            binaryPath: bin,
+            logsDir: logsDirectory().path,
+            except: keep,
+            selfPid: getpid(),
+            executablePath: executablePath(of:)
+        )
+        guard !targets.isEmpty else { return }
         for pid in targets {
-            if kill(pid, 0) != 0 { continue }
             // HavenLog is MainActor — print via NSLog so we can call from any queue.
             NSLog("haven cloudflared: killing orphan pid=%d", pid)
             kill(pid, SIGTERM)
         }
         Thread.sleep(forTimeInterval: 0.35)
-        for pid in targets {
-            if kill(pid, 0) == 0 {
-                kill(pid, SIGKILL)
-                var status: Int32 = 0
-                _ = waitpid(pid, &status, WNOHANG)
-            }
+        for pid in targets where kill(pid, 0) == 0 {
+            kill(pid, SIGKILL)
+            var status: Int32 = 0
+            _ = waitpid(pid, &status, WNOHANG)
         }
-        // Keep only the except set in defaults.
-        UserDefaults.standard.set(except.map { Int($0) }, forKey: key)
     }
 
-    /// PIDs of processes whose command line looks like Haven's cloudflared helper.
-    nonisolated private static func scanHavenCloudflaredPids() -> [Int32] {
+    /// `ps -ax -ww -o pid= -o command=`, or nil when it cannot run. `-ww`: never truncate the
+    /// command — the `--logfile` argument the ownership check needs sits past column 132.
+    nonisolated private static func processListing() -> String? {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/ps")
-        task.arguments = ["-ax", "-o", "pid=", "-o", "command="]
+        task.arguments = ["-ax", "-ww", "-o", "pid=", "-o", "command="]
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = FileHandle.nullDevice
-        do { try task.run() } catch { return [] }
-        task.waitUntilExit()
+        do { try task.run() } catch { return nil }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return [] }
-        var out: [Int32] = []
-        for line in text.split(separator: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard let space = trimmed.firstIndex(of: " ") else { continue }
-            let pidStr = trimmed[..<space].trimmingCharacters(in: .whitespaces)
-            let cmd = trimmed[trimmed.index(after: space)...]
-            guard let pid = Int32(pidStr), pid > 1 else { continue }
-            // Match Haven-bundled helper or matrix stub helper — never a random homebrew cloudflared
-            // unless it is clearly tunneling to Haven's local ports.
-            let isHavenHelper = cmd.contains("/Contents/Helpers/cloudflared")
-                || cmd.contains("matrix-haven-mac-stub") && cmd.contains("cloudflared")
-                || cmd.contains("HavenStub") && cmd.contains("cloudflared")
-            let isHavenLocalOrigin = cmd.contains("cloudflared")
-                && (cmd.contains("127.0.0.1:8675")
-                    || cmd.contains("127.0.0.1:8674")
-                    || cmd.contains("127.0.0.1:3340"))
-            if isHavenHelper || isHavenLocalOrigin {
-                out.append(pid)
-            }
-        }
-        return out
+        task.waitUntilExit()
+        guard task.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
-    private static func findBinary() -> URL? {
+    nonisolated private static func executablePath(of pid: Int32) -> String? {
+        var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        let n = proc_pidpath(pid, &buf, UInt32(buf.count))
+        return n > 0 ? String(cString: buf) : nil
+    }
+
+    // MARK: - App lifecycle
+
+    private var lifecycleGuardsInstalled = false
+
+    /// Call once from `applicationDidFinishLaunching`, before the relay can start a tunnel:
+    /// 1. sweeps a stale cloudflared left by a previous run (quit/crash/force-quit) — synchronous,
+    ///    so it can never race the connector this launch is about to spawn;
+    /// 2. tears every connector down on `NSApplication.willTerminateNotification`;
+    /// 3. installs crash/termination signal handlers that SIGKILL tracked connectors before the
+    ///    process dies. macOS has no parent-death signal, so a SIGKILL'd app (Force Quit, jetsam)
+    ///    still leaves one behind — step 1 on the next launch is the backstop for that.
+    func installLifecycleGuards() {
+        guard !lifecycleGuardsInstalled else { return }
+        lifecycleGuardsInstalled = true
+        Self.killOrphanCloudflareds(except: [])
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: nil
+        ) { _ in
+            Self.terminateAllForAppExit()
+        }
+        CloudflaredChildGuard.installSignalHandlers()
+    }
+
+    /// Synchronous teardown for app exit: SIGTERM every tracked connector and owned orphan, give
+    /// them ~1s, then SIGKILL. Blocks — the process is about to exit, nothing else needs main.
+    nonisolated static func terminateAllForAppExit() {
+        var targets = CloudflaredChildGuard.livePids()
+        if let bin = findBinary()?.path, let listing = processListing() {
+            targets.formUnion(CloudflaredOrphans.sweepTargets(
+                psOutput: listing, saved: [], binaryPath: bin, logsDir: logsDirectory().path,
+                except: [], selfPid: getpid(), executablePath: { _ in nil }
+            ))
+        }
+        guard !targets.isEmpty else { return }
+        NSLog("haven cloudflared: app terminating — stopping pids=%@", targets.map(String.init).joined(separator: ","))
+        for pid in targets { kill(pid, SIGTERM) }
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline, targets.contains(where: { kill($0, 0) == 0 }) {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        for pid in targets where kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+        for pid in targets {
+            var status: Int32 = 0
+            _ = waitpid(pid, &status, WNOHANG)
+        }
+        CloudflaredChildGuard.clearAll()
+        UserDefaults.standard.removeObject(forKey: "haven.relay.cloudflaredPids")
+    }
+
+    nonisolated private static func findBinary() -> URL? {
         let name = "cloudflared"
         if let helpers = Bundle.main.privateFrameworksURL?
             .deletingLastPathComponent()
@@ -1072,3 +1109,77 @@ final class CloudflaredTunnel: ObservableObject {
         return t
     }
 }
+
+#if os(macOS)
+/// PIDs of the live cloudflared connectors, in storage a signal handler may read.
+///
+/// `CloudflaredTunnel.process` / `derpProcess` mirror themselves here on every assignment. The
+/// crash handlers SIGKILL whatever is here and then let the original signal take the process down,
+/// so a crashing Haven does not leave a tunnel serving a dead relay. Only async-signal-safe calls
+/// (`kill`, `sigaction`, `raise`) happen inside the handler; the storage is plain C memory.
+enum CloudflaredChildGuard {
+    private static let slotCount = 2
+    nonisolated(unsafe) private static let pids: UnsafeMutablePointer<pid_t> = {
+        let p = UnsafeMutablePointer<pid_t>.allocate(capacity: slotCount)
+        p.initialize(repeating: 0, count: slotCount)
+        return p
+    }()
+    nonisolated(unsafe) private static let previous: UnsafeMutablePointer<sigaction> = {
+        let p = UnsafeMutablePointer<sigaction>.allocate(capacity: Int(NSIG))
+        p.initialize(repeating: sigaction(), count: Int(NSIG))
+        return p
+    }()
+    nonisolated(unsafe) private static var installed = false
+
+    /// Crash signals plus the polite ones that end a process without `willTerminate`.
+    private static let signals: [Int32] = [
+        SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGFPE, SIGSYS,
+        SIGTERM, SIGINT, SIGHUP, SIGQUIT,
+    ]
+
+    static func set(slot: Int, pid: Int32) {
+        guard slot >= 0, slot < slotCount else { return }
+        pids[slot] = pid > 1 ? pid : 0
+    }
+
+    static func clearAll() {
+        for i in 0..<slotCount { pids[i] = 0 }
+    }
+
+    static func livePids() -> Set<Int32> {
+        var out = Set<Int32>()
+        for i in 0..<slotCount where pids[i] > 1 { out.insert(pids[i]) }
+        return out
+    }
+
+    /// Install once. Only signals still at their default disposition are taken over — an ignored
+    /// signal or another component's handler is left alone.
+    static func installSignalHandlers() {
+        guard !installed else { return }
+        installed = true
+        for sig in signals {
+            var current = sigaction()
+            guard sigaction(sig, nil, &current) == 0,
+                  current.__sigaction_u.__sa_handler == nil   // SIG_DFL
+            else { continue }
+            previous[Int(sig)] = current
+            var action = sigaction()
+            action.__sigaction_u.__sa_handler = { sig in
+                for i in 0..<CloudflaredChildGuard.slotCount {
+                    let pid = CloudflaredChildGuard.pids[i]
+                    if pid > 1 { kill(pid, SIGKILL) }
+                }
+                // Restore the default and re-deliver: the process still dies of the original
+                // signal (crash reports and exit status unchanged). The signal is blocked while
+                // this handler runs, so it lands as soon as the handler returns.
+                var prior = CloudflaredChildGuard.previous[Int(sig)]
+                sigaction(sig, &prior, nil)
+                raise(sig)
+            }
+            sigemptyset(&action.sa_mask)
+            action.sa_flags = 0
+            sigaction(sig, &action, nil)
+        }
+    }
+}
+#endif

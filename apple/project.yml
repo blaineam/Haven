@@ -465,6 +465,9 @@ targets:
       - path: HavenApp/ActivityPersistence.swift
       # The hosted relay keeps its well-known HTTP port across a restart (bounded retry first).
       - path: HavenApp/RelayPortBind.swift
+      # Which running cloudflared is this install's own (our helper binary AND our logs dir) —
+      # the quit/launch orphan sweep's matching rule. Foundation only.
+      - path: HavenApp/CloudflaredOrphans.swift
       # Heat fixes (2026-10-02): the append-only mailbox seen journal, the size-aware engine-export
       # cadence, the tmp sweep, and the per-media maps moved out of UserDefaults. Foundation only.
       - path: HavenApp/SeenJournal.swift

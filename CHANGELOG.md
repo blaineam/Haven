@@ -22,6 +22,14 @@ copy are released and downloaded again.
 On the desktop app, an item that was skipped this way is now tried again as soon as its author puts a
 fresh copy back, instead of waiting for a restart.
 
+### Fixed — Mac: quitting Haven left its tunnel running
+
+Quitting the Mac app while it hosted a relay could leave its bundled `cloudflared` tunnel running
+in the background after Haven had exited, still holding a public address for a relay that was gone.
+Haven now shuts its tunnel down when it quits, kills it if Haven crashes, and on the next launch
+cleans up any tunnel an earlier run left behind (for example after a Force Quit). The cleanup only
+touches Haven's own helper — never another app's `cloudflared` or one you run yourself.
+
 ## 2.0.0 — release candidate 4 (2026-10-03)
 
 Soren release gate green (all 11 suites; e2e 457/0).

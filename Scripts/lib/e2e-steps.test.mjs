@@ -110,6 +110,8 @@ test('perf fields: absent section / partial section are reported by name', () =>
   assert.equal(persistExportAllowance(0), 2);
   assert.equal(persistExportAllowance(10_000), 6);
   assert.equal(persistExportAllowance(-5), 2);
+  assert.equal(persistExportAllowance(29_900, 5), 18, 'each user action exports at once on top of the cadence');
+  assert.equal(persistExportAllowance(10_000, -3), 6);
   assert.equal(reactLatency({ react_latency: { engineAppliedMs: 3.5, publishedMs: 42 } }), 42);
   assert.equal(reactLatency({ react_latency: { engineAppliedMs: 3.5, publishedMs: -1 } }), Infinity);
   assert.equal(reactLatency({ react_latency: { engineAppliedMs: 7 } }), 7);

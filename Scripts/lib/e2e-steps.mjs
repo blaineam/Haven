@@ -152,9 +152,14 @@ export function missingPerfFields(perf) {
   return PERF_FIELDS.filter((k) => typeof perf[k] !== 'number');
 }
 
-/** Persist-export allowance during a burst: at most one per 2.5 s of burst, plus slack of 2. */
-export function persistExportAllowance(burstMs) {
-  return Math.floor(Math.max(0, burstMs) / 2500) + 2;
+/**
+ * Persist-export allowance during a burst: the network-driven cadence at most once per 2.5 s of
+ * burst, PLUS one per user action taken meanwhile (reactions and other authored events export at
+ * once by design — a kill right after the tap must not undo it), plus slack of 2. Without the
+ * user-action term the step's own 5 reactions ate the slack and the score flapped 12–14 on timing.
+ */
+export function persistExportAllowance(burstMs, userActions = 0) {
+  return Math.floor(Math.max(0, burstMs) / 2500) + Math.max(0, userActions | 0) + 2;
 }
 
 /**

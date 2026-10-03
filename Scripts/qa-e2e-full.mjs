@@ -1757,7 +1757,7 @@ async function main() {
     perfGate('responsive: engine user-wait p95 [ios]', 'ios', num(perf.engineUserWaitP95Ms), BUDGET.engineP95);
     const rl = reacts.filter((v) => typeof v === 'number');
     perfGate('responsive: react local latency, worst of 5 [ios]', 'ios', rl.length === 5 ? Math.max(...rl) : -1, BUDGET.react);
-    const allow = persistExportAllowance(burstMs);
+    const allow = persistExportAllowance(burstMs, reacts.length);   // each react exports at once
     score(`responsive: persist exports during the burst ≤ ${allow}`, num(perf.persistExportCount) <= allow, `count=${perf.persistExportCount}`);
     // IDLE starts once the WHOLE burst has landed, not just its texts: the photo and the two videos
     // (posts from a slow desktop leg especially) used to arrive inside the "idle" window, and each

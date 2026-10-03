@@ -719,4 +719,29 @@
     <string name="audience_confirm_private">改为私下发送…</string>
     <string name="circle_reply_placeholder_named">回复 %1$s 的所有人…</string>
     <string name="circle_member_message_cd">私信 %1$s</string>
+    <!-- Settings ▸ Devices ▸ Load history from your relays (RelayHistory.kt) -->
+    <string name="relay_history_title">从你的 Relay 加载历史记录</string>
+    <string name="relay_history_explain">拉取你的 Relay 仍保存的帖子和媒体——包括你在其他设备上发布的内容。</string>
+    <string name="relay_history_satellite">卫星连接下不可用。</string>
+    <string name="relay_history_norelay">你的圈子都还没有使用 Relay。</string>
+    <string name="relay_history_stop_q">要停止加载历史记录吗？</string>
+    <string name="relay_history_stop">停止加载</string>
+    <string name="relay_history_keep">继续</string>
+    <string name="relay_history_stays">已加载的内容会保留；再次运行时会从中断处继续。</string>
+    <string name="relay_history_checking">正在检查你的 Relay…</string>
+    <string name="relay_history_downloading">正在下载照片和视频…</string>
+    <string name="relay_history_loaded">历史记录已加载</string>
+    <string name="relay_history_stopped">已停止</string>
+    <string name="relay_history_circles_n">已检查的圈子：%1$d/%2$d</string>
+    <string name="relay_history_posts_n">已检查的帖子：%1$d/%2$d</string>
+    <string name="relay_history_added_posts">已添加 %1$d 条帖子</string>
+    <string name="relay_history_media_n">照片和视频：%1$d/%2$d</string>
+    <string name="relay_history_summary">已添加 %1$d 条帖子和 %2$d 个照片和视频。</string>
+    <string name="relay_history_uptodate">你的 Relay 保存的所有内容都已在此设备上。</string>
+    <string name="relay_history_unreachable">无法连接你的 Relay。请检查网络连接后重试。</string>
+    <string name="relay_history_media_missing">有 %1$d 个照片和视频不在你的 Relay 上。</string>
+    <string name="relay_history_hot">由于设备过热，照片下载已暂停。打开时会加载。</string>
+    <string name="relay_history_relay_err">有 %1$d 个圈子无法检查——某个 Relay 没有响应。</string>
+    <string name="relay_history_caveat">部分较早的帖子可能已不在你的 Relay 上。</string>
+    <string name="relay_history_dismiss">关闭</string>
 </resources>

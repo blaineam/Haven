@@ -720,4 +720,29 @@
     <string name="audience_confirm_private">Stattdessen privat senden…</string>
     <string name="circle_reply_placeholder_named">Allen in %1$s antworten…</string>
     <string name="circle_member_message_cd">%1$s privat schreiben</string>
+    <!-- Settings ▸ Devices ▸ Load history from your relays (RelayHistory.kt) -->
+    <string name="relay_history_title">Verlauf von deinen Relays laden</string>
+    <string name="relay_history_explain">Lädt Beiträge und Medien, die deine Relays noch aufbewahren – auch solche, die du auf anderen Geräten gepostet hast.</string>
+    <string name="relay_history_satellite">Über eine Satellitenverbindung nicht verfügbar.</string>
+    <string name="relay_history_norelay">Noch keiner deiner Kreise nutzt ein Relay.</string>
+    <string name="relay_history_stop_q">Laden des Verlaufs beenden?</string>
+    <string name="relay_history_stop">Laden beenden</string>
+    <string name="relay_history_keep">Weitermachen</string>
+    <string name="relay_history_stays">Bereits Geladenes bleibt erhalten; beim nächsten Start geht es dort weiter, wo es aufgehört hat.</string>
+    <string name="relay_history_checking">Deine Relays werden geprüft …</string>
+    <string name="relay_history_downloading">Fotos und Videos werden geladen …</string>
+    <string name="relay_history_loaded">Verlauf geladen</string>
+    <string name="relay_history_stopped">Gestoppt</string>
+    <string name="relay_history_circles_n">Geprüfte Kreise: %1$d von %2$d</string>
+    <string name="relay_history_posts_n">Geprüfte Beiträge: %1$d von %2$d</string>
+    <string name="relay_history_added_posts">%1$d Beiträge hinzugefügt</string>
+    <string name="relay_history_media_n">Fotos und Videos: %1$d von %2$d</string>
+    <string name="relay_history_summary">%1$d Beiträge und %2$d Fotos und Videos hinzugefügt.</string>
+    <string name="relay_history_uptodate">Alles, was deine Relays aufbewahren, war bereits auf diesem Gerät.</string>
+    <string name="relay_history_unreachable">Deine Relays waren nicht erreichbar. Prüfe deine Verbindung und versuche es erneut.</string>
+    <string name="relay_history_media_missing">%1$d Fotos und Videos waren nicht auf deinen Relays.</string>
+    <string name="relay_history_hot">Foto-Downloads pausiert, weil dieses Gerät heiß ist. Sie werden geladen, wenn du sie öffnest.</string>
+    <string name="relay_history_relay_err">%1$d Kreise konnten nicht geprüft werden – ein Relay hat nicht geantwortet.</string>
+    <string name="relay_history_caveat">Einige ältere Beiträge sind möglicherweise nicht mehr auf deinen Relays.</string>
+    <string name="relay_history_dismiss">Schließen</string>
 </resources>

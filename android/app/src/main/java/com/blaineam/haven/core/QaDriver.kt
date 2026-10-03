@@ -331,6 +331,12 @@ object QaDriver {
                 HavenNet.post(circle, body, music = track)
             }
             "mark_read" -> HavenNet.markThreadRead(circle)
+            // Settings ▸ Devices ▸ "Load history from your relays", headless (dump `relay_history`).
+            "relay_history_resync" -> {
+                if (cmd.optBoolean("reset_journal", false)) RelayHistoryResync.resetJournal()
+                RelayHistoryResync.start()
+            }
+            "relay_history_cancel" -> RelayHistoryResync.cancel()
             "wire_relay" -> {
                 val hex = cmd.optString("hex").lowercase()
                 val urlsArr = cmd.optJSONArray("urls")

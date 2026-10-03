@@ -19,7 +19,7 @@ object ComposeStateHolders {
         "EvictedMediaStore", "HiddenStore", "InstagramImporter", "KeptStoriesStore", "LowDataMonitor",
         "SyncMetrics", "HavenNet", "MediaProcessing", "MediaWantedStore", "MediaReoptimizer",
         "MediaLimits", "QaDriver", "RelayNudge", "PinnedMediaStore", "ScheduledStore", "ShareInbox",
-        "InviteInbox", "PostLinkInbox", "StoryLinkInbox", "CircleLinkInbox",
+        "InviteInbox", "PostLinkInbox", "StoryLinkInbox", "CircleLinkInbox", "RelayHistoryResync",
     )
 
     /** Run each holder's initializer on the calling (main) thread; already-initialized ones are free. */

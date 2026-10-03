@@ -3,6 +3,7 @@ package com.blaineam.haven.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.blaineam.haven.core.RelayHistoryProgress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -422,6 +423,9 @@ fun SettingsScreen(onBack: () -> Unit) {
 
             Spacer(Modifier.height(16.dp))
             AuthorizedDevicesCard()
+
+            Spacer(Modifier.height(16.dp))
+            RelayHistoryCard()
 
             Spacer(Modifier.height(24.dp))
             Text(stringResource(R.string.settings_start_over_new_identity), color = Color(0xFFF87171), fontWeight = FontWeight.Medium,
@@ -1340,6 +1344,103 @@ private fun AuthorizedDevicesCard() {
             },
             dismissButton = {
                 Text(stringResource(R.string.common_cancel), color = HavenTheme.textSecondary, modifier = Modifier.clickable { revokeTarget = null }.padding(8.dp))
+            },
+        )
+    }
+}
+
+/** Settings ▸ Devices ▸ "Load history from your relays" (core RelayHistoryResync — Apple parity): pull
+ *  everything this account's relays still hold, including posts made on other devices, with honest
+ *  progress, Cancel, and a closing summary. */
+@Composable
+private fun RelayHistoryCard() {
+    val p by com.blaineam.haven.core.RelayHistoryResync.progress
+    val unavailable = remember(p.phase) { com.blaineam.haven.core.RelayHistoryResync.unavailableReason() }
+    var confirmCancel by remember { mutableStateOf(false) }
+    val r = com.blaineam.haven.core.RelayHistoryResync
+
+    Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
+        if (p.phase != RelayHistoryProgress.Phase.IDLE) {
+            Row(verticalAlignment = Alignment.Top) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        stringResource(when (p.phase) {
+                            RelayHistoryProgress.Phase.SCANNING, RelayHistoryProgress.Phase.RETRYING -> R.string.relay_history_checking
+                            RelayHistoryProgress.Phase.MEDIA -> R.string.relay_history_downloading
+                            RelayHistoryProgress.Phase.DONE -> R.string.relay_history_loaded
+                            else -> R.string.relay_history_stopped
+                        }),
+                        color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp,
+                    )
+                    val lines = mutableListOf<String>()
+                    when (p.phase) {
+                        RelayHistoryProgress.Phase.SCANNING, RelayHistoryProgress.Phase.RETRYING -> {
+                            lines += stringResource(R.string.relay_history_circles_n, minOf(p.circlesDone, p.circlesTotal), p.circlesTotal)
+                            lines += stringResource(R.string.relay_history_posts_n, minOf(p.entriesChecked, p.entriesFound), p.entriesFound)
+                        }
+                        RelayHistoryProgress.Phase.MEDIA -> {
+                            lines += stringResource(R.string.relay_history_added_posts, p.postsAdded)
+                            lines += stringResource(R.string.relay_history_media_n, minOf(p.mediaDone, p.mediaTotal), p.mediaTotal)
+                        }
+                        else -> {
+                            lines += when (val o = p.outcome) {
+                                is RelayHistoryProgress.Outcome.Added ->
+                                    stringResource(R.string.relay_history_summary, o.posts, o.media)
+                                RelayHistoryProgress.Outcome.Unreachable -> stringResource(R.string.relay_history_unreachable)
+                                RelayHistoryProgress.Outcome.UpToDate -> stringResource(R.string.relay_history_uptodate)
+                            }
+                            if (p.phase == RelayHistoryProgress.Phase.CANCELLED) lines += stringResource(R.string.relay_history_stays)
+                            if (p.mediaMissing > 0) lines += stringResource(R.string.relay_history_media_missing, p.mediaMissing)
+                            if (p.mediaDeferred) lines += stringResource(R.string.relay_history_hot)
+                            if (p.relayErrors > 0 && p.outcome != RelayHistoryProgress.Outcome.Unreachable)
+                                lines += stringResource(R.string.relay_history_relay_err, p.relayErrors)
+                            if (p.showsRetentionCaveat) lines += stringResource(R.string.relay_history_caveat)
+                        }
+                    }
+                    for (l in lines) Text(l, color = HavenTheme.textSecondary, fontSize = 12.sp)
+                }
+                if (!p.running) {
+                    Text(stringResource(R.string.relay_history_dismiss), color = HavenTheme.textSecondary, fontSize = 13.sp,
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { r.dismiss() }.padding(6.dp))
+                }
+            }
+            if (p.running) {
+                Spacer(Modifier.height(8.dp))
+                androidx.compose.material3.LinearProgressIndicator(
+                    progress = { p.fraction }, modifier = Modifier.fillMaxWidth(), color = HavenTheme.pink)
+                Text(stringResource(R.string.common_cancel), color = HavenTheme.pink, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { confirmCancel = true }.padding(vertical = 8.dp))
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        if (!p.running) {
+            Text(
+                stringResource(R.string.relay_history_title),
+                color = if (unavailable == null) HavenTheme.pink else HavenTheme.textSecondary,
+                fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                    .clickable(enabled = unavailable == null) { r.start() }.padding(vertical = 8.dp),
+            )
+        }
+        Text(stringResource(R.string.relay_history_explain), color = HavenTheme.textSecondary, fontSize = 12.sp)
+        when (unavailable) {
+            "satellite" -> Text(stringResource(R.string.relay_history_satellite), color = HavenTheme.textSecondary, fontSize = 12.sp)
+            "norelay" -> Text(stringResource(R.string.relay_history_norelay), color = HavenTheme.textSecondary, fontSize = 12.sp)
+        }
+    }
+
+    if (confirmCancel) {
+        AlertDialog(
+            onDismissRequest = { confirmCancel = false }, containerColor = HavenTheme.card,
+            title = { Text(stringResource(R.string.relay_history_stop_q), color = HavenTheme.textPrimary) },
+            text = { Text(stringResource(R.string.relay_history_stays), color = HavenTheme.textSecondary) },
+            confirmButton = {
+                Text(stringResource(R.string.relay_history_stop), color = Color(0xFFF87171),
+                    modifier = Modifier.clickable { confirmCancel = false; r.cancel() }.padding(8.dp))
+            },
+            dismissButton = {
+                Text(stringResource(R.string.relay_history_keep), color = HavenTheme.textSecondary,
+                    modifier = Modifier.clickable { confirmCancel = false }.padding(8.dp))
             },
         )
     }

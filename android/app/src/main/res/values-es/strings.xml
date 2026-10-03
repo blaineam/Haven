@@ -726,4 +726,29 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="audience_confirm_private">Enviar en privado…</string>
     <string name="circle_reply_placeholder_named">Responde a todos en %1$s…</string>
     <string name="circle_member_message_cd">Enviar mensaje privado a %1$s</string>
+    <!-- Settings ▸ Devices ▸ Load history from your relays (RelayHistory.kt) -->
+    <string name="relay_history_title">Cargar el historial desde tus relays</string>
+    <string name="relay_history_explain">Descarga las publicaciones y los archivos que tus relays aún conservan, incluidos los que publicaste desde otros dispositivos.</string>
+    <string name="relay_history_satellite">No disponible con una conexión por satélite.</string>
+    <string name="relay_history_norelay">Ninguno de tus círculos usa un relay todavía.</string>
+    <string name="relay_history_stop_q">¿Dejar de cargar el historial?</string>
+    <string name="relay_history_stop">Dejar de cargar</string>
+    <string name="relay_history_keep">Continuar</string>
+    <string name="relay_history_stays">Lo que ya se cargó se conserva; si lo vuelves a ejecutar, continúa donde se quedó.</string>
+    <string name="relay_history_checking">Revisando tus relays…</string>
+    <string name="relay_history_downloading">Descargando fotos y videos…</string>
+    <string name="relay_history_loaded">Historial cargado</string>
+    <string name="relay_history_stopped">Detenido</string>
+    <string name="relay_history_circles_n">Círculos revisados: %1$d de %2$d</string>
+    <string name="relay_history_posts_n">Publicaciones revisadas: %1$d de %2$d</string>
+    <string name="relay_history_added_posts">Se añadieron %1$d publicaciones</string>
+    <string name="relay_history_media_n">Fotos y videos: %1$d de %2$d</string>
+    <string name="relay_history_summary">Se añadieron %1$d publicaciones y %2$d fotos y videos.</string>
+    <string name="relay_history_uptodate">Todo lo que guardan tus relays ya estaba en este dispositivo.</string>
+    <string name="relay_history_unreachable">No se pudo conectar con tus relays. Revisa tu conexión e inténtalo de nuevo.</string>
+    <string name="relay_history_media_missing">%1$d fotos y videos no estaban en tus relays.</string>
+    <string name="relay_history_hot">Se pausaron las descargas de fotos porque este dispositivo está caliente. Se cargarán al abrirlas.</string>
+    <string name="relay_history_relay_err">No se pudieron revisar %1$d círculos: un relay no respondió.</string>
+    <string name="relay_history_caveat">Es posible que algunas publicaciones antiguas ya no estén en tus relays.</string>
+    <string name="relay_history_dismiss">Descartar</string>
 </resources>

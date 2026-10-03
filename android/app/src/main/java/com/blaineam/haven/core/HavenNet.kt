@@ -6110,6 +6110,90 @@ object HavenNet : InboundListener {
 
     private val pendingSeenMarks = java.util.concurrent.ConcurrentLinkedQueue<String>()
 
+    // ---- Relay history resync ("Load history from your relays" — RelayHistory.kt) ----------------
+    // The few HavenNet internals the deep relay pass needs. Nothing here fans out, pushes, uploads
+    // or notifies: history that arrives this way is old news (Apple RelayHistoryResync parity).
+
+    /** The engine, once booted (null before `start` finishes). */
+    internal val historySocial: HavenSocial? get() = if (ready) social else null
+
+    /** Where the resync's ingested-key journal lives (per app install; reset with the identity). */
+    internal val historyJournalFile: File get() = File(appContext.filesDir, "haven_relay_history.journal")
+
+    /** Every circle and DM thread the engine holds. */
+    internal fun historyCircleIds(): List<String> =
+        runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
+
+    /** The relays a circle is read from — its own + the default, minus S3 pseudo-nodes. */
+    internal fun historyRelayNodes(circleId: String): List<String> =
+        relaysFor(circleId).filter { !it.startsWith("s3:") }
+
+    /** One relay's FULL listing of a circle's mailbox — no delta digest, no seen-set filter. null =
+     *  the relay could not be listed (unreachable or refusing us). HTTP first (the cross-NAT path),
+     *  then the iroh dial. */
+    internal suspend fun historyList(circleId: String, nodeHex: String): List<String>? {
+        val prefix = "haven/mailbox/$circleId/"
+        val entry = relayEntries[nodeHex]
+        if (entry != null && entry.httpToken.isNotEmpty()) {
+            for (base in httpUrlsFor(entry)) {
+                val r = relayHttpListDelta(base, entry.httpToken, prefix, digest = null)
+                if (r.isSuccess) { markRelaySeen(nodeHex); return r.getOrNull()?.first ?: emptyList() }
+                if (r.exceptionOrNull() is RelayForbidden) { noteRefused(nodeHex, "history list"); return null }
+                markHttpUrlBad(base)
+            }
+        }
+        val client = relayClientFor(nodeHex) ?: return null
+        val keys = runCatching { client.list(prefix) }.getOrNull()
+        if (keys == null) { relayFailed(nodeHex); return null }
+        markRelayOk(nodeHex)
+        return keys
+    }
+
+    /** GET one mailbox key from one relay, ignoring the seen-set. */
+    internal suspend fun historyGet(nodeHex: String, key: String): ByteArray? {
+        val entry = relayEntries[nodeHex]
+        if (entry != null && entry.httpToken.isNotEmpty()) {
+            for (base in httpUrlsFor(entry)) {
+                val r = relayHttpGet(base, entry.httpToken, key)
+                if (r.isSuccess) return r.getOrNull()?.takeIf { it.isNotEmpty() }
+                if (r.exceptionOrNull() is RelayForbidden) return null
+                markHttpUrlBad(base)
+            }
+        }
+        val client = relayClientFor(nodeHex) ?: return null
+        return runCatching { client.get(key) }.getOrNull()?.takeIf { it.isNotEmpty() }
+    }
+
+    /** Save the engine NOW; the resync commits a batch's keys only once this returns true. */
+    internal fun historySave(): Boolean {
+        val startedAtMs = System.currentTimeMillis()
+        return runCatching { StateFiles.writeAtomicFrom(stateFile) { social.exportState() } }
+            .onSuccess { QaPerf.notePersistExport(startedAtMs) }
+            .onFailure { Log.e(TAG, "relay history: persist failed", it) }
+            .isSuccess
+    }
+
+    /** Record keys the resync processed in the ordinary mailbox seen-set (after [historySave]). */
+    internal fun historyMarkSeen(keys: List<String>) { for (k in keys) markMailboxSeen(k) }
+
+    /** Events landed: repaint once (no fan-out, no banners). */
+    internal suspend fun historyLanded() {
+        withContext(Dispatchers.Main) { feedVersion.value++ }
+        ActivityStore.poke(social)
+    }
+
+    /** Relay-first fetch of one media ref (the same path a missing-media restore takes). */
+    internal suspend fun historyFetchMedia(circleId: String, ref: String): Boolean {
+        if (LocalMedia.has(ref)) return true
+        val got = (fetchMediaFromRelay(circleId, ref) || (healForbiddenRelays() && fetchMediaFromRelay(circleId, ref))) &&
+            acceptFetchedBlob(ref, circleId)
+        if (got) {
+            mediaArrived(ref)
+            withContext(Dispatchers.Main) { feedVersion.value++ }
+        }
+        return got
+    }
+
     // ---- Cross-device media bytes (frame 3 request / frame 5 sealed chunks), like iOS ----
 
     // 32KB chunks transmit reliably over a slow BLE-only nearby link (larger frames overflowed the
@@ -9675,6 +9759,7 @@ object HavenNet : InboundListener {
         initiated.clear(); initiatedAt.clear(); saveInitiated()
         relayNodes.clear(); relayClients.clear(); relayHealth.clear(); seenMailbox.clear()
         runCatching { seenMailboxFile.delete() }   // a new identity must not inherit the seen-set
+        RelayHistoryResync.resetJournal()   // …nor the relay-history resync's ingested journal
         invalidateListDigests()   // a fresh seen-set must re-list everything (no 204 short-circuit)
         relayEntries.clear(); suppressedRelays.clear(); forgotAtRelays.clear(); clearedRelayForgets.clear(); erasedRelays.clear(); defaultRelayHex = ""
         Presign.reset()
@@ -9791,6 +9876,7 @@ object HavenNet : InboundListener {
             .put("history_handoff", JSONObject()
                 .put("role", "none").put("state", "idle").put("done", 0).put("total", 0)
                 .put("media_done", 0).put("media_total", 0))
+            .put("relay_history", RelayHistoryResync.qaSnapshot())
     }
 
     /** Snapshot taken ON Main at publish time, so the last publish always carries the latest counts. */

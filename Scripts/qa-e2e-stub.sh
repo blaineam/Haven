@@ -43,8 +43,17 @@ for PREFS in \
   defaults write "$PREFS" "haven.relay.host.enabled" -bool true 2>/dev/null || true
   defaults write "$PREFS" "haven.relay.httpToken" -string "${HAVEN_STUB_TOKEN:-8e17157a4fd8f6eeef1c3accdd9fc1de}" 2>/dev/null || true
 done
+# `-ApplePersistenceIgnoreState YES`: never let AppKit window restoration decide whether the stub
+# gets a window. The account (`AccountStore`, which the `invite_link` op and every UI-owned path
+# read) is created by RootView, i.e. only when the main window is. Once ONE run ended with the
+# window closed (or was killed windowless), the saved state said "no windows", every later launch
+# restored exactly that, and the stub ran headless forever: relay up, dumps answering, but
+# `invite_link` silently produced no link — the rc.4 gate's "inviter minted a ticketed invite link"
+# RED and the whole newfriend → circle-membership cascade behind it (2026-10-03). The state lives
+# in AppKit's restoration store, not the container, so wiping QA state never cleared it.
+STUB_ARGS=(-ApplePersistenceIgnoreState YES)
 nohup env HOME=/tmp/haven-mac-stub-home HAVEN_SKIP_ONBOARDING=1 TMPDIR=/tmp/haven-mac-stub-tmp \
-  "$APP/Contents/MacOS/Haven" >"$OUT/stub-stdout.log" 2>&1 &
+  "$APP/Contents/MacOS/Haven" "${STUB_ARGS[@]}" >"$OUT/stub-stdout.log" 2>&1 &
 echo $! >"$OUT/stub.pid"
 sleep 6
 # Match by PATH, not by process name. The stub's executable is `Haven` — the .app DIRECTORY is
@@ -54,7 +63,7 @@ sleep 6
 stub_pid() { pgrep -f "HavenStub.app" 2>/dev/null | head -1; }
 if [[ -z "$(stub_pid)" ]]; then
   log "isolated HOME launch failed — trying open(1)"
-  open "$APP" 2>/dev/null || true
+  open "$APP" --args "${STUB_ARGS[@]}" 2>/dev/null || true
   sleep 5
 fi
 [[ -n "$(stub_pid)" ]] || { echo "error: HavenStub not running"; tail -40 "$OUT/stub-stdout.log" 2>/dev/null; exit 1; }

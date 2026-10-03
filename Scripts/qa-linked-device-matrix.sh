@@ -87,12 +87,12 @@ start_stub() {
   defaults write /tmp/haven-mac-stub-home/Library/Preferences/com.blaineam.kith.qa.stub \
     "haven.relay.host.enabled" -bool true 2>/dev/null || true
   nohup env HOME=/tmp/haven-mac-stub-home HAVEN_SKIP_ONBOARDING=1 TMPDIR=/tmp/haven-mac-stub-tmp \
-    "$app/Contents/MacOS/HavenStub" >"$OUT/stub-stdout.log" 2>&1 &
+    "$app/Contents/MacOS/HavenStub" -ApplePersistenceIgnoreState YES >"$OUT/stub-stdout.log" 2>&1 &
   echo $! >"$OUT/stub.pid"
   sleep 6
   if ! pgrep -f "HavenStub.app" >/dev/null; then
     log "isolated HOME launch failed — trying open(1)"
-    open "$app" 2>/dev/null || true
+    open "$app" --args -ApplePersistenceIgnoreState YES 2>/dev/null || true   # see qa-e2e-stub.sh
     sleep 5
   fi
   pgrep -f "HavenStub.app" >/dev/null || { echo "error: HavenStub not running"; tail -40 "$OUT/stub-stdout.log" 2>/dev/null; exit 1; }

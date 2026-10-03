@@ -1908,8 +1908,11 @@ async function main() {
     const dups = Object.entries((post?.posts || []).reduce((m, p) => { if (p.id) m[p.id] = (m[p.id] || 0) + 1; return m; }, {}))
       .filter(([, n]) => n > 1);
     score('relayhistory: no duplicate posts anywhere in Y\'s feed', dups.length === 0, JSON.stringify(dups.slice(0, 5)));
-    score('relayhistory: summary counts the recovered posts and media',
-      num(rh?.posts_added) >= 2 && num(rh?.media_done) >= 1, `posts_added=${rh?.posts_added} media_done=${rh?.media_done}`);
+    // ONE photo post was recovered: the summary counts user-visible items (a photo + its thumb/preview
+    // are one), so exactly 1 — 0 was the "already fetched by ingest" bug, 3 the per-ref bug.
+    score('relayhistory: summary counts the recovered posts and the one photo (items, not refs)',
+      num(rh?.posts_added) >= 2 && num(rh?.media_done) === 1 && num(rh?.media_total) >= 1 && num(rh?.media_done) <= num(rh?.media_total),
+      `posts_added=${rh?.posts_added} media_done=${rh?.media_done} media_total=${rh?.media_total}`);
     const minted = [...new Set(mailboxKeys())].filter((k) => !keysBefore.has(k));
     score('relayhistory: no new mailbox keys minted on the relay by the resync', minted.length === 0,
       `${minted.length} new: ${minted.slice(0, 4).join(', ')}`);

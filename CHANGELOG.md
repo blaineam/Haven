@@ -7,6 +7,23 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 2.0.0 — release candidate 4 (unreleased)
+
+### Fixed — the iPhone no longer heats up after loading history
+
+After **Load history from your relays** brought in hundreds of photos and videos, the phone kept
+downloading them all over again from the very relay it had just got them from — just to check the
+relay still had them — and re-uploading copies to your other relays, so it got hot and stayed hot.
+Now a photo or video downloaded from a relay is remembered as being on that relay, checking whether a
+relay holds something no longer downloads it, and copying media you didn't just post to your other
+relays waits until the phone is cool and goes a few at a time. Same fix on Android and desktop.
+
+### Fixed — your recovered posts showing "not backed up"
+
+Posts brought back by Load history could show the orange "not backed up" cloud on your profile even
+though the relay held everything, and the same post could show the pink check in the circle feed. The
+cloud now reflects what your relays actually hold, and updates as soon as that changes.
+
 ## 2.0.0 — release candidate 3 (2026-10-03)
 
 Soren release gate green (all 11 suites; e2e 455/0, including the new `relayhistory` step).

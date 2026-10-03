@@ -1924,8 +1924,23 @@ async function main() {
       score(`relayhistory: stub /notify pushes during the resync ≤ ${BUDGET.idleNotifyPerMin}/min`,
         r.perMin <= BUDGET.idleNotifyPerMin, `${r.notify} in ${((opTo - opFrom) / 1000).toFixed(0)}s`);
     }
+    // 3b. No re-download (rc.3 heat report): the recovered photo was recorded in Y's backup ledger as
+    // held by the relay it came from AT DOWNLOAD, and the next backfill tick (desktop: every 2 min)
+    // must not pull it back down to ask "do you hold it?". `probe_full_gets` counts probes answered
+    // with a whole-blob GET (only a relay without HEAD); `received_via_relay` must not move either.
+    const marked = num(post?.relay_first?.holder_marked_on_fetch) - num(pre?.relay_first?.holder_marked_on_fetch);
+    score('relayhistory: recovered media is recorded as held by its relay at download',
+      marked >= num(rh?.media_done), `marked=${marked} media_done=${rh?.media_done}`);
+    const probeGets0 = num(post?.relay_first?.probe_full_gets);
+    const recv0 = num(post?.relay_first?.received_via_relay);
+    await sleep(130_000);   // one desktop media backfill tick (120 s) plus slack
+    const tick = await freshDump(devices.desktop);
+    const probeGets = num(tick?.relay_first?.probe_full_gets) - probeGets0;
+    const recv = num(tick?.relay_first?.received_via_relay) - recv0;
+    score('relayhistory: the next backfill tick re-downloads nothing (no GET probes, no relay receives)',
+      probeGets === 0 && recv === 0, `probe_full_gets +${probeGets}, received_via_relay +${recv}`);
+
     // 4. Idempotent: a second run finds nothing new and adds nothing.
-    await op(devices.desktop, { op: 'relay_history_resync' });
     let rh2 = null;
     await converge(devices.desktop, (j) => { rh2 = j.relay_history; return num(rh2?.started_ms) > num(rh?.started_ms) && rh2?.state === 'done'; }, 180_000, 3000);
     const post2 = await freshDump(devices.desktop);

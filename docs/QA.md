@@ -189,7 +189,10 @@ authored_refs_enqueued, authored_media_posts_checked, broadcast_before_enqueue �
 desktop; plus served_direct_friend_by_role {content|thumb|preview|poster|original|unresolved|cached: n},
 served_direct_friend_by_why {circle-unresolved|circle-has-no-relay|hints-exhausted|
 not-on-relay-nor-queued|other: n} and served_direct_friend_recent [{ref, role, why, at_ms}] ≤ 20 —
-Apple, Android), `heavy_work` {suspended, friend_serving, reason, forced} (Apple, Android),
+Apple, Android; probe_full_gets + holder_marked_on_fetch — desktop, asserted by `relayhistory`:
+recovered media is ledgered at download and the next backfill tick re-downloads none of it; Apple and
+Android count the same in `relay_stats` per relay as `probeGet` next to `headOk`/`headMiss`/`headRefused`/
+`headUnsupported`/`headFail`), `heavy_work` {suspended, friend_serving, reason, forced} (Apple, Android),
 `pending_media_uploads`, `contacts`, `pending_connections`, `circle_relays`, `relay_backoff`
 {relays[{relay, fails, backoff_until_ms, reason}], peak_backoff_ms, pending_enrollment,
 pending_enrollment_refusals} (Apple; Android has the pending-enrollment half), `launch`

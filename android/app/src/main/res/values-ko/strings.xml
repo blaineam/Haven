@@ -720,4 +720,29 @@
     <string name="audience_confirm_private">대신 비공개로 보내기…</string>
     <string name="circle_reply_placeholder_named">%1$s의 모든 사람에게 답글…</string>
     <string name="circle_member_message_cd">%1$s에게 비공개 메시지</string>
+    <!-- Settings ▸ Devices ▸ Load history from your relays (RelayHistory.kt) -->
+    <string name="relay_history_title">Relay에서 기록 불러오기</string>
+    <string name="relay_history_explain">Relay에 아직 남아 있는 게시물과 미디어를 가져옵니다. 다른 기기에서 올린 게시물도 포함됩니다.</string>
+    <string name="relay_history_satellite">위성 연결에서는 사용할 수 없습니다.</string>
+    <string name="relay_history_norelay">아직 Relay를 사용하는 서클이 없습니다.</string>
+    <string name="relay_history_stop_q">기록 불러오기를 중지할까요?</string>
+    <string name="relay_history_stop">중지</string>
+    <string name="relay_history_keep">계속하기</string>
+    <string name="relay_history_stays">이미 불러온 항목은 그대로 유지되며, 다시 실행하면 중단된 지점부터 이어서 진행합니다.</string>
+    <string name="relay_history_checking">Relay 확인 중…</string>
+    <string name="relay_history_downloading">사진 및 동영상 다운로드 중…</string>
+    <string name="relay_history_loaded">기록을 불러왔습니다</string>
+    <string name="relay_history_stopped">중지됨</string>
+    <string name="relay_history_circles_n">확인한 서클: %2$d개 중 %1$d개</string>
+    <string name="relay_history_posts_n">확인한 게시물: %2$d개 중 %1$d개</string>
+    <string name="relay_history_added_posts">게시물 %1$d개 추가됨</string>
+    <string name="relay_history_media_n">사진 및 동영상: %2$d개 중 %1$d개</string>
+    <string name="relay_history_summary">게시물 %1$d개와 사진 및 동영상 %2$d개를 추가했습니다.</string>
+    <string name="relay_history_uptodate">Relay에 있는 모든 항목이 이미 이 기기에 있습니다.</string>
+    <string name="relay_history_unreachable">Relay에 연결할 수 없습니다. 연결 상태를 확인하고 다시 시도하세요.</string>
+    <string name="relay_history_media_missing">사진 및 동영상 %1$d개가 Relay에 없었습니다.</string>
+    <string name="relay_history_hot">기기가 뜨거워 사진 다운로드를 일시 중지했습니다. 열면 불러옵니다.</string>
+    <string name="relay_history_relay_err">서클 %1$d개를 확인하지 못했습니다. Relay가 응답하지 않았습니다.</string>
+    <string name="relay_history_caveat">일부 오래된 게시물은 더 이상 Relay에 없을 수 있습니다.</string>
+    <string name="relay_history_dismiss">닫기</string>
 </resources>

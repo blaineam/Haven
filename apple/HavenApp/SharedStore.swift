@@ -3218,6 +3218,64 @@ enum SharedStore {
         return nil
     }
 
+    // MARK: - Relay history resync ("Load history from your relays" — RelayHistoryResync.swift)
+
+    /// The relays the deep resync reads a circle from: the circle's own relays (best first), never
+    /// the S3 pseudo-nodes (a legacy bucket is outside "your relays").
+    static func historyRelayNodes(_ circleId: String) -> [String] {
+        relayNodes(circleId).filter { !$0.hasPrefix("s3:") }
+    }
+
+    /// One relay's FULL listing of a circle's mailbox — never the delta digest (a 204 would hide
+    /// exactly the keys a resync is for), never filtered by the seen-set. nil = the relay could not
+    /// be listed (unreachable, or it refused us); an empty array is a real empty mailbox.
+    static func historyList(circleId: String, node: String) async -> [String]? {
+        guard RelayEnrollment.mayAttempt(node) else { return nil }
+        let prefix = "haven/mailbox/\(circleId)/"
+        if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+            let host = RelayHost.shared
+            return await Task.detached(priority: .utility) { host.localList(prefix) }.value
+        }
+        if let http = RelayMailboxStore.shared.httpInterface(node) {
+            for base in http.urls where !httpUrlBad(base) {
+                switch await httpList(base, http.token, prefix) {
+                case .success(let keys):
+                    RelayHealth.shared.recordSuccess(node)
+                    RelayMailboxStore.shared.markSeen(node)
+                    return keys
+                case .failure(is RelayForbidden):
+                    noteRefused(node, "history list")
+                    return nil   // its other URLs and the iroh LIST sit behind the same gate
+                case .failure:
+                    markHttpUrlBad(base)
+                }
+            }
+        }
+        guard let c = await RelayClients.client(node), let keys = try? await c.list(prefix: prefix) else { return nil }
+        RelayHealth.shared.recordSuccess(node)
+        RelayMailboxStore.shared.markSeen(node)
+        return keys
+    }
+
+    /// GET one mailbox key from one relay, ignoring the seen-set (unlike `fetchMailboxKey`).
+    static func historyGet(node: String, key: String) async -> Data? {
+        if RelayHost.shared.serving, node == RelayHost.shared.nodeId {
+            let host = RelayHost.shared
+            return await Task.detached(priority: .utility) { host.localGet(key) }.value
+        }
+        if let http = RelayMailboxStore.shared.httpInterface(node) {
+            for base in http.urls where !httpUrlBad(base) {
+                switch await httpGet(base, http.token, key) {
+                case .success(let d): return (d?.isEmpty ?? true) ? nil : d
+                case .failure(is RelayForbidden): return nil
+                case .failure: markHttpUrlBad(base)
+                }
+            }
+        }
+        guard let c = await RelayClients.client(node), let d = await c.get(key: key), !d.isEmpty else { return nil }
+        return d
+    }
+
     /// The ids a mailbox HELLO addressed to THIS device may be claimed under: our account hex
     /// (the canonical slot every sender now targets) plus our CURRENT transport device id
     /// (transition-build senders addressed hellos per dial target). STALE/former device ids are

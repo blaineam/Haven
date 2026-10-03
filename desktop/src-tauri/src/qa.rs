@@ -253,6 +253,14 @@ fn apply(engine: &Arc<Engine>, cmd: &Value) {
             };
             engine.post(content_circle(engine, cmd), field(cmd, "body"), vec![], Some(track), false, None);
         }
+        // Settings ▸ Devices ▸ "Load history from your relays", headless (dump `relay_history`).
+        "relay_history_resync" => {
+            if cmd.get("reset_journal").and_then(Value::as_bool).unwrap_or(false) {
+                engine.relay_history_reset_journal();
+            }
+            engine.relay_history_start();
+        }
+        "relay_history_cancel" => engine.relay_history_cancel(),
         "mark_read" => {
             let cid = field(cmd, "circle_id");
             if cid.is_empty() {
@@ -523,6 +531,7 @@ fn write_dump(engine: &Arc<Engine>) -> DumpTiming {
         "call": call,
         // Relay-first media counters (e2e step `relayfirst`).
         "relay_first": crate::engine::qa_media::snapshot(),
+        "relay_history": engine.relay_history_status(),
         "circles": circles,
         // What the engine is HOLDING BACK: parked (received-but-unopenable) envelopes per circle,
         // plus the rosters we know. A short feed alone cannot tell "never arrived" from "arrived and

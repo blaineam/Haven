@@ -842,4 +842,29 @@
     <string name="audience_confirm_private">Send privately instead…</string>
     <string name="circle_reply_placeholder_named">Reply to everyone in %1$s…</string>
     <string name="circle_member_message_cd">Message %1$s privately</string>
+    <!-- Settings ▸ Devices ▸ Load history from your relays (RelayHistory.kt) -->
+    <string name="relay_history_title">Load history from your relays</string>
+    <string name="relay_history_explain">Pulls posts and media your relays still hold — including ones you posted from other devices.</string>
+    <string name="relay_history_satellite">Not available on a satellite connection.</string>
+    <string name="relay_history_norelay">None of your circles use a relay yet.</string>
+    <string name="relay_history_stop_q">Stop loading history?</string>
+    <string name="relay_history_stop">Stop loading</string>
+    <string name="relay_history_keep">Keep going</string>
+    <string name="relay_history_stays">Anything already loaded stays; running it again picks up where it left off.</string>
+    <string name="relay_history_checking">Checking your relays…</string>
+    <string name="relay_history_downloading">Downloading photos and videos…</string>
+    <string name="relay_history_loaded">History loaded</string>
+    <string name="relay_history_stopped">Stopped</string>
+    <string name="relay_history_circles_n">Circles checked: %1$d of %2$d</string>
+    <string name="relay_history_posts_n">Posts checked: %1$d of %2$d</string>
+    <string name="relay_history_added_posts">Added %1$d posts</string>
+    <string name="relay_history_media_n">Photos and videos: %1$d of %2$d</string>
+    <string name="relay_history_summary">Added %1$d posts and %2$d photos and videos.</string>
+    <string name="relay_history_uptodate">Everything your relays hold was already on this device.</string>
+    <string name="relay_history_unreachable">Couldn’t reach your relays. Check your connection and try again.</string>
+    <string name="relay_history_media_missing">%1$d photos and videos weren’t on your relays.</string>
+    <string name="relay_history_hot">Paused photo downloads because this device is hot. They load when you open them.</string>
+    <string name="relay_history_relay_err">%1$d circles couldn’t be checked — a relay didn’t answer.</string>
+    <string name="relay_history_caveat">Some older posts may no longer be on your relays.</string>
+    <string name="relay_history_dismiss">Dismiss</string>
 </resources>

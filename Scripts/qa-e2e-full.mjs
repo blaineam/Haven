@@ -18,7 +18,8 @@
 //   drop {op,…} JSON at the platform's qa-cmd path, poke the app (deep link /
 //   broadcast), then read qa-dump.json back. Ops: post, story, dm, react, comment,
 //   profile, circle_create, circle_invite, file, music_post, dump, mark_read, plus the step-specific
-//   heavy_work_override, media_ask, relay_backoff_reset, screen_share, invite_link, connect_link.
+//   heavy_work_override, media_ask, relay_backoff_reset, screen_share, invite_link, connect_link,
+//   relay_history_resync (dump `relay_history`).
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, rmSync, statSync, readdirSync, openSync, closeSync, utimesSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -49,7 +50,7 @@ const RUN_NONCE = Date.now();   // per-run fixture salt — see the satellite la
 const REPORT = [];
 const PERF = [];
 const HISTORY = join(ROOT, 'build', 'e2e-history.jsonl');
-const STEPS = (process.env.E2E_STEPS || 'newfriend,profile,circle,post,story,file,music,dm,relayfirst,progress,audience,call,screenshare,callgate,react,comment,media,satellite,launch,responsive,invite_offline,multirelay').split(',');
+const STEPS = (process.env.E2E_STEPS || 'newfriend,profile,circle,post,story,file,music,dm,relayfirst,progress,audience,call,screenshare,callgate,react,comment,media,satellite,launch,responsive,invite_offline,relayhistory,multirelay').split(',');
 
 // Convergence budgets (ms). Generous but bounded; tune via env.
 // One active-cadence mailbox poll is ~30-45s; a budget must cover a full poll plus
@@ -1815,6 +1816,129 @@ async function main() {
     gcTtl: +(process.env.E2E_MR_GC_TTL_S || 60),
   };
 
+  // ── relayhistory: "Load history from your relays" ──────────────────────────────────────────
+  // Device X (iOS) posts text + photo while device Y (desktop, same account) is DOWN. Every other
+  // sibling is stopped too, so the relay is the ONLY holder Y could learn them from. Y is then
+  // relaunched with those mailbox keys already in its seen-set — exactly the state a dropped/parked
+  // ingest leaves behind — so its ordinary mailbox poll provably skips them. The resync op must
+  // recover every post and its photo from the relay, add no duplicates, mint no new mailbox keys,
+  // and send (nearly) no /notify pushes.
+  async function stepRelayHistory() {
+    const cidRH = circleId || await ensureSharedCircle();
+    if (!cidRH || !devices.desktop) { score('relayhistory: needs the shared circle + desktop leg', false); return; }
+    const store = join(process.env.HOME, 'Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/haven-relay-store');
+    const mailboxKeys = () => mrStoreKeys(store).map((k) => k.key)
+      .filter((k) => k.startsWith('haven/mailbox/') && !/\/__(hello|live|relay)__\//.test(k));
+    const deskBin = join(ROOT, 'desktop/src-tauri/target/qa/haven-desktop');
+    const seedFile = join(OUT, 'fleet-seed.txt');
+    if (!existsSync(deskBin) || !existsSync(seedFile)) {
+      score('relayhistory: desktop binary + fleet seed available for the relaunch', false, `${deskBin} ${seedFile}`);
+      return;
+    }
+    const tText = `${MARKER}_RH_Text`, tPhoto = `${MARKER}_RH_Photo`;
+
+    // 1. Y and the other sibling go dark; X posts.
+    spawnSync('pkill', ['-f', 'target/qa/haven-desktop']);
+    if (devices.android) shOk('adb', ['shell', 'am', 'force-stop', AND_PKG]);
+    await sleep(2000);
+    const before = new Set(eventKeys(mailboxKeys(), cidRH));
+    await op(devices.ios, { op: 'post', body: tText, circle_id: cidRH });
+    const ph = devices.ios.stage(PHOTO, 'qa-photo-rh.jpg');
+    await op(devices.ios, { op: 'post', body: tPhoto, media: 'photo', photo_path: ph, circle_id: cidRH });
+    let photoRefs = [];
+    await converge(devices.ios, (j) => {
+      photoRefs = j.posts?.find((p) => p.body === tPhoto)?.media_refs || [];
+      return photoRefs.length > 0;
+    }, BUDGET.mediaEvent);
+    // Both events and the photo blob must be ON THE RELAY before X goes away.
+    let landed = false;
+    const t0 = Date.now();
+    while (Date.now() - t0 < BUDGET.mediaBlob) {
+      const keys = mrStoreKeys(store).map((k) => k.key);
+      const fresh = eventKeys(keys, cidRH).filter((k) => !before.has(k));
+      const blobs = photoRefs.length > 0 && photoRefs.every((r) => keys.includes(`haven/media/${r}`));
+      if (fresh.length >= 2 && blobs) { landed = true; break; }
+      await sleep(2000);
+    }
+    score('relayhistory: X\'s text + photo events and the photo blob are on the relay', landed,
+      `refs=${JSON.stringify(photoRefs)}`);
+    shOk('xcrun', ['simctl', 'terminate', IOS_UDID, IOS_BUNDLE]);
+    log('relayhistory: ios (X) terminated — the relay is now the only source');
+
+    // 2. Y's seen-set already "has" every key of the circle (the dropped-ingest state).
+    const circleKeys = eventKeys(mailboxKeys(), cidRH);
+    try { appendFileSync(join(DESK_DATA, 'mailbox-seen.txt'), '\n' + circleKeys.join('\n')); }
+    catch (e) { score('relayhistory: seed the desktop seen-set', false, String(e)); }
+    const child = spawn(deskBin, [], {
+      cwd: join(ROOT, 'desktop/src-tauri'), detached: true,
+      stdio: ['ignore', openSync(join(OUT, 'tauri-relayhistory.log'), 'a'), openSync(join(OUT, 'tauri-relayhistory.log'), 'a')],
+      env: { ...process.env, HAVEN_QA_SEED_FILE: seedFile, RUST_LOG: process.env.HAVEN_DESKTOP_LOG || 'info' },
+    });
+    child.unref();
+    try { writeFileSync(join(OUT, 'tauri.pid'), String(child.pid)); } catch { /* best effort */ }
+    channelFor(devices.desktop).reset('desktop relaunched by the relayhistory step');
+    await sleep(8000);
+    const up = await converge(devices.desktop, (j) => Array.isArray(j.posts) && j.posts.length > 0, 60_000);
+    score('relayhistory: desktop (Y) relaunched', up >= 0);
+    // Let at least one ordinary mailbox pass run: it must NOT find them (the seen-set hides them).
+    await sleep(45_000);
+    const pre = await freshDump(devices.desktop);
+    const has = (j, body) => (j?.posts || []).filter((p) => p.body === body).length;
+    score('relayhistory: Y lacks X\'s posts after a normal poll (the gap is real)',
+      has(pre, tText) === 0 && has(pre, tPhoto) === 0, `text=${has(pre, tText)} photo=${has(pre, tPhoto)}`);
+
+    // 3. The resync.
+    const keysBefore = new Set(mailboxKeys());
+    const push0 = num(pre?.relay_first?.push_notify_sent);
+    const opFrom = Date.now();
+    await op(devices.desktop, { op: 'relay_history_resync' });
+    let rh = null;
+    const ms = await converge(devices.desktop, (j) => { rh = j.relay_history; return rh?.state === 'done' || rh?.state === 'cancelled'; }, 300_000, 3000);
+    const opTo = Date.now();
+    log(`relayhistory: summary ${JSON.stringify(rh)}`);
+    score(`relayhistory: resync finished (${ms < 0 ? 'never' : (ms / 1000).toFixed(1) + 's'})`, rh?.state === 'done', JSON.stringify(rh));
+    const post = await freshDump(devices.desktop);
+    score('relayhistory: Y gained X\'s text post — exactly once', has(post, tText) === 1, `count=${has(post, tText)}`);
+    score('relayhistory: Y gained X\'s photo post — exactly once', has(post, tPhoto) === 1, `count=${has(post, tPhoto)}`);
+    const photo = (post?.posts || []).find((p) => p.body === tPhoto);
+    score('relayhistory: the photo itself came down from the relay',
+      !!photo && photo.media_present?.length > 0 && photo.media_present.every(Boolean), JSON.stringify(photo?.media_present));
+    const dups = Object.entries((post?.posts || []).reduce((m, p) => { if (p.id) m[p.id] = (m[p.id] || 0) + 1; return m; }, {}))
+      .filter(([, n]) => n > 1);
+    score('relayhistory: no duplicate posts anywhere in Y\'s feed', dups.length === 0, JSON.stringify(dups.slice(0, 5)));
+    score('relayhistory: summary counts the recovered posts and media',
+      num(rh?.posts_added) >= 2 && num(rh?.media_done) >= 1, `posts_added=${rh?.posts_added} media_done=${rh?.media_done}`);
+    const minted = [...new Set(mailboxKeys())].filter((k) => !keysBefore.has(k));
+    score('relayhistory: no new mailbox keys minted on the relay by the resync', minted.length === 0,
+      `${minted.length} new: ${minted.slice(0, 4).join(', ')}`);
+    const pushes = num(post?.relay_first?.push_notify_sent) - push0;
+    score('relayhistory: Y sent no /notify push storm (≤ 2 during the resync)', pushes <= 2, `${pushes} pushes`);
+    const stubLog = join(OUT, 'stub-stdout.log');
+    if (existsSync(stubLog)) {
+      const r = stubIdleRates(readFileSync(stubLog, 'utf8'), opFrom, opTo);
+      score(`relayhistory: stub /notify pushes during the resync ≤ ${BUDGET.idleNotifyPerMin}/min`,
+        r.perMin <= BUDGET.idleNotifyPerMin, `${r.notify} in ${((opTo - opFrom) / 1000).toFixed(0)}s`);
+    }
+    // 4. Idempotent: a second run finds nothing new and adds nothing.
+    await op(devices.desktop, { op: 'relay_history_resync' });
+    let rh2 = null;
+    await converge(devices.desktop, (j) => { rh2 = j.relay_history; return num(rh2?.started_ms) > num(rh?.started_ms) && rh2?.state === 'done'; }, 180_000, 3000);
+    const post2 = await freshDump(devices.desktop);
+    score('relayhistory: a second run is a no-op (nothing added, no duplicates)',
+      rh2?.state === 'done' && num(rh2?.posts_added) === 0 && has(post2, tText) === 1 && has(post2, tPhoto) === 1,
+      JSON.stringify(rh2));
+
+    // 5. Bring the fleet back for the steps after this one.
+    shOk('xcrun', ['simctl', 'launch', IOS_UDID, IOS_BUNDLE]);
+    channelFor(devices.ios).reset('ios relaunched by the relayhistory step');
+    if (devices.android) {
+      shOk('adb', ['shell', 'am', 'start', '-n', `${AND_PKG}/.MainActivity`]);
+      channelFor(devices.android).reset('android relaunched by the relayhistory step');
+    }
+    await sleep(5000);
+    devices.ios.poke();
+  }
+
   async function stepMultiRelay() {
     const ios = devices.ios, stub = devices.stub;
     const tag = (s) => `${MARKER}_MR_${s}`;
@@ -2909,6 +3033,11 @@ async function main() {
     // And the acceptor completes from the parked grant alone.
     await convergeAll(['stub'], (j) => j.friend_invites?.accepted?.some((a) => a.granted),
       BUDGET.text * 3, 'grant fetched — friendship async-complete');
+  }
+
+  if (STEPS.includes('relayhistory')) {
+    try { await stepRelayHistory(); }
+    catch (e) { score('relayhistory: step ran to completion', false, String(e?.stack || e).split('\n').slice(0, 3).join(' | ')); }
   }
 
   // LAST on purpose: it makes A's own relay A's default and takes relays down on purpose, which no

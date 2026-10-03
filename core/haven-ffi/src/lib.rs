@@ -315,6 +315,9 @@ pub mod multidevice;
 /// `pub` so the desktop backend can call the shared seed-drop S4 enrollment codec directly.
 pub mod enroll;
 pub mod friend_invite;
+/// "Load history from your relays": the deep mailbox resync's planner + ingested-key journal.
+/// `pub` so the desktop backend drives the same planner directly.
+pub mod history_resync;
 
 /// Android only: receive the app's `Context` (and, via it, the `JavaVM`) from Kotlin and hand
 /// both to `ndk-context`. iroh's TLS stack (rustls platform verifier) reads the system trust
@@ -4585,6 +4588,7 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8], pre: Option<P
     };
     let c = &mut st.circles[idx];
     if c.seen.contains(&event.id) {
+        history_resync::note_primary_duplicate();
         return Ok(false);
     }
     c.seen.insert(event.id.clone());
@@ -4614,6 +4618,7 @@ fn receive_legacy(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, Ha
     };
     let c = &mut st.circles[idx];
     if c.seen.contains(&event.id) {
+        history_resync::note_primary_duplicate();
         return Ok(false);
     }
     c.seen.insert(event.id.clone());
@@ -8306,6 +8311,17 @@ impl HavenSocial {
     /// `receive`. Test builds also reach it with `off_lock = false` — the reference the lock-released
     /// path is checked against (`receive_matches_the_in_place_reference`).
     fn receive_impl(&self, circle_id: String, envelope: Vec<u8>, off_lock: bool) -> Result<bool, HavenError> {
+        self.receive_impl_opts(circle_id, envelope, off_lock, false)
+    }
+
+    /// `receive_impl`, optionally WITHOUT the session outer-hash re-delivery filter. The relay
+    /// history resync (`history_resync`) needs every envelope it hands in to be judged on its merits
+    /// — "applied / already held / parked / unreadable" — and the filter answers a bare `false` for
+    /// any bytes seen earlier this session, including an event that parked and was later EVICTED
+    /// from the 512-slot pending buffer (which the filter would then hide forever).
+    pub(crate) fn receive_impl_opts(
+        &self, circle_id: String, envelope: Vec<u8>, off_lock: bool, bypass_dedupe: bool,
+    ) -> Result<bool, HavenError> {
         if envelope.is_empty() {
             return Ok(false);
         }
@@ -8323,7 +8339,7 @@ impl HavenSocial {
         // once the circle exists.
         let dedupe = matches!(envelope[0], TAG_KEY_COMMIT | TAG_EPOCH_EVENT);
         let outer = *blake3::hash(&envelope).as_bytes();
-        if dedupe {
+        if dedupe && !bypass_dedupe {
             let seen = self.seen_envelopes.lock().unwrap();
             if seen.get(&circle_id).is_some_and(|s| s.contains(&outer)) {
                 return Ok(false);

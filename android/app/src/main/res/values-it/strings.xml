@@ -720,4 +720,29 @@
     <string name="audience_confirm_private">Invia invece in privato…</string>
     <string name="circle_reply_placeholder_named">Rispondi a tutti in %1$s…</string>
     <string name="circle_member_message_cd">Scrivi in privato a %1$s</string>
+    <!-- Settings ▸ Devices ▸ Load history from your relays (RelayHistory.kt) -->
+    <string name="relay_history_title">Carica la cronologia dai tuoi relay</string>
+    <string name="relay_history_explain">Scarica i post e i contenuti multimediali che i tuoi relay conservano ancora, inclusi quelli pubblicati da altri dispositivi.</string>
+    <string name="relay_history_satellite">Non disponibile con una connessione satellitare.</string>
+    <string name="relay_history_norelay">Nessuna delle tue cerchie usa ancora un relay.</string>
+    <string name="relay_history_stop_q">Interrompere il caricamento della cronologia?</string>
+    <string name="relay_history_stop">Interrompi</string>
+    <string name="relay_history_keep">Continua</string>
+    <string name="relay_history_stays">Ciò che è già stato caricato resta; se lo avvii di nuovo, riprende da dove si era fermato.</string>
+    <string name="relay_history_checking">Controllo dei tuoi relay…</string>
+    <string name="relay_history_downloading">Download di foto e video…</string>
+    <string name="relay_history_loaded">Cronologia caricata</string>
+    <string name="relay_history_stopped">Interrotto</string>
+    <string name="relay_history_circles_n">Cerchie controllate: %1$d di %2$d</string>
+    <string name="relay_history_posts_n">Post controllati: %1$d di %2$d</string>
+    <string name="relay_history_added_posts">%1$d post aggiunti</string>
+    <string name="relay_history_media_n">Foto e video: %1$d di %2$d</string>
+    <string name="relay_history_summary">Aggiunti %1$d post e %2$d foto e video.</string>
+    <string name="relay_history_uptodate">Tutto ciò che conservano i tuoi relay era già su questo dispositivo.</string>
+    <string name="relay_history_unreachable">Impossibile raggiungere i tuoi relay. Controlla la connessione e riprova.</string>
+    <string name="relay_history_media_missing">%1$d foto e video non erano sui tuoi relay.</string>
+    <string name="relay_history_hot">Download delle foto in pausa perché il dispositivo è caldo. Si caricheranno quando le apri.</string>
+    <string name="relay_history_relay_err">Impossibile controllare %1$d cerchie: un relay non ha risposto.</string>
+    <string name="relay_history_caveat">Alcuni post meno recenti potrebbero non essere più sui tuoi relay.</string>
+    <string name="relay_history_dismiss">Ignora</string>
 </resources>

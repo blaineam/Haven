@@ -577,6 +577,7 @@ final class FeedStore: ObservableObject {
         }
         SelfSyncCoordinator.shared.reset()
         SharedStore.resetSeenMailbox()   // the new identity must not inherit the old ingestion cursor
+        RelayHistoryResync.shared.resetJournal()   // …nor the relay-history resync's ingested journal
         // Switch-Flip: identity-scoped bookkeeping must not leak across identities — a stale
         // "account leaf retired" flag would wrongly skip migration for a legacy multi-device account.
         SwitchFlipMigration.clear()
@@ -3790,6 +3791,18 @@ final class FeedStore: ObservableObject {
             HavenLog.net("matrix-qa v2 approve_connections: approved \(reqs.count)")
             qaWriteDump()
             return
+        case "relay_history_resync":
+            // QA: Settings ▸ Devices ▸ "Load history from your relays", headless. `reset_journal`
+            // forgets the resync's own ingested journal first (a clean first run); progress and the
+            // summary land in the dump's `relay_history` block.
+            if (obj["reset_journal"] as? Bool) == true { RelayHistoryResync.shared.resetJournal() }
+            RelayHistoryResync.shared.start()
+            qaWriteDump()
+            return
+        case "relay_history_cancel":
+            RelayHistoryResync.shared.cancel()
+            qaWriteDump()
+            return
         case "relay_backoff_reset":
             // QA: start a fresh peak-backoff window (the newfriend step measures its own span).
             RelayHealth.shared.qaResetPeak()
@@ -4211,6 +4224,7 @@ final class FeedStore: ObservableObject {
                 "role": role, "state": hState, "done": h.done, "total": h.total,
                 "media_done": h.mediaDone, "media_total": h.mediaTotal,
             ] as [String: Any],
+            "relay_history": RelayHistoryResync.shared.qaSnapshot,
         ]
     }
 
@@ -10869,4 +10883,36 @@ final class FeedStore: ObservableObject {
         NotificationManager.shared.notify(title: title, body: body, dedupeKey: newest.id,
                                           deepLink: DeepLink.interactionLink(circleId: circleId, postId: newest.id))
     }
+}
+
+// MARK: - Relay history resync hooks (RelayHistoryResync.swift)
+//
+// The deep relay pass lives in its own file; these are the few FeedStore internals it needs. Nothing
+// here fans out, pushes, or notifies — history that arrives this way is old news.
+extension FeedStore {
+    var relayHistoryEngine: Engine? { engine }
+
+    /// Save the engine state NOW (not on the debounce): the resync commits a batch's keys to its
+    /// journal and the seen-set only after the events they carry are on disk. Same shape as the
+    /// history handoff's page save — whatever was waiting on the debounced export rides this one.
+    func relayHistorySave() async -> Bool {
+        guard let engine else { return false }
+        persistDebouncePending = false
+        persistReason = ""
+        let waiting = afterPersist
+        afterPersist.removeAll()
+        deferredMarkKeys = 0
+        let destination: @Sendable () async -> URL? = { [weak self] in await self?.persistDestination(for: engine) }
+        let saved = await StatePersister.shared.persist(engine: engine, reason: "relay-history", to: destination)
+        for f in waiting { f(saved) }
+        return saved
+    }
+
+    /// Events landed in these circles: drop the stale reads and repaint once.
+    func relayHistoryLanded(circleIds: Set<String>) {
+        for cid in circleIds { invalidateMessagesCache(cid); invalidateSyncBundle(cid) }
+        refresh()
+    }
+
+    func relayHistoryMediaLanded(_ ref: String) { mediaArrived(ref) }
 }

@@ -41,6 +41,11 @@ use crate::localmedia::LocalMedia;
 use crate::store::{self, Contact, Paths, Prefs, Profile};
 use crate::wire;
 
+/// "Load history from your relays" — the deep relay-mailbox pass (a child module so it can use the
+/// engine's relay plumbing directly).
+#[path = "relayhistory.rs"]
+pub mod relayhistory;
+
 pub const DEFAULT_CIRCLE: &str = "default";
 
 /// The push Worker — also hosts the content-free moderation ledger (`/flag`).
@@ -1184,6 +1189,7 @@ impl Engine {
         if crate::netgate::offline() {
             return;   // HAVEN_NO_NET: no peer is woken from the harness
         }
+        qa_media::bump(&qa_media::PUSH_NOTIFY, 1);
         let http = self.http.clone();
         tauri::async_runtime::spawn(async move {
             // Manual JSON body — this crate's reqwest is built without the `json` feature.
@@ -12634,6 +12640,9 @@ pub(crate) mod qa_media {
     pub static RECEIVED_VIA_DIRECT: AtomicU64 = AtomicU64::new(0);
     pub static REQUESTS_FROM_FRIENDS: AtomicU64 = AtomicU64::new(0);
     pub static DECLINED: AtomicU64 = AtomicU64::new(0);
+    /// Every `/notify` push this device sent (`push_wake`) — the relay-history e2e asserts a resync
+    /// adds none of them.
+    pub static PUSH_NOTIFY: AtomicU64 = AtomicU64::new(0);
 
     #[inline]
     pub fn bump(counter: &AtomicU64, n: u64) {
@@ -12654,6 +12663,7 @@ pub(crate) mod qa_media {
             "received_via_direct": g(&RECEIVED_VIA_DIRECT),
             "media_requests_from_friends": g(&REQUESTS_FROM_FRIENDS),
             "serve_declined": g(&DECLINED),
+            "push_notify_sent": g(&PUSH_NOTIFY),
         })
     }
 }

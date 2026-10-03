@@ -720,4 +720,29 @@
     <string name="audience_confirm_private">代わりに非公開で送信…</string>
     <string name="circle_reply_placeholder_named">%1$s の全員に返信…</string>
     <string name="circle_member_message_cd">%1$s に非公開でメッセージ</string>
+    <!-- Settings ▸ Devices ▸ Load history from your relays (RelayHistory.kt) -->
+    <string name="relay_history_title">Relay から履歴を読み込む</string>
+    <string name="relay_history_explain">Relay にまだ残っている投稿とメディアを取得します。ほかのデバイスから投稿したものも含まれます。</string>
+    <string name="relay_history_satellite">衛星通信では利用できません。</string>
+    <string name="relay_history_norelay">Relay を使っているサークルはまだありません。</string>
+    <string name="relay_history_stop_q">履歴の読み込みを停止しますか？</string>
+    <string name="relay_history_stop">停止</string>
+    <string name="relay_history_keep">続ける</string>
+    <string name="relay_history_stays">読み込み済みの内容はそのまま残ります。もう一度実行すると、中断したところから再開します。</string>
+    <string name="relay_history_checking">Relay を確認しています…</string>
+    <string name="relay_history_downloading">写真とビデオをダウンロードしています…</string>
+    <string name="relay_history_loaded">履歴を読み込みました</string>
+    <string name="relay_history_stopped">停止しました</string>
+    <string name="relay_history_circles_n">確認したサークル: %2$d 件中 %1$d 件</string>
+    <string name="relay_history_posts_n">確認した投稿: %2$d 件中 %1$d 件</string>
+    <string name="relay_history_added_posts">%1$d 件の投稿を追加しました</string>
+    <string name="relay_history_media_n">写真とビデオ: %2$d 件中 %1$d 件</string>
+    <string name="relay_history_summary">%1$d 件の投稿と %2$d 件の写真・ビデオを追加しました。</string>
+    <string name="relay_history_uptodate">Relay に保存されている内容は、すべてこのデバイスにありました。</string>
+    <string name="relay_history_unreachable">Relay に接続できませんでした。接続を確認して、もう一度お試しください。</string>
+    <string name="relay_history_media_missing">%1$d 件の写真・ビデオは Relay にありませんでした。</string>
+    <string name="relay_history_hot">このデバイスが高温のため、写真のダウンロードを一時停止しました。開くと読み込まれます。</string>
+    <string name="relay_history_relay_err">%1$d 件のサークルを確認できませんでした。Relay が応答しませんでした。</string>
+    <string name="relay_history_caveat">古い投稿の一部は、すでに Relay に残っていない可能性があります。</string>
+    <string name="relay_history_dismiss">閉じる</string>
 </resources>

@@ -7733,6 +7733,18 @@ impl Engine {
             st.media_backed_up_dirty = true;
         }
     }
+    /// `flush_media_backed_up`, at most every 30 s — a history recovery marks hundreds of refs, and
+    /// each flush rewrites the whole ledger file. The in-memory set is authoritative meanwhile; the
+    /// next upload pass flushes unconditionally.
+    fn flush_media_backed_up_throttled(&self) {
+        static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = now_ms();
+        let last = LAST.load(std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(last) >= 30_000 {
+            LAST.store(now, std::sync::atomic::Ordering::Relaxed);
+            self.flush_media_backed_up();
+        }
+    }
     fn flush_media_backed_up(&self) {
         let snapshot = {
             let mut st = self.dyn_state.lock();
@@ -9367,6 +9379,78 @@ impl Engine {
         }
     }
 
+    /// HEAD one key — held or not, no body. haven-relay serves `HEAD /k/<key>` (signed exactly like a
+    /// GET, method "HEAD"); 400/405/501 (an old relay or a proxy) is `Unsupported` and the caller falls
+    /// back to GET. Apple `SharedStore.httpHead` parity.
+    async fn http_head(self: &Arc<Self>, base: &str, token: &str, key: &str) -> crate::mediaholding::Head {
+        use crate::mediaholding::Head;
+        if crate::netgate::offline() {
+            return Head::Unreachable;
+        }
+        let Some(auth) = self.http_auth(token, "HEAD", key, b"") else { return Head::Unreachable };
+        let Ok(resp) = self
+            .http
+            .head(Self::http_key_url(base, key))
+            .header("authorization", auth)
+            .timeout(HTTP_GET_TIMEOUT)
+            .send()
+            .await
+        else {
+            return Head::Unreachable;
+        };
+        match resp.status().as_u16() {
+            200..=299 => Head::Present,
+            404 => Head::Absent,
+            401 => {
+                self.note_unverified(base);
+                Head::Refused
+            }
+            403 => Head::Refused,
+            400 | 405 | 501 => Head::Unsupported,
+            _ => Head::Unreachable,
+        }
+    }
+
+    /// Plain existence of one key (a chunk window), HEAD-first; GET only where HEAD is unsupported.
+    async fn http_exists(self: &Arc<Self>, base: &str, token: &str, key: &str) -> bool {
+        use crate::mediaholding::Head;
+        match self.http_head(base, token, key).await {
+            Head::Present => true,
+            Head::Unsupported => {
+                qa_media::bump(&qa_media::PROBE_FULL_GETS, 1);
+                matches!(self.http_get(base, token, key).await, Ok(Some(d)) if !d.is_empty())
+            }
+            _ => false,
+        }
+    }
+
+    /// Does the relay behind `base` hold a COMPLETE copy of `reference`? HEAD-first
+    /// (`mediaholding::probe`): the old probe GET the whole blob — every photo, in full — just to
+    /// learn "yes"; full GETs now happen only against a relay that won't answer HEAD.
+    async fn probe_http_hold(self: &Arc<Self>, reference: &str, base: &str, token: &str) -> crate::mediaholding::Verdict {
+        use crate::mediaholding::Fetch;
+        let (verdict, full_gets) = crate::mediaholding::probe(
+            &Self::media_key(reference),
+            |i| Self::media_chunk_key(reference, i),
+            |k| async move { self.http_head(base, token, &k).await },
+            |k| async move {
+                match self.http_get(base, token, &k).await {
+                    Ok(Some(d)) => Fetch::Data(d),
+                    Ok(None) => Fetch::Miss,
+                    Err(RelayErr::Forbidden) => Fetch::Refused,
+                    Err(RelayErr::Unreachable) => Fetch::Unreachable,
+                }
+            },
+            |m| Self::parse_manifest(m),
+        )
+        .await;
+        if full_gets > 0 {
+            qa_media::bump(&qa_media::PROBE_FULL_GETS, full_gets as u64);
+            log::debug!("backup probe ref={reference}: relay {base} has no HEAD — {full_gets} GET probe(s)");
+        }
+        verdict
+    }
+
     /// Delta-LIST (the radio saver): echo the last-seen `X-Haven-List-Digest` for this prefix and
     /// an UNCHANGED key set comes back as a bodiless 204 (`keys == None`) instead of the same list
     /// again. A 200 carries the fresh keys plus the digest to echo next time. A relay that doesn't
@@ -9683,34 +9767,30 @@ impl Engine {
                 } else {
                     let mut resolved = false;
                     for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
-                        match self.http_get(base, &token, &key).await {
-                            Ok(Some(head)) => {
+                        use crate::mediaholding::Verdict;
+                        // HEAD, not GET (`probe_http_hold`). COMPLETE, not merely present — paid at
+                        // most once per (ref, relay): a copy that checks out goes into the ledger and
+                        // is never re-probed.
+                        match self.probe_http_hold(reference, base, &token).await {
+                            Verdict::Complete => {
                                 self.mark_relay_ok(&node_hex);
-                                // COMPLETE, not merely present — see `completeness_probe_key`. The
-                                // extra GET of the final window is paid at most once per (ref, relay):
-                                // a copy that checks out goes into the ledger and is never re-probed.
-                                let complete = match Self::completeness_probe_key(reference, &head) {
-                                    None => true,
-                                    Some(k) => matches!(self.http_get(base, &token, &k).await, Ok(Some(_))),
-                                };
-                                if complete {
-                                    self.mark_media_backed_up(&node_hex, reference);
-                                    landed = true;
-                                } else {
-                                    log::info!("backup probe ref={reference} relay={}: manifest present but chunks INCOMPLETE — re-uploading",
-                                               &node_hex[..8.min(node_hex.len())]);
-                                    http_uploads.push((node_hex.clone(), base.clone(), token.clone()));
-                                }
+                                self.mark_media_backed_up(&node_hex, reference);
+                                landed = true;
                                 resolved = true;
                             }
-                            Ok(None) => {
+                            v @ (Verdict::Incomplete | Verdict::Absent) => {
+                                if v == Verdict::Incomplete {
+                                    self.mark_relay_ok(&node_hex);
+                                    log::info!("backup probe ref={reference} relay={}: manifest present but chunks INCOMPLETE — re-uploading",
+                                               &node_hex[..8.min(node_hex.len())]);
+                                }
                                 http_uploads.push((node_hex.clone(), base.clone(), token.clone()));
                                 resolved = true;
                             }
                             // Reachable and healthy — it just doesn't know us. Backing off here would
                             // strand our media on a relay that would happily store it once authorized.
-                            Err(RelayErr::Forbidden) => self.note_refused(&node_hex, "media probe"),
-                            Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
+                            Verdict::Refused => self.note_refused(&node_hex, "media probe"),
+                            Verdict::Unreachable => self.mark_http_url_bad(base),
                         }
                         if resolved { break; }
                     }
@@ -9863,12 +9943,9 @@ impl Engine {
                 // the blob readable, and an interrupted attempt never got that far.
                 let (base_ref, token_ref) = (&base, &token);
                 let skip = self
+                    // HEAD, not GET: each resume question used to download the 8 MB window it asked about.
                     .resume_skip(&node_hex, reference, &seal_fp, window_count, force, |i| async move {
-                        self.http_get(base_ref, token_ref, &Self::media_chunk_key(reference, i))
-                            .await
-                            .ok()
-                            .flatten()
-                            .is_some()
+                        self.http_exists(base_ref, token_ref, &Self::media_chunk_key(reference, i)).await
                     })
                     .await;
                 for (i, slice) in blob.chunks(MEDIA_CHUNK_BYTES).enumerate() {
@@ -10034,7 +10111,8 @@ impl Engine {
         }
     }
 
-    async fn fetch_media_from_relay(self: &Arc<Self>, circle_id: &str, reference: &str) -> bool {
+    /// Returns the source that served a COMPLETE blob — a relay node hex, or "s3" — or None.
+    async fn fetch_media_from_relay(self: &Arc<Self>, circle_id: &str, reference: &str) -> Option<String> {
         let key = Self::media_key(reference);
         // S3/HTTP bucket FIRST — the DEFAULT media transport (see upload_media): an iroh blob dial
         // that must cross a NAT stalls ~30s and dies, so the bucket is tried before any dial.
@@ -10054,11 +10132,11 @@ impl Engine {
                     }
                     if ok && self.media.adopt_sealed_part(reference, &part) {
                         self.restore_resume_clear(reference);
-                        return true;
+                        return Some("s3".into());
                     }
                     // KEEP the partial + sidecar — the next attempt resumes where this one stalled.
                 } else if self.media.write_raw_sealed(reference, &head) {
-                    return true;
+                    return Some("s3".into());
                 }
                 // An EMPTY body is a miss, not a found-but-corrupt copy: fall through to the relays.
             }
@@ -10100,12 +10178,12 @@ impl Engine {
                                 if ok && self.media.adopt_sealed_part(reference, &part) {
                                     self.restore_resume_clear(reference);
                                     self.mark_relay_ok(&node_hex);
-                                    return true;
+                                    return Some(node_hex);
                                 }
                                 // Partial + sidecar kept — the retry resumes on the missing chunks.
                             } else if self.media.write_raw_sealed(reference, &head) {
                                 self.mark_relay_ok(&node_hex);
-                                return true;
+                                return Some(node_hex);
                             }
                             // 200 with an empty body (or a failed local write) counts as a miss —
                             // never as a stored copy that "failed to open" and gets blacklisted.
@@ -10137,14 +10215,14 @@ impl Engine {
                         if ok && self.media.adopt_sealed_part(reference, &part) {
                             self.restore_resume_clear(reference);
                             self.mark_relay_ok(&node_hex);
-                            return true;
+                            return Some(node_hex);
                         }
                         // Partial + sidecar kept for the next attempt.
                         continue;
                     }
                     if self.media.write_raw_sealed(reference, &head) {
                         self.mark_relay_ok(&node_hex);
-                        return true;
+                        return Some(node_hex);
                     }
                 }
             }
@@ -10167,7 +10245,7 @@ impl Engine {
         } else {
             log::info!("media restore {short}: REFUSED by {refused} relay(s) — not missing; re-publishing our roster so the retry is allowed");
         }
-        false
+        None
     }
 
     /// Fetch a blob, and if every relay REFUSED us rather than lacking it, publish our device roster
@@ -10194,13 +10272,19 @@ impl Engine {
         if self.media.has(reference) {
             return true; // landed between the caller's check and our claim
         }
-        let got = if self.fetch_media_from_relay(circle_id, reference).await {
-            self.accept_fetched_blob(reference)
-        } else if self.heal_forbidden_relays().await && self.fetch_media_from_relay(circle_id, reference).await {
-            self.accept_fetched_blob(reference)
-        } else {
-            false
-        };
+        let mut holder = self.fetch_media_from_relay(circle_id, reference).await;
+        if holder.is_none() && self.heal_forbidden_relays().await {
+            holder = self.fetch_media_from_relay(circle_id, reference).await;
+        }
+        let got = holder.is_some() && self.accept_fetched_blob(reference);
+        // The source we just downloaded a complete, openable copy from HOLDS it — record that, or the
+        // 2-minute backfill treats this freshly downloaded blob as unbacked and probes it again (the
+        // rc.3 "hot after Load history from your relays" report). Never for a partial / unopenable copy.
+        if let Some(dest) = crate::mediaholding::holder_to_record(holder.as_deref(), holder.is_some(), got) {
+            self.mark_media_backed_up(&dest, reference);
+            self.flush_media_backed_up_throttled();
+            qa_media::bump(&qa_media::HOLDER_MARKED_ON_FETCH, 1);
+        }
         if got {
             qa_media::bump(&qa_media::RECEIVED_VIA_RELAY, 1);
         }
@@ -12670,6 +12754,11 @@ pub(crate) mod qa_media {
     /// Every `/notify` push this device sent (`push_wake`) — the relay-history e2e asserts a resync
     /// adds none of them.
     pub static PUSH_NOTIFY: AtomicU64 = AtomicU64::new(0);
+    /// Backup "does this relay hold it?" probes answered with a FULL GET (only a relay that won't
+    /// answer HEAD) — the relay-history e2e asserts recovered media is never re-downloaded.
+    pub static PROBE_FULL_GETS: AtomicU64 = AtomicU64::new(0);
+    /// Relay downloads recorded in the backup ledger as held by the relay they came from.
+    pub static HOLDER_MARKED_ON_FETCH: AtomicU64 = AtomicU64::new(0);
 
     #[inline]
     pub fn bump(counter: &AtomicU64, n: u64) {
@@ -12691,6 +12780,8 @@ pub(crate) mod qa_media {
             "media_requests_from_friends": g(&REQUESTS_FROM_FRIENDS),
             "serve_declined": g(&DECLINED),
             "push_notify_sent": g(&PUSH_NOTIFY),
+            "probe_full_gets": g(&PROBE_FULL_GETS),
+            "holder_marked_on_fetch": g(&HOLDER_MARKED_ON_FETCH),
         })
     }
 }

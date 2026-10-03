@@ -16,6 +16,7 @@ mod igencode;
 mod igimport;
 mod instagram;
 mod localmedia;
+mod mediaholding;
 mod mediaresume;
 mod netgate;
 // qa-cmd v2 driver (docs/QA.md) — same rule as demo: `cfg`, not a runtime check, so no release

@@ -109,36 +109,99 @@ pub fn merge_plans(per_relay: Vec<(String, Vec<String>)>) -> Vec<(String, Vec<St
     order.into_iter().map(|k| { let n = nodes.remove(&k).unwrap_or_default(); (k, n) }).collect()
 }
 
-/// The media phase's plan. `candidates` are (ref, circle, is_small) in feed order, already deduped
-/// and with synthetic refs dropped. `before` = every ref the feed named when the run STARTED.
-/// A ref already on disk is counted as done only when it is NEW to the feed (a recovered post or
-/// comment brought it — the app's normal ingest path may have fetched it before this phase ran);
-/// a ref missing on disk is wanted unless evicted. On constrained links only small companions are
-/// considered at all. Returns (already-landed new refs, refs to fetch — small companions first).
+/// One media candidate: (ref, circle, is_small, item). `item` is the user-visible photo/video the ref
+/// belongs to — its primary ref; a small companion (thumb / preview / poster) names its primary.
+pub type MediaCandidate = (String, String, bool, String);
+
+/// The media phase's plan. The summary counts user-visible ITEMS, never refs: a photo, its thumb and
+/// its preview are one item. An item counts as done once ANY of its refs landed — on a constrained
+/// link only companions are considered at all, so the companion alone is the item; on a normal link
+/// a thumb that lands before the full-size file already makes the photo visible in the feed.
+#[derive(Debug, Default)]
+pub struct MediaPlan {
+    /// Items new to the feed (not in `before` — a recovered post or comment named them) that already
+    /// have something on disk: counted done up front, whichever path fetched them.
+    pub landed: usize,
+    /// Items counted: `landed` + items with something to fetch.
+    pub total: usize,
+    /// Refs to fetch, small companions first (fetch behaviour is per ref, unchanged).
+    pub want: Vec<MediaCandidate>,
+    counted: HashSet<String>,
+}
+
+/// `candidates` in feed order, synthetic refs dropped; `before` = every ref the feed named when the
+/// run STARTED. On constrained links only small companions are considered.
 pub fn plan_media(
-    candidates: Vec<(String, String, bool)>, before: &HashSet<String>, constrained: bool,
+    candidates: Vec<MediaCandidate>, before: &HashSet<String>, constrained: bool,
     has: impl Fn(&str) -> bool, evicted: impl Fn(&str) -> bool,
-) -> (usize, Vec<(String, String, bool)>) {
-    let mut landed = 0usize;
-    let mut want: Vec<(String, String, bool)> = Vec::new();
+) -> MediaPlan {
+    let mut order: Vec<String> = Vec::new();
+    let mut items: HashMap<String, (bool, Vec<MediaCandidate>)> = HashMap::new(); // (any present, missing)
     let mut taken: HashSet<String> = HashSet::new();
-    for (r, cid, is_small) in candidates {
-        if constrained && !is_small {
+    for cand in candidates {
+        if (constrained && !cand.2) || !taken.insert(cand.0.clone()) {
             continue;
         }
-        if !taken.insert(r.clone()) {
-            continue;
-        }
-        if has(&r) {
-            if !before.contains(&r) {
-                landed += 1;
-            }
-        } else if !evicted(&r) {
-            want.push((r, cid, is_small));
+        let e = items.entry(cand.3.clone()).or_insert_with(|| {
+            order.push(cand.3.clone());
+            (false, Vec::new())
+        });
+        if has(&cand.0) {
+            e.0 = true;
+        } else if !evicted(&cand.0) {
+            e.1.push(cand);
         }
     }
-    want.sort_by_key(|w| !w.2);
-    (landed, want)
+    let mut plan = MediaPlan::default();
+    for item in order {
+        let Some((present, missing)) = items.remove(&item) else { continue };
+        if present && !before.contains(&item) {
+            plan.landed += 1;
+            plan.total += 1;
+            plan.counted.insert(item);
+        } else if !missing.is_empty() {
+            plan.total += 1;
+        }
+        plan.want.extend(missing);
+    }
+    plan.want.sort_by_key(|w| !w.2);
+    plan
+}
+
+/// Turns per-ref fetch results into per-item counts: an item is done at its first ref that lands,
+/// missing once every one of its refs failed; an item counted up front never counts again.
+pub struct MediaTally {
+    pending: HashMap<String, usize>,
+    counted: HashSet<String>,
+}
+
+impl MediaTally {
+    pub fn new(plan: &MediaPlan) -> Self {
+        let mut pending: HashMap<String, usize> = HashMap::new();
+        for w in &plan.want {
+            *pending.entry(w.3.clone()).or_default() += 1;
+        }
+        Self { pending, counted: plan.counted.clone() }
+    }
+
+    /// (done delta, missing delta) for one fetched ref of `item`.
+    pub fn record(&mut self, item: &str, ok: bool) -> (usize, usize) {
+        let left = self.pending.get_mut(item).map(|n| {
+            *n = n.saturating_sub(1);
+            *n
+        });
+        if self.counted.contains(item) {
+            (0, 0)
+        } else if ok {
+            self.counted.insert(item.to_string());
+            (1, 0)
+        } else if left.unwrap_or(0) == 0 {
+            self.counted.insert(item.to_string());
+            (0, 1)
+        } else {
+            (0, 0)
+        }
+    }
 }
 
 struct RhState {
@@ -303,7 +366,7 @@ impl Engine {
         let before = self.rh_event_count(&circles);
         // The media the feed already named: anything outside it at the end came from this run.
         let refs_before: HashSet<String> =
-            circles.iter().flat_map(|c| self.rh_media_candidates(c)).map(|(r, _, _)| r).collect();
+            circles.iter().flat_map(|c| self.rh_media_candidates(c)).map(|(r, _, _, _)| r).collect();
         let planner = self.rh_planner();
         let mut retry: Vec<Pending> = Vec::new();
         let mut landed = false;
@@ -438,9 +501,9 @@ impl Engine {
         (retry, changed)
     }
 
-    /// Every (ref, circle, is_small) the circle's feed names — posts, comments and their small
-    /// companions — deduped, synthetic refs dropped.
-    fn rh_media_candidates(&self, cid: &str) -> Vec<(String, String, bool)> {
+    /// Every media candidate the circle's feed names — posts, comments and their small companions
+    /// (each tagged with the primary it belongs to) — deduped, synthetic refs dropped.
+    fn rh_media_candidates(&self, cid: &str) -> Vec<MediaCandidate> {
         let mut refs: Vec<String> = Vec::new();
         for item in self.social.feed(cid.to_string(), now_ms(), None) {
             refs.extend(item.media.iter().cloned());
@@ -448,32 +511,48 @@ impl Engine {
                 refs.extend(c.media.iter().cloned());
             }
         }
+        let mut primary: HashMap<String, String> = HashMap::new();
+        for r in &refs {
+            let pair = Self::parse_thumb_marker(r)
+                .or_else(|| Self::parse_preview_marker(r))
+                .or_else(|| haven_p2p::mediavariants::parse_poster(r));
+            if let Some((content, small)) = pair {
+                primary.entry(small.to_string()).or_insert_with(|| content.to_string());
+            }
+        }
         let small: HashSet<String> = Self::small_companion_refs(&refs).into_iter().collect();
         let mut seen: HashSet<String> = HashSet::new();
         refs.iter()
             .chain(small.iter())
             .filter(|r| !LocalMedia::is_synthetic(r) && seen.insert((*r).clone()))
-            .map(|r| (r.clone(), cid.to_string(), small.contains(r)))
+            .map(|r| {
+                let item = primary.get(r).cloned().unwrap_or_else(|| r.clone());
+                (r.clone(), cid.to_string(), small.contains(r), item)
+            })
             .collect()
     }
 
-    /// "Photos and videos" = media this run brought onto the device: refs new to the feed that
-    /// are on disk now (whichever path fetched them) plus what this phase fetches itself.
+    /// "Photos and videos" = ITEMS this run brought onto the device: items new to the feed with
+    /// something on disk now (whichever path fetched it) plus items this phase fetches itself.
     async fn rh_media(self: &Arc<Self>, circles: &[String], before: &HashSet<String>, cancel: &Arc<AtomicBool>) {
         let constrained = self.low_data_level() != "normal";
         let candidates: Vec<_> = circles.iter().flat_map(|c| self.rh_media_candidates(c)).collect();
-        let (landed, want) =
-            plan_media(candidates, before, constrained, |r| self.media.has(r), |r| self.evicted_contains(r));
+        let plan = plan_media(candidates, before, constrained, |r| self.media.has(r), |r| self.evicted_contains(r));
+        let mut tally = MediaTally::new(&plan);
         update(|p| {
-            p.media_total = landed + want.len();
-            p.media_done = landed;
+            p.media_total = plan.total;
+            p.media_done = plan.landed;
         });
-        for (r, cid, _) in want {
+        for (r, cid, _, item) in &plan.want {
             if cancel.load(Ordering::SeqCst) {
                 return;
             }
-            let ok = self.media.has(&r) || self.fetch_media_healing(&cid, &r).await;
-            update(|p| if ok { p.media_done += 1 } else { p.media_missing += 1 });
+            let ok = self.media.has(r) || self.fetch_media_healing(cid, r).await;
+            let (done, missing) = tally.record(item, ok);
+            update(|p| {
+                p.media_done += done;
+                p.media_missing += missing;
+            });
             if ok {
                 self.emit_changed();
             }
@@ -497,43 +576,62 @@ mod tests {
         assert_eq!(m[2].1, vec!["r2".to_string()]);
     }
 
-    fn c(r: &str, small: bool) -> (String, String, bool) {
-        (r.into(), "circle".into(), small)
+    fn c(r: &str, small: bool, item: &str) -> MediaCandidate {
+        (r.into(), "circle".into(), small, item.into())
     }
 
+    fn set(v: &[&str]) -> HashSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The e2e: ONE recovered photo post (photo + thumb + preview), all three already fetched by the
+    /// ordinary ingest path → one item, done.
     #[test]
-    fn media_plan_counts_recovered_media_another_path_already_fetched() {
-        // Before: an old post with photo "old" (on disk) and "gone" (missing). The resync recovered
-        // a post with photo "new" + thumb "new.t" — the ingest path's auto-fetch already landed both.
-        let before: HashSet<String> = ["old", "gone"].iter().map(|s| s.to_string()).collect();
-        let on_disk = ["old", "new", "new.t"];
-        let cands = vec![c("old", false), c("gone", false), c("new", false), c("new.t", true), c("new", false)];
-        let (landed, want) = plan_media(cands.clone(), &before, false, |r| on_disk.contains(&r), |_| false);
-        assert_eq!(landed, 2, "recovered media already on disk counts, once per ref");
-        assert_eq!(want.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(), ["gone"]);
-        let p = RelayHistoryProgress {
-            phase: "done", posts_added: 2, media_done: landed + 1, media_total: landed + want.len(), ..Default::default()
-        };
-        assert!(p.media_done >= 1 && p.media_done <= p.media_total);
+    fn media_plan_counts_one_recovered_photo_with_companions_as_one_item() {
+        let cands = vec![c("p", false, "p"), c("p.t", true, "p"), c("p.v", true, "p")];
+        let disk = set(&["p", "p.t", "p.v"]);
+        let plan = plan_media(cands.clone(), &set(&[]), false, |r| disk.contains(r), |_| false);
+        assert_eq!((plan.landed, plan.total, plan.want.len()), (1, 1, 0));
+        // Nothing fetched yet: the three refs are fetched small-first, the item counts once.
+        let plan = plan_media(cands.clone(), &set(&[]), false, |_| false, |_| false);
+        assert_eq!((plan.landed, plan.total), (0, 1));
+        assert_eq!(plan.want.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(), ["p.t", "p.v", "p"]);
+        let mut t = MediaTally::new(&plan);
+        let sum = plan.want.iter().map(|w| t.record(&w.3, true)).fold((0, 0), |a, d| (a.0 + d.0, a.1 + d.1));
+        assert_eq!(sum, (1, 0));
+        // Only the full-size landed by another path, companions still to fetch: done up front, once.
+        let disk = set(&["p"]);
+        let plan = plan_media(cands.clone(), &set(&[]), false, |r| disk.contains(r), |_| false);
+        assert_eq!((plan.landed, plan.total, plan.want.len()), (1, 1, 2));
+        let mut t = MediaTally::new(&plan);
+        assert_eq!(t.record("p", false), (0, 0));
+        assert_eq!(t.record("p", true), (0, 0));
+        // Constrained: the companion alone is the item.
+        let disk = set(&["p.t"]);
+        let plan = plan_media(cands, &set(&[]), true, |r| disk.contains(r), |_| false);
+        assert_eq!((plan.landed, plan.total, plan.want.len()), (1, 1, 1));
+        let p = RelayHistoryProgress { phase: "done", posts_added: 2, media_done: 1, media_total: 1, ..Default::default() };
         assert_eq!(p.outcome(), "added");
-        // Media alone (no new posts) still reads as "added".
-        let m = RelayHistoryProgress { phase: "done", media_done: landed, media_total: landed, ..Default::default() };
-        assert_eq!(m.outcome(), "added");
-
-        // Constrained: only small companions count or are wanted; evicted refs are never wanted.
-        let (landed, want) = plan_media(cands.clone(), &before, true, |r| on_disk.contains(&r), |_| false);
-        assert_eq!((landed, want.len()), (1, 0));
-        let (landed, want) = plan_media(cands, &before, false, |r| on_disk.contains(&r), |r| r == "gone");
-        assert_eq!((landed, want.len()), (2, 0));
     }
 
     #[test]
-    fn media_plan_wants_small_companions_first_and_ignores_old_present_media() {
-        let before: HashSet<String> = ["a", "a.t"].iter().map(|s| s.to_string()).collect();
-        let (landed, want) =
-            plan_media(vec![c("a", false), c("a.t", true), c("b", false), c("b.t", true)], &before, false, |r| r.starts_with('a'), |_| false);
-        assert_eq!(landed, 0, "media that was already there before the run is not counted");
-        assert_eq!(want.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(), ["b.t", "b"]);
+    fn media_plan_old_media_missing_items_and_eviction() {
+        // Old item "a" (thumb on disk, full missing), recovered "b" fully on disk, old "gone" evicted,
+        // old "x" whose two refs both fail.
+        let before = set(&["a", "a.t", "gone", "x", "x.t"]);
+        let disk = set(&["a.t", "b", "b.t"]);
+        let cands = vec![
+            c("a", false, "a"), c("a.t", true, "a"), c("b", false, "b"), c("b.t", true, "b"),
+            c("gone", false, "gone"), c("x", false, "x"), c("x.t", true, "x"),
+        ];
+        let plan = plan_media(cands, &before, false, |r| disk.contains(r), |r| r == "gone");
+        assert_eq!(plan.landed, 1, "old media already there never counts; the recovered item once");
+        assert_eq!(plan.total, 3);
+        assert_eq!(plan.want.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(), ["x.t", "a", "x"]);
+        let mut t = MediaTally::new(&plan);
+        assert_eq!(t.record("x", false), (0, 0), "x still has a ref to try");
+        assert_eq!(t.record("a", true), (1, 0));
+        assert_eq!(t.record("x", false), (0, 1), "every ref of x failed → one missing item");
     }
 
     #[test]

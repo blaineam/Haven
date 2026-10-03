@@ -1514,12 +1514,19 @@ final class RelayMailboxStore: ObservableObject {
     /// Create-or-update the RelayEntry for a hex. `activate` flips it on; lastSeen is stamped now on
     /// first creation so a freshly-added relay's stale-clock starts now (not 1970).
     func ensureEntry(_ hex: String, name: String? = nil, isS3: Bool = false, activate: Bool = false, adoptedAtMs: UInt64 = 0) {
-        if var e = entries[hex] {
+        if let old = entries[hex] {
+            var e = old
             if let name, !name.isEmpty { e.name = name }
             if activate { e.active = true }
             // Adoption stamp only ever moves FORWARD (max) — so the freshest legitimate re-add
             // propagates while a stale echo can't roll it back or refresh it to now().
             if adoptedAtMs > 0 { e.addedAtMs = max(e.addedAtMs ?? 0, adoptedAtMs) }
+            // Unchanged → no write. Every announce ingested runs add + setHttpInterface +
+            // setDerpUrl + setTurn, each of which lands here first; persisting unconditionally
+            // re-encoded EVERY entry to JSON, rewrote UserDefaults and re-mirrored the App Group
+            // relay directory four times per announce, on the main actor. A backlog of relay
+            // announces (a history re-pull) made that the Mac's hottest main-thread path.
+            guard e != old else { return }
             entries[hex] = e
         } else {
             entries[hex] = RelayEntry(hex: hex, name: name ?? Self.shortName(hex),

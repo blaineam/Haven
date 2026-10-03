@@ -160,3 +160,28 @@ enum HavenHairpin {
         return c.url
     }
 }
+
+/// When a DERP-set change may soft-rebind the transport (`FeedStore.noteFabricUrlsChanged`).
+///
+/// A fabric rebind is the most expensive thing the app does on purpose: node teardown + re-spawn,
+/// DERP re-handshake, relay host detach/reattach, re-announce, re-sync. The 2 s debounce alone
+/// coalesced a burst but not a STREAM — ingesting a backlog of relay announces (a "Load history
+/// from your relays" re-pull, a `forgetSeenPrefix` re-open) keeps moving the DERP set as each
+/// older announce lands, and every move scheduled the next rebind 2 s after the last one finished.
+/// On a Mac hosting a large relay each of those reattached the store on the main thread (Haven
+/// 2.0.0 (629): main thread pinned in the relay GC sweep, 150% CPU). So rebinds are also spaced by
+/// a cooldown measured from the LAST rebind; the pending one recomputes its target at fire time,
+/// so waiting loses nothing — it lands on the settled set.
+enum FabricRebindPolicy {
+    /// Coalescing window after the first change of a burst.
+    static let debounceMs: UInt64 = 2_000
+    /// Minimum spacing between two fabric rebinds (matches the network-path rebind's limit).
+    static let cooldownMs: UInt64 = 60_000
+
+    /// Delay before a newly scheduled rebind may fire. `lastRebindMs == 0` = never rebound.
+    static func delayMs(nowMs: UInt64, lastRebindMs: UInt64) -> UInt64 {
+        guard lastRebindMs > 0, nowMs >= lastRebindMs else { return debounceMs }
+        let elapsed = nowMs - lastRebindMs
+        return max(debounceMs, elapsed >= cooldownMs ? 0 : cooldownMs - elapsed)
+    }
+}

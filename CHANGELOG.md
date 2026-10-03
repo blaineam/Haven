@@ -24,6 +24,14 @@ Posts brought back by Load history could show the orange "not backed up" cloud o
 though the relay held everything, and the same post could show the pink check in the circle feed. The
 cloud now reflects what your relays actually hold, and updates as soon as that changes.
 
+### Fixed — a Mac hosting a relay freezing at high CPU
+
+A Mac (or desktop) hosting a relay with a large library could beachball at 150% CPU, especially while
+another device ran Load history. Each time Haven reconnected to the circle's relays it rescanned the
+whole relay library before the window could respond again, and a stream of relay updates made it
+reconnect every few seconds. The cleanup scan now runs in the background, reconnects are spaced at
+least a minute apart, and relay details that haven't changed are no longer re-saved on every update.
+
 ## 2.0.0 — release candidate 3 (2026-10-03)
 
 Soren release gate green (all 11 suites; e2e 455/0, including the new `relayhistory` step).

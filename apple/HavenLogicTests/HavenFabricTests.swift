@@ -93,4 +93,45 @@ final class HavenFabricTests: XCTestCase {
         XCTAssertEqual(u?.host, "abc.trycloudflare.com")
         XCTAssertEqual(u?.path, "/webrtc/hairpin")
     }
+
+    // MARK: - Fabric rebind spacing
+
+    func testFirstFabricRebindOnlyWaitsTheDebounce() {
+        XCTAssertEqual(FabricRebindPolicy.delayMs(nowMs: 1_000_000, lastRebindMs: 0), FabricRebindPolicy.debounceMs)
+    }
+
+    func testRebindSoonAfterAnotherWaitsOutTheCooldown() {
+        let last: UInt64 = 1_000_000
+        // A DERP change 5 s after the previous rebind finished: wait the remaining 55 s, not 2 s.
+        XCTAssertEqual(FabricRebindPolicy.delayMs(nowMs: last + 5_000, lastRebindMs: last), 55_000)
+        // Right at the end of the cooldown: never shorter than the debounce.
+        XCTAssertEqual(FabricRebindPolicy.delayMs(nowMs: last + 59_500, lastRebindMs: last), FabricRebindPolicy.debounceMs)
+    }
+
+    func testRebindLongAfterTheLastOnlyWaitsTheDebounce() {
+        let last: UInt64 = 1_000_000
+        XCTAssertEqual(FabricRebindPolicy.delayMs(nowMs: last + 600_000, lastRebindMs: last), FabricRebindPolicy.debounceMs)
+    }
+
+    func testClockGoingBackwardsDoesNotStallTheRebind() {
+        XCTAssertEqual(FabricRebindPolicy.delayMs(nowMs: 500, lastRebindMs: 1_000_000), FabricRebindPolicy.debounceMs)
+    }
+
+    /// A stream of DERP changes (one per second, as a backlog of announces lands) yields at most
+    /// one rebind per cooldown window — the 629 hot loop was one every ~2 s plus the rebind itself.
+    func testAStreamOfChangesRebindsAtMostOncePerCooldown() {
+        var now: UInt64 = 10_000_000
+        var last: UInt64 = 0
+        var fireAt: UInt64?
+        var rebinds: [UInt64] = []
+        for _ in 0..<600 {   // ten minutes of one change per second
+            if let f = fireAt, now >= f { rebinds.append(now); last = now; fireAt = nil }
+            if fireAt == nil { fireAt = now + FabricRebindPolicy.delayMs(nowMs: now, lastRebindMs: last) }
+            now += 1_000
+        }
+        XCTAssertLessThanOrEqual(rebinds.count, 11)
+        for (a, b) in zip(rebinds, rebinds.dropFirst()) {
+            XCTAssertGreaterThanOrEqual(b - a, FabricRebindPolicy.cooldownMs)
+        }
+    }
 }

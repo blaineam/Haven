@@ -308,6 +308,9 @@ final class FeedStore: ObservableObject {
     private var fabricBoundUrls: [String] = []
     private var fabricRebindPending = false
     private var fabricRebindInFlight = false
+    /// When the last fabric rebind (of either kind) STARTED — spaces the next one by
+    /// `FabricRebindPolicy.cooldownMs` (see there: the 2.0.0 (629) rebind storm).
+    private var lastFabricRebindMs: UInt64 = 0
     /// Base cadences and the idle multipliers. Idle <3min = base; <15min = ×3; else ×6.
     /// Thermal pressure and super data saver stretch further so a warm phone (or one the user
     /// asked to go easy on the radio) isn't also blasting hello+roster at the tight cadence.
@@ -3138,10 +3141,14 @@ final class FeedStore: ObservableObject {
         // both starved the rebind forever AND logged "scheduled" dozens of times a second. The
         // pending task recomputes the target from RelayMailboxStore at fire time, so coalescing
         // later calls into it loses nothing.
+        //
+        // Also spaced from the PREVIOUS rebind (FabricRebindPolicy): the debounce coalesced a burst
+        // but a steady stream of changes still rebound every ~2 s, back to back.
         fabricRebindPending = true
-        HavenLog.net("fabric rebind scheduled (urls=\(target.count))")
+        let delayMs = FabricRebindPolicy.delayMs(nowMs: now(), lastRebindMs: lastFabricRebindMs)
+        HavenLog.net("fabric rebind scheduled (urls=\(target.count), in \(delayMs / 1000)s)")
         Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
             fabricRebindPending = false
             await rebindTransportForFabric()
         }
@@ -3197,6 +3204,7 @@ final class FeedStore: ObservableObject {
             guard !target.isEmpty, target != fabricBoundUrls else { return }
         }
         fabricRebindInFlight = true
+        lastFabricRebindMs = now()
         defer { fabricRebindInFlight = false }
         HavenLog.net("fabric rebind starting…")
         let wasHosting = RelayHost.shared.serving || RelayHost.shared.enabled

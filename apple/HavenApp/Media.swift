@@ -728,7 +728,7 @@ final class MediaStore: ObservableObject {
             return "img_\(UUID().uuidString)"
         }
         let ref = Self.contentRef(.image, data)
-        if let url = fileURL(ref) { try? data.write(to: url) }
+        if let url = fileURL(ref) { try? data.write(to: url, options: .atomic) }
         cachePut(ref, MediaItem(id: ref, kind: .image, image: img, videoURL: nil))
         // Mint the tiny thumb companion (~256px, ≤32KB) for photos worth one: recipients render it
         // blurred behind the loading placeholder long before the full bytes land. The pairing
@@ -824,7 +824,7 @@ final class MediaStore: ObservableObject {
         // preview at all — silently. Observed on the mac stub, whose posts carried `markers: []` while
         // its companion maps held a perfectly-formed pairing.
         guard let previewURL = fileURL(previewRef) else { return }
-        do { try data.write(to: previewURL) } catch {
+        do { try data.write(to: previewURL, options: .atomic) } catch {
             HavenLog.net("preview companion write FAILED for \(ref.prefix(12)): \(error.localizedDescription)")
             return
         }
@@ -856,7 +856,7 @@ final class MediaStore: ObservableObject {
         // Same hazard as the preview path above: a swallowed write left the map naming a blob that
         // was never stored, so the post lost its thumb marker with no error anywhere.
         guard let thumbURL = fileURL(thumbRef) else { return }
-        do { try data.write(to: thumbURL) } catch {
+        do { try data.write(to: thumbURL, options: .atomic) } catch {
             HavenLog.net("thumb companion write FAILED for \(ref.prefix(12)): \(error.localizedDescription)")
             return
         }
@@ -1216,7 +1216,7 @@ final class MediaStore: ObservableObject {
         guard let data = img.jpegData(compressionQuality: quality) else { return nil }
         let ref = Self.contentRef(.image, data)
         guard let url = fileURL(ref) else { return nil }
-        do { try data.write(to: url) } catch { return nil }
+        do { try data.write(to: url, options: .atomic) } catch { return nil }
         cachePut(ref, MediaItem(id: ref, kind: .image, image: img, videoURL: nil))
         return ref
     }
@@ -1410,7 +1410,10 @@ final class MediaStore: ObservableObject {
             return false
         }
         if !seeding { HavenPerf.shared.noteMediaStoreOnMain() }   // the synchronous path hashes + writes on main
-        if (try? bytes.write(to: url)) != nil { HeldMediaIndex.shared.insert(url.lastPathComponent) }
+        // ATOMIC (temp + rename): two lanes can land the same ref at once, and a plain write
+        // truncates the live file before refilling it — a concurrent reader (the held-media probe, a
+        // peer serve, the image decoder) then sees 0 bytes or half a blob and calls it corrupt.
+        if (try? bytes.write(to: url, options: .atomic)) != nil { HeldMediaIndex.shared.insert(url.lastPathComponent) }
         landed(ref, kind: kind, url: url)
         return true
     }
@@ -1425,7 +1428,7 @@ final class MediaStore: ObservableObject {
         let outcome: (verified: Bool, written: Bool) = await Task.detached(priority: .utility) {
             HavenPerf.shared.checkMediaStoreOffMain()
             guard Self.verify(ref, bytes) else { return (false, false) }
-            return (true, (try? bytes.write(to: url)) != nil)
+            return (true, (try? bytes.write(to: url, options: .atomic)) != nil)   // atomic: see `store`
         }.value
         guard outcome.verified else {
             HavenLog.relay("media REJECTED \(ref.prefix(12)): \(bytes.count)B do not match its content address")
@@ -1505,9 +1508,12 @@ final class MediaStore: ObservableObject {
             try? FileManager.default.removeItem(at: temp)
             return false
         }
-        HeldMediaIndex.shared.remove(dst.lastPathComponent)
-        try? FileManager.default.removeItem(at: dst)
-        do { try FileManager.default.moveItem(at: temp, to: dst) } catch { return false }
+        // One rename over the target — never remove-then-move, whose gap made the ref look absent and
+        // failed a second adopter's move outright (AtomicFile.replace).
+        guard AtomicFile.replace(dst, with: temp) else {
+            try? FileManager.default.removeItem(at: temp)
+            return false
+        }
         HeldMediaIndex.shared.insert(dst.lastPathComponent)
         MediaArrivals.shared.note(ref)
         // Do NOT eagerly decode the full image here. With own-device media sync, a burst of received blobs
@@ -1529,9 +1535,10 @@ final class MediaStore: ObservableObject {
                 try? FileManager.default.removeItem(at: temp)
                 return nil
             }
-            HeldMediaIndex.shared.remove(name)
-            try? FileManager.default.removeItem(at: dst)
-            do { try FileManager.default.moveItem(at: temp, to: dst) } catch { return false }
+            guard AtomicFile.replace(dst, with: temp) else {   // one rename — see `adopt`
+                try? FileManager.default.removeItem(at: temp)
+                return false
+            }
             HeldMediaIndex.shared.insert(name)
             return true
         }.value

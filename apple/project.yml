@@ -445,6 +445,9 @@ targets:
       - path: HavenApp/HeldMediaIndex.swift
       # Whether a held (plaintext-at-rest) media file is readable, sealed, or corrupt.
       - path: HavenApp/HeldMediaProbe.swift
+      # Single-flight per ref, an empty relay body as a miss, atomic replace — what keeps a racing
+      # fetch from getting a ref judged corrupt and blacklisted for the session. Foundation only.
+      - path: HavenApp/MediaFetchSafety.swift
       # The sync pill / media spinner / "media waiting" decisions — pure state, Foundation only.
       - path: HavenApp/SyncProgress.swift
       # Byte-identical device-roster re-deliveries (receive() reports a known roster as applied).

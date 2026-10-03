@@ -10287,6 +10287,8 @@ impl Engine {
         }
         if got {
             qa_media::bump(&qa_media::RECEIVED_VIA_RELAY, 1);
+            // It opens now: drop any session-unopenable mark (Apple `mediaArrived` parity).
+            self.dyn_state.lock().media_unopenable.remove(reference);
         }
         got
     }
@@ -11137,6 +11139,9 @@ impl Engine {
             }
         }
         self.clear_evicted(&reference);
+        // The author re-sealed and re-uploaded it: the session-unopenable mark described the OLD
+        // stored copy, and kept the missing-media sweep off the new one (Android parity).
+        self.dyn_state.lock().media_unopenable.remove(&reference);
         self.media_download(reference.clone()); // pull it now, while we know it's there
         // Silent unless the user personally asked. The sweep asks on its own for media nobody has
         // heard of; the fetch above still runs, which is the part that matters — the picture

@@ -76,4 +76,17 @@ object RelayHistoryPlan {
             !synthetic(r) && !have(r) && !evicted(r) && seen.add(r) && (!constrained || r in small)
         }
     }
+
+    /** Media this run already brought onto the device without fetching it itself: refs NEW to the
+     *  feed (not in [before], the refs it named when the run started — i.e. named by a recovered post
+     *  or comment) that are on disk now. The ordinary ingest path auto-fetches a fresh post's media
+     *  concurrently, so by the media phase it is often already there; the summary must still count it.
+     *  Same synthetic / constrained rules as [wanted]; disjoint from it (that needs `!have`). */
+    fun landed(refs: List<String>, small: Set<String>, before: Set<String>, have: (String) -> Boolean,
+               synthetic: (String) -> Boolean, constrained: Boolean): List<String> {
+        val seen = HashSet<String>()
+        return refs.filter { r ->
+            !synthetic(r) && r !in before && seen.add(r) && (!constrained || r in small) && have(r)
+        }
+    }
 }

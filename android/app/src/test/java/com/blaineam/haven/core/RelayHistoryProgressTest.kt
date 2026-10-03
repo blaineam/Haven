@@ -44,4 +44,25 @@ class RelayHistoryProgressTest {
         assertEquals(listOf("full1", "thumb1"), w(false))
         assertEquals(listOf("thumb1"), w(true))
     }
+
+    /** The e2e bug: a recovered photo post whose photo the ordinary ingest path had already fetched
+     *  was never counted ("Added 2 posts and 0 photos and videos"). */
+    @Test fun landedCountsRecoveredMediaAnotherPathAlreadyFetched() {
+        val before = setOf("old", "gone")
+        val onDisk = setOf("old", "new", "new.t")
+        val refs = listOf("old", "gone", "new", "new.t", "new", "geo:1")
+        val small = setOf("new.t")
+        val l = { constrained: Boolean ->
+            RelayHistoryPlan.landed(refs, small, before, { it in onDisk }, { it.startsWith("geo:") }, constrained)
+        }
+        assertEquals(listOf("new", "new.t"), l(false))
+        assertEquals(listOf("new.t"), l(true))
+        val wanted = RelayHistoryPlan.wanted(refs, small, { it in onDisk }, { false }, { it.startsWith("geo:") }, false)
+        assertEquals(listOf("gone"), wanted)
+        assertTrue(l(false).none { it in wanted })
+        val p = RelayHistoryProgress(phase = RelayHistoryProgress.Phase.DONE, postsAdded = 2,
+            mediaTotal = l(false).size + wanted.size, mediaDone = l(false).size)
+        assertEquals(RelayHistoryProgress.Outcome.Added(2, 2), p.outcome)
+        assertTrue(p.copy(phase = RelayHistoryProgress.Phase.MEDIA).fraction <= 1f)
+    }
 }

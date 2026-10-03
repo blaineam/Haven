@@ -78,6 +78,8 @@ object RelayHistoryResync {
         update { it.copy(circlesTotal = circles.size) }
         fun events() = circles.sumOf { runCatching { social.historyEventCount(it).toLong() }.getOrDefault(0L) }
         val before = events()
+        // The media the feed already names: anything outside it at the end came from this run.
+        val refsBefore = namedMedia(circles, social).flatMapTo(HashSet()) { it.second }
         val retry = ArrayList<Pending>()
         var landed = false
         for (cid in circles) {
@@ -117,7 +119,7 @@ object RelayHistoryResync {
         Log.i(TAG, "relay history: scan done ${progress.value}")
         if (job?.isCancelled != true) {
             update { it.copy(phase = RelayHistoryProgress.Phase.MEDIA) }
-            fetchMedia(circles, social)
+            fetchMedia(circles, social, refsBefore)
         }
         update {
             it.copy(phase = if (job?.isCancelled == true) RelayHistoryProgress.Phase.CANCELLED else RelayHistoryProgress.Phase.DONE,
@@ -161,28 +163,42 @@ object RelayHistoryResync {
         return retry to changed
     }
 
-    private suspend fun fetchMedia(circles: List<String>, social: uniffi.haven_ffi.HavenSocial) {
-        val constrained = LowDataMonitor.effective.value != LinkConstraint.NORMAL
+    /** (circle, every ref its feed names — posts, comments, plus small companions, small set). */
+    private fun namedMedia(circles: List<String>, social: uniffi.haven_ffi.HavenSocial): List<Triple<String, List<String>, Set<String>>> {
         val now = System.currentTimeMillis().toULong()
-        val want = ArrayList<Pair<String, String>>()
-        val taken = HashSet<String>()
-        val allSmall = HashSet<String>()
-        for (cid in circles) {
+        return circles.map { cid ->
             val refs = ArrayList<String>()
             for (item in runCatching { social.feed(cid, now, null) }.getOrDefault(emptyList())) {
                 refs += item.media
                 for (c in item.comments) refs += c.media
             }
             val small = MediaVariants.prefetchCompanions(refs).toSet()
+            Triple(cid, refs + small, small)
+        }
+    }
+
+    /** "Photos and videos" = media this run brought onto the device: refs new to the feed that are on
+     *  disk now (whichever path fetched them) plus what this phase fetches itself. */
+    private suspend fun fetchMedia(circles: List<String>, social: uniffi.haven_ffi.HavenSocial, before: Set<String>) {
+        val constrained = LowDataMonitor.effective.value != LinkConstraint.NORMAL
+        val named = namedMedia(circles, social)
+        val landed = HashSet<String>()
+        for ((_, refs, small) in named) {
+            landed += RelayHistoryPlan.landed(refs, small, before, { LocalMedia.has(it) }, { LocalMedia.isSynthetic(it) }, constrained)
+        }
+        val want = ArrayList<Pair<String, String>>()
+        val taken = HashSet<String>()
+        val allSmall = HashSet<String>()
+        for ((cid, refs, small) in named) {
             allSmall += small
-            for (r in RelayHistoryPlan.wanted(refs + small, small, { LocalMedia.has(it) }, { EvictedMediaStore.contains(it) },
+            for (r in RelayHistoryPlan.wanted(refs, small, { LocalMedia.has(it) }, { EvictedMediaStore.contains(it) },
                     { LocalMedia.isSynthetic(it) }, constrained)) {
-                if (taken.add(r)) want.add(r to cid)
+                if (r !in landed && taken.add(r)) want.add(r to cid)
             }
         }
         // Small companions first: they make the feed look right long before full-size files land.
         want.sortBy { if (it.first in allSmall) 0 else 1 }
-        update { it.copy(mediaTotal = want.size) }
+        update { it.copy(mediaTotal = landed.size + want.size, mediaDone = landed.size) }
         // ONE blob at a time: the media queue's OOM rule (a restore holds a whole sealed blob in RAM).
         for ((ref, cid) in want) {
             if (job?.isCancelled == true) return

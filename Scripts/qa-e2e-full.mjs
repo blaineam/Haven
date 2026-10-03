@@ -1940,7 +1940,10 @@ async function main() {
     score('relayhistory: the next backfill tick re-downloads nothing (no GET probes, no relay receives)',
       probeGets === 0 && recv === 0, `probe_full_gets +${probeGets}, received_via_relay +${recv}`);
 
-    // 4. Idempotent: a second run finds nothing new and adds nothing.
+    // 4. Idempotent: a second run finds nothing new and adds nothing. The second run has to be
+    // STARTED — the converge below waits for a newer `started_ms`, so without this op it can only
+    // time out on the first run's summary (the 3b insertion dropped it, rc.4).
+    await op(devices.desktop, { op: 'relay_history_resync' });
     let rh2 = null;
     await converge(devices.desktop, (j) => { rh2 = j.relay_history; return num(rh2?.started_ms) > num(rh?.started_ms) && rh2?.state === 'done'; }, 180_000, 3000);
     const post2 = await freshDump(devices.desktop);

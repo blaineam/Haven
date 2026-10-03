@@ -77,16 +77,73 @@ object RelayHistoryPlan {
         }
     }
 
-    /** Media this run already brought onto the device without fetching it itself: refs NEW to the
-     *  feed (not in [before], the refs it named when the run started — i.e. named by a recovered post
-     *  or comment) that are on disk now. The ordinary ingest path auto-fetches a fresh post's media
-     *  concurrently, so by the media phase it is often already there; the summary must still count it.
-     *  Same synthetic / constrained rules as [wanted]; disjoint from it (that needs `!have`). */
-    fun landed(refs: List<String>, small: Set<String>, before: Set<String>, have: (String) -> Boolean,
-               synthetic: (String) -> Boolean, constrained: Boolean): List<String> {
-        val seen = HashSet<String>()
-        return refs.filter { r ->
-            !synthetic(r) && r !in before && seen.add(r) && (!constrained || r in small) && have(r)
+    /** One media ref the feed names, tagged with the user-visible ITEM it belongs to: its primary
+     *  ref. A small companion (thumb / preview / poster) names its primary through its marker. */
+    data class MediaCandidate(val ref: String, val circle: String, val small: Boolean, val item: String)
+
+    /** Every candidate one circle's raw feed refs name (posts + comments, markers included): the refs
+     *  themselves plus their small companions, deduped, each tagged with its item. */
+    fun mediaCandidates(circle: String, refs: List<String>): List<MediaCandidate> {
+        val primary = HashMap<String, String>()
+        for (r in refs) {
+            (MediaVariants.parseThumb(r) ?: MediaVariants.parsePreview(r) ?: MediaVariants.parsePoster(r))
+                ?.let { (content, small) -> primary.putIfAbsent(small, content) }
+        }
+        val smallList = MediaVariants.prefetchCompanions(refs)
+        val small = smallList.toSet()
+        return (refs + smallList).distinct().map { MediaCandidate(it, circle, it in small, primary[it] ?: it) }
+    }
+
+    /** The media phase's plan. The summary counts user-visible ITEMS, never refs: a photo, its thumb
+     *  and its preview are one item. An item counts as done once ANY of its refs landed — on a
+     *  constrained link only companions are considered at all, so the companion alone is the item; on
+     *  a normal link a thumb that lands before the full-size file already shows the photo.
+     *  [landed]: items new to the feed (not in `before` — a recovered post or comment named them)
+     *  already with something on disk, done up front whichever path fetched them. [total]: [landed] +
+     *  items with something to fetch. [want]: refs to fetch, small companions first (per ref). */
+    data class MediaPlan(val landed: Int, val total: Int, val want: List<MediaCandidate>, internal val counted: Set<String>)
+
+    /** `before` = every ref the feed named when the run STARTED. Same rules as [wanted]. */
+    fun mediaPlan(candidates: List<MediaCandidate>, before: Set<String>, constrained: Boolean, have: (String) -> Boolean,
+                  evicted: (String) -> Boolean, synthetic: (String) -> Boolean): MediaPlan {
+        val present = LinkedHashMap<String, Boolean>()
+        val missing = HashMap<String, MutableList<MediaCandidate>>()
+        val taken = HashSet<String>()
+        for (c in candidates) {
+            if (synthetic(c.ref) || (constrained && !c.small) || !taken.add(c.ref)) continue
+            present.putIfAbsent(c.item, false)
+            if (have(c.ref)) present[c.item] = true
+            else if (!evicted(c.ref)) missing.getOrPut(c.item) { mutableListOf() }.add(c)
+        }
+        var landed = 0
+        var total = 0
+        val counted = HashSet<String>()
+        val want = ArrayList<MediaCandidate>()
+        for ((item, has) in present) {
+            val m = missing[item].orEmpty()
+            if (has && item !in before) { landed++; total++; counted += item }
+            else if (m.isNotEmpty()) total++
+            want += m
+        }
+        return MediaPlan(landed, total, want.sortedBy { if (it.small) 0 else 1 }, counted)
+    }
+}
+
+/** Per-ref fetch results → per-item counts: an item is done at its first ref that lands, missing once
+ *  every one of its refs failed; an item counted up front never counts again. */
+class RelayHistoryMediaTally(plan: RelayHistoryPlan.MediaPlan) {
+    private val pending = HashMap<String, Int>().apply { plan.want.forEach { merge(it.item, 1, Int::plus) } }
+    private val counted = HashSet(plan.counted)
+
+    /** (done delta, missing delta) for one fetched ref of [item]. */
+    fun record(item: String, ok: Boolean): Pair<Int, Int> {
+        val left = maxOf(0, (pending[item] ?: 0) - 1)
+        pending[item] = left
+        return when {
+            item in counted -> 0 to 0
+            ok -> { counted += item; 1 to 0 }
+            left == 0 -> { counted += item; 0 to 1 }
+            else -> 0 to 0
         }
     }
 }

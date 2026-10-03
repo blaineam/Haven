@@ -45,24 +45,47 @@ class RelayHistoryProgressTest {
         assertEquals(listOf("thumb1"), w(true))
     }
 
-    /** The e2e bug: a recovered photo post whose photo the ordinary ingest path had already fetched
-     *  was never counted ("Added 2 posts and 0 photos and videos"). */
-    @Test fun landedCountsRecoveredMediaAnotherPathAlreadyFetched() {
-        val before = setOf("old", "gone")
-        val onDisk = setOf("old", "new", "new.t")
-        val refs = listOf("old", "gone", "new", "new.t", "new", "geo:1")
-        val small = setOf("new.t")
-        val l = { constrained: Boolean ->
-            RelayHistoryPlan.landed(refs, small, before, { it in onDisk }, { it.startsWith("geo:") }, constrained)
+    /** The e2e: ONE recovered photo post — photo + thumb + preview, all already fetched by the
+     *  ordinary ingest path — is one item, done ("Added 2 posts and 1 photo", never 0, never 3). */
+    @Test fun oneRecoveredPhotoWithCompanionsIsOneItem() {
+        val cands = RelayHistoryPlan.mediaCandidates("c", listOf("p", "thumb:p:pt", "preview:p:pv"))
+        assertEquals(setOf("p"), cands.filter { ':' !in it.ref }.map { it.item }.toSet())
+        val plan = { have: Set<String>, constrained: Boolean ->
+            RelayHistoryPlan.mediaPlan(cands, emptySet(), constrained, { it in have }, { false }, { ':' in it })
         }
-        assertEquals(listOf("new", "new.t"), l(false))
-        assertEquals(listOf("new.t"), l(true))
-        val wanted = RelayHistoryPlan.wanted(refs, small, { it in onDisk }, { false }, { it.startsWith("geo:") }, false)
-        assertEquals(listOf("gone"), wanted)
-        assertTrue(l(false).none { it in wanted })
-        val p = RelayHistoryProgress(phase = RelayHistoryProgress.Phase.DONE, postsAdded = 2,
-            mediaTotal = l(false).size + wanted.size, mediaDone = l(false).size)
-        assertEquals(RelayHistoryProgress.Outcome.Added(2, 2), p.outcome)
-        assertTrue(p.copy(phase = RelayHistoryProgress.Phase.MEDIA).fraction <= 1f)
+        val all = plan(setOf("p", "pt", "pv"), false)
+        assertEquals(listOf(1, 1, 0), listOf(all.landed, all.total, all.want.size))
+        val p = RelayHistoryProgress(phase = RelayHistoryProgress.Phase.DONE, postsAdded = 2, mediaDone = all.landed, mediaTotal = all.total)
+        assertEquals(RelayHistoryProgress.Outcome.Added(2, 1), p.outcome)
+
+        // Nothing on disk yet: three refs fetched small-first, the item counts once.
+        val none = plan(emptySet(), false)
+        assertEquals(listOf(0, 1), listOf(none.landed, none.total))
+        assertEquals(listOf("pv", "pt", "p"), none.want.map { it.ref })
+        val t = RelayHistoryMediaTally(none)
+        assertEquals(1, none.want.sumOf { t.record(it.item, true).first })
+
+        // Only the full-size landed by another path: done up front, its companions never re-count.
+        val full = plan(setOf("p"), false)
+        assertEquals(listOf(1, 1, 2), listOf(full.landed, full.total, full.want.size))
+        assertEquals(0 to 0, RelayHistoryMediaTally(full).record("p", true))
+
+        // Constrained: the companion alone is the item.
+        val lean = plan(setOf("pt"), true)
+        assertEquals(listOf(1, 1, 1), listOf(lean.landed, lean.total, lean.want.size))
+    }
+
+    @Test fun mediaPlanIgnoresOldMediaAndCountsMissingItemsOnce() {
+        val cands = RelayHistoryPlan.mediaCandidates("c",
+            listOf("a", "thumb:a:at", "b", "thumb:b:bt", "gone", "x", "thumb:x:xt", "geo:1,2"))
+        val plan = RelayHistoryPlan.mediaPlan(cands, setOf("a", "at", "gone", "x", "xt"), false,
+            { it in setOf("at", "b", "bt") }, { it == "gone" }, { ':' in it })
+        assertEquals(1, plan.landed)
+        assertEquals(3, plan.total)
+        assertEquals(listOf("xt", "a", "x"), plan.want.map { it.ref })
+        val t = RelayHistoryMediaTally(plan)
+        assertEquals(0 to 0, t.record("x", false))
+        assertEquals(1 to 0, t.record("a", true))
+        assertEquals(0 to 1, t.record("x", false))
     }
 }

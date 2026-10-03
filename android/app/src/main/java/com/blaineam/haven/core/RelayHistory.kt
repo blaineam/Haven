@@ -79,7 +79,7 @@ object RelayHistoryResync {
         fun events() = circles.sumOf { runCatching { social.historyEventCount(it).toLong() }.getOrDefault(0L) }
         val before = events()
         // The media the feed already names: anything outside it at the end came from this run.
-        val refsBefore = namedMedia(circles, social).flatMapTo(HashSet()) { it.second }
+        val refsBefore = namedMedia(circles, social).mapTo(HashSet()) { it.ref }
         val retry = ArrayList<Pending>()
         var landed = false
         for (cid in circles) {
@@ -163,50 +163,38 @@ object RelayHistoryResync {
         return retry to changed
     }
 
-    /** (circle, every ref its feed names — posts, comments, plus small companions, small set). */
-    private fun namedMedia(circles: List<String>, social: uniffi.haven_ffi.HavenSocial): List<Triple<String, List<String>, Set<String>>> {
+    /** Every media candidate each circle's feed names (posts, comments, small companions), tagged
+     *  with the user-visible item it belongs to. */
+    private fun namedMedia(circles: List<String>, social: uniffi.haven_ffi.HavenSocial): List<RelayHistoryPlan.MediaCandidate> {
         val now = System.currentTimeMillis().toULong()
-        return circles.map { cid ->
+        return circles.flatMap { cid ->
             val refs = ArrayList<String>()
             for (item in runCatching { social.feed(cid, now, null) }.getOrDefault(emptyList())) {
                 refs += item.media
                 for (c in item.comments) refs += c.media
             }
-            val small = MediaVariants.prefetchCompanions(refs).toSet()
-            Triple(cid, refs + small, small)
+            RelayHistoryPlan.mediaCandidates(cid, refs)
         }
     }
 
-    /** "Photos and videos" = media this run brought onto the device: refs new to the feed that are on
-     *  disk now (whichever path fetched them) plus what this phase fetches itself. */
+    /** "Photos and videos" = ITEMS this run brought onto the device (a photo and its thumb/preview are
+     *  one): items new to the feed with something on disk now (whichever path fetched it) plus items
+     *  this phase fetches itself. */
     private suspend fun fetchMedia(circles: List<String>, social: uniffi.haven_ffi.HavenSocial, before: Set<String>) {
         val constrained = LowDataMonitor.effective.value != LinkConstraint.NORMAL
-        val named = namedMedia(circles, social)
-        val landed = HashSet<String>()
-        for ((_, refs, small) in named) {
-            landed += RelayHistoryPlan.landed(refs, small, before, { LocalMedia.has(it) }, { LocalMedia.isSynthetic(it) }, constrained)
-        }
-        val want = ArrayList<Pair<String, String>>()
-        val taken = HashSet<String>()
-        val allSmall = HashSet<String>()
-        for ((cid, refs, small) in named) {
-            allSmall += small
-            for (r in RelayHistoryPlan.wanted(refs, small, { LocalMedia.has(it) }, { EvictedMediaStore.contains(it) },
-                    { LocalMedia.isSynthetic(it) }, constrained)) {
-                if (r !in landed && taken.add(r)) want.add(r to cid)
-            }
-        }
-        // Small companions first: they make the feed look right long before full-size files land.
-        want.sortBy { if (it.first in allSmall) 0 else 1 }
-        update { it.copy(mediaTotal = landed.size + want.size, mediaDone = landed.size) }
+        val plan = RelayHistoryPlan.mediaPlan(namedMedia(circles, social), before, constrained, { LocalMedia.has(it) },
+            { EvictedMediaStore.contains(it) }, { LocalMedia.isSynthetic(it) })
+        val tally = RelayHistoryMediaTally(plan)
+        update { it.copy(mediaTotal = plan.total, mediaDone = plan.landed) }
         // ONE blob at a time: the media queue's OOM rule (a restore holds a whole sealed blob in RAM).
-        for ((ref, cid) in want) {
+        for (w in plan.want) {
             if (job?.isCancelled == true) return
             var waited = 0
             while ((HeavyWorkMonitor.current.heat >= HeavyWorkPolicy.Heat.SERIOUS) && waited < 120 && job?.isCancelled != true) { delay(5_000); waited += 5 }
             if ((HeavyWorkMonitor.current.heat >= HeavyWorkPolicy.Heat.SERIOUS)) { update { it.copy(mediaDeferred = true) }; return }
-            val ok = runCatching { HavenNet.historyFetchMedia(cid, ref) }.getOrDefault(false)
-            update { if (ok) it.copy(mediaDone = it.mediaDone + 1) else it.copy(mediaMissing = it.mediaMissing + 1) }
+            val ok = runCatching { HavenNet.historyFetchMedia(w.circle, w.ref) }.getOrDefault(false)
+            val (done, missing) = tally.record(w.item, ok)
+            update { it.copy(mediaDone = it.mediaDone + done, mediaMissing = it.mediaMissing + missing) }
         }
     }
 

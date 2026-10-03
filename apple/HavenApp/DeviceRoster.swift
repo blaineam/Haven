@@ -456,6 +456,8 @@ struct AuthorizedDevicesView: View {
 
                 historySection
 
+                RelayHistorySection()
+
                 // Only a device that ISN'T already the primary offers these. The primary (roster on) shows
                 // just the roster + revoke above.
                 if hasSeed && !roster.isEnabled {
@@ -510,5 +512,129 @@ struct AuthorizedDevicesView: View {
         } message: {
             Text("This device will no longer hold the master-key role. Make your iPhone the primary, then link this device to it.")
         }
+    }
+}
+
+/// Settings ▸ Devices ▸ "Load history from your relays" (RelayHistoryResync): pull everything this
+/// account's relays still hold — including posts made on other devices — with honest progress, a
+/// Cancel, and a closing summary.
+struct RelayHistorySection: View {
+    @ObservedObject private var resync = RelayHistoryResync.shared
+    @State private var confirmingCancel = false
+
+    private var p: RelayHistoryProgress { resync.progress }
+
+    var body: some View {
+        Section {
+            if p.phase != .idle {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 12) {
+                        Image(systemName: icon).font(.title2).foregroundStyle(HavenTheme.pink)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(title).font(.subheadline.weight(.semibold))
+                            ForEach(Array(details.enumerated()), id: \.offset) { _, line in
+                                Text(line).font(.caption).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                        if !p.running {
+                            Button { resync.dismiss() } label: { Image(systemName: "xmark").font(.caption.weight(.bold)) }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(Text("Dismiss"))
+                        }
+                    }
+                    if p.running {
+                        ProgressView(value: p.fraction).tint(HavenTheme.pink)
+                        Button { confirmingCancel = true } label: {
+                            Text("Cancel").font(.caption.weight(.semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("relayHistoryCancel")
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            if !p.running {
+                Button { resync.start() } label: {
+                    Label("Load history from your relays", systemImage: "arrow.down.circle")
+                }
+                .disabled(resync.unavailableReason != nil)
+                .accessibilityIdentifier("relayHistoryStart")
+            }
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Pulls posts and media your relays still hold — including ones you posted from other devices.")
+                if resync.unavailableReason == "satellite" {
+                    Text("Not available on a satellite connection.")
+                } else if resync.unavailableReason == "norelay" {
+                    Text("None of your circles use a relay yet.")
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .alert("Stop loading history?", isPresented: $confirmingCancel) {
+            Button("Stop loading", role: .destructive) { resync.cancel() }
+            Button("Keep going", role: .cancel) {}
+        } message: {
+            Text("Anything already loaded stays; running it again picks up where it left off.")
+        }
+    }
+
+    private var icon: String {
+        switch p.phase {
+        case .done: return "checkmark.circle.fill"
+        case .cancelled: return "xmark.circle"
+        default: return "arrow.down.circle"
+        }
+    }
+
+    private var title: LocalizedStringKey {
+        switch p.phase {
+        case .scanning, .retrying: return "Checking your relays…"
+        case .media: return "Downloading photos and videos…"
+        case .done: return "History loaded"
+        case .cancelled: return "Stopped"
+        case .idle: return ""
+        }
+    }
+
+    private var details: [LocalizedStringKey] {
+        var out: [LocalizedStringKey] = []
+        switch p.phase {
+        case .scanning, .retrying:
+            out.append("Circles checked: \(min(p.circlesDone, p.circlesTotal)) of \(p.circlesTotal)")
+            out.append("Posts checked: \(min(p.entriesChecked, p.entriesFound)) of \(p.entriesFound)")
+        case .media:
+            out.append("Added \(p.postsAdded) posts")
+            out.append("Photos and videos: \(min(p.mediaDone, p.mediaTotal)) of \(p.mediaTotal)")
+        case .done, .cancelled:
+            switch p.outcome {
+            case .added(let posts, let media):
+                out.append("Added \(posts) posts and \(media) photos and videos.")
+            case .upToDate:
+                out.append("Everything your relays hold was already on this device.")
+            case .unreachable:
+                out.append("Couldn’t reach your relays. Check your connection and try again.")
+            }
+            if p.phase == .cancelled {
+                out.append("Anything already loaded stays; running it again picks up where it left off.")
+            }
+            if p.mediaMissing > 0 {
+                out.append("\(p.mediaMissing) photos and videos weren’t on your relays.")
+            }
+            if p.mediaDeferred {
+                out.append("Paused photo downloads because this device is hot. They load when you open them.")
+            }
+            if p.relayErrors > 0, p.outcome != .unreachable {
+                out.append("\(p.relayErrors) circles couldn’t be checked — a relay didn’t answer.")
+            }
+            if p.showsRetentionCaveat {
+                out.append("Some older posts may no longer be on your relays.")
+            }
+        case .idle:
+            break
+        }
+        return out
     }
 }

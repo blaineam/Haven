@@ -704,20 +704,10 @@
     <string name="view_story">Story ansehen</string>
     <string name="story_no_longer_available">Story nicht mehr verfügbar</string>
     <!-- Composer audience: a circle post goes to EVERYONE in it; make that unmistakable. -->
-    <string name="composer_audience_everyone">Alle in %1$s</string>
-    <string name="composer_audience_everyone_count">Alle in %1$s · %2$s</string>
-    <string name="composer_one_person">1 Person</string>
-    <string name="composer_n_people">%1$d Personen</string>
     <string name="composer_placeholder">An alle posten…</string>
     <string name="circle_reply_placeholder_generic">Allen antworten…</string>
     <string name="composer_post_button">Posten</string>
     <string name="composer_post_cd_named">An alle in %1$s posten</string>
-    <string name="composer_audience_cd">Beitrag geht an: %1$s. Öffnet Optionen, u. a. privat an eine Person senden</string>
-    <string name="composer_send_privately">Privat an jemanden senden…</string>
-    <string name="audience_confirm_title">An alle in %1$s posten?</string>
-    <string name="audience_confirm_body">Das wird mit allen in %1$s geteilt (%2$s). Um nur einer Person zu schreiben, nutze „Nachricht“.</string>
-    <string name="audience_confirm_post">An alle posten</string>
-    <string name="audience_confirm_private">Stattdessen privat senden…</string>
     <string name="circle_reply_placeholder_named">Allen in %1$s antworten…</string>
     <string name="circle_member_message_cd">%1$s privat schreiben</string>
     <!-- Settings ▸ Devices ▸ Load history from your relays (RelayHistory.kt) -->

@@ -1311,12 +1311,12 @@ async function renderFeed() {
 
   const composer = buildComposer(
     (body, music, muteVideo, retentionSecs) => invoke("post", { circleId: state.activeCircle, body, media: withThumbMarkers(state.attachments), music, muteVideo, retentionSecs }),
-    t("post_to_everyone_ph"),   // the audience chip above names the circle
+    Audience.placeholder(state.activeCircleName),
     {
       circleId: state.activeCircle,
       floating: true,
-      // Who this reaches — said out loud (see `Audience`). member_count excludes me.
-      audience: { circleId: state.activeCircle, name: state.activeCircleName, count: (active || {}).member_count || 0 },
+      // Who this reaches — said out loud by the placeholder and the labeled Post (see `Audience`).
+      audience: { name: state.activeCircleName },
       onSchedule: (body, music, muteVideo, sendAtMs) => invoke("schedule_message", { kind: "post", circleId: state.activeCircle, body, media: withThumbMarkers(state.attachments), music, muteVideo, sendAtMs }),
     },
   );
@@ -1490,54 +1490,18 @@ function groupStoriesFlat(stories) {
  *
  *  `opts.floating` pins it to the bottom of the feed; the story composer reuses the same row
  *  inline inside its sheet. */
-/** Who a circle post (or a reply on one) actually reaches — surfaced right at the composer.
+/** Who a circle post (or a reply on one) actually reaches — said by the composer itself.
  *
  *  People posted private things to the WHOLE circle believing they were writing to one person: the
- *  audience was implicit in the circle switcher. So the feed composer says it out loud (an
- *  "Everyone in <Circle> · N people" chip whose menu offers "Send privately to someone…", a
- *  placeholder naming the circle, a labeled Post button), and the first post in each circle with more
- *  than one other person asks once. Apple parity: `ComposerAudience.swift`. */
+ *  audience was implicit in the circle switcher. So the feed composer's own form says it: the
+ *  placeholder names the circle ("Post to everyone in Family") and the send control is a labeled
+ *  "Post" pill, not the DM paper plane. Passive cues only — no audience menu and no "are you sure?"
+ *  step in front of a post. Apple parity: `ComposerAudience.swift`. */
 const Audience = {
-  KEY: "haven.audienceAck.v1",
-  shortName(name, max = 22) {
+  /** Names the circle when it fits (<= 14 chars), else the plain "Post to everyone…". */
+  placeholder(name) {
     const n = name || "";
-    return n.length > max ? n.slice(0, max - 1).trimEnd() + "\u2026" : n;
-  },
-  people(n) { return n === 1 ? t("one_person") : t("n_people", n); },
-  summary(name, count) {
-    return count > 0 ? t("everyone_in_count", name, Audience.people(count)) : t("everyone_in", name);
-  },
-  acked() {
-    try { return JSON.parse(localStorage.getItem(Audience.KEY) || "[]"); } catch (_) { return []; }
-  },
-  isAcknowledged(circleId) { return Audience.acked().includes(circleId); },
-  acknowledge(circleId) {
-    const ids = Audience.acked();
-    if (ids.includes(circleId)) return;
-    ids.push(circleId);
-    try { localStorage.setItem(Audience.KEY, JSON.stringify(ids)); } catch (_) {}
-  },
-  /** Once per circle, and only when a post really fans out (more than one other person). */
-  needsConfirmation(circleId, count) {
-    return !String(circleId).startsWith("dm:") && count > 1 && !Audience.isAcknowledged(circleId);
-  },
-  /** "Post to everyone in <Circle>?" → resolves "post" | "private" | null (cancel). */
-  confirm(name, count) {
-    return new Promise((resolve) => {
-      let done = false;
-      const finish = (v) => { if (done) return; done = true; closeModal(); resolve(v); };
-      modal(el("div", { style: "max-width:420px" },
-        el("h2", {}, t("post_to_everyone_in_q", name)),
-        el("p", { class: "muted", style: "margin:0 0 14px" }, t("audience_confirm_body", name, Audience.people(count))),
-        el("div", { class: "row", style: "gap:8px;justify-content:flex-end;flex-wrap:wrap" },
-          el("button", { class: "btn ghost", onclick: () => finish(null) }, t("cancel")),
-          el("button", { class: "btn", onclick: () => finish("private") }, t("send_privately_instead")),
-          el("button", { class: "btn primary", onclick: () => finish("post") }, t("post_to_everyone")),
-        ),
-      // closeModal() hands off to onClose instead of clearing, so clear here — and treat the
-      // backdrop / Esc / ✕ as Cancel.
-      ), { onClose: () => { $("#modal-root").replaceChildren(); if (!done) { done = true; resolve(null); } } });
-    });
+    return n && n.length <= 14 ? t("post_to_everyone_in", n) : t("post_to_everyone_ph");
   },
 };
 
@@ -1617,21 +1581,9 @@ function buildComposer(onPost, placeholder = t("share_something"), opts = {}) {
   refreshSync();
   state.syncTimer = setInterval(refreshSync, 2500);
 
-  // "Send privately…": the typed words move into a private thread (attachments stay here).
-  const sendPrivately = () => newMessageSheet({
-    draft: ta.value.trim(),
-    onStarted: () => { ta.value = ""; autoGrow(); },
-  });
   const send = async () => {
     const body = ta.value.trim();
     if (!body && !state.attachments.length && !music) return;
-    // One-time per circle: make sure they know this goes to everyone, not one person.
-    if (aud && Audience.needsConfirmation(aud.circleId, aud.count)) {
-      const choice = await Audience.confirm(aud.name, aud.count);
-      if (choice === "private") { sendPrivately(); return; }
-      if (choice !== "post") return;
-      Audience.acknowledge(aud.circleId);
-    }
     await onPost(body, music, muteVideo, retentionSecs);
     ta.value = ""; autoGrow();
     state.attachments = [];
@@ -1679,21 +1631,6 @@ function buildComposer(onPost, placeholder = t("share_something"), opts = {}) {
     } } : null,
   ]));
 
-  // The audience chip — its menu is the always-there door to a private message.
-  let audienceRow = null;
-  if (aud) {
-    const chip = el("button", { class: "audience-chip",
-      title: Audience.summary(aud.name, aud.count),
-      "aria-label": t("posting_to", Audience.summary(aud.name, aud.count)) },
-      icon("person.2.fill"),
-      el("span", {}, Audience.summary(Audience.shortName(aud.name), aud.count)),
-      icon("chevron.down"));
-    chip.addEventListener("click", () => popMenu(chip, [
-      { head: Audience.summary(aud.name, aud.count) },
-      { label: t("send_privately_to_someone"), icon: "bubble.left", on: sendPrivately },
-    ]));
-    audienceRow = el("div", { class: "composer-audience" }, chip);
-  }
   // A circle post's send is labeled "Post", not a bare paper plane: the plane is what a private
   // message's send looks like, and this goes to the whole circle.
   const sendBtn = aud
@@ -1707,7 +1644,6 @@ function buildComposer(onPost, placeholder = t("share_something"), opts = {}) {
     musicRow,
     retentionRow,
     el("div", { class: "row wrap", style: "gap:6px" }, muteBtn),
-    audienceRow,
     el("div", { class: "composer-row" },
       plus,
       ta,
@@ -4832,7 +4768,7 @@ async function renderMessages() {
 
 /** New message / new group — the port of `DMContactPicker`: tap contacts to select, one → a 1:1,
  *  several → a group DM, with the prominent gradient action in the sheet's footer. */
-async function newMessageSheet(opts = {}) {
+async function newMessageSheet() {
   const contacts = await invoke("contacts").catch(() => []);
   const picked = new Set();
   const start = async () => {
@@ -4842,9 +4778,6 @@ async function newMessageSheet(opts = {}) {
     if (members.length === 1) { id = await invoke("start_dm", { contactIdHex: members[0][0], contactName: members[0][1] }); name = members[0][1]; }
     else { id = await invoke("start_group_dm", { members }); name = members.map((m) => m[1]).join(", "); }
     closeModal();
-    // "Send privately instead…" from the feed composer carries the typed words into this thread.
-    if (opts.draft) state.pendingDraft = { id, text: opts.draft };
-    if (opts.onStarted) opts.onStarted();
     state.activeDm = { id, name };
     switchView("messages");
   };

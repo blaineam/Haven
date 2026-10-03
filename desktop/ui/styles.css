@@ -740,19 +740,6 @@ input:focus, textarea:focus, select:focus {
   font-size: 11px; font-weight: 600; color: var(--muted);
 }
 .sync-badge.hide { display: none; }
-/* Who a circle post reaches — FeedView.swift `ComposerAudienceChip`. A SOLID capsule (not see-through
-   glass: it floats over photos) with one hairline ring, text-colored label, accent on the icon only. */
-.composer-audience { display: flex; }
-.audience-chip {
-  display: inline-flex; align-items: center; gap: 5px; max-width: 100%; border-radius: 999px;
-  padding: 4px 10px; font-size: 12px; font-weight: 600; color: var(--text); cursor: pointer;
-  font-family: inherit; background: var(--panel-solid); border: 1px solid var(--line);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
-}
-.audience-chip svg:first-child { color: var(--pink); }
-.audience-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.audience-chip svg { width: 13px; height: 13px; flex: 0 0 auto; }
-.audience-chip svg:last-child { width: 10px; height: 10px; color: var(--muted); }
 /* A circle post's send is a labeled "Post" pill, not the DM paper plane. */
 .composer-send.labeled { width: auto; padding: 0 18px; border-radius: 999px; font-size: 14px; font-weight: 700; font-family: inherit; }
 

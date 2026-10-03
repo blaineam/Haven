@@ -704,20 +704,10 @@
     <string name="view_story">스토리 보기</string>
     <string name="story_no_longer_available">스토리를 더 이상 볼 수 없음</string>
     <!-- Composer audience: a circle post goes to EVERYONE in it; make that unmistakable. -->
-    <string name="composer_audience_everyone">%1$s의 모든 사람</string>
-    <string name="composer_audience_everyone_count">%1$s의 모든 사람 · %2$s</string>
-    <string name="composer_one_person">1명</string>
-    <string name="composer_n_people">%1$d명</string>
     <string name="composer_placeholder">모두에게 게시…</string>
     <string name="circle_reply_placeholder_generic">모두에게 답글…</string>
     <string name="composer_post_button">게시</string>
     <string name="composer_post_cd_named">%1$s의 모든 사람에게 게시</string>
-    <string name="composer_audience_cd">게시 대상: %1$s. 한 사람에게 비공개로 보내기 등 옵션을 엽니다</string>
-    <string name="composer_send_privately">한 사람에게 비공개로 보내기…</string>
-    <string name="audience_confirm_title">%1$s의 모든 사람에게 게시할까요?</string>
-    <string name="audience_confirm_body">%1$s의 모든 사람(%2$s)에게 공유됩니다. 한 사람에게만 보내려면 메시지를 사용하세요.</string>
-    <string name="audience_confirm_post">모두에게 게시</string>
-    <string name="audience_confirm_private">대신 비공개로 보내기…</string>
     <string name="circle_reply_placeholder_named">%1$s의 모든 사람에게 답글…</string>
     <string name="circle_member_message_cd">%1$s에게 비공개 메시지</string>
     <!-- Settings ▸ Devices ▸ Load history from your relays (RelayHistory.kt) -->

@@ -38,8 +38,6 @@ final class SyncProgressUITests: XCTestCase {
         field.tap()
         field.typeText(text)
         app.buttons["composeSend"].tap()
-        let confirm = app.buttons["Post to everyone"]
-        if confirm.waitForExistence(timeout: 3) { confirm.tap() }
     }
 
     /// Every launch re-publishes an epoch head for every circle. That is upkeep, not something the

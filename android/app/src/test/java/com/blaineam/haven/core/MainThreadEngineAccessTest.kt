@@ -36,7 +36,7 @@ class MainThreadEngineAccessTest {
     private val engineReads = listOf(
         "HavenNet.engine.", "HavenNet.messages(", "HavenNet.unreadDmConversations(", "HavenNet.reports(",
         "HavenNet.lastActivity(", "HavenNet.unreadMessages(", "HavenNet.pendingCircleUpgrades(",
-        "HavenNet.circleIsUpgradable(", "HavenNet.membersOf(", "ComposerAudience.othersCount(",
+        "HavenNet.circleIsUpgradable(", "HavenNet.membersOf(",
         "resolveStory(", "previewOf(",
     )
 

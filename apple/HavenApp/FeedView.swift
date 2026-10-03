@@ -274,8 +274,6 @@ struct FeedView: View {
     @State private var attachedTrack: TrackRefFfi?
     @State private var muteVideo = false   // author's audio choice for attached video(s)
     @State private var pendingSensitive: [String]?   // attachments SCA flagged, awaiting send-anyway
-    @State private var confirmAudience = false   // one-time "this goes to everyone in <Circle>" check
-    @State private var showPrivatePicker = false // "Send privately…" → DM contact picker, draft carried over
     @State private var showLocation = false   // opt-in: tag the post with a photo's reverse-geocoded place
     @State private var showSchedule = false   // "send later" date picker
     @State private var dropActive = false   // drag-and-drop media onto the composer (macOS/iPadOS)
@@ -620,20 +618,6 @@ struct FeedView: View {
             } message: {
                 Text("On-device analysis flagged one or more attachments as sensitive. If you send, they'll be blurred for everyone in the circle until each person taps to reveal.")
             }
-            .confirmationDialog("Post to everyone in \(store.activeCircleTitle)?",
-                                isPresented: $confirmAudience, titleVisibility: .visible) {
-                Button("Post to everyone") {
-                    ComposerAudience.acknowledge(store.activeCircleId)
-                    send(audienceConfirmed: true)
-                }
-                Button("Send privately instead…") { showPrivatePicker = true }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("This will be shared with everyone in \(store.activeCircleTitle) (\(ComposerAudience.peopleText(audienceCount))). To send to just one person, use Message.")
-            }
-            .sheet(isPresented: $showPrivatePicker) {
-                DMContactPicker { id in showPrivatePicker = false; sendPrivately(to: id) }
-            }
             .havenFullScreenCover(isPresented: $showStoryCamera) {
                 StoryCameraView { ref, caption, track in
                     Task { @MainActor in
@@ -780,14 +764,6 @@ struct FeedView: View {
                     .tint(HavenTheme.pink)
                     .padding(.horizontal, 4)
                 }
-                // Say out loud who this reaches — the audience used to be implicit in the circle switcher,
-                // and people posted private things to the whole circle meaning to write to one person.
-                HStack {
-                    ComposerAudienceChip(circleName: store.activeCircleTitle, count: audienceCount) {
-                        showPrivatePicker = true
-                    }
-                    Spacer()
-                }
                 HStack(spacing: 10) {
                     Menu {
                         Button { showMediaPicker = true } label: { Label("Photo or Video", systemImage: "photo.on.rectangle") }
@@ -821,7 +797,10 @@ struct FeedView: View {
                     .fixedSize()
                     #endif
 
-                    TextField("Post to everyone…", text: $compose, axis: .vertical)   // the chip above names the circle
+                    // Say out loud who this reaches — the audience used to be implicit in the circle
+                    // switcher, and people posted private things to the whole circle meaning to write
+                    // to one person. The placeholder names the circle; the labeled Post pill does the rest.
+                    TextField(ComposerAudience.postPlaceholder(store.activeCircleTitle), text: $compose, axis: .vertical)
                         .accessibilityIdentifier("composeField")
                         .focused($composeFocused)
                         .textFieldStyle(.plain)   // drop the macOS system focus ring/border — matches iOS
@@ -1039,26 +1018,9 @@ struct FeedView: View {
         composeFocused = false
     }
 
-    /// Everyone else this circle's posts reach (see ComposerAudience.othersCount).
-    private var audienceCount: Int { ComposerAudience.othersCount(circleId: store.activeCircleId) }
-
-    /// "Send privately instead…": open (or reuse) the DM thread and carry the typed words into its
-    /// composer — the same hand-off the post menu's "Message <name>" makes. Attachments stay here.
-    private func sendPrivately(to dmCircleId: String) {
-        let text = compose.trimmingCharacters(in: .whitespacesAndNewlines)
-        DMDraftStore.shared.stage(circleId: dmCircleId, text: text)
-        compose = ""; composeFocused = false
-        DeepLinkRouter.shared.requestedTab = "messages"
-    }
-
-    private func send(audienceConfirmed: Bool = false) {
+    private func send() {
         let text = compose.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachedMedia.isEmpty || attachedTrack != nil else { return }
-        // One-time per circle: make sure they know this goes to everyone, not one person.
-        if !audienceConfirmed, ComposerAudience.needsConfirmation(circleId: store.activeCircleId) {
-            confirmAudience = true
-            return
-        }
         // Sender-side check: if on-device Sensitive Content Analysis flags an attachment, ask before
         // sending. (Only when the user has SCA on; otherwise post straight away.)
         let media = attachedMedia

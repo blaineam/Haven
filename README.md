@@ -50,10 +50,10 @@ S3-compatible bucket, or a direct peer-to-peer link.
   and videos go up to it once (sealed end-to-end) and friends fetch them from there, instead
   of your phone streaming a copy to each friend. Heavy background transfers pause during
   calls and when the device is hot or in Low Power Mode / Battery Saver, and resume later.
-- **Always clear who sees what (2.0).** The composer shows exactly who a post reaches
-  ("Everyone in <circle> · N people"), the Post button is labeled with its audience, the first
-  post in a circle asks once, replies are marked as visible to the circle, and "Send privately
-  instead" plus a Message button on profiles and member lists make the private path one tap away.
+- **Always clear who sees what (2.0).** The composer names who a post reaches ("Post to
+  everyone in <circle>"), the Post button is labeled with its audience, replies are marked as
+  visible to the circle, and a Message button on profiles and member lists makes the private
+  path one tap away — without an extra "are you sure?" step in front of every post.
 - **You're in control.** Block anyone, approve every new contact, and on-device
   sensitive-content guards keep flagged media blurred — all without anything
   leaving your phone.

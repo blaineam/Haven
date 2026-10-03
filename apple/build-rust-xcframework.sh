@@ -78,7 +78,14 @@ echo "▸ Ensuring Apple targets (iOS device + sim + Mac Catalyst + native macOS
 # objects default to a higher min version than the app links against → "built for newer version than
 # being linked" link warnings on every build.
 export IPHONEOS_DEPLOYMENT_TARGET="17.0"
-export MACOSX_DEPLOYMENT_TARGET="14.0"
+# NOT MACOSX_DEPLOYMENT_TARGET. The host's proc-macro dylibs (serde_derive, time_macros, uniffi's
+# macros…) are built for aarch64-apple-darwin too, and Xcode 27's ld-27037 — the RELEASED one now,
+# not only the beta, and the Command Line Tools' — links them unloadably ("mis-aligned LINKEDIT
+# string pool" → "can't find crate for `time_macros`") whenever MACOSX_DEPLOYMENT_TARGET=14.0 is
+# set. Unset, rustc and cc ≥1.1 both use rustc's default (11.0), which is BELOW the app's 14.0, so
+# the native-macOS slice still links warning-free. (2026-10-03: a dependency bump relinked the
+# macros and every xcframework build failed until this line went.)
+unset MACOSX_DEPLOYMENT_TARGET
 echo "▸ Building static libs (device + simulator + Mac Catalyst + native macOS)…"
 ( cd "$CORE" && "$CARGO" build -p haven_ffi --lib --release --target aarch64-apple-ios )
 ( cd "$CORE" && "$CARGO" build -p haven_ffi --lib --release --target aarch64-apple-ios-sim )

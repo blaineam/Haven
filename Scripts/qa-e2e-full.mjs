@@ -1843,7 +1843,9 @@ async function main() {
     await sleep(2000);
     const before = new Set(eventKeys(mailboxKeys(), cidRH));
     await op(devices.ios, { op: 'post', body: tText, circle_id: cidRH });
-    const ph = devices.ios.stage(PHOTO, 'qa-photo-rh.jpg');
+    // Distinct pixels: the shared fixture's ref is already on Y from earlier steps, so it would
+    // land as "already had it" and the summary would rightly count 0 recovered media.
+    const ph = devices.ios.stage(distinctPhoto('relayhistory'), 'qa-photo-rh.jpg');
     await op(devices.ios, { op: 'post', body: tPhoto, media: 'photo', photo_path: ph, circle_id: cidRH });
     let photoRefs = [];
     await converge(devices.ios, (j) => {

@@ -7,6 +7,17 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Fixed — desktop: a photo's preview could stay missing for the whole session
+
+When a post arrived, the desktop app could start downloading the same small preview two or three
+times at once. One download could catch another mid-write, read an empty file, decide the stored copy
+was corrupt, delete it and stop retrying until the app restarted — so a post sent over a satellite or
+other very slow link showed no preview until the full photo arrived. Downloads of the same item now
+run one at a time, files are written atomically, and an empty reply counts as "not there yet" rather
+than "broken".
+
 ## 2.0.0 — release candidate 3 (2026-10-02)
 
 Soren release gate green (all 11 suites, including the new `relayhistory` e2e step).

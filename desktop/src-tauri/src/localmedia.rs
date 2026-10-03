@@ -19,6 +19,22 @@ use sha2::{Digest, Sha256};
 
 pub struct LocalMedia {
     dir: PathBuf,
+    /// Refs with a relay fetch in flight — the single-flight set behind [`LocalMedia::claim_fetch`].
+    fetching: parking_lot::Mutex<std::collections::HashSet<String>>,
+}
+
+/// Exclusive right to fetch one ref; releases on drop, INCLUDING when the owning future is
+/// cancelled (the prefetch lane wraps fetches in a 5s timeout), so a claim can never leak and
+/// wedge a ref as permanently "in flight".
+pub struct FetchClaim<'a> {
+    media: &'a LocalMedia,
+    reference: String,
+}
+
+impl Drop for FetchClaim<'_> {
+    fn drop(&mut self) {
+        self.media.fetching.lock().remove(&self.reference);
+    }
 }
 
 /// What kind of media a ref points at — drives the ref prefix and the rendered player.
@@ -101,7 +117,28 @@ pub fn audio_mime(bytes: &[u8]) -> &'static str {
 impl LocalMedia {
     pub fn new(dir: PathBuf) -> Self {
         let _ = fs::create_dir_all(&dir);
-        Self { dir }
+        Self { dir, fetching: Default::default() }
+    }
+
+    /// Claim the relay fetch of `reference`, or `None` when another task already holds it.
+    ///
+    /// Up to three lanes start fetching the same small companion the instant a post lands
+    /// (prefetch-before-notify, the missing-media sweep, push-ahead on announce). Running them
+    /// concurrently bought nothing and raced each other on the same on-disk file — the loser's
+    /// open-check read a half-written blob, declared it corrupt and blacklisted the ref for the
+    /// session. One fetch per ref; the others wait for it (see [`Self::fetch_in_flight`]).
+    pub fn claim_fetch(&self, reference: &str) -> Option<FetchClaim<'_>> {
+        let key = bare_id(reference).to_string();
+        if self.fetching.lock().insert(key.clone()) {
+            Some(FetchClaim { media: self, reference: key })
+        } else {
+            None
+        }
+    }
+
+    /// Whether some task currently holds [`Self::claim_fetch`] for `reference`.
+    pub fn fetch_in_flight(&self, reference: &str) -> bool {
+        self.fetching.lock().contains(bare_id(reference))
     }
 
     pub fn is_video(reference: &str) -> bool {
@@ -250,9 +287,35 @@ impl LocalMedia {
         fs::read(self.dir.join(bare_id(reference))).ok()
     }
 
-    /// Write a sealed blob fetched from the relay straight to disk.
-    pub fn write_raw_sealed(&self, reference: &str, blob: &[u8]) {
-        let _ = fs::write(self.dir.join(bare_id(reference)), blob);
+    /// Write a sealed blob fetched from the relay to disk, ATOMICALLY. Returns false (and writes
+    /// nothing) for an empty body or an IO error — the caller treats that as a miss.
+    ///
+    /// Several lanes fetch the same small companion at the same moment (prefetch-before-notify, the
+    /// missing-media sweep, push-ahead on announce). A plain `fs::write` truncates the live file
+    /// before refilling it, so a sibling task's open-check could read 0 bytes mid-write, declare the
+    /// copy "found but OPEN FAILED", delete it and blacklist the ref for the session — a satellite
+    /// post's preview then never rendered on desktop. Write to a per-call temp and rename over the
+    /// target instead: readers see the old file or the new one, never a truncated one. The temp is
+    /// `incoming_*.part`-named so the cleanup inventory skips it and the orphan sweep reclaims a
+    /// leaked one after its grace window.
+    pub fn write_raw_sealed(&self, reference: &str, blob: &[u8]) -> bool {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        if blob.is_empty() {
+            return false;
+        }
+        let name = bare_id(reference);
+        let tmp = self.dir.join(format!(
+            "incoming_{name}.{}-{}.raw.part",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        if fs::write(&tmp, blob).and_then(|_| fs::rename(&tmp, self.dir.join(name))).is_ok() {
+            true
+        } else {
+            let _ = fs::remove_file(&tmp);
+            false
+        }
     }
 
     // ---- Chunked reassembly (large-media fix) -----------------------------------------------
@@ -950,5 +1013,69 @@ mod tests {
         assert_eq!(bare_id("v:deadbeef"), "deadbeef");
         assert_eq!(bare_id("img_deadbeef"), "deadbeef");
         assert_eq!(bare_id("vid_abc"), "abc");
+    }
+
+    /// The satellite-preview race: several lanes fetch the same companion at once. A reader must
+    /// never observe the stored blob truncated — that is what produced "found (0B) but OPEN FAILED"
+    /// and blacklisted a perfectly good preview for the session.
+    #[test]
+    fn raw_sealed_write_is_atomic_under_concurrent_writers() {
+        let (m, dir) = tmp_media();
+        let m = Arc::new(m);
+        let blob = vec![0x5au8; 64 * 1024];
+        assert!(m.write_raw_sealed("img_cafef00d", &blob));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writers: Vec<_> = (0..3)
+            .map(|_| {
+                let (m, blob, stop) = (m.clone(), blob.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        assert!(m.write_raw_sealed("img_cafef00d", &blob));
+                    }
+                })
+            })
+            .collect();
+        for _ in 0..2000 {
+            let got = m.raw_sealed("img_cafef00d").expect("never missing mid-rewrite");
+            assert_eq!(got.len(), blob.len(), "a reader saw a truncated blob");
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for w in writers {
+            w.join().unwrap();
+        }
+        // No temp files left behind, and the cleanup inventory only ever sees the blob itself.
+        let names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["cafef00d".to_string()], "stray temp files: {names:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_raw_sealed_body_is_a_miss_not_a_stored_copy() {
+        let (m, dir) = tmp_media();
+        assert!(!m.write_raw_sealed("img_beef", b""));
+        assert!(!m.has("img_beef"), "an empty relay body must not become a held (\"corrupt\") blob");
+        assert!(m.write_raw_sealed("img_beef", b"sealed"));
+        assert!(m.has("img_beef"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fetch_claim_is_single_flight_and_released_on_drop() {
+        let (m, dir) = tmp_media();
+        let first = m.claim_fetch("img_abc").expect("first claim wins");
+        assert!(m.fetch_in_flight("img_abc"));
+        // Same storage key regardless of prefix — they would race on the same file.
+        assert!(m.claim_fetch("abc").is_none());
+        assert!(m.claim_fetch("img_abc").is_none());
+        // Other refs are independent.
+        assert!(m.claim_fetch("img_def").is_some());
+        drop(first); // also what a cancelled (timed-out) future does
+        assert!(!m.fetch_in_flight("img_abc"));
+        assert!(m.claim_fetch("img_abc").is_some());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

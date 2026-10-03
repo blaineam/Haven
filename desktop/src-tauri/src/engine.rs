@@ -9791,7 +9791,7 @@ impl Engine {
             match self.media.load_any_circle(&self.social, reference) {
                 Some(plain) => match self.social.seal_circle_media(circle_id.to_string(), plain) {
                     Ok(fresh) => {
-                        self.media.write_raw_sealed(reference, &fresh);
+                        let _ = self.media.write_raw_sealed(reference, &fresh);
                         log::info!("reseal {}: sealed afresh for the circle's current members ({} B)",
                                    short(reference), fresh.len());
                         Some(fresh)
@@ -10057,10 +10057,10 @@ impl Engine {
                         return true;
                     }
                     // KEEP the partial + sidecar — the next attempt resumes where this one stalled.
-                } else {
-                    self.media.write_raw_sealed(reference, &head);
+                } else if self.media.write_raw_sealed(reference, &head) {
                     return true;
                 }
+                // An EMPTY body is a miss, not a found-but-corrupt copy: fall through to the relays.
             }
         }
         // Then each relay in turn — the circle's own PLUS every other known relay (media is
@@ -10103,12 +10103,13 @@ impl Engine {
                                     return true;
                                 }
                                 // Partial + sidecar kept — the retry resumes on the missing chunks.
-                            } else {
+                            } else if self.media.write_raw_sealed(reference, &head) {
                                 self.mark_relay_ok(&node_hex);
-                                self.media.write_raw_sealed(reference, &head);
                                 return true;
                             }
-                            http_miss = true; // served the manifest but reassembly failed — don't dial
+                            // 200 with an empty body (or a failed local write) counts as a miss —
+                            // never as a stored copy that "failed to open" and gets blacklisted.
+                            http_miss = true; // answered, but nothing usable landed — don't dial
                             break;
                         }
                     }
@@ -10141,9 +10142,10 @@ impl Engine {
                         // Partial + sidecar kept for the next attempt.
                         continue;
                     }
-                    self.mark_relay_ok(&node_hex);
-                    self.media.write_raw_sealed(reference, &head);
-                    return true;
+                    if self.media.write_raw_sealed(reference, &head) {
+                        self.mark_relay_ok(&node_hex);
+                        return true;
+                    }
                 }
             }
         }
@@ -10172,7 +10174,26 @@ impl Engine {
     /// to the refusers and try once more. Without this the fetch degrades to a peer ask that only
     /// works while the author happens to be online — which is exactly how media a few days old became
     /// permanently unreachable while fresh media (author still around) looked fine.
+    ///
+    /// SINGLE-FLIGHT per ref: a caller that finds a fetch of the same ref already running waits for
+    /// it and reports whether the blob is now held, instead of downloading it a second time into the
+    /// same file (that race is what left a satellite post's preview permanently missing on desktop).
     async fn fetch_media_healing(self: &Arc<Self>, circle_id: &str, reference: &str) -> bool {
+        let _claim = loop {
+            if let Some(claim) = self.media.claim_fetch(reference) {
+                break claim;
+            }
+            while self.media.fetch_in_flight(reference) {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            if self.media.has(reference) {
+                return true;
+            }
+            // The leader came up empty (or was cancelled): take our own turn.
+        };
+        if self.media.has(reference) {
+            return true; // landed between the caller's check and our claim
+        }
         let got = if self.fetch_media_from_relay(circle_id, reference).await {
             self.accept_fetched_blob(reference)
         } else if self.heal_forbidden_relays().await && self.fetch_media_from_relay(circle_id, reference).await {
@@ -10213,6 +10234,12 @@ impl Engine {
             return true; // nothing to judge it against — under-claiming corruption is the safe direction
         }
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if size == 0 {
+            // Nothing to judge: an empty file is a MISS, never "found but corrupt" — blacklisting
+            // it would stop every retry this session for a blob that may be fine on the relay.
+            self.media.delete(reference);
+            return false;
+        }
         // Above ~64 MB decrypt file→file (native, streaming) rather than pulling the blob — and a copy
         // of it per circle — into RAM. "Too big to check in memory" must never become "declared
         // corrupt": that would delete perfectly good video.

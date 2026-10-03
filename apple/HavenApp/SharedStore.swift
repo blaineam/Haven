@@ -61,7 +61,9 @@ final class MediaBackupQueue {
     static let shared = MediaBackupQueue()
     /// `at` (authored ms, priority lane only) lets the drain announce a FRESH post's media to the
     /// circle the moment it lands (frame 32) — optional so old persisted queues still decode.
-    private struct Job: Codable, Equatable { let ref: String; let cid: String; var at: UInt64? }
+    /// `mine` (backfill lane): the post/comment carrying the ref is MY account's. nil = unknown
+    /// (a job persisted by an older build, or a blob received from a peer) — treated as mirroring.
+    private struct Job: Codable, Equatable { let ref: String; let cid: String; var at: UInt64?; var mine: Bool? }
     private let key = "haven.mediaBackupQueue"
     private let hiKey = "haven.mediaBackupQueue.hi"
     private var pending: [Job]
@@ -134,7 +136,8 @@ final class MediaBackupQueue {
     /// `priority`: a just-authored event's media — drained before any backfill backlog. Callers
     /// enqueue in the media list's order (thumbs/posters ride before the video), which the lane
     /// preserves, so a poster is on the relay before its (much larger) video starts.
-    func enqueue(_ ref: String, circleId: String, engine: Engine, priority: Bool = false) {
+    /// `mine` (backfill only): whether the item carrying `ref` is my own — see `MediaHolding.isBackgroundMirror`.
+    func enqueue(_ ref: String, circleId: String, engine: Engine, priority: Bool = false, mine: Bool? = nil) {
         if MediaStore.isSynthetic(ref) { return }   // geo: pins et al. carry no bytes — never relay-storable
         let queued = (inFlightHi + inFlightLo).contains(where: { $0.ref == ref && $0.cid == circleId })
             || pending.contains(where: { $0.ref == ref && $0.cid == circleId })
@@ -142,12 +145,17 @@ final class MediaBackupQueue {
         if !queued {
             if priority {
                 priorityPending.append(Job(ref: ref, cid: circleId,
-                                           at: UInt64(Date().timeIntervalSince1970 * 1000)))
+                                           at: UInt64(Date().timeIntervalSince1970 * 1000), mine: true))
                 if priorityPending.count > 500 { priorityPending.removeFirst(priorityPending.count - 500) }
             } else {
-                pending.append(Job(ref: ref, cid: circleId, at: nil))
+                pending.append(Job(ref: ref, cid: circleId, at: nil, mine: mine))
                 if pending.count > 10_000 { pending.removeFirst(pending.count - 10_000) }   // bound the queue itself
             }
+            save()
+            MediaLedgerChanges.shared.note(ref)   // its badge starts showing the upload
+        } else if let mine, let i = pending.firstIndex(where: { $0.ref == ref && $0.cid == circleId }),
+                  pending[i].mine == nil {
+            pending[i].mine = mine   // a job persisted by an older build learns its authorship
             save()
         }
         drain(engine: engine)
@@ -163,7 +171,7 @@ final class MediaBackupQueue {
     func promote(_ ref: String) {
         guard let i = pending.firstIndex(where: { $0.ref == ref }) else { return }
         let job = pending.remove(at: i)
-        priorityPending.insert(Job(ref: job.ref, cid: job.cid, at: nil), at: 0)
+        priorityPending.insert(Job(ref: job.ref, cid: job.cid, at: nil, mine: job.mine), at: 0)
         save()
     }
 
@@ -217,7 +225,24 @@ final class MediaBackupQueue {
             // the priority lane (media you just authored — what spares every future peer serve)
             // keeps going ONE job per pass and the backfill lane waits; .critical stops both. The
             // gate lifting re-drives this queue (HeavyWorkMonitor → FeedStore.heavyWorkLifted).
-            let gate = HeavyWorkPolicy.uploadBudget(base: budget, HeavyWorkMonitor.current)
+            //
+            // MIRRORING (`gate.mirror`): backfill of media this device is not the only safe holder of —
+            // a friend's post, or your own post a relay already holds (a "Load history from your
+            // relays" recovery is hundreds of those) — is background work: it waits already at
+            // `.fair`, and a phone takes only a couple per pass. rc.3 field report: a warm iPhone kept
+            // re-mirroring a just-recovered history and never cooled down.
+            #if os(iOS)
+            let phone = true
+            #else
+            let phone = false
+            #endif
+            let gate = HeavyWorkPolicy.uploadBudget(base: budget, phone: phone, HeavyWorkMonitor.current)
+            let ownRelayHex = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
+            let isMirror: (Job) -> Bool = { job in
+                MediaHolding.isBackgroundMirror(
+                    mine: job.mine,
+                    heldRemotely: MediaBackupLedger.hasAnyRemote(job.ref, ownRelayHex: ownRelayHex))
+            }
             // ULTRA-CONSTRAINED LINK: previews only (docs/PREVIEW-TIER-DESIGN.md §4.1).
             //
             // A ~6 KB preview is the one media that can actually cross a satellite bearer; the
@@ -236,7 +261,16 @@ final class MediaBackupQueue {
                 return !previewsOnly || MediaStore.shared.maySendOnUltraConstrained(job.ref)
             }
             let hiWork = Array(priorityPending.filter(sendable).prefix(gate.priority))
-            let loWork = Array(pending.filter(sendable).prefix(min(gate.backfill, budget - hiWork.count)))
+            var loWork: [Job] = []
+            var mirrorsTaken = 0
+            let loBudget = min(gate.backfill, budget - hiWork.count)
+            for job in pending where loWork.count < loBudget && sendable(job) {
+                if isMirror(job) {
+                    guard mirrorsTaken < gate.mirror else { continue }   // stays queued for a cooler pass
+                    mirrorsTaken += 1
+                }
+                loWork.append(job)
+            }
             guard !hiWork.isEmpty || !loWork.isEmpty else {
                 // Everything queued is inside its backoff window. Do NOT re-arm on a timer: the
                 // 2-minute backfill sweep already re-enqueues refs whose window has elapsed (it is
@@ -265,7 +299,10 @@ final class MediaBackupQueue {
                 }
                 // Own hosted store: if the blob is already local under the media key, ledger it and
                 // skip the expensive seal path for that dest (backup still mirrors to remote peers).
-                let ok = await SharedStore.backup(ref: job.ref, circleId: job.cid, engine: engine)
+                // A backfill job of my own media that the probe finds already safe on a relay is
+                // mirroring from then on: its remaining uploads wait for a cool device.
+                let ok = await SharedStore.backup(ref: job.ref, circleId: job.cid, engine: engine,
+                                                  deferMirrorWhenWarm: !isPriority)
                 if !ok {
                     // RECORD THE STALL HERE, at the one choke point, instead of trusting every path
                     // inside backup() to do it — three of them did not:
@@ -428,6 +465,7 @@ enum MediaBackupLedger {
             byRef[ref, default: []].insert(dest)
         }
         UserDefaults.standard.set(Array(set), forKey: defaultsKey)
+        MediaLedgerChanges.shared.note(ref)
     }
     /// Forget every confirmation for ONE ref, so the next pass re-probes every destination instead of
     /// trusting a verdict that has since turned out to be wrong.
@@ -441,6 +479,7 @@ enum MediaBackupLedger {
         set = set.filter { !$0.hasSuffix("|\(ref)") }
         byRef[ref] = nil
         UserDefaults.standard.set(Array(set), forKey: defaultsKey)
+        MediaLedgerChanges.shared.note(ref)
     }
 
     /// Forget a destination's confirmations (e.g. a relay was wiped/forgotten) so we re-mirror to it.
@@ -450,6 +489,49 @@ enum MediaBackupLedger {
         if set.count != before {
             byRef = index(set)
             UserDefaults.standard.set(Array(set), forKey: defaultsKey)
+            MediaLedgerChanges.shared.noteAll()
+        }
+    }
+}
+
+/// "The backup ledger (or the upload queue) changed for these refs" — what the backed-up badge on your
+/// own posts re-renders on.
+///
+/// The badge computes its state from `MediaBackupLedger` inside a `PostCard` marked `.equatable()`,
+/// whose equality compares only the post. So a ledger change never reached a card that was already on
+/// screen: it ticked hourly unless an upload was in flight, and the You tab kept the orange "not backed
+/// up" cloud for posts the relay held completely, while the circle feed — rebuilt for unrelated reasons
+/// — showed the pink check for the very same post (rc.3 field report). Coalesced like `MediaArrivals`;
+/// the badge filters `lastBatch` by its own refs in `onReceive`, so a mark re-evaluates only the badges
+/// it concerns — never every card on screen.
+@MainActor
+final class MediaLedgerChanges: ObservableObject {
+    static let shared = MediaLedgerChanges()
+    @Published private(set) var generation: UInt64 = 0
+    /// Refs changed in the last published burst; `everything` = a whole destination was dropped.
+    private(set) var lastBatch: Set<String> = []
+    private(set) var everything = false
+    private var pending: Set<String> = []
+    private var pendingAll = false
+    private var flushScheduled = false
+
+    func note(_ ref: String) { pending.insert(ref); schedule() }
+    func noteAll() { pendingAll = true; schedule() }
+    /// Whether the last burst touched any of `refs`.
+    func touched(_ refs: [String]) -> Bool { everything || refs.contains(where: lastBatch.contains) }
+
+    private func schedule() {
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard let self else { return }
+            self.flushScheduled = false
+            self.lastBatch = self.pending
+            self.everything = self.pendingAll
+            self.pending.removeAll()
+            self.pendingAll = false
+            self.generation &+= 1
         }
     }
 }
@@ -876,8 +958,13 @@ enum SharedStore {
     /// truthfully reporting success. Media is sealed once and never re-sealed, so a member who joins
     /// after a blob was posted is not one of its recipients and can never open it — the roster-skew
     /// case the seal-reuse guard below silently made permanent.
+    ///
+    /// `deferMirrorWhenWarm` (backfill only): if the probe finds a relay another device can read
+    /// already holding the blob, the remaining uploads are redundancy — skip them while the device is
+    /// not cool enough for background mirroring (`HeavyWorkPolicy.Conditions.backgroundMirrorAllowed`).
+    /// The next 2-minute sweep re-enqueues the ref as a mirror job, gated accordingly.
     static func backup(ref: String, circleId: String, engine: Engine, force: Bool = false,
-                       reseal: Bool = false) async -> Bool {
+                       reseal: Bool = false, deferMirrorWhenWarm: Bool = false) async -> Bool {
         // ULTRA-CONSTRAINED LINK: previews only, by EVERY upload path. The queue filters its own jobs
         // (MediaBackupQueue.drain), but a friend's media-wanted ask, a direct-ask re-probe or a
         // quarantine re-seal call this directly — and one of those put a 330 KB original on the relay
@@ -889,14 +976,16 @@ enum SharedStore {
             HavenLog.sync("backup ref=\(ref.prefix(12)) held — link is ultra-constrained (previews only)")
             return false
         }
-        if await backupOnce(ref: ref, circleId: circleId, engine: engine, force: force, reseal: reseal) { return true }
+        if await backupOnce(ref: ref, circleId: circleId, engine: engine, force: force, reseal: reseal,
+                            deferMirrorWhenWarm: deferMirrorWhenWarm) { return true }
         // Nothing took the blob and at least one relay REFUSED it rather than being down: publish our
         // roster to the refusers and try once more, exactly as `restore` does for the read side. A
         // device that has never been authorized anywhere otherwise never gets its FIRST blob up — and
         // because that upload failure is invisible, the damage surfaces much later as a fetch that
         // genuinely 404s, an absence manufactured entirely by a permissions problem.
         guard await healForbiddenRelays(engine: engine) else { return false }
-        return await backupOnce(ref: ref, circleId: circleId, engine: engine, force: force, reseal: reseal)
+        return await backupOnce(ref: ref, circleId: circleId, engine: engine, force: force, reseal: reseal,
+                                deferMirrorWhenWarm: deferMirrorWhenWarm)
     }
 
     /// Copy a sealed blob from a relay that HOLDS it to the circle's relays that don't, for a ref this
@@ -915,7 +1004,7 @@ enum SharedStore {
         guard dests.count >= 2 else { return false }   // nothing to mirror between
 
         typealias Endpoint = (node: String, base: String, token: String)
-        var holders: [(endpoint: Endpoint, head: Data)] = []
+        var holders: [Endpoint] = []
         var missing: [Endpoint] = []
         // OUR OWN HOSTED RELAY is a destination too, and it has no HTTP interface to itself — it is
         // the local store. Without this the Mac that HOSTS a relay was skipped entirely by the
@@ -941,24 +1030,22 @@ enum SharedStore {
             case .unreachable: continue
             }
             guard let base = http.urls.first(where: { !httpUrlBad($0) }) else { continue }
-            switch await httpGet(base, http.token, key(ref)) {
-            case .success(let blob):
-                if let blob {
-                    MediaBackupLedger.mark(node, ref)
-                    // Keep the bytes from the probe: for a chunked blob this is just the manifest, and
-                    // for a single-blob media it IS the media — re-fetching to copy would double the
-                    // download for every mirror.
-                    holders.append(((node, base, http.token), blob))
-                } else {
-                    missing.append((node, base, http.token))
-                }
-            case .failure(is RelayForbidden):
+            // HEAD first (see `probeHttpHold`): a holder's bytes are only needed if some relay is
+            // MISSING the blob, and usually none is — the old GET probe downloaded the whole blob
+            // from every holder on every pass just to learn that.
+            switch await probeHttpHold(ref, base: base, token: http.token) {
+            case .complete:
+                MediaBackupLedger.mark(node, ref)
+                holders.append((node, base, http.token))
+            case .absent, .incomplete:
+                missing.append((node, base, http.token))
+            case .refused:
                 noteRefused(node, "mirror probe", ref: ref)
-            case .failure:
+            case .unreachable:
                 markHttpUrlBad(base)   // unreachable — not "absent"
             }
         }
-        guard let first = holders.first else {
+        guard !holders.isEmpty else {
             // Nobody reachable holds it and we cannot re-seal it — genuinely stalled, so take the
             // backoff rather than re-probing every relay on every 2-minute pass forever.
             HavenLog.sync("media mirror NO-SOURCE ref=\(ref) — no reachable relay holds it")
@@ -966,8 +1053,16 @@ enum SharedStore {
             return false
         }
         guard !missing.isEmpty || ownRelayNeeds else { return true }   // everyone reachable holds it
-        let src = first.endpoint
-        let head = first.head
+        // Something needs a copy: NOW fetch the source's manifest key (for a single-blob media this is
+        // the media itself) from the first holder that still serves it.
+        var picked: (src: Endpoint, head: Data)?
+        for h in holders {
+            if case .success(let d?) = await httpGet(h.base, h.token, key(ref)) { picked = (h, d); break }
+        }
+        guard let (src, head) = picked else {
+            HavenLog.sync("media mirror ref=\(ref) — holders stopped serving it between probe and copy")
+            return true   // still on at least one relay; the next pass retries the copy
+        }
         let chunks = parseManifest(head)
 
         var mirrored = false
@@ -1016,7 +1111,7 @@ enum SharedStore {
     }
 
     private static func backupOnce(ref: String, circleId: String, engine: Engine, force: Bool = false,
-                                   reseal: Bool = false) async -> Bool {
+                                   reseal: Bool = false, deferMirrorWhenWarm: Bool = false) async -> Bool {
         // Skip entirely if this blob is already confirmed on EVERY destination — before the expensive
         // file read + seal. Content-addressed keys never change, so a confirmed upload is permanent.
         // This is what stops the periodic backfill from re-sending media the relay already has.
@@ -1118,26 +1213,25 @@ enum SharedStore {
                 var resolved = false
                 var refused = false
                 for base in http.urls where !httpUrlBad(base) {
-                    switch await httpGet(base, http.token, key(ref)) {
-                    case .success(let existing):
-                        // Complete, not merely present — see `holdsCompleteBlob`. The extra probe is
-                        // one GET of the final window, paid at most once per (ref, relay): a blob that
-                        // checks out is marked in the ledger and never probed again.
-                        let complete = await holdsCompleteBlob(ref, head: existing) { k in
-                            if case .success(let d) = await httpGet(base, http.token, k), let d, !d.isEmpty { return true }
-                            return false
-                        }
-                        if complete {
-                            RelayMailboxStore.shared.markSeen(node)
-                            MediaBackupLedger.mark(node, ref); landed = true
-                        } else {
-                            if existing != nil {
-                                HavenLog.sync("backup probe ref=\(ref.prefix(12)) relay=\(node.prefix(8)): manifest present but chunks INCOMPLETE — re-uploading")
-                            }
-                            uploads.append((node, .http(base: base, token: http.token)))
-                        }
+                    // HEAD, not GET: the old probe downloaded the WHOLE blob (every photo, in full)
+                    // just to learn "yes, it's there" — and after a history recovery the phone did
+                    // that for every recovered photo, from the relay it had just downloaded it from.
+                    // Complete, not merely present (see `holdsCompleteBlob`); a relay that doesn't
+                    // speak HEAD gets the old GET probe. Paid at most once per (ref, relay): a blob
+                    // that checks out is marked in the ledger and never probed again.
+                    let probe = await probeHttpHold(ref, base: base, token: http.token)
+                    switch probe {
+                    case .complete:
+                        RelayMailboxStore.shared.markSeen(node)
+                        MediaBackupLedger.mark(node, ref); landed = true
                         resolved = true
-                    case .failure(is RelayForbidden):
+                    case .incomplete, .absent:
+                        if probe == .incomplete {
+                            HavenLog.sync("backup probe ref=\(ref.prefix(12)) relay=\(node.prefix(8)): manifest present but chunks INCOMPLETE — re-uploading")
+                        }
+                        uploads.append((node, .http(base: base, token: http.token)))
+                        resolved = true
+                    case .refused:
                         // Reachable and healthy — it just doesn't know us. Backing off here would
                         // strand our media on a relay that would happily store it once authorized.
                         // Its other URLs and the iroh dial reach the SAME store behind the SAME
@@ -1145,7 +1239,7 @@ enum SharedStore {
                         // in cooldown then took a relay-health strike for a relay that answered).
                         noteRefused(node, "media probe", ref: ref)
                         refused = true
-                    case .failure:
+                    case .unreachable:
                         markHttpUrlBad(base)
                     }
                     if resolved || refused { break }
@@ -1200,6 +1294,22 @@ enum SharedStore {
                     }
                     continue
                 }
+            }
+        }
+
+        // MIRRORING WAITS FOR A COOL DEVICE. A backfill job of my own media whose probe just found a
+        // relay another device can read holding it is no longer "the only copy is here" — what is
+        // left is redundancy, and sealing + uploading a full blob for redundancy on a warm phone is
+        // the rc.3 heat report. Report it as landed (it IS safe on a relay); the next 2-minute sweep
+        // re-enqueues it as a mirror job, which the drain only runs while the device is cool.
+        if deferMirrorWhenWarm, s3Needs || !uploads.isEmpty,
+           !HeavyWorkMonitor.current.backgroundMirrorAllowed {
+            let ownHex = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
+            if MediaBackupLedger.hasAnyRemote(ref, ownRelayHex: ownHex) {
+                HavenLog.sync("backup ref=\(ref.prefix(12)): already on a relay — mirroring to \(uploads.count + (s3Needs ? 1 : 0)) more dest(s) deferred until the device cools [\(HeavyWorkMonitor.current.reason)]")
+                MediaBackupBackoff.recordLanded(ref)
+                MediaUploadProgress.shared.finish(ref)
+                return true
             }
         }
 
@@ -1318,10 +1428,8 @@ enum SharedStore {
                     try await putMediaFile(
                         ref: ref, dest: node, sealedURL: sealedURL, size: sealedSize,
                         sealFp: sealFp, force: force,
-                        exists: { k in
-                            if case .success(let d) = await httpGet(base, token, k), let d, !d.isEmpty { return true }
-                            return false
-                        }) { k, d in
+                        // HEAD, not GET: a resume probe used to download each 8 MB window it asked about.
+                        exists: { await httpExists(base, token, $0) }) { k, d in
                         if case .failure(let e) = await httpPut(base, token, k, d) { throw e }
                     }
                     RelayMailboxStore.shared.markSeen(node)
@@ -1763,7 +1871,16 @@ enum SharedStore {
         case ownRelay                              // our own hosted relay (local store)
         case relay(RelayClient, String)            // dialed relay client + node hex
         case s3(S3Client)                          // shared/owner bucket
-        case http(String, String)                  // relay plain-HTTP interface (base url, token)
+        case http(String, String, String)          // relay plain-HTTP interface (base url, token, node hex)
+    }
+    /// Who to credit in `MediaBackupLedger` for a blob this source just served in full.
+    private static func holder(_ src: MediaSource) -> MediaHolding.Source? {
+        switch src {
+        case .ownRelay: return RelayHost.shared.serving ? .relay(RelayHost.shared.nodeId) : nil
+        case .relay(_, let node): return .relay(node)
+        case .http(_, _, let node): return .relay(node)
+        case .s3: return .s3
+        }
     }
     /// Every source that could serve this circle's media keys, in the same priority order the
     /// manifest search uses. Built only when a chunk MISSES, so the happy path never pays for it.
@@ -1779,7 +1896,7 @@ enum SharedStore {
                 if RelayHost.shared.serving, node == RelayHost.shared.nodeId { continue }
                 if let http = RelayMailboxStore.shared.httpInterface(node),
                    let base = http.urls.first(where: { !httpUrlBad($0) }) {
-                    out.append(.http(base, http.token))
+                    out.append(.http(base, http.token, node))
                 }
             }
         }
@@ -1809,7 +1926,12 @@ enum SharedStore {
     ///
     /// Every window comes from `source`, and the partial is stamped with `head`'s fingerprint. Both
     /// halves of that matter: see the cross-seal note in `restore`.
-    private static func reassemble(ref: String, head: Data, source: MediaSource, src: String) async -> Data? {
+    /// `servedTail` is set when THIS source served the final window in this call — with the manifest,
+    /// the same "manifest + last window" completeness bar `holdsCompleteBlob` applies, so the caller
+    /// may credit the source in the backup ledger.
+    private static func reassemble(ref: String, head: Data, source: MediaSource, src: String,
+                                   servedTail: inout Bool) async -> Data? {
+        servedTail = false
         guard let chunkCount = parseManifest(head) else { return nil }
         sweepRestorePartsOnce()
         let fp = manifestFingerprint(head)
@@ -1836,6 +1958,7 @@ enum SharedStore {
                     ok = false; break
                 }
                 have = i + 1
+                if have == chunkCount { servedTail = true }
                 // Honest progress for the placeholder: i/n while a chunked blob reassembles.
                 FeedStore.shared.noteRestoreProgress(ref, done: have, total: chunkCount)
             }
@@ -1887,7 +2010,7 @@ enum SharedStore {
         case .ownRelay: return RelayHost.shared.localGet(key)
         case .relay(let c, _): return await c.get(key: key)
         case .s3(let s3): return try? await s3.getObject(key: key)
-        case .http(let base, let token): return (try? await httpGet(base, token, key).get()) ?? nil
+        case .http(let base, let token, _): return (try? await httpGet(base, token, key).get()) ?? nil
         }
     }
 
@@ -2057,6 +2180,64 @@ enum SharedStore {
         } catch { qaCount(base, "getFail"); return .failure(error) }
     }
 
+    /// HEAD one key: does the relay hold it, without the body. haven-relay serves `HEAD /k/<key>`
+    /// (signed exactly like a GET, method "HEAD") since its HTTP interface shipped. 400/405/501 — an
+    /// old relay or a proxy that won't pass HEAD — is `.unsupported`, and the caller falls back to GET.
+    private static func httpHead(_ base: String, _ token: String, _ key: String) async -> MediaHolding.Head {
+        guard !HavenNet.offline else { return .unreachable }
+        guard let url = httpKeyURL(base, key) else { return .unreachable }
+        guard let auth = httpAuth(token, "HEAD", key, Data()) else { return .unreachable }
+        var req = URLRequest(url: url, timeoutInterval: 20)
+        req.httpMethod = "HEAD"
+        req.setValue(auth, forHTTPHeaderField: "Authorization")
+        do {
+            let (_, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            switch code {
+            case 200...299: qaCount(base, "headOk"); return .present
+            case 404: qaCount(base, "headMiss"); return .absent
+            case 401, 403:
+                qaCount(base, "headRefused")
+                if code == 401 { noteUnverified(base) }
+                return .refused
+            case 400, 405, 501: qaCount(base, "headUnsupported"); return .unsupported
+            default: qaCount(base, "headFail"); return .unreachable
+            }
+        } catch { qaCount(base, "headFail"); return .unreachable }
+    }
+
+    /// Plain existence of one key (a chunk window), HEAD-first; GET only where HEAD is unsupported.
+    private static func httpExists(_ base: String, _ token: String, _ key: String) async -> Bool {
+        switch await httpHead(base, token, key) {
+        case .present: return true
+        case .unsupported:
+            qaCount(base, "probeGet")
+            if case .success(let d?) = await httpGet(base, token, key), !d.isEmpty { return true }
+            return false
+        case .absent, .refused, .unreachable: return false
+        }
+    }
+
+    /// Does the relay behind `base` hold a COMPLETE copy of `ref`? HEAD-first (`MediaHolding.probe`);
+    /// full GETs only against a relay that won't answer HEAD. Each such GET is counted as `probeGet`
+    /// in the QA dump — the e2e `relayhistory` step asserts recovered media is never re-downloaded.
+    private static func probeHttpHold(_ ref: String, base: String, token: String) async -> MediaHolding.Verdict {
+        let r = await MediaHolding.probe(
+            manifestKey: key(ref), chunkKey: { chunkKey(ref, $0) },
+            head: { await httpHead(base, token, $0) },
+            get: { k in
+                switch await httpGet(base, token, k) {
+                case .success(let d?): return .data(d)
+                case .success(nil): return .miss
+                case .failure(is RelayForbidden): return .refused
+                case .failure: return .unreachable
+                }
+            },
+            chunkCount: { parseManifest($0) })
+        for _ in 0..<r.fullGets { qaCount(base, "probeGet") }
+        return r.verdict
+    }
+
     /// PUT one key. `.success` = stored; `.failure(RelayForbidden)` = the relay is up and would take
     /// this write the moment it knows our device; any other `.failure` = unreachable. The same
     /// three-way split `httpGet` needs, for the mirror-image reason: a device that has never been
@@ -2118,7 +2299,9 @@ enum SharedStore {
     #if DEBUG
     private static var qaHttpCounts: [String: [String: Int]] = [:]
     static let qaHttpCountKeys = ["putOk", "putRefused", "putFail", "getOk", "getMiss", "getRefused",
-                                  "getFail", "listOk", "listRefused", "listFail"]
+                                  "getFail", "listOk", "listRefused", "listFail",
+                                  "headOk", "headMiss", "headRefused", "headUnsupported", "headFail",
+                                  "probeGet"]
 
     /// The dump's `relay_stats`: one row per relay this device knows, with its announced URLs, a
     /// fingerprint of its token (never the token), health/backoff, the circles it serves HERE, and
@@ -2300,7 +2483,7 @@ enum SharedStore {
                             RelayHealth.shared.recordSuccess(node)
                             if let s {
                                 RelayMailboxStore.shared.markSeen(node)
-                                head = s; chosen = .http(base, http.token); src = "http:\(node.prefix(8))"
+                                head = s; chosen = .http(base, http.token, node); src = "http:\(node.prefix(8))"
                                 break httpOuter
                             }
                             httpMissed.insert(node)   // reachable, doesn't hold it
@@ -2369,6 +2552,8 @@ enum SharedStore {
         // many landed, so a retry after a mid-download failure fetches only the missing chunks
         // (mirror of the frame-33 peer resume) instead of restarting a multi-hundred-MB pull.
         var sealed: Data?
+        // The source that served the COMPLETE sealed blob — credited in the backup ledger once it opens.
+        var servedBy: MediaSource?
         if parseManifest(head) != nil {
             // EVERY WINDOW FROM ONE SOURCE'S SEAL — never a mix.
             //
@@ -2391,9 +2576,11 @@ enum SharedStore {
             var i = 0
             while i < attempts.count {
                 let attempt = attempts[i]; i += 1
+                var tail = false
                 if let bytes = await reassemble(ref: ref, head: attempt.head, source: attempt.source,
-                                                src: attempt.label) {
+                                                src: attempt.label, servedTail: &tail) {
                     sealed = bytes
+                    servedBy = tail ? attempt.source : nil
                     break
                 }
                 guard !altsLoaded else { continue }
@@ -2428,6 +2615,7 @@ enum SharedStore {
             }
         } else {
             sealed = head
+            servedBy = source   // unchunked: the head IS the whole blob
         }
         guard let blob = sealed else {
             HavenLog.relay("media restore \(ref.prefix(12)): reassembled read FAIL via \(src)"); return nil
@@ -2442,6 +2630,15 @@ enum SharedStore {
         }
         if let data = opened {
             HavenLog.relay("media restore \(ref.prefix(12)): OK via \(src), \(data.count)B")
+            // The relay we just downloaded a complete, openable copy from HOLDS it. Record that, or
+            // the 2-minute backfill treats this freshly downloaded blob as unbacked and probes — and
+            // used to re-download — it from that very relay, then re-seals it for the others (the
+            // rc.3 "phone heats up after Load history from your relays" report). Only here: a
+            // partial or an undecryptable copy proves nothing about what the source holds.
+            if let dest = MediaHolding.holderToRecord(from: servedBy.flatMap(holder), complete: servedBy != nil,
+                                                      opened: true) {
+                MediaBackupLedger.mark(dest, ref)
+            }
             return data
         }
         HavenLog.relay("media restore \(ref.prefix(12)): found via \(src) (\(blob.count)B) but OPEN FAILED for all \(circleIds.count) circles")

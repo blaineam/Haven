@@ -116,11 +116,25 @@ final class HeavyWorkPolicyTests: XCTestCase {
     // MARK: upload queue
 
     func testOwnFreshUploadsContinueThroughACall() {
-        XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, C()), .init(priority: 5, backfill: 5))
-        XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, C(havenCall: true)), .init(priority: 1, backfill: 0))
-        XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, C(heat: .fair)), .init(priority: 5, backfill: 5),
-                       "warm → keep uploading to the relay")
-        XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, C(heat: .critical)), .init(priority: 0, backfill: 0))
+        XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, C()), .init(priority: 5, backfill: 5, mirror: 5))
+        XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, C(havenCall: true)), .init(priority: 1, backfill: 0, mirror: 0))
+        XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, C(heat: .fair)).priority, 5,
+                       "warm → keep uploading your own media to the relay")
+        XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, C(heat: .fair)).backfill, 5)
+        XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, C(heat: .critical)), .init(priority: 0, backfill: 0, mirror: 0))
+    }
+
+    /// rc.3 field report: a warm iPhone kept mirroring a just-recovered history. Mirroring media this
+    /// device is not the only holder of is background work — it stops at `.fair`, not `.serious`.
+    func testMirroringStopsAlreadyWhenWarm() {
+        XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, C(heat: .fair)).mirror, 0)
+        XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, phone: true, C(heat: .fair)).mirror, 0)
+        XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, C(lowPower: true)).mirror, 0)
+        XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, C()).mirror, 5, "cool Mac: full mirror budget")
+        XCTAssertEqual(HeavyWorkPolicy.uploadBudget(base: 5, phone: true, C()).mirror,
+                       HeavyWorkPolicy.phoneMirrorPerPass, "cool phone: a small trickle per pass")
+        XCTAssertFalse(C(heat: .fair).backgroundMirrorAllowed)
+        XCTAssertTrue(C().backgroundMirrorAllowed)
     }
 
     /// The QA attribution of a direct friend serve names its cause (e2e `relayfirst`).

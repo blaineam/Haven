@@ -2532,7 +2532,7 @@ final class FeedStore: ObservableObject {
         // the same media. Notifying normally would fire one alert per rewritten post at every member
         // (25 per tap), for content nobody wrote. The event still delivers and still syncs.
         broadcastEvent(target.circleId, a, silent: true)
-        for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: target.circleId, engine: engine) }
+        for ref in media { MediaBackupQueue.shared.enqueue(ref, circleId: target.circleId, engine: engine, mine: true) }
         return true
     }
 
@@ -8189,8 +8189,15 @@ final class FeedStore: ObservableObject {
     func backfillMailboxMedia(circleIds: [String]) {
         guard let engine else { return }
         // Host Macs with large libraries: enqueue a bounded newest-first slice per pass so the
-        // 2‑min tick can't dump thousands of seal jobs onto MediaBackupQueue at once.
-        let perCircleCap = RelayHost.shared.serving ? 40 : 200
+        // 2‑min tick can't dump thousands of seal jobs onto MediaBackupQueue at once. On a phone,
+        // MIRRORING (media this device is not the only safe holder of) gets a small slice too — a
+        // recovered history is hundreds of refs (`MediaHolding.perCircleCap`).
+        #if os(iOS)
+        let phone = true
+        #else
+        let phone = false
+        #endif
+        let hosting = RelayHost.shared.serving
         let cids = circleIds.filter { SharedStore.hasMailbox($0) }
         guard !cids.isEmpty else { return }
         var retention: [String: UInt64?] = [:]
@@ -8200,16 +8207,17 @@ final class FeedStore: ObservableObject {
         // (stall detector, 2026-09-01: 1.66s parked in `syncWithContactsApply → backfillMailboxMedia
         // → social.feed`); only the enqueue decisions hop back.
         Task { @MainActor [weak self] in
-            let refsByCircle: [(cid: String, refs: [String])] = await engine.run { s in
+            // `mine`: the carrying post/comment is my account's (see `MediaHolding.isBackgroundMirror`).
+            let refsByCircle: [(cid: String, refs: [(ref: String, mine: Bool)])] = await engine.run { s in
                 cids.map { cid in
                     let feed = s.feed(circleId: cid, nowMs: nowMs, viewerRetentionSecs: retention[cid] ?? nil)
-                    var refs: [String] = []
+                    var refs: [(ref: String, mine: Bool)] = []
                     var seen = Set<String>()
                     // Newest posts first (feed is reverse-chronological).
                     for item in feed {
-                        for r in item.media where seen.insert(r).inserted { refs.append(r) }
+                        for r in item.media where seen.insert(r).inserted { refs.append((r, item.isMe)) }
                         for c in item.comments {
-                            for r in c.media where seen.insert(r).inserted { refs.append(r) }
+                            for r in c.media where seen.insert(r).inserted { refs.append((r, c.isMe)) }
                         }
                     }
                     return (cid, refs)
@@ -8217,10 +8225,13 @@ final class FeedStore: ObservableObject {
             }
             guard let self, self.engine === engine else { return }
             for (cid, refs) in refsByCircle {
-                var enqueued = 0
+                var ownEnqueued = 0
+                var mirrorEnqueued = 0
+                let ownCap = MediaHolding.perCircleCap(hostingRelay: hosting, phone: phone, mirror: false)
+                let mirrorCap = MediaHolding.perCircleCap(hostingRelay: hosting, phone: phone, mirror: true)
                 let ownRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
-                for ref in refs {
-                    guard enqueued < perCircleCap else { break }
+                for (ref, mine) in refs {
+                    if ownEnqueued >= ownCap && mirrorEnqueued >= mirrorCap { break }
                     guard MediaStore.shared.has(ref), !MediaBackupBackoff.shouldSkip(ref) else { continue }
                     // Skip only when EVERY relay this circle publishes to already holds it. The old
                     // test was "any relay a DIFFERENT DEVICE can read" — one remote copy stopped the
@@ -8229,16 +8240,24 @@ final class FeedStore: ObservableObject {
                     // stayed empty for good. Redundancy across relays is the entire point of having
                     // several: a peer polls the relays IT knows, not the one that happened to win the
                     // race here. Exactly the per-(relay,key) shape the EVENT upload path needed.
+                    //
+                    // A ref this device DOWNLOADED from a relay is recorded as held there (restore →
+                    // ledger), so a recovered history no longer looks unbacked here. `s3:` pseudo-relays
+                    // compare as the ledger's "s3" (`MediaHolding.ledgerDests`) — compared raw, a circle
+                    // with an S3 entry could never be satisfied and was re-enqueued every sweep.
                     let wanted = RelayMailboxStore.shared.relays(forCircle: cid)
-                    if wanted.isEmpty {
-                        // No explicit relay set for this circle — fall back to the old remote test.
-                        if MediaBackupLedger.hasAnyRemote(ref, ownRelayHex: ownRelay) { continue }
+                    let heldRemotely = MediaBackupLedger.hasAnyRemote(ref, ownRelayHex: ownRelay)
+                    guard MediaHolding.needsBackfill(wanted: wanted,
+                                                     held: Set(MediaBackupLedger.destinations(for: ref)),
+                                                     heldRemotely: heldRemotely) else { continue }
+                    if MediaHolding.isBackgroundMirror(mine: mine, heldRemotely: heldRemotely) {
+                        guard mirrorEnqueued < mirrorCap else { continue }
+                        mirrorEnqueued += 1
                     } else {
-                        let held = Set(MediaBackupLedger.destinations(for: ref))
-                        if wanted.allSatisfy({ held.contains($0) }) { continue }
+                        guard ownEnqueued < ownCap else { continue }
+                        ownEnqueued += 1
                     }
-                    MediaBackupQueue.shared.enqueue(ref, circleId: cid, engine: engine)
-                    enqueued += 1
+                    MediaBackupQueue.shared.enqueue(ref, circleId: cid, engine: engine, mine: mine)
                 }
             }
         }

@@ -76,7 +76,9 @@ final class HeavyWorkMonitor: NSObject {
             HavenLog.net("heavy-work gate: suspend=\(new.suspendHeavyIO) friendServe=\(new.peerServingAllowedForFriends) [\(new.reason)]")
         }
         // A lift (or a partial lift, e.g. serious → fair) → resume what was parked.
+        // Cooling from .fair to .nominal lifts background mirroring (`backgroundMirrorAllowed`).
         let lifted = (old.suspendHeavyIO && !new.suspendHeavyIO) || (old.pauseEverything && !new.pauseEverything)
+            || (!old.backgroundMirrorAllowed && new.backgroundMirrorAllowed)
         if lifted { FeedStore.shared.heavyWorkLifted() }
     }
 }

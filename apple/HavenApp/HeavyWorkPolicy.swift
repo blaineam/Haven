@@ -50,6 +50,10 @@ enum HeavyWorkPolicy {
         /// relay upload is what gets the budget, not peer serving.
         var peerServingAllowedForFriends: Bool { !suspendHeavyIO && heat < .fair }
 
+        /// Background mirroring (backfill of media this device is not the only safe holder of) —
+        /// the same bar as friend serving: nothing suspended AND fully cool.
+        var backgroundMirrorAllowed: Bool { !suspendHeavyIO && heat < .fair }
+
         /// .critical: everything waits, including the upload of media you just authored.
         var pauseEverything: Bool { heat >= .critical }
 
@@ -167,15 +171,26 @@ enum HeavyWorkPolicy {
         var priority: Int
         /// Jobs this pass may take from the backfill lane.
         var backfill: Int
+        /// Of those backfill jobs, how many may be MIRRORING — media this device is not the only safe
+        /// holder of (`MediaHolding.isBackgroundMirror`): a friend's post, or your own post a relay
+        /// already holds (a history recovery). Background priority: it stops already at `.fair`.
+        var mirror: Int
     }
+
+    /// Mirroring jobs per pass on a phone while it is cool. Each one can be a seal + upload of a full
+    /// photo or video, and a recovered history is hundreds of them.
+    static let phoneMirrorPerPass = 2
 
     /// Uploading your OWN fresh media to the relay is what saves every future peer serve, so it keeps
     /// going (one at a time) through a call / Low Power Mode / .serious; only .critical stops it.
-    /// Backfill waits for the gate to lift.
-    static func uploadBudget(base: Int, _ c: Conditions) -> UploadBudget {
-        if c.pauseEverything { return UploadBudget(priority: 0, backfill: 0) }
-        if c.suspendHeavyIO { return UploadBudget(priority: 1, backfill: 0) }
-        return UploadBudget(priority: base, backfill: base)
+    /// Backfill waits for the gate to lift. Mirroring (`mirror`) is redundancy, not safety, so it also
+    /// waits while the device is merely WARM (`.fair`) — field report rc.3: a warm iPhone kept
+    /// re-mirroring a just-recovered history and never cooled down.
+    static func uploadBudget(base: Int, phone: Bool = false, _ c: Conditions) -> UploadBudget {
+        if c.pauseEverything { return UploadBudget(priority: 0, backfill: 0, mirror: 0) }
+        if c.suspendHeavyIO { return UploadBudget(priority: 1, backfill: 0, mirror: 0) }
+        let mirror = c.backgroundMirrorAllowed ? (phone ? min(base, phoneMirrorPerPass) : base) : 0
+        return UploadBudget(priority: base, backfill: base, mirror: mirror)
     }
 
     // MARK: - Ultra-constrained (satellite) link

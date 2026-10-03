@@ -1144,6 +1144,103 @@ extension PostCard: Equatable {
     }
 }
 
+/// Upload/backup state for YOUR OWN media post — ALWAYS shown when there is media, even if this
+/// device knows zero relays. Gating on "has a relay" hid the indicator entirely when a friend never
+/// learned frame-19 (or only had LAN media URLs), so "not syncing" looked identical to "nothing to
+/// show". Driven PER-MEDIA off the backup ledger + queue (`MediaHolding.badge`).
+///
+/// Its own view, OUTSIDE PostCard's `.equatable()` comparison, for one reason: the ledger changes
+/// while the post does not. It re-renders when `MediaLedgerChanges` names one of ITS refs (a mark,
+/// a forget, an enqueue) — filtered in `onReceive`, so a burst of marks during a history recovery
+/// re-evaluates only the badges it concerns. Before, it re-read the ledger only on an hourly tick:
+/// the circle feed happened to refresh for unrelated reasons and showed the pink check, while the
+/// You tab kept the orange cloud for the same post (rc.3 field report).
+struct OwnPostBackupBadge: View {
+    let blobs: [String]
+    let circleId: String
+    /// Bumped when the ledger/queue changes for one of `blobs` — the read below depends on it.
+    @State private var ledgerTick: UInt64 = 0
+
+    var body: some View {
+        // TICK ONLY WHILE AN UPLOAD IS GENUINELY IN FLIGHT.
+        //
+        // A Time Profiler trace of a warm phone (47s, iPhone 17 Pro Max) is ~half
+        // AG::Graph::UpdateStack::update / update_attribute / input_value_ref_slow with
+        // CA::Layer::commit_if_needed and LayoutEngineBox.sizeThatFits behind them: SwiftUI's attribute
+        // graph being dirtied over and over and re-running layout. Each per-second timer dirties its
+        // subtree, so the 1s cadence — which exists for the progress ring and percentage — applies
+        // ONLY when the queue actually holds one of this post's blobs (hasPending is O(1)). Everything
+        // else falls to an hourly tick that effectively never fires, and re-renders on
+        // `MediaLedgerChanges` instead.
+        let ownRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
+        let settled = !blobs.isEmpty && blobs.allSatisfy {
+            MediaBackupLedger.hasAnyRemote($0, ownRelayHex: ownRelay)
+        }
+        let inFlight = !settled && blobs.contains { MediaBackupQueue.shared.hasPending($0) }
+        TimelineView(.periodic(from: .now, by: inFlight ? 1.0 : 3600)) { _ in
+            let _ = ledgerTick   // dependency: re-read the ledger when it changes for our refs
+            let hasRelay = !RelayMailboxStore.shared.relays(forCircle: circleId).isEmpty
+                || SharedStore.hasMailbox(circleId)
+            // "Backed up" must mean a relay SOMEONE ELSE can read. Writing to our own in-process relay
+            // is a local file copy that cannot fail, so counting it showed a confident tick on every
+            // post while friends could fetch none of them.
+            let badge = MediaHolding.badge(
+                blobs: blobs,
+                heldRemotely: { MediaBackupLedger.hasAnyRemote($0, ownRelayHex: ownRelay) },
+                heldAnywhere: { MediaBackupLedger.hasAny($0) },
+                pending: { MediaBackupQueue.shared.hasPending($0) },
+                progress: MediaUploadProgress.shared.fraction(for: blobs),
+                looksStuck: MediaUploadProgress.shared.looksStuck(blobs),
+                hasRelay: hasRelay)
+            switch badge {
+            case .backedUp:
+                Image(systemName: "checkmark.icloud.fill")
+                    .font(.caption2).foregroundStyle(HavenTheme.pink)
+                    .help("Backed up to a relay others can read")
+            case .noRelay:
+                // The invisible case: no known mailbox → never showed an icon before.
+                Image(systemName: "exclamationmark.icloud")
+                    .font(.caption2).foregroundStyle(.orange)
+                    .help("No relay known for this circle — media stays on this device only. Open Relays or wait for a member who hosts one.")
+            case .ownRelayOnly:
+                // Reached OUR relay and nowhere else: not an error, not safe either. Says so.
+                Image(systemName: "externaldrive.badge.exclamationmark")
+                    .font(.caption2).foregroundStyle(.orange)
+                    .help("Only on this device's own relay — nobody else can fetch it yet")
+            case .uploading(let progress, let stuck):
+                // A real fraction, because a big video genuinely takes minutes and a motionless arrow
+                // made "slow" and "broken" look identical. Determinate ring + percentage.
+                ZStack {
+                    Circle().stroke(Color.secondary.opacity(0.25), lineWidth: 2)
+                    Circle().trim(from: 0, to: max(0.02, progress))
+                        .stroke(stuck ? Color.orange : HavenTheme.pink,
+                                style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+                .frame(width: 12, height: 12)
+                .help(stuck
+                      ? "Still trying to upload — it has restarted several times"
+                      : "Uploading to a relay… \(Int(progress * 100))%")
+            case .waiting(let stuck):
+                // Queued but no window has been written yet (or the blob is small enough to go in one
+                // shot). Orange once it has restarted repeatedly: the queue never gives up, so without
+                // this an upload that can never succeed looks like one about to.
+                Image(systemName: stuck ? "exclamationmark.icloud" : "arrow.up.circle")
+                    .font(.caption2)
+                    .foregroundStyle(stuck ? AnyShapeStyle(Color.orange) : AnyShapeStyle(Color.secondary))
+                    .help(stuck
+                          ? (hasRelay
+                             ? "Upload not reaching a relay yet — tap for detail; keep Haven open"
+                             : "No relay available — media only on this device")
+                          : "Waiting to upload to a relay…")
+            }
+        }
+        .onReceive(MediaLedgerChanges.shared.$generation.dropFirst()) { _ in
+            if MediaLedgerChanges.shared.touched(blobs) { ledgerTick &+= 1 }
+        }
+    }
+}
+
 /// A post's reaction chips + quick-react buttons.
 ///
 /// Extracted from PostCard, which was a single ~1,600-line `body`. SwiftUI instantiates that whole
@@ -1370,90 +1467,13 @@ struct PostHeader: View {
                 // hourly tick (a timer that effectively never fires) instead of a per-second one.
                 // Anything still in flight keeps the 1s cadence, which is the case the ring and the
                 // percentage were built for.
-                let settledOwnRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
-                let settledBlobs = item.media.filter { !MediaStore.isSynthetic($0) }
-                let settled = !settledBlobs.isEmpty && settledBlobs.allSatisfy {
-                    MediaBackupLedger.hasAnyRemote($0, ownRelayHex: settledOwnRelay)
-                }
-                // TICK ONLY WHILE AN UPLOAD IS GENUINELY IN FLIGHT.
-                //
-                // A Time Profiler trace of a warm phone (47s, iPhone 17 Pro Max) is ~half
-                // AG::Graph::UpdateStack::update / update_attribute / input_value_ref_slow with
-                // CA::Layer::commit_if_needed and LayoutEngineBox.sizeThatFits behind them: SwiftUI's
-                // attribute graph being dirtied over and over and re-running layout. Not media
-                // decode, not networking — the earlier fixes in this release were all treating
-                // network symptoms of a RENDERING problem.
-                //
-                // Each of these timers dirties its subtree, and a subtree invalidation drags a layout
-                // pass across the list. Gating on `settled` alone was not enough: a post that is not
-                // backed up AND has nothing queued (no relay known, upload long since abandoned) also
-                // ticked every second while its answer was every bit as fixed.
-                //
-                // So the 1s cadence — which exists for the progress ring and percentage — now applies
-                // ONLY when the queue actually holds one of this post's blobs. hasPending is O(1)
-                // now, so asking is free. Everything else falls to an hourly tick that effectively
-                // never fires, and re-renders when its own state publishes instead.
-                let inFlight = !settled && settledBlobs.contains { MediaBackupQueue.shared.hasPending($0) }
-                TimelineView(.periodic(from: .now, by: inFlight ? 1.0 : 3600)) { _ in
-                    let blobs = item.media.filter { !MediaStore.isSynthetic($0) }
-                    let circleId = FeedStore.shared.activeCircleId
-                    let hasRelay = !RelayMailboxStore.shared.relays(forCircle: circleId).isEmpty
-                        || SharedStore.hasMailbox(circleId)
-                    // "Backed up" must mean a relay SOMEONE ELSE can read. Writing to our own
-                    // in-process relay is a local file copy that cannot fail, so counting it showed a
-                    // confident tick on every post while friends could fetch none of them.
-                    let ownRelay = RelayHost.shared.serving ? RelayHost.shared.nodeId : ""
-                    let backed = !blobs.isEmpty && blobs.allSatisfy {
-                        MediaBackupLedger.hasAnyRemote($0, ownRelayHex: ownRelay)
-                    }
-                    // Reached OUR relay and nowhere else: not an error, not safe either. Says so.
-                    let localOnly = !backed && !blobs.isEmpty && blobs.allSatisfy { MediaBackupLedger.hasAny($0) }
-                    let pending = blobs.contains { MediaBackupQueue.shared.hasPending($0) }
-                    let progress = MediaUploadProgress.shared.fraction(for: blobs)
-                    let stuck = MediaUploadProgress.shared.looksStuck(blobs)
-                        || (!backed && !hasRelay)
-                        || (!backed && !pending && !localOnly && !blobs.isEmpty)
-                    if backed {
-                        Image(systemName: "checkmark.icloud.fill")
-                            .font(.caption2).foregroundStyle(HavenTheme.pink)
-                            .help("Backed up to a relay others can read")
-                    } else if !hasRelay {
-                        // The invisible case: no known mailbox → never showed an icon before.
-                        Image(systemName: "exclamationmark.icloud")
-                            .font(.caption2).foregroundStyle(.orange)
-                            .help("No relay known for this circle — media stays on this device only. Open Relays or wait for a member who hosts one.")
-                    } else if localOnly {
-                        Image(systemName: "externaldrive.badge.exclamationmark")
-                            .font(.caption2).foregroundStyle(.orange)
-                            .help("Only on this device's own relay — nobody else can fetch it yet")
-                    } else if let progress {
-                        // A real fraction, because a big video genuinely takes minutes and a motionless
-                        // arrow made "slow" and "broken" look identical. Determinate ring + percentage.
-                        ZStack {
-                            Circle().stroke(Color.secondary.opacity(0.25), lineWidth: 2)
-                            Circle().trim(from: 0, to: max(0.02, progress))
-                                .stroke(stuck ? Color.orange : HavenTheme.pink,
-                                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                                .rotationEffect(.degrees(-90))
-                        }
-                        .frame(width: 12, height: 12)
-                        .help(stuck
-                              ? "Still trying to upload — it has restarted several times"
-                              : "Uploading to a relay… \(Int(progress * 100))%")
-                    } else {
-                        // Queued but no window has been written yet (or the blob is small enough to go
-                        // in one shot). Orange once it has restarted repeatedly: the queue never gives
-                        // up, so without this an upload that can never succeed looks like one about to.
-                        Image(systemName: stuck ? "exclamationmark.icloud" : "arrow.up.circle")
-                            .font(.caption2)
-                            .foregroundStyle(stuck ? AnyShapeStyle(Color.orange) : AnyShapeStyle(Color.secondary))
-                            .help(stuck
-                                  ? (hasRelay
-                                     ? "Upload not reaching a relay yet — tap for detail; keep Haven open"
-                                     : "No relay available — media only on this device")
-                                  : "Waiting to upload to a relay…")
-                    }
-                }
+                // The cluster lives in its own view so a LEDGER change can re-render it: this card is
+                // `.equatable()` on the post alone, so state read here from the ledger went stale on
+                // screen (rc.3: the You tab kept an orange cloud for posts the relay held completely).
+                // `myPosts` / the circle feed both come from the ACTIVE circle's feed, and the item
+                // carries no circle of its own, so the active circle is the post's circle here.
+                OwnPostBackupBadge(blobs: item.media.filter { !MediaStore.isSynthetic($0) },
+                                   circleId: FeedStore.shared.activeCircleId)
                 .contentShape(Rectangle())
                 .onTapGesture { showBackupDetail = true }
                 .accessibilityAddTraits(.isButton)

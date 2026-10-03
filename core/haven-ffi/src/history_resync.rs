@@ -86,14 +86,36 @@ impl HavenSocial {
                         return ReceiveStatus::Duplicate;
                     }
                     let digest = *blake3::hash(envelope).as_bytes();
-                    let st = self.state.lock().unwrap();
-                    let parked = st.circles.iter().find(|c| c.id == circle_id).is_some_and(|c| {
-                        c.pending_epoch.iter().any(|p| match &p.parsed {
-                            Some(q) => q.digest == digest,
-                            None => p.raw.as_slice() == &envelope[1..],
-                        })
-                    });
-                    return if parked { ReceiveStatus::Parked } else { ReceiveStatus::Unreadable };
+                    let mut st = self.state.lock().unwrap();
+                    let me_hex = crate::hex(&st.me().node_id_bytes());
+                    let Some(c) = st.circles.iter_mut().find(|c| c.id == circle_id) else {
+                        return ReceiveStatus::Unreadable;
+                    };
+                    let Some(pos) = c.pending_epoch.iter().position(|p| match &p.parsed {
+                        Some(q) => q.digest == digest,
+                        None => p.raw.as_slice() == &envelope[1..],
+                    }) else {
+                        return ReceiveStatus::Unreadable;
+                    };
+                    // A FOSSIL — sealed more than KEEP_EPOCHS behind the newest key this circle holds
+                    // for its author — can never open: the commit for its epoch was pruned
+                    // everywhere. A deep resync walks a relay's whole backlog, so parking those
+                    // would flood the 512-slot evict-oldest buffer and push out envelopes that ARE
+                    // about to open (a fresh DM waiting on its commit). Same rule as the fossil GC
+                    // in `drain_pending`; it just runs at the door instead of on the next drain.
+                    if let Some(parsed) = &c.pending_epoch[pos].parsed {
+                        let author = parsed.env.sender_hex();
+                        let newest = if author == me_hex {
+                            Some(c.my_epoch)
+                        } else {
+                            c.peer_epoch_keys.keys().filter(|(a, _)| *a == author).map(|(_, e)| *e).max()
+                        };
+                        if newest.is_some_and(|n| parsed.env.epoch + 4 < n) {
+                            c.pending_epoch.remove(pos);
+                            return ReceiveStatus::Unreadable;
+                        }
+                    }
+                    return ReceiveStatus::Parked;
                 }
                 if is_legacy(tag) {
                     return if PRIMARY_DUPLICATE.with(|f| f.get()) {
@@ -514,6 +536,31 @@ mod tests {
         ]);
         reopened.reset();
         assert_eq!(RelayHistoryPlanner::new(path).ingested_count(), 0);
+    }
+
+    #[test]
+    fn an_old_epoch_fossil_is_unreadable_and_never_floods_the_pending_buffer() {
+        let author = HavenSocial::new(vec![81u8; 32]).unwrap();
+        let reader = HavenSocial::new(vec![82u8; 32]).unwrap();
+        let cid = DEFAULT_CIRCLE.to_string();
+        author.add_contact_bundle(cid.clone(), reader.my_bundle()).unwrap();
+        reader.add_contact_bundle(cid.clone(), author.my_bundle()).unwrap();
+        // The relay still holds an envelope from long ago…
+        let old = author.post(cid.clone(), "ancient".into(), vec![], None, None, false, false, 1_000).unwrap();
+        // …and the author has rotated well past the KEEP_EPOCHS window since.
+        for _ in 0..6 {
+            author.rotate_circle(cid.clone());
+        }
+        author.post(cid.clone(), "recent".into(), vec![], None, None, false, false, 2_000).unwrap();
+        for env in author.sync_envelopes(cid.clone()).into_iter().filter(|e| e[0] != TAG_EPOCH_EVENT) {
+            let _ = reader.receive(cid.clone(), env);
+        }
+        let p = RelayHistoryPlanner::new(tmp("fossil"));
+        let b = p.ingest(reader.clone(), cid.clone(), vec![RelayHistoryItem { key: "haven/mailbox/default/old".into(), envelope: old }]);
+        assert_eq!((b.unreadable, b.parked), (1, 0), "{b:?}");
+        assert!(b.retry.is_empty());
+        let pending = reader.state.lock().unwrap().circles.iter().find(|c| c.id == cid).unwrap().pending_epoch.len();
+        assert_eq!(pending, 0, "the fossil must not occupy a pending slot");
     }
 
     #[test]

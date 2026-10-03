@@ -89,7 +89,7 @@ final class RelayHistoryResync: ObservableObject {
         progress.circlesTotal = circleIds.count
         let before = await store.historyEventCount(circleIds: circleIds)
         // The media the feed already names: anything outside it at the end came from this run.
-        let refsBefore = Set(await Self.namedMedia(circleIds: circleIds, engine: engine).flatMap(\.refs))
+        let refsBefore = Set(await Self.namedMedia(circleIds: circleIds, engine: engine).map(\.ref))
         var retry: [Pending] = []
         var landed = Set<String>()
 
@@ -184,49 +184,35 @@ final class RelayHistoryResync: ObservableObject {
         return (retry, changed)
     }
 
-    /// Every ref each circle's feed names (posts and comments), plus which of them are the small
-    /// companions (also included in `refs`).
-    private static func namedMedia(circleIds: [String], engine: Engine) async -> [(circle: String, refs: [String], small: Set<String>)] {
+    /// Every media candidate each circle's feed names (posts and comments, plus small companions),
+    /// each tagged with the user-visible item it belongs to.
+    private static func namedMedia(circleIds: [String], engine: Engine) async -> [RelayHistoryPlan.MediaCandidate] {
         let nowMs = Self.nowMs()
         return await engine.run(readOnly: true) { s in
-            circleIds.map { cid in
+            circleIds.flatMap { cid in
                 var refs: [String] = []
                 for item in s.feed(circleId: cid, nowMs: nowMs, viewerRetentionSecs: nil) {
                     refs += item.media
                     for c in item.comments { refs += c.media }
                 }
-                let small = Set(MediaVariants.allThumbs(in: refs) + MediaVariants.allPosters(in: refs)
-                                + MediaVariants.allPreviews(in: refs))
-                return (cid, refs + Array(small), small)
+                return RelayHistoryPlan.mediaCandidates(circle: cid, refs: refs)
             }
         }
     }
 
-    /// "Photos and videos" in the summary = media this run brought onto the device: refs new to the
-    /// feed that are on disk now (whichever path fetched them) plus what this phase fetches itself.
+    /// "Photos and videos" in the summary = ITEMS this run brought onto the device (a photo and its
+    /// thumb/preview are one): items new to the feed with something on disk now (whichever path
+    /// fetched it) plus items this phase fetches itself.
     private func fetchMedia(circleIds: [String], before: Set<String>, engine: Engine) async {
         let constrained = linkConstraint() != .normal || SettingsStore.shared.dataSaverActive
-        let named = await Self.namedMedia(circleIds: circleIds, engine: engine)
-        var landed = Set<String>()
-        for n in named {
-            landed.formUnion(RelayHistoryPlan.landed(
-                refs: n.refs, small: n.small, before: before, have: { MediaStore.shared.has($0) },
-                synthetic: { MediaStore.isSynthetic($0) }, constrained: constrained))
-        }
-        var want: [(ref: String, circle: String)] = []
-        var taken = Set<String>()
-        for n in named {
-            let refs = RelayHistoryPlan.wanted(
-                refs: n.refs, small: n.small,
-                have: { MediaStore.shared.has($0) }, evicted: { EvictedMediaStore.shared.contains($0) },
-                synthetic: { MediaStore.isSynthetic($0) }, constrained: constrained)
-            for r in refs where !landed.contains(r) && taken.insert(r).inserted { want.append((r, n.circle)) }
-        }
-        // Small companions first: they make the feed look right long before the full-size files land.
-        let small = Set(named.flatMap(\.small))
-        want.sort { small.contains($0.ref) && !small.contains($1.ref) }
-        progress.mediaTotal = landed.count + want.count
-        progress.mediaDone = landed.count
+        let plan = RelayHistoryPlan.mediaPlan(
+            await Self.namedMedia(circleIds: circleIds, engine: engine), before: before, constrained: constrained,
+            have: { MediaStore.shared.has($0) }, evicted: { EvictedMediaStore.shared.contains($0) },
+            synthetic: { MediaStore.isSynthetic($0) })
+        var tally = RelayHistoryMediaTally(plan)
+        progress.mediaTotal = plan.total
+        progress.mediaDone = plan.landed
+        let want = plan.want
         let allCircles = FeedStore.shared.circles.map(\.id)
         for batch in RelayHistoryPlan.batches(want, size: Self.mediaConcurrency * 4) {
             if Task.isCancelled { return }
@@ -245,7 +231,11 @@ final class RelayHistoryResync: ObservableObject {
                 if stored { FeedStore.shared.relayHistoryMediaLanded(w.ref) }
                 return stored
             }
-            for r in ok { if r { progress.mediaDone += 1 } else { progress.mediaMissing += 1 } }
+            for (w, r) in zip(batch, ok) {
+                let d = tally.record(item: w.item, ok: r)
+                progress.mediaDone += d.done
+                progress.mediaMissing += d.missing
+            }
         }
     }
 

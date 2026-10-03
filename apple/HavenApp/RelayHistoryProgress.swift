@@ -122,19 +122,97 @@ enum RelayHistoryPlan {
         }
     }
 
-    /// The media a resync already brought onto the device without fetching it itself: refs NEW to the
-    /// feed (not in `before`, the refs the feed named when the run started — i.e. named by a recovered
-    /// post or comment) that are on disk now. The app's ordinary ingest path auto-fetches a freshly
-    /// ingested post's media concurrently, so by the media phase it is often already there; the
-    /// summary must still count it. Same synthetic / constrained rules as `wanted`, so on a
-    /// constrained link only small companions count. Disjoint from `wanted` (that needs `!have`).
-    static func landed(refs: [String], small: Set<String>, before: Set<String>, have: (String) -> Bool,
-                       synthetic: (String) -> Bool, constrained: Bool) -> [String] {
-        var seen = Set<String>()
-        return refs.filter { r in
-            guard !synthetic(r), !before.contains(r), seen.insert(r).inserted else { return false }
-            guard !constrained || small.contains(r) else { return false }
-            return have(r)
+    /// One media ref the feed names, tagged with the user-visible ITEM it belongs to: its primary
+    /// ref. A small companion (thumb / preview / poster) names its primary through its marker.
+    struct MediaCandidate: Equatable, Sendable {
+        let ref: String
+        let circle: String
+        let small: Bool
+        let item: String
+    }
+
+    /// Every candidate one circle's raw feed refs name (posts + comments, markers included): the
+    /// refs themselves plus their small companions, deduped, each tagged with its item.
+    static func mediaCandidates(circle: String, refs: [String]) -> [MediaCandidate] {
+        var primary: [String: String] = [:]
+        for r in refs {
+            if let t = MediaVariants.parseThumb(r) { primary[t.thumb] = primary[t.thumb] ?? t.content }
+            if let p = MediaVariants.parsePreview(r) { primary[p.preview] = primary[p.preview] ?? p.content }
+            if let p = MediaVariants.parsePoster(r) { primary[p.poster] = primary[p.poster] ?? p.video }
         }
+        let smallList = MediaVariants.allThumbs(in: refs) + MediaVariants.allPosters(in: refs) + MediaVariants.allPreviews(in: refs)
+        let small = Set(smallList)
+        var seen = Set<String>()
+        return (refs + smallList).compactMap { r in
+            guard seen.insert(r).inserted else { return nil }
+            return MediaCandidate(ref: r, circle: circle, small: small.contains(r), item: primary[r] ?? r)
+        }
+    }
+
+    /// The media phase's plan. The summary counts user-visible ITEMS, never refs: a photo, its thumb
+    /// and its preview are one item. An item counts as done once ANY of its refs landed — on a
+    /// constrained link only companions are considered at all, so the companion alone is the item; on
+    /// a normal link a thumb that lands before the full-size file already shows the photo.
+    struct MediaPlan {
+        /// Items new to the feed (not in `before` — a recovered post or comment named them) that
+        /// already have something on disk: done up front, whichever path fetched them.
+        var landed = 0
+        /// `landed` + items with something to fetch.
+        var total = 0
+        /// Refs to fetch, small companions first (fetching stays per ref).
+        var want: [MediaCandidate] = []
+        fileprivate(set) var counted = Set<String>()
+    }
+
+    /// `before` = every ref the feed named when the run STARTED. Same rules as `wanted`: synthetic
+    /// refs never, evicted refs not fetched, constrained links only small companions.
+    static func mediaPlan(_ candidates: [MediaCandidate], before: Set<String>, constrained: Bool,
+                          have: (String) -> Bool, evicted: (String) -> Bool, synthetic: (String) -> Bool) -> MediaPlan {
+        var order: [String] = []
+        var present: [String: Bool] = [:]
+        var missing: [String: [MediaCandidate]] = [:]
+        var taken = Set<String>()
+        for c in candidates {
+            guard !synthetic(c.ref), !constrained || c.small, taken.insert(c.ref).inserted else { continue }
+            if present[c.item] == nil { order.append(c.item); present[c.item] = false }
+            if have(c.ref) { present[c.item] = true } else if !evicted(c.ref) { missing[c.item, default: []].append(c) }
+        }
+        var plan = MediaPlan()
+        var want: [MediaCandidate] = []
+        for item in order {
+            let m = missing[item] ?? []
+            if present[item] == true && !before.contains(item) {
+                plan.landed += 1
+                plan.total += 1
+                plan.counted.insert(item)
+            } else if !m.isEmpty {
+                plan.total += 1
+            }
+            want += m
+        }
+        // Small companions first (stable): they make the feed look right long before full-size lands.
+        plan.want = want.filter(\.small) + want.filter { !$0.small }
+        return plan
+    }
+}
+
+/// Per-ref fetch results → per-item counts: an item is done at its first ref that lands, missing once
+/// every one of its refs failed; an item counted up front never counts again.
+struct RelayHistoryMediaTally {
+    private var pending: [String: Int] = [:]
+    private var counted: Set<String>
+
+    init(_ plan: RelayHistoryPlan.MediaPlan) {
+        counted = plan.counted
+        for w in plan.want { pending[w.item, default: 0] += 1 }
+    }
+
+    mutating func record(item: String, ok: Bool) -> (done: Int, missing: Int) {
+        let left = max(0, (pending[item] ?? 0) - 1)
+        pending[item] = left
+        if counted.contains(item) { return (0, 0) }
+        if ok { counted.insert(item); return (1, 0) }
+        if left == 0 { counted.insert(item); return (0, 1) }
+        return (0, 0)
     }
 }

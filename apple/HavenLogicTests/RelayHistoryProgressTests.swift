@@ -93,31 +93,54 @@ final class RelayHistoryProgressTests: XCTestCase {
                                                synthetic: synthetic, constrained: true), ["thumb1"])
     }
 
-    /// The e2e bug: a recovered photo post whose photo the ordinary ingest path had already fetched
-    /// was never counted ("Added 2 posts and 0 photos and videos").
-    func testLandedCountsRecoveredMediaAnotherPathAlreadyFetched() {
-        let before: Set<String> = ["old", "gone"]
-        let onDisk: Set<String> = ["old", "new", "new.t"]
-        let refs = ["old", "gone", "new", "new.t", "new", "geo:1"]
-        let small: Set<String> = ["new.t"]
-        let have: (String) -> Bool = { onDisk.contains($0) }
-        let synthetic: (String) -> Bool = { $0.hasPrefix("geo:") }
-        let landed = RelayHistoryPlan.landed(refs: refs, small: small, before: before, have: have,
-                                             synthetic: synthetic, constrained: false)
-        XCTAssertEqual(landed, ["new", "new.t"], "new-to-the-feed media on disk counts once; old media never")
-        XCTAssertEqual(RelayHistoryPlan.landed(refs: refs, small: small, before: before, have: have,
-                                               synthetic: synthetic, constrained: true), ["new.t"])
-        let wanted = RelayHistoryPlan.wanted(refs: refs, small: small, have: have, evicted: { _ in false },
-                                             synthetic: synthetic, constrained: false)
-        XCTAssertEqual(wanted, ["gone"])
-        XCTAssertTrue(Set(landed).isDisjoint(with: wanted))
-
+    /// The e2e: ONE recovered photo post — photo + thumb + preview, all already fetched by the
+    /// ordinary ingest path — is one item, done ("Added 2 posts and 1 photo", never 0, never 3).
+    func testOneRecoveredPhotoWithCompanionsIsOneItem() {
+        let refs = ["p", "thumb:p:pt", "preview:p:pv"]
+        let cands = RelayHistoryPlan.mediaCandidates(circle: "c", refs: refs)
+        XCTAssertEqual(Set(cands.filter { !$0.ref.contains(":") }.map(\.item)), ["p"])
+        let synthetic: (String) -> Bool = { $0.contains(":") }
+        let plan = { (have: Set<String>, constrained: Bool) in
+            RelayHistoryPlan.mediaPlan(cands, before: [], constrained: constrained, have: { have.contains($0) },
+                                       evicted: { _ in false }, synthetic: synthetic)
+        }
+        let all = plan(["p", "pt", "pv"], false)
+        XCTAssertEqual([all.landed, all.total, all.want.count], [1, 1, 0])
         var p = RelayHistoryProgress(phase: .done)
-        p.postsAdded = 2
-        p.mediaTotal = landed.count + wanted.count
-        p.mediaDone = landed.count
-        XCTAssertEqual(p.outcome, .added(posts: 2, media: 2))
-        p.phase = .media
-        XCTAssertLessThanOrEqual(p.fraction, 1)
+        p.postsAdded = 2; p.mediaDone = all.landed; p.mediaTotal = all.total
+        XCTAssertEqual(p.outcome, .added(posts: 2, media: 1))
+
+        // Nothing on disk yet: three refs fetched small-first, the item counts once.
+        let none = plan([], false)
+        XCTAssertEqual([none.landed, none.total], [0, 1])
+        XCTAssertEqual(none.want.map(\.ref), ["pt", "pv", "p"])
+        var tally = RelayHistoryMediaTally(none)
+        let done = none.want.map { tally.record(item: $0.item, ok: true).done }.reduce(0, +)
+        XCTAssertEqual(done, 1)
+
+        // Only the full-size landed by another path: done up front, its companions never re-count.
+        let full = plan(["p"], false)
+        XCTAssertEqual([full.landed, full.total, full.want.count], [1, 1, 2])
+        tally = RelayHistoryMediaTally(full)
+        XCTAssertTrue(tally.record(item: "p", ok: true) == (0, 0))
+
+        // Constrained: the companion alone is the item.
+        let lean = plan(["pt"], true)
+        XCTAssertEqual([lean.landed, lean.total, lean.want.count], [1, 1, 1])
+    }
+
+    func testMediaPlanIgnoresOldMediaAndCountsMissingItemsOnce() {
+        let cands = RelayHistoryPlan.mediaCandidates(circle: "c", refs: [
+            "a", "thumb:a:at", "b", "thumb:b:bt", "gone", "x", "thumb:x:xt", "geo:1,2"])
+        let plan = RelayHistoryPlan.mediaPlan(
+            cands, before: ["a", "at", "gone", "x", "xt"], constrained: false,
+            have: { ["at", "b", "bt"].contains($0) }, evicted: { $0 == "gone" }, synthetic: { $0.contains(":") })
+        XCTAssertEqual(plan.landed, 1, "old media never counts; the recovered item once")
+        XCTAssertEqual(plan.total, 3)
+        XCTAssertEqual(plan.want.map(\.ref), ["xt", "a", "x"])
+        var tally = RelayHistoryMediaTally(plan)
+        XCTAssertTrue(tally.record(item: "x", ok: false) == (0, 0), "x still has a ref to try")
+        XCTAssertTrue(tally.record(item: "a", ok: true) == (1, 0))
+        XCTAssertTrue(tally.record(item: "x", ok: false) == (0, 1), "every ref of x failed → one missing item")
     }
 }

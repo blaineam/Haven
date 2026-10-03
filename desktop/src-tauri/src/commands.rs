@@ -224,6 +224,28 @@ pub fn request_older_history(engine: Eng, circle_id: String, oldest_created_at: 
     engine.request_older_history(circle_id, oldest_created_at);
 }
 
+/// Settings ▸ Devices ▸ "Load history from your relays" (engine::relayhistory): start / cancel /
+/// dismiss the deep relay pass, and read its progress + summary.
+#[tauri::command]
+pub fn relay_history_start(engine: Eng) -> bool {
+    engine.relay_history_start()
+}
+
+#[tauri::command]
+pub fn relay_history_cancel(engine: Eng) {
+    engine.relay_history_cancel();
+}
+
+#[tauri::command]
+pub fn relay_history_dismiss(engine: Eng) {
+    engine.relay_history_dismiss();
+}
+
+#[tauri::command]
+pub fn relay_history_status(engine: Eng) -> serde_json::Value {
+    engine.relay_history_status()
+}
+
 #[tauri::command]
 pub fn self_test() -> serde_json::Value {
     let r = haven_ffi::self_test();

@@ -6549,7 +6549,64 @@ async function devicesSheet() {
       el("button", { class: "btn small ghost", onclick: async () => { await invoke("enroll_reject", { deviceHex: p.device_hex }); devicesSheet(); } }, t("dismiss"))));
   }
 
+  devicesCard.append(relayHistoryCard());
+
   sheet(t("devices"), devicesCard);
+}
+
+// ---- Load history from your relays (engine::relayhistory — Apple/Android parity) ----
+// Pulls everything this account's relays still hold — including posts made on other devices — with
+// honest progress, Cancel, and a closing summary. Re-renders itself once a second while running.
+function relayHistoryCard() {
+  const box = el("div", { class: "col", style: "margin-top:14px;gap:4px" });
+  async function render() {
+    if (!box.isConnected && box.dataset.mounted) return;   // sheet closed — stop polling
+    const s = await invoke("relay_history_status").catch(() => null);
+    box.dataset.mounted = "1";
+    const kids = [];
+    const running = s && ["scanning", "retrying", "media"].includes(s.state);
+    if (s && s.state && s.state !== "idle") {
+      const title = { scanning: "rh_checking", retrying: "rh_checking", media: "rh_downloading", done: "rh_loaded" }[s.state] || "rh_stopped";
+      const lines = [];
+      if (s.state === "scanning" || s.state === "retrying") {
+        lines.push(t("rh_circles_n", Math.min(s.circles_done, s.circles_total), s.circles_total));
+        lines.push(t("rh_posts_n", Math.min(s.entries_checked, s.entries_found), s.entries_found));
+      } else if (s.state === "media") {
+        lines.push(t("rh_added_posts", s.posts_added));
+        lines.push(t("rh_media_n", Math.min(s.media_done, s.media_total), s.media_total));
+      } else {
+        lines.push(s.outcome === "added" ? t("rh_summary", s.posts_added, s.media_done)
+          : s.outcome === "unreachable" ? t("rh_unreachable") : t("rh_uptodate"));
+        if (s.state === "cancelled") lines.push(t("rh_stays"));
+        if (s.media_missing > 0) lines.push(t("rh_media_missing", s.media_missing));
+        if (s.media_deferred) lines.push(t("rh_hot"));
+        if (s.relay_errors > 0 && s.outcome !== "unreachable") lines.push(t("rh_relay_err", s.relay_errors));
+        if (s.retention_caveat) lines.push(t("rh_caveat"));
+      }
+      kids.push(el("div", { class: "row" },
+        el("strong", { style: "flex:1" }, t(title)),
+        running ? null : el("button", { class: "btn small ghost", onclick: async () => { await invoke("relay_history_dismiss"); render(); } }, t("dismiss"))));
+      for (const l of lines) kids.push(el("div", { class: "muted small" }, l));
+      if (running) {
+        kids.push(el("progress", { max: "1", value: String(s.fraction || 0), style: "width:100%" }));
+        kids.push(el("div", { class: "row wrap" }, el("button", { class: "btn small ghost", onclick: async () => {
+          if (confirm(t("rh_stop_q") + "\n\n" + t("rh_stays"))) { await invoke("relay_history_cancel"); render(); }
+        } }, t("cancel"))));
+      }
+    }
+    if (!running) {
+      const why = s && s.unavailable;
+      kids.push(el("div", { class: "row wrap", style: "margin-top:4px" },
+        el("button", { class: "btn small", disabled: why ? "" : null, onclick: async () => { await invoke("relay_history_start"); render(); } }, t("rh_title"))));
+    }
+    kids.push(el("div", { class: "muted small" }, t("rh_explain")));
+    if (s && s.unavailable === "satellite") kids.push(el("div", { class: "muted small" }, t("rh_satellite")));
+    if (s && s.unavailable === "norelay") kids.push(el("div", { class: "muted small" }, t("rh_norelay")));
+    box.replaceChildren(...kids.filter(Boolean));
+    if (running) setTimeout(render, 1000);
+  }
+  render();
+  return box;
 }
 
 /// PRIMARY: mint a one-time `haven-enroll:` ticket and show it as a QR + copyable string for the new

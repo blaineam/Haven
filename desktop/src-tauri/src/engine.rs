@@ -41,6 +41,11 @@ use crate::localmedia::LocalMedia;
 use crate::store::{self, Contact, Paths, Prefs, Profile};
 use crate::wire;
 
+/// "Load history from your relays" — the deep relay-mailbox pass (a child module so it can use the
+/// engine's relay plumbing directly).
+#[path = "relayhistory.rs"]
+pub mod relayhistory;
+
 pub const DEFAULT_CIRCLE: &str = "default";
 
 /// The push Worker — also hosts the content-free moderation ledger (`/flag`).

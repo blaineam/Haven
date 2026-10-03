@@ -83,6 +83,17 @@ class HeavyWorkPolicyTest {
         assertFalse(HeavyWorkPolicy.backupAllowed(priority = true, c = Conditions(heat = Heat.CRITICAL)))
     }
 
+    /** rc.3 field report: a warm phone kept re-mirroring a recovered history. Mirroring (media this
+     *  device is not the only holder of) waits already at FAIR; own backfill and fresh uploads don't. */
+    @Test fun mirroring_backfill_stops_when_merely_warm() {
+        assertFalse(HeavyWorkPolicy.backupAllowed(priority = false, c = Conditions(heat = Heat.FAIR), mirror = true))
+        assertTrue(HeavyWorkPolicy.backupAllowed(priority = false, c = Conditions(heat = Heat.FAIR), mirror = false))
+        assertTrue(HeavyWorkPolicy.backupAllowed(priority = true, c = Conditions(heat = Heat.FAIR), mirror = true))
+        assertTrue(HeavyWorkPolicy.backupAllowed(priority = false, c = Conditions(), mirror = true))
+        assertFalse(Conditions(heat = Heat.FAIR).backgroundMirrorAllowed)
+        assertTrue(Conditions().backgroundMirrorAllowed)
+    }
+
     /** The QA attribution of a direct friend serve names its cause (e2e `relayfirst`). */
     @Test fun stream_reason_names_why_no_hint_answered() {
         assertEquals("circle-unresolved", HeavyWorkPolicy.streamReason(friend(onRelay = true, relay = false), circleKnown = false))

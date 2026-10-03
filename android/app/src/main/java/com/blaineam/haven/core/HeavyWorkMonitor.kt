@@ -114,13 +114,16 @@ object HeavyWorkMonitor {
             Log.i(TAG, "heavy-work gate: suspend=${new.suspendHeavyIO} friendServe=${new.peerServingAllowedForFriends} [${new.reason}]")
         }
         synchronized(this) {
-            if (new.suspendHeavyIO && liftPoller?.isActive != true) {
+            // Poll while anything is parked — including background mirroring at FAIR, whose cool-down
+            // to NOMINAL must re-offer the mirror jobs the queue skipped.
+            if (!new.backgroundMirrorAllowed && liftPoller?.isActive != true) {
                 liftPoller = scope.launch {
-                    while (current.suspendHeavyIO) { delay(20_000); refresh() }
+                    while (!current.backgroundMirrorAllowed) { delay(20_000); refresh() }
                 }
             }
         }
-        val lifted = (old.suspendHeavyIO && !new.suspendHeavyIO) || (old.pauseEverything && !new.pauseEverything)
+        val lifted = (old.suspendHeavyIO && !new.suspendHeavyIO) || (old.pauseEverything && !new.pauseEverything) ||
+            (!old.backgroundMirrorAllowed && new.backgroundMirrorAllowed)
         if (lifted) scope.launch { runCatching { onLifted?.invoke() } }
         return new
     }

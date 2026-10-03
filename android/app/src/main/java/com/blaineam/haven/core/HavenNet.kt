@@ -4143,7 +4143,7 @@ object HavenNet : InboundListener {
                 target.music, target.muteVideo, nowMs())
         }.getOrNull() ?: return false
         afterAuthor(target.circleId, env)
-        media.forEach { enqueueBackup(target.circleId, it) }
+        media.forEach { enqueueBackup(target.circleId, it, mine = true) }
         return true
     }
 
@@ -5748,7 +5748,19 @@ object HavenNet : InboundListener {
         // Also push the media bytes of anything I've posted here that I still hold locally — through
         // the serial media queue so several circles backfilling at once can't stack full blobs in RAM.
         val feed = runCatching { social.feed(circleId, nowMs(), null) }.getOrDefault(emptyList())
-        for (item in feed) if (item.isMe) item.media.forEach { if (LocalMedia.has(it)) enqueueBackup(circleId, it) }
+        // Offer only what the ledger does not already confirm on every relay this circle publishes to
+        // — a blob downloaded from a relay is recorded there now (fetchAndAccept), so a recovered
+        // history is not re-offered. My media already on a relay is MIRRORING (background priority),
+        // and only a few such refs per sweep, so a big recovered history trickles instead of saturating.
+        val wanted = relaysFor(circleId)
+        var mirrors = 0
+        for (item in feed) if (item.isMe) item.media.forEach { ref ->
+            if (!LocalMedia.has(ref)) return@forEach
+            val remote = isBackedUpRemote(ref)
+            if (!MediaHolding.needsBackfill(wanted, mediaBackupDestinations(ref).toSet(), remote)) return@forEach
+            if (MediaHolding.isBackgroundMirror(true, remote) && mirrors++ >= MediaHolding.MIRROR_PER_SWEEP) return@forEach
+            enqueueBackup(circleId, ref, mine = true)
+        }
     }
 
     /** Refresh the liveness of my envelopes on every iroh relay serving a circle — ONE batched
@@ -5792,15 +5804,16 @@ object HavenNet : InboundListener {
         for (env in history) {
             uploadEvent(circleId, env)
         }
-        val refs = LinkedHashSet<String>()
+        val refs = LinkedHashMap<String, Boolean>()   // ref → mine
         val feed = runCatching { social.feed(circleId, nowMs(), null) }.getOrDefault(emptyList())
         for (item in feed) {
-            refs.addAll(item.media)
-            item.comments.forEach { refs.addAll(it.media) }
+            item.media.forEach { refs.putIfAbsent(it, item.isMe) }
+            item.comments.forEach { c -> c.media.forEach { refs.putIfAbsent(it, c.isMe) } }
         }
         // Serialized: enqueue each blob to the single media queue so the whole-library backfill (and
         // any concurrent per-circle backfills) load at most one full media file into RAM at a time.
-        for (ref in refs) if (LocalMedia.has(ref)) enqueueBackup(circleId, ref)
+        // Tagged with authorship so a friend's media rides as background mirroring.
+        for ((ref, mine) in refs) if (LocalMedia.has(ref)) enqueueBackup(circleId, ref, mine = mine)
     }
 
     /** Control-plane keys rank first — they unlock everything else (iOS pullMailbox parity). */
@@ -6185,8 +6198,7 @@ object HavenNet : InboundListener {
     /** Relay-first fetch of one media ref (the same path a missing-media restore takes). */
     internal suspend fun historyFetchMedia(circleId: String, ref: String): Boolean {
         if (LocalMedia.has(ref)) return true
-        val got = (fetchMediaFromRelay(circleId, ref) || (healForbiddenRelays() && fetchMediaFromRelay(circleId, ref))) &&
-            acceptFetchedBlob(ref, circleId)
+        val got = fetchAndAccept(circleId, ref)
         if (got) {
             mediaArrived(ref)
             withContext(Dispatchers.Main) { feedVersion.value++ }
@@ -6310,7 +6322,9 @@ object HavenNet : InboundListener {
          *  [atMs] = when it was enqueued, so a landed PRIORITY blob that is still fresh announces
          *  itself to the circle (frame 32) instead of waiting out everyone's missing-media sweep. */
         class Backup(ref: String, circleId: String, val force: Boolean = false,
-                     val priority: Boolean = false, val atMs: Long = 0L) : MediaJob(ref, circleId)
+                     val priority: Boolean = false, val atMs: Long = 0L,
+                     /** The carrying post/comment is mine (null = unknown) — [MediaHolding.isBackgroundMirror]. */
+                     val mine: Boolean? = null) : MediaJob(ref, circleId)
         /** [onMiss] runs when no relay could supply the blob — the requester's direct peer ask,
          *  now strictly AFTER the relay (it used to go out alongside it, so every holder streamed
          *  bytes the relay was about to deliver). */
@@ -6347,8 +6361,12 @@ object HavenNet : InboundListener {
                 // durable pending set, and the gate lifting re-offers it (heavyWorkLifted →
                 // drainPersistedBackups).
                 while (HeavyWorkMonitor.refresh().pauseEverything) delay(15_000)
+                // MIRRORING (media this device is not the only safe holder of: a friend's, or my own
+                // already on a relay — a history recovery) is background work and also waits at FAIR.
+                // rc.3 field report: a warm phone kept re-mirroring a just-recovered history.
                 if (job is MediaJob.Backup && !job.force &&
-                    !HeavyWorkPolicy.backupAllowed(job.priority, HeavyWorkMonitor.current)) {
+                    !HeavyWorkPolicy.backupAllowed(job.priority, HeavyWorkMonitor.current,
+                        mirror = MediaHolding.isBackgroundMirror(job.mine, isBackedUpRemote(job.ref)))) {
                     synchronized(mediaQueueLock) { mediaQueueKeys.remove(key) }
                     continue
                 }
@@ -6360,7 +6378,8 @@ object HavenNet : InboundListener {
                             // actually landed on a relay. A failed pass leaves it persisted, so the next
                             // start / background sync / 2-min backfill retries it — the media reaches a
                             // relay even if the app was killed the instant after the post was made.
-                            val landed = uploadMedia(job.circleId, job.ref, job.force)
+                            val landed = uploadMedia(job.circleId, job.ref, job.force,
+                                deferMirrorWhenWarm = !job.priority)
                             if (landed) mediaBackupLanded(job.ref, job.circleId)   // peers told to wait for it
                             if (landed && !job.force) {
                                 clearPendingBackup(job.ref, job.circleId)
@@ -6381,9 +6400,7 @@ object HavenNet : InboundListener {
                             // (author still around) looked fine.
                             restoreInFlight.add(job.ref)
                             val got = try {
-                                (fetchMediaFromRelay(job.circleId, job.ref) ||
-                                    (healForbiddenRelays() && fetchMediaFromRelay(job.circleId, job.ref))) &&
-                                    acceptFetchedBlob(job.ref, job.circleId)
+                                fetchAndAccept(job.circleId, job.ref)
                             } finally { restoreInFlight.remove(job.ref) }
                             if (got) {
                                 QaStats.bump("received_via_relay")
@@ -6413,7 +6430,8 @@ object HavenNet : InboundListener {
      *  [force] = the 1.0.8 recovery overwrite (bypass the "already held?" probe + ledger).
      *  [priority] = just-authored media — rides the fast lane ahead of any backfill backlog and
      *  announces itself to the circle the moment it lands (frame 32). */
-    private fun enqueueBackup(circleId: String, ref: String, force: Boolean = false, priority: Boolean = false) {
+    private fun enqueueBackup(circleId: String, ref: String, force: Boolean = false, priority: Boolean = false,
+                              mine: Boolean? = if (priority) true else null) {
         if (LocalMedia.isSynthetic(ref)) return   // geo: pins et al. carry no bytes — never relay-storable
         // Record the job DURABLY before the in-memory Channel enqueue, so a story's blob still reaches a
         // relay even if the app is killed the instant after posting. The Channel (mediaQueue) is
@@ -6436,7 +6454,7 @@ object HavenNet : InboundListener {
             !LocalMedia.maySendOnUltraConstrained(ref)
         ) return
         val job = MediaJob.Backup(ref, circleId, force, priority,
-            atMs = if (priority) System.currentTimeMillis() else 0L)
+            atMs = if (priority) System.currentTimeMillis() else 0L, mine = mine)
         if (!offerMediaJob(jobKey(job))) return
         ensureMediaQueueDraining()
         (if (priority) mediaPriorityQueue else mediaQueue).trySend(job)
@@ -7448,6 +7466,67 @@ object HavenNet : InboundListener {
         } finally { c.disconnect() }
     }
 
+    /** HEAD one key — held or not, no body. haven-relay serves `HEAD /k/<key>` (signed like GET, method
+     *  "HEAD"); 400/405/501 (an old relay or a proxy) → UNSUPPORTED and the caller falls back to GET.
+     *  Apple `SharedStore.httpHead` parity. */
+    private fun relayHttpHead(base: String, token: String, key: String): MediaHolding.Head {
+        if (HavenOffline.enabled) return MediaHolding.Head.UNREACHABLE
+        val auth = httpAuth(token, "HEAD", key, ByteArray(0)) ?: return MediaHolding.Head.UNREACHABLE
+        return try {
+            val c = (java.net.URL(httpKeyUrl(base, key)).openConnection() as java.net.HttpURLConnection).apply {
+                requestMethod = "HEAD"
+                connectTimeout = 4000; readTimeout = 20000
+                setRequestProperty("Authorization", auth)
+            }
+            try {
+                when (val code = c.responseCode) {
+                    in 200..299 -> MediaHolding.Head.PRESENT.also { qaCountHttp(base, "headOk") }
+                    404 -> MediaHolding.Head.ABSENT.also { qaCountHttp(base, "headMiss") }
+                    401, 403 -> {
+                        qaCountHttp(base, "headRefused")
+                        if (code == 401) noteUnverified(base)
+                        MediaHolding.Head.REFUSED
+                    }
+                    400, 405, 501 -> MediaHolding.Head.UNSUPPORTED.also { qaCountHttp(base, "headUnsupported") }
+                    else -> MediaHolding.Head.UNREACHABLE.also { qaCountHttp(base, "headFail") }
+                }
+            } finally { c.disconnect() }
+        } catch (e: java.io.IOException) {
+            qaCountHttp(base, "headFail"); MediaHolding.Head.UNREACHABLE
+        }
+    }
+
+    /** Plain existence of one key (a chunk window), HEAD-first; GET only where HEAD is unsupported. */
+    private fun relayHttpExists(base: String, token: String, key: String): Boolean =
+        when (relayHttpHead(base, token, key)) {
+            MediaHolding.Head.PRESENT -> true
+            MediaHolding.Head.UNSUPPORTED -> {
+                qaCountHttp(base, "probeGet")
+                relayHttpGet(base, token, key).getOrNull()?.isNotEmpty() == true
+            }
+            else -> false
+        }
+
+    /** Does the relay behind [base] hold a COMPLETE copy of [ref]? HEAD-first ([MediaHolding.probe]);
+     *  each full GET (only against a relay that won't answer HEAD) counts as QA `probeGet`. */
+    private suspend fun probeHttpHold(ref: String, base: String, token: String): MediaHolding.Verdict {
+        val p = MediaHolding.probe(
+            manifestKey = mediaKey(ref), chunkKey = { mediaChunkKey(ref, it) },
+            head = { relayHttpHead(base, token, it) },
+            get = { k ->
+                val r = relayHttpGet(base, token, k)
+                when {
+                    r.exceptionOrNull() is RelayForbidden -> MediaHolding.Fetch.Refused
+                    r.isFailure -> MediaHolding.Fetch.Unreachable
+                    else -> r.getOrNull()?.let { MediaHolding.Fetch.Data(it) } ?: MediaHolding.Fetch.Miss
+                }
+            },
+            chunkCount = { parseManifest(it) },
+        )
+        repeat(p.fullGets) { qaCountHttp(base, "probeGet") }
+        return p.verdict
+    }
+
     /** LIST keys under a prefix via the relay's plain-HTTP interface (`GET /l/<prefix>`). */
     private fun relayHttpList(base: String, token: String, prefix: String): Result<List<String>> =
         relayHttpListDelta(base, token, prefix, digest = null).map { it.first ?: emptyList() }
@@ -7739,7 +7818,8 @@ object HavenNet : InboundListener {
             .getOrPut(what) { java.util.concurrent.atomic.AtomicInteger() }.incrementAndGet()
     }
     private val QA_HTTP_COUNT_KEYS = listOf("putOk", "putRefused", "putFail", "getOk", "getMiss",
-        "getRefused", "getFail", "listOk", "listRefused", "listFail")
+        "getRefused", "getFail", "listOk", "listRefused", "listFail",
+        "headOk", "headMiss", "headRefused", "headUnsupported", "headFail", "probeGet")
 
     /** The DEBUG dump's `relay_stats` — same field names as Apple (docs/QA.md ▸ multirelay). The
      *  token is reported only as a fingerprint (first 12 hex of SHA-256), never itself. */
@@ -7788,8 +7868,9 @@ object HavenNet : InboundListener {
                 // A relay already holding the leading windows of an attempt that got cut short is asked
                 // rather than re-sent. The manifest is still written at the end — it is what makes the
                 // blob readable, and an interrupted attempt never got that far.
+                // HEAD, not GET: each resume question used to download the 8 MB window it asked about.
                 val skip = resumeSkip(nodeHex, ref, sealFp, ranges.size, force) { i ->
-                    relayHttpGet(base, e.httpToken, mediaChunkKey(ref, i)).getOrNull() != null
+                    relayHttpExists(base, e.httpToken, mediaChunkKey(ref, i))
                 }
                 val sizes = ArrayList<Int>()
                 var acc: Result<Unit> = Result.success(Unit)
@@ -7884,7 +7965,7 @@ object HavenNet : InboundListener {
      *  member who joined after a blob was posted is not one of its recipients and can never open it;
      *  answering their ask with the old seal reports success while fixing nothing. */
     suspend fun uploadMedia(circleId: String, ref: String, force: Boolean = false,
-                            reseal: Boolean = false): Boolean {
+                            reseal: Boolean = false, deferMirrorWhenWarm: Boolean = false): Boolean {
         // ULTRA-CONSTRAINED LINK: previews only, by EVERY upload path. enqueueBackup gates the queue,
         // but a friend's media-wanted ask (forced re-seal), a relay hint's promoted upload and the
         // quarantine repair call this directly — and the media-wanted path put a 330 KB original on
@@ -7894,13 +7975,13 @@ object HavenNet : InboundListener {
             Log.i("MediaSync", "upload ${ref.take(12)} held — link is ultra-constrained (previews only)")
             return false
         }
-        if (uploadMediaOnce(circleId, ref, force, reseal)) return true
+        if (uploadMediaOnce(circleId, ref, force, reseal, deferMirrorWhenWarm)) return true
         // Nothing took the blob and at least one relay REFUSED it rather than being down: publish our
         // roster to the refusers and try once more, exactly as the Restore job does for the read side. A
         // device that has never been authorized anywhere otherwise never gets its FIRST blob up — and
         // because that upload failure is invisible, the damage surfaces much later as a fetch that
         // genuinely 404s, an absence manufactured entirely by a permissions problem.
-        return healForbiddenRelays() && uploadMediaOnce(circleId, ref, force, reseal)
+        return healForbiddenRelays() && uploadMediaOnce(circleId, ref, force, reseal, deferMirrorWhenWarm)
     }
 
     /** Re-seal a blob we authored from its plaintext, and replace our at-rest copy with the new
@@ -7922,8 +8003,11 @@ object HavenNet : InboundListener {
         return fresh
     }
 
+    /** [deferMirrorWhenWarm] (backfill): once the probe finds a relay another device can read holding
+     *  the blob, the remaining uploads are redundancy — skipped while the device is not cool enough
+     *  for background mirroring; the next sweep re-offers the ref as a mirror job. */
     private suspend fun uploadMediaOnce(circleId: String, ref: String, force: Boolean = false,
-                                        reseal: Boolean = false): Boolean {
+                                        reseal: Boolean = false, deferMirrorWhenWarm: Boolean = false): Boolean {
         // Skip entirely if every destination already has this blob (before the expensive rawSealed read).
         // Only relays that serve this circle: a relay that refused the circle's scope marker holds
         // none of its media (see mediaScopeKey).
@@ -8008,22 +8092,20 @@ object HavenNet : InboundListener {
                 } else {
                     var resolved = false
                     for (base in httpUrlsFor(entry)) {
-                        val r = relayHttpGet(base, entry.httpToken, key)
-                        // Reachable and healthy — it just doesn't know us. Backing off here would
-                        // strand our media on a relay that would happily store it once authorized.
-                        if (r.exceptionOrNull() is RelayForbidden) { noteRefused(nodeHex, "media probe"); continue }
-                        if (r.isFailure) { markHttpUrlBad(base); continue }
-                        // COMPLETE, not merely present — see holdsCompleteBlob. The extra GET of the
-                        // final window is paid at most once per (ref, relay): a copy that checks out
-                        // goes into the ledger and is never probed again.
-                        val head = r.getOrNull()
-                        val complete = holdsCompleteBlob(ref, head) { k ->
-                            relayHttpGet(base, entry.httpToken, k).getOrNull() != null
-                        }
-                        if (complete) { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true }
-                        else {
-                            if (head != null) Log.i("MediaSync", "probe ref=${ref.take(12)} relay=${nodeHex.take(8)}: manifest present but chunks INCOMPLETE — re-uploading")
-                            uploadHttp.add(nodeHex to entry)
+                        // HEAD, not GET (MediaHolding.probe): the old probe downloaded the WHOLE blob —
+                        // every photo, in full — just to learn "yes, it's there". COMPLETE, not merely
+                        // present (see holdsCompleteBlob); paid at most once per (ref, relay): a copy
+                        // that checks out goes into the ledger and is never probed again.
+                        when (val v = probeHttpHold(ref, base, entry.httpToken)) {
+                            // Reachable and healthy — it just doesn't know us. Backing off here would
+                            // strand our media on a relay that would happily store it once authorized.
+                            MediaHolding.Verdict.REFUSED -> { noteRefused(nodeHex, "media probe"); continue }
+                            MediaHolding.Verdict.UNREACHABLE -> { markHttpUrlBad(base); continue }
+                            MediaHolding.Verdict.COMPLETE -> { markRelaySeen(nodeHex); markBackedUp(nodeHex, ref); landed = true }
+                            MediaHolding.Verdict.INCOMPLETE, MediaHolding.Verdict.ABSENT -> {
+                                if (v == MediaHolding.Verdict.INCOMPLETE) Log.i("MediaSync", "probe ref=${ref.take(12)} relay=${nodeHex.take(8)}: manifest present but chunks INCOMPLETE — re-uploading")
+                                uploadHttp.add(nodeHex to entry)
+                            }
                         }
                         resolved = true
                         break
@@ -8061,6 +8143,12 @@ object HavenNet : InboundListener {
             }.onFailure { relayFailed(nodeHex) }
         }
         if (uploadS3.isEmpty() && uploadLocal.isEmpty() && uploadHttp.isEmpty() && uploadDial.isEmpty()) return landed
+        // MIRRORING WAITS FOR A COOL DEVICE: a backfill job whose probe just found a relay another
+        // device can read holding the blob has only redundancy left to do (Apple backupOnce parity).
+        if (deferMirrorWhenWarm && !force && !HeavyWorkMonitor.current.backgroundMirrorAllowed && isBackedUpRemote(ref)) {
+            Log.i("MediaSync", "upload ${ref.take(12)}: already on a relay — mirroring deferred until the device cools [${HeavyWorkMonitor.current.reason}]")
+            return true
+        }
 
         // ---- Read the sealed blob, now known to be needed by at least one reachable destination.
         // A repair must produce NEW bytes: open our own copy and seal it again, so the fresh envelope
@@ -8526,6 +8614,25 @@ object HavenNet : InboundListener {
         }
     }
 
+    /** The relay (node hex / `s3:` id) whose COMPLETE copy [fetchMediaFromRelay] just reassembled, per ref. */
+    private val fetchedFrom = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * Relay-fetch [ref] (healing a refusal once), open-check it, and — only when it opened — record
+     * the relay it came from as HOLDING it. Without that record the 2-minute backfill treated a blob
+     * just downloaded from relay X as unbacked and probed X for it again with a full GET (then re-sealed
+     * it for every other relay): the rc.3 "hot after Load history from your relays" report.
+     */
+    private suspend fun fetchAndAccept(circleId: String, ref: String): Boolean {
+        fetchedFrom.remove(ref)
+        val fetched = fetchMediaFromRelay(circleId, ref) ||
+            (healForbiddenRelays() && fetchMediaFromRelay(circleId, ref))
+        val opened = fetched && acceptFetchedBlob(ref, circleId)
+        MediaHolding.holderToRecord(fetchedFrom.remove(ref), complete = fetched, opened = opened)
+            ?.let { markBackedUp(it, ref) }
+        return opened
+    }
+
     private suspend fun fetchMediaFromRelay(circleId: String, ref: String): Boolean {
         val key = mediaKey(ref)   // "haven/media/<ref>" — matches the iOS S3 upload key
         val relays = mediaRelaysFor(circleId)   // S3/HTTP first (default), iroh blob = fast-path
@@ -8543,6 +8650,7 @@ object HavenNet : InboundListener {
                 val ok = reassembleInto(ref, head) { i -> runCatching { uniffi.haven_ffi.s3Get(cfg, mediaChunkKey(ref, i)) }.getOrNull() }
                 if (!ok) continue
                 markRelaySeen(nodeHex)
+                fetchedFrom[ref] = nodeHex   // complete: reassembleInto succeeded from this source
                 android.util.Log.i("MediaSync", "S3 fetched ref=$ref headBytes=${head.size}")
                 return true
             }
@@ -8592,6 +8700,7 @@ object HavenNet : InboundListener {
                 val ok = reassembleInto(ref, head) { i -> relayHttpGet(base, entry.httpToken, mediaChunkKey(ref, i)).getOrNull() }
                 if (!ok) continue
                 markRelaySeen(nodeHex)
+                fetchedFrom[ref] = nodeHex
                 android.util.Log.i("MediaSync", "HTTP fetched ref=$ref via $base headBytes=${head.size}")
                 httpDone = true
                 break
@@ -8608,6 +8717,7 @@ object HavenNet : InboundListener {
             val ok = reassembleInto(ref, head) { i -> runCatching { client.get(mediaChunkKey(ref, i)) }.getOrNull() }
             if (!ok) { relayFailed(nodeHex); continue }
             markRelayOk(nodeHex)
+            fetchedFrom[ref] = nodeHex
             return true
         }
         // Say WHICH it was. Reporting a permissions failure as absence is what made this read as data

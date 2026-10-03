@@ -36,6 +36,11 @@ object HeavyWorkPolicy {
          *  gets the budget, not peer serving. */
         val peerServingAllowedForFriends: Boolean get() = !suspendHeavyIO && heat < Heat.FAIR
 
+        /** Background mirroring (backfill of media this device is not the only safe holder of —
+         *  [MediaHolding.isBackgroundMirror]) needs the same as friend serving: nothing suspended
+         *  AND fully cool. rc.3 field report: a warm phone kept re-mirroring a recovered history. */
+        val backgroundMirrorAllowed: Boolean get() = !suspendHeavyIO && heat < Heat.FAIR
+
         /** CRITICAL: everything waits, including uploading media you just authored. */
         val pauseEverything: Boolean get() = heat >= Heat.CRITICAL
 
@@ -117,10 +122,12 @@ object HeavyWorkPolicy {
     fun prefetchAllowed(small: Boolean, c: Conditions): Boolean = small || !c.suspendHeavyIO
 
     /** Which backup jobs may run now: own fresh (priority) uploads continue through a call / power
-     *  save / SERIOUS (they spare every future peer serve); backfill waits; CRITICAL stops both. */
-    fun backupAllowed(priority: Boolean, c: Conditions): Boolean = when {
+     *  save / SERIOUS (they spare every future peer serve); backfill waits; CRITICAL stops both.
+     *  [mirror] backfill (redundancy, not safety) also waits while merely warm (FAIR). */
+    fun backupAllowed(priority: Boolean, c: Conditions, mirror: Boolean = false): Boolean = when {
         c.pauseEverything -> false
         c.suspendHeavyIO -> priority
+        mirror && !priority -> c.backgroundMirrorAllowed
         else -> true
     }
 

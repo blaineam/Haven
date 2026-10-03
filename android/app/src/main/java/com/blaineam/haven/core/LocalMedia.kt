@@ -57,16 +57,21 @@ object LocalMedia {
     private fun sealToFile(circleId: String, bytes: ByteArray, dst: File) {
         if (bytes.size > SEAL_TO_FILE_THRESHOLD) {
             val tmp = File(dst.parentFile, "${dst.name}.plain.tmp")
+            // Seal into a scratch file and rename it over [dst]: sealing straight into the live file
+            // let a concurrent reader (verify sweep, a peer serve) see a half-written envelope.
+            val sealed = MediaFiles.scratchFor(dst, "seal")
             val ok = runCatching {
                 tmp.writeBytes(bytes)
-                HavenNet.engine.sealCircleMediaFile(circleId, tmp.absolutePath, dst.absolutePath)
+                HavenNet.engine.sealCircleMediaFile(circleId, tmp.absolutePath, sealed.absolutePath) &&
+                    sealed.exists() && MediaFiles.replace(dst, sealed)
             }.getOrDefault(false)
             runCatching { tmp.delete() }
+            runCatching { if (sealed.exists()) sealed.delete() }
             if (ok && dst.exists()) return
             // Seal-to-file failed → fall through to the in-memory path (then raw plaintext).
         }
         val toWrite = runCatching { HavenNet.engine.sealCircleMedia(circleId, bytes) }.getOrNull() ?: bytes
-        runCatching { dst.writeBytes(toWrite) }
+        MediaFiles.writeAtomic(dst, toWrite)
     }
 
     /**
@@ -725,10 +730,16 @@ object LocalMedia {
         return f.readBytes()
     }
 
-    /** Write a sealed blob fetched from the relay straight to disk (load() opens it on read). */
-    fun writeRawSealed(ref: String, blob: ByteArray) {
-        runCatching { mediaFile(ref).writeBytes(blob) }
-    }
+    /**
+     * Write a sealed blob fetched from the relay to disk ATOMICALLY (load() opens it on read).
+     * Returns false — and writes nothing — for an EMPTY body or an IO error; callers treat that as a
+     * miss, never as a stored copy that "failed to open" and gets quarantined.
+     *
+     * `writeBytes` truncated the live file before refilling it, so the verify sweep or a second fetch
+     * of the same ref could read 0 bytes mid-write and quarantine a perfectly good blob (desktop
+     * 85dd646b is the same race). Temp + rename: readers see the old file or the new one.
+     */
+    fun writeRawSealed(ref: String, blob: ByteArray): Boolean = MediaFiles.writeAtomic(mediaFile(ref), blob)
 
     // ---- Chunked reassembly (large-media fix) ---------------------------------------------------
     // A relay/S3 blob is capped at MAX_BLOB = 256 MB, so large sealed videos are transferred as 8 MB
@@ -794,14 +805,16 @@ object LocalMedia {
             return false
         }
         val dst = mediaFile(ref)
-        runCatching { dst.delete() }
+        // Seal into scratch, then ONE rename over the target (never delete-then-write into it).
+        val scratch = MediaFiles.scratchFor(dst, "seal")
         val sealed = runCatching {
-            HavenNet.engine.sealCircleMediaFile(circleId, part.absolutePath, dst.absolutePath)
-        }.getOrDefault(false) && dst.exists()
+            HavenNet.engine.sealCircleMediaFile(circleId, part.absolutePath, scratch.absolutePath)
+        }.getOrDefault(false) && scratch.exists() && MediaFiles.replace(dst, scratch)
+        runCatching { if (scratch.exists()) scratch.delete() }
         // On a seal failure, move the verified plaintext into place rather than discarding a transfer
         // that just cost the sender the whole file — exactly what [sealToFile] falls back to, and
         // [load] reads a raw at-rest blob fine. Never a silent drop.
-        if (!sealed) runCatching { part.renameTo(dst) }
+        if (!sealed) runCatching { MediaFiles.replace(dst, part) }
         runCatching { part.delete() }
         return dst.exists()
     }
@@ -810,8 +823,9 @@ object LocalMedia {
     fun adoptSealedPart(ref: String, part: File): Boolean =
         runCatching {
             val dst = mediaFile(ref)   // adopts any legacy-key file first, so it isn't left orphaned
-            runCatching { dst.delete() }
-            part.renameTo(dst) || (part.copyTo(dst, overwrite = true).let { part.delete(); true })
+            // An empty reassembly is a miss, not a blob; and ONE rename over the target — the old
+            // delete-first left a window in which the ref looked absent.
+            part.length() > 0 && MediaFiles.replace(dst, part)
         }.getOrDefault(false)
 
     // ---- Size-sorted inventory + local-limit sweep (storage management UX) ----------------------

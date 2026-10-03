@@ -6185,8 +6185,7 @@ object HavenNet : InboundListener {
     /** Relay-first fetch of one media ref (the same path a missing-media restore takes). */
     internal suspend fun historyFetchMedia(circleId: String, ref: String): Boolean {
         if (LocalMedia.has(ref)) return true
-        val got = (fetchMediaFromRelay(circleId, ref) || (healForbiddenRelays() && fetchMediaFromRelay(circleId, ref))) &&
-            acceptFetchedBlob(ref, circleId)
+        val got = fetchAndAcceptFromRelay(circleId, ref)
         if (got) {
             mediaArrived(ref)
             withContext(Dispatchers.Main) { feedVersion.value++ }
@@ -6381,9 +6380,7 @@ object HavenNet : InboundListener {
                             // (author still around) looked fine.
                             restoreInFlight.add(job.ref)
                             val got = try {
-                                (fetchMediaFromRelay(job.circleId, job.ref) ||
-                                    (healForbiddenRelays() && fetchMediaFromRelay(job.circleId, job.ref))) &&
-                                    acceptFetchedBlob(job.ref, job.circleId)
+                                fetchAndAcceptFromRelay(job.circleId, job.ref)
                             } finally { restoreInFlight.remove(job.ref) }
                             if (got) {
                                 QaStats.bump("received_via_relay")
@@ -8302,6 +8299,13 @@ object HavenNet : InboundListener {
      * corruption is the safe direction. iOS `SharedStore.restore`'s "found … but OPEN FAILED" branch.
      */
     private fun acceptFetchedBlob(ref: String, circleId: String? = null): Boolean {
+        if (LocalMedia.has(ref) && LocalMedia.sizeOf(ref) == 0L) {
+            // Nothing to judge: an empty file is a MISS, never "found but corrupt" — quarantining it
+            // (persisted, with `has()` answering true) would stop every future fetch of a blob that
+            // may be fine on the relay.
+            LocalMedia.delete(ref)
+            return false
+        }
         val opens = LocalMedia.opensForAnyCircle(ref) ?: return true
         if (opens) { if (unopenableMedia.remove(ref)) saveUnopenable(); return true }
         android.util.Log.w("MediaSync",
@@ -8441,7 +8445,16 @@ object HavenNet : InboundListener {
             return
         }
         val saved = prefs.getStringSet("unopenableMedia", emptySet()) ?: return
-        if (saved.isNotEmpty()) unopenableMedia.addAll(saved)
+        // A parked ref whose held "copy" is 0 bytes was never a bad blob — it is an empty relay body
+        // or a read that raced a truncating write (fixed now). Drop the empty file and the park, so
+        // the ordinary sweep fetches the real bytes instead of skipping the ref forever.
+        val empty = saved.filter { LocalMedia.has(it) && LocalMedia.sizeOf(it) == 0L }
+        for (r in empty) LocalMedia.delete(r)
+        unopenableMedia.addAll(saved - empty.toSet())
+        if (empty.isNotEmpty()) {
+            saveUnopenable()
+            Log.i(TAG, "quarantine: released ${empty.size} parked ref(s) holding an EMPTY copy — they re-fetch")
+        }
     }
     private fun saveUnopenable() {
         prefs.edit().putStringSet("unopenableMedia", HashSet(unopenableMedia)).apply()
@@ -8516,6 +8529,11 @@ object HavenNet : InboundListener {
         var opened = 0
         var regone = 0
         for (r in parked) {
+            // A 0-byte "copy" quarantined by an older build (an empty relay body, or a read that raced
+            // a truncating write): drop it and un-park, so the ordinary sweep fetches the real blob.
+            if (LocalMedia.has(r) && LocalMedia.sizeOf(r) == 0L) {
+                LocalMedia.delete(r); unopenableMedia.remove(r); regone++; continue
+            }
             val verdict = LocalMedia.opensForAnyCircle(r)
             if (verdict == true) { unopenableMedia.remove(r); opened++ }
             else if (verdict == null && !LocalMedia.has(r)) { unopenableMedia.remove(r); regone++ }
@@ -8525,6 +8543,22 @@ object HavenNet : InboundListener {
             Log.i(TAG, "quarantine retry: $opened now open, $regone lost their bytes (will re-fetch), ${unopenableMedia.size} still parked")
         }
     }
+
+    /** Single-flight set behind [fetchAndAcceptFromRelay], keyed by storage id (prefix-insensitive:
+     *  `img_abc` and `abc` land in the same file, so they would race just the same). */
+    private val relayFetchFlights = SingleFlight<Boolean>()
+
+    /**
+     * Relay fetch + open gate for one ref, SINGLE-FLIGHT per ref. The serialized media lane and the
+     * relay-history resync both fetch media, and nothing kept them off the same ref at the same time:
+     * two downloads into one file is the race that quarantined good blobs (desktop 85dd646b). A
+     * caller that finds a fetch of this ref already running waits for it and shares its answer.
+     */
+    private suspend fun fetchAndAcceptFromRelay(circleId: String, ref: String): Boolean =
+        relayFetchFlights.run(LocalMedia.bareId(ref)) {
+            (fetchMediaFromRelay(circleId, ref) || (healForbiddenRelays() && fetchMediaFromRelay(circleId, ref))) &&
+                acceptFetchedBlob(ref, circleId)
+        }
 
     private suspend fun fetchMediaFromRelay(circleId: String, ref: String): Boolean {
         val key = mediaKey(ref)   // "haven/media/<ref>" — matches the iOS S3 upload key
@@ -8539,7 +8573,7 @@ object HavenNet : InboundListener {
             // can't inline never arrived. THE "posts sync but recent videos won't play on Android" bug.
             if (nodeHex.startsWith("s3:")) {
                 val cfg = StorageStore.s3Config(appContext) ?: continue
-                val head = runCatching { uniffi.haven_ffi.s3Get(cfg, key) }.getOrNull() ?: continue
+                val head = runCatching { uniffi.haven_ffi.s3Get(cfg, key) }.getOrNull()?.takeIf { it.isNotEmpty() } ?: continue
                 val ok = reassembleInto(ref, head) { i -> runCatching { uniffi.haven_ffi.s3Get(cfg, mediaChunkKey(ref, i)) }.getOrNull() }
                 if (!ok) continue
                 markRelaySeen(nodeHex)
@@ -8605,6 +8639,7 @@ object HavenNet : InboundListener {
             val head = RelayDialBound.bounded { client.get(key) }
             android.util.Log.i("MediaSync", "  node=${nodeHex.take(12)} got=${head?.size ?: -1}")
             if (head == null) { relayFailed(nodeHex); continue }
+            if (head.isEmpty()) continue   // an empty body is a miss, not a stored copy (and not an outage)
             val ok = reassembleInto(ref, head) { i -> runCatching { client.get(mediaChunkKey(ref, i)) }.getOrNull() }
             if (!ok) { relayFailed(nodeHex); continue }
             markRelayOk(nodeHex)
@@ -8710,7 +8745,9 @@ object HavenNet : InboundListener {
      */
     private suspend fun reassembleInto(ref: String, head: ByteArray, getChunk: suspend (Int) -> ByteArray?): Boolean {
         val count = parseManifest(head)
-        if (count == null) { LocalMedia.writeRawSealed(ref, head); return true }
+        // An EMPTY body (or a failed local write) is a miss — the caller moves on to the next source
+        // instead of leaving a 0-byte file that "opens for no circle" and gets quarantined.
+        if (count == null) return LocalMedia.writeRawSealed(ref, head)
         sweepRestorePartsOnce()
         // Every window of this reassembly must come from ONE seal — see [manifestFingerprint]. The
         // caller retries against the NEXT relay's own head on failure, and a fingerprint mismatch
@@ -8726,7 +8763,7 @@ object HavenNet : InboundListener {
             android.util.Log.i("MediaSync", "reassemble ref=$ref resuming at chunk $have/$count")
         }
         for (i in have until count) {
-            val chunk = getChunk(i)
+            val chunk = getChunk(i)?.takeIf { it.isNotEmpty() }
             if (chunk == null || !LocalMedia.appendSealedPart(part, chunk)) {
                 // KEEP the partial + sidecar — the next attempt resumes from `have`. The i/n stays
                 // too (those chunks ARE held); the watchdog lowers the spinner if nothing follows.

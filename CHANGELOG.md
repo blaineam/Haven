@@ -7,6 +7,18 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Fixed — iPhone, iPad, Mac and Android: a photo could stay missing after a clashing download
+
+The same race the desktop app had in rc.3. Several parts of the app can start downloading the same
+small preview or thumbnail at the same moment, and a file being rewritten could be read while it was
+still half-written — so the copy looked broken, and the item was skipped until the app restarted (on
+Android it was skipped across restarts, too). Downloads of the same item now run one at a time, media
+files are always written whole before they replace the old copy, and an empty reply from a relay
+counts as "not there yet" rather than "broken". On Android, items already skipped because of an empty
+copy are released and downloaded again.
+
 ## 2.0.0 — release candidate 3 (2026-10-03)
 
 Soren release gate green (all 11 suites; e2e 455/0, including the new `relayhistory` step).

@@ -2267,7 +2267,20 @@ enum SharedStore {
     /// Fetch a media blob from the circle's mailbox and open it for whichever circle it belongs to.
     /// If the mailbox holds a chunked manifest (large media), reassemble the sealed bytes by streaming
     /// each 8 MB chunk to a temp file on disk — the full sealed blob is NEVER held in RAM during transfer.
+    ///
+    /// SINGLE-FLIGHT per ref: a caller that finds a restore of the same ref already running gets
+    /// THAT run's result instead of starting a second one. Up to four lanes ask for the same small
+    /// companion the moment a post lands (the fresh lane, the thumb sweep, `requestMedia` on view,
+    /// the relay-history resync); running them concurrently bought nothing and raced on the one
+    /// per-ref resume `.part` — one run's fresh start truncated the file the other was appending to,
+    /// the reassembled blob failed to open, and the ref was blacklisted for the session (desktop
+    /// 85dd646b is the same race on its raw-blob file).
     static func restore(ref: String, circleIds: [String], engine: Engine) async -> Data? {
+        await restoreFlights.run(ref) { await restoreOnce(ref: ref, circleIds: circleIds, engine: engine) }
+    }
+    private static let restoreFlights = SingleFlight<Data?>()
+
+    private static func restoreOnce(ref: String, circleIds: [String], engine: Engine) async -> Data? {
         var chosen: MediaSource?
         var head: Data?
         var src = "none"
@@ -2279,7 +2292,7 @@ enum SharedStore {
         // when the dial must cross a NAT over pure relay, so it's tried LAST, not first).
         if RelayHost.shared.serving,
            circleIds.contains(where: { relayNodes($0).contains(RelayHost.shared.nodeId) }),
-           let s = RelayHost.shared.localGet(key(ref)) {
+           let s = RelayMediaBody.usable(RelayHost.shared.localGet(key(ref))) {
             head = s; chosen = .ownRelay; src = "own:\(RelayHost.shared.nodeId.prefix(8))"
         }
         // Relays whose HTTP interface answered 404: the iroh path serves the same store — skip dialing.
@@ -2298,7 +2311,9 @@ enum SharedStore {
                             nodeFailedAll = false
                             // Reachable over HTTP = proof-of-life (green in Storage).
                             RelayHealth.shared.recordSuccess(node)
-                            if let s {
+                            // A 200 with an EMPTY body counts as a miss (RelayMediaBody), never as
+                            // a stored copy that "failed to open" and gets blacklisted.
+                            if let s = RelayMediaBody.usable(s) {
                                 RelayMailboxStore.shared.markSeen(node)
                                 head = s; chosen = .http(base, http.token); src = "http:\(node.prefix(8))"
                                 break httpOuter
@@ -2325,7 +2340,7 @@ enum SharedStore {
             }
         }
         if head == nil, let s3 = circleIds.compactMap({ mediaS3(for: $0) }).first {
-            if let s = try? await s3.getObject(key: key(ref)) { head = s; chosen = .s3(s3); src = "s3" }
+            if let s = RelayMediaBody.usable(try? await s3.getObject(key: key(ref))) { head = s; chosen = .s3(s3); src = "s3" }
         }
         if head == nil {
             outer: for cid in circleIds {
@@ -2334,7 +2349,7 @@ enum SharedStore {
                     if RelayHost.shared.serving, node == RelayHost.shared.nodeId { continue }
                     if httpMissed.contains(node) { continue }   // same store already said MISS over HTTP
                     guard let c = await RelayClients.client(node) else { continue }
-                    if let s = await c.get(key: key(ref)) { RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); head = s; chosen = .relay(c, node); src = "dial:\(node.prefix(8))"; break outer }
+                    if let s = RelayMediaBody.usable(await c.get(key: key(ref))) { RelayHealth.shared.recordSuccess(node); RelayMailboxStore.shared.markSeen(node); head = s; chosen = .relay(c, node); src = "dial:\(node.prefix(8))"; break outer }
                 }
             }
         }
@@ -2443,6 +2458,12 @@ enum SharedStore {
         if let data = opened {
             HavenLog.relay("media restore \(ref.prefix(12)): OK via \(src), \(data.count)B")
             return data
+        }
+        guard RelayMediaBody.mayCondemn(blob) else {
+            // Nothing to judge: an empty blob is a MISS, never "found but corrupt" — blacklisting it
+            // would stop every retry this session for a ref that may be fine on the relay.
+            HavenLog.relay("media restore \(ref.prefix(12)): \(src) served an EMPTY blob — treating as a miss")
+            return nil
         }
         HavenLog.relay("media restore \(ref.prefix(12)): found via \(src) (\(blob.count)B) but OPEN FAILED for all \(circleIds.count) circles")
         // Present-but-undecryptable: remember it for this session so the missing-media sweeps stop

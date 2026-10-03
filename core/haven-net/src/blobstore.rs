@@ -1586,7 +1586,8 @@ impl BlobServer {
     pub async fn local_dial_addr(&self) -> Result<EndpointAddr> {
         for _ in 0..50 {
             let addr = self.endpoint.addr();
-            if let Some(a) = addr.ip_addrs().next() {
+            // The IPv4 socket's port — a v6 port paired with 127.0.0.1 dials nothing.
+            if let Some(a) = addr.ip_addrs().find(|a| a.is_ipv4()) {
                 return Ok(EndpointAddr::new(addr.id)
                     .with_ip_addr(std::net::SocketAddr::from(([127, 0, 0, 1], a.port()))));
             }

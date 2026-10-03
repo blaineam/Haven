@@ -69,7 +69,9 @@ impl S3Server {
     pub async fn local_dial_addr(&self) -> Result<EndpointAddr> {
         for _ in 0..50 {
             let addr = self.endpoint.addr();
-            if let Some(a) = addr.ip_addrs().next() {
+            // The IPv4 socket's port: iroh binds v4 and v6 on different ports, so pairing a
+            // v6 port with 127.0.0.1 dials nothing and the tunnel silently never connects.
+            if let Some(a) = addr.ip_addrs().find(|a| a.is_ipv4()) {
                 return Ok(EndpointAddr::new(addr.id)
                     .with_ip_addr(SocketAddr::from(([127, 0, 0, 1], a.port()))));
             }

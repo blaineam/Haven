@@ -7,6 +7,27 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 2.0.0 — release candidate 3 (2026-10-02)
+
+Soren release gate green (all 11 suites, including the new `relayhistory` e2e step).
+
+### Added — load history from your relays
+
+Settings ▸ Devices ▸ **Load history from your relays** pulls every post, photo and video your relays
+still hold — including ones you posted from your other devices — onto this one. It shows circles, posts
+checked and media progress, can be cancelled at any time (running it again picks up where it stopped),
+and ends with an honest summary: "Added N posts and M photos and videos." Relays drop posts nobody has
+touched for about 30 days, so very old posts may no longer be there. It never uploads, re-shares or
+sends notifications; it's off over satellite, downloads previews only on mobile data or Data Saver, and
+pauses media downloads if the phone is very hot. On iPhone, iPad, Mac, Android and desktop.
+
+### Fixed — posts that were marked seen but never loaded
+
+A post that arrived before this device had the key to open it was set aside and marked "seen". The
+holding area kept only 512 posts, so a busy circle could push older ones out and they were never
+fetched again. Loading history now tracks what was actually loaded, separately from "seen", and
+leftovers sealed under long-retired keys are dropped instead of crowding out ones about to open.
+
 ## 2.0.0 — release candidate 2 (2026-10-02)
 
 Follow-ups from rc.1 testing. Soren release gate green (all 11 suites; e2e 442/0).

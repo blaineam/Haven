@@ -121,4 +121,20 @@ enum RelayHistoryPlan {
             return !constrained || small.contains(r)
         }
     }
+
+    /// The media a resync already brought onto the device without fetching it itself: refs NEW to the
+    /// feed (not in `before`, the refs the feed named when the run started — i.e. named by a recovered
+    /// post or comment) that are on disk now. The app's ordinary ingest path auto-fetches a freshly
+    /// ingested post's media concurrently, so by the media phase it is often already there; the
+    /// summary must still count it. Same synthetic / constrained rules as `wanted`, so on a
+    /// constrained link only small companions count. Disjoint from `wanted` (that needs `!have`).
+    static func landed(refs: [String], small: Set<String>, before: Set<String>, have: (String) -> Bool,
+                       synthetic: (String) -> Bool, constrained: Bool) -> [String] {
+        var seen = Set<String>()
+        return refs.filter { r in
+            guard !synthetic(r), !before.contains(r), seen.insert(r).inserted else { return false }
+            guard !constrained || small.contains(r) else { return false }
+            return have(r)
+        }
+    }
 }

@@ -88,6 +88,8 @@ final class RelayHistoryResync: ObservableObject {
         let circleIds = store.circles.map(\.id).filter { !SharedStore.historyRelayNodes($0).isEmpty }
         progress.circlesTotal = circleIds.count
         let before = await store.historyEventCount(circleIds: circleIds)
+        // The media the feed already names: anything outside it at the end came from this run.
+        let refsBefore = Set(await Self.namedMedia(circleIds: circleIds, engine: engine).flatMap(\.refs))
         var retry: [Pending] = []
         var landed = Set<String>()
 
@@ -137,7 +139,7 @@ final class RelayHistoryResync: ObservableObject {
         // 4. Media for everything the feed now names.
         if !Task.isCancelled {
             progress.phase = .media
-            await fetchMedia(circleIds: circleIds, engine: engine)
+            await fetchMedia(circleIds: circleIds, before: refsBefore, engine: engine)
         }
         progress.phase = Task.isCancelled ? .cancelled : .done
         progress.finishedAtMs = Self.nowMs()
@@ -182,11 +184,11 @@ final class RelayHistoryResync: ObservableObject {
         return (retry, changed)
     }
 
-    private func fetchMedia(circleIds: [String], engine: Engine) async {
-        let constrained = linkConstraint() != .normal || SettingsStore.shared.dataSaverActive
+    /// Every ref each circle's feed names (posts and comments), plus which of them are the small
+    /// companions (also included in `refs`).
+    private static func namedMedia(circleIds: [String], engine: Engine) async -> [(circle: String, refs: [String], small: Set<String>)] {
         let nowMs = Self.nowMs()
-        // Every ref the feed names, per circle, plus which of them are the small companions.
-        let named: [(circle: String, refs: [String], small: Set<String>)] = await engine.run(readOnly: true) { s in
+        return await engine.run(readOnly: true) { s in
             circleIds.map { cid in
                 var refs: [String] = []
                 for item in s.feed(circleId: cid, nowMs: nowMs, viewerRetentionSecs: nil) {
@@ -198,6 +200,19 @@ final class RelayHistoryResync: ObservableObject {
                 return (cid, refs + Array(small), small)
             }
         }
+    }
+
+    /// "Photos and videos" in the summary = media this run brought onto the device: refs new to the
+    /// feed that are on disk now (whichever path fetched them) plus what this phase fetches itself.
+    private func fetchMedia(circleIds: [String], before: Set<String>, engine: Engine) async {
+        let constrained = linkConstraint() != .normal || SettingsStore.shared.dataSaverActive
+        let named = await Self.namedMedia(circleIds: circleIds, engine: engine)
+        var landed = Set<String>()
+        for n in named {
+            landed.formUnion(RelayHistoryPlan.landed(
+                refs: n.refs, small: n.small, before: before, have: { MediaStore.shared.has($0) },
+                synthetic: { MediaStore.isSynthetic($0) }, constrained: constrained))
+        }
         var want: [(ref: String, circle: String)] = []
         var taken = Set<String>()
         for n in named {
@@ -205,12 +220,13 @@ final class RelayHistoryResync: ObservableObject {
                 refs: n.refs, small: n.small,
                 have: { MediaStore.shared.has($0) }, evicted: { EvictedMediaStore.shared.contains($0) },
                 synthetic: { MediaStore.isSynthetic($0) }, constrained: constrained)
-            for r in refs where taken.insert(r).inserted { want.append((r, n.circle)) }
+            for r in refs where !landed.contains(r) && taken.insert(r).inserted { want.append((r, n.circle)) }
         }
         // Small companions first: they make the feed look right long before the full-size files land.
         let small = Set(named.flatMap(\.small))
         want.sort { small.contains($0.ref) && !small.contains($1.ref) }
-        progress.mediaTotal = want.count
+        progress.mediaTotal = landed.count + want.count
+        progress.mediaDone = landed.count
         let allCircles = FeedStore.shared.circles.map(\.id)
         for batch in RelayHistoryPlan.batches(want, size: Self.mediaConcurrency * 4) {
             if Task.isCancelled { return }

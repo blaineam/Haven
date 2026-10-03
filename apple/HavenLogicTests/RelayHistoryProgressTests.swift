@@ -92,4 +92,32 @@ final class RelayHistoryProgressTests: XCTestCase {
         XCTAssertEqual(RelayHistoryPlan.wanted(refs: refs, small: small, have: have, evicted: evicted,
                                                synthetic: synthetic, constrained: true), ["thumb1"])
     }
+
+    /// The e2e bug: a recovered photo post whose photo the ordinary ingest path had already fetched
+    /// was never counted ("Added 2 posts and 0 photos and videos").
+    func testLandedCountsRecoveredMediaAnotherPathAlreadyFetched() {
+        let before: Set<String> = ["old", "gone"]
+        let onDisk: Set<String> = ["old", "new", "new.t"]
+        let refs = ["old", "gone", "new", "new.t", "new", "geo:1"]
+        let small: Set<String> = ["new.t"]
+        let have: (String) -> Bool = { onDisk.contains($0) }
+        let synthetic: (String) -> Bool = { $0.hasPrefix("geo:") }
+        let landed = RelayHistoryPlan.landed(refs: refs, small: small, before: before, have: have,
+                                             synthetic: synthetic, constrained: false)
+        XCTAssertEqual(landed, ["new", "new.t"], "new-to-the-feed media on disk counts once; old media never")
+        XCTAssertEqual(RelayHistoryPlan.landed(refs: refs, small: small, before: before, have: have,
+                                               synthetic: synthetic, constrained: true), ["new.t"])
+        let wanted = RelayHistoryPlan.wanted(refs: refs, small: small, have: have, evicted: { _ in false },
+                                             synthetic: synthetic, constrained: false)
+        XCTAssertEqual(wanted, ["gone"])
+        XCTAssertTrue(Set(landed).isDisjoint(with: wanted))
+
+        var p = RelayHistoryProgress(phase: .done)
+        p.postsAdded = 2
+        p.mediaTotal = landed.count + wanted.count
+        p.mediaDone = landed.count
+        XCTAssertEqual(p.outcome, .added(posts: 2, media: 2))
+        p.phase = .media
+        XCTAssertLessThanOrEqual(p.fraction, 1)
+    }
 }

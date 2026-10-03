@@ -5752,12 +5752,16 @@ object HavenNet : InboundListener {
         // — a blob downloaded from a relay is recorded there now (fetchAndAccept), so a recovered
         // history is not re-offered. My media already on a relay is MIRRORING (background priority),
         // and only a few such refs per sweep, so a big recovered history trickles instead of saturating.
+        // O(relays) per ref via the ledger's HashSet — never a scan of the whole ledger per ref.
         val wanted = relaysFor(circleId)
+        val own = ownHostedRelayHex()
+        val known = (wanted + mediaRelaysFor(circleId)).distinct()
         var mirrors = 0
         for (item in feed) if (item.isMe) item.media.forEach { ref ->
             if (!LocalMedia.has(ref)) return@forEach
-            val remote = isBackedUpRemote(ref)
-            if (!MediaHolding.needsBackfill(wanted, mediaBackupDestinations(ref).toSet(), remote)) return@forEach
+            val held = known.filter { isBackedUp(it, ref) }.toSet()
+            val remote = held.any { it != own }
+            if (!MediaHolding.needsBackfill(wanted, held, remote)) return@forEach
             if (MediaHolding.isBackgroundMirror(true, remote) && mirrors++ >= MediaHolding.MIRROR_PER_SWEEP) return@forEach
             enqueueBackup(circleId, ref, mine = true)
         }

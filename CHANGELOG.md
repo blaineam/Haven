@@ -19,6 +19,9 @@ files are always written whole before they replace the old copy, and an empty re
 counts as "not there yet" rather than "broken". On Android, items already skipped because of an empty
 copy are released and downloaded again.
 
+On the desktop app, an item that was skipped this way is now tried again as soon as its author puts a
+fresh copy back, instead of waiting for a restart.
+
 ## 2.0.0 — release candidate 3 (2026-10-03)
 
 Soren release gate green (all 11 suites; e2e 455/0, including the new `relayhistory` step).

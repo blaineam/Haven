@@ -90,12 +90,16 @@ final class FriendInviteStore: ObservableObject {
     /// and the plain live-only link still works.
     func currentTicketLinkValue() -> String? {
         prune()
-        if let live = issued.last(where: { $0.consumedAt == nil && isLive($0.issuedAt) }),
-           let v = Self.linkValue(live.ticket) {
-            return v
+        if let live = issued.last(where: { $0.consumedAt == nil && isLive($0.issuedAt) }) {
+            if let v = Self.linkValue(live.ticket) { return v }
+            HavenLog.net("friend-invite: live ticket has no haven-friend: prefix — minting a fresh one")
         }
         guard let text = mint() else { return nil }
-        return Self.linkValue(text)
+        guard let v = Self.linkValue(text) else {
+            HavenLog.net("friend-invite: minted ticket has no haven-friend: prefix (\(text.prefix(16))…)")
+            return nil
+        }
+        return v
     }
 
     /// Manually roll the invite link: retire every live, unconsumed ticket and mint a fresh one,
@@ -142,11 +146,15 @@ final class FriendInviteStore: ObservableObject {
            let v = Self.linkValue(live.ticket) { return v }
         guard let material = mintMaterial() else { return nil }
         let issuedAt = Self.now()
-        let text = await Task.detached(priority: .userInitiated) {
-            guard let t = try? friendInviteIssue(accountBundle: material.bundle, issuedAt: issuedAt,
-                                                 relays: material.relays, deviceHints: material.hints),
-                  let text = try? friendTicketEncode(ticket: t) else { return String?.none }
-            return text
+        let text = await Task.detached(priority: .userInitiated) { () -> String? in
+            do {
+                let t = try friendInviteIssue(accountBundle: material.bundle, issuedAt: issuedAt,
+                                              relays: material.relays, deviceHints: material.hints)
+                return try friendTicketEncode(ticket: t)
+            } catch {
+                HavenLog.net("friend-invite: off-main mint FAILED relays=\(material.relays.count) hints=\(material.hints.count) — \(error)")
+                return nil
+            }
         }.value
         guard let text else { return nil }
         issued.append(Issued(ticket: text, issuedAt: issuedAt, consumedAt: nil, acceptorHex: nil))
@@ -170,7 +178,10 @@ final class FriendInviteStore: ObservableObject {
             HavenLog.net("friend-invite: mint skipped — no relays (live-only link)")
             return nil
         }
-        guard let bundle = FeedStore.shared.myPublicBundle() else { return nil }
+        guard let bundle = FeedStore.shared.myPublicBundle() else {
+            HavenLog.net("friend-invite: mint skipped — my public bundle not cached yet")
+            return nil
+        }
         return (bundle, relays, FeedStore.shared.inviteDeviceIds().compactMap(Self.hexData))
     }
 
@@ -180,11 +191,20 @@ final class FriendInviteStore: ObservableObject {
             HavenLog.net("friend-invite: mint skipped — no relays (live-only link)")
             return nil
         }
-        guard let bundle = FeedStore.shared.myPublicBundle() else { return nil }
+        guard let bundle = FeedStore.shared.myPublicBundle() else {
+            HavenLog.net("friend-invite: mint skipped — my public bundle not cached yet")
+            return nil
+        }
         let hints = FeedStore.shared.inviteDeviceIds().compactMap(Self.hexData)
-        guard let t = try? friendInviteIssue(accountBundle: bundle, issuedAt: Self.now(),
-                                             relays: relays, deviceHints: hints),
-              let text = try? friendTicketEncode(ticket: t) else { return nil }
+        let text: String
+        do {
+            let t = try friendInviteIssue(accountBundle: bundle, issuedAt: Self.now(),
+                                          relays: relays, deviceHints: hints)
+            text = try friendTicketEncode(ticket: t)
+        } catch {
+            HavenLog.net("friend-invite: mint FAILED relays=\(relays.count) hints=\(hints.count) bundle=\(bundle.count)B — \(error)")
+            return nil
+        }
         issued.append(Issued(ticket: text, issuedAt: Self.now(), consumedAt: nil, acceptorHex: nil))
         save()
         HavenLog.net("friend-invite: minted ticket (relays=\(relays.count))")

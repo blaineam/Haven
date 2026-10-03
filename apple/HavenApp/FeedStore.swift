@@ -3979,12 +3979,16 @@ final class FeedStore: ObservableObject {
         case "invite_link":
             // Mint (or reuse) the ticketed invite link and expose it via the dump — the
             // invite_offline e2e reads it, kills this app, and has the peer accept it.
+            if AccountStore.qaShared?.account == nil {
+                HavenLog.net("matrix-qa v2 invite_link: no account (qaShared=\(AccountStore.qaShared == nil ? "nil" : "set")) — link not minted")
+            }
             if let acct = AccountStore.qaShared?.account {
                 Self.qaInviteLink = InviteHints.appendQuery(
                     in: InviteHints.embed(in: acct.havenLink(domain: HavenSite.inviteDomain),
                                           deviceIds: inviteDeviceIds()),
                     name: "t",
                     value: FriendInviteStore.shared.currentTicketLinkValue() ?? "")
+                HavenLog.net("matrix-qa v2 invite_link: ticketed=\(Self.qaInviteLink.contains("t="))")
             }
 
         case "connect_link":

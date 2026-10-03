@@ -7,7 +7,9 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 2.0.0 — release candidate 4 (unreleased)
+## 2.0.0 — release candidate 4 (2026-10-03)
+
+Soren release gate green (all 11 suites; e2e 457/0).
 
 ### Fixed — the iPhone no longer heats up after loading history
 
@@ -31,6 +33,14 @@ another device ran Load history. Each time Haven reconnected to the circle's rel
 whole relay library before the window could respond again, and a stream of relay updates made it
 reconnect every few seconds. The cleanup scan now runs in the background, reconnects are spaced at
 least a minute apart, and relay details that haven't changed are no longer re-saved on every update.
+
+### Security — networking and TLS libraries updated
+
+The peer-to-peer networking library (iroh) moves from 1.0.2 to 1.3.0, which brings steadier relay
+reconnects. The same update patches published advisories in the TLS library (rustls), the HTTP/2
+library a relay serves with (h2: a denial-of-service via empty data frames — relevant to any relay
+reachable from the internet), the XML parser (quick-xml) and two smaller libraries. Relays on the
+release-candidate channel pick this up on their own.
 
 ## 2.0.0 — release candidate 3 (2026-10-03)
 

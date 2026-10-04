@@ -253,6 +253,77 @@ enum SiblingTeachPlan {
     }
 }
 
+/// When the in-app host teaches its relays their siblings again (`RelayHost.meshSyncTick`).
+///
+/// Teaching used to be fire-and-forget: a topology change was marked taught the moment the
+/// lessons were SENT. A relay refuses a lesson from someone it does not yet count as a member of
+/// that circle, and membership on a freshly adopted relay lands a little after the relay itself
+/// (the member's device roster / enrollment arrives on its own schedule). So the one lesson sent
+/// on the topology change was refused, the topology was already marked taught, and nothing
+/// re-taught until the 5-minute mesh pull — the relay meshed with nobody until then. e2e
+/// `multirelay` ("R_A pulls a fresh key from its sibling R_C"): 4–12 s through rc.3, 94–135 s
+/// from rc.4, where the lesson was refused 12 s before B's enrollment on R_A completed.
+///
+/// A topology is now taught until every lesson is ACCEPTED: a refused lesson is retried every
+/// `retryBaseMs` for `fastWindowMs` after the topology changed — the window in which the missing
+/// membership normally lands; a doubling backoff there let the retry drift 1–2 minutes past it —
+/// then doubling to `retryCapMs` (a relay that keeps refusing — an older one with no teaching
+/// verb, or a circle we are not a member of there — costs one round trip per cap window, like the
+/// gated pull already spends). A new topology starts over at once. (Android and desktop re-teach
+/// on every mesh pass, so they never lost a refused lesson; only this topology gate could.)
+struct SiblingTeachSchedule {
+    static let retryBaseMs: UInt64 = 15_000
+    static let retryCapMs: UInt64 = 300_000
+    static let fastWindowMs: UInt64 = 600_000
+
+    private(set) var topology = ""
+    private var changedAtMs: UInt64 = 0
+    private var generation = 0
+    private var confirmed = false
+    private var inFlight = false
+    private var inFlightSinceMs: UInt64 = 0
+    private var failStreak: UInt32 = 0
+    private var retryAtMs: UInt64 = 0
+
+    /// Should this tick teach `topology`? Returns the attempt's generation (hand it back to
+    /// `finish`), or nil when the topology is already taught, an attempt is in flight, or the
+    /// retry after a refusal is not due yet.
+    mutating func begin(topology t: String, nowMs: UInt64) -> Int? {
+        if t != topology || changedAtMs == 0 {
+            topology = t
+            changedAtMs = nowMs
+            confirmed = false
+            inFlight = false   // a still-running attempt taught the OLD topology; its result is stale
+            failStreak = 0
+            retryAtMs = 0
+        }
+        // An attempt that never reported back (a dial wedged past every timeout) stops blocking
+        // the retry after one cap window.
+        let stuck = inFlight && nowMs &- inFlightSinceMs >= Self.retryCapMs
+        guard !confirmed, !inFlight || stuck, nowMs >= retryAtMs else { return nil }
+        inFlight = true
+        inFlightSinceMs = nowMs
+        generation += 1
+        return generation
+    }
+
+    /// The attempt `generation` finished: every lesson accepted (`allTaught`), or not.
+    mutating func finish(generation g: Int, allTaught: Bool, nowMs: UInt64) {
+        guard g == generation, inFlight else { return }   // superseded by a newer topology
+        inFlight = false
+        if allTaught {
+            confirmed = true
+            failStreak = 0
+        } else {
+            failStreak += 1
+            let backoff = nowMs &- changedAtMs < Self.fastWindowMs
+                ? Self.retryBaseMs
+                : min(Self.retryBaseMs << UInt64(min(failStreak - 1, 5)), Self.retryCapMs)
+            retryAtMs = nowMs &+ backoff
+        }
+    }
+}
+
 /// What the in-process relay is told to serve, per circle (`RelayHost.authorizeMembership`).
 /// `authorize` REPLACES a circle's member set, so every circle must be authorized exactly once,
 /// with everything that belongs in it. The matrix QA stub used to authorize "default" a SECOND

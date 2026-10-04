@@ -271,6 +271,67 @@ final class SiblingTeachPlanTests: XCTestCase {
     }
 }
 
+/// Re-teaching until every relay accepts (ReachPolicy.swift `SiblingTeachSchedule`).
+final class SiblingTeachScheduleTests: XCTestCase {
+    let t0: UInt64 = 1_000_000
+
+    /// e2e `multirelay` rc.4/rc.5: the topology's one lesson was refused (B not yet a member on R_A)
+    /// and nothing re-taught for ~5 minutes. A refused lesson must come back on the next tick
+    /// after the short retry, not at the next 5-minute mesh pull.
+    func testARefusedTopologyIsRetaughtWithinSeconds() {
+        var s = SiblingTeachSchedule()
+        let g1 = s.begin(topology: "cS=a,c", nowMs: t0)
+        XCTAssertNotNil(g1, "a new topology is taught at once")
+        s.finish(generation: g1!, allTaught: false, nowMs: t0 + 100)
+        XCTAssertNil(s.begin(topology: "cS=a,c", nowMs: t0 + 5_000), "not before the retry is due")
+        let g2 = s.begin(topology: "cS=a,c", nowMs: t0 + 100 + SiblingTeachSchedule.retryBaseMs)
+        XCTAssertNotNil(g2, "re-taught one retry window later (was: never, until the 5-min pull)")
+        s.finish(generation: g2!, allTaught: true, nowMs: t0 + 20_000)
+        XCTAssertNil(s.begin(topology: "cS=a,c", nowMs: t0 + 600_000), "an accepted topology is not re-sent")
+    }
+
+    func testATopologyChangeTeachesAtOnceAndIgnoresTheStaleResult() {
+        var s = SiblingTeachSchedule()
+        let old = s.begin(topology: "cS=a", nowMs: t0)!
+        XCTAssertNil(s.begin(topology: "cS=a", nowMs: t0 + 1), "one attempt in flight at a time")
+        let new = s.begin(topology: "cS=a,c", nowMs: t0 + 2)
+        XCTAssertNotNil(new, "a changed topology does not wait for the old attempt")
+        s.finish(generation: old, allTaught: true, nowMs: t0 + 3)   // stale: taught the OLD set
+        s.finish(generation: new!, allTaught: false, nowMs: t0 + 4)
+        XCTAssertNotNil(s.begin(topology: "cS=a,c", nowMs: t0 + 4 + SiblingTeachSchedule.retryBaseMs),
+                        "the stale success did not mark the new topology taught")
+    }
+
+    /// While membership is expected to land (the first `fastWindowMs` after a change) a refusal is
+    /// retried every `retryBaseMs`, so the lesson lands within one retry of the membership — a
+    /// doubling backoff there drifted the retry 1–2 minutes past it (14 s instead of 4 s in e2e).
+    /// After the window, a relay that never accepts backs off to one try per cap.
+    func testAPersistentRefusalRetriesBrisklyThenBacksOffToTheCap() {
+        var s = SiblingTeachSchedule()
+        var now = t0
+        var gaps: [UInt64] = []
+        var last = now
+        while now - t0 < SiblingTeachSchedule.fastWindowMs + 30 * 60_000 {
+            var g = s.begin(topology: "cS=a,old", nowMs: now)
+            while g == nil { now += 1_000; g = s.begin(topology: "cS=a,old", nowMs: now) }
+            gaps.append(now - last)
+            last = now
+            s.finish(generation: g!, allTaught: false, nowMs: now)
+        }
+        let fast = gaps.dropFirst().prefix(Int(SiblingTeachSchedule.fastWindowMs / SiblingTeachSchedule.retryBaseMs) - 1)
+        XCTAssertTrue(fast.allSatisfy { $0 == SiblingTeachSchedule.retryBaseMs }, "brisk inside the window: \(Array(fast))")
+        XCTAssertEqual(gaps.last, SiblingTeachSchedule.retryCapMs, "an old relay that never accepts costs one try per cap")
+        XCTAssertTrue(gaps.dropFirst().allSatisfy { $0 <= SiblingTeachSchedule.retryCapMs })
+    }
+
+    func testAnAttemptThatNeverReportsBackDoesNotWedgeTheSchedule() {
+        var s = SiblingTeachSchedule()
+        XCTAssertNotNil(s.begin(topology: "cS=a,c", nowMs: t0))
+        XCTAssertNil(s.begin(topology: "cS=a,c", nowMs: t0 + 60_000))
+        XCTAssertNotNil(s.begin(topology: "cS=a,c", nowMs: t0 + SiblingTeachSchedule.retryCapMs))
+    }
+}
+
 /// Which circle a launch reopens and pulls first (ReachPolicy.swift `LaunchOrder`).
 final class LaunchOrderTests: XCTestCase {
     func testRelaunchReopensTheRememberedCircle() {

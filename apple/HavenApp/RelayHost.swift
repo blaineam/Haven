@@ -1047,24 +1047,41 @@ final class RelayHost: ObservableObject {
     /// mailbox, and the flat pool made every relay we know a sibling for every circle we are in —
     /// a friend's relay adopted for ONE shared circle ended up mirroring the others, and kept
     /// mirroring a circle after its creator removed us from it.
-    /// Taught as soon as a circle's relay set changes (a relay adopted, an announce learned), and
-    /// again with every mesh pull — a relay that learns its sibling minutes late pulls minutes late.
-    private var lastTaughtTopology = ""
+    /// Taught as soon as a circle's relay set changes (a relay adopted, an announce learned) — and
+    /// re-taught until every relay ACCEPTS (`SiblingTeachSchedule`) — and again with every mesh
+    /// pull. A relay that learns its sibling minutes late pulls minutes late.
+    private var teachSchedule = SiblingTeachSchedule()
 
-    private func teachSiblingRelays(pool: [String], myHex: String) {
+    /// `done(allTaught)` runs on the main actor once every lesson was sent: false when a relay we
+    /// reached REFUSED a lesson — typically because our membership there has not landed yet, so a
+    /// retry shortly will succeed. Nothing to teach counts as taught. Our own in-process relay is
+    /// never dialed (self-dial guard) and a relay we cannot reach right now (in backoff) is not a
+    /// refusal: re-teaching it would not help, and it re-enters the topology when it comes back.
+    private func teachSiblingRelays(pool: [String], myHex: String,
+                                    done: (@MainActor (Bool) -> Void)? = nil) {
         let live = Set(pool.filter { $0.count == 64 })
-        guard live.count > 1 else { return }   // nothing to teach when we're the only relay
-        let plan = SiblingTeachPlan.plan(
-            circleIds: FeedStore.shared.circles.map(\.id),
-            relaysFor: { RelayMailboxStore.shared.relays(forCircle: $0) },
-            live: live, myHex: myHex)
-        guard !plan.isEmpty else { return }
+        let plan = live.count > 1   // nothing to teach when we're the only relay
+            ? SiblingTeachPlan.plan(
+                circleIds: FeedStore.shared.circles.map(\.id),
+                relaysFor: { RelayMailboxStore.shared.relays(forCircle: $0) },
+                live: live, myHex: myHex)
+            : []
+        guard !plan.isEmpty else { done?(true); return }
         Task.detached {
-            for (target, lessons) in plan {
+            var refused: [String] = []
+            for (target, lessons) in plan where target != myHex.lowercased() {
                 guard let client = await RelayClients.client(target) else { continue }
                 for (cid, siblings) in lessons {
-                    _ = await client.teachRelays(circleId: cid, relays: siblings)
+                    if !(await client.teachRelays(circleId: cid, relays: siblings)) {
+                        refused.append("\(target.prefix(8))/\(cid.prefix(8))")
+                    }
                 }
+            }
+            await MainActor.run {
+                if !refused.isEmpty {
+                    HavenLog.relay("sibling teach not accepted by \(refused.joined(separator: ",")) — will re-teach")
+                }
+                done?(refused.isEmpty)
             }
         }
     }
@@ -1088,9 +1105,10 @@ final class RelayHost: ObservableObject {
         let topology = FeedStore.shared.circles.map(\.id).sorted().map { cid in
             "\(cid)=" + Set(RelayMailboxStore.shared.relays(forCircle: cid)).intersection(peers).sorted().joined(separator: ",")
         }.joined(separator: ";")
-        if topology != lastTaughtTopology, !peers.isEmpty {
-            lastTaughtTopology = topology
-            teachSiblingRelays(pool: peers + [myHex], myHex: myHex)
+        if !peers.isEmpty, let attempt = teachSchedule.begin(topology: topology, nowMs: UInt64(Date().timeIntervalSince1970 * 1000)) {
+            teachSiblingRelays(pool: peers + [myHex], myHex: myHex) { [weak self] allTaught in
+                self?.teachSchedule.finish(generation: attempt, allTaught: allTaught, nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+            }
         }
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         // Cheap path every tick: membership only. Expensive pull is throttled hard.

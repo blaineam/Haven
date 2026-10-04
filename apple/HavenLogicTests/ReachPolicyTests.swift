@@ -391,3 +391,53 @@ final class RelayBackoffStepTests: XCTestCase {
         XCTAssertEqual(s?.backoffMs, 5_000)
     }
 }
+
+/// A relay that joins a circle is introduced (devroster + member enroll) seconds later, not on the
+/// next roster tick / 10-minute enroll gate — the e2e `multirelay` 105–177 s enrollment.
+final class RelayIntroductionTests: XCTestCase {
+    let ra = String(repeating: "a", count: 64)
+    let rb = String(repeating: "b", count: 64)
+
+    /// The first join schedules; further joins inside the debounce ride the same flush.
+    func testJoinSchedulesOnceAndCoalesces() {
+        var p = RelayIntroduction()
+        XCTAssertTrue(p.noteJoined(circleId: "cS", relay: ra, nowMs: 1_000))
+        XCTAssertFalse(p.noteJoined(circleId: "cA", relay: ra, nowMs: 1_100))   // already scheduled
+        XCTAssertEqual(p.drain(circleIds: ["default", "cA", "cS"]), ["cA", "cS"])
+        XCTAssertTrue(p.pendingCircles.isEmpty)
+    }
+
+    /// Announce echoes of the same (circle, relay) don't re-introduce inside the gap; after it they do.
+    func testSamePairIsRateLimited() {
+        var p = RelayIntroduction()
+        XCTAssertTrue(p.noteJoined(circleId: "cS", relay: ra, nowMs: 0))
+        _ = p.drain(circleIds: ["cS"])
+        XCTAssertFalse(p.noteJoined(circleId: "cS", relay: ra.uppercased(), nowMs: 10_000))
+        XCTAssertTrue(p.noteJoined(circleId: "cS", relay: rb, nowMs: 10_000))   // a different relay is news
+        _ = p.drain(circleIds: ["cS"])
+        XCTAssertTrue(p.noteJoined(circleId: "cS", relay: ra, nowMs: RelayIntroduction.reintroduceGapMs + 1))
+    }
+
+    /// The all-circles default joins every circle; s3 pseudo-relays and malformed ids are never introduced.
+    func testDefaultExpandsAndS3Ignored() {
+        var p = RelayIntroduction()
+        XCTAssertFalse(p.noteJoined(circleId: "cS", relay: "s3:bucket", nowMs: 0))
+        XCTAssertFalse(p.noteJoined(circleId: "cS", relay: "abc", nowMs: 0))
+        XCTAssertTrue(p.noteJoined(circleId: RelayIntroduction.allCircles, relay: ra, nowMs: 0))
+        XCTAssertEqual(p.drain(circleIds: ["default", "cS"]), ["default", "cS"])
+    }
+
+    /// The enroll gate holds only while the relay set is unchanged: a relay added since the last
+    /// enroll opens it at once (the old per-circle 10-min gate kept a new relay waiting).
+    func testEnrollGateOpensForANewRelay() {
+        let enrolled: Set<String> = [rb]
+        XCTAssertFalse(RelayIntroduction.enrollDue(nowMs: 60_000, lastMs: 0, lastRelays: enrolled,
+                                                   relays: [rb], force: false))
+        XCTAssertTrue(RelayIntroduction.enrollDue(nowMs: 60_000, lastMs: 0, lastRelays: enrolled,
+                                                  relays: [rb, ra], force: false))
+        XCTAssertTrue(RelayIntroduction.enrollDue(nowMs: RelayIntroduction.enrollGapMs, lastMs: 0,
+                                                  lastRelays: enrolled, relays: [rb], force: false))
+        XCTAssertTrue(RelayIntroduction.enrollDue(nowMs: 1, lastMs: nil, lastRelays: [], relays: [rb], force: false))
+        XCTAssertTrue(RelayIntroduction.enrollDue(nowMs: 1, lastMs: 0, lastRelays: enrolled, relays: [rb], force: true))
+    }
+}

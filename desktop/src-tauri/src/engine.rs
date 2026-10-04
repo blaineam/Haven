@@ -101,6 +101,8 @@ struct DynState {
     media_req_at: HashMap<String, u64>,
     /// last time we mirrored our OWN media to the circle relays (idempotent backfill, ~every 2 min).
     last_media_backfill_ms: u64,
+    /// Which relays joined which circle since the last heartbeat (see `relayintro`).
+    relay_intro: crate::relayintro::RelayIntroduction,
     /// last own-device catch-up sweep, and whether one is still running. Throttled HARD (5 min) and
     /// single-flight: the sweep RE-SEALS every envelope it hands over, so it is real CPU per item
     /// and must never ride the sync tick or be allowed to overlap itself. See `sync_with_contacts`.
@@ -1835,6 +1837,9 @@ impl Engine {
                 // Scheduled posts are time-sensitive — check every heartbeat so they fire punctually
                 // regardless of the adaptive back-off below (cheap: just compares due timestamps).
                 me.fire_due_scheduled();
+                // A relay that joined a circle since the last heartbeat serves nobody until we
+                // introduce ourselves — now, not on the ~2-min backfill tick (`relayintro`).
+                me.introduce_to_joined_relays().await;
 
                 // Poll bucket (base 30s): pull the circle mailbox so posts arrive even when peers
                 // aren't both online, then converge this user's OWN devices over the same relays.
@@ -6838,9 +6843,49 @@ impl Engine {
     /// caller the relay already serves; the verb simply had no caller here. We must name ourselves or
     /// the relay declines by rule (2). iOS `enrollMembers` / Android `enrollCircleMembers` parity.
     async fn enroll_circle_members(self: &Arc<Self>) {
+        self.enroll_circle_members_in(None).await
+    }
+
+    /// Introduce ourselves to every relay that JOINED one of our circles since the last heartbeat:
+    /// our signed device roster FIRST (the enroll is refused unless the relay already serves this
+    /// device, and a headless relay learns our device ids only from it), then the circle's members.
+    /// Unchanged-roster skips keep the publish to relays that have never had it. See `relayintro`.
+    async fn introduce_to_joined_relays(self: &Arc<Self>) {
+        let current = {
+            let p = self.prefs.lock();
+            let mut m: HashMap<String, std::collections::BTreeSet<String>> = p
+                .relays
+                .iter()
+                .map(|(c, rs)| {
+                    (c.clone(), rs.iter().filter(|h| p.relay_is_active(h)).map(|h| h.to_lowercase()).collect())
+                })
+                .collect();
+            if !p.default_relay.is_empty() && p.relay_is_active(&p.default_relay) {
+                m.insert(crate::relayintro::ALL_CIRCLES.to_string(), [p.default_relay.to_lowercase()].into());
+            }
+            m
+        };
+        if !self.dyn_state.lock().relay_intro.observe(now_ms(), current) {
+            return;
+        }
+        let ids: Vec<String> = self.social.circles().into_iter().map(|c| c.id).collect();
+        let cids = self.dyn_state.lock().relay_intro.drain(&ids);
+        if cids.is_empty() {
+            return;
+        }
+        log::info!("introducing to newly joined relay(s): {} circle(s)", cids.len());
+        self.publish_device_roster().await;
+        self.enroll_circle_members_in(Some(&cids)).await;
+    }
+
+    /// [`Self::enroll_circle_members`] for `only` these circles (all when `None`).
+    async fn enroll_circle_members_in(self: &Arc<Self>, only: Option<&[String]>) {
         let me = self.social.my_node_hex();
         let my_dev = self.node_id_hex();
         for c in self.social.circles() {
+            if only.is_some_and(|o| !o.contains(&c.id)) {
+                continue;
+            }
             let relays: Vec<String> = self
                 .relays_for(&c.id)
                 .into_iter()

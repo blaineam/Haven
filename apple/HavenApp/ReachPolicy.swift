@@ -86,6 +86,61 @@ enum DialOrder {
     }
 }
 
+/// A relay that just JOINED one of our circles (adopted, announced by a member, synced from a sibling
+/// device, or made the all-circles default) serves nobody until it has been introduced: it needs our
+/// account-signed device roster (so it authorizes THIS device's id, not only the account id its link
+/// named) and, from a member it already serves, the circle's member list (`enrollMembers`). Both ran
+/// only on timers — the roster on the media-backfill tick (2–3 min), the enroll behind a 10-minute
+/// per-CIRCLE gate that a brand-new relay for an already-enrolled circle could not open. So a friend
+/// waited out whatever was left of the roster tick before the new relay answered them (e2e
+/// `multirelay`: B enrolled on R_A 105 s / 168 s / 177 s after adoption — purely the tick's phase).
+/// Now the join itself schedules the introduction a beat later (coalescing a burst of announces).
+struct RelayIntroduction {
+    /// Coalesce a burst (one announce adds the relay to several circles; adoption also sets the default).
+    static let debounceMs: UInt64 = 1_500
+    /// A relay that keeps re-joining (announce echoes after a forget/re-add) is introduced at most this often.
+    static let reintroduceGapMs: UInt64 = 30_000
+    /// The member enroll's steady-state gate: the set changes rarely, so once per 10 min is plenty.
+    static let enrollGapMs: UInt64 = 600_000
+
+    /// Circle id meaning "every circle" — a relay made the all-circles default joined all of them.
+    static let allCircles = "*"
+
+    private(set) var introducedAtMs: [String: UInt64] = [:]   // "circle|relay" → last introduction
+    private(set) var pendingCircles: Set<String> = []
+
+    /// `relay` joined `circleId`. Returns true when an introduction must be scheduled (the caller
+    /// debounces by `debounceMs`, then calls `drain`). A join of the same pair inside
+    /// `reintroduceGapMs` is ignored; an s3 pseudo-relay is never introduced (it has no auth map).
+    mutating func noteJoined(circleId: String, relay: String, nowMs: UInt64) -> Bool {
+        let r = relay.lowercased()
+        guard r.count == 64, !r.hasPrefix("s3:"), !circleId.isEmpty else { return false }
+        let key = circleId + "|" + r
+        if let at = introducedAtMs[key], nowMs &- at < Self.reintroduceGapMs { return false }
+        introducedAtMs[key] = nowMs
+        let wasIdle = pendingCircles.isEmpty
+        pendingCircles.insert(circleId)
+        return wasIdle
+    }
+
+    /// The circles to introduce now (`allCircles` expanded against `circleIds`), clearing the queue.
+    mutating func drain(circleIds: [String]) -> [String] {
+        defer { pendingCircles.removeAll() }
+        if pendingCircles.contains(Self.allCircles) { return circleIds }
+        return circleIds.filter { pendingCircles.contains($0) }
+    }
+
+    /// The member-enroll gate. Due when forced, never enrolled, the circle's relay set gained a relay
+    /// since the last enroll (that relay has never heard the list), or `enrollGapMs` has passed.
+    static func enrollDue(nowMs: UInt64, lastMs: UInt64?, lastRelays: Set<String>, relays: [String],
+                          force: Bool) -> Bool {
+        if force { return true }
+        guard let lastMs else { return true }
+        if relays.contains(where: { !lastRelays.contains($0.lowercased()) }) { return true }
+        return nowMs &- lastMs >= enrollGapMs
+    }
+}
+
 /// Relays adopted from a friend-invite ticket answer 403 to our uploads until the inviter approves
 /// us and enrolls our ids there. That refusal is EXPECTED and short-lived, so it must not feed the
 /// long backoffs built for dead or hostile relays (media 2 min → 1 h, relay stand-down, uploader

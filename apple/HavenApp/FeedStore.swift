@@ -8156,8 +8156,34 @@ final class FeedStore: ObservableObject {
         }
     }
 
-    /// Last member-enroll per circle — the set changes rarely, so once per 10 min is plenty.
+    /// Last member-enroll per circle — the set changes rarely, so once per 10 min is plenty — and
+    /// the relays that enroll reached: a relay added since then opens the gate (`RelayIntroduction`).
     private var lastEnrollMs: [String: UInt64] = [:]
+    private var lastEnrollRelays: [String: Set<String>] = [:]
+    private var relayIntro = RelayIntroduction()
+
+    /// A relay just joined `circleId` (adopted, announced, synced, or made the default). Introduce
+    /// ourselves there a beat later — our signed device roster, then the circle's members — so it
+    /// serves us and our friends in seconds instead of after the next roster tick (2–3 min) or the
+    /// 10-minute enroll gate. See `RelayIntroduction`.
+    func relayJoined(circleId: String, relay: String) {
+        guard engine != nil, relayIntro.noteJoined(circleId: circleId, relay: relay, nowMs: now()) else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: RelayIntroduction.debounceMs * 1_000_000)
+            await self?.introduceToJoinedRelays()
+        }
+    }
+
+    private func introduceToJoinedRelays() async {
+        let cids = relayIntro.drain(circleIds: circles.map(\.id))
+        guard let engine, !cids.isEmpty else { return }
+        HavenLog.relay("introducing to newly joined relay(s): \(cids.count) circle(s)")
+        // Roster FIRST: the enroll below is refused unless the relay already serves this device,
+        // and a headless relay only learns our device ids from the roster. Unchanged-roster skips
+        // keep this to the relays that have never had it.
+        await SharedStore.publishDeviceRoster(engine: engine)
+        for cid in cids { enrollMembers(circleId: cid, force: true) }
+    }
 
     /// Tell every relay serving `circleId` who its members are, so a peer the operator never listed
     /// in the relay link is still served. Best-effort: a relay that refuses (we aren't served there
@@ -8168,12 +8194,15 @@ final class FeedStore: ObservableObject {
     func enrollMembers(circleId: String, force: Bool = false, replace: Bool = false) {
         guard engine != nil else { return }
         let nowMs = now()
-        // `force`: a member was just added (approval) — the set DID change, so the gate that assumes
-        // it rarely does must not hold the new friend out for up to ten minutes.
-        if !force, let last = lastEnrollMs[circleId], nowMs &- last < 600_000 { return }
         let relays = RelayMailboxStore.shared.relays(forCircle: circleId)
             .filter { !$0.hasPrefix("s3:") && $0.count == 64 }
         guard !relays.isEmpty else { return }
+        // `force`: a member was just added (approval) — the set DID change, so the gate that assumes
+        // it rarely does must not hold the new friend out for up to ten minutes. Same for a relay
+        // added since the last enroll: it has never heard the list at all.
+        guard RelayIntroduction.enrollDue(nowMs: nowMs, lastMs: lastEnrollMs[circleId],
+                                          lastRelays: lastEnrollRelays[circleId] ?? [],
+                                          relays: relays, force: force) else { return }
         // Rule (2) of `learn`: we must name OURSELVES or the relay declines outright.
         var members = Set(dialTargets(circleId).map { $0.lowercased() })
         // A replace names every remaining member's ACCOUNT too — the relay re-expands each account's
@@ -8183,6 +8212,7 @@ final class FeedStore: ObservableObject {
         members.insert(myDeviceNodeHex.lowercased())
         guard members.count > 1 || replace else { return }
         lastEnrollMs[circleId] = nowMs
+        lastEnrollRelays[circleId] = Set(relays.map { $0.lowercased() })
         let list = Array(members)
         Task.detached {
             for hex in relays {

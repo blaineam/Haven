@@ -1356,6 +1356,7 @@ final class RelayMailboxStore: ObservableObject {
             list.append(hex)
             relaysByCircle[circleId] = list
             UserDefaults.standard.set(relaysByCircle, forKey: key)
+            FeedStore.shared.relayJoined(circleId: circleId, relay: hex)
         }
     }
 
@@ -1526,6 +1527,9 @@ final class RelayMailboxStore: ObservableObject {
             // A relay we didn't have may hold the rosters we couldn't find — let the next sync
             // pass ask it now instead of after each contact's 10-min pull backoff.
             SharedStore.clearRosterPullBackoff()
+            // …and it serves nobody until we introduce ourselves (roster + members) — now, not on
+            // the next roster tick (`RelayIntroduction`).
+            FeedStore.shared.relayJoined(circleId: circleId, relay: hex)
         }
     }
 
@@ -1736,7 +1740,10 @@ final class RelayMailboxStore: ObservableObject {
     /// Pick a relay as the all-circles default (every present + future circle inherits it).
     func setDefault(_ hex: String?) {
         if let hex { ensureEntry(hex, activate: true) }
+        let changed = hex != nil && hex != defaultNodeHex
         defaultNodeHex = hex
+        // The default joins EVERY circle at once (`relays(forCircle:)` folds it in).
+        if changed, let hex { FeedStore.shared.relayJoined(circleId: RelayIntroduction.allCircles, relay: hex) }
     }
 
     /// Whether the user has FORGOTTEN/deactivated this relay — auto-learn checks this and skips so a

@@ -3464,22 +3464,80 @@ object HavenNet : InboundListener {
      * have produced it — a relay can serve it, never forge it. iOS
      * SharedStore.adoptNewerOwnRosterAndRetry parity.
      */
-    /** Last member-enroll per circle — the member set changes rarely, so once per 10 min is plenty. */
+    /** Last member-enroll per circle — the member set changes rarely, so once per 10 min is plenty —
+     *  and the relays that enroll reached: a relay added since then opens the gate ([RelayIntroduction]). */
     private val lastEnrollMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val lastEnrollRelays = java.util.concurrent.ConcurrentHashMap<String, Set<String>>()
+
+    /** Which relays each circle had at the last [noteRelayJoins] — the diff is what JOINED. Seeded by
+     *  [loadRelayNodes] so a relaunch introduces nothing. Guarded by [relayIntro]. */
+    private var relayJoinSeen: Map<String, Set<String>> = emptyMap()
+    private var relayJoinSeenDefault = ""
+    private var relayJoinSeeded = false
+    private val relayIntro = RelayIntroduction()
+
+    private fun relayJoinSnapshot(): Map<String, Set<String>> =
+        relayNodes.mapValues { (_, v) -> v.map { it.lowercase() }.toSet() }
+
+    /**
+     * Every relay mutation ends in [saveRelayNodes], which calls this: diff the per-circle relay lists
+     * (and the all-circles default) against the last snapshot, and introduce ourselves to whatever just
+     * JOINED a circle — our signed device roster, then the circle's members — a beat later instead of
+     * on the next roster tick / 10-minute enroll gate. iOS `FeedStore.relayJoined` parity.
+     */
+    private fun noteRelayJoins() {
+        val now = System.currentTimeMillis()
+        val schedule = synchronized(relayIntro) {
+            val cur = relayJoinSnapshot()
+            val def = defaultRelayHex.lowercase()
+            if (!relayJoinSeeded) {
+                relayJoinSeen = cur; relayJoinSeenDefault = def; relayJoinSeeded = true
+                return
+            }
+            var sched = false
+            for ((cid, relays) in cur) {
+                val before = relayJoinSeen[cid] ?: emptySet()
+                for (r in relays) if (r !in before) sched = relayIntro.noteJoined(cid, r, now) || sched
+            }
+            if (def.isNotEmpty() && def != relayJoinSeenDefault)
+                sched = relayIntro.noteJoined(RelayIntroduction.ALL_CIRCLES, def, now) || sched
+            relayJoinSeen = cur; relayJoinSeenDefault = def
+            sched
+        }
+        if (schedule) scope.launch {
+            delay(RelayIntroduction.DEBOUNCE_MS)
+            introduceToJoinedRelays()
+        }
+    }
+
+    private suspend fun introduceToJoinedRelays() {
+        val ids = runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
+        val cids = synchronized(relayIntro) { relayIntro.drain(ids) }
+        if (cids.isEmpty()) return
+        Log.i(TAG, "introducing to newly joined relay(s): ${cids.size} circle(s)")
+        // Roster FIRST: the enroll is refused unless the relay already serves this device, and a
+        // headless relay learns our device ids only from the roster. Unchanged-roster skips keep this
+        // to the relays that have never had it.
+        runCatching { publishDeviceRoster() }
+        runCatching { enrollCircleMembers(only = cids.toSet(), force = true) }
+    }
 
     /**
      * Tell every relay serving a circle who its members are, so a peer the operator never listed in
      * the relay link is still served. Best-effort: a relay that refuses (because WE are the one it
      * doesn't serve) or that predates the verb just keeps its existing set.
      */
-    private fun enrollCircleMembers() {
+    private fun enrollCircleMembers(only: Set<String>? = null, force: Boolean = false) {
         val nowMs = System.currentTimeMillis()
         val myAcct = runCatching { social.myNodeHex() }.getOrNull()?.lowercase() ?: return
         val myNode = runCatching { node?.nodeIdHex() }.getOrNull()?.lowercase()
         for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {
+            if (only != null && c.id !in only) continue
             val relays = relaysFor(c.id).filter { !it.startsWith("s3:") && it.length == 64 }
             if (relays.isEmpty()) continue
-            if (nowMs - (lastEnrollMs[c.id] ?: 0L) < 600_000) continue
+            // A relay added since the last enroll has never heard the list: the gate opens for it.
+            if (!RelayIntroduction.enrollDue(nowMs, lastEnrollMs[c.id], lastEnrollRelays[c.id] ?: emptySet(),
+                    relays, force)) continue
             // Rule (2) of `learn`: name OURSELVES or the relay declines the whole request.
             val members = LinkedHashSet<String>()
             members.add(myAcct)
@@ -3487,6 +3545,7 @@ object HavenNet : InboundListener {
             for (t in dialTargets(c.id)) members.add(t.lowercase())
             if (members.size <= 1) continue
             lastEnrollMs[c.id] = nowMs
+            lastEnrollRelays[c.id] = relays.map { it.lowercase() }.toSet()
             val list = members.toList()
             scope.launch {
                 for (hex in relays) {
@@ -9628,6 +9687,7 @@ object HavenNet : InboundListener {
         // Migrate any relay that only exists in relayNodes/the default into a RelayEntry.
         migrateRelayEntries()
         refreshHavenFabric()
+        noteRelayJoins()   // seeds the join snapshot: what we load was introduced in an earlier run
     }
 
     /**
@@ -9819,6 +9879,7 @@ object HavenNet : InboundListener {
      * at once and carries every pending stamp with it.
      */
     private fun saveRelayNodes(stampFlush: Boolean = false): Unit = synchronized(relaySaveLock) {
+        noteRelayJoins()
         val now = relayNow()
         val o = JSONObject()
         relayNodes.forEach { (k, v) -> o.put(k, JSONArray().apply { v.forEach { put(it) } }) }

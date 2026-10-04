@@ -24,6 +24,7 @@ mod netgate;
 #[cfg(debug_assertions)]
 mod qa;
 mod relayhealth;
+mod relayintro;
 mod reoptimize;
 mod roster;
 mod scheduled;

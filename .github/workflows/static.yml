@@ -12,6 +12,7 @@ on:
       - "web/**"
       - "docs/**"
       - ".github/workflows/static.yml"
+      - ".github/legacy-site.mjs"
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
@@ -40,11 +41,23 @@ jobs:
         uses: actions/checkout@v4
       - name: Setup Pages
         uses: actions/configure-pages@v5
+      # The site lives at wemiller.com/apps/haven/ now: the portfolio's mirror-app-docs
+      # workflow rsyncs web/ from this repo (the source, not this deploy), so it always gets
+      # the real pages. haven.wemiller.com keeps serving every file, but each mirrored page
+      # becomes a redirect to its copy there (path, query and #fragment kept). Left as they are:
+      #   - open/ — the deep-link landing page. The apps claim wemiller.com/apps/haven/open, but
+      #     any haven.wemiller.com/open/#… link still resolves on this host without a hop.
+      #   - .well-known/ and every other non-HTML file.
+      - name: Build the redirecting site
+        run: |
+          set -euo pipefail
+          cp -R web _site
+          node .github/legacy-site.mjs _site web https://wemiller.com/apps/haven/ \
+            --keep open/index.html --keep _preview.html
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          # Upload entire repository
-          path: 'web'
+          path: '_site'
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5

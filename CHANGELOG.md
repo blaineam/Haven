@@ -7,6 +7,19 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased (next release candidate)
+
+### Fixed — every platform: a newly added relay could take up to three minutes to start serving your friends
+
+A relay only serves you once it has your devices' signed list, and only serves a friend once someone
+already in the circle has told it who the members are. Haven sent both on a timer: your device list
+every 2–3 minutes, the member list at most every 10 minutes per circle, even when the relay was
+new. So after you or a friend added a relay, it refused you for whatever was left of that timer —
+1¾ to 3 minutes in our tests (the rc.3 → rc.4 "slowdown" was the timer's phase, not a code change).
+Haven now introduces itself to a relay a second or two after it joins a circle, whether you added
+it, a friend announced it, another of your devices synced it, or you made it the default for all
+circles. It sends your device list first, then the circle's members.
+
 ## 2.0.0 — release candidate 5 (2026-10-03)
 
 Soren release gate green (all 11 suites; e2e 457/0).

@@ -203,14 +203,8 @@ fun CircleScreen(onAddFriend: () -> Unit) {
     var disappearSecs by remember { mutableStateOf<ULong?>(null) }  // disappearing post (retention)
     var showDisappearMenu by remember { mutableStateOf(false) }
     var showSchedule by remember { mutableStateOf(false) }   // "send later" dialog
-    // Composer audience (see ComposerAudience): who a post here reaches, the one-time per-circle
-    // "this goes to everyone" check, and the "Send privately…" DM picker (draft carried over).
+    // Composer audience (see ComposerAudience): the placeholder and Post pill name who a post here reaches.
     val audienceName = remember(active, circlesVersion) { HavenNet.circleName(active) }
-    // Member resolution reads the engine — off main; the default circle (contacts only) is exact meanwhile.
-    val audienceCount = rememberOffMain(listOf<Any>(active, circlesVersion, HavenNet.contacts.size, HavenNet.blocked.size),
-        if (active == com.blaineam.haven.core.DEFAULT_CIRCLE) HavenNet.contacts.size else 0) { k ->
-        ComposerAudience.othersCount(k[0] as String)
-    }.second
     fun postNow() {
         // The publish itself runs off main (HavenNet's author lane); the rating ask follows only a
         // post the engine actually accepted, back on main.
@@ -445,15 +439,13 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                     }
                 }
             }
-            // Say out loud who this reaches (chip, placeholder, labeled Post, one-time confirmation,
-            // "Send privately…") — see AudienceComposerBar. Attachments stay in this composer; only
-            // the words travel to a private thread.
+            // Say out loud who this reaches (placeholder naming the circle, labeled Post) — see
+            // AudienceComposerBar. Post goes straight out; nothing asks.
             AudienceComposerBar(
-                circleId = active, circleName = audienceName, count = audienceCount,
+                circleName = audienceName,
                 draft = draft, onDraftChange = { draft = it },
                 canPost = draft.isNotBlank() || pendingMedia.isNotEmpty() || pendingMusic != null,
                 onPost = { postNow() },
-                onSendPrivately = { picks, text -> ComposerAudience.sendPrivately(picks, text); draft = "" },
             )
             }
         }

@@ -1614,7 +1614,9 @@ async function main() {
     }));
   }
 
-  // ── audience: "Send privately instead" stays private ──────────────────────────────────────────
+  // ── audience: a private message stays private; a circle post reaches everyone ─────────────────
+  // There is no confirmation step on any platform (the composer's placeholder and labeled Post pill
+  // are the audience cue), so both sends go straight out through the same ops a person's taps drive.
   async function stepAudience() {
     const shared = await ensureSharedCircle();
     if (!shared || !B) { score('audience (needs a circle shared with B)', false); return; }

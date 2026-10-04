@@ -1,7 +1,7 @@
 2.0.0 — Mais leve, mais rápido, mais claro.
 • Fotos e vídeos sobem uma vez para o relay do seu círculo e os amigos baixam de lá: o celular esquenta menos.
 • Transferências grandes pausam em chamadas, com calor ou na Economia de bateria.
-• Veja quem uma publicação alcança, envie em privado com um toque, mande mensagem do perfil.
+• Veja quem uma publicação alcança e mande mensagem direto do perfil.
 • Novos amigos conectados em segundos.
 • Abertura mais rápida, rolagem suave, sincronização honesta.
 • O compartilhamento de tela do Android agora chega a todos.

@@ -704,20 +704,10 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="view_story">Voir la story</string>
     <string name="story_no_longer_available">Story plus disponible</string>
     <!-- Composer audience: a circle post goes to EVERYONE in it; make that unmistakable. -->
-    <string name="composer_audience_everyone">Tout le monde dans %1$s</string>
-    <string name="composer_audience_everyone_count">Tout le monde dans %1$s · %2$s</string>
-    <string name="composer_one_person">1 personne</string>
-    <string name="composer_n_people">%1$d personnes</string>
     <string name="composer_placeholder">Publier pour tout le monde…</string>
     <string name="circle_reply_placeholder_generic">Répondre à tout le monde…</string>
     <string name="composer_post_button">Publier</string>
     <string name="composer_post_cd_named">Publier pour tout le monde dans %1$s</string>
-    <string name="composer_audience_cd">Publication pour : %1$s. Ouvre des options, dont l\'envoi en privé à une personne</string>
-    <string name="composer_send_privately">Envoyer en privé à quelqu\'un…</string>
-    <string name="audience_confirm_title">Publier pour tout le monde dans %1$s ?</string>
-    <string name="audience_confirm_body">Ce sera partagé avec tout le monde dans %1$s (%2$s). Pour l\'envoyer à une seule personne, utilisez Message.</string>
-    <string name="audience_confirm_post">Publier pour tout le monde</string>
-    <string name="audience_confirm_private">Envoyer plutôt en privé…</string>
     <string name="circle_reply_placeholder_named">Répondre à tout le monde dans %1$s…</string>
     <string name="circle_member_message_cd">Envoyer un message privé à %1$s</string>
     <!-- Settings ▸ Devices ▸ Load history from your relays (RelayHistory.kt) -->

@@ -739,20 +739,10 @@ O que já tentei:
     <string name="view_story">Ver story</string>
     <string name="story_no_longer_available">Story não está mais disponível</string>
     <!-- Composer audience: a circle post goes to EVERYONE in it; make that unmistakable. -->
-    <string name="composer_audience_everyone">Todos em %1$s</string>
-    <string name="composer_audience_everyone_count">Todos em %1$s · %2$s</string>
-    <string name="composer_one_person">1 pessoa</string>
-    <string name="composer_n_people">%1$d pessoas</string>
     <string name="composer_placeholder">Publique para todos…</string>
     <string name="circle_reply_placeholder_generic">Responda a todos…</string>
     <string name="composer_post_button">Publicar</string>
     <string name="composer_post_cd_named">Publicar para todos em %1$s</string>
-    <string name="composer_audience_cd">Publicando para: %1$s. Abre opções, incluindo enviar em privado para uma pessoa</string>
-    <string name="composer_send_privately">Enviar em privado para alguém…</string>
-    <string name="audience_confirm_title">Publicar para todos em %1$s?</string>
-    <string name="audience_confirm_body">Isso será compartilhado com todos em %1$s (%2$s). Para enviar só para uma pessoa, use Mensagem.</string>
-    <string name="audience_confirm_post">Publicar para todos</string>
-    <string name="audience_confirm_private">Enviar em privado…</string>
     <string name="circle_reply_placeholder_named">Responda a todos em %1$s…</string>
     <string name="circle_member_message_cd">Enviar mensagem privada para %1$s</string>
     <!-- Settings ▸ Devices ▸ Load history from your relays (RelayHistory.kt) -->

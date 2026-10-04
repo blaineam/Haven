@@ -36,7 +36,7 @@ New in 2.0: your relay does the heavy lifting for photos and videos, so your pho
 2.0.0 — Lighter on your phone, clearer about who sees what.
 • Your relay does the heavy lifting: when your circle has a relay, photos and videos go up to it once and friends fetch them from there. Your phone no longer streams media to each friend, so it stays cooler and easier on the battery.
 • Haven stays out of the way: during calls, or when your device is hot or in Low Power Mode, big background transfers pause and pick up again later.
-• Always know who sees a post: the composer shows exactly who it reaches — the circle and how many people — and the Post button says so too. The first time you post in a circle, Haven checks with you once. Replies are marked as visible to the circle, “Send privately instead” is one tap away, and profiles and member lists have a Message button.
+• Always know who sees a post: the composer names the circle a post reaches, and the Post button says so too. Replies are marked as visible to the circle, and profiles and member lists have a Message button for writing to just one person.
 • New friends connect and see each other's posts in seconds instead of minutes.
 • Faster launch, smoother scrolling, and taps that respond right away.
 • Honest sync status: real counts of what's sending and receiving, and progress that actually moves.

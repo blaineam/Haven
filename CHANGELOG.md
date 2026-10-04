@@ -9,6 +9,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.0 — release candidate 5 (unreleased)
 
+### Changed — posting to your circle no longer asks you to confirm
+
+On iPhone, iPad, Mac, Android and the desktop app, Post sends straight to your circle. The "Post to
+everyone?" check and the audience menu above the composer are gone; the composer still names the
+circle a post goes to, and the button still says **Post**. To write to just one person, use Message
+on their profile or in the circle's member list.
+
 ### Fixed — iPhone, iPad and Mac: a friend's relays could take minutes to start sharing posts
 
 When you host a relay in the app, Haven tells every relay a circle uses about the others, so they

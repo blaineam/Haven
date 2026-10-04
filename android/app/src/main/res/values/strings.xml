@@ -825,21 +825,11 @@
     <string name="edit_post_change_song">Change</string>
     <string name="edit_post_video_muted">Video muted</string>
     <string name="edit_post_video_sound">Play video sound</string>
-    <!-- Composer audience: a circle post goes to EVERYONE in it; make that unmistakable. -->
-    <string name="composer_audience_everyone">Everyone in %1$s</string>
-    <string name="composer_audience_everyone_count">Everyone in %1$s · %2$s</string>
-    <string name="composer_one_person">1 person</string>
-    <string name="composer_n_people">%1$d people</string>
+    <!-- Composer audience: a circle post goes to EVERYONE in it; the placeholder and Post pill say so. -->
     <string name="composer_placeholder">Post to everyone…</string>
     <string name="circle_reply_placeholder_generic">Reply to everyone…</string>
     <string name="composer_post_button">Post</string>
     <string name="composer_post_cd_named">Post to everyone in %1$s</string>
-    <string name="composer_audience_cd">Posting to %1$s. Opens options, including sending privately to one person</string>
-    <string name="composer_send_privately">Send privately to someone…</string>
-    <string name="audience_confirm_title">Post to everyone in %1$s?</string>
-    <string name="audience_confirm_body">This will be shared with everyone in %1$s (%2$s). To send to just one person, use Message.</string>
-    <string name="audience_confirm_post">Post to everyone</string>
-    <string name="audience_confirm_private">Send privately instead…</string>
     <string name="circle_reply_placeholder_named">Reply to everyone in %1$s…</string>
     <string name="circle_member_message_cd">Message %1$s privately</string>
     <!-- Settings ▸ Devices ▸ Load history from your relays (RelayHistory.kt) -->

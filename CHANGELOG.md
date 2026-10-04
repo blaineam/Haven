@@ -9,6 +9,18 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.0 — release candidate 5 (unreleased)
 
+### Fixed — iPhone, iPad and Mac: a friend's relays could take minutes to start sharing posts
+
+When you host a relay in the app, Haven tells every relay a circle uses about the others, so they
+copy new posts between themselves. A relay only accepts that from someone it already counts as a
+member, and on a newly added relay your membership usually arrives a few seconds after the relay
+itself. Haven sent the introduction once, and if it came too early it waited about five minutes
+before trying again — so a post written to one of a friend's relays reached their other relay
+minutes late (2 minutes in our tests, up from a few seconds in rc.3). Haven now keeps
+re-introducing the relays every 15 seconds until each one accepts, easing off to once every five
+minutes for a relay that is still saying no ten minutes later. Android and the desktop app already re-sent the
+introduction on every sync, so they were not affected.
+
 ### Fixed — iPhone, iPad, Mac and Android: a photo could stay missing after a clashing download
 
 The same race the desktop app had in rc.3. Several parts of the app can start downloading the same

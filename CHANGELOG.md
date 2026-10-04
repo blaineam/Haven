@@ -7,7 +7,9 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased (next release candidate)
+## 2.0.0 — release candidate 6 (2026-10-03)
+
+Soren release gate green (all 11 suites; e2e 457/0).
 
 ### Fixed — every platform: a newly added relay could take up to three minutes to start serving your friends
 

@@ -165,6 +165,25 @@ export default {
       description: 'desktop web UI syntax check',
     },
 
+    // ── Desktop web UI LOGIC (not just syntax): the i18n tables (six export-compliant languages,
+    //    placeholder parity with English, every t("key") the UI uses is defined) and app.js's pure
+    //    helpers, lifted verbatim out of the shipped scripts into a node:vm sandbox.
+    'desktop-ui-test': {
+      type: 'cmd',
+      cmd: 'node',
+      args: ['--test', 'desktop/ui/ui.test.mjs'],
+      description: 'Desktop UI i18n + pure-helper tests (node --test)',
+    },
+
+    // ── Website /open landing page: the #fragment → haven:// link detection every shared link
+    //    lands on when the app does not intercept it.
+    web: {
+      type: 'cmd',
+      cmd: 'node',
+      args: ['--test', 'web/open/open.test.mjs'],
+      description: 'Website /open link detection (node --test)',
+    },
+
     // ── Blind push relay (Cloudflare Worker, push/worker.js): its security contract run offline —
     //    signed registration, no existence oracle, report-only moderation ledger with no reporter,
     //    rate limit, APNs payload shapes — against an in-memory KV and a recording fetch stub. It also
@@ -271,7 +290,7 @@ export default {
     // different product.
     requireGreen: [
       'core', 'fabric', 'apple-logic', 'ios', 'macos', 'watch-build', 'android-native', 'android',
-      'desktop', 'desktop-ui', 'desktop-build', 'push-worker', 'qa-harness', 'e2e',
+      'desktop', 'desktop-ui', 'desktop-ui-test', 'desktop-build', 'push-worker', 'web', 'qa-harness', 'e2e',
     ],
   },
 };

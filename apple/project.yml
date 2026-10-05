@@ -478,6 +478,16 @@ targets:
       # Every VoIP push → ring / re-report / report-and-end (PushKit aborts on an unreported push).
       - path: HavenApp/VoipPushPolicy.swift
       - path: Shared/SharedNotificationPrivacy.swift
+      # Link-preview SSRF guard + safety words (cross-platform golden vectors) + composer audience
+      # labels — pure Foundation.
+      - path: HavenApp/LinkSafety.swift
+      - path: HavenApp/SafetyWords.swift
+      - path: HavenApp/ComposerAudience.swift
+      # Instagram import: the archive reader + JSON mapping (Foundation + Compression only).
+      - path: HavenApp/ZipReader.swift
+      - path: HavenApp/InstagramArchive.swift
+      # The iPhone <-> Watch wire models (FFI-free by design).
+      - path: WatchShared/WatchBridge.swift
       - path: HavenLogicTests
     settings:
       base:

@@ -74,6 +74,37 @@ export default {
       description: 'macOS build (HavenMac scheme)',
     },
 
+    // ── Apple LOGIC tests: HavenLogicTests is host-less and FFI-less by design (pure Swift files
+    //    listed explicitly in project.yml), so it runs on the Mac in seconds with no simulator and
+    //    no signing. Until this suite existed it ran ONLY in .github/workflows/apple-tests.yml —
+    //    `ios` runs the UI tests and `macos` is build-only, so ~360 Swift tests (media upload plan,
+    //    relay-first media, heavy-work gate, call audio gate, link-preview SSRF guard, safety words,
+    //    Instagram import, Watch wire…) were never part of the release gate.
+    'apple-logic': {
+      type: 'xcodebuild-test',
+      platform: 'macos',
+      project: 'apple/Haven.xcodeproj',
+      scheme: 'HavenLogicTests',
+      xcodegen: true,
+      destination: 'platform=macOS',
+      env: { DEVELOPER_DIR: '/Applications/Xcode.app/Contents/Developer' },
+      description: 'Host-less Swift logic tests (HavenLogicTests, macOS)',
+    },
+
+    // ── Apple Watch companion: compile gate. HavenWatch ships embedded in the iOS app but no other
+    //    suite builds its scheme, so a watch-only compile error would first surface at archive time.
+    //    Generic destination → no simulator is booted.
+    'watch-build': {
+      type: 'xcodebuild-test',
+      action: 'build',
+      project: 'apple/Haven.xcodeproj',
+      scheme: 'HavenWatch',
+      xcodegen: true,
+      destination: 'generic/platform=watchOS Simulator',
+      env: { DEVELOPER_DIR: '/Applications/Xcode.app/Contents/Developer' },
+      description: 'watchOS companion builds (HavenWatch scheme, generic simulator)',
+    },
+
     // ── Android: JVM unit tests always; instrumented (connected) tests boot the
     //    `haven_phone` AVD on demand (reusing a running emulator when present),
     //    poll for full boot, then run — gracefully skipped if it can't boot.
@@ -111,6 +142,18 @@ export default {
       description: 'Android unit + (emulator) connected tests',
     },
 
+    // ── Android JVM unit tests ONLY — no emulator. Same task as `android`'s unit half, for quick
+    //    local runs and for hosts where an AVD can't boot. `android` stays the release gate.
+    'android-unit': {
+      type: 'gradle',
+      cwd: 'android',
+      unit: 'testDebugUnitTest',
+      javaHome: '/opt/homebrew/opt/openjdk@17',
+      androidHome: '/opt/homebrew/share/android-commandlinetools',
+      bootEmulator: false,
+      description: 'Android JVM unit tests (no emulator)',
+    },
+
     desktop: {
       type: 'cargo',
       cwd: 'desktop/src-tauri',
@@ -120,6 +163,17 @@ export default {
       type: 'node-check',
       files: ['desktop/ui/app.js'],
       description: 'desktop web UI syntax check',
+    },
+
+    // ── Blind push relay (Cloudflare Worker, push/worker.js): its security contract run offline —
+    //    signed registration, no existence oracle, report-only moderation ledger with no reporter,
+    //    rate limit, APNs payload shapes — against an in-memory KV and a recording fetch stub. It also
+    //    verifies a registration signature produced by the Rust core (shared vector).
+    'push-worker': {
+      type: 'cmd',
+      cmd: 'node',
+      args: ['--test', 'push/worker.test.mjs'],
+      description: 'Push relay worker tests (node --test, no network)',
     },
 
     // ── Desktop (Tauri) BINARY. `desktop` above runs the crate's tests and `desktop-ui` is a JS
@@ -164,8 +218,9 @@ export default {
     'qa-harness': {
       type: 'cmd',
       cmd: 'node',
-      args: ['--test', 'Scripts/lib/dump-freshness.test.mjs', 'Scripts/lib/e2e-steps.test.mjs', 'Scripts/lib/multirelay.test.mjs'],
-      description: 'e2e harness unit tests (dump-channel freshness + step decisions + multirelay)',
+      args: ['--test', 'Scripts/lib/dump-freshness.test.mjs', 'Scripts/lib/e2e-steps.test.mjs', 'Scripts/lib/multirelay.test.mjs',
+             'Scripts/lib/screenshare-flow.test.mjs'],
+      description: 'e2e harness unit tests (dump-channel freshness + step decisions + multirelay + screenshare flow)',
       tags: ['e2e'],
     },
 
@@ -215,8 +270,8 @@ export default {
     // them never produce the Tauri app, and `macos` builds the native HavenMac app, which is a
     // different product.
     requireGreen: [
-      'core', 'fabric', 'ios', 'macos', 'android-native', 'android',
-      'desktop', 'desktop-ui', 'desktop-build', 'qa-harness', 'e2e',
+      'core', 'fabric', 'apple-logic', 'ios', 'macos', 'watch-build', 'android-native', 'android',
+      'desktop', 'desktop-ui', 'desktop-build', 'push-worker', 'qa-harness', 'e2e',
     ],
   },
 };

@@ -227,3 +227,42 @@ test('app: carouselAspect is uniform only once every item reported, else clamped
   // One still decoding (0): not yet known to be uniform → clamped path.
   assert.equal(carouselAspect([3, 0]), Math.min(PAGE_ASPECT_MAX, Math.max(PAGE_ASPECT_MIN, 3)));
 });
+
+test('app: stories older than 24h are past their window', () => {
+  const ctx = vm.createContext({});
+  vm.runInContext(`${constSource('STORY_LIFETIME_MS')}\n${fnSource('isPastStoryWindow')}\nglobalThis.r = isPastStoryWindow;`, ctx);
+  const past = ctx.r;
+  const now = Date.now();
+  assert.equal(past(now - 23 * 3_600_000), false);
+  assert.equal(past(now - 25 * 3_600_000), true);
+  assert.equal(past(String(now - 1000)), false, 'engine timestamps arrive as strings/u64');
+});
+
+test('app: story tray groups by author, oldest-first within, most recent author first', () => {
+  const { groupStoriesFlat } = lift(['groupStoriesFlat']);
+  const s = (author_name, created_at) => ({ author_name, created_at, id: `${author_name}${created_at}` });
+  const { flat, starts } = groupStoriesFlat([s('ann', 5), s('bob', 9), s('ann', 1), s('bob', 3), s('cy', 7)]);
+  assert.deepEqual(JSON.parse(JSON.stringify(flat.map((x) => x.id))), ['bob3', 'bob9', 'cy7', 'ann1', 'ann5']);
+  assert.equal(starts.get('bob'), 0);
+  assert.equal(starts.get('cy'), 2);
+  assert.equal(starts.get('ann'), 3);
+});
+
+test('app: composer audience names the circle only when it fits (Apple ComposerAudience parity)', () => {
+  const start = appSrc.indexOf('const Audience = {');
+  assert.ok(start >= 0, 'Audience not found');
+  let depth = 0, end = -1;
+  for (let i = appSrc.indexOf('{', start); i < appSrc.length; i++) {
+    if (appSrc[i] === '{') depth++;
+    else if (appSrc[i] === '}' && --depth === 0) { end = i + 1; break; }
+  }
+  const w = loadStrings('en-US');
+  const ctx = vm.createContext({ t: w.t });
+  vm.runInContext(`${appSrc.slice(start, end)};\nglobalThis.r = Audience;`, ctx);
+  const A = ctx.r;
+  assert.equal(A.placeholder('Family'), 'Post to everyone in Family');
+  assert.equal(A.placeholder('a'.repeat(14)), `Post to everyone in ${'a'.repeat(14)}`);
+  assert.equal(A.placeholder('a'.repeat(15)), 'Post to everyone…');
+  assert.equal(A.placeholder(''), 'Post to everyone…');
+  assert.equal(A.placeholder(undefined), 'Post to everyone…');
+});

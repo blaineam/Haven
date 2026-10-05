@@ -257,3 +257,46 @@ fn run(cmd: &mut Command) -> Result<()> {
         Err(anyhow!("{:?} exited with {st}", cmd.get_program()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The pure parts of service installation: which data dir the installed service will use, whether
+    //! it starts already linked, and the command line written into the systemd unit / Windows task.
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn the_run_command_line_quotes_every_passthrough_argument() {
+        let exe = std::path::Path::new("/opt/haven relay/haven-relay");
+        assert_eq!(
+            run_cmdline(exe, &s(&["--data", "/srv/my data", "--port", "8674"])),
+            "\"/opt/haven relay/haven-relay\" run \"--data\" \"/srv/my data\" \"--port\" \"8674\""
+        );
+        assert_eq!(run_cmdline(exe, &[]), "\"/opt/haven relay/haven-relay\" run");
+    }
+
+    #[test]
+    fn a_custom_data_dir_is_honoured_and_hinted() {
+        assert_eq!(data_dir(&s(&["--data", "/tmp/x"])), PathBuf::from("/tmp/x"));
+        assert_eq!(data_dir(&[]), PathBuf::from(crate::config::default_data_dir()));
+        assert_eq!(data_flag_hint(&s(&["--data", "/tmp/x"])), " --data /tmp/x");
+        assert_eq!(data_flag_hint(&[]), "");
+        // A trailing flag with no value is not a data dir.
+        assert_eq!(arg_value(&s(&["--data"]), "--data"), None);
+    }
+
+    #[test]
+    fn linked_means_a_saved_link_exists_in_that_data_dir() {
+        let d = std::env::temp_dir().join(format!("haven-relay-svc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let args = s(&["--data", d.to_str().unwrap()]);
+        assert!(!is_linked(&args));
+        std::fs::write(d.join("link.json"), "{}").unwrap();
+        assert!(is_linked(&args));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

@@ -178,3 +178,97 @@ fn verify(args: &[String]) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    //! The release signer is the one place a wrong key or a sloppy argument parse turns into a
+    //! release no relay will accept (or, worse, signatures over the wrong name/version). These drive
+    //! the real subcommands against temp files with a `--key-file` (never the env var).
+    use super::*;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("haven-relay-sign-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    fn key_file(dir: &Path, seed: [u8; 32]) -> String {
+        let p = dir.join("key.b64");
+        std::fs::write(&p, format!("{}\n", data_encoding::BASE64.encode(&seed))).unwrap();
+        p.display().to_string()
+    }
+
+    #[test]
+    fn sign_refuses_a_key_the_relay_does_not_trust() {
+        let d = tmp("untrusted");
+        let asset = d.join("haven-relay-x86_64-unknown-linux-gnu");
+        std::fs::write(&asset, b"bin").unwrap();
+        let kf = key_file(&d, [3u8; 32]);
+        let err = run(&s(&["sign", "--version", "1.0.0", "--key-file", &kf, asset.to_str().unwrap()])).unwrap_err();
+        assert!(err.contains("TRUSTED_KEYS"), "{err}");
+        assert!(!d.join("haven-relay-x86_64-unknown-linux-gnu.sig").exists(), "nothing may be written");
+    }
+
+    #[test]
+    fn allow_untrusted_signs_name_and_stripped_version_verifiably() {
+        let d = tmp("signs");
+        let asset = d.join("haven-relay-aarch64-apple-darwin");
+        std::fs::write(&asset, b"pretend binary").unwrap();
+        let seed = [4u8; 32];
+        let kf = key_file(&d, seed);
+        run(&s(&["sign", "--version", "relay-v2.3.4", "--allow-untrusted", "--key-file", &kf, asset.to_str().unwrap()])).unwrap();
+        let text = std::fs::read_to_string(d.join("haven-relay-aarch64-apple-darwin.sig")).unwrap();
+        let pk = sig::public_key(&seed);
+        let h = sig::sha256(b"pretend binary");
+        // The tag prefix is stripped: the relay compares against the bare semver.
+        assert!(sig::verify(&text, "2.3.4", "haven-relay-aarch64-apple-darwin", &h, &[pk]).is_ok());
+        assert!(sig::verify(&text, "relay-v2.3.4", "haven-relay-aarch64-apple-darwin", &h, &[pk]).is_err());
+        // Bound to the FILE NAME, not the path it was signed from.
+        assert!(sig::verify(&text, "2.3.4", "haven-relay-x86_64-pc-windows-msvc.exe", &h, &[pk]).is_err());
+        // And the `verify` subcommand checks against the COMPILED-IN keys, which do not include this one.
+        let err = run(&s(&["verify", "--version", "2.3.4", asset.to_str().unwrap()])).unwrap_err();
+        assert!(err.contains("does not verify"), "{err}");
+    }
+
+    #[test]
+    fn missing_key_or_bad_key_material_is_refused() {
+        let d = tmp("badkey");
+        let short = d.join("short.b64");
+        std::fs::write(&short, data_encoding::BASE64.encode(&[1u8; 31])).unwrap();
+        assert!(load_seed(&s(&["--key-file", short.to_str().unwrap()])).unwrap_err().contains("32 bytes"));
+        let junk = d.join("junk.b64");
+        std::fs::write(&junk, "!!!not base64!!!").unwrap();
+        assert!(load_seed(&s(&["--key-file", junk.to_str().unwrap()])).unwrap_err().contains("base64"));
+        assert!(decode_seed(&data_encoding::BASE64.encode(&[9u8; 32])).is_ok());
+        assert!(run(&s(&["sign", "--key-file", short.to_str().unwrap()])).unwrap_err().contains("--version"));
+        assert!(run(&s(&["bogus"])).unwrap_err().contains("usage"));
+    }
+
+    #[test]
+    fn keygen_writes_a_private_seed_once_and_never_overwrites() {
+        let d = tmp("keygen");
+        let out = d.join("new.key");
+        run(&s(&["keygen", "--out", out.to_str().unwrap()])).unwrap();
+        let seed = decode_seed(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_ne!(seed, [0u8; 32]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let before = std::fs::read(&out).unwrap();
+        assert!(run(&s(&["keygen", "--out", out.to_str().unwrap()])).unwrap_err().contains("refusing to overwrite"));
+        assert_eq!(std::fs::read(&out).unwrap(), before, "an existing key must never be replaced");
+    }
+
+    #[test]
+    fn positional_files_skip_flag_values() {
+        let got = files(&s(&["--version", "1.0", "a", "--key-file", "k", "--allow-untrusted", "b", "--out", "o"]));
+        assert_eq!(got, vec![PathBuf::from("a"), PathBuf::from("b")]);
+    }
+}

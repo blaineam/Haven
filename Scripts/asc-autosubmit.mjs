@@ -16,7 +16,10 @@
  *      list (the list can say VALID while the binary is still processing).
  *   3. Per platform: find-or-create the editable App Store version `--version`; set What's New
  *      for every localization from appstore-metadata[.<locale>].md (en-US must START with the
- *      version — stale notes fail the run instead of shipping); attach the build; answer export
+ *      version — stale notes fail the run instead of shipping). Each platform reads its own
+ *      `## whats_new_<platform>` / `## promotional_text_<platform>` section when the file has one
+ *      (ios, macos, tvos, visionos — rocket's override names), else the shared `## whats_new`, so
+ *      neither store's notes describe the other platform. Attach the build; answer export
  *      compliance on the build if ASC is still asking (NO — matches ITSAppUsesNonExemptEncryption).
  *   4. Submit via reviewSubmissions. A submission already WAITING_FOR_REVIEW / IN_REVIEW for this
  *      version is success. A wedged UNRESOLVED_ISSUES submission is reported, never silently reused.
@@ -310,30 +313,41 @@ async function ensureVersion(appId, platform, version, opts) {
 	return { version: created, state: 'PREPARE_FOR_SUBMISSION' };
 }
 
+// rocket's per-platform override suffixes (`whats_new_macos`, `promotional_text_ios`, …).
+const PLATFORM_SECTION_SUFFIX = { IOS: 'ios', MAC_OS: 'macos', TV_OS: 'tvos', VISION_OS: 'visionos' };
+
 // `## whats_new` (and `## promotional_text`) from appstore-metadata[.<locale>].md, per
 // locale that has a file. Promotional text rides along because a NEW App Store version
 // does not inherit it from its predecessor — 1.6.1 went into review with it blank.
-async function notesByLocale(dir) {
+// A `## whats_new_<platform>` / `## promotional_text_<platform>` section wins over the shared
+// one for that platform: Blip 2.0.5 needed Mac-only notes (Keep Awake) and iOS-only notes
+// (translations) in the same release, and the shared section used to ship to both stores.
+async function notesByLocale(dir, platform) {
+	const suffix = PLATFORM_SECTION_SUFFIX[platform];
 	const section = (md, key) => { const m = md.match(new RegExp(`^##\\s+${key}\\s*$\\n([\\s\\S]*?)(?=^##\\s+|\\s*$(?![\\s\\S]))`, 'm')); return m ? m[1].replace(/<!--[\s\S]*?-->/g, '').trim() : null; };
 	const out = {}, promo = {};
+	let source = 'whats_new';
 	const { readdir } = await import('node:fs/promises');
 	for (const f of await readdir(dir)) {
 		const m = f.match(/^appstore-metadata(?:\.([A-Za-z-]+))?\.md$/);
 		if (!m) continue;
 		const locale = m[1] || 'en-US';
 		const md = await readFile(join(dir, f), 'utf8');
-		const body = section(md, 'whats_new');
+		const own = suffix ? section(md, `whats_new_${suffix}`) : null;
+		const body = own ?? section(md, 'whats_new');
 		if (body) out[locale] = body;
-		const p = section(md, 'promotional_text');
+		if (locale === 'en-US') source = own != null ? `whats_new_${suffix}` : 'whats_new';
+		const p = (suffix ? section(md, `promotional_text_${suffix}`) : null) ?? section(md, 'promotional_text');
 		if (p) promo[locale] = p;
 	}
-	return Object.assign(out, { __promo: promo });
+	return Object.assign(out, { __promo: promo, __source: source });
 }
 
 async function setNotes(versionId, version, notes, { dryRun }) {
 	const en = notes['en-US'];
-	if (!en) die('appstore-metadata.md has no `## whats_new` — nothing to ship as release notes');
-	if (!en.startsWith(version)) die(`appstore-metadata.md whats_new starts with "${en.split('\n')[0].slice(0, 60)}" — it must start with "${version}" (stale notes would ship otherwise)`);
+	const src = notes.__source || 'whats_new';
+	if (!en) die(`appstore-metadata.md has no \`## ${src}\` — nothing to ship as release notes`);
+	if (!en.startsWith(version)) die(`appstore-metadata.md ${src} starts with "${en.split('\n')[0].slice(0, 60)}" — it must start with "${version}" (stale notes would ship otherwise)`);
 	const locs = (await api('GET', `/v1/appStoreVersions/${versionId}/appStoreVersionLocalizations?limit=50&fields[appStoreVersionLocalizations]=locale,whatsNew,promotionalText`)).data || [];
 	let set = 0; const fellBack = [];
 	for (const loc of locs) {
@@ -367,7 +381,7 @@ async function setNotes(versionId, version, notes, { dryRun }) {
 		}
 		set++;
 	}
-	log(`What's New${Object.keys(notes.__promo || {}).length ? ' + promotional text' : ''} set on ${set}/${locs.length} localization(s)`);
+	log(`What's New (${src})${Object.keys(notes.__promo || {}).length ? ' + promotional text' : ''} set on ${set}/${locs.length} localization(s)`);
 	if (fellBack.length) {
 		const msg = `no ${version} translation for ${fellBack.join(', ')} — those listings got the English notes (run \`rocket loc translate Haven --locale big8 --provider claude\` and re-push with \`rocket meta Haven --locale all\`)`;
 		console.log(`⚠ ${msg}`); summary(`- ⚠️ ${msg}`);
@@ -518,9 +532,9 @@ async function main() {
 	}
 
 	// 3 + 4. per platform
-	const notes = await notesByLocale(args.notesDir);
 	const results = [];
 	for (const platform of args.platforms) {
+		const notes = await notesByLocale(args.notesDir, platform);
 		const build = byPlatform[platform];
 		const { version, state, done } = await ensureVersion(app.id, platform, args.version, { dryRun: args.dryRun, resubmit: args.resubmit });
 		if (done) { log(`${platform} ${args.version} is already ${state} — nothing to do`); results.push(`${platform} ${args.version}: already ${state}`); continue; }

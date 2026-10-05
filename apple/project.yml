@@ -488,6 +488,8 @@ targets:
       - path: HavenApp/InstagramArchive.swift
       # The iPhone <-> Watch wire models (FFI-free by design).
       - path: WatchShared/WatchBridge.swift
+      # Device-id dial hints on invite links (byte-format parity with Android + desktop).
+      - path: HavenApp/InviteHints.swift
       - path: HavenLogicTests
     settings:
       base:

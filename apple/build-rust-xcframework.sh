@@ -86,29 +86,51 @@ export IPHONEOS_DEPLOYMENT_TARGET="17.0"
 # the native-macOS slice still links warning-free. (2026-10-03: a dependency bump relinked the
 # macros and every xcframework build failed until this line went.)
 unset MACOSX_DEPLOYMENT_TARGET
+# …but the C/assembly that build scripts compile through the `cc` crate (ring's crypto .S files)
+# then gets the SDK's version (27.0), and every native-macOS link warns "object file … was built
+# for newer 'macOS' version (27.0) than being linked (14.0)". Pin ONLY the target's C/asm flags:
+# they reach `cc`, never rustc's linker, so the proc-macro dylibs above are unaffected.
+export CFLAGS_aarch64_apple_darwin="-mmacosx-version-min=14.0"
+export ASMFLAGS_aarch64_apple_darwin="-mmacosx-version-min=14.0"
 echo "▸ Building static libs (device + simulator + Mac Catalyst + native macOS)…"
 ( cd "$CORE" && "$CARGO" build -p haven_ffi --lib --release --target aarch64-apple-ios )
 ( cd "$CORE" && "$CARGO" build -p haven_ffi --lib --release --target aarch64-apple-ios-sim )
 ( cd "$CORE" && "$CARGO" build -p haven_ffi --lib --release --target aarch64-apple-ios-macabi )
 ( cd "$CORE" && "$CARGO" build -p haven_ffi --lib --release --target aarch64-apple-darwin )
 
+# Bindings and the xcframework are assembled in a STAGING dir and only then synced into place by
+# CONTENT (rsync -c): a file whose bytes did not change keeps its old mtime.
+#
+# That matters for every incremental Xcode build that consumes the xcframework. Xcode copies
+# haven_ffiFFI.h into Products/include and precompiles it into an explicit-module .pcm, and clang
+# stamps the header's mtime into that .pcm. Rewriting the xcframework from scratch on every run
+# gave the header a new mtime with identical bytes; Xcode's content-based up-to-date check then
+# kept the old .pcm, and clang refused it — "haven_ffiFFI.h has been modified since the module file
+# … was built" — failing every Swift file in Haven/HavenMac/HavenNotificationService (the Soren
+# `ios`/`macos` gates went red in seconds, 2026-10-05). Unchanged bytes now keep their mtime, and
+# changed bytes get a new one AND new content, which Xcode does rebuild for.
+STAGE="$HERE/build/ffi-stage"
+rm -rf "$STAGE"; mkdir -p "$STAGE/Generated" "$STAGE/headers"
+
 echo "▸ Generating Swift bindings…"
 ( cd "$CORE" && "$CARGO" build -q -p haven_ffi --lib )   # host dylib for the generator
-rm -rf "$HERE/Generated"; mkdir -p "$HERE/Generated"
 ( cd "$CORE" && "$CARGO" run -q -p haven_ffi --bin uniffi-bindgen -- \
-    generate --library "$TARGET/debug/libhaven_ffi.dylib" --language swift --out-dir "$HERE/Generated" )
+    generate --library "$TARGET/debug/libhaven_ffi.dylib" --language swift --out-dir "$STAGE/Generated" )
 
 echo "▸ Assembling HavenFFI.xcframework…"
-rm -rf "$HERE/HavenFFI.xcframework" "$HERE/build/headers"
-mkdir -p "$HERE/build/headers"
-cp "$HERE/Generated/haven_ffiFFI.h" "$HERE/build/headers/"
-cp "$HERE/Generated/haven_ffiFFI.modulemap" "$HERE/build/headers/module.modulemap"
+cp "$STAGE/Generated/haven_ffiFFI.h" "$STAGE/headers/"
+cp "$STAGE/Generated/haven_ffiFFI.modulemap" "$STAGE/headers/module.modulemap"
 xcodebuild -create-xcframework \
-  -library "$TARGET/aarch64-apple-ios/release/libhaven_ffi.a" -headers "$HERE/build/headers" \
-  -library "$TARGET/aarch64-apple-ios-sim/release/libhaven_ffi.a" -headers "$HERE/build/headers" \
-  -library "$TARGET/aarch64-apple-ios-macabi/release/libhaven_ffi.a" -headers "$HERE/build/headers" \
-  -library "$TARGET/aarch64-apple-darwin/release/libhaven_ffi.a" -headers "$HERE/build/headers" \
-  -output "$HERE/HavenFFI.xcframework" >/dev/null
+  -library "$TARGET/aarch64-apple-ios/release/libhaven_ffi.a" -headers "$STAGE/headers" \
+  -library "$TARGET/aarch64-apple-ios-sim/release/libhaven_ffi.a" -headers "$STAGE/headers" \
+  -library "$TARGET/aarch64-apple-ios-macabi/release/libhaven_ffi.a" -headers "$STAGE/headers" \
+  -library "$TARGET/aarch64-apple-darwin/release/libhaven_ffi.a" -headers "$STAGE/headers" \
+  -output "$STAGE/HavenFFI.xcframework" >/dev/null
+
+mkdir -p "$HERE/Generated" "$HERE/HavenFFI.xcframework"
+rsync -rc --delete "$STAGE/Generated/" "$HERE/Generated/"
+rsync -rc --delete "$STAGE/HavenFFI.xcframework/" "$HERE/HavenFFI.xcframework/"
+rm -rf "$STAGE" "$HERE/build/headers"
 
 echo "✓ Done. Next:  cd apple && xcodegen generate && open Haven.xcodeproj"
 echo "  (device build: set your Team in Signing & Capabilities, then Run on your iPhone)"

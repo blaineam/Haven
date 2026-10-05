@@ -1077,11 +1077,12 @@ final class RelayHost: ObservableObject {
                     }
                 }
             }
+            let refusedNow = refused   // a let: the main-actor hop must not capture the var
             await MainActor.run {
-                if !refused.isEmpty {
-                    HavenLog.relay("sibling teach not accepted by \(refused.joined(separator: ",")) — will re-teach")
+                if !refusedNow.isEmpty {
+                    HavenLog.relay("sibling teach not accepted by \(refusedNow.joined(separator: ",")) — will re-teach")
                 }
-                done?(refused.isEmpty)
+                done?(refusedNow.isEmpty)
             }
         }
     }

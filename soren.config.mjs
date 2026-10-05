@@ -36,6 +36,23 @@ export default {
       tags: ['migration', 'regression'],
     },
 
+    // ── Apple FFI: HavenFFI.xcframework + Generated/haven_ffi.swift are rebuilt from the current
+    //    core. Both are gitignored build products, and NOTHING else in the gate refreshes them — the
+    //    `ios`/`macos`/`watch-build` suites compile Swift against whatever bindings happen to be on
+    //    disk. That went red for real on 2026-10-05: core gained RelayHistoryPlanner/RelayHistoryItem,
+    //    HavenApp/RelayHistoryResync.swift uses them, and the checkout's bindings were six days old
+    //    ("cannot find 'RelayHistoryPlanner' in scope"). Same lesson as `android-native` below.
+    //    Must run before ios/macos (suites run in declaration order). The script syncs by content,
+    //    so an unchanged core leaves the xcframework's mtimes — and Xcode's precompiled modules —
+    //    alone.
+    'apple-ffi': {
+      type: 'cmd',
+      cmd: 'bash',
+      args: ['build-rust-xcframework.sh'],
+      cwd: 'apple',
+      description: 'HavenFFI.xcframework + Swift bindings are rebuilt from the current core',
+    },
+
     // ── iOS: the Haven scheme's test action (HavenUITests) on a booted simulator.
     //    Signing is disabled; a real run needs macOS + Xcode + an available sim.
     ios: {

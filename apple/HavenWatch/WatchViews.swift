@@ -39,8 +39,7 @@ struct WatchConversationsView: View {
         }
         .onAppear {
             client.refresh()   // auto-sync on open; the phone also pushes updates as they happen
-            if ProcessInfo.processInfo.environment["HAVENWATCH_DEMO_SCENE"] == "thread",
-               path.isEmpty, let first = client.threads.first { path = [first] }
+            if WatchDemo.opensThread, path.isEmpty, let first = client.threads.first { path = [first] }
         }
     }
 

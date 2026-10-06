@@ -42,25 +42,42 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
         session.activate()
     }
 
-    /// HAVENWATCH_DEMO=1 — PII-free synthetic threads/messages so the UI is screenshottable
-    /// without a paired iPhone (mirrors the phone app's DemoEnv harness). Returns true when
-    /// seeded, so `start()` skips activating a real (empty) session.
+    /// Every demo thread's contents, keyed by thread id, so opening any of them works offline.
+    private var demoThreads: [String: WatchThreadDetail] = [:]
+
+    /// HAVENWATCH_DEMO=1 (or a `-UITestMode` UI-test launch) — PII-free synthetic threads/messages
+    /// so the UI is screenshottable and testable without a paired iPhone (mirrors the phone app's
+    /// DemoEnv harness). DEBUG-only: a release build always talks to the real phone. Returns true
+    /// when seeded, so `start()` skips activating a real (empty) session.
     @discardableResult
     private func seedDemoIfNeeded() -> Bool {
-        guard ProcessInfo.processInfo.environment["HAVENWATCH_DEMO"] == "1" else { return false }
+        guard WatchDemo.isOn else { return false }
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
         threads = [
             WatchThread(id: "dm:ari", title: "Ari", subtitle: "On my way 🚲", timestamp: now - 90_000, isDM: true, unread: 1),
             WatchThread(id: "dm:noa", title: "Noa", subtitle: "❤️ that photo", timestamp: now - 1_800_000, isDM: true, unread: 0),
             WatchThread(id: "circle:trail", title: "Trail Crew", subtitle: "Sunset hike Saturday?", timestamp: now - 5_400_000, isDM: false, unread: 0),
         ]
-        openThread = WatchThreadDetail(threadId: "dm:ari", title: "Ari", isDM: true, messages: [
+        let dm = WatchThreadDetail(threadId: "dm:ari", title: "Ari", isDM: true, messages: [
             WatchMessage(id: "m1", author: "Ari", isMe: false, body: "Heading over now", timestamp: now - 240_000, hasMedia: false, reactions: "👍1"),
             WatchMessage(id: "m2", author: "You", isMe: true, body: "Cool, door's open", timestamp: now - 180_000, hasMedia: false, reactions: ""),
             WatchMessage(id: "m3", author: "Ari", isMe: false, body: "On my way 🚲", timestamp: now - 90_000, hasMedia: false, reactions: "❤️2"),
             WatchMessage(id: "m4", author: "Ari", isMe: false, body: "Made it to the top!", timestamp: now - 60_000, hasMedia: true,
                          reactions: "🔥3", media: Self.demoMedia()),
         ])
+        let media = Self.demoMedia()
+        let circle = WatchThreadDetail(threadId: "circle:trail", title: "Trail Crew", isDM: false, messages: [
+            WatchMessage(id: "s1", author: "Noa", isMe: false, body: "golden hour up here", timestamp: now - 3_600_000,
+                         hasMedia: true, reactions: "", media: Array(media.prefix(1)), isStory: true),
+            WatchMessage(id: "p1", author: "Noa", isMe: false, body: "Sunset hike Saturday?", timestamp: now - 5_400_000,
+                         hasMedia: false, reactions: "👍2"),
+        ])
+        demoThreads = [dm.threadId: dm, circle.threadId: circle,
+                       "dm:noa": WatchThreadDetail(threadId: "dm:noa", title: "Noa", isDM: true, messages: [
+                           WatchMessage(id: "n1", author: "Noa", isMe: false, body: "❤️ that photo",
+                                        timestamp: now - 1_800_000, hasMedia: false, reactions: ""),
+                       ])]
+        openThread = dm
         reachable = true
         lastSyncedAt = now
         return true
@@ -94,6 +111,11 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
     }
 
     func openThread(_ threadId: String) {
+        if WatchDemo.isOn {
+            openThread = demoThreads[threadId]
+            finishLoading()
+            return
+        }
         loadingThread = true
         beginLoadTimeout()
         // Show what we already have immediately if the same thread is cached.
@@ -117,6 +139,13 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
 
     func sendReply(threadId: String, body: String, targetId: String? = nil) {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if WatchDemo.isOn, !trimmed.isEmpty {
+            // Demo: no phone to send to — echo the reply locally, as the phone's answer would.
+            demoAppend(threadId, WatchMessage(id: "demo-\(UUID().uuidString)", author: "You", isMe: true, body: trimmed,
+                                              timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+                                              hasMedia: false, reactions: ""))
+            return
+        }
         guard !trimmed.isEmpty, activated else { return }
         loadingThread = true
         beginLoadTimeout()
@@ -135,6 +164,15 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
     }
 
     func react(threadId: String, messageId: String, emoji: String) {
+        if WatchDemo.isOn {
+            guard var detail = demoThreads[threadId],
+                  let i = detail.messages.firstIndex(where: { $0.id == messageId }) else { return }
+            let r = detail.messages[i].reactions
+            detail.messages[i].reactions = r.isEmpty ? "\(emoji)1" : "\(r) \(emoji)1"
+            demoThreads[threadId] = detail
+            if openThread?.threadId == threadId { openThread = detail }
+            return
+        }
         guard activated else { return }
         let payload = WatchCodec.encode(.react, WatchReaction(threadId: threadId, messageId: messageId, emoji: emoji))
         if session.isReachable {
@@ -144,6 +182,13 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
         } else {
             session.transferUserInfo(payload)
         }
+    }
+
+    private func demoAppend(_ threadId: String, _ message: WatchMessage) {
+        guard var detail = demoThreads[threadId] else { return }
+        detail.messages.append(message)
+        demoThreads[threadId] = detail
+        if openThread?.threadId == threadId { openThread = detail }
     }
 
     // MARK: - Inbound
@@ -211,4 +256,25 @@ extension WatchConnectivityClient: WCSessionDelegate {
     nonisolated func sessionDidBecomeInactive(_ session: WCSession) {}
     nonisolated func sessionDidDeactivate(_ session: WCSession) {}
     #endif
+}
+
+/// The watch's demo / UI-test switch. DEBUG-only: `isOn` is constant `false` in a release build.
+enum WatchDemo {
+    static let isOn: Bool = {
+        #if DEBUG
+        let p = ProcessInfo.processInfo
+        return p.environment["HAVENWATCH_DEMO"] == "1" || p.arguments.contains("-UITestMode")
+        #else
+        return false
+        #endif
+    }()
+
+    /// The thread to auto-open for its screenshot (`HAVENWATCH_DEMO_SCENE=thread`), DEBUG-only.
+    static var opensThread: Bool {
+        #if DEBUG
+        return isOn && ProcessInfo.processInfo.environment["HAVENWATCH_DEMO_SCENE"] == "thread"
+        #else
+        return false
+        #endif
+    }
 }

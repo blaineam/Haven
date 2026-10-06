@@ -45,13 +45,20 @@ enum DemoEnv {
         // so it can't seed a demo identity/profile/contacts into the real store or iCloud Keychain —
         // no matter what env it's launched with. (Screenshots are captured from a debug build.)
         #if DEBUG
-        return env["HAVEN_DEMO"] == "1"
+        return env["HAVEN_DEMO"] == "1" || UITestMode.impliesDemo
         #else
         return false
         #endif
     }
     /// The scene to auto-present, if any.
-    static var scene: DemoScene? { env["HAVEN_SCENE"].flatMap(DemoScene.init) }
+    /// DEBUG-only, like `isDemo`: a release build never auto-presents a harness scene.
+    static var scene: DemoScene? {
+        #if DEBUG
+        return env["HAVEN_SCENE"].flatMap(DemoScene.init)
+        #else
+        return nil
+        #endif
+    }
 }
 
 // MARK: - Demo seeder

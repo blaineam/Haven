@@ -95,10 +95,14 @@ final class ProfileStore: ObservableObject {
         avatar = Self.loadAvatar(ns: ns0)
         loadFieldTs()
 
-        if ProcessInfo.processInfo.environment["HAVEN_SKIP_ONBOARDING"] == "1" {
+        // DEBUG-only, matching TermsStore: a release build always runs real onboarding, whatever
+        // it is launched with.
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["HAVEN_SKIP_ONBOARDING"] == "1" || UITestMode.skipsOnboarding {
             if displayName.isEmpty { displayName = "You" }
             onboarded = true
         }
+        #endif
     }
 
     /// Re-read all profile fields for the now-current identity (call right after an identity switch

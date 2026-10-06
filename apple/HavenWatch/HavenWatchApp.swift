@@ -8,7 +8,7 @@ struct HavenWatchApp: App {
     init() {
         WatchConnectivityClient.shared.start()
         // Don't raise the system permission prompt in the offline screenshot harness.
-        if ProcessInfo.processInfo.environment["HAVENWATCH_DEMO"] != "1" {
+        if !WatchDemo.isOn {
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         }
     }

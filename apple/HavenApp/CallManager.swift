@@ -2043,7 +2043,7 @@ final class CallManager: NSObject, ObservableObject {
     /// render the brand-gradient + initial placeholders (no camera), which is exactly the populated
     /// group-call look we want to capture.
     func enterDemoCall(participants: [String], name: String) {
-        guard ProcessInfo.processInfo.environment["HAVEN_DEMO"] == "1" else { return }
+        guard DemoEnv.isDemo else { return }
         peerName = name
         self.participants = participants
         activeSpeaker = participants.first

@@ -40,5 +40,6 @@ import Foundation
 /// silently online" would be the surprising reading.
 enum HavenNet {
     /// True when this process must talk to nothing. Read once — this is consulted on hot paths.
-    static let offline: Bool = ProcessInfo.processInfo.environment["HAVEN_NO_NET"] == "1"
+    /// (`UITestMode.isOn` is constant `false` outside DEBUG, so release behaviour is unchanged.)
+    static let offline: Bool = ProcessInfo.processInfo.environment["HAVEN_NO_NET"] == "1" || UITestMode.isOn
 }

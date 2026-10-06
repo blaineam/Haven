@@ -27,7 +27,7 @@ final class TermsStore: ObservableObject {
         // ground-rules wall: 7 byte-identical App Store screenshots that the capture script
         // happily reported as a success. Honour the same DEBUG-only flag Profile does.
         // Release builds can't reach this — real users always see the gate.
-        if ProcessInfo.processInfo.environment["HAVEN_SKIP_ONBOARDING"] == "1" {
+        if ProcessInfo.processInfo.environment["HAVEN_SKIP_ONBOARDING"] == "1" || UITestMode.skipsOnboarding {
             accepted = true
             return
         }

@@ -234,6 +234,9 @@ struct HavenApp: App {
     #endif
 
     init() {
+        // UI-test launches (DEBUG only): wipe this app's own state BEFORE any store reads it, and
+        // turn animations off. A no-op for every other launch, and compiled out of Release.
+        UITestMode.applyAtLaunch()
         // Register the background-refresh task at launch (required before didFinishLaunching).
         NotificationManager.shared.registerBackgroundTask()
         NotificationManager.shared.registerTapRouting()   // notification taps route to what they're about
@@ -398,7 +401,14 @@ struct RootView: View {
     @ObservedObject private var call = CallManager.shared          // drives the minimized "Call" tab
     @ObservedObject private var terms = TermsStore.shared          // zero-tolerance terms gate (1.2)
 
-    @State private var tab = ProcessInfo.processInfo.environment["HAVEN_TAB"] ?? "circle"
+    @State private var tab: String = {
+        // The harness's starting tab is DEBUG-only, like the rest of the demo launch flags.
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["HAVEN_TAB"] ?? "circle"
+        #else
+        return "circle"
+        #endif
+    }()
     /// Reopened by tapping the import banner (the sheet is dismissible mid-import by design).
     @State private var showImportSheet = false
     @State private var showConnect = false
@@ -663,7 +673,8 @@ struct RootView: View {
             // Gently walk first-time users into adding their first person.
             guard !didPrompt,
                   contacts.contacts.isEmpty,
-                  ProcessInfo.processInfo.environment["HAVEN_SKIP_ONBOARDING"] != "1"
+                  ProcessInfo.processInfo.environment["HAVEN_SKIP_ONBOARDING"] != "1",
+                  !UITestMode.skipsOnboarding
             else { return }
             didPrompt = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showConnect = true }

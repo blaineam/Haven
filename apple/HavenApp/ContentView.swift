@@ -347,6 +347,9 @@ struct AdvancedView: View {
                             Spacer()
                             Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
                         }
+                        // `.plain` adds no hit shape: only the label and the chevron took a tap, and
+                        // the empty middle of the row — most of it — did nothing.
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("connectionRow")

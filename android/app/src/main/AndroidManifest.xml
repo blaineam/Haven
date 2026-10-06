@@ -63,11 +63,15 @@
              one usually won, and the freshly-launched one found the inbox already empty and opened
              Connect on its default tab (your own invite QR). Hence "it takes two taps". One instance
              means one composition and one consumer: a link arrives at onNewIntent instead. -->
+        <!-- supportsPictureInPicture: a live call floats in a PiP window when you leave the app
+             (ui/CallPip.kt). The extra configChanges keep the activity — and the call's video
+             renderers — alive across the PiP resize instead of recreating it mid-call. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
-            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode"
+            android:supportsPictureInPicture="true"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.Haven">
             <intent-filter>

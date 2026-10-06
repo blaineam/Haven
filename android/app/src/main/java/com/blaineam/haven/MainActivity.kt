@@ -1,6 +1,7 @@
 package com.blaineam.haven
 
 import android.content.Intent
+import android.content.res.Configuration
 import android.os.Bundle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -8,8 +9,10 @@ import androidx.fragment.app.FragmentActivity
 import android.net.Uri
 import androidx.core.content.IntentCompat
 import androidx.core.content.pm.ShortcutManagerCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.blaineam.haven.core.DeepLink
@@ -21,6 +24,7 @@ import com.blaineam.haven.core.PostLinkInbox
 import com.blaineam.haven.core.ShareInbox
 import com.blaineam.haven.core.isVideoUri
 import com.blaineam.haven.core.loadAndDownscale
+import com.blaineam.haven.ui.CallPip
 import com.blaineam.haven.ui.HavenAppTheme
 import com.blaineam.haven.ui.RootScreen
 import com.blaineam.haven.BuildConfig
@@ -71,6 +75,30 @@ class MainActivity : FragmentActivity() {
         }
         // DEBUG matrix QA: retry until HavenNet is ready (init is async from Application).
         if (BuildConfig.DEBUG) scheduleQaExtras(intent)
+        // Call picture-in-picture: keep the system's auto-enter flag in step with the call, and close
+        // the window when the call ends while floating. See CallPip for the whole lifecycle.
+        lifecycleScope.launch {
+            androidx.compose.runtime.snapshotFlow { CallPip.eligible() to CallPip.showingScreenShare() }
+                .distinctUntilChanged()
+                .collect { (eligible, share) -> CallPip.onEligibilityChanged(this@MainActivity, eligible, share) }
+        }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        CallPip.enterOnLeaveHint(this)   // API < 31 only; 31+ auto-enters
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        CallPip.active.value = isInPictureInPictureMode
+        // Leaving PiP is either EXPAND (the activity stays started and comes back to the front) or
+        // CLOSE (it has already been stopped). Expand means "take me back to my call", so show the
+        // full call screen even if the call was minimized to the nav-bar tab when the user left.
+        if (!isInPictureInPictureMode && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) &&
+            CallPip.eligible()) {
+            com.blaineam.haven.core.CallManager.minimized.value = false
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

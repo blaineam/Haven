@@ -146,10 +146,38 @@ fun CallOverlay() {
     }
     androidx.activity.compose.BackHandler(enabled = ringing && !inCall) { /* absorb */ }
 
+    // Picture-in-picture (CallPip): the window shows the call and nothing else — even when the call
+    // had been minimized to the nav-bar tab, since a floating window of the feed would be useless.
+    val inPip by CallPip.active
     when {
+        inPip && (inCall || connecting) -> PipCall()
         ringing && !inCall -> IncomingCall()
         (inCall || connecting) && minimized -> Unit   // shown as a nav-bar "Call" tab (see RootScreen)
         inCall || connecting -> InCall()
+    }
+}
+
+/**
+ * The call as drawn in a picture-in-picture window: the remote video edge-to-edge and no chrome.
+ * PiP gets no touch input and is a few hundred pixels wide, so controls would be unreadable and
+ * unusable; the system's own expand / close buttons are the controls. A peer's screen share wins
+ * (it's what the call is about while it lasts), then the active speaker, then the first remote.
+ */
+@Composable
+private fun PipCall() {
+    val participants = CallManager.participants
+    val remote = CallManager.remoteVideo
+    val screenShare = CallManager.remoteScreen.entries.firstOrNull { it.value != null }
+    val speaker = CallManager.activeSpeaker.value
+    Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+        when {
+            screenShare != null -> CallVideoTile(screenShare.value, Modifier.fillMaxSize(), fit = true)
+            participants.isNotEmpty() -> {
+                val who = participants.firstOrNull { it == speaker } ?: participants[0]
+                CallTile(who, remote, fill = true, showName = false, Modifier.fillMaxSize())
+            }
+            else -> Text(stringResource(R.string.call_connecting), color = Color.White, fontSize = 12.sp)
+        }
     }
 }
 

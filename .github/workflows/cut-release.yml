@@ -49,6 +49,25 @@ jobs:
             CN=$(head -1 android/fastlane/metadata/android/en-US/changelogs/default.txt)
             [[ "$CN" == "$V"* ]] || { echo "::error::Play changelog starts with '$CN' — write the $V fastlane changelogs first"; exit 1; }
           fi
+          python3 - <<'PY'
+          import pathlib, re, sys
+          errors = []
+          # App Review 2.3.10: App Store text never names another platform or store — not even
+          # "nothing changes on iPhone". Play notes may name Android freely; this only reads the
+          # App Store files. Review notes (private to Apple) are not checked.
+          OTHER = re.compile(r'(?i)\b(android|google play|play store|wear ?os|chrome ?os|chromebook|linux|microsoft store)\b|\bWindows\b')
+          STORE_KEYS = re.compile(r'(?m)^##\s+((?:whats_new|promotional_text|description|subtitle|keywords|name)\w*)\s*$')
+          for f in sorted(pathlib.Path(".").glob("appstore-metadata*.md")):
+              md = f.read_text(encoding="utf-8")
+              for key in STORE_KEYS.findall(md):
+                  m = re.search(rf'(?ms)^##\s+{key}\s*$\n(.*?)(?=^##\s|\Z)', md)
+                  text = re.sub(r'<!--.*?-->', '', m.group(1), flags=re.S) if m else ''
+                  hit = OTHER.search(text)
+                  if hit: errors.append(f"{f} {key} mentions {hit.group(0)!r} — App Store text never names another platform (2.3.10)")
+          for e in errors: print(f"::error::{e}")
+          if errors: sys.exit("App Store text names another platform — rewrite it from the Apple user's side")
+          print("App Store text OK")
+          PY
           python3 - <<PY
           import re
           v = "$V"

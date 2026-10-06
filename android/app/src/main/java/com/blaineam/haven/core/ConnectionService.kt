@@ -7,7 +7,6 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -21,6 +20,9 @@ import androidx.core.content.ContextCompat
  * off, the WorkManager periodic sync still catches up every ~15 min.
  */
 class ConnectionService : Service() {
+    /** True once startForeground has succeeded for this instance (until it leaves the foreground). */
+    private var inForeground = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -32,31 +34,36 @@ class ConnectionService : Service() {
         // or Android stops the MediaProjection out from under the capture.
         val projection = projectionWanted || intent?.getBooleanExtra(EXTRA_PROJECTION, false) == true
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                if (projection) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                // Read the FLAG, not just this intent's extra: the service gets (re)started for
-                // several unrelated reasons during a call, and any plain restart that dropped the
-                // microphone type would cut capture mid-call exactly as if it were never declared.
-                if (micWanted && Build.VERSION.SDK_INT >= 34) {
-                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                }
-                startForeground(NOTIF_ID, notification(), type)
-            } else {
-                startForeground(NOTIF_ID, notification())
-            }
+            // Types come from [ForegroundTypes]: during a call/share on Android 15+ there is no
+            // dataSync, so the call's mic and capture never depend on the idle-sync time budget.
+            // The flags (not just this intent's extra) decide: the service gets (re)started for
+            // several unrelated reasons during a call, and any plain restart that dropped the
+            // microphone type would cut capture mid-call exactly as if it were never declared.
+            val type = ForegroundTypes.forState(Build.VERSION.SDK_INT, micWanted, projection)
+            if (type != 0) startForeground(NOTIF_ID, notification(), type)
+            else startForeground(NOTIF_ID, notification())
+            inForeground = true
             if (projection) projectionReady(true)
         } catch (e: Exception) {
             if (projection) {
                 Log.w(ScreenSharePolicy.LOG_TAG, "mediaProjection FGS promotion refused: ${e.javaClass.simpleName}: ${e.message}")
                 projectionReady(false)
             }
-            // Android 15 caps a dataSync FGS at ~6h/day; once exhausted, startForeground throws
-            // ForegroundServiceStartNotAllowedException. Don't crash — keep the node running as a plain
-            // background service; the WorkManager periodic sync still catches up every ~15 min.
-            Log.w(TAG, "foreground start blocked, running in background: ${e.message}")
+            // Refused — most often Android 15's dataSync budget is used up for today
+            // (ForegroundServiceStartNotAllowedException). Don't crash, and don't linger as a
+            // started-but-never-foreground service either (that ends in a did-not-start-in-time
+            // kill). The engine runs in the process regardless; the WorkManager periodic sync
+            // catches up every ~15 min and the next launch tries again.
             bootEngine()
-            return START_STICKY
+            // Mid-call and already foreground (e.g. the screen-share upgrade was refused): keep it
+            // exactly as it is — stopping would take the call's mic with it.
+            if (inForeground && (micWanted || projection)) return START_STICKY
+            // Otherwise leave: never hold a call's mic type idle (a standing privacy indicator).
+            Log.w(TAG, "foreground start refused (${e.javaClass.simpleName}) — stopping; periodic sync covers it: ${e.message}")
+            if (inForeground) runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+            inForeground = false
+            stopSelf()
+            return START_NOT_STICKY
         }
         bootEngine()
         return START_STICKY
@@ -77,13 +84,32 @@ class ConnectionService : Service() {
     }
 
     /**
-     * Android 15+: the dataSync time budget is about to expire. Stop foreground GRACEFULLY here, or
-     * the system kills us with ForegroundServiceDidNotStopInTimeException (a hard crash). Background
-     * delivery falls back to the periodic WorkManager sync.
+     * Android 15+: the dataSync time budget ran out. This is the callback the system actually
+     * calls for dataSync (API 35, with the type) — the one-argument [onTimeout] below is only ever
+     * called for shortService, so handling just that one let every long "Stay connected" session
+     * end in ForegroundServiceDidNotStopInTimeException (Play vitals, 2026-10). We must leave the
+     * foreground within seconds: during a call/share re-promote WITHOUT dataSync (the mic and
+     * capture types have no budget); otherwise stop. Background delivery falls back to the periodic
+     * WorkManager sync.
      */
-    override fun onTimeout(startId: Int) {
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        val keep = ForegroundTypes.afterTimeout(Build.VERSION.SDK_INT, micWanted, projectionWanted)
+        if (keep != null) {
+            Log.w(TAG, "dataSync FGS time limit reached mid-call — keeping only the call's types")
+            val ok = runCatching { startForeground(NOTIF_ID, notification(), keep) }.isSuccess
+            if (ok) return
+        }
         Log.w(TAG, "dataSync FGS time limit reached — stopping foreground")
         runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        inForeground = false
+        stopSelf()
+    }
+
+    /** Android 14's timeout — only ever called for shortService, which Haven doesn't use. Same exit. */
+    override fun onTimeout(startId: Int) {
+        Log.w(TAG, "FGS timeout — stopping foreground")
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        inForeground = false
         stopSelf()
     }
 

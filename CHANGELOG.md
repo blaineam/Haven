@@ -7,6 +7,25 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 2.0.0 — final (unreleased)
+
+### Fixed — Android 15+: Haven crashed after "Stay connected" had run for about six hours
+
+Android 15 gives a background-sync foreground service about six hours a day. When that runs out it
+calls the service's `onTimeout(startId, fgsType)` and kills the app if the service hasn't left the
+foreground within seconds (ForegroundServiceDidNotStopInTimeException, seen in Play vitals). Haven
+only handled the older one-argument `onTimeout`, which Android calls for a different kind of
+service, so the stop never ran. It now stops cleanly and the periodic sync takes over.
+
+Two related fixes: a call (or screen share) no longer holds the background-sync type at all on
+Android 15+, so a call keeps its microphone even after the daily budget is used up; and when the
+budget is already spent, a restart that Android refuses now stops the service instead of leaving it
+half-started (which ended in a different kill a few seconds later).
+
+Verified on the Android 15 emulator with the budget shrunk to 8 seconds: the old code reproduces
+the crash; the new code stops cleanly, survives a refused restart, and keeps a call's microphone
+past the limit (`ConnectionServiceTimeoutTest`, in the `android` gate suite).
+
 ## 2.0.0 — release candidate 6 (2026-10-03)
 
 Soren release gate green (all 11 suites; e2e 457/0).

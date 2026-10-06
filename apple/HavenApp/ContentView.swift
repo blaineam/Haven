@@ -17,8 +17,7 @@ struct YouView: View {
 
     @State private var showConnect = false
     @State private var showEditProfile = false
-    @State private var showStories = false
-    @State private var storyIndex = 0
+    @State private var storyLaunch: StoryLaunch?   // see FeedView.storyLaunch
     @State private var showIdentity = false   // screenshot harness: identity switcher sheet
     #if os(iOS)
     /// The viewport width, rounded, used to key the scroll content so its width clamp is re-resolved
@@ -111,8 +110,8 @@ struct YouView: View {
                 ConnectView(account: account, contacts: contacts).macSheetFrame()
             }
             .sheet(isPresented: $showEditProfile) { EditProfileSheet() }   // brings its own chrome (HavenMacSheet / iOS toolbar Done)
-            .havenFullScreenCover(isPresented: $showStories) {
-                StoryViewer(stories: feed.myStories, index: storyIndex, friendName: "Friend")
+            .havenFullScreenCover(item: $storyLaunch) { launch in
+                StoryViewer(stories: feed.myStories, index: launch.index, friendName: "Friend")
             }
             .sheet(isPresented: $showIdentity) {
                 NavigationStack { IdentityBackupView(account: account, accountStore: accountStore) }.macSheetFrame()
@@ -220,7 +219,7 @@ struct YouView: View {
                 // every one of them — off-screen ones included — as the tab opens.
                 LazyHStack(spacing: 12) {
                     ForEach(Array(feed.myStories.enumerated()), id: \.element.id) { idx, s in
-                        Button { storyIndex = idx; showStories = true } label: {
+                        Button { storyLaunch = StoryLaunch(index: idx) } label: {
                             ZStack {
                                 Circle().fill(LinearGradient(colors: [HavenTheme.violet, HavenTheme.pink, HavenTheme.amber],
                                                              startPoint: .topLeading, endPoint: .bottomTrailing))

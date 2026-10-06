@@ -288,8 +288,11 @@ struct FeedView: View {
     @State private var showNewCircle = false
     @State private var newCircleName = ""
     @State private var showStoryCamera = false
-    @State private var showStories = false
-    @State private var storyIndex = 0
+    /// The open story viewer and where it starts. ONE item-driven value, not a flag plus an index:
+    /// `fullScreenCover(isPresented:)` built its content from the index as it stood BEFORE the tap
+    /// (nothing else in the body reads it), so tapping any ring but the first opened the lineup at
+    /// your own story and then auto-advanced into whoever was next.
+    @State private var storyLaunch: StoryLaunch?
     @State private var trimmingRef: TrimTarget?
     @State private var showRequests = false
     @State private var showActivity = false
@@ -565,7 +568,7 @@ struct FeedView: View {
                     func tryPresent(_ attempt: Int = 0) {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                             if !store.groupedStoriesFlat.isEmpty {
-                                storyIndex = 0; showStories = true
+                                storyLaunch = StoryLaunch(index: 0)
                             } else if attempt < 10 {
                                 tryPresent(attempt + 1)
                             }
@@ -630,12 +633,11 @@ struct FeedView: View {
                 }
             }
             .sheet(isPresented: $showRequests) { ConnectionRequestsView() }
-            .havenFullScreenCover(isPresented: $showStories) {
-                // `.id(storyIndex)` forces a fresh StoryViewer per tapped user — otherwise SwiftUI reuses
-                // the view identity and its @State `index` sticks at the first value, so every tap opened
-                // the lineup from the far-left user instead of the one tapped.
-                StoryViewer(stories: store.groupedStoriesFlat, index: storyIndex, friendName: friendName)
-                    .id(storyIndex)
+            .havenFullScreenCover(item: $storyLaunch) { launch in
+                // `.id` forces a fresh StoryViewer per tap — otherwise SwiftUI reuses the view identity
+                // and its @State `index` sticks at the first value.
+                StoryViewer(stories: store.groupedStoriesFlat, index: launch.index, friendName: friendName)
+                    .id(launch.id)
             }
             .havenFullScreenCover(item: $trimmingRef) { target in
                 if let url = MediaStore.shared.storagePath(for: target.ref) {
@@ -695,7 +697,7 @@ struct FeedView: View {
                 }
                 .buttonStyle(.plain)
                 ForEach(Array(store.groupedStories.enumerated()), id: \.element.author) { gi, group in
-                    Button { storyIndex = store.storyStartIndex(forGroup: gi); showStories = true } label: {
+                    Button { storyLaunch = StoryLaunch(index: store.storyStartIndex(forGroup: gi)) } label: {
                         VStack(spacing: 6) {
                             storyThumb(group.items.last ?? group.items[0])   // latest as the cover
                             Text((group.items.first?.isMe ?? false) ? String(localized: "You") : (ContactsStore.shared.name(forNodePrefix: group.author) ?? friendName))
@@ -2741,8 +2743,7 @@ struct ProfileView: View {
     @ObservedObject private var profile = ProfileStore.shared
     @ObservedObject private var store = FeedStore.shared
     let friendName: String
-    @State private var showStories = false
-    @State private var storyIndex = 0
+    @State private var storyLaunch: StoryLaunch?   // see FeedView.storyLaunch
 
     var body: some View {
         ZStack {
@@ -2796,8 +2797,8 @@ struct ProfileView: View {
         // kill leaves nothing behind to read. Says what it is holding and how much headroom is
         // left, twice a second, so the last line before the process disappears is the evidence.
         .memoryTrace { "you-tab \(store.myPosts.count) posts / \(store.myStories.count) stories" }
-        .havenFullScreenCover(isPresented: $showStories) {
-            StoryViewer(stories: store.myStories, index: storyIndex, friendName: friendName)
+        .havenFullScreenCover(item: $storyLaunch) { launch in
+            StoryViewer(stories: store.myStories, index: launch.index, friendName: friendName)
         }
     }
 
@@ -2811,7 +2812,7 @@ struct ProfileView: View {
                 // every one of them the moment the tab opens — off-screen ones included.
                 LazyHStack(spacing: 12) {
                     ForEach(Array(store.myStories.enumerated()), id: \.element.id) { idx, s in
-                        Button { storyIndex = idx; showStories = true } label: {
+                        Button { storyLaunch = StoryLaunch(index: idx) } label: {
                             ZStack {
                                 Circle().fill(LinearGradient(colors: [HavenTheme.violet, HavenTheme.pink, HavenTheme.amber],
                                                              startPoint: .topLeading, endPoint: .bottomTrailing))

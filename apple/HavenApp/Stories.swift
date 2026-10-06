@@ -951,3 +951,10 @@ private struct StoryProgressFill: View {
         }
     }
 }
+
+/// Opens the story viewer at a given story. Item-driven on purpose: a cover presented from a
+/// `Bool` plus a separate `@State` index read the index as it was BEFORE the tap that set both.
+struct StoryLaunch: Identifiable, Equatable {
+    let id = UUID()
+    let index: Int
+}

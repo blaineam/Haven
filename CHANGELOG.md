@@ -9,6 +9,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.0 — final (unreleased)
 
+### Fixed — Android: the keyboard covered the call controls
+
+Starting a call from a conversation, with the message field still focused, left the keyboard up over
+the call screen. It hid every control, including End, until you dismissed it. The ring and in-call
+screens now drop the keyboard when they appear.
+
 ### Added — relay: set mailbox retention from the environment
 
 `HAVEN_RELAY_MAILBOX_TTL_DAYS` (and `HAVEN_RELAY_MEDIA_MAX_AGE_DAYS` / `HAVEN_RELAY_MEDIA_MAX_BYTES`)

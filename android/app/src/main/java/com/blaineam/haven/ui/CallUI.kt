@@ -148,6 +148,20 @@ fun CallOverlay() {
     }
     androidx.activity.compose.BackHandler(enabled = ringing && !inCall) { /* absorb */ }
 
+    // The full-screen call surfaces (ring, in-call) draw over whatever was focused underneath. Calls
+    // usually start from a DM thread with the composer focused, and the keyboard then stayed up over
+    // the call and hid every control — End included (caught by the android-minified smoke test,
+    // 2026-10-06). Drop focus (which also hides the IME) whenever one of them takes the screen.
+    val fullScreenCall = (ringing && !inCall) || ((inCall || connecting) && !minimized)
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    androidx.compose.runtime.LaunchedEffect(fullScreenCall) {
+        if (fullScreenCall) {
+            focusManager.clearFocus(force = true)
+            keyboard?.hide()
+        }
+    }
+
     // Picture-in-picture (CallPip): the window shows the call and nothing else — even when the call
     // had been minimized to the nav-bar tab, since a floating window of the feed would be useless.
     val inPip by CallPip.active

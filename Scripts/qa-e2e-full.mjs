@@ -1288,7 +1288,7 @@ async function main() {
   /** Drive the consent surface: 'entire' | 'single' | 'cancel'. Returns {ok, why, seen}. */
   async function driveConsent(choice, budgetMs = 25_000) {
     const t0 = Date.now();
-    let picked = false, confirmed = false, sawSurface = false, opened = 0, seen = [];
+    let picked = false, confirmed = false, sawSurface = false, opened = 0, scrolled = 0, seen = [];
     const want = choice === 'entire' ? CONSENT.entire : CONSENT.single;
     const other = choice === 'entire' ? CONSENT.single : CONSENT.entire;
     while (Date.now() - t0 < budgetMs) {
@@ -1298,6 +1298,14 @@ async function main() {
         // "Next" on a single-app share opens an app picker: share Haven itself.
         const app = findNode(nodes, /^Haven$/);
         if (app) { tap(app); return { ok: true, why: 'picked Haven in the app chooser', seen }; }
+        // The chooser is a scrolling, alphabetical grid; uiautomator only dumps what is on screen.
+        // With more apps on the shared emulator (2026-10-06: Scripture Alone + Gmail/Files…) Haven
+        // fell below the fold and the step read RED with Haven never shown. Scroll the grid once
+        // it has rendered (the "Apps list" node), a short slow drag at a time.
+        if (nodes.some((n) => /^Apps list$/.test(n.text || n.desc || '')) && ++scrolled <= 8) {
+          shOk('adb', ['shell', 'input', 'swipe', '540', '1900', '540', '1200', '600']);
+          await sleep(900); continue;
+        }
         await sleep(800); continue;
       }
       if (!isConsentSurface(nodes)) {
@@ -1444,7 +1452,7 @@ async function main() {
 
     // (4) GRANT "A single app" (Android 14+ chooser) — pick Haven itself.
     await ask();
-    drove = await driveConsent('single');
+    drove = await driveConsent('single', 60_000);   // room to scroll the app grid
     t0 = Date.now();
     log(`screenshare single-app: ${JSON.stringify(drove)}`);
     if (!drove.ok && /no single-app option|no app chooser/.test(drove.why)) {
@@ -2449,7 +2457,10 @@ async function main() {
       await sleep(30_000);
       const st3 = await mrProxy('GET', '/stats');
       const late = hitsBetween(st3?.ports?.[plan.ra.pub]?.times || [], Date.now() - 30_000, Date.now());
-      score('multirelay: the old door is abandoned once the new one is known', late <= 5, `${late} request(s) to :${plan.ra.pub} in the last 30s`);
+      const lateWho = (st3?.ports?.[plan.ra.pub]?.recent || []).filter((h) => h.t >= Date.now() - 30_000)
+        .map((h) => `${h.method} ${h.path.split('?')[0].slice(0, 40)} [${h.ua || 'no UA'}]`);
+      log(`multirelay: old-door requests in the last 30s: ${JSON.stringify(lateWho)}`);
+      score('multirelay: the old door is abandoned once the new one is known', late <= 5, `${late} request(s) to :${plan.ra.pub} in the last 30s — ${lateWho.slice(0, 6).join('; ')}`);
     }
 
     // (e) Token rotation on R_C: clients recover the new token.
@@ -2478,7 +2489,16 @@ async function main() {
     //     sibling's mesh pull does not bring them back.
     await mrStopRelay('rc');
     const ttl = MRB.gcTtl;
-    const idleBefore = mrStoreKeys(RC.store).filter((k) => k.key.startsWith('haven/mailbox/') && Date.now() - k.mtimeMs > ttl * 1000 + 5_000).map((k) => k.key);
+    // Relay ANNOUNCES (`<circle>/__relay__/<relay>/<id>`) are not on the mailbox TTL any more
+    // (6df08b68): the newest ANNOUNCE_KEEP per (circle, relay) and any younger than 2 days are kept
+    // past it, because they are how an absent member finds the relay's current door. Every
+    // announce in this run is minutes old, so the sweep must keep ALL of them — scored below —
+    // and they are neither "idle keys to sweep" nor "resurrections" when seen again.
+    const isAnnounce = (key) => /^haven\/mailbox\/[^/]+\/__relay__\/[^/]+\/[^/]+$/.test(key);
+    const preKeys = mrStoreKeys(RC.store);
+    const announcesBefore = preKeys.filter((k) => isAnnounce(k.key)).map((k) => k.key);
+    const idleBefore = preKeys.filter((k) => k.key.startsWith('haven/mailbox/') && !isAnnounce(k.key)
+      && Date.now() - k.mtimeMs > ttl * 1000 + 5_000).map((k) => k.key);
     t0 = Date.now();
     mrStartRelay('rc', { ...RC, internal: plan.rc.internal, pub: plan.rc.pub,
       env: { HAVEN_RELAY_QA_MAILBOX_TTL_SECS: String(ttl), HAVEN_RELAY_QA_GC_GRACE_SECS: '0', HAVEN_RELAY_QA_GC_INTERVAL_SECS: '5' } });
@@ -2495,6 +2515,13 @@ async function main() {
     })();
     score(`multirelay: the QA GC clock sweeps R_C's idle mailbox keys (${idleBefore.length} older than ${ttl}s)`, idleBefore.length > 0 && swept >= 0,
       `swept after ${swept} ms; stale sentinel gone=${!storeKeys.rc().includes(sStale)}`);
+    {
+      const now = new Set(mrStoreKeys(RC.store).map((k) => k.key));
+      const lost = announcesBefore.filter((k) => !now.has(k));
+      score('multirelay: the sweep keeps fresh relay announces past the mailbox TTL (absent members still find the door)',
+        announcesBefore.length > 0 && lost.length === 0,
+        `${announcesBefore.length} announce(s) before, ${lost.length} deleted${lost.length ? ` — e.g. ${lost[0].slice(-24)}` : ''}`);
+    }
     // For two mesh cycles in both directions, no swept key may sit on R_C OLDER than the TTL — that
     // can only be a sibling handing back a key it should have treated as expired (the sweep, every
     // 5s, would otherwise have removed it). Fresh re-PUTs by clients are legitimate repair.

@@ -56,6 +56,10 @@ function listen(pub) {
   r.server = http.createServer((req, res) => {
     r.times.push(Date.now());
     if (r.times.length > MAX_TIMES) r.times.splice(0, r.times.length - MAX_TIMES);
+    // Who is still knocking, for the harness's failure detail (which client, which call).
+    (r.recent ||= []).push({ t: Date.now(), method: req.method, path: String(req.url || '').slice(0, 96),
+      ua: String(req.headers['user-agent'] || '').slice(0, 48) });
+    if (r.recent.length > 64) r.recent.splice(0, r.recent.length - 64);
     // In-flight requests (path only, so the harness can see a reader MID-download of one blob).
     const flight = { method: req.method, path: req.url, started: Date.now(), bytes: 0 };
     r.inflight.add(flight);
@@ -91,7 +95,7 @@ const control = http.createServer((req, res) => {
     const out = {};
     for (const [p, r] of routes) {
       out[p] = { upstream: r.upstream, hits: r.times.length, times: r.times, statuses: r.statuses,
-        upstreamErrors: r.upstreamErrors, bytesDown: r.bytesDown, throttleBps: r.throttleBps,
+        upstreamErrors: r.upstreamErrors, bytesDown: r.bytesDown, throttleBps: r.throttleBps, recent: r.recent || [],
         inflight: [...r.inflight].map((f) => ({ ...f, ageMs: Date.now() - f.started })),
         listening: !!r.server?.listening, listenError: r.listenError || null };
     }

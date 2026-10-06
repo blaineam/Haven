@@ -563,15 +563,21 @@ async fn handle_conn(
                 }
             }
             Route::List(_) => {
-                let mut keys = local_list(root, &key);
-                // Same per-circle view as the iroh LIST: a sibling's broad listing carries only the
-                // circles it replicates (see `RelayAuth::listing_visible`).
-                {
-                    let a = auth.lock().unwrap();
-                    listing_retain(root, &a, &peer, &mut keys, |k| k.as_str());
-                }
-                keys.sort();
-                let body = keys.join("\n");
+                // Filesystem walk + per-key visibility: blocking work, off the async workers.
+                let (root2, auth2, peer2, key2) = (root.to_path_buf(), auth.clone(), peer.clone(), key.clone());
+                let body = tokio::task::spawn_blocking(move || {
+                    let mut keys = local_list(&root2, &key2);
+                    // Same per-circle view as the iroh LIST: a sibling's broad listing carries only
+                    // the circles it replicates (see `RelayAuth::listing_visible`).
+                    {
+                        let a = auth2.lock().unwrap();
+                        listing_retain(&root2, &a, &peer2, &mut keys, |k| k.as_str());
+                    }
+                    keys.sort();
+                    keys.join("\n")
+                })
+                .await
+                .unwrap_or_default();
                 let digest = list_digest(&body);
                 // Radio saver: a client that already holds this exact key set (it echoed the
                 // digest we last sent) gets a bodiless 204 instead of the same list again.
@@ -595,7 +601,9 @@ async fn handle_conn(
                     .map(|k| k.to_string())
                     .collect();
                 let ttl = auth.lock().map(|a| a.mailbox_ttl()).unwrap_or(None);
-                let misses = local_touch(root, &keys, ttl);
+                let root2 = root.to_path_buf();
+                let misses =
+                    tokio::task::spawn_blocking(move || local_touch(&root2, &keys, ttl)).await.unwrap_or_default();
                 respond(&mut w, 200, "OK", keep_alive, misses.join("\n").as_bytes()).await?;
             }
             Route::Bad => respond(&mut w, 404, "no route", keep_alive, b"").await?,

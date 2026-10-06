@@ -173,6 +173,31 @@ the PUT rules (circle members + sibling relays only, once membership is configur
 TOUCH/AGES prefixes are refused to non-relays, and a member can at most keep entries alive —
 it can never delete (deletion is purely the relay's local TTL policy).
 
+**Control-plane entries have their own retention (2.0.0).** Two kinds of mailbox key are not
+posts: durable relay announces (`<circle>/__relay__/<relay>/<id>`) and HTTP live-lane call frames
+(`<circle>/__live__/<dest>/<hash>`). Apple devices TOUCH every key they have ingested, these
+included, so under rule 1 none of them ever expired: one NAS relay held 194k announces and 208k
+call frames next to 65k posts, and a sibling whose copies stayed fresh mesh-fed back whatever its
+TTL sweep deleted. Now (`ControlClass` / `sweep_control` in `blobstore.rs`):
+
+- TOUCH and HAS report them held but never refresh their mtime — it stays their write time;
+- call frames are deleted after **1 hour**, and the mesh replicates only frames under 2 minutes old;
+- per `(circle, relay)` the newest **4** announces are kept regardless of age (past the 30-day TTL,
+  so a relay announced once stays discoverable), plus any younger than **2 days**; the rest go;
+- the mesh pulls only a sibling's newest 4 announces per `(circle, relay)`, so a sibling that still
+  refreshes superseded ones cannot feed them back;
+- apps from 2.0.0 also leave control keys out of their keep-alive TOUCH (`MailboxKeepAlive`), and
+  the client splits a TOUCH into ≤ 256 KB requests (a big circle's single TOUCH used to be refused,
+  so its posts were never refreshed on remote relays).
+
+**Listings are served from a directory cache (2.0.0).** LIST, AGES and the mesh pass used to walk
+the whole store with two or three `stat` calls per file on every request, on the async workers.
+`dircache.rs` remembers each directory's entry names, revalidated by one `stat` of the directory
+(its mtime moves on every create / rename / unlink in it; a directory changed in the last 2 s is
+never cached, and nothing is trusted for longer than 5 minutes). LIST costs one `stat` per
+directory; AGES still reads each file's mtime (TOUCH moves it without touching the directory).
+All of it runs on `spawn_blocking`.
+
 **Security note (review before relying on it in production):** replication never widens content exposure —
 adopting a relay already hands it the full (sealed) mailbox, so a peer relay holding the same
 ciphertext is no new disclosure. The review items are (a) **amplification/DoS** — cap peer

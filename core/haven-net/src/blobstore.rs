@@ -276,6 +276,68 @@ pub(crate) fn listing_retain<T>(root: &Path, a: &RelayAuth, peer: &str, items: &
 /// A mailbox entry idle (no PUT / HAS hit / TOUCH) longer than this is garbage-collected.
 /// Clients refresh their live refs daily, so 30 days tolerates a month of total inactivity.
 pub const MAILBOX_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
+/// Mailbox CONTROL-PLANE entries — keys the apps write under a circle mailbox that are not posts:
+///
+/// * `haven/mailbox/<circle>/__relay__/<relay>/<id>` — a durable frame-19 relay ANNOUNCE (sealed
+///   `{node, urls, token, derp, turn…}`). Only the newest few per (circle, relay) say anything a
+///   reader needs; every older one is superseded.
+/// * `haven/mailbox/<circle>/__live__/<dest>/<hash>` — an HTTP live-lane CALL FRAME, claimed by the
+///   callee's 2 s in-call poll within seconds and meaningless minutes later.
+///
+/// They used to share the posts' liveness rule — kept while anyone TOUCHes them — and every Apple
+/// device TOUCHes every mailbox key it has ever ingested (`touchHeldKeys`), these included. So
+/// none of them ever died: Blaine's NAS relay (2026-10-06) held 194k announces and 208k call
+/// frames against 65k real posts, re-listed by every member poll and every sibling's 15 s AGES,
+/// which is where its 130–250 % CPU went. A sibling whose copies stayed TOUCH-fresh (the Mac's
+/// in-app relay) also handed back, by mesh pull, whatever this relay's TTL sweep had just deleted
+/// — 30k announces up to 2½ months old re-pulled in one evening, none of them new.
+///
+/// Their retention is now their own (see [`sweep_control`]): TOUCH / HAS never refresh them, call
+/// frames go after [`LIVE_TTL`], announces keep the newest [`ANNOUNCE_KEEP`] per (circle, relay)
+/// plus anything younger than [`ANNOUNCE_FRESH`], and the mesh never pulls what that rule would
+/// delete (see [`keys_to_pull`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ControlClass {
+    /// `…/__relay__/<relay>/<id>`
+    Announce,
+    /// `…/__live__/<dest>/<hash>`
+    Live,
+}
+
+/// The control-plane class of a mailbox key, for the EXACT shapes the apps write
+/// (`haven/mailbox/<circle>/<__relay__|__live__>/<a>/<b>`); anything else is an ordinary entry.
+pub(crate) fn control_class(key: &str) -> Option<ControlClass> {
+    let rest = key.strip_prefix(MAILBOX_PREFIX)?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.len() != 4 || parts.iter().any(|p| p.is_empty()) {
+        return None;
+    }
+    match parts[1] {
+        "__relay__" => Some(ControlClass::Announce),
+        "__live__" => Some(ControlClass::Live),
+        _ => None,
+    }
+}
+
+/// The `(circle, relay)` group of an announce key — the key up to its last `/`.
+fn announce_group(key: &str) -> &str {
+    key.rsplit_once('/').map(|(g, _)| g).unwrap_or(key)
+}
+
+/// A live-lane call frame older than this is garbage-collected (the callee claims frames within
+/// seconds; a call's setup times out long before an hour).
+pub const LIVE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+/// The mesh only replicates a call frame younger than this — a sibling pulling an older one could
+/// only hand the callee a call that is already over.
+pub const LIVE_PULL_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(120);
+/// Announces kept per `(circle, relay)` regardless of age: the newest ones by write time. They
+/// are what a member who was away learns the relay's current front door from, so they are kept
+/// even past the mailbox TTL (a relay whose interface never changes is announced once).
+pub const ANNOUNCE_KEEP: usize = 4;
+/// Announces younger than this are kept whatever their rank, so a burst of re-announces from
+/// several members is still all readable for a while.
+pub const ANNOUNCE_FRESH: std::time::Duration = std::time::Duration::from_secs(2 * 24 * 3600);
+
 /// After GC is first enabled on a store, wait this long before the first deletion — every
 /// member gets a daily-refresh cycle to stamp its live entries (pre-GC mtimes are ancient).
 pub const GC_GRACE: std::time::Duration = std::time::Duration::from_secs(48 * 3600);
@@ -342,6 +404,11 @@ pub struct GcStats {
     pub media_bytes_total: u64,
     /// Abandoned `.part` temp files (> 1h) removed anywhere else in the store.
     pub parts_deleted: usize,
+    /// Mailbox control-plane entries (superseded relay announces, stale call frames) deleted by
+    /// [`sweep_control`].
+    pub control_deleted: usize,
+    /// Bytes those control-plane deletions freed.
+    pub control_bytes_freed: u64,
 }
 
 /// Human-readable byte count for operator output ("1.5 GB", "512 MB", "980 B").
@@ -438,8 +505,22 @@ impl<T, E: std::fmt::Debug> IntoAnyhow<T> for std::result::Result<T, E> {
 /// out so the set-difference + safety + age logic is unit-testable without a live network.
 /// (A legacy peer that can't report ages advertises age 0, i.e. "fresh" — old
 /// pull-everything behavior during the transition.)
+#[cfg_attr(not(test), allow(dead_code))] // the mesh pass calls `keys_to_pull_held`
 pub(crate) fn keys_to_pull(
     root: &Path,
+    peer_keys: &[(String, u64)],
+    retention: &Retention,
+    serves_circle: &(dyn Fn(&str) -> bool + Sync),
+) -> Vec<(String, u64)> {
+    let held: HashSet<String> = local_list(root, SYNC_PREFIX).into_iter().collect();
+    keys_to_pull_held(root, &held, peer_keys, retention, serves_circle)
+}
+
+/// [`keys_to_pull`] against an already-taken inventory of what we hold under [`SYNC_PREFIX`]
+/// (so an async caller can take it on a blocking thread).
+pub(crate) fn keys_to_pull_held(
+    root: &Path,
+    held: &HashSet<String>,
     peer_keys: &[(String, u64)],
     retention: &Retention,
     serves_circle: &(dyn Fn(&str) -> bool + Sync),
@@ -454,12 +535,40 @@ pub(crate) fn keys_to_pull(
     let peer_scopes = peer_media_scopes(peer_keys);
     let mut local_scopes: HashMap<&str, Vec<String>> = HashMap::new();
     let mut out = Vec::new();
+    // `held`: what we already hold, from one cached walk — one stat per directory. Checking each
+    // advertised key with `is_file()` was a stat per key per sibling per 15 s pass.
+    // Control-plane entries: pull only what our own retention would keep (see `ControlClass`).
+    // Announces: the peer's newest ANNOUNCE_KEEP per (circle, relay). Not "anything fresh" — a
+    // sibling that still refreshes superseded announces on TOUCH advertises all of them as fresh,
+    // and we'd re-pull thousands only to delete them again.
+    let announces_wanted: HashSet<&str> = {
+        let mut groups: HashMap<&str, Vec<(u64, &str)>> = HashMap::new();
+        for (k, age) in peer_keys {
+            if control_class(k) == Some(ControlClass::Announce) {
+                groups.entry(announce_group(k)).or_default().push((*age, k.as_str()));
+            }
+        }
+        groups
+            .into_values()
+            .flat_map(|mut g| {
+                g.sort();
+                g.into_iter().take(ANNOUNCE_KEEP).map(|(_, k)| k)
+            })
+            .collect()
+    };
     for (key, age) in peer_keys {
         if out.len() >= MAX_SYNC_PULL {
             break;
         }
-        if *age >= mailbox_ttl && key.starts_with(MAILBOX_PREFIX) {
-            continue; // expired on the peer's clock → never resurrect
+        match control_class(key) {
+            Some(ControlClass::Live) if *age > LIVE_PULL_MAX_AGE.as_secs() => continue,
+            Some(ControlClass::Announce) if !announces_wanted.contains(key.as_str()) => continue,
+            // The newest announces outlive the mailbox TTL here (see `ANNOUNCE_KEEP`).
+            Some(ControlClass::Announce) => {}
+            _ if *age >= mailbox_ttl && key.starts_with(MAILBOX_PREFIX) => {
+                continue; // expired on the peer's clock → never resurrect
+            }
+            _ => {}
         }
         if let Some(c) = key_circle(key) {
             if !serves_circle(c) {
@@ -493,9 +602,10 @@ pub(crate) fn keys_to_pull(
                 continue;
             }
         }
-        match safe_path(root, key) {
-            Ok(p) if !p.is_file() => out.push((key.clone(), *age)),
-            _ => {} // already have it, or it escapes our namespace → never pull
+        let Ok(p) = safe_path(root, key) else { continue }; // escapes our namespace → never pull
+        let have = if key.starts_with("haven/") { held.contains(key.as_str()) } else { p.is_file() };
+        if !have {
+            out.push((key.clone(), *age));
         }
     }
     out
@@ -507,6 +617,7 @@ fn touch_now(path: &Path) {
         .write(true)
         .open(path)
         .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    crate::dircache::note_mtime_changed(path);
 }
 
 /// Is this stored MAILBOX entry dead — idle past the relay's TTL with the GC past its first-enable
@@ -530,6 +641,7 @@ fn backdate(path: &Path, age_secs: u64) {
     }
     let then = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
     let _ = std::fs::File::options().write(true).open(path).and_then(|f| f.set_modified(then));
+    crate::dircache::note_mtime_changed(path);
 }
 
 /// Seconds since a file was last written/touched (0 on any error → treated as fresh, so a
@@ -1196,10 +1308,23 @@ pub(crate) fn local_list(root: &Path, prefix: &str) -> Vec<String> {
 /// Like [`local_list`] but with each key's idle age in seconds — the AGES verb / age-aware
 /// mesh sync read their inventory through this.
 pub(crate) fn local_list_ages(root: &Path, prefix: &str) -> Vec<(String, u64)> {
-    local_list(root, prefix)
-        .into_iter()
-        .filter_map(|key| safe_path(root, &key).ok().map(|p| (key, idle_age_secs(&p))))
-        .collect()
+    let start = safe_path(root, prefix).unwrap_or_else(|_| root.to_path_buf());
+    let mut out = Vec::new();
+    // Names AND mtimes from the directory cache (see `dircache` for when an mtime is re-read).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut last_dir: Option<PathBuf> = None;
+    let mut dir_prefix = String::new();
+    crate::dircache::walk_mtimes(root, &start, &mut |d, name, mtime| {
+        if last_dir.as_deref() != Some(d) {
+            dir_prefix = key_prefix_of(root, d);
+            last_dir = Some(d.to_path_buf());
+        }
+        out.push((format!("{dir_prefix}{}", decode_comp(name)), now.saturating_sub(mtime)));
+    });
+    out
 }
 
 /// Refresh the liveness stamp (mtime) of every key in `keys` the store holds; returns the
@@ -1218,7 +1343,13 @@ pub(crate) fn local_touch(root: &Path, keys: &[String], mailbox_ttl: Option<Mail
     for key in keys {
         match safe_path(root, key) {
             Ok(p) if p.is_file() && mailbox_expired(root, key, &p, mailbox_ttl) => misses.push(key.clone()),
-            Ok(p) if p.is_file() => touch_now(&p),
+            // Control-plane entries are held (no re-PUT invited) but never refreshed: their
+            // retention is their own (see `ControlClass`), not "someone still TOUCHes it".
+            Ok(p) if p.is_file() => {
+                if control_class(key).is_none() {
+                    touch_now(&p)
+                }
+            }
             Ok(_) => misses.push(key.clone()),
             Err(_) => {} // unsafe key: neither touched nor reported (don't invite a re-PUT)
         }
@@ -1255,8 +1386,14 @@ pub fn gc_sweep_with(root: &Path, retention: &Retention, grace: std::time::Durat
     let mailbox_marker = root.join(".haven-gc-enabled");
     if marker_past_grace(&mailbox_marker, grace) {
         if let Ok(mailbox_root) = safe_path(root, MAILBOX_PREFIX) {
+            // Control plane first: superseded announces + stale call frames (see `ControlClass`).
+            let (n, bytes) = sweep_control(&mailbox_root);
+            stats.control_deleted = n;
+            stats.control_bytes_freed = bytes;
             let mut freed = 0u64; // mailbox bytes aren't reported; media accounting only
-            sweep_dir(&mailbox_root, retention.mailbox_ttl.as_secs(), &mut stats.mailbox_deleted, &mut freed, &|_| false);
+            // The announces `sweep_control` kept are kept on ITS rule, past the mailbox TTL too.
+            let is_announce = |p: &Path| is_announce_path(&mailbox_root, p);
+            sweep_dir(&mailbox_root, retention.mailbox_ttl.as_secs(), &mut stats.mailbox_deleted, &mut freed, &is_announce);
         }
     }
 
@@ -1355,6 +1492,78 @@ fn marker_past_grace(marker: &Path, grace: std::time::Duration) -> bool {
         return false;
     }
     idle_age_secs(marker) >= grace.as_secs()
+}
+
+/// Is `path` (on disk, under the mailbox root) a relay announce — `<circle>/__relay__/<relay>/<id>`?
+fn is_announce_path(mailbox_root: &Path, path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(mailbox_root) else { return false };
+    let parts: Vec<_> = rel.components().collect();
+    parts.len() == 4 && parts[1].as_os_str() == "__relay__"
+}
+
+/// The control-plane retention pass over `haven/mailbox/` (see [`ControlClass`]):
+///
+/// * every `<circle>/__live__/**` call frame idle longer than [`LIVE_TTL`] is deleted;
+/// * in every `<circle>/__relay__/<relay>/` group the newest [`ANNOUNCE_KEEP`] announces (by
+///   mtime — the write time, since TOUCH no longer moves it) and any younger than
+///   [`ANNOUNCE_FRESH`] are kept, every other one is deleted.
+///
+/// Posts, hellos and anything not shaped exactly like a control key are never looked at.
+/// In-flight `.part` temps are left to the regular sweep. Returns `(deleted, bytes freed)`.
+pub(crate) fn sweep_control(mailbox_root: &Path) -> (usize, u64) {
+    let now = std::time::SystemTime::now();
+    let age_of = |m: &std::fs::Metadata| {
+        m.modified().ok().and_then(|t| now.duration_since(t).ok()).map(|d| d.as_secs()).unwrap_or(0)
+    };
+    let is_part = |p: &Path| p.extension().map(|e| e == "part").unwrap_or(false);
+    let subdirs = |d: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(d)
+            .map(|rd| rd.flatten().filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false)).map(|e| e.path()).collect())
+            .unwrap_or_default()
+    };
+    let files = |d: &Path| -> Vec<(PathBuf, std::fs::Metadata)> {
+        std::fs::read_dir(d)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                    .map(|e| e.path())
+                    .filter(|p| !is_part(p))
+                    .filter_map(|p| std::fs::metadata(&p).ok().map(|m| (p, m)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (mut deleted, mut freed) = (0usize, 0u64);
+    let mut remove = |p: &Path, len: u64| {
+        if std::fs::remove_file(p).is_ok() {
+            deleted += 1;
+            freed += len;
+        }
+    };
+    for circle in subdirs(mailbox_root) {
+        for dest in subdirs(&circle.join("__live__")) {
+            for (p, m) in files(&dest) {
+                if age_of(&m) > LIVE_TTL.as_secs() {
+                    remove(&p, m.len());
+                }
+            }
+            let _ = std::fs::remove_dir(&dest); // only succeeds if now empty
+        }
+        let _ = std::fs::remove_dir(circle.join("__live__"));
+        for group in subdirs(&circle.join("__relay__")) {
+            let mut entries: Vec<(u64, PathBuf, u64)> =
+                files(&group).into_iter().map(|(p, m)| (age_of(&m), p, m.len())).collect();
+            entries.sort(); // newest (smallest idle age) first; path breaks ties deterministically
+            for (rank, (age, p, len)) in entries.into_iter().enumerate() {
+                if rank >= ANNOUNCE_KEEP && age > ANNOUNCE_FRESH.as_secs() {
+                    remove(&p, len);
+                }
+            }
+            let _ = std::fs::remove_dir(&group);
+        }
+        let _ = std::fs::remove_dir(circle.join("__relay__"));
+    }
+    (deleted, freed)
 }
 
 /// Recursive TTL sweep under `dir`; removes directories that end up empty (best-effort).
@@ -1759,7 +1968,17 @@ pub(crate) async fn pull_missing_from_peer(
     // still answers LIST) loaded multi‑hundred‑MB blobs into RAM every tick — Mac host sample
     // 4.6 GB peak / unresponsive while serving. Remainder is picked up on later passes.
     // Prefer mailbox keys first so event history converges before multi‑MB media.
-    let want = keys_to_pull(root, &peer_keys, retention, serves_circle);
+    // Our own inventory is a store walk: take it off the async workers.
+    let held: HashSet<String> = {
+        let r = root.to_path_buf();
+        // An empty inventory would mean "pull everything": skip the pass instead.
+        let Ok(held) = tokio::task::spawn_blocking(move || local_list(&r, SYNC_PREFIX).into_iter().collect()).await
+        else {
+            return 0;
+        };
+        held
+    };
+    let want = keys_to_pull_held(root, &held, &peer_keys, retention, serves_circle);
     let peer_scopes = peer_media_scopes(&peer_keys);
     let mut pulled = 0usize;
     for (key, age) in mesh_pass_selection(want) {
@@ -2805,7 +3024,10 @@ pub(crate) async fn handle_request(
                     return Ok(());
                 }
             };
-            match std::fs::read(&path) {
+            match tokio::task::spawn_blocking(move || std::fs::read(&path))
+                .await
+                .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+            {
                 Ok(bytes) => {
                     let _ = send.write_all(&bytes).await;
                 }
@@ -2822,8 +3044,11 @@ pub(crate) async fn handle_request(
                 Ok(p) if p.is_file() && mailbox_expired(&root, &key, &p, ttl) => false,
                 Ok(p) if p.is_file() => {
                     // A HAS hit is proof the caller still cares about this entry —
-                    // refresh its liveness stamp so mailbox GC keeps it.
-                    touch_now(&p);
+                    // refresh its liveness stamp so mailbox GC keeps it. Not a control-plane
+                    // entry's: those age on their own clock (see `ControlClass`).
+                    if control_class(&key).is_none() {
+                        touch_now(&p);
+                    }
                     true
                 }
                 _ => false,
@@ -2851,7 +3076,8 @@ pub(crate) async fn handle_request(
                 .map(|k| k.to_string())
                 .collect();
             let ttl = auth.lock().map(|a| a.mailbox_ttl()).unwrap_or(None);
-            let misses = local_touch(&root, &keys, ttl);
+            // A file open + mtime write per key: blocking work, off the async workers.
+            let misses = tokio::task::spawn_blocking(move || local_touch(&root, &keys, ttl)).await.unwrap_or_default();
             let mut reply = String::from("OK");
             for m in &misses {
                 reply.push('\n');
@@ -2861,17 +3087,23 @@ pub(crate) async fn handle_request(
             let _ = send.finish();
         }
         VERB_LIST => {
-            // `key` is treated as a prefix directory under the store root.
-            let mut keys = Vec::new();
-            if let Ok(base) = safe_path(&root, &key) {
-                collect_keys(&root, &base, &mut keys);
-            }
-            {
-                let a = auth.lock().unwrap();
-                listing_retain(&root, &a, &peer, &mut keys, |k| k.as_str());
-            }
-            keys.sort();
-            let body = keys.join("\n");
+            // `key` is treated as a prefix directory under the store root. The walk is
+            // filesystem work: off the async workers (`spawn_blocking`), so a big listing never
+            // stalls every other stream this relay is serving.
+            let body = tokio::task::spawn_blocking(move || {
+                let mut keys = Vec::new();
+                if let Ok(base) = safe_path(&root, &key) {
+                    collect_keys(&root, &base, &mut keys);
+                }
+                {
+                    let a = auth.lock().unwrap();
+                    listing_retain(&root, &a, &peer, &mut keys, |k| k.as_str());
+                }
+                keys.sort();
+                keys.join("\n")
+            })
+            .await
+            .unwrap_or_default();
             let _ = send.write_all(body.as_bytes()).await;
             let _ = send.finish();
         }
@@ -2879,18 +3111,18 @@ pub(crate) async fn handle_request(
             // LIST with idle ages: "<age-secs> <key>" per line — the age-preserving mesh
             // sync inventory. Same auth shape as LIST (checked above). A bad prefix yields
             // an empty reply — local_list's fall-back-to-root would enumerate self/ slots.
-            let mut pairs =
-                if safe_path(&root, &key).is_ok() { local_list_ages(&root, &key) } else { Vec::new() };
-            {
-                let a = auth.lock().unwrap();
-                listing_retain(&root, &a, &peer, &mut pairs, |(k, _)| k.as_str());
-            }
-            pairs.sort();
-            let body = pairs
-                .into_iter()
-                .map(|(k, age)| format!("{age} {k}"))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let body = tokio::task::spawn_blocking(move || {
+                let mut pairs =
+                    if safe_path(&root, &key).is_ok() { local_list_ages(&root, &key) } else { Vec::new() };
+                {
+                    let a = auth.lock().unwrap();
+                    listing_retain(&root, &a, &peer, &mut pairs, |(k, _)| k.as_str());
+                }
+                pairs.sort();
+                pairs.into_iter().map(|(k, age)| format!("{age} {k}")).collect::<Vec<_>>().join("\n")
+            })
+            .await
+            .unwrap_or_default();
             let _ = send.write_all(body.as_bytes()).await;
             let _ = send.finish();
         }
@@ -2989,28 +3221,38 @@ pub(crate) async fn handle_request(
     Ok(())
 }
 
-/// Recursively collect store-relative key strings under `dir` (best-effort).
+/// Recursively collect store-relative key strings under `dir` (best-effort). Served from the
+/// per-store directory cache ([`crate::dircache`]): one `stat` per directory, not per file.
 fn collect_keys(root: &Path, dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_keys(root, &path, out);
-        } else if path.is_file() {
-            if path.extension().map(|e| e == "part").unwrap_or(false) {
-                continue; // skip in-progress writes
-            }
-            if let Ok(rel) = path.strip_prefix(root) {
-                // Decode each on-disk component back to its wire form (see encode_comp).
-                let key = rel
-                    .components()
-                    .map(|c| decode_comp(&c.as_os_str().to_string_lossy()))
-                    .collect::<Vec<_>>()
-                    .join("/");
-                out.push(key);
-            }
+    walk_keys(root, dir, &mut |key, _| out.push(key));
+}
+
+/// Visit every stored key under `dir` as `(wire key, on-disk path)`. Each on-disk component is
+/// decoded back to its wire form (see [`encode_comp`]); `.part` temp files are skipped.
+fn walk_keys(root: &Path, dir: &Path, f: &mut dyn FnMut(String, PathBuf)) {
+    let mut last_dir: Option<PathBuf> = None;
+    let mut prefix = String::new();
+    crate::dircache::walk(root, dir, &mut |d, name| {
+        if last_dir.as_deref() != Some(d) {
+            prefix = key_prefix_of(root, d);
+            last_dir = Some(d.to_path_buf());
         }
+        f(format!("{prefix}{}", decode_comp(name)), d.join(name));
+    });
+}
+
+/// The wire-key prefix (`a/b/`) of an on-disk directory under `root` (empty for `root` itself).
+fn key_prefix_of(root: &Path, dir: &Path) -> String {
+    let Ok(rel) = dir.strip_prefix(root) else { return String::new() };
+    let mut prefix = rel
+        .components()
+        .map(|c| decode_comp(&c.as_os_str().to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join("/");
+    if !prefix.is_empty() {
+        prefix.push('/');
     }
+    prefix
 }
 
 // --- client side ---------------------------------------------------------------------
@@ -3357,13 +3599,23 @@ impl BlobClient {
     /// Refresh the liveness of `keys` (all under `prefix`, a single circle's mailbox path)
     /// so mailbox GC keeps them; returns the keys the relay does NOT hold — the caller
     /// re-PUTs those (refresh doubles as repair). One request for the whole batch.
+    ///
+    /// Split into requests the relay accepts ([`touch_batches`]): one body used to carry every
+    /// key, and a circle past ~2,500 keys bailed with "touch batch too large" — so the keep-alive
+    /// of exactly the busiest circles never reached any remote relay, whose copies then aged out
+    /// while the in-app relay (touched locally, no cap) kept its own fresh.
     pub async fn touch(&self, prefix: &str, keys: &[String]) -> Result<Vec<String>> {
-        match self.touch_once(prefix, keys).await {
-            Err(e) if is_forbidden(&e) && self.recover_forbidden(prefix).await => {
-                self.touch_once(prefix, keys).await
-            }
-            other => other,
+        let mut misses = Vec::new();
+        for batch in touch_batches(keys) {
+            let m = match self.touch_once(prefix, batch).await {
+                Err(e) if is_forbidden(&e) && self.recover_forbidden(prefix).await => {
+                    self.touch_once(prefix, batch).await
+                }
+                other => other,
+            }?;
+            misses.extend(m);
         }
+        Ok(misses)
     }
 
     async fn touch_once(&self, prefix: &str, keys: &[String]) -> Result<Vec<String>> {
@@ -3465,6 +3717,25 @@ impl BlobClient {
 /// Did the relay refuse this op on policy grounds (rather than fail on transport)? Only a policy
 /// refusal is worth answering with an ENROLL — a timeout or a dead connection must not be turned
 /// into a retry storm.
+/// Split TOUCH keys into consecutive batches whose newline-joined body fits [`MAX_TOUCH_BODY`].
+/// Always at least one batch (an empty TOUCH is still one request, as before).
+pub(crate) fn touch_batches(keys: &[String]) -> Vec<&[String]> {
+    let mut out = Vec::new();
+    let (mut start, mut size) = (0usize, 0u64);
+    for (i, k) in keys.iter().enumerate() {
+        let add = k.len() as u64 + u64::from(i > start); // + the joining newline
+        if i > start && size + add > MAX_TOUCH_BODY {
+            out.push(&keys[start..i]);
+            start = i;
+            size = k.len() as u64;
+        } else {
+            size += add;
+        }
+    }
+    out.push(&keys[start..]);
+    out
+}
+
 fn is_forbidden(e: &anyhow::Error) -> bool {
     e.to_string().contains("ERR forbidden")
 }
@@ -4819,4 +5090,171 @@ mod tests {
         assert_eq!(load_devroster_devices(&dir), vec![(acct_hex.clone(), vec![b_hex.clone(), c_hex.clone()])]);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // --- mailbox control plane (relay announces + live-lane call frames) -------------------
+
+    const R1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const R2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    fn announce(circle: &str, relay: &str, i: usize) -> String {
+        format!("haven/mailbox/{circle}/__relay__/{relay}/{i:064x}")
+    }
+
+    fn live(circle: &str, i: usize) -> String {
+        format!("haven/mailbox/{circle}/__live__/{R1}/{i:064x}")
+    }
+
+    #[test]
+    fn control_class_matches_exactly_the_shapes_the_apps_write() {
+        assert_eq!(control_class(&announce("c1X", R1, 1)), Some(ControlClass::Announce));
+        assert_eq!(control_class(&announce("dm:a-b", R1, 1)), Some(ControlClass::Announce));
+        assert_eq!(control_class(&live("default", 1)), Some(ControlClass::Live));
+        for not in [
+            "haven/mailbox/c1X/abcd",                          // a post
+            "haven/mailbox/default/__hello__/a/b/c",           // a hello
+            "haven/mailbox/c1X/__relay__/r",                   // too short
+            "haven/mailbox/c1X/__relay__/r/id/extra",          // too long
+            "haven/mailbox/c1X/__relay__//id",                 // empty component
+            "haven/media/__relay__/r/id",                      // not the mailbox
+            "haven/mailbox/__relay__/x/y/z",                   // `__relay__` as the circle
+        ] {
+            assert_eq!(control_class(not), None, "{not}");
+        }
+    }
+
+    /// The immortality bug: every Apple device TOUCHes every key it has ingested, announces and
+    /// call frames included, so the relay's idle clock never ran for them. A TOUCH / HAS still
+    /// reports them held (no re-PUT invited) but leaves their age alone; posts still refresh.
+    #[test]
+    fn touch_and_has_never_refresh_control_entries() {
+        let a = announce("fam", R1, 1);
+        let l = live("fam", 1);
+        let post = "haven/mailbox/fam/post".to_string();
+        let day = 24 * 3600;
+        let dir = retention_store("touch-control", &[(&a, b"x", 5 * day), (&l, b"x", 5 * day), (&post, b"x", 5 * day)]);
+        let misses = local_touch(&dir, &[a.clone(), l.clone(), post.clone()], None);
+        assert!(misses.is_empty(), "all three are held: {misses:?}");
+        let ages: HashMap<String, u64> = local_list_ages(&dir, "haven/mailbox/").into_iter().collect();
+        assert!(ages[&a] >= 5 * day, "a TOUCH must not refresh a relay announce");
+        assert!(ages[&l] >= 5 * day, "a TOUCH must not refresh a call frame");
+        assert!(ages[&post] < 60, "a post is refreshed as before");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn control_sweep_keeps_newest_announces_and_drops_stale_call_frames() {
+        let (h, day) = (3600u64, 24 * 3600u64);
+        let mut entries: Vec<(String, u64)> = Vec::new();
+        // fam/R1: 12 announces, ages 3..14 days → only the newest ANNOUNCE_KEEP survive.
+        for i in 0..12 {
+            entries.push((announce("fam", R1, i), (3 + i as u64) * day));
+        }
+        // fam/R2: one announce idle 40 days (past the mailbox TTL) — the newest of its group,
+        // so it stays: it is how an away member learns R2's current front door.
+        entries.push((announce("fam", R2, 0), 40 * day));
+        // dm/R1: a burst of 9 within the fresh window → all kept.
+        for i in 0..9 {
+            entries.push((announce("dm:a-b", R1, i), h * (1 + i as u64)));
+        }
+        // Call frames: 10 min (kept) vs 2 h (gone).
+        entries.push((live("fam", 1), 600));
+        entries.push((live("fam", 2), 2 * h));
+        // Posts and hellos are not control-plane: only the mailbox TTL applies to them.
+        entries.push(("haven/mailbox/fam/post-old".to_string(), 10 * day));
+        entries.push(("haven/mailbox/default/__hello__/a/b/c".to_string(), 10 * day));
+        let refs: Vec<(&str, &[u8], u64)> = entries.iter().map(|(k, a)| (k.as_str(), b"x".as_slice(), *a)).collect();
+        let dir = retention_store("control-sweep", &refs);
+
+        let stats = gc_sweep_with(&dir, &Retention::default(), GC_GRACE);
+        assert_eq!(stats.control_deleted, (12 - ANNOUNCE_KEEP) + 1);
+        assert_eq!(stats.mailbox_deleted, 0, "nothing else was past the 30-day TTL");
+        let held: HashSet<String> = local_list(&dir, "haven/mailbox/").into_iter().collect();
+        for i in 0..12 {
+            assert_eq!(held.contains(&announce("fam", R1, i)), i < ANNOUNCE_KEEP, "fam/R1 #{i}");
+        }
+        assert!(held.contains(&announce("fam", R2, 0)), "the newest announce outlives the mailbox TTL");
+        for i in 0..9 {
+            assert!(held.contains(&announce("dm:a-b", R1, i)), "fresh announce #{i}");
+        }
+        assert!(held.contains(&live("fam", 1)) && !held.contains(&live("fam", 2)));
+        assert!(held.contains("haven/mailbox/fam/post-old"));
+        assert!(held.contains("haven/mailbox/default/__hello__/a/b/c"));
+        // Idempotent: a second pass finds nothing more.
+        assert_eq!(gc_sweep_with(&dir, &Retention::default(), GC_GRACE).control_deleted, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The resurrection loop: a sibling that still refreshes superseded announces on TOUCH
+    /// advertises all of them as fresh; we used to pull every one back, sweep it, pull it again.
+    /// Now a pass takes only its newest ANNOUNCE_KEEP per (circle, relay) and call frames young
+    /// enough to matter — and once we hold those, later passes pull NOTHING.
+    #[test]
+    fn mesh_pull_takes_only_newest_announces_and_young_call_frames() {
+        let dir = std::env::temp_dir().join(format!("haven-control-pull-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut peer: Vec<(String, u64)> = Vec::new();
+        for i in 0..1000 {
+            peer.push((announce("fam", R1, i), 300 + (i as u64 % 7))); // all TOUCH-fresh
+        }
+        peer.push((announce("fam", R2, 0), 50 * 24 * 3600)); // lone, old: still the newest of R2
+        peer.push((live("fam", 1), 30));
+        peer.push((live("fam", 2), LIVE_PULL_MAX_AGE.as_secs() + 1));
+        peer.push(("haven/mailbox/fam/post".to_string(), 60));
+        let first = keys_to_pull(&dir, &peer, &Retention::default(), &|_| true);
+        let n_r1 = first.iter().filter(|(k, _)| k.contains(&format!("/__relay__/{R1}/"))).count();
+        assert_eq!(n_r1, ANNOUNCE_KEEP);
+        assert!(first.iter().any(|(k, _)| *k == announce("fam", R2, 0)));
+        assert!(first.iter().any(|(k, _)| *k == live("fam", 1)));
+        assert!(!first.iter().any(|(k, _)| *k == live("fam", 2)));
+        assert!(first.iter().any(|(k, _)| k == "haven/mailbox/fam/post"));
+        assert_eq!(first.len(), ANNOUNCE_KEEP + 3);
+        // Land them (as the pass would), sweep, and ask again: steady state is zero pulls.
+        for (k, age) in &first {
+            local_put(&dir, k, b"x").unwrap();
+            backdate(&safe_path(&dir, k).unwrap(), *age);
+        }
+        for _ in 0..5 {
+            gc_sweep_with(&dir, &Retention::default(), GC_GRACE);
+            let again = keys_to_pull(&dir, &peer, &Retention::default(), &|_| true);
+            assert!(again.is_empty(), "a quiet mesh pass must pull nothing: {again:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The write rate of a relay announce is pinned app-side by its key (a hash of the PLAINTEXT
+    /// — `RelayAnnounceKey`): re-announcing an unchanged relay N times is one overwrite of one
+    /// entry, so N quiet ticks leave the store exactly as they found it.
+    #[test]
+    fn repeated_unchanged_announces_never_grow_the_store() {
+        let dir = std::env::temp_dir().join(format!("haven-announce-rate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let key = announce("fam", R1, 7);
+        for _ in 0..50 {
+            local_put(&dir, &key, b"sealed-announce").unwrap();
+        }
+        assert_eq!(local_list(&dir, "haven/mailbox/"), vec![key]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn touch_batches_fit_the_relay_limit_and_cover_every_key() {
+        assert_eq!(touch_batches(&[]).len(), 1, "an empty TOUCH is still one request");
+        let keys: Vec<String> = (0..10_000).map(|i| format!("haven/mailbox/fam/{i:064x}")).collect();
+        let batches = touch_batches(&keys);
+        assert!(batches.len() >= 3);
+        for b in &batches {
+            assert!(!b.is_empty());
+            assert!(b.join("\n").len() as u64 <= MAX_TOUCH_BODY);
+        }
+        let joined: Vec<String> = batches.iter().flat_map(|b| b.iter().cloned()).collect();
+        assert_eq!(joined, keys);
+        let small: Vec<String> = keys[..10].to_vec();
+        assert_eq!(touch_batches(&small), vec![small.as_slice()]);
+    }
+
 }
+
+#[cfg(test)]
+#[path = "blobstore_bench.rs"]
+mod bench;

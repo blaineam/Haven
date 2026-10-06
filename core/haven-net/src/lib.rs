@@ -20,6 +20,7 @@ use iroh::{
 };
 
 pub mod blobstore;
+mod dircache;
 pub mod cfquicktunnel;
 pub mod derp;
 pub mod accountdiscovery;
@@ -400,9 +401,17 @@ impl Node {
                     std::ptr::eq(alive.as_ptr(), Arc::as_ptr(&c.gc_token))
                         .then(|| (c.root.clone(), c.retention))
                 };
-                // Deferred first-enable sweep (see above) — silent, like the old inline one.
+                // Deferred first-enable sweep (see above) — silent like the old inline one, except
+                // for control-plane cleanup (the one-time shrink of a store that predates it).
                 let Some((root, retention)) = current() else { return };
-                let _ = blobstore::gc_sweep_with(&root, &retention, retention.gc_grace);
+                let first = blobstore::gc_sweep_with(&root, &retention, retention.gc_grace);
+                if first.control_deleted > 0 {
+                    println!(
+                        "▸ mailbox sweep: {} superseded relay announces / stale call frames removed ({} freed).",
+                        first.control_deleted,
+                        blobstore::fmt_bytes(first.control_bytes_freed),
+                    );
+                }
                 let mut slept = std::time::Duration::ZERO;
                 loop {
                     std::thread::sleep(tick);
@@ -411,6 +420,13 @@ impl Node {
                     if slept >= retention.gc_interval {
                         slept = std::time::Duration::ZERO;
                         let stats = blobstore::gc_sweep_with(&root, &retention, retention.gc_grace);
+                        if stats.control_deleted > 0 {
+                            println!(
+                                "▸ mailbox sweep: {} superseded relay announces / stale call frames removed ({} freed).",
+                                stats.control_deleted,
+                                blobstore::fmt_bytes(stats.control_bytes_freed),
+                            );
+                        }
                         // Operator visibility, but ONLY when a media limit is configured —
                         // default (app-embedded) relays keep the existing no-output posture.
                         if retention.media_limited() {

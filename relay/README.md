@@ -125,7 +125,9 @@ self-check passed and is fresh — what Docker's HEALTHCHECK runs).
   a quarter of it, every new write is refused. Reads, TOUCH and GC keep running, and service
   resumes by itself once space is freed.
 - **GC.** The hourly sweep (mailbox TTL, your media retention) also deletes abandoned `.part`
-  temp files anywhere in the store, and stale update downloads.
+  temp files anywhere in the store, and stale update downloads. It also removes superseded relay
+  announces (keeping the newest few per relay) and call frames older than an hour, and logs
+  `▸ mailbox sweep: N superseded relay announces / stale call frames removed` when it does.
 - **Bounded memory.** The HTTP interface caps concurrent connections (1024) and buffered upload
   bytes (1 GiB total), so a burst of uploads queues instead of growing without limit.
 

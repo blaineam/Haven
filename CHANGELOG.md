@@ -9,6 +9,37 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.0 — final (unreleased)
 
+### Fixed — relays: a long-running relay spent 1–2.5 CPU cores re-reading its own store
+
+A relay's mailbox holds more than posts. Hosts also leave **relay announcements** in it (so a friend
+who was offline can still learn the relay's address) and **call signals** (the fallback path when a
+call can't connect directly). Both are useful for minutes to days. But every Apple device kept every
+mailbox entry it had ever seen alive, these included, so they never expired. Blaine's NAS relay held
+194,000 announcements and 208,000 call signals next to 65,000 real posts. It re-read all 475,000
+files on every member's poll and every 15-second sync with a sibling relay, one `stat` per file, on
+the threads that serve requests. That cost 130–250 % CPU with almost no network traffic.
+
+A sibling that kept its own copies alive made it worse: whatever the NAS deleted, the next sync
+brought back. 30,000 announcements up to 2½ months old came back in one evening, none of them new.
+
+What changed:
+
+- **Announcements and call signals now expire on their own schedule.** A relay keeps the newest
+  4 announcements per relay per circle, plus any from the last 2 days. Call signals go after an
+  hour. Keeping an entry alive no longer applies to either kind, a sibling no longer re-sends what
+  would only be deleted again, and posts, DMs and invites are untouched. On the NAS's own key list
+  this removes about 400,000 entries (~5 GB) and keeps every post. The first hourly sweep after the
+  update does it and logs `▸ mailbox sweep: N superseded relay announces / stale call frames removed`.
+- **Listing the store is cheap.** A relay remembers each folder's file list and re-reads a folder
+  only when it changed (one `stat` per folder instead of two or three per file). This work also
+  runs off the request threads, so a big listing no longer stalls other requests.
+- **Apple apps keep only posts alive.** Announcements, call signals and invites are no longer
+  included in that refresh.
+- **Busy circles' posts stay alive on other relays again.** That refresh was sent as one request,
+  and a circle with more than about 2,500 entries went over the relay's 256 KB limit and was
+  refused. Its posts were then never refreshed on any relay except the device's own. It is now
+  split into requests the relay accepts.
+
 ### Fixed — Android 15+: Haven crashed after "Stay connected" had run for about six hours
 
 Android 15 gives a background-sync foreground service about six hours a day. When that runs out it

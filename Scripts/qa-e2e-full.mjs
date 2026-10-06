@@ -353,7 +353,7 @@ function makeAndroid() {
       const tmp = join(OUT, 'and-cmd.json'); writeFileSync(tmp, JSON.stringify(cmd));
       if (!note(androidQaWrite(tmp, 'qa-cmd.json'))) log(`WARN android qaWrite '${cmd.op}' failed — this leg will read RED`);
     },
-    poke: () => note(shOk('adb', ['shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', 'haven://qa']) !== null),
+    poke: () => note(shOk('adb', ['shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', 'haven://qa', '-p', AND_PKG]) !== null),
     // Like the host legs: the driver deletes the drop on consume, so "still there" means "not yet
     // taken" — and waiting for that keeps the NEXT command from overwriting an unconsumed one. An
     // adb failure answers "not pending" so a sick emulator cannot stall every op for 10s.
@@ -429,8 +429,13 @@ function makeAndroid() {
       } else {
         out.push(`dump file:  ${p} — cannot stat (${String(st || '(adb failed)').trim().split('\n')[0]})`);
       }
+      // The driver polls only while the app is foregrounded, so name what IS on top. 2026-10-06: an
+      // unpinned `haven://qa` VIEW resolved to BOTH com.blaineam.haven and the android-minified
+      // suite's com.blaineam.haven.minified, and the system chooser sat over Haven all run.
+      const top = (shOk('adb', ['shell', 'dumpsys activity activities | grep -m1 topResumedActivity']) || '').trim();
+      out.push(`foreground: ${top.replace(/^topResumedActivity=/, '') || '(unknown)'}`);
       // The driver logs every failed dump write; surface the latest so the cause is in the report.
-      const lg = shOk('adb', ['logcat', '-d', '-t', '4000', '-s', 'HavenQA']) || '';
+      const lg =shOk('adb', ['logcat', '-d', '-t', '4000', '-s', 'HavenQA']) || '';
       const hits = lg.split('\n').filter((l) => /qa-dump write failed|qa-cmd .* failed/.test(l));
       out.push(hits.length
         ? `logcat:     ${hits.length} HavenQA failure line(s); last: ${hits[hits.length - 1].trim().slice(0, 160)}`

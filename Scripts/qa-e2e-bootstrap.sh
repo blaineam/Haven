@@ -474,6 +474,16 @@ elif command -v adb >/dev/null 2>&1; then
         && APK="$ROOT/android/app/build/outputs/apk/debug/app-universal-debug.apk"
     fi
     if [[ -f "$APK" ]]; then
+      # Other Haven builds on this shared emulator (the android-minified suite's
+      # com.blaineam.haven.minified + its test APK) register the same haven:// and invite-link
+      # filters; any unpinned VIEW then opens a system chooser over Haven and the qa driver — which
+      # polls only while Haven is foregrounded — goes silent. Remove them before the fleet starts.
+      for other in $(adb shell pm list packages com.blaineam.haven 2>/dev/null | tr -d '\r' | sed 's/^package://'); do
+        [[ "$other" == "$AND_PKG" ]] && continue
+        if adb uninstall "$other" >/dev/null 2>&1; then
+          log "removed $other from the emulator (shares Haven's intent filters)"
+        fi
+      done
       if ! adb install -r "$APK" >/dev/null 2>&1; then
         # A long-lived emulator's system_server can lose the package service between the boot check
         # and the install ("Can't find service: package" / broken pipe). Cold-reboot once and retry.
@@ -542,14 +552,14 @@ elif command -v adb >/dev/null 2>&1; then
     # raced the app's own rewrites and left the leg silently relay-less).
     printf '{"op":"wire_relay","hex":"%s","urls":["http://10.0.2.2:8674","http://127.0.0.1:8674"],"token":"%s"}' "$NODE" "$TOKEN" >/tmp/and-wire.json
     and_qa_put /tmp/and-wire.json qa-cmd.json || log "WARN: run-as wire_relay stage failed"
-    adb shell am start -a android.intent.action.VIEW -d "haven://qa" >/dev/null 2>&1 || true
+    adb shell am start -a android.intent.action.VIEW -d "haven://qa" -p "$AND_PKG" >/dev/null 2>&1 || true
     # Wait for the driver to CONSUME the drop (it deletes it on apply). A cold emulator's first
     # launch can take well over the old fixed 4s to bring the engine up, and the harness's very
     # first {"op":"dump"} then OVERWROTE the unconsumed wire_relay — the leg ran the whole suite
     # with no relay at all (relay_stats [], warm-up "never") while every other leg was fine.
     for i in $(seq 1 60); do
       and_qa_has qa-cmd.json || break
-      [[ $((i % 10)) == 0 ]] && adb shell am start -a android.intent.action.VIEW -d "haven://qa" >/dev/null 2>&1
+      [[ $((i % 10)) == 0 ]] && adb shell am start -a android.intent.action.VIEW -d "haven://qa" -p "$AND_PKG" >/dev/null 2>&1
       sleep 1
     done
     and_qa_has qa-cmd.json && log "WARN: android never consumed wire_relay — this leg has NO relay"

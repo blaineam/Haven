@@ -158,7 +158,11 @@ async function main() {
       logcatScan(t.split('.').pop(), mapping);
     }
   } finally {
-    sh(`pm clear ${PKG}`);
+    // Uninstall, don't just clear: the minified app shares the debug build's intent filters
+    // (haven://, invite links), so leaving it installed turns every unpinned VIEW on this shared
+    // emulator into a system chooser — that froze the e2e android leg's qa driver on 2026-10-06.
+    adb('uninstall', TEST_PKG);
+    adb('uninstall', PKG);
     if (booted) { log('shutting the emulator down (we booted it)'); adb('emu', 'kill'); }
   }
   if (process.exitCode) console.error('[android-minified] FAILED'); else log('all green');

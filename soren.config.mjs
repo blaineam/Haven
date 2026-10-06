@@ -171,6 +171,24 @@ export default {
       description: 'Android JVM unit tests (no emulator)',
     },
 
+    // ── Android RELEASE configuration (R8 minify + obfuscation), run on an emulator. Every suite
+    //    above tests the debug build, which R8 never touches — yet Haven's FFI (JNA + UniFFI) and
+    //    its JNI entry point look classes, fields and methods up BY NAME, so a missing keep rule in
+    //    android/app/proguard-rules.pro is a crash that only release has. This builds the `minified`
+    //    build type (release's R8 config, debug-signed, its own applicationId), runs the
+    //    MinifiedSmokeTest flows (identity, feed, text + photo post, settings, demo DM, call
+    //    start/end) plus ConnectionServiceTimeoutTest on cleared installs, and fails on any R8
+    //    signature in the app's logcat. In the release gate. Needs an emulator (boots haven_phone
+    //    if none is running, and shuts it down again).
+    'android-minified': {
+      type: 'cmd',
+      cmd: 'node',
+      args: ['Scripts/android-minified-smoke.mjs'],
+      env: { JAVA_HOME: '/opt/homebrew/opt/openjdk@17', ANDROID_HOME: '/opt/homebrew/share/android-commandlinetools' },
+      description: 'Android R8-minified build: smoke flows across the JNA/UniFFI boundary on an emulator',
+      tags: ['android', 'release'],
+    },
+
     desktop: {
       type: 'cargo',
       cwd: 'desktop/src-tauri',
@@ -306,7 +324,7 @@ export default {
     // them never produce the Tauri app, and `macos` builds the native HavenMac app, which is a
     // different product.
     requireGreen: [
-      'core', 'fabric', 'apple-logic', 'ios', 'macos', 'watch-build', 'android-native', 'android',
+      'core', 'fabric', 'apple-logic', 'ios', 'macos', 'watch-build', 'android-native', 'android', 'android-minified',
       'desktop', 'desktop-ui', 'desktop-ui-test', 'desktop-build', 'push-worker', 'web', 'qa-harness', 'e2e',
     ],
   },

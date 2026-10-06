@@ -172,6 +172,11 @@ private fun MainScaffold() {
         if (DemoEnv.isDemo) {
             // No-ops under the flag (which demo implies); left in place so a future demo run that
             // deliberately wants the wire — `--ez haven_demo true --ez haven_no_net false` — still works.
+            // Wait for the demo boot RootScreen started: this effect can run before that off-main
+            // init finishes, and `HavenNet.nodeIdHex` below then throws (lateinit `core`) — a launch
+            // crash first seen on the R8 smoke build, whose faster startup loses the race. init is
+            // idempotent, so this only waits.
+            com.blaineam.haven.core.EngineBoot.offMain { HavenNet.init(context) }
             HavenNet.start()
             com.blaineam.haven.core.CallManager.init(context, HavenNet.nodeIdHex)
             HavenNet.presentDemoConnected()

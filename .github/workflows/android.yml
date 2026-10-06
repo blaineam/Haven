@@ -364,6 +364,19 @@ jobs:
           find app/build/outputs/bundle -name '*.aab' -exec cp {} ../out/ \;
           ls -la ../out
 
+      # The R8 mapping for THIS build (release is minified + obfuscated since 2.0.0). Play needs it to
+      # deobfuscate crash and ANR stack traces; it is uploaded alongside the AAB below, and kept here
+      # too so a trace from any channel (a tester's logcat, a sideloaded APK) can be retraced with
+      # `retrace mapping.txt stack.txt`. Built by the same R8 run as the AAB, so it matches it exactly.
+      - name: Keep the R8 mapping (deobfuscates release stack traces)
+        if: (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && steps.keystore.outputs.have_keystore == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: haven-android-mapping
+          path: android/app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: error
+          retention-days: 90
+
       # KEEP THE AAB. It used to be built, handed to the Play API, and thrown away — so when the API
       # refused it (a Console-side gate like an undeclared permission), the only artifact that could
       # get past that gate by hand did not exist anywhere. Rebuilding it locally is not an option
@@ -461,6 +474,9 @@ jobs:
           serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
           packageName: com.blaineam.haven
           releaseFiles: out/*.aab
+          # R8 deobfuscation file for this versionCode, so Play Console crash/ANR reports show real
+          # class and method names instead of a.b.c().
+          mappingFile: android/app/build/outputs/mapping/release/mapping.txt
           releaseName: ${{ steps.cfg.outputs.version_name }}
           track: ${{ steps.cfg.outputs.track }}
           status: ${{ steps.cfg.outputs.status }}

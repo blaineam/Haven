@@ -26,7 +26,8 @@ private const val TAG = "DemoSeed"
  * stories / DMs, and those envelopes are receive()d into the user's engine — so the feed, stories
  * tray, DM threads, circle switcher, reactions, and comments are all genuinely populated, NOT faked.
  *
- * EVERYTHING here is gated on [BuildConfig.DEBUG] so it can never run in a release build.
+ * EVERYTHING here is gated on [BuildConfig.QA_HOOKS] (debug + the R8 `minified` smoke build) so it
+ * can never run in a release build.
  *
  * Launch flags (read from the Activity intent extras):
  *   haven_demo (bool)            seed the synthetic dataset + jump into the app
@@ -47,7 +48,7 @@ object DemoEnv {
      *  answers "are we offline", and a second name for the same state is what let the old code read
      *  the flag in one branch and gate on it in another. */
     fun configure(intent: Intent?) {
-        if (!BuildConfig.DEBUG || intent == null) return
+        if (!BuildConfig.QA_HOOKS || intent == null) return
         // Tri-state on purpose: present-and-true, present-and-false, absent. Read BEFORE the demo
         // check — this used to sit below the `if (!isDemo) return`, so asking for an offline run
         // without also asking for the synthetic dataset silently did nothing, and the app went
@@ -93,7 +94,7 @@ object DemoSeeder {
      * after [HavenNet.init] so the engine + LocalMedia are ready. Gated on DEBUG + demo flag.
      */
     fun seed(context: Context) {
-        if (!BuildConfig.DEBUG || !DemoEnv.isDemo || didSeed || !HavenNet.isReady) return
+        if (!BuildConfig.QA_HOOKS || !DemoEnv.isDemo || didSeed || !HavenNet.isReady) return
         didSeed = true
         val main = HavenNet.engine
 

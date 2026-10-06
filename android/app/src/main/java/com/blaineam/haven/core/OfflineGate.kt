@@ -29,7 +29,7 @@ import com.blaineam.haven.BuildConfig
  *  - The schedulers that would seal envelopes for a lane that will drop them — the node start, the
  *    sync fan-out, the mailbox polls and the backup drain — don't run.
  *
- * **DEBUG builds only, deliberately** — and unlike Apple, which honours its env var in release too.
+ * **Never in release, deliberately** (debug and the R8 `minified` smoke build only) — and unlike Apple, which honours its env var in release too.
  * The difference is the input: iOS reads a process environment variable that nothing outside the
  * test harness can set, whereas this reads an Intent extra on an **exported** activity, which any
  * app on the device can put there. A release build that could be launched permanently silent by a
@@ -51,7 +51,8 @@ object HavenOffline {
      * every test having to remember, the same role `launchEnvironment` plays for the iOS UI tests.
      */
     fun set(on: Boolean) {
-        if (!BuildConfig.DEBUG) return
+        // QA_HOOKS = debug + the R8 `minified` smoke build (never release — see the class note).
+        if (!BuildConfig.QA_HOOKS) return
         if (offline == on) return
         offline = on
         Log.i("HavenOffline", if (on) "offline: this process talks to nothing" else "offline: cleared")

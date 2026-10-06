@@ -46,14 +46,52 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
+            // QA/demo hooks (demo seeding, the haven_no_net gate) — see the `minified` type below.
+            buildConfigField("boolean", "QA_HOOKS", "true")
         }
         release {
-            isMinifyEnabled = false   // tighten later; JNA + reflection need care under R8
+            // R8: shrink + optimize + obfuscate. Play flagged 1.8.11 at 0% obfuscation. JNA and the
+            // UniFFI bindings look classes/fields/methods up by NAME, so proguard-rules.pro keeps
+            // exactly those (every rule says what lookup it protects). The `android-minified` Soren
+            // suite runs this exact R8 configuration on an emulator before every release.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            buildConfigField("boolean", "QA_HOOKS", "false")
             // Only attach the release signing config when CI actually provided a keystore.
             if (havenKeystoreFile != null && file(havenKeystoreFile).exists()) {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
+        // Release's R8 configuration, debug-signed and installable side by side with the debug app
+        // (its own applicationId, so a smoke run can `pm clear` it without touching the QA fleet's
+        // debug install). NOT debuggable on purpose: a debuggable build puts R8 in debug mode, which
+        // skips the inlining/merging that release does, and we want to RUN what we ship.
+        //
+        // The one difference from release: QA_HOOKS is on, so the instrumented smoke tests can
+        // launch the offline demo dataset (friends, DMs, a call target) — the same hooks the debug
+        // build has. They are still compiled out of release. proguard-minified.pro adds the
+        // handful of keeps the androidTest APK needs to reach into the app (none affect JNA).
+        create("minified") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".minified"
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+            proguardFiles("proguard-minified.pro")
+            testProguardFiles("proguard-test.pro")
+            buildConfigField("boolean", "QA_HOOKS", "true")
+        }
+    }
+
+    // Instrumented tests normally target `debug`. `-PhavenTestBuildType=minified` points them at the
+    // R8 build instead (Scripts/android-minified-smoke.mjs) so the smoke tests exercise obfuscated
+    // code — the only way to catch a missing keep rule before Play does.
+    testBuildType = (project.findProperty("havenTestBuildType") as String?) ?: "debug"
+
+    sourceSets {
+        // The demo dataset's photos/avatars live with the debug-only assets; the minified smoke
+        // run seeds the same dataset, so it needs them too. Release never sees them.
+        getByName("minified").assets.srcDir("src/debug/assets")
     }
 
     compileOptions {
@@ -183,6 +221,9 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+    // UI-level smoke tests for the R8 build (MinifiedSmokeTest): drives the app through the
+    // accessibility tree, so the test never reaches into obfuscated app internals.
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
     androidTestImplementation(platform("androidx.compose:compose-bom:2024.10.01"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

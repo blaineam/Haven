@@ -37,7 +37,7 @@ class ConnectionServiceTimeoutTest {
 
     /** (foreground, types) for ConnectionService, from `dumpsys activity services`; null when not running. */
     private fun state(): Pair<Boolean, Int>? {
-        val dump = sh("dumpsys activity services $pkg/.core.ConnectionService")
+        val dump = sh("dumpsys activity services $pkg/com.blaineam.haven.core.ConnectionService")
         if (!dump.contains("ServiceRecord")) return null
         val fg = Regex("isForeground=(true|false)").find(dump)?.groupValues?.get(1) == "true"
         val types = Regex("(?:foregroundServiceType|types)=0x([0-9a-fA-F]+)").find(dump)?.groupValues?.get(1)?.toInt(16) ?: 0

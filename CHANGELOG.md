@@ -9,6 +9,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.0 — final (unreleased)
 
+### Fixed — your other devices learn a circle's new relay in seconds
+
+Adding a relay to a circle (or changing the default, deactivating, deleting or re-adding one) told
+the circle's other members right away but left your own phone, tablet and computer waiting for the
+next periodic sync, often two minutes or more. Until then they could not read a circle that now
+lived only on the new relay. In testing, a post in a private circle reached the poster's Android
+phone after more than four minutes and their desktop after four. Relay changes now reach your other
+devices within seconds on iPhone, iPad, Mac, Android and desktop.
+
 ### Fixed — Android: the keyboard covered the call controls
 
 Starting a call from a conversation, with the message field still focused, left the keyboard up over

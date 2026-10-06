@@ -7275,6 +7275,10 @@ impl Engine {
             }
             self.backfill_mailbox(&c.id).await;
         }
+        // A circle's relays ride self-sync; frame 19 above reaches only the circle's OTHER members,
+        // so without this my own devices waited out the periodic pass before they could read a
+        // circle that now lives on this relay (e2e multirelay, 2026-10-06).
+        self.nudge_self_sync();
         self.poll_mailbox().await;
     }
 
@@ -7361,6 +7365,7 @@ impl Engine {
         }
         let _ = p.save(&self.paths);
         drop(p);
+        self.nudge_self_sync(); // the default reaches my other devices promptly
         self.emit_changed();
     }
 
@@ -7407,6 +7412,7 @@ impl Engine {
         }
         self.relay_clients.lock().await.remove(&hex);
         self.relay_health.lock().remove(&hex);
+        self.nudge_self_sync(); // …on a prompt pass, not the next periodic one
         self.emit_changed();
     }
 
@@ -7496,6 +7502,7 @@ impl Engine {
         if on {
             self.backfill_mailbox(&circle_id).await;
         }
+        self.nudge_self_sync(); // the per-circle override reaches my other devices promptly
         self.poll_mailbox().await;
         self.emit_changed();
     }
@@ -7533,6 +7540,7 @@ impl Engine {
         for c in self.social.circles() {
             self.backfill_mailbox(&c.id).await;
         }
+        self.nudge_self_sync(); // the circle → bucket mapping reaches my other devices promptly
         self.poll_mailbox().await;
         self.emit_changed();
         Ok(hex)

@@ -8048,12 +8048,18 @@ final class FeedStore: ObservableObject {
             Task { await BackgroundUploader.shared.flush() }
             self.pollMailboxNow()
         }
+        // A circle's relays ride self-sync, and frame 19 above reaches only the circle's OTHER
+        // members — my own devices waited out the 2-minute periodic pass (or longer) before they
+        // could read a circle that now lives only on this relay (e2e multirelay 2026-10-06: a
+        // private circle's post reached my Android after 4+ min, my desktop after 251 s).
+        nudgeSelfSyncSoon()
     }
 
     /// Forget a relay across every circle (and as the default) — drops its cached connection and
     /// health, mirroring desktop `forget_relay`. Local only: other members keep their own pools.
     func forgetRelay(_ nodeHex: String) {
         RelayMailboxStore.shared.forget(nodeHex: nodeHex)
+        nudgeSelfSyncSoon()   // the deletion tombstone reaches my other devices in seconds
     }
 
     /// Bring a DELETED relay back. Restoring is a deliberate re-adoption, so it goes through the same
@@ -8086,6 +8092,7 @@ final class FeedStore: ObservableObject {
         backfillMailbox(circleIds: targets)
         Task { await BackgroundUploader.shared.flush() }
         pollMailboxNow()
+        nudgeSelfSyncSoon()   // the circle → bucket mapping reaches my other devices in seconds
         return hex
     }
 
@@ -8094,6 +8101,7 @@ final class FeedStore: ObservableObject {
         if on { RelayMailboxStore.shared.add(circleId: circleId, nodeHex: nodeHex, isS3: nodeHex.hasPrefix("s3:")) }
         else { RelayMailboxStore.shared.remove(circleId: circleId, nodeHex: nodeHex) }
         pollMailboxNow()
+        nudgeSelfSyncSoon()   // the per-circle override reaches my other devices in seconds
     }
 
     /// Re-upload every post I've ALREADY authored in these circles to their mailbox. Fixes the

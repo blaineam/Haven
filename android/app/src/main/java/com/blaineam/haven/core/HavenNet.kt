@@ -5037,6 +5037,10 @@ object HavenNet : InboundListener {
                 backfillMailbox(cid)
             }
             saveRelayNodes()
+            // A circle's relays ride self-sync, and frame 19 above only reaches the circle's OTHER
+            // members — my own devices otherwise waited out the periodic pass (minutes) before they
+            // could read a circle that now lives only on this relay (e2e multirelay, 2026-10-06).
+            selfSyncNudge()   // the relay change reaches my other devices in seconds, not the next periodic pass
             withContext(Dispatchers.Main) { bumpRelays() }
             pollMailbox()
         }
@@ -5062,6 +5066,7 @@ object HavenNet : InboundListener {
                 backfillMailbox(c.id)
             }
             saveRelayNodes()
+            selfSyncNudge()   // the relay change reaches my other devices in seconds, not the next periodic pass
             withContext(Dispatchers.Main) { bumpRelays() }
             pollMailbox()
         }
@@ -5089,6 +5094,7 @@ object HavenNet : InboundListener {
                 relayHealth.remove(hex)
             }
             invalidateListDigests(hex)   // its cached LIST digests describe a relay we no longer read
+            selfSyncNudge()   // the relay change reaches my other devices in seconds, not the next periodic pass
             withContext(Dispatchers.Main) { bumpRelays() }
         }
     }
@@ -5101,6 +5107,7 @@ object HavenNet : InboundListener {
         ensureRelayEntry(hex, activate = true, adoptedAtMs = adoptedAtMs)
         relayHealth.remove(hex)   // clear stale backoff so it's retried immediately
         saveRelayNodes()
+        if (adoptedAtMs == 0L) selfSyncNudge()   // a local reactivation, not a learned re-announce: tell my devices now
         bumpRelays()
     }
 
@@ -5159,6 +5166,7 @@ object HavenNet : InboundListener {
         if (hex != null) ensureRelayEntry(hex, activate = true)
         defaultRelayHex = hex ?: ""
         saveRelayNodes(); bumpRelays()
+        selfSyncNudge()   // the relay change reaches my other devices in seconds, not the next periodic pass
     }
 
     /** Toggle whether a single configured relay applies to one circle (per-circle override). */
@@ -5172,6 +5180,7 @@ object HavenNet : InboundListener {
             if (relayNodes[circleId]?.isEmpty() == true) relayNodes.remove(circleId)
         }
         saveRelayNodes(); bumpRelays()
+        selfSyncNudge()   // the relay change reaches my other devices in seconds, not the next periodic pass
         scope.launch { if (on) backfillMailbox(circleId); pollMailbox() }
     }
 

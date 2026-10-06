@@ -861,7 +861,7 @@ struct RelaysView: View {
         .sheet(isPresented: $showAdd) { AddRelaySheet() }
         .alert("Rename relay", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("Name", text: $renameText)
-            Button("Save") { if let e = renaming { store.rename(e.hex, to: renameText) }; renaming = nil }
+            Button("Save") { if let e = renaming { store.rename(e.hex, to: renameText); FeedStore.shared.nudgeSelfSyncSoon() }; renaming = nil }
             Button("Cancel", role: .cancel) { renaming = nil }
         }.havenPausesPostAudio()
     }
@@ -905,21 +905,21 @@ struct RelaysView: View {
             }
             HStack(spacing: 8) {
                 if e.active {
-                    Button { store.forget(nodeHex: e.hex) } label: { Label("Deactivate", systemImage: "pause.fill") }
+                    Button { store.forget(nodeHex: e.hex); FeedStore.shared.nudgeSelfSyncSoon() } label: { Label("Deactivate", systemImage: "pause.fill") }
                 } else {
-                    Button { store.reactivate(e.hex) } label: { Label("Reactivate", systemImage: "play.fill") }
+                    Button { store.reactivate(e.hex); FeedStore.shared.nudgeSelfSyncSoon() } label: { Label("Reactivate", systemImage: "play.fill") }
                         .tint(.green)
                 }
                 if !isDefault {
-                    Button { store.setDefault(e.hex) } label: { Label("Default", systemImage: "star") }
+                    Button { store.setDefault(e.hex); FeedStore.shared.nudgeSelfSyncSoon() } label: { Label("Default", systemImage: "star") }
                 } else {
-                    Button { store.setDefault(nil) } label: { Label("Unset default", systemImage: "star.slash") }
+                    Button { store.setDefault(nil); FeedStore.shared.nudgeSelfSyncSoon() } label: { Label("Unset default", systemImage: "star.slash") }
                 }
                 Spacer()
                 // Secondary actions in a roomy menu so the primary buttons stay big + tappable.
                 Menu {
                     Button { renaming = e; renameText = e.name } label: { Label("Rename", systemImage: "pencil") }
-                    Button(role: .destructive) { store.eraseNow(e.hex) } label: { Label("Delete now", systemImage: "trash") }
+                    Button(role: .destructive) { store.eraseNow(e.hex); FeedStore.shared.nudgeSelfSyncSoon() } label: { Label("Delete now", systemImage: "trash") }
                 } label: {
                     Image(systemName: "ellipsis.circle").font(.title3).foregroundStyle(.secondary)
                 }

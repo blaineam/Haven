@@ -26,6 +26,51 @@ Verified on the Android 15 emulator with the budget shrunk to 8 seconds: the old
 the crash; the new code stops cleanly, survives a refused restart, and keeps a call's microphone
 past the limit (`ConnectionServiceTimeoutTest`, in the `android` gate suite).
 
+### Changed — Android: the release build is shrunk and obfuscated (R8)
+
+Play Console rated Haven's Android code at 0% obfuscation (its threshold is 25%, with a deadline of
+February 2027). Release builds now run R8: the DEX shrinks from 54 MB to 6 MB, and the arm64 APK from
+104 MB to 58 MB. About 88% of classes are renamed, including about 96% of Haven's own. The Rust core is
+reached through JNA, the UniFFI bindings and one JNI entry point, and all three look classes, fields and
+methods up by name. `android/app/proguard-rules.pro` keeps exactly those names, and each rule says which
+lookup it protects. CI uploads the R8 mapping with every Play release, so crash reports show real names.
+
+A minified build only fails when it runs, so the release gate now runs one. The new `android-minified`
+Soren suite builds release's exact R8 configuration (debug-signed, under its own app id) and runs
+`MinifiedSmokeTest` on an emulator: onboarding and identity creation, the feed, a text post and a photo
+post, settings, the offline demo dataset, a DM, and a call that starts, floats in picture-in-picture
+and ends. It also runs `ConnectionServiceTimeoutTest`, then fails on any R8 error in the app's logcat.
+
+### New — Android: calls continue in picture-in-picture
+
+Leaving Haven during a call (Home, a notification, another app) now shrinks the call to a floating
+window instead of hiding it. The window shows the other person's video, or their shared screen as
+16:9, with no controls. Expanding it returns to the full call screen, even if the call was
+minimized when you left. If the call ends while it's floating, the window closes. A ringing call never
+floats. Uses auto-enter on Android 12+ and the Home-press fallback on Android 10–11.
+
+### Improved — Android: pictures are decoded at the size they're drawn
+
+Feed, profile, story and attachment tiles all used to decode photos to a fixed 1280 px edge, whatever
+their size on screen. A 44 dp attachment chip or a 56 dp story ring held a bitmap of about 1000 px.
+Video tiles held the clip's full frame (8 MB for 1080p). Each tile now decodes for its own measured box
+and crop mode, and video posters are scaled by the decoder. Display-only images become hardware
+bitmaps, so their pixels stay in graphics memory instead of the app's heap. Feed photos are also
+sharper: power-of-two sampling used to drop a 1080 px photo to 540 px on a 1080 px-wide card.
+
+### Fixed — Android: edge-to-edge on Android 15+
+
+`androidx.activity` is now 1.10.1, whose `enableEdgeToEdge()` no longer calls the window bar-colour
+setters that Android 15 deprecates (Play flagged the old version). The themes no longer set
+`statusBarColor`/`navigationBarColor`. Several screens drew under the system bars: onboarding's logo
+was under the status bar, the call screen's Minimize button and name were too, and the share sheet's
+title, Cancel and Send sat under the status and navigation bars. All of them are now inset.
+
+### Fixed — Android: demo mode could crash on launch
+
+The demo dataset (used for store screenshots and now the minified smoke test) could read the engine
+before its off-main start finished, which crashed the app. It now waits for the start to finish.
+
 ## 2.0.0 — release candidate 6 (2026-10-03)
 
 Soren release gate green (all 11 suites; e2e 457/0).

@@ -15,6 +15,9 @@ final class HavenUITests: XCTestCase {
 
     private func app(tab: String) -> XCUIApplication {
         let app = XCUIApplication()
+        // Start from a wiped container (DEBUG-only `UITestMode` reset) so nothing a previous run
+        // left on the simulator — posts, relay records, settings — leaks into this one.
+        app.launchArguments += ["-UITestReset"]
         app.launchEnvironment["HAVEN_SKIP_ONBOARDING"] = "1"
         app.launchEnvironment["HAVEN_TAB"] = tab
         // Hermetic: no iroh node, no relay HTTP, no Multipeer, no push, no S3 (see `HavenNet`).
@@ -148,7 +151,9 @@ final class HavenUITests: XCTestCase {
 
         let frame = minimize.frame
         XCTAssertGreaterThanOrEqual(frame.minX, 16, "minimize must clear the display's rounded corner")
-        XCTAssertGreaterThanOrEqual(frame.minY, 62, "minimize must sit below the status bar / Dynamic Island")
+        // iPhone: below the Dynamic Island (62pt). iPad: below its 24pt status bar — there is no island.
+        let statusBarBottom: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? 24 : 62
+        XCTAssertGreaterThanOrEqual(frame.minY, statusBarBottom, "minimize must sit below the status bar / Dynamic Island")
 
         minimize.tap()
         XCTAssertTrue(minimize.waitForNonExistence(timeout: 5), "minimize should take you back to the app")

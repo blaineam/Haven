@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- macOS UI-test host (HavenMacUITestHost): App Sandbox ON + its own bundle id → its own
+	     container (~/Library/Containers/com.blaineam.kith.uitesthost). Never shares the personal
+	     com.blaineam.kith container or the e2e fleet's qa.stub one. No app groups, no iCloud, no
+	     push. Debug/test only — never shipped or archived. -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	<key>com.apple.security.get-task-allow</key>
+	<true/>
+	<!-- Its own keychain group, so the data-protection keychain (the identity seed) works and is
+	     wiped by UI-test reset without touching any other app's items. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.blaineam.kith.uitesthost</string>
+	</array>
+</dict>
+</plist>

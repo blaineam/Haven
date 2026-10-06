@@ -287,6 +287,7 @@ struct CircleSettingsView: View {
             Form {
                 Section {
                     TextField("Circle name", text: $name)
+                        .accessibilityIdentifier("circleNameField")
                         .onSubmit { FeedStore.shared.renameCircle(circleId, to: name) }
                 } header: {
                     Text("Name")
@@ -397,6 +398,7 @@ struct CircleSettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 sectionHeader("Name")
                 TextField("Circle name", text: $name)
+                    .accessibilityIdentifier("circleNameField")
                     .onSubmit { FeedStore.shared.renameCircle(circleId, to: name) }
                     .havenPillField()
                 footnote("What this circle is called for you and everyone in it.")

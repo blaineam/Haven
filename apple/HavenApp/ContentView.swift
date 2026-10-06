@@ -104,6 +104,7 @@ struct YouView: View {
                     }
                     .buttonStyle(HavenGlassIcon())
                     .accessibilityLabel("Settings")
+                    .accessibilityIdentifier("settingsButton")
                 }
             }
             .sheet(isPresented: $showConnect) {
@@ -253,10 +254,14 @@ struct YouView: View {
                     }
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Edit profile")
+            .accessibilityIdentifier("editProfileButton")
             Text(profile.displayName.isEmpty ? String(localized: "You") : profile.displayName)
                 .font(.title2.bold())
+                .accessibilityIdentifier("youDisplayName")
             if !profile.bio.isEmpty {
                 Text(profile.bio)
+                    .accessibilityIdentifier("youBio")
                     .font(.subheadline).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center).padding(.horizontal, 24)
             }
@@ -345,6 +350,7 @@ struct AdvancedView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("connectionRow")
                     .havenCard()
                     // Identity (iCloud sync / move / restore) lives in Settings ▸ "Identity & iCloud
                     // backup" (IdentityBackupView) — not duplicated here.

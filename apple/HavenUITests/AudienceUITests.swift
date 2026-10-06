@@ -19,6 +19,9 @@ final class AudienceUITests: XCTestCase {
 
     private func launch(tab: String = "circle") -> XCUIApplication {
         let app = XCUIApplication()
+        // Start from a wiped container (DEBUG-only `UITestMode` reset) so nothing a previous run
+        // left on the simulator — posts, relay records, settings — leaks into this one.
+        app.launchArguments += ["-UITestReset"]
         app.launchEnvironment["HAVEN_SKIP_ONBOARDING"] = "1"
         app.launchEnvironment["HAVEN_TAB"] = tab
         app.launchEnvironment["HAVEN_NO_NET"] = "1"

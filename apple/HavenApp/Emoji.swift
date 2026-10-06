@@ -87,6 +87,7 @@ struct ReactionPicker: View {
                         onPick(e)
                         dismiss()
                     } label: { Text(e).font(.system(size: 30)) }
+                        .accessibilityIdentifier("reaction.\(e)")
                         // The glyph IS the button — without a style macOS bezels every emoji.
                         .buttonStyle(PressableStyle())
                 }

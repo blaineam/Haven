@@ -155,6 +155,10 @@ final class CallManager: NSObject, ObservableObject {
         }
     }
     private var isCaller = false
+    #if DEBUG
+    /// The overlay is showing `enterDemoCall`'s synthetic call (screenshot / UI-test harness).
+    private var demoCall = false
+    #endif
     /// True for the WHOLE call lifecycle (ringing → connecting → in progress). Feed/story/DM
     /// media playback checks this so post music and video audio never compete with call audio.
     var callInProgress: Bool { active }
@@ -1925,6 +1929,16 @@ final class CallManager: NSObject, ObservableObject {
     // MARK: - End
 
     func endCall() {
+        #if DEBUG
+        // The screenshot/UI-test demo call has no session, peers or CallKit call behind it (it never
+        // sets `active`), so the real path below ignores it — just put the overlay away.
+        if demoCall {
+            demoCall = false
+            inCall = false; minimized = false; muted = false
+            participants = []; activeSpeaker = nil
+            return
+        }
+        #endif
         #if os(macOS)
         reallyEnd(); return
         #else
@@ -2044,6 +2058,9 @@ final class CallManager: NSObject, ObservableObject {
     /// group-call look we want to capture.
     func enterDemoCall(participants: [String], name: String) {
         guard DemoEnv.isDemo else { return }
+        #if DEBUG
+        demoCall = true
+        #endif
         peerName = name
         self.participants = participants
         activeSpeaker = participants.first
@@ -2600,6 +2617,8 @@ struct CallOverlay: View {
                 Button { CallManager.shared.toggleMute() } label: {
                     callButton(call.muted ? "mic.slash.fill" : "mic.fill", on: call.muted)
                 }
+                .accessibilityLabel(call.muted ? "Unmute" : "Mute")
+                .accessibilityIdentifier("callMute")
                 #if targetEnvironment(macCatalyst)
                 micMenu
                 #else
@@ -2627,11 +2646,15 @@ struct CallOverlay: View {
                 #endif
                 // Add another person to the live call — rings them and meshes them with everyone already in.
                 Button { showAddPicker = true } label: { callButton("person.badge.plus", on: false) }
+                    .accessibilityLabel("Add someone to the call")
+                    .accessibilityIdentifier("callAddPerson")
                 Button { CallManager.shared.endCall() } label: {
                     Image(systemName: "phone.down.fill").font(.title2)
                         .foregroundStyle(.white).frame(width: 58, height: 58)
                         .background(Color.red, in: Circle())
                 }
+                .accessibilityLabel("End call")
+                .accessibilityIdentifier("callEnd")
             }
         }
         .padding(.horizontal, 12)

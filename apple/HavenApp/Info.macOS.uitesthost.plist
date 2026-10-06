@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Haven UI Test Host</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSAppleMusicUsageDescription</key>
+	<string>UI-test host: Apple Music is never used by the tests.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>UI-test host: runs offline.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>UI-test host: camera is never used by the tests.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>UI-test host: Touch ID is never used by the tests.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>UI-test host: runs offline.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>UI-test host: location is never used by the tests.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>UI-test host: microphone is never used by the tests.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>UI-test host: Photos is never used by the tests.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>UI-test host: Photos is never used by the tests.</string>
+</dict>
+</plist>

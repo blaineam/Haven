@@ -341,6 +341,7 @@ struct FeedView: View {
             }
             .foregroundStyle(.primary)
         }
+        .accessibilityIdentifier("circleSwitcher")
         .menuIndicator(.hidden)   // macOS adds its own chevron; keep only our styled one
         #if os(macOS)
         .menuStyle(.borderlessButton)   // else macOS wraps the title+chevron in a popup-button bezel
@@ -507,6 +508,7 @@ struct FeedView: View {
                     }
                     .buttonStyle(HavenGlassIcon())
                     .accessibilityLabel("Activity")
+                    .accessibilityIdentifier("activityBell")
                 }
                 // Manage this circle (members, invite, settings) — lives on the circle, not You.
                 ToolbarItem(placement: .havenTrailing) {
@@ -1244,6 +1246,9 @@ struct PostReactionsRow: View {
                 // One glass capsule, tinted pink when it's YOUR reaction.
                 .havenGlass(in: Capsule(), tint: r.mine ? HavenTheme.pink : nil)
                 .contentShape(Capsule())
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("reactionChip.\(r.emoji)")
+                .accessibilityAddTraits(.isButton)
                 .onTapGesture { if r.mine { onUnreact(r.emoji) } else { react(r.emoji) } }
                 .onLongPressGesture(minimumDuration: 0.3) { showDetail = true }
                 .transition(.scale.combined(with: .opacity))
@@ -1265,6 +1270,8 @@ struct PostReactionsRow: View {
                 Image(systemName: "plus.circle").font(.body).foregroundStyle(.secondary)
             }
             .buttonStyle(PressableStyle())
+            .accessibilityIdentifier("reactionAdd")
+            .accessibilityLabel("Add reaction")
         }
         .animation(HavenTheme.bouncy, value: reactions.count)
         .sheet(isPresented: $showPicker) { ReactionPicker { e in onReact(e) } }
@@ -1323,6 +1330,8 @@ struct PostCommentField: View {
                     Image(systemName: "arrow.up.circle.fill").imageScale(.large).foregroundStyle(HavenTheme.pink)
                 }
                 .buttonStyle(PressableStyle())
+                .accessibilityIdentifier("replySend")
+                .accessibilityLabel("Send reply")
             }
         }
         .sheet(isPresented: $showMediaPicker) { MediaPicker { refs in media.append(contentsOf: refs) }.macSheetFrame() }
@@ -1556,6 +1565,7 @@ struct PostHeader: View {
                         }
                     }
                 } label: { Image(systemName: "ellipsis").foregroundStyle(.secondary).padding(6) }
+                .accessibilityIdentifier("postMenu")
                 .menuIndicator(.hidden)
                 #if os(macOS)
                 .menuStyle(.borderlessButton)   // else macOS paints a rounded-rect bezel behind the glyph
@@ -2651,6 +2661,7 @@ struct NewCircleView: View {
             memberColumn
         } footer: {
             Button("Create") { create() }
+                .accessibilityIdentifier("newCircleCreate")
                 .buttonStyle(BrandButtonStyle())
                 .keyboardShortcut(.defaultAction)
                 .disabled(trimmedName.isEmpty)
@@ -2661,7 +2672,7 @@ struct NewCircleView: View {
             ZStack {
                 HavenBackground()
                 Form {
-                    Section("Name") { TextField("Circle name (e.g. Family)", text: $name) }
+                    Section("Name") { TextField("Circle name (e.g. Family)", text: $name).accessibilityIdentifier("newCircleName") }
                     Section("Who's in it") { memberRows }
                 }
                 .formStyle(.grouped)   // grouped sections (not macOS right-aligned columns)
@@ -2673,6 +2684,7 @@ struct NewCircleView: View {
                 ToolbarItem(placement: .havenCancelLeading) { Button("Cancel") { dismiss() }.havenToolbarPill() }
                 ToolbarItem(placement: .havenTrailing) {
                     Button("Create") { create() }
+                    .accessibilityIdentifier("newCircleCreate")
                     .havenToolbarPill(tint: HavenTheme.pink)
                     .fontWeight(.semibold)
                     .disabled(trimmedName.isEmpty)
@@ -2695,7 +2707,7 @@ struct NewCircleView: View {
     @ViewBuilder private var memberColumn: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Name").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
-            TextField("Circle name (e.g. Family)", text: $name).havenPillField()
+            TextField("Circle name (e.g. Family)", text: $name).havenPillField().accessibilityIdentifier("newCircleName")
             Text("Who's in it").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
             memberRows
         }

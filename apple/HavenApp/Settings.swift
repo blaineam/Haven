@@ -283,10 +283,12 @@ struct SettingsView: View {
                 }
                 Section {
                     Toggle("Auto-optimize media", isOn: $settings.autoOptimize)
+                        .accessibilityIdentifier("settings.autoOptimize")
                         .tint(HavenTheme.pink)
                     Toggle("Also send original", isOn: $settings.sendOriginal)
                         .tint(HavenTheme.pink)
                     Toggle("Super data saver", isOn: $settings.superDataSaver)
+                        .accessibilityIdentifier("settings.superDataSaver")
                         .tint(HavenTheme.pink)
                 } footer: {
                     Text("Shares a smaller copy by default and always strips location.")
@@ -317,6 +319,7 @@ struct SettingsView: View {
                     } label: {
                         Label("Import from Instagram", systemImage: "square.and.arrow.down.on.square")
                     }
+                    .accessibilityIdentifier("settings.instagramImport")
                 } header: { Text("Bring your posts over") }
                 footer: {
                     Text("Walks you through asking Instagram for your export, then brings your posts, stories and reels into this circle with their original dates. Nobody is notified.")
@@ -362,6 +365,7 @@ struct SettingsView: View {
                 }
                 Section {
                     Toggle("Name the song in my videos", isOn: $settings.identifySongsInVideos)
+                        .accessibilityIdentifier("settings.identifySongs")
                         .tint(HavenTheme.pink)
                     Button {
                         ShazamRescan.shared.start()

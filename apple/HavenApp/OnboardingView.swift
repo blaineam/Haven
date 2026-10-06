@@ -154,6 +154,7 @@ struct OnboardingView: View {
             // ONE surface: plain field style + a single glass capsule. (The default macOS field
             // style drew its own bezel + focus ring INSIDE the capsule — doubled chrome.)
             TextField("Your name or nickname", text: $name)
+                .accessibilityIdentifier("onboardingName")
                 .font(.title3)
                 .multilineTextAlignment(.center)
                 .havenPillField()
@@ -206,6 +207,7 @@ struct OnboardingView: View {
                     Text(step == 3 ? "I agree — enter Haven" : "Continue")
                 }
                 .buttonStyle(BrandButtonStyle())
+                .accessibilityIdentifier(step == 3 ? "onboardingFinish" : "onboardingNext")
                 .disabled(step == 1 && name.trimmingCharacters(in: .whitespaces).isEmpty)
                 .opacity(step == 1 && name.trimmingCharacters(in: .whitespaces).isEmpty ? 0.5 : 1)
             }

@@ -17,6 +17,9 @@ final class SyncProgressUITests: XCTestCase {
 
     private func app(uploads: String? = nil, scene: String? = nil) -> XCUIApplication {
         let app = XCUIApplication()
+        // Start from a wiped container (DEBUG-only `UITestMode` reset) so nothing a previous run
+        // left on the simulator — posts, relay records, settings — leaks into this one.
+        app.launchArguments += ["-UITestReset"]
         app.launchEnvironment["HAVEN_SKIP_ONBOARDING"] = "1"
         app.launchEnvironment["HAVEN_TAB"] = "circle"
         app.launchEnvironment["HAVEN_NO_NET"] = "1"

@@ -54,6 +54,9 @@ npm link`), it's just `soren run Haven`.
 | `core` | cargo | the whole Rust workspace — `haven-p2p`, `haven-ffi` (**incl. the FFI migration harness**), `haven-net`, `haven-relay`, `haven-s3`, `demo` (`cargo test --workspace`) | Rust toolchain (the runner bakes in the Homebrew-rustup PATH fix) |
 | `migrate` | cargo | the `haven_ffi` package alone — the upgrade/migration regression harness | Rust toolchain |
 | `ios` | xcodebuild-test | the `Haven` scheme's tests (HavenUITests) on an iOS simulator | macOS + Xcode + a simulator |
+| `ui-ipad` | xcodebuild-test | the same HavenUITests on a dedicated iOS 26.5 iPad simulator (shut down after) | macOS + Xcode + that simulator |
+| `ui-mac` | xcodebuild-test | `HavenMacUITests` against **HavenMacUITestHost** (`com.blaineam.kith.uitesthost` — never the personal `com.blaineam.kith`, never the fleet's `qa.stub`) | macOS + Xcode; the runner's one-time Accessibility approval |
+| `ui-watch` | xcodebuild-test | `HavenWatchUITests` against HavenWatch's DEBUG demo, on a dedicated watchOS 26.5 simulator (shut down after) | macOS + Xcode + that simulator |
 | `macos` | xcodebuild-test | the native `HavenMac` scheme, macOS destination | macOS + Xcode |
 | `android` | gradle | `testDebugUnitTest` always; `connectedDebugAndroidTest` after reusing/booting the `haven_phone` AVD (skipped, never hung, if it can't boot) | JDK 17, Android SDK/NDK, the Rust `.so` from `android/build-rust.sh` |
 | `desktop` | cargo | the Tauri Rust side (`desktop/src-tauri`) | Rust + (Linux) the WebKitGTK build deps |
@@ -63,6 +66,17 @@ npm link`), it's just `soren run Haven`.
 | `vm-windows` | utm | **launches** the `Windows` UTM VM and confirms `started` | UTM + the VM present |
 | `e2e` | cmd | **full cross-device E2E with perf gates** — see below | DEBUG builds of all four clients |
 | `qa-harness` | cmd | the e2e harness's own unit tests — the dump-channel freshness decision (`Scripts/lib/dump-freshness.mjs`), the one part of the harness that can *invent* a failure, plus the step decisions (`e2e-steps.mjs`, `multirelay.mjs`) | node (no fleet) |
+
+### UI-test mode (`-UITestMode`, `-UITestReset`)
+
+The screen-by-screen UI tests launch with `-UITestMode -UITestReset` (see
+`apple/Shared/UITestMode.swift`). Both are compiled out of Release builds. `-UITestMode` implies
+`HAVEN_DEMO` + `HAVEN_NO_NET` + `HAVEN_SKIP_ONBOARDING` and turns animations off;
+`-UITestReset` wipes the app's own container, preferences and data-protection keychain items before
+any store reads them — only on a simulator or in the `.uitesthost` Mac bundle, never anywhere else —
+so every launch starts from the same seeded demo cast. `-UITestOnboarding` keeps the mode but leaves
+onboarding in (the first-run test). On the Watch, `-UITestMode` turns on the DEBUG demo, where a
+reply or reaction echoes locally instead of going to WCSession.
 
 ### The `ios` suite is hermetic (`HAVEN_NO_NET`)
 

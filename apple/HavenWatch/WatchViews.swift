@@ -44,7 +44,9 @@ struct WatchConversationsView: View {
     }
 
     private func row(_ t: WatchThread) -> some View {
-        NavigationLink(value: t) { WatchThreadRow(thread: t) }.listRowBackground(Color.clear)
+        NavigationLink(value: t) { WatchThreadRow(thread: t) }
+            .accessibilityIdentifier("watch.threadRow")
+            .listRowBackground(Color.clear)
     }
 }
 
@@ -112,6 +114,8 @@ struct WatchThreadView: View {
                 }
                 ForEach(posts) { msg in
                     WatchMessageRow(message: msg)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("watch.messageRow")
                         .id(msg.id)
                         .onLongPressGesture(minimumDuration: 0.3) { acting = msg }
                 }
@@ -296,6 +300,7 @@ private struct WatchStoryTray: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("watch.storyRing")
                 }
             }
             .padding(.horizontal, 4).padding(.top, 2)
@@ -336,6 +341,9 @@ private struct WatchStoryViewer: View {
             }
         }
         .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("watch.storyViewer")
+        .accessibilityAddTraits(.isButton)
         .onTapGesture { if idx + 1 < group.items.count { idx += 1 } else { dismiss() } }
     }
 }
@@ -367,6 +375,7 @@ struct WatchReplyView: View {
                         onDone()
                     } label: { Text(canned).frame(maxWidth: .infinity) }
                     .buttonStyle(.bordered)
+                    .accessibilityIdentifier("watch.quickReply")
                 }
             }
             .padding(.horizontal, 4)
@@ -394,6 +403,7 @@ struct WatchReactionPicker: View {
                 ForEach(WatchQuickReplies.reactions, id: \.self) { emoji in
                     Button { onPick(emoji) } label: { Text(emoji).font(.title2) }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("watch.reaction.\(emoji)")
                 }
             }
             .padding(8)

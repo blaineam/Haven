@@ -578,6 +578,8 @@ struct StoryViewer: View {
                 }
                 Button { dismiss() } label: { Image(systemName: "xmark") }
                     .buttonStyle(GlassIconButtonStyle(size: 30, tint: .white))
+                    .accessibilityLabel("Close")
+                    .accessibilityIdentifier("storyClose")
             }
             .padding(.horizontal).padding(.top, 4)
             .background(rowProbe("header", extra: "isMe=\(s.isMe)"))
@@ -695,6 +697,7 @@ struct StoryViewer: View {
         return HStack(spacing: 10) {
             TextField("", text: $replyText, prompt: Text("Reply to \(name)…").foregroundColor(.white.opacity(0.7)))
                 .textFieldStyle(.plain)   // drop macOS's default field border so we don't double up with the capsule
+                .accessibilityIdentifier("storyReplyField")
                 .foregroundStyle(.white).tint(.white)
                 .focused($replyFocused)
                 .submitLabel(.send)

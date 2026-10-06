@@ -76,6 +76,54 @@ export default {
       description: 'iOS simulator tests (Haven scheme)',
     },
 
+    // ── iPad: the same Haven scheme / HavenUITests (every screen test runs on both idioms), on a
+    //    DEDICATED iOS 26.5 iPad simulator by UDID so it never fights another suite for a device.
+    //    Every test launches `-UITestMode -UITestReset` (DEBUG-only: wiped container, seeded demo
+    //    cast, no network, animations off). Shut down again afterwards.
+    'ui-ipad': {
+      type: 'xcodebuild-test',
+      project: 'apple/Haven.xcodeproj',
+      scheme: 'Haven',
+      xcodegen: true,
+      destination: 'platform=iOS Simulator,id=ED680D09-0DDD-4D50-B4A0-61DF947B0DBB',   // iOS 26.5 iPad Pro 13-inch (M5)
+      env: { DEVELOPER_DIR: '/Applications/Xcode.app/Contents/Developer' },
+      signing: { team: '8ZVSPZYSVF' },   // real keychain identity, as for `ios`
+      extraArgs: ['-parallel-testing-enabled', 'NO'],
+      shutdownSimulator: true,
+      description: 'iPad UI tests (Haven scheme on an iPad simulator)',
+    },
+
+    // ── macOS UI tests. They drive HavenMacUITestHost — the HavenMac sources under their OWN bundle
+    //    id (com.blaineam.kith.uitesthost), container and keychain group — and NEVER
+    //    com.blaineam.kith (the owner's real account on this Mac) or the e2e fleet's qa.stub. The
+    //    XCUITest runner needs this Mac's one-time Accessibility/Automation approval.
+    'ui-mac': {
+      type: 'xcodebuild-test',
+      platform: 'macos',
+      project: 'apple/Haven.xcodeproj',
+      scheme: 'HavenMacUITests',
+      xcodegen: true,
+      destination: 'platform=macOS',
+      env: { DEVELOPER_DIR: '/Applications/Xcode.app/Contents/Developer' },
+      signing: { team: '8ZVSPZYSVF' },   // the host's data-protection keychain needs a signed build
+      extraArgs: ['-parallel-testing-enabled', 'NO'],
+      description: 'macOS UI tests (HavenMacUITests against the isolated UI-test host)',
+    },
+
+    // ── watchOS UI tests: HavenWatch in its DEBUG demo (`-UITestMode`: synthetic threads, no paired
+    //    iPhone, replies/reactions echo locally). Dedicated watchOS 26.5 simulator by UDID.
+    'ui-watch': {
+      type: 'xcodebuild-test',
+      project: 'apple/Haven.xcodeproj',
+      scheme: 'HavenWatchUITests',
+      xcodegen: true,
+      destination: 'platform=watchOS Simulator,id=844E45C8-850D-4438-9E5A-AC5402E18BCE',   // watchOS 26.5 Series 11 46mm
+      env: { DEVELOPER_DIR: '/Applications/Xcode.app/Contents/Developer' },
+      extraArgs: ['-parallel-testing-enabled', 'NO'],
+      shutdownSimulator: true,
+      description: 'watchOS UI tests (HavenWatchUITests, demo mode)',
+    },
+
     // ── macOS: the native HavenMac scheme has no XCTest target (its logic is covered by the core
     //    Rust suite), so the meaningful gate is that it compiles cleanly on the macOS destination.
     macos: {

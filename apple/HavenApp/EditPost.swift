@@ -29,6 +29,7 @@ struct EditPostSheet: View {
                 editorColumn
             } footer: {
                 Button("Save") { save() }
+                    .accessibilityIdentifier("editPostSave")
                     .buttonStyle(BrandButtonStyle())
                     .disabled(isEmpty)
                     .opacity(isEmpty ? 0.5 : 1)
@@ -62,6 +63,7 @@ struct EditPostSheet: View {
                 }
                 ToolbarItem(placement: .havenTrailing) {
                     Button("Save") { save() }
+                        .accessibilityIdentifier("editPostSave")
                         .fontWeight(.semibold)
                         .havenToolbarPill(tint: HavenTheme.pink)
                         .disabled(isEmpty)
@@ -75,6 +77,7 @@ struct EditPostSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             // One glass surface — no system bezel inside a custom shape (house rule).
             TextField("Say something…", text: $text, axis: .vertical)
+                .accessibilityIdentifier("editPostField")
                 .lineLimit(3...10)
                 .textFieldStyle(.plain)
                 .padding(12)

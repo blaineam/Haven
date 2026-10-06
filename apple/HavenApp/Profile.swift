@@ -300,6 +300,7 @@ struct EditProfileSheet: View {
             editColumn
         } footer: {
             Button("Done") { commit(); dismiss() }
+                .accessibilityIdentifier("editProfileDone")
                 .buttonStyle(BrandButtonStyle())
                 .keyboardShortcut(.defaultAction)
         }
@@ -312,7 +313,7 @@ struct EditProfileSheet: View {
             }
             .navigationTitle("Edit profile")
             .havenInlineNavTitle()
-            .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { commit(); dismiss() }.havenToolbarPill(tint: HavenTheme.pink) } }
+            .toolbar { ToolbarItem(placement: .havenConfirmTrailing) { Button("Done") { commit(); dismiss() }.havenToolbarPill(tint: HavenTheme.pink).accessibilityIdentifier("editProfileDone") } }
         }
         .havenPausesPostAudio()
         #endif
@@ -339,12 +340,14 @@ struct EditProfileSheet: View {
             // Fields carry exactly ONE surface (glass) — the default macOS field style
             // painted its own bezel + focus ring inside the custom shapes.
             TextField("Your name", text: $name)
+                .accessibilityIdentifier("editName")
                 .font(.title3).multilineTextAlignment(.center)
                 .havenPillField()
                 .padding(.horizontal, 30)
 
             VStack(spacing: 10) {
                 TextField("Add a short bio", text: $bio, axis: .vertical)
+                    .accessibilityIdentifier("editBio")
                     .lineLimit(1...3)
                     .havenAutocap(.sentences)
                     .textFieldStyle(.plain)

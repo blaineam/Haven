@@ -176,6 +176,8 @@ struct MessagesView: View {
                 ToolbarItem(placement: .havenTrailing) {
                     Button { showPicker = true } label: { Image(systemName: "square.and.pencil") }
                         .buttonStyle(HavenGlassIcon())
+                        .accessibilityLabel("New message")
+                        .accessibilityIdentifier("newMessageButton")
                 }
             }
         }
@@ -1067,6 +1069,8 @@ struct DMThreadView: View {
                     Image(systemName: "arrow.up.circle.fill").font(.title).foregroundStyle(HavenTheme.pink)
                 }
                 .buttonStyle(PressableStyle())
+                .accessibilityIdentifier("dmSend")
+                .accessibilityLabel("Send")
                 .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty && attachedMedia.isEmpty && attachedTrack == nil)
             }
         }

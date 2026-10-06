@@ -170,7 +170,9 @@ targets:
     type: application
     platform: macOS
     deploymentTarget: "14.0"
-    sources:
+    # Anchored: HavenMacUITestHost below compiles EXACTLY these sources and dependencies, so the two
+    # lists can never drift apart.
+    sources: &havenMacSources
       - path: HavenApp
         excludes:
           - "Info*.plist"
@@ -181,7 +183,7 @@ targets:
         compilerFlags: ["-suppress-warnings"]
       - path: Shared
       - path: Generated/haven_ffi.swift
-    dependencies:
+    dependencies: &havenMacDependencies
       - package: MillerKit
       - framework: HavenFFI.xcframework
         embed: false
@@ -511,6 +513,81 @@ targets:
         "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
         TEST_TARGET_NAME: Haven
 
+  # The macOS UI tests' HOST: the HavenMac app, same sources and dependencies (YAML anchors above),
+  # under its OWN bundle id, product name, container and keychain group. UI-test mode seeds a demo
+  # identity and wipes the container it runs in, so it must never run as com.blaineam.kith — that
+  # is the owner's real account on this Mac (a demo capture under that id overwrote real data once,
+  # 2026-09-24) — nor as the e2e fleet's com.blaineam.kith.qa.stub. No app groups, no iCloud, no
+  # push, no URL scheme (it must not compete with the real app for haven:// links). Debug only;
+  # built solely by the HavenMacUITests scheme and never archived.
+  HavenMacUITestHost:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources: *havenMacSources
+    dependencies: *havenMacDependencies
+    info:
+      path: HavenApp/Info.macOS.uitesthost.plist
+      properties:
+        CFBundleDisplayName: Haven UI Test Host
+        CFBundleIconName: AppIcon
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        ITSAppUsesNonExemptEncryption: false
+        NSCameraUsageDescription: "UI-test host: camera is never used by the tests."
+        NSMicrophoneUsageDescription: "UI-test host: microphone is never used by the tests."
+        NSPhotoLibraryUsageDescription: "UI-test host: Photos is never used by the tests."
+        NSPhotoLibraryAddUsageDescription: "UI-test host: Photos is never used by the tests."
+        NSAppleMusicUsageDescription: "UI-test host: Apple Music is never used by the tests."
+        NSLocalNetworkUsageDescription: "UI-test host: runs offline."
+        NSBluetoothAlwaysUsageDescription: "UI-test host: runs offline."
+        NSLocationWhenInUseUsageDescription: "UI-test host: location is never used by the tests."
+        NSFaceIDUsageDescription: "UI-test host: Touch ID is never used by the tests."
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.uitesthost
+        PRODUCT_NAME: HavenUITestHost
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "2.0.0"
+        CURRENT_PROJECT_VERSION: "608"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        "EXCLUDED_ARCHS[sdk=macosx*]": x86_64
+        CODE_SIGN_ENTITLEMENTS: HavenApp/Haven.macOS.uitesthost.entitlements
+        SKIP_INSTALL: YES
+
+  HavenMacUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: HavenMacUITests
+    dependencies:
+      - target: HavenMacUITestHost
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.uitesthost.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: HavenMacUITestHost
+        "EXCLUDED_ARCHS[sdk=macosx*]": x86_64
+
+  HavenWatchUITests:
+    type: bundle.ui-testing
+    platform: watchOS
+    deploymentTarget: "10.0"
+    sources:
+      - path: HavenWatchUITests
+    dependencies:
+      - target: HavenWatch
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.watchkitapp.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: HavenWatch
+        TARGETED_DEVICE_FAMILY: "4"
+
   # Standalone Apple Watch companion (single-target SwiftUI watchOS app — no separate WatchKit
   # extension; `WKApplication` in Info.plist). Thin client: talks to the iPhone over WCSession,
   # holds NO iroh node and links NEITHER HavenFFI NOR WebRTC. Embedded in the iOS Haven app.
@@ -582,3 +659,21 @@ schemes:
     build:
       targets:
         HavenWatch: all
+  # macOS UI tests, against the isolated HavenMacUITestHost (never com.blaineam.kith).
+  HavenMacUITests:
+    build:
+      targets:
+        HavenMacUITestHost: all
+        HavenMacUITests: [test]
+    test:
+      targets:
+        - HavenMacUITests
+  # watchOS UI tests, against the HavenWatch app in its DEBUG demo (no paired iPhone).
+  HavenWatchUITests:
+    build:
+      targets:
+        HavenWatch: all
+        HavenWatchUITests: [test]
+    test:
+      targets:
+        - HavenWatchUITests

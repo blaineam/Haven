@@ -3271,12 +3271,12 @@ enum SharedStore {
         }
     }
 
-    /// Every mailbox key we've already ingested for a circle (from the persisted seen-set). Used to
-    /// keep-alive posts we RECEIVED but didn't author — we can't re-derive a peer's key (only the
+    /// Every POST key we've already ingested for a circle (from the persisted seen-set; control
+    /// keys excluded — see `MailboxKeepAlive`). Used to keep-alive posts we RECEIVED but didn't author — we can't re-derive a peer's key (only the
     /// author can re-seal), but we hold the keys we fetched, so we can TOUCH them.
     static func seenKeys(circleId: String) -> [String] {
         let prefix = "haven/mailbox/\(circleId)/"
-        return withSeen { $0.filter { $0.hasPrefix(prefix) } }
+        return withSeen { $0.filter { $0.hasPrefix(prefix) && MailboxKeepAlive.isKeepAliveKey($0) } }
     }
 
     /// TOUCH keys we HOLD but did not author, to keep them alive against the relay's 30-day GC.

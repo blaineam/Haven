@@ -242,6 +242,18 @@ final class RelayAnnounceKeyTests: XCTestCase {
     }
 }
 
+/// `touchHeldKeys` keeps POSTS alive, never control-plane entries (ReachPolicy.swift `MailboxKeepAlive`).
+final class MailboxKeepAliveTests: XCTestCase {
+    func testOnlyPostsAreKeptAlive() {
+        let relay = String(repeating: "a", count: 64)
+        XCTAssertTrue(MailboxKeepAlive.isKeepAliveKey("haven/mailbox/cS/\(String(repeating: "b", count: 64))"))
+        XCTAssertTrue(MailboxKeepAlive.isKeepAliveKey("haven/mailbox/dm:x-y/\(String(repeating: "c", count: 64))"))
+        XCTAssertFalse(MailboxKeepAlive.isKeepAliveKey(RelayAnnounceKey.key(circleId: "cS", nodeHex: relay, plain: Data("x".utf8))))
+        XCTAssertFalse(MailboxKeepAlive.isKeepAliveKey("haven/mailbox/cS/__live__/\(relay)/f00d"))
+        XCTAssertFalse(MailboxKeepAlive.isKeepAliveKey("haven/mailbox/default/__hello__/\(relay)/\(relay)/beef"))
+    }
+}
+
 /// Sibling teaching is per circle (ReachPolicy.swift `SiblingTeachPlan`).
 final class SiblingTeachPlanTests: XCTestCase {
     let own = String(repeating: "b", count: 64)      // B's in-app relay

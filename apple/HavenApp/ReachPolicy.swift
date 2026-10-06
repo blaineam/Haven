@@ -283,6 +283,18 @@ enum RelayAnnounceKey {
     }
 }
 
+/// Which held mailbox keys `touchHeldKeys` keeps alive on the relays. Posts only: a relay
+/// announce (`__relay__`), a live-lane call frame (`__live__`) or a hello (`__hello__`) is
+/// control plane — superseded, claimed or delivered long before the relay's 30-day clock — and
+/// TOUCHing every one we had ever ingested is what kept 400k of them alive on one NAS relay
+/// (2026-10-06), and what pushed a busy circle's TOUCH past the relay's body limit so its POSTS
+/// stopped being refreshed at all. Relays from 2.0.0 ignore a TOUCH of control keys anyway.
+enum MailboxKeepAlive {
+    static func isKeepAliveKey(_ key: String) -> Bool {
+        !key.contains("/__relay__/") && !key.contains("/__live__/") && !key.contains("/__hello__/")
+    }
+}
+
 /// What an in-app host teaches each relay about its siblings (`RelayHost.teachSiblingRelays`).
 /// PER CIRCLE: a relay taught a sibling for a circle lets that sibling replicate the circle's
 /// mailbox, so each circle's relays learn only each other. The flat pool (every relay we know, for

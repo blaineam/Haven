@@ -3083,7 +3083,11 @@ final class FeedStore: ObservableObject {
                 // the Android peer when HELLO cannot dial (HTTP-mailbox-only stub path).
                 let b = self.cachedBundle
                 if !b.isEmpty {
+                    #if DEBUG
+                    let dir = QaFiles.dir
+                    #else
                     let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                    #endif
                     if let url = dir?.appendingPathComponent("qa-my-bundle.bin") {
                         try? b.write(to: url, options: .atomic)
                         let name = ProfileStore.shared.displayName.isEmpty ? "SimPeer" : ProfileStore.shared.displayName
@@ -3095,7 +3099,7 @@ final class FeedStore: ObservableObject {
                 // unreadable to Scripts/qa-link-tauri-to-ios.sh under the sim.
                 #if DEBUG
                 if let seed = AccountStore.storedSeed(), seed.count == 32,
-                   let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+                   let dir = QaFiles.dir {
                     let line = "haven-seed:" + seed.base64EncodedString()
                     try? line.write(to: dir.appendingPathComponent("qa-account-seed.txt"), atomically: true, encoding: .utf8)
                     try? myNodeHex.write(
@@ -3509,7 +3513,7 @@ final class FeedStore: ObservableObject {
     }
 
     private func processMatrixQaDropFile() {
-        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        guard let dir = QaFiles.dir else { return }
         let url = dir.appendingPathComponent("qa-cmd.json")
         guard let data = try? Data(contentsOf: url), !data.isEmpty else { return }
         try? FileManager.default.removeItem(at: url)
@@ -4262,7 +4266,7 @@ final class FeedStore: ObservableObject {
 
     private func qaWriteDumpFile(_ snapshot: [QaCircleSnapshot], accountHex: String, tsMs: UInt64,
                                  delivery: String, treeChain: String) {
-        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        guard let dir = QaFiles.dir else { return }
         #if os(iOS)
         let device = "ios"
         #else
@@ -4432,7 +4436,7 @@ final class FeedStore: ObservableObject {
     private func ingestQaPeerBundle() {
         #if DEBUG
         guard let engine else { return }
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let dir = QaFiles.dir
         guard let url = dir?.appendingPathComponent("qa-peer-bundle.bin"),
               let bundle = try? Data(contentsOf: url), !bundle.isEmpty else { return }
         let name = (try? String(contentsOf: dir!.appendingPathComponent("qa-peer-name.txt"), encoding: .utf8))?

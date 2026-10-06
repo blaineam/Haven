@@ -32,17 +32,18 @@ pkill -f "HavenStub.app" 2>/dev/null || true
 sleep 1
 free_ports
 mkdir -p /tmp/haven-mac-stub-home/Library/Application\ Support /tmp/haven-mac-stub-tmp
-# The stub is SANDBOXED: UserDefaults live in its container prefs, not the /tmp HOME.
-# Write both (the /tmp copy covers a hypothetical non-sandboxed build). Pre-seeding
-# the relay token keeps a fresh container on the fixed token every client default
-# expects (RelayHost mints a random one only when the key is empty).
-for PREFS in \
-  "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Preferences/com.blaineam.kith.qa.stub" \
-  "/tmp/haven-mac-stub-home/Library/Preferences/com.blaineam.kith.qa.stub"; do
-  mkdir -p "$(dirname "$PREFS")"
-  defaults write "$PREFS" "haven.relay.host.enabled" -bool true 2>/dev/null || true
-  defaults write "$PREFS" "haven.relay.httpToken" -string "${HAVEN_STUB_TOKEN:-8e17157a4fd8f6eeef1c3accdd9fc1de}" 2>/dev/null || true
-done
+# The stub is SANDBOXED and macOS App Data protection forbids every other process from touching
+# its container — no `defaults write`/`rm` into ~/Library/Containers/com.blaineam.kith.qa.stub, ever.
+#  * Its QA files + hosted relay store live in the shared dir below (stub-only HAVEN_QA_STUB build +
+#    temporary-exception entitlement; apple/HavenApp/QaFiles.swift). The harness creates it.
+#  * Its prefs come in as launch ARGUMENTS (NSArgumentDomain): relay host on, and the fixed token
+#    every client default expects (RelayHost mints a random one only when the key is empty).
+#  * A hermetic run (E2E_STUB_RESET=1, set by the bootstrap's wipe) passes HAVEN_QA_STUB_RESET=1 so
+#    the stub wipes its OWN container state before any store reads it.
+STUB_QA_DIR="$HOME/Library/Application Support/HavenQA/stub"
+mkdir -p "$STUB_QA_DIR"
+STUB_RESET_ENV=()
+[[ "${E2E_STUB_RESET:-0}" == "1" ]] && STUB_RESET_ENV=(HAVEN_QA_STUB_RESET=1) && log "hermetic launch — stub wipes its own container state"
 # `-ApplePersistenceIgnoreState YES`: never let AppKit window restoration decide whether the stub
 # gets a window. The account (`AccountStore`, which the `invite_link` op and every UI-owned path
 # read) is created by RootView, i.e. only when the main window is. Once ONE run ended with the
@@ -51,8 +52,10 @@ done
 # `invite_link` silently produced no link — the rc.4 gate's "inviter minted a ticketed invite link"
 # RED and the whole newfriend → circle-membership cascade behind it (2026-10-03). The state lives
 # in AppKit's restoration store, not the container, so wiping QA state never cleared it.
-STUB_ARGS=(-ApplePersistenceIgnoreState YES)
-nohup env HOME=/tmp/haven-mac-stub-home HAVEN_SKIP_ONBOARDING=1 TMPDIR=/tmp/haven-mac-stub-tmp \
+STUB_ARGS=(-ApplePersistenceIgnoreState YES
+  -haven.relay.host.enabled YES
+  -haven.relay.httpToken "${HAVEN_STUB_TOKEN:-8e17157a4fd8f6eeef1c3accdd9fc1de}")
+nohup env HOME=/tmp/haven-mac-stub-home HAVEN_SKIP_ONBOARDING=1 TMPDIR=/tmp/haven-mac-stub-tmp ${STUB_RESET_ENV[@]+"${STUB_RESET_ENV[@]}"} \
   "$APP/Contents/MacOS/Haven" "${STUB_ARGS[@]}" >"$OUT/stub-stdout.log" 2>&1 &
 echo $! >"$OUT/stub.pid"
 sleep 6

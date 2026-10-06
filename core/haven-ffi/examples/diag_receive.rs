@@ -16,7 +16,7 @@ fn main() {
         Err(e) => println!("receive keycommit err => {e:?}"),
     }
     // also try with account identity if we can derive - skip
-    let store = std::path::Path::new("/Users/blainemiller/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/haven-relay-store/haven/mailbox/default");
+    let store = std::path::Path::new("/Users/blainemiller/Library/Application Support/HavenQA/stub/haven-relay-store/haven/mailbox/default");
     let mut ok=0; let mut fail_by_tag = std::collections::BTreeMap::new();
     for ent in fs::read_dir(store).unwrap() {
         let p = ent.unwrap().path();

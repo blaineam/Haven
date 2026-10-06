@@ -47,7 +47,7 @@ fn run(mls: bool, retire: bool, label: &str) {
     );
 
     let store = format!(
-        "{home}/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/haven-relay-store/haven/mailbox"
+        "{home}/Library/Application Support/HavenQA/stub/haven-relay-store/haven/mailbox"
     );
     let mut b_true = 0usize;
     let mut b_false = 0usize;
@@ -94,6 +94,7 @@ fn run(mls: bool, retire: bool, label: &str) {
 }
 
 #[test]
+#[ignore = "diagnostic probe: replays the LIVE e2e fleet state (desktop qa-matrix + the stub relay store in ~/Library/Application Support/HavenQA/stub) — not hermetic; run with --ignored right after an e2e run"]
 fn live_shape_replay() {
     run(true, true, "LIVE SHAPE (desktop Engine::new)");
     run(false, false, "switches OFF");

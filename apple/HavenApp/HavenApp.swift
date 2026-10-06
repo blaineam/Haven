@@ -237,6 +237,11 @@ struct HavenApp: App {
         // UI-test launches (DEBUG only): wipe this app's own state BEFORE any store reads it, and
         // turn animations off. A no-op for every other launch, and compiled out of Release.
         UITestMode.applyAtLaunch()
+        #if DEBUG && HAVEN_QA_STUB && os(macOS)
+        // e2e fleet's HavenStub only: a hermetic run (HAVEN_QA_STUB_RESET=1) wipes the stub's own
+        // container state here, because nothing outside the sandbox may touch it. See QaFiles.
+        QaFiles.applyStubResetAtLaunch()
+        #endif
         // Register the background-refresh task at launch (required before didFinishLaunching).
         NotificationManager.shared.registerBackgroundTask()
         NotificationManager.shared.registerTapRouting()   // notification taps route to what they're about

@@ -62,13 +62,8 @@ free_matrix_ports
 write_stub_members() {
   # Write QA authorize list to every path the stub may read (sandbox container, isolated HOME, app-name subdirs).
   local content="$1"
-  local paths=(
-    "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/qa-authorize-members.txt"
-    "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/HavenStub/qa-authorize-members.txt"
-    "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/com.blaineam.kith.qa.stub/qa-authorize-members.txt"
-    "/tmp/haven-mac-stub-home/Library/Application Support/qa-authorize-members.txt"
-    "/tmp/haven-mac-stub-home/Library/Application Support/HavenStub/qa-authorize-members.txt"
-  )
+  # The shared QA dir only — never the stub's sandbox container (App Data protection; QaFiles.swift).
+  local paths=("$HOME/Library/Application Support/HavenQA/stub/qa-authorize-members.txt")
   for p in "${paths[@]}"; do
     mkdir -p "$(dirname "$p")"
     printf '%s\n' "$content" >"$p"
@@ -83,11 +78,10 @@ start_stub() {
   sleep 1
   free_matrix_ports
   mkdir -p /tmp/haven-mac-stub-home/Library/Application\ Support /tmp/haven-mac-stub-tmp
-  # Prefer isolated HOME so we don't thrash the user's personal container; host must be on.
-  defaults write /tmp/haven-mac-stub-home/Library/Preferences/com.blaineam.kith.qa.stub \
-    "haven.relay.host.enabled" -bool true 2>/dev/null || true
+  # Relay host on via a launch argument (no `defaults write` into the stub's container).
+  mkdir -p "$HOME/Library/Application Support/HavenQA/stub"
   nohup env HOME=/tmp/haven-mac-stub-home HAVEN_SKIP_ONBOARDING=1 TMPDIR=/tmp/haven-mac-stub-tmp \
-    "$app/Contents/MacOS/HavenStub" -ApplePersistenceIgnoreState YES >"$OUT/stub-stdout.log" 2>&1 &
+    "$app/Contents/MacOS/Haven" -ApplePersistenceIgnoreState YES -haven.relay.host.enabled YES >"$OUT/stub-stdout.log" 2>&1 &
   echo $! >"$OUT/stub.pid"
   sleep 6
   if ! pgrep -f "HavenStub.app" >/dev/null; then

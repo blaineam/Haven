@@ -193,6 +193,11 @@ function score(name, ok, detail = '') {
 const IOS_BUNDLE = process.env.HAVEN_IOS_BUNDLE || 'com.blaineam.kith';
 const AND_PKG = process.env.HAVEN_AND_PKG || 'com.blaineam.haven';
 const STUB_HOME = '/tmp/haven-mac-stub-home';
+// HavenStub's QA files (qa-cmd/qa-dump/qa-account-hex/staging) and hosted relay store. NOT its sandbox
+// container: macOS App Data protection forbids reading another app's container, so the stub-only
+// HAVEN_QA_STUB build resolves them here (apple/HavenApp/QaFiles.swift + the stub's
+// temporary-exception entitlement). Must match QaFiles.stubSharedDir.
+const STUB_QA_DIR = join(process.env.HOME, 'Library/Application Support/HavenQA/stub');
 const DESK_DATA = process.env.HAVEN_DESKTOP_DATA || join(process.env.HOME, 'Library/Application Support/Haven/qa-matrix');
 
 if (DESK_DATA === join(process.env.HOME, 'Library/Application Support/Haven')) {
@@ -447,9 +452,9 @@ function makeAndroid() {
 }
 
 function makeStub() {
-  // The stub is sandboxed: its Application Support lives in the container,
-  // regardless of the HOME override its launcher uses.
-  const as = join(process.env.HOME, 'Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support');
+  // The stub is sandboxed; its QA files live in the shared QA dir (see STUB_QA_DIR), never read
+  // out of its container.
+  const as = STUB_QA_DIR;
   return {
     label: 'mac-stub',
     qaWrite: (cmd) => writeFileSync(join(as, 'qa-cmd.json'), JSON.stringify(cmd)),
@@ -1009,7 +1014,7 @@ async function main() {
   await Promise.all(all.map((n) => op(devices[n], { op: 'approve_connections' }, 1500)));
 
   const stubDump = await freshDump(devices.stub);
-  const stubHexPath = join(process.env.HOME, 'Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/qa-account-hex.txt');
+  const stubHexPath = join(STUB_QA_DIR, 'qa-account-hex.txt');
   const B = stubDump?.account_hex || process.env.HAVEN_STUB_ACCOUNT
     || (existsSync(stubHexPath) ? readFileSync(stubHexPath, 'utf8').trim() : '');
 
@@ -1841,7 +1846,7 @@ async function main() {
   async function stepRelayHistory() {
     const cidRH = circleId || await ensureSharedCircle();
     if (!cidRH || !devices.desktop) { score('relayhistory: needs the shared circle + desktop leg', false); return; }
-    const store = join(process.env.HOME, 'Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/haven-relay-store');
+    const store = join(STUB_QA_DIR, 'haven-relay-store');
     const mailboxKeys = () => mrStoreKeys(store).map((k) => k.key)
       .filter((k) => k.startsWith('haven/mailbox/') && !/\/__(hello|live|relay)__\//.test(k));
     const deskBin = join(ROOT, 'desktop/src-tauri/target/qa/haven-desktop');
@@ -2050,7 +2055,7 @@ async function main() {
     const RB = {
       name: 'rb', node: String(stubJ?.hosted_relay?.node || '').toLowerCase(),
       token: process.env.HAVEN_STUB_TOKEN || '8e17157a4fd8f6eeef1c3accdd9fc1de',
-      store: join(process.env.HOME, 'Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/haven-relay-store'),
+      store: join(STUB_QA_DIR, 'haven-relay-store'),
       port: num(stubJ?.hosted_relay?.httpPort) || 8674,
     };
     const rbRow = statsRow(stubJ, RB.node);

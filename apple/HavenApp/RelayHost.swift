@@ -101,8 +101,14 @@ final class RelayHost: ObservableObject {
     }
 
     private var storeDir: String {
+        #if DEBUG && HAVEN_QA_STUB && os(macOS)
+        // The e2e fleet's HavenStub only: the harness inspects this store (multirelay / relayhistory
+        // steps) and can no longer read the stub's container, so it lives in the shared QA dir.
+        let dir = QaFiles.stubSharedDir.appendingPathComponent("haven-relay-store", isDirectory: true)
+        #else
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("haven-relay-store", isDirectory: true)
+        #endif
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.path
     }
@@ -972,38 +978,15 @@ final class RelayHost: ObservableObject {
     }
 
     /// Hexes (account and/or device) the matrix driver wants this host relay to serve.
-    /// File: Application Support/`qa-authorize-members.txt` — one 64-hex id per line.
-    /// Also checks common sandboxed subdirs (HavenStub / bundle id) used by macOS containers,
-    /// the absolute container path, and `/tmp/haven-mac-stub-home/…` when the stub is launched
-    /// with an isolated HOME (matrix driver).
+    /// File: `qa-authorize-members.txt` in the QA files directory (`QaFiles.dir` — Application
+    /// Support, or the shared `HavenQA/stub` directory for the e2e fleet's HavenStub), one 64-hex id
+    /// per line. Nothing reads another app's container any more: macOS App Data protection forbids it.
     private static func qaAuthorizeMembers() -> [String] {
         #if DEBUG
         var candidates: [URL] = []
-        if let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+        if let base = QaFiles.dir {
             candidates.append(base.appendingPathComponent("qa-authorize-members.txt"))
-            for sub in ["HavenStub", "com.blaineam.kith.qa.stub", Bundle.main.bundleIdentifier ?? ""] where !sub.isEmpty {
-                candidates.append(base.appendingPathComponent(sub).appendingPathComponent("qa-authorize-members.txt"))
-            }
         }
-        #if os(macOS)
-        // Matrix paths only make sense on Mac (the QA stub host). iOS never hosts the matrix relay.
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        candidates.append(home.appendingPathComponent(
-            "Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/qa-authorize-members.txt"))
-        candidates.append(home.appendingPathComponent(
-            "Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/HavenStub/qa-authorize-members.txt"))
-        // Isolated matrix HOME (driver often launches with HOME=/tmp/haven-mac-stub-home).
-        candidates.append(URL(fileURLWithPath: "/tmp/haven-mac-stub-home/Library/Application Support/qa-authorize-members.txt"))
-        candidates.append(URL(fileURLWithPath: "/tmp/haven-mac-stub-home/Library/Application Support/HavenStub/qa-authorize-members.txt"))
-        // Real user container even when process HOME is isolated.
-        if let pw = getpwuid(getuid()) {
-            let realHome = String(cString: pw.pointee.pw_dir)
-            candidates.append(URL(fileURLWithPath: realHome)
-                .appendingPathComponent("Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/qa-authorize-members.txt"))
-            candidates.append(URL(fileURLWithPath: realHome)
-                .appendingPathComponent("Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/HavenStub/qa-authorize-members.txt"))
-        }
-        #endif
         var seen = Set<String>()
         var all: [String] = []
         for url in candidates {

@@ -18,6 +18,14 @@ lived only on the new relay. In testing, a post in a private circle reached the 
 phone after more than four minutes and their desktop after four. Relay changes now reach your other
 devices within seconds on iPhone, iPad, Mac, Android and desktop.
 
+### Internal — the test fleet no longer needs access to another app's data
+
+The cross-device test fleet used to drive its macOS test host by reading and writing that app's
+sandbox container, which macOS now blocks unless the Mac grants "access data from other apps". The
+test-only host build (never shipped) now exchanges its test files through a dedicated folder in
+Application Support instead, and takes its settings as launch arguments. The App Store, TestFlight
+and direct-download apps are unchanged.
+
 ### Fixed — Android: the keyboard covered the call controls
 
 Starting a call from a conversation, with the message field still focused, left the keyboard up over

@@ -19,6 +19,15 @@
 	<true/>
 	<key>com.apple.security.get-task-allow</key>
 	<true/>
+	<!-- The ONE path outside the container the stub may touch: the harness's shared QA directory
+	     (qa-cmd/qa-dump/qa-account-hex/peer-bundle staging + the hosted relay store). macOS App Data
+	     protection forbids the harness from reading this app's container, so the QA files live here
+	     instead (QaFiles.swift, compiled only with -D HAVEN_QA_STUB). Relative to the real home.
+	     Stub-only: never in Haven.macOS*.entitlements. -->
+	<key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+	<array>
+		<string>/Library/Application Support/HavenQA/</string>
+	</array>
 	<!-- Stub-only keychain groups — not personal kith / kith.shared -->
 	<key>keychain-access-groups</key>
 	<array>

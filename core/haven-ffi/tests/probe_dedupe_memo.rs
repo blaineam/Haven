@@ -22,7 +22,7 @@ fn peer_key_total(s: &HavenSocial) -> usize {
 fn b_commits(limit: usize) -> Vec<(String, Vec<u8>)> {
     let home = std::env::var("HOME").unwrap();
     let store = format!(
-        "{home}/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support/haven-relay-store/haven/mailbox"
+        "{home}/Library/Application Support/HavenQA/stub/haven-relay-store/haven/mailbox"
     );
     let mut out = Vec::new();
     for circ in fs::read_dir(&store).unwrap().flatten() {
@@ -74,6 +74,7 @@ fn engine() -> (std::sync::Arc<HavenSocial>, Vec<u8>) {
 }
 
 #[test]
+#[ignore = "diagnostic probe: replays the LIVE e2e fleet state (desktop qa-matrix + the stub relay store in ~/Library/Application Support/HavenQA/stub) — not hermetic; run with --ignored right after an e2e run"]
 fn ok_false_is_memoized_and_never_reevaluated() {
     let commits = b_commits(6);
     eprintln!("replaying {} real B-device key commits", commits.len());

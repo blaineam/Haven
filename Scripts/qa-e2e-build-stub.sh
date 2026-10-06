@@ -37,10 +37,17 @@ xcodebuild \
   -derivedDataPath "$DD" \
   PRODUCT_BUNDLE_IDENTIFIER=com.blaineam.kith.qa.stub \
   CODE_SIGN_ENTITLEMENTS="HavenApp/Haven.macOS.stub.entitlements" \
+  OTHER_SWIFT_FLAGS='$(inherited) -DHAVEN_QA_STUB' \
   DEVELOPMENT_TEAM=8ZVSPZYSVF \
   build >"$LOG" 2>&1 || { echo "stub build FAILED — tail of $LOG:"; tail -30 "$LOG"; exit 1; }
 
 grep -q "BUILD SUCCEEDED" "$LOG" || { echo "no BUILD SUCCEEDED in $LOG"; exit 1; }
+
+# HAVEN_QA_STUB (stub build only — no scheme, config or project.yml carries it): the stub's QA
+# files and hosted relay store resolve to the shared ~/Library/Application Support/HavenQA/stub/
+# instead of its sandbox container, which macOS App Data protection forbids the harness to read.
+# See apple/HavenApp/QaFiles.swift and the temporary-exception entitlement in the stub entitlements.
+# Both are proven after the rename below — a stub without them strands every QA file in its container.
 
 # Rename the .app DIRECTORY only — do not touch anything inside it.
 #
@@ -62,4 +69,9 @@ if [[ -d "$BUILT" ]]; then
   codesign -v "$APP" >>"$LOG" 2>&1 || { echo "stub signature broke on rename — see $LOG"; exit 1; }
 fi
 [[ -d "$APP" ]] || { echo "missing $APP after build"; exit 1; }
+codesign -d --entitlements - "$APP" 2>/dev/null | grep -q 'HavenQA' \
+  || { echo "stub is missing the HavenQA temporary-exception entitlement"; exit 1; }
+# Debug builds keep the code in Haven.debug.dylib next to the launcher; search the whole MacOS dir.
+grep -rqa 'Application Support/HavenQA/stub' "$APP/Contents/MacOS" \
+  || { echo "stub was not compiled with -DHAVEN_QA_STUB (no HavenQA path in the binary)"; exit 1; }
 echo "stub built → $APP"

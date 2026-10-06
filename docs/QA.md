@@ -162,6 +162,27 @@ Safety: the mac leg is **always** `com.blaineam.kith.qa.stub` under
 data dir. The personal account, container, and daily-driver desktop data root
 are never touched, and the script refuses to run otherwise.
 
+**No harness process touches the stub's sandbox container.** macOS App Data protection forbids any
+other app (Terminal, node, an agent) from reading or writing `~/Library/Containers/<other app>`
+without "access data from other apps" / Full Disk Access, and the fleet must never need those
+grants. So the stub is built with `-D HAVEN_QA_STUB` (`Scripts/qa-e2e-build-stub.sh` only — no
+scheme, configuration or `project.yml` carries it) and its entitlements add one
+`com.apple.security.temporary-exception.files.home-relative-path.read-write` entry for
+`/Library/Application Support/HavenQA/`. In that build — and only there:
+
+| What | Where |
+|---|---|
+| `qa-cmd.json`, `qa-dump.json`, `qa-account-{hex,seed}.txt`, `qa-device-hex.txt`, `qa-my-bundle.bin`, `qa-peer-bundle.bin`, `qa-authorize-members.txt`, staged media | `~/Library/Application Support/HavenQA/stub/` (`QaFiles.dir`, `apple/HavenApp/QaFiles.swift`) |
+| hosted relay store (`haven-relay-store/`, read by `multirelay`/`relayhistory`) | `~/Library/Application Support/HavenQA/stub/haven-relay-store` |
+| relay host on + fixed relay token | launch arguments (`-haven.relay.host.enabled YES -haven.relay.httpToken …`, NSArgumentDomain) — no `defaults write` |
+| hermetic wipe of feed / media / seen-set / self-sync blob / **preferences** | the stub wipes its OWN container at launch when started with `HAVEN_QA_STUB_RESET=1` (the bootstrap sets it on a fresh run); it refuses under any bundle id but `*.qa.stub` |
+
+The bootstrap wipes `HavenQA/stub/` itself, then stages A's bundle there before the stub's launch.
+`QaFiles` and every call site are inside `#if DEBUG`, and the stub paths inside `#if HAVEN_QA_STUB`,
+so Release HavenMac / iOS / TestFlight binaries and `Haven.macOS*.entitlements` are unchanged. The
+other legs never needed another app's container: the iOS sim's data is under `~/Library/Developer`,
+the desktop leg's `qa-matrix` dir and `HAVEN_QA_SEED_FILE` are plain files, Android goes over adb.
+
 Every read is also checked for **dump-channel freshness** — a leg whose dump file has stopped being
 rewritten is named as a dead channel instead of being scored as a delivery failure. See
 [Dump-channel freshness](#dump-channel-freshness--the-harness-will-not-believe-a-stale-dump) below;

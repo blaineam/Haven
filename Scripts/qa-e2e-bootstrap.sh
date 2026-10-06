@@ -10,6 +10,9 @@ mkdir -p "$OUT"
 NODE="${HAVEN_STUB_NODE:-401f6cda9ed29974eb0ef02412de42bbd125c4bf16f7a857f285fe8aeb57af89}"
 TOKEN="${HAVEN_STUB_TOKEN:-8e17157a4fd8f6eeef1c3accdd9fc1de}"
 DATA_DIR="${HAVEN_DESKTOP_DATA:-$HOME/Library/Application Support/Haven/qa-matrix}"
+# HavenStub's QA files (qa-cmd/qa-dump/qa-account-hex/bundles/authorize list) + hosted relay store.
+# A plain directory the harness owns; the stub reaches it through a stub-only sandbox exception.
+STUB_QA_DIR="$HOME/Library/Application Support/HavenQA/stub"
 DESK="${HAVEN_DESKTOP_BIN:-$ROOT/desktop/src-tauri/target/qa/haven-desktop}"
 IOS_BUNDLE="${HAVEN_IOS_BUNDLE:-com.blaineam.kith}"
 AND_PKG="${HAVEN_AND_PKG:-com.blaineam.haven}"
@@ -74,26 +77,12 @@ if [[ "${E2E_FRESH:-1}" != "0" ]]; then
   pkill -f "HavenStub.app" 2>/dev/null || true
   pkill -f 'target/qa/haven-desktop' 2>/dev/null || true
   sleep 1
-  rm -rf "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support"/{haven-relay-store,haven-media,haven-feed.json,haven-mailbox-seen.txt,haven-selfsync.bin,qa-*} 2>/dev/null || true
-  # The authorize list is ALSO read from subdirs and the isolated stub HOME (qa-e2e-authorize.sh
-  # writes all five paths); the `qa-*` glob above only reached the top-level one. The fleet seed
-  # is stable across runs, so a stale list from the previous run pre-authorized A on B's relay and
-  # `newfriend` never saw a single pre-enrollment 403 ("adopted … (pending enrollment) — []").
-  for p in "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support"/{HavenStub,com.blaineam.kith.qa.stub}/qa-authorize-members.txt \
-           "/tmp/haven-mac-stub-home/Library/Application Support"/{,HavenStub/}qa-authorize-members.txt; do
-    rm -f "$p" 2>/dev/null || true
-  done
-  # PREFERENCES too. The companion maps (haven.media.previewCompanions / thumbCompanions) live here,
-  # not in Application Support, so a "hermetic" wipe left them behind — and a pairing naming a blob
-  # the wipe had just deleted then suppressed re-minting on every subsequent run. The stub shipped
-  # posts with no preview marker for three consecutive runs because of it.
-  # Through cfprefsd FIRST, by the container plist's PATH: the bare domain name addresses
-  # ~/Library/Preferences (not the sandbox container), and a plain `rm` under a warm cfprefsd cache
-  # is undone the next time the stub launches — the stub came back up still knowing A as a contact
-  # ("A and B start as strangers — already contacts") with its old relay directory.
-  defaults delete "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Preferences/com.blaineam.kith.qa.stub" 2>/dev/null || true
-  rm -f "$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Preferences/com.blaineam.kith.qa.stub.plist" 2>/dev/null || true
-  defaults delete com.blaineam.kith.qa.stub 2>/dev/null || true
+  # The stub's QA files + hosted relay store live in the shared QA dir (never its container — macOS
+  # App Data protection forbids touching another app's container; see apple/HavenApp/QaFiles.swift).
+  # Wipe that here; the stub wipes its OWN container state (feed, media, seen-set, self-sync blob and
+  # PREFERENCES — the companion maps live there) on this run's launch via E2E_STUB_RESET=1 below.
+  rm -rf "$STUB_QA_DIR" 2>/dev/null || true
+  export E2E_STUB_RESET=1
   rm -rf "$DATA_DIR" 2>/dev/null || true
   SIM_FRESH="${HAVEN_IOS_UDID:-$(xcrun simctl list devices booted 2>/dev/null | grep -oE '[A-F0-9-]{36}' | head -1 || true)}"
   if [[ -z "$SIM_FRESH" ]]; then
@@ -178,7 +167,7 @@ fi
 # ── 1b. Stage account A's contact bundle for the stub BEFORE its (only) launch —
 # DEBUG builds ingest qa-peer-bundle.bin at startup, and mutual addContactBundle is
 # what makes A↔B contacts (circle invites + DMs need it, mailbox auth alone doesn't).
-STUB_AS_PRE="$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support"
+STUB_AS_PRE="$STUB_QA_DIR"
 APP_DATA_PRE="$(xcrun simctl get_app_container "$SIM" "$IOS_BUNDLE" data 2>/dev/null || true)"
 if [[ -n "$APP_DATA_PRE" && "$PREFRIEND" != "0" ]]; then
   IOS_AS_PRE="$APP_DATA_PRE/Library/Application Support"
@@ -217,9 +206,9 @@ fi
 "$ROOT/Scripts/qa-e2e-stub.sh" "$OUT"
 
 # The stub's relay node id IS its account node hex (RelayHost shares the node) —
-# resolve it live instead of trusting the baked default. The stub is SANDBOXED, so
-# despite HOME=/tmp it writes to its container; the DEBUG seed dump lands there.
-STUB_AS="$HOME/Library/Containers/com.blaineam.kith.qa.stub/Data/Library/Application Support"
+# resolve it live instead of trusting the baked default. The DEBUG seed dump lands in the shared
+# QA dir (the stub build resolves its QA files there, not in its sandbox container).
+STUB_AS="$STUB_QA_DIR"
 for i in $(seq 1 40); do [[ -s "$STUB_AS/qa-account-hex.txt" ]] && break; sleep 1; done
 STUB_NODE="$( (cat "$STUB_AS/qa-account-hex.txt" 2>/dev/null || true) | tr -d '\r\n')"
 if [[ ${#STUB_NODE} -eq 64 ]]; then

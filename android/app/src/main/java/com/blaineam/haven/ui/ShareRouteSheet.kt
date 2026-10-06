@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -76,7 +77,10 @@ fun ShareRouteSheet(payload: ShareInbox.Payload, onDone: () -> Unit) {
     }
 
     HavenBackground {
-        Column(Modifier.fillMaxSize()) {
+        // Edge-to-edge: the background runs under the bars, the sheet's content does not — its title
+        // and Cancel sat under the status bar and Send under the navigation bar. safeDrawing also
+        // lifts the caption field above the keyboard.
+        Column(Modifier.fillMaxSize().safeDrawingPadding()) {
             Row(
                 Modifier.fillMaxWidth().padding(start = 20.dp, top = 16.dp, bottom = 8.dp, end = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,

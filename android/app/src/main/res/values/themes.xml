@@ -6,8 +6,8 @@
         <!-- Both of these resolve per-mode out of values/ vs values-night/. ONE style definition so a
              future item can't silently drift between the two modes. -->
         <item name="android:windowBackground">@color/haven_window_background</item>
-        <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <!-- No android:statusBarColor / navigationBarColor: deprecated (and ignored) from API 35.
+             MainActivity's enableEdgeToEdge() owns the bars on every API level. -->
         <item name="android:windowLightStatusBar">@bool/haven_light_status_bar</item>
     </style>
 
@@ -15,7 +15,7 @@
          stays visible behind the system dialog. -->
     <style name="Theme.Haven.Consent" parent="android:Theme.Translucent.NoTitleBar">
         <item name="android:windowAnimationStyle">@null</item>
-        <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <!-- Bars: enableEdgeToEdge() in ScreenShareConsentActivity (the bar-colour attributes are
+             deprecated from API 35). -->
     </style>
 </resources>

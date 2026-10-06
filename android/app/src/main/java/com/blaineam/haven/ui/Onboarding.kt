@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -138,6 +139,9 @@ fun OnboardingScreen(onDone: (name: String, emoji: String, avatarB64: String) ->
                 // once the keyboard takes half the display, centred content taller than what's left
                 // has no way to be reached without it.
                 .imePadding()
+                // Edge-to-edge: keep the scrolling content clear of the status and navigation bars
+                // (in landscape the logo sat under the status bar).
+                .systemBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally,

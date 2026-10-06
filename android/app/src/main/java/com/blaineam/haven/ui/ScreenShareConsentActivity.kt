@@ -6,6 +6,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import com.blaineam.haven.core.CallManager
@@ -31,6 +32,9 @@ class ScreenShareConsentActivity : ComponentActivity() {
     private var launcher: ActivityResultLauncher<Intent>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Transparent bars over the call behind us, the non-deprecated way (the theme used to set
+        // android:statusBarColor / navigationBarColor, which API 35 deprecates and ignores).
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         val l = activityResultRegistry.register(RESULT_KEY, ActivityResultContracts.StartActivityForResult()) { r ->
             val outcome = ScreenSharePolicy.consentOutcome(r.resultCode, r.data != null)

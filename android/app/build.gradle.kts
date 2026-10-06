@@ -97,7 +97,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
-    implementation("androidx.activity:activity-compose:1.9.3")
+    // 1.10.x: enableEdgeToEdge() no longer calls Window.setStatusBarColor/setNavigationBarColor on
+    // API 35+ (deprecated there — Play flags apps whose edge-to-edge path still uses them).
+    implementation("androidx.activity:activity-compose:1.10.1")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")

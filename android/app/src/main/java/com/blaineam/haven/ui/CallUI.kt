@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items as lazyItems
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -260,7 +262,7 @@ private fun InCall() {
                 CallVideoTile(screenShareEntry.value, Modifier.fillMaxSize(), fit = true)
                 Text(stringResource(R.string.call_screen_share_notice, screenShareEntry.key.take(6)),
                     color = Color.White, fontSize = 12.sp,
-                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 64.dp)
+                    modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 64.dp)
                         .clip(RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = 0.5f)).padding(horizontal = 10.dp, vertical = 4.dp))
             }
             participants.isEmpty() -> {
@@ -291,7 +293,9 @@ private fun InCall() {
 
         // Local self-preview.
         Box(
-            Modifier.align(Alignment.TopEnd).padding(12.dp).size(96.dp, 132.dp)
+            // Edge-to-edge: the call surface is black to the screen edges, but nothing tappable or
+            // readable sits under the status / navigation bars.
+            Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(12.dp).size(96.dp, 132.dp)
                 .clip(RoundedCornerShape(12.dp)).background(CallChip),
         ) {
             CallVideoTile(CallManager.localVideo, Modifier.fillMaxSize(), mirror = true, overlay = true)
@@ -301,7 +305,7 @@ private fun InCall() {
         }
 
         // Title + minimize (return to the app while the call continues).
-        Row(Modifier.align(Alignment.TopStart).padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.align(Alignment.TopStart).statusBarsPadding().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(40.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.4f))
                 .clickable { CallManager.minimized.value = true }, contentAlignment = Alignment.Center) {
                 Icon(Icons.Filled.KeyboardArrowDown, stringResource(R.string.call_minimize), tint = Color.White)
@@ -314,7 +318,7 @@ private fun InCall() {
         // hang up) below. A single row of 7 buttons was wider than any phone screen, which
         // silently pushed the share-screen and HANG-UP buttons off the right edge.
         Column(
-            Modifier.align(Alignment.BottomCenter).padding(bottom = 36.dp),
+            Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 36.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {

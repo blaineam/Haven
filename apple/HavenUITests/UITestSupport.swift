@@ -96,17 +96,34 @@ class HavenUITestCase: XCTestCase {
     /// The first element of `query` that is on screen in the open band, scrolling down the list
     /// until one is. (A lazy list keeps rows it has scrolled past in the tree with an empty frame,
     /// so "first match" can be a row far above the screen.)
-    func firstOnScreen(_ app: XCUIApplication, _ query: XCUIElementQuery, maxScrolls: Int = 8) -> XCUIElement? {
-        let height = app.windows.firstMatch.frame.height
-        for attempt in 0...maxScrolls {
-            if let hit = query.allElementsBoundByIndex.first(where: {
+    ///
+    /// It steps with short, slow drags, never flicks. On an iPhone a photo post is most of a screen
+    /// tall, and `swipeUp()`'s momentum carried every reply field straight past the open band between
+    /// samples, all the way to the end of the feed (gate 2026-10-06: five fields in the tree, none
+    /// ever sampled in the band). A quarter-screen drag moves less than the band is tall, so any
+    /// element the list scrolls past has to stop inside it once.
+    func firstOnScreen(_ app: XCUIApplication, _ query: XCUIElementQuery, maxScrolls: Int = 30) -> XCUIElement? {
+        let window = app.windows.firstMatch
+        let height = window.frame.height
+        // The feed fills in after the composer appears; wait for the first row rather than
+        // scrolling an empty list.
+        _ = query.firstMatch.waitForExistence(timeout: 20)
+        func inBand() -> XCUIElement? {
+            query.allElementsBoundByIndex.first(where: {
                 let f = $0.frame
                 return f.minY.isFinite && f.height > 0 && f.minY > height * 0.12 && f.maxY < height * 0.72
-            }) {
-                if attempt > 0 { settle(hit) }
-                return hit
+            })
+        }
+        for _ in 0...maxScrolls {
+            if let hit = inBand() {
+                settle(hit)
+                // Confirm after the list is still; a late layout pass can move it out again.
+                if let still = inBand() { return still }
+                continue
             }
-            app.swipeUp()
+            let from = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+            let to = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+            from.press(forDuration: 0.05, thenDragTo: to, withVelocity: .slow, thenHoldForDuration: 0.1)
         }
         return nil
     }

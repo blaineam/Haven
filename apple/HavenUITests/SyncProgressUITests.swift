@@ -75,11 +75,12 @@ final class SyncProgressUITests: XCTestCase {
                       "a post waiting on the retry timer should say Retrying with its count")
         // Still there through the backoff AND the retry attempts it starts — it neither vanishes nor
         // flickers back to "Sending" per attempt.
-        for _ in 0..<4 {
-            sleep(2)
-            XCTAssertTrue(badge(app, labelContains: "Retrying (1 waiting)").exists,
-                          "Retrying must persist through the backoff and its retry passes")
-        }
+        // Watch it for 8 s: the wait must time out (the pill never stops saying Retrying), not
+        // complete (it vanished or changed).
+        let retrying = badge(app, labelContains: "Retrying (1 waiting)")
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: retrying)
+        XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 8), .timedOut,
+                       "Retrying must persist through the backoff and its retry passes")
     }
 
     /// Peer-to-peer chunk progress reaches the placeholder (it never did: only relay restores

@@ -9,6 +9,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.0 — final (unreleased)
 
+### Added — relay: set mailbox retention from the environment
+
+`HAVEN_RELAY_MAILBOX_TTL_DAYS` (and `HAVEN_RELAY_MEDIA_MAX_AGE_DAYS` / `HAVEN_RELAY_MEDIA_MAX_BYTES`)
+now work like every other relay setting, alongside the existing `--mailbox-ttl-days` flag and config
+key. The default stays 30 days; an operator who wants a year of posts and DMs on their own relay sets
+`365`.
+
 ### Fixed — relays: a long-running relay spent 1–2.5 CPU cores re-reading its own store
 
 A relay's mailbox holds more than posts. Hosts also leave **relay announcements** in it (so a friend

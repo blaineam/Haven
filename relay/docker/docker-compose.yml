@@ -70,6 +70,8 @@ services:
       # Disk guard: stop accepting new uploads when the data volume has less than this free
       # (default 1G; small mailbox writes continue until 1/4 of it; 0 disables). GC keeps running.
       HAVEN_RELAY_MIN_FREE: ${HAVEN_RELAY_MIN_FREE:-}
+      # Mailbox retention in days (default 30). e.g. 365 keeps a year of posts and DMs.
+      HAVEN_RELAY_MAILBOX_TTL_DAYS: ${HAVEN_RELAY_MAILBOX_TTL_DAYS:-}
       # ── Public media front door ────────────────────────────────────────────
       # DEFAULT (leave both unset): image ships cloudflared and auto-starts a free
       # Cloudflare Quick Tunnel (*.trycloudflare.com). Hostname changes on restart;

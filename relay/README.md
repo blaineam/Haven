@@ -109,6 +109,9 @@ Knobs (flag / environment / `--config` JSON key):
 | `--auto-update off\|stable\|rc` | `HAVEN_RELAY_UPDATE_CHANNEL` | `auto_update` | `stable` | `rc` also follows release candidates (never downgrades: a newer stable never moves to an older rc) |
 | `--update-interval-hours N` | `HAVEN_RELAY_UPDATE_INTERVAL_HOURS` | `update_interval_hours` | `6` | 1–336, jitter added |
 | `--min-free SIZE` | `HAVEN_RELAY_MIN_FREE` | `min_free` | `1G` | disk guard floor, `0` = off |
+| `--mailbox-ttl-days N` | `HAVEN_RELAY_MAILBOX_TTL_DAYS` | `mailbox_ttl_days` | `30` | how long idle posts/DMs stay on this relay (e.g. `365` to keep a year) |
+| `--media-max-age-days N` | `HAVEN_RELAY_MEDIA_MAX_AGE_DAYS` | `media_max_age_days` | off | delete media idle longer than this |
+| `--media-max-bytes SIZE` | `HAVEN_RELAY_MEDIA_MAX_BYTES` | `media_max_bytes` | off | cap total media, oldest first |
 | — | `HAVEN_RELAY_UPDATE_INSTALL` | — | auto | `volume` / `inplace` / `notify` to force a strategy |
 | — | `HAVEN_RELAY_UPDATE_HEALTH_SECS` | — | `180` | probation window for a fresh update |
 

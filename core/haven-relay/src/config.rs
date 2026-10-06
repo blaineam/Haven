@@ -311,15 +311,7 @@ impl Config {
         };
 
         // Operator-chosen retention. Absent/0 media limits = today's behavior (never delete).
-        let retention = resolve_retention(
-            arg_value(args, "--mailbox-ttl-days")
-                .map(|v| v.parse::<u64>().map_err(|_| anyhow!("--mailbox-ttl-days must be a number")))
-                .transpose()?,
-            arg_value(args, "--media-max-age-days")
-                .map(|v| v.parse::<u64>().map_err(|_| anyhow!("--media-max-age-days must be a number")))
-                .transpose()?,
-            arg_value(args, "--media-max-bytes").as_deref(),
-        )?;
+        let retention = retention_from_args(args, process_env)?;
 
         // Haven fabric (iroh DERP): default ON for local-disk relays so a linked Mac/Linux/CLI
         // box can replace n0. `--no-derp` disables; `--derp-bind` / `--derp-url` override.
@@ -478,6 +470,22 @@ impl Config {
             maintenance,
         })
     }
+}
+
+/// Retention from flags, falling back to the environment (flag > env > default), so Docker and
+/// systemd operators set it the same way as every other knob:
+/// `--mailbox-ttl-days` / `HAVEN_RELAY_MAILBOX_TTL_DAYS` (default 30),
+/// `--media-max-age-days` / `HAVEN_RELAY_MEDIA_MAX_AGE_DAYS`, `--media-max-bytes` / `HAVEN_RELAY_MEDIA_MAX_BYTES`.
+fn retention_from_args(args: &[String], env: impl Fn(&str) -> Option<String>) -> Result<haven_net::blobstore::Retention> {
+    let pick = |flag: &str, var: &str| arg_value(args, flag).or_else(|| env(var).filter(|v| !v.trim().is_empty()));
+    let days = |flag: &str, var: &str| -> Result<Option<u64>> {
+        pick(flag, var).map(|v| v.trim().parse::<u64>().map_err(|_| anyhow!("{flag} must be a number (got '{v}')"))).transpose()
+    };
+    resolve_retention(
+        days("--mailbox-ttl-days", "HAVEN_RELAY_MAILBOX_TTL_DAYS")?,
+        days("--media-max-age-days", "HAVEN_RELAY_MEDIA_MAX_AGE_DAYS")?,
+        pick("--media-max-bytes", "HAVEN_RELAY_MEDIA_MAX_BYTES").as_deref(),
+    )
 }
 
 /// Fold the operator's raw retention knobs into a [`haven_net::blobstore::Retention`].
@@ -782,6 +790,32 @@ mod tests {
         qa_gc_overrides_from(&mut r, |n| (n != "HAVEN_RELAY_QA_GC_GRACE_SECS").then(|| "0".to_string()));
         assert_eq!(r.mailbox_ttl, haven_net::blobstore::MAILBOX_TTL);
         assert_eq!(r.gc_interval, haven_net::blobstore::GC_INTERVAL);
+    }
+
+    #[test]
+    fn retention_flag_beats_env_beats_default() {
+        use std::time::Duration;
+        let day = 24 * 3600;
+        let none = |_: &str| None;
+        let r = retention_from_args(&[], none).unwrap();
+        assert_eq!(r.mailbox_ttl, haven_net::blobstore::MAILBOX_TTL, "default stays 30 days");
+        assert_eq!(r.mailbox_ttl, Duration::from_secs(30 * day));
+        let env = |n: &str| match n {
+            "HAVEN_RELAY_MAILBOX_TTL_DAYS" => Some("365".to_string()),
+            "HAVEN_RELAY_MEDIA_MAX_AGE_DAYS" => Some("90".to_string()),
+            "HAVEN_RELAY_MEDIA_MAX_BYTES" => Some("2G".to_string()),
+            _ => None,
+        };
+        let r = retention_from_args(&[], env).unwrap();
+        assert_eq!(r.mailbox_ttl, Duration::from_secs(365 * day));
+        assert_eq!(r.media_max_age, Some(Duration::from_secs(90 * day)));
+        assert!(r.media_max_bytes.is_some());
+        let args: Vec<String> = ["--mailbox-ttl-days", "60"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(retention_from_args(&args, env).unwrap().mailbox_ttl, Duration::from_secs(60 * day), "flag wins");
+        assert!(retention_from_args(&[], |n| (n == "HAVEN_RELAY_MAILBOX_TTL_DAYS").then(|| "0".into())).is_err(), "0 refused");
+        assert!(retention_from_args(&[], |n| (n == "HAVEN_RELAY_MAILBOX_TTL_DAYS").then(|| "a year".into())).is_err());
+        assert_eq!(retention_from_args(&[], |n| (n == "HAVEN_RELAY_MAILBOX_TTL_DAYS").then(|| " ".into())).unwrap().mailbox_ttl,
+            haven_net::blobstore::MAILBOX_TTL, "blank env = unset");
     }
 
     #[test]

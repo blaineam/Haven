@@ -460,9 +460,12 @@ elif command -v adb >/dev/null 2>&1; then
       # iCloud Drive leaves "name 2.ext" conflict copies inside build/ (2,734 of them on 2026-10-06);
       # AGP rejects them ("Failed file name validation … ic_launcher_background 2.xml") and the leg
       # then silently ran the PREVIOUS apk. They are regenerable intermediates — drop them first.
-      dupes=$(find "$ROOT/android/app/build" -name '* 2*' 2>/dev/null | wc -l | tr -d ' ')
+      # Any " N" copy, not just " 2": a "HavenNet$ErasedRelay 3.dex" broke dex merging as a duplicate
+      # class (2026-10-06). Build intermediates never legitimately contain a space before a number.
+      dupe_re='.*/[^/]* [0-9]+(\.[^/ ]+)?$'
+      dupes=$(/usr/bin/find -E "$ROOT/android/app/build" -regex "$dupe_re" 2>/dev/null | wc -l | tr -d ' ')
       if [[ "${dupes:-0}" -gt 0 ]]; then
-        find "$ROOT/android/app/build" -name '* 2*' -delete 2>/dev/null || true
+        /usr/bin/find -E "$ROOT/android/app/build" -depth -regex "$dupe_re" -exec rm -rf {} + 2>/dev/null || true
         log "removed $dupes iCloud conflict copies from android/app/build"
       fi
       (cd "$ROOT/android" && ./gradlew assembleDebug -q) >>"$OUT/android-build.log" 2>&1 \

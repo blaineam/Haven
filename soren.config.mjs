@@ -371,8 +371,11 @@ export default {
     // `desktop-build` is here because `desktop` (crate tests) and `desktop-ui` (JS syntax) between
     // them never produce the Tauri app, and `macos` builds the native HavenMac app, which is a
     // different product.
+    // ui-ipad / ui-mac / ui-watch: every screen's UI tests on each Apple platform (owner, 2026-10-06:
+    // "the fixes should land on main and be part of the release gate"). ui-mac needs macOS Automation
+    // Mode without an auth prompt on the gate Mac (`automationmodetool enable-automationmode-without-authentication`).
     requireGreen: [
-      'core', 'fabric', 'apple-logic', 'ios', 'macos', 'watch-build', 'android-native', 'android', 'android-minified',
+      'core', 'fabric', 'apple-logic', 'ios', 'ui-ipad', 'ui-mac', 'ui-watch', 'macos', 'watch-build', 'android-native', 'android', 'android-minified',
       'desktop', 'desktop-ui', 'desktop-ui-test', 'desktop-build', 'push-worker', 'web', 'qa-harness', 'e2e',
     ],
   },

@@ -473,11 +473,63 @@ object LocalMedia {
         }.getOrNull()
     }
 
+    /**
+     * A stored IMAGE (or a video's poster) decoded for DISPLAY in a [boxW]×[boxH] px box under [fit]
+     * — the size it is actually drawn at, not a fixed 1280px — and handed back as a HARDWARE bitmap,
+     * whose pixels live in graphics memory instead of the app's heap and are never copied again to
+     * reach the GPU. Draw-only: a hardware bitmap can't be read back (getPixels / a software Canvas),
+     * so anything that inspects pixels keeps using [imageBitmap] / [thumbnail]. A box dimension ≤ 0
+     * is unbounded; [cap] bounds the long edge whatever the box says. Null if missing/undecodable.
+     */
+    fun displayBitmap(circleId: String, ref: String, boxW: Int, boxH: Int,
+                      fit: BitmapSizing.Fit, cap: Int = 1280): Bitmap? {
+        if (isAudio(ref)) return null
+        if (isVideo(ref)) {
+            val longest = maxOf(boxW, boxH).takeIf { it > 0 }?.coerceAtMost(cap) ?: cap
+            return videoPoster(circleId, ref, maxDim = longest)?.let(::toHardware)
+        }
+        val bytes = load(circleId, ref) ?: return null   // size-guarded
+        return runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+            // Size against what will be DRAWN: a rotated photo's header reports the sensor's axes.
+            val orientation = exifOrientation(bytes)
+            val swap = exifSwapsAxes(orientation)
+            val (ow, oh) = if (swap) bounds.outHeight to bounds.outWidth else bounds.outWidth to bounds.outHeight
+            recordPixelSize(ref, ow, oh)   // the TRUE size, same as imageBitmap banks
+            val s = BitmapSizing.scale(ow, oh, boxW, boxH, fit, cap)
+            val raw = BitmapFactory.decodeByteArray(bytes, 0, bytes.size,
+                BitmapFactory.Options().apply { inSampleSize = BitmapSizing.sampleSize(s) })
+                ?: return@runCatching null
+            // Power-of-two sampling lands within 2× of the target; finish with one filtered resize
+            // whenever that still leaves more than 10% to spare — the resize is transient, the
+            // smaller bitmap is what stays resident for as long as the tile is on screen.
+            val (tw, th) = BitmapSizing.scaled(bounds.outWidth, bounds.outHeight, s)
+            val sized = if (raw.width > tw * 11 / 10) {
+                Bitmap.createScaledBitmap(raw, tw, th, true).also { if (it !== raw) raw.recycle() }
+            } else raw
+            toHardware(uprighted(sized, bytes))
+        }.getOrNull()
+    }
+
+    /** Move a freshly decoded, draw-only bitmap into graphics memory (see [displayBitmap]). Falls
+     *  back to the software bitmap when the device can't allocate a hardware one. */
+    private fun toHardware(b: Bitmap): Bitmap {
+        if (b.config == Bitmap.Config.HARDWARE) return b
+        val hw = runCatching { b.copy(Bitmap.Config.HARDWARE, false) }.getOrNull() ?: return b
+        if (hw !== b) b.recycle()
+        return hw
+    }
+
     /** A poster frame for a VIDEO ref, read via MediaMetadataRetriever — but ONLY from an already
      *  decrypted cache file (i.e. a video that's been opened/played once). We deliberately do NOT
      *  trigger a full decrypt just to draw a feed thumbnail (a 600 MB video would be needless heavy
-     *  work per feed item); an un-played video shows the play-glyph tile until it's opened. */
-    fun videoPoster(circleId: String, ref: String): Bitmap? {
+     *  work per feed item); an un-played video shows the play-glyph tile until it's opened.
+     *
+     *  Scaled by the retriever itself to fit [maxDim] (aspect kept): a plain getFrameAtTime hands back
+     *  the clip's FULL frame — 8 MB for 1080p, 33 MB for 4K — for every video tile in the feed. */
+    fun videoPoster(circleId: String, ref: String, maxDim: Int = 1280): Bitmap? {
         val file = plainCacheFile(ref, "mp4")
         if (!file.exists()) return null
         val mmr = android.media.MediaMetadataRetriever()
@@ -485,8 +537,14 @@ object LocalMedia {
             mmr.setDataSource(file.absolutePath)
             // The retriever is already open on this clip, so its dimensions cost nothing extra here —
             // and banking them means the clip's card is the right height before the poster ever draws.
-            mmrSize(mmr)?.let { (w, h) -> recordPixelSize(ref, w, h) }
-            mmr.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            val size = mmrSize(mmr)
+            size?.let { (w, h) -> recordPixelSize(ref, w, h) }
+            val option = android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+            if (size != null && maxOf(size.first, size.second) > maxDim) {
+                mmr.getScaledFrameAtTime(0, option, maxDim, maxDim)
+            } else {
+                mmr.getFrameAtTime(0, option)
+            }
         }.getOrNull().also { runCatching { mmr.release() } }
     }
 
@@ -861,7 +919,8 @@ object LocalMedia {
      *  / undecodable blobs (the cleanup screen falls back to a glyph). Blocking — off the main thread. */
     fun thumbnail(ref: String, reqDim: Int = 160): Bitmap? {
         if (isAudio(ref)) return null
-        if (isVideo(ref)) return videoPoster("", ref)   // videoPoster ignores the circle (reads plain cache)
+        // videoPoster ignores the circle (reads plain cache); scaled, not the clip's full frame.
+        if (isVideo(ref)) return videoPoster("", ref, maxDim = reqDim)
         val bytes = loadAnyCircle(ref) ?: return null
         return runCatching {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }

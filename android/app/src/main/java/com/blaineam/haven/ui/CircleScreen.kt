@@ -102,6 +102,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.viewinterop.AndroidView
@@ -928,10 +929,9 @@ fun ComposerAttachmentTile(
             // disk, while the poster seek may be slow or may not resolve a frame at all.
             val companion = com.blaineam.haven.core.HavenNet.thumbRefFor(ref)
                 ?.takeIf { LocalMedia.has(it) }
-                ?.let { LocalMedia.imageBitmap(circleId, it, reqDim = 256) }
+                ?.let { LocalMedia.displayBitmap(circleId, it, 256, 256, com.blaineam.haven.core.BitmapSizing.Fit.CROP, cap = 256) }
             val raw = companion
-                ?: if (LocalMedia.isVideo(ref)) LocalMedia.videoPoster(circleId, ref)
-                   else LocalMedia.imageBitmap(circleId, ref, reqDim = 256)
+                ?: LocalMedia.displayBitmap(circleId, ref, 256, 256, com.blaineam.haven.core.BitmapSizing.Fit.CROP, cap = 256)
             raw?.asImageBitmap()
         }
     }
@@ -987,9 +987,36 @@ fun MediaImage(circleId: String, id: String, modifier: Modifier = Modifier,
                // story viewer holds several at once. Callers that only need a blurred wash pass
                // something tiny.
                reqDim: Int = 1280) {
-    val (bmp, done) = rememberMediaBitmap(circleId, id, reqDim = reqDim)
-    MediaBitmapContent(circleId, id, bmp, done, modifier, contentScale)
+    // Decode for the box the tile is actually laid out in (see BitmapSizing): a 44dp chip or a 56dp
+    // story ring no longer holds a 1280px bitmap. `reqDim` stays the ceiling.
+    val box = remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+    val (bmp, done) = rememberMediaBitmap(circleId, id, reqDim = reqDim, box = box.value,
+        fit = contentScale.bitmapFit())
+    MediaBitmapContent(circleId, id, bmp, done, modifier.reportBox(box), contentScale)
 }
+
+/** The decode-sizing rule for a Compose [ContentScale]. */
+private fun ContentScale.bitmapFit(): com.blaineam.haven.core.BitmapSizing.Fit = when (this) {
+    ContentScale.Crop, ContentScale.FillBounds, ContentScale.FillHeight -> com.blaineam.haven.core.BitmapSizing.Fit.CROP
+    ContentScale.FillWidth -> com.blaineam.haven.core.BitmapSizing.Fit.FILL_WIDTH
+    else -> com.blaineam.haven.core.BitmapSizing.Fit.FIT
+}
+
+/**
+ * Publishes the incoming layout constraints' bounded edges (px; 0 = unbounded) into [box] without
+ * changing measurement, so the decode can size itself to the tile. Written once — the first real
+ * measurement — so a re-layout never restarts a decode that is already in hand.
+ */
+private fun Modifier.reportBox(box: androidx.compose.runtime.MutableState<androidx.compose.ui.unit.IntSize>): Modifier =
+    this.layout { measurable, constraints ->
+        if (box.value == androidx.compose.ui.unit.IntSize.Zero) {
+            val w = if (constraints.hasBoundedWidth) constraints.maxWidth else 0
+            val h = if (constraints.hasBoundedHeight) constraints.maxHeight else 0
+            if (w > 0 || h > 0) box.value = androidx.compose.ui.unit.IntSize(w, h)
+        }
+        val p = measurable.measure(constraints)
+        layout(p.width, p.height) { p.place(0, 0) }
+    }
 
 /** Decrypt + decode a media ref's bitmap off the main thread, ONCE per (ref, circle) — `load()` is a
  *  full AEAD open of the whole file, so anything that wants these pixels shares this rather than
@@ -997,7 +1024,10 @@ fun MediaImage(circleId: String, id: String, modifier: Modifier = Modifier,
  *  "still loading" from "there is no bitmap". */
 @Composable
 private fun rememberMediaBitmap(circleId: String, ref: String, reloadKey: Any? = null,
-                                reqDim: Int = 1280): Pair<ImageBitmap?, Boolean> {
+                                reqDim: Int = 1280,
+                                box: androidx.compose.ui.unit.IntSize? = null,
+                                fit: com.blaineam.haven.core.BitmapSizing.Fit = com.blaineam.haven.core.BitmapSizing.Fit.FIT,
+                                ): Pair<ImageBitmap?, Boolean> {
     var bmp by remember(ref, circleId) { mutableStateOf<ImageBitmap?>(null) }
     var done by remember(ref, circleId) { mutableStateOf(false) }
     // Re-attempt whenever the feed bumps WHILE we still have nothing to show — this is how a tile
@@ -1008,12 +1038,16 @@ private fun rememberMediaBitmap(circleId: String, ref: String, reloadKey: Any? =
     // `reloadKey` re-asks WITHOUT clearing what's already drawn: a video's poster only becomes
     // readable once the clip has been decrypted to cache, and blinking the page out to go fetch it
     // would be worse than showing it a beat late.
-    LaunchedEffect(ref, circleId, reloadKey, if (bmp == null) fv else 0) {
+    // A caller that measures its tile (`box` non-null) waits for that first measurement, so the one
+    // decode it pays for is already the right size; IntSize.Zero means "not laid out yet".
+    val measured = box == null || box != androidx.compose.ui.unit.IntSize.Zero
+    LaunchedEffect(ref, circleId, reloadKey, if (bmp == null) fv else 0, measured) {
         if (bmp != null) return@LaunchedEffect   // already have pixels — a feed bump is a no-op here
+        if (!measured) return@LaunchedEffect
         val b = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            val raw = if (LocalMedia.isVideo(ref)) LocalMedia.videoPoster(circleId, ref)
-                      else LocalMedia.imageBitmap(circleId, ref, reqDim)
-            raw?.asImageBitmap()
+            // Display-only pixels: sized to the tile and hardware-backed (LocalMedia.displayBitmap).
+            LocalMedia.displayBitmap(circleId, ref, box?.width ?: 0, box?.height ?: 0, fit, cap = reqDim)
+                ?.asImageBitmap()
         }
         if (b != null || !done) bmp = b
         done = true
@@ -1362,7 +1396,11 @@ private fun MediaBackdrop(source: ImageBitmap, modifier: Modifier = Modifier) {
 
 /** A tiny copy of a bitmap — the pre-31 blur stand-in, where the upscale itself IS the blur. */
 private fun ImageBitmap.downscaled(maxDim: Int): ImageBitmap {
-    val b = asAndroidBitmap()
+    // Feed bitmaps are HARDWARE (LocalMedia.displayBitmap); scaling one needs a readable copy.
+    val b = asAndroidBitmap().let {
+        if (it.config == android.graphics.Bitmap.Config.HARDWARE) it.copy(android.graphics.Bitmap.Config.ARGB_8888, false) ?: return this
+        else it
+    }
     val s = maxDim.toFloat() / maxOf(b.width, b.height)
     if (s >= 1f) return this
     return android.graphics.Bitmap
@@ -1416,7 +1454,9 @@ private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, pl
     // ONE decode for the page AND its backdrop — they draw the same pixels, so the backdrop can never
     // silently drop out from under media that IS showing. Re-asked once `vid` lands: that decrypt is
     // precisely what turns a video's poster from null into a real frame.
-    val (bmp, done) = rememberMediaBitmap(circleId, ref, reloadKey = vid)
+    val pageBox = remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+    val (bmp, done) = rememberMediaBitmap(circleId, ref, reloadKey = vid, box = pageBox.value,
+        fit = com.blaineam.haven.core.BitmapSizing.Fit.FIT)
     // `containerAspect` MUST be the page's real (measured) shape, never the media's own — comparing the
     // media against itself always yields ~0 and the backdrop could never draw. null = draw it regardless
     // (the single-media path: if the media does fill the page, the backdrop is simply covered).
@@ -1428,7 +1468,7 @@ private fun MediaPage(circleId: String, ref: String, containerAspect: Float?, pl
     }
     // clip() keeps the fill copy from bleeding onto the neighbouring page.
     Box(
-        Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).clickable {
+        Modifier.fillMaxSize().reportBox(pageBox).clip(RoundedCornerShape(16.dp)).clickable {
             // Super data saver / not-yet-fetched video: tap play means pull the bytes, then open
             // the viewer so it actually plays. Without this, a poster still was a dead end.
             if (isVideo && !hasBytes) {

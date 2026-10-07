@@ -34,7 +34,7 @@ OUT="${HAVEN_QA_OUT:-$ROOT/build/live-drive-matrix-qa-20260721-154034}"
 mkdir -p "$OUT"
 
 if [[ -z "$SIM" ]]; then
-  SIM="$(xcrun simctl list devices booted 2>/dev/null | grep -oE '\([A-F0-9-]{36}\)' | head -1 | tr -d '()')"
+  source "$(dirname "${BASH_SOURCE[0]}")/lib/haven-sim.sh"; SIM="$(haven_sim_udid || true)"
 fi
 [[ -n "$SIM" ]] || { echo "error: no booted iOS simulator" >&2; exit 1; }
 

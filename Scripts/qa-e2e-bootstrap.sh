@@ -4,6 +4,7 @@
 # Reuses the conventions of qa-linked-device-matrix.sh; never touches the personal
 # com.blaineam.kith prod container or the personal desktop data root.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/haven-sim.sh"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${QA_OUT:-$ROOT/build/e2e-bootstrap-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUT"
@@ -84,12 +85,12 @@ if [[ "${E2E_FRESH:-1}" != "0" ]]; then
   rm -rf "$STUB_QA_DIR" 2>/dev/null || true
   export E2E_STUB_RESET=1
   rm -rf "$DATA_DIR" 2>/dev/null || true
-  SIM_FRESH="${HAVEN_IOS_UDID:-$(xcrun simctl list devices booted 2>/dev/null | grep -oE '[A-F0-9-]{36}' | head -1 || true)}"
+  SIM_FRESH="$(haven_sim_udid || true)"
   if [[ -z "$SIM_FRESH" ]]; then
-    log "ERROR: no booted iOS simulator (and no HAVEN_IOS_UDID) — boot one first: xcrun simctl boot <udid>"
-    log "       (under pipefail this used to kill the script at the assignment with no message at all)"
+    log "ERROR: no Haven QA simulator (HAVEN_IOS_UDID, the pinned 80289DC4…, or one named exactly 'iPhone 17 Pro')"
     exit 1
   fi
+  haven_sim_ensure_booted "$SIM_FRESH"
   if [[ -n "$SIM_FRESH" ]]; then
     xcrun simctl terminate "$SIM_FRESH" "$IOS_BUNDLE" 2>/dev/null || true
     xcrun simctl uninstall "$SIM_FRESH" "$IOS_BUNDLE" 2>/dev/null || true
@@ -109,12 +110,11 @@ fi
 open -a Simulator 2>/dev/null || true
 
 # ── 1. iOS sim: booted + app installed ────────────────────────────────────────
-SIM="${HAVEN_IOS_UDID:-$(xcrun simctl list devices booted 2>/dev/null | grep -oE '[A-F0-9-]{36}' | head -1)}"
-if [[ -z "$SIM" ]]; then
-  SIM=$(xcrun simctl list devices available | grep "iPhone 17 Pro (" | grep -oE '[A-F0-9-]{36}' | head -1)
-  [[ -n "$SIM" ]] || { echo "error: no iPhone 17 Pro simulator"; exit 1; }
-  log "booting sim $SIM"; xcrun simctl boot "$SIM"; sleep 8
-fi
+# By UDID only — never "the first booted sim" (another session's sim can be booted; see lib/haven-sim.sh).
+SIM="$(haven_sim_udid || true)"
+[[ -n "$SIM" ]] || { echo "error: no Haven QA simulator (see Scripts/lib/haven-sim.sh)"; exit 1; }
+export HAVEN_IOS_UDID="$SIM"
+haven_sim_ensure_booted "$SIM"
 # NB: must be a SIGNED sim build — unsigned has no data-protection keychain, the seed
 # never persists, and the QA dumps (which need storedSeed) never appear on a fresh container.
 IOS_APP="${HAVEN_IOS_APP:-/tmp/haven-signed-ios-dd/Build/Products/Debug-iphonesimulator/Haven.app}"

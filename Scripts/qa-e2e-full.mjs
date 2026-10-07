@@ -965,9 +965,10 @@ const PDF = join(ROOT, 'Scripts/fixtures/qa-doc.pdf');
 async function main() {
   bootstrap();
 
-  const udid = process.env.HAVEN_IOS_UDID
-    || (sh('xcrun', ['simctl', 'list', 'devices', 'booted']).match(/[A-F0-9-]{36}/) || [])[0];
-  if (!udid) { console.error('no booted iOS sim'); process.exit(1); }
+  // By UDID only — never "the first booted sim": another session's simulator can be booted, and this
+  // run installs, wipes and drives Haven on whatever it picks (Scripts/lib/haven-sim.sh).
+  const udid = sh('bash', ['-c', `source "${join(ROOT, 'Scripts/lib/haven-sim.sh')}" && haven_sim_udid`]).trim();
+  if (!/^[A-F0-9-]{36}$/.test(udid)) { console.error('no Haven QA simulator (see Scripts/lib/haven-sim.sh)'); process.exit(1); }
   IOS_UDID = udid;
   devices.ios = makeIos(udid);
   devices.stub = makeStub();

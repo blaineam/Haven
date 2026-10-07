@@ -20,7 +20,7 @@ AND_PKG="${HAVEN_AND_PKG:-com.blaineam.haven}"
 LAN="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en7 2>/dev/null || true)"
 
 if [[ -z "$SIM" ]]; then
-  SIM="$(xcrun simctl list devices booted 2>/dev/null | grep -oE '\([A-F0-9-]{36}\)' | head -1 | tr -d '()')"
+  source "$(dirname "${BASH_SOURCE[0]}")/lib/haven-sim.sh"; SIM="$(haven_sim_udid || true)"
 fi
 if [[ -z "$SIM" ]]; then
   echo "error: no booted iOS simulator" >&2

@@ -31,8 +31,9 @@ score() {
   echo "| Check | Result |"; echo "|-------|--------|"
 } >"$OUT/LINKED_REPORT.md"
 
-SIM="${HAVEN_IOS_UDID:-$(xcrun simctl list devices booted 2>/dev/null | grep -oE '[A-F0-9-]{36}' | head -1)}"
-[[ -n "$SIM" ]] || { echo "error: no booted iOS sim"; exit 1; }
+source "$(dirname "${BASH_SOURCE[0]}")/lib/haven-sim.sh"
+SIM="$(haven_sim_udid || true)"
+[[ -n "$SIM" ]] || { echo "error: no Haven QA simulator (see Scripts/lib/haven-sim.sh)"; exit 1; }
 
 # Production Haven.app owns :8674/:8675 when hosting — matrix clients would hit IT and get
 # REFUSED (different node id / no QA members). Free the ports for HavenStub.

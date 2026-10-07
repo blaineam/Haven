@@ -12,7 +12,7 @@ AND_PKG="${HAVEN_AND_PKG:-com.blaineam.haven}"
 AND_SERIAL="${AND_SERIAL:-$(adb devices 2>/dev/null | awk '/device$/{print $1; exit}')}"
 
 if [[ -z "$SIM" ]]; then
-  SIM="$(xcrun simctl list devices booted 2>/dev/null | grep -oE '[A-F0-9-]{36}' | head -1 || true)"
+  source "$(dirname "${BASH_SOURCE[0]}")/lib/haven-sim.sh"; SIM="$(haven_sim_udid || true)"
 fi
 [[ -n "$SIM" ]] || { echo "error: no booted iOS simulator" >&2; exit 1; }
 [[ -n "$AND_SERIAL" ]] || { echo "error: no Android device" >&2; exit 1; }

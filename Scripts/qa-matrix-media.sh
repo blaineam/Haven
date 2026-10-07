@@ -27,7 +27,8 @@ check() {
   fi
 }
 
-IOS_UDID="${IOS_UDID:-$(xcrun simctl list devices booted 2>/dev/null | grep -oE '[A-F0-9-]{36}' | head -1 || true)}"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/haven-sim.sh"
+IOS_UDID="${IOS_UDID:-$(haven_sim_udid || true)}"
 AND_SERIAL="${AND_SERIAL:-$(adb devices 2>/dev/null | awk '/device$/{print $1; exit}')}"
 
 {

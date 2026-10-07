@@ -12,18 +12,7 @@ final class HavenWatchUITests: XCTestCase {
     private func launch() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["-UITestMode"]
-        // On a loaded host the watch simulator can drop the app right after launch — the next query
-        // then fails "application com.blaineam.kith.watchkitapp is not running" (2026-10-07 gate,
-        // load ~32, no crash report). Wait for the demo's first screen and relaunch once if the app
-        // never got there; a real launch failure still fails, on the second attempt.
-        for attempt in 1...2 {
-            app.launch()
-            if app.wait(for: .runningForeground, timeout: 30),
-               app.staticTexts["Circles"].waitForExistence(timeout: 30) {
-                return app
-            }
-            if attempt == 1 { app.terminate() }
-        }
+        app.launch()
         return app
     }
 

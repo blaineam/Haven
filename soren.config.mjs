@@ -117,7 +117,11 @@ export default {
       project: 'apple/Haven.xcodeproj',
       scheme: 'HavenWatchUITests',
       xcodegen: true,
-      destination: 'platform=watchOS Simulator,id=844E45C8-850D-4438-9E5A-AC5402E18BCE',   // watchOS 26.5 Series 11 46mm
+      // A DEDICATED, UNPAIRED watch: "Haven UI Watch (46mm)", watchOS 26.5 Series 11. The shared
+      // Series 11 (844E45C8…) is paired with an iPhone 17 Pro Max that has no Haven installed, so
+      // ~45 s after boot appconduitd processed the companion's deletion list and UNINSTALLED the
+      // watch app mid-run — the 4th test then failed "application … is not running" (2026-10-07).
+      destination: 'platform=watchOS Simulator,id=923C63C2-0564-467B-A8C3-DAE21D26ACB1',
       env: { DEVELOPER_DIR: '/Applications/Xcode.app/Contents/Developer' },
       extraArgs: ['-parallel-testing-enabled', 'NO'],
       shutdownSimulator: true,

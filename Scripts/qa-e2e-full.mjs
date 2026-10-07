@@ -635,6 +635,22 @@ async function noteDumpFreshness(dev, issuedAt, dump) {
 /// would otherwise have to go and collect — try the one recovery that is known to work, and fail
 /// the run if it does not clear. Never carry on quietly: every assertion from here would be a
 /// statement about a file nobody is writing.
+// A Mac leg whose driver stops writing is usually a HUNG app (2026-10-06: HavenStub's log stopped dead
+// mid-call, no crash report). Before any recovery touches it, take a 5 s stack sample of the process
+// into the run dir — the next hang then names the stuck threads instead of leaving a guess.
+function captureHang(dev) {
+  const pidFile = { 'mac-stub': 'stub.pid', desktop: 'tauri.pid' }[dev.label];
+  if (!pidFile) return;
+  let pid = '';
+  try { pid = readFileSync(join(OUT, pidFile), 'utf8').trim(); } catch { /* fall back below */ }
+  if (!pid && dev.label === 'mac-stub') pid = String(shOk('pgrep', ['-f', 'HavenStub\\.app']) || '').trim().split('\n')[0];
+  if (!/^\d+$/.test(pid)) { log(`  hang capture: no pid for ${dev.label}`); return; }
+  const out = join(OUT, `${dev.label}-hang-sample-${Date.now()}.txt`);
+  const alive = shOk('kill', ['-0', pid]) !== null;
+  log(`  hang capture: ${dev.label} pid ${pid} ${alive ? 'is alive' : 'is GONE (exited/crashed)'}${alive ? ` — sampling 5 s → ${out}` : ''}`);
+  if (alive) shOk('/usr/bin/sample', [pid, '5', '-file', out], { timeout: 30_000 });
+}
+
 async function handleStaleChannel(dev, r) {
   const ch = channelFor(dev);
   log('');
@@ -644,6 +660,7 @@ async function handleStaleChannel(dev, r) {
   log(`  issued a fresh {"op":"dump"} — so this is the HARNESS's view of the leg, not the product's`);
   log(`  behaviour. Left alone it reads as "never converged" on content the device may already hold.`);
   for (const line of dev.diagnose?.() || []) log(`  ${line}`);
+  captureHang(dev);
 
   // A clock that JUMPED (an emulator resyncing NTP mid-run) produces the same lag as a dead
   // channel. Re-measure before accusing anything, and re-judge the reading that got us here.

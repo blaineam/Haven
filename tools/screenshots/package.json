@@ -13,7 +13,7 @@
     "list": "node src/cli.js list"
   },
   "dependencies": {
-    "sharp": "^0.33.5"
+    "sharp": "^0.35.5"
   },
   "engines": {
     "node": ">=18"

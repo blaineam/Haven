@@ -2373,6 +2373,14 @@ async function main() {
     // random port strands every one of them until a re-announce reaches them.
     score(`multirelay: R_B comes back on the same port (:${RB.port})`, num(rbBack?.httpPort) === RB.port,
       `httpPort=${rbBack?.httpPort}`);
+    // Serving is not settled: the restarted host still mints a fresh tunnel, probes its DNS and
+    // publishes the new front door (~15-20 s), and that triggers a fabric rebind that drops every
+    // cached relay client. Starting the R_A mid-download kill inside that window measured the
+    // rebind (stub failover 26-35 s, a PERF REGRESSION) instead of relay failover. Wait it out.
+    const settled = (j) => j.hosted_relay?.front_door_settled === true && j.hosted_relay?.fabric_rebinding !== true;
+    let rbSettle = await converge(stub, settled, 90_000);
+    if (rbSettle >= 0) { await sleep(3_000); rbSettle = await converge(stub, settled, 30_000); }   // rebind is scheduled ~2 s after
+    log(`multirelay: R_B front door ${rbSettle >= 0 ? 'settled' : 'NOT settled within 120s (older stub build?)'} after the toggle`);
     const stubPid = String(shOk('pgrep', ['-f', 'HavenStub\\.app']) || '').trim().split('\n')[0];
     if (stubPid) log(`multirelay: stub listeners after the toggle:\n${shOk('lsof', ['-nP', '-a', '-p', stubPid, '-iTCP', '-sTCP:LISTEN']) || '(lsof failed)'}`);
     const offKeysOnRA = eventKeys(storeKeys.ra(), cS);
@@ -2434,7 +2442,12 @@ async function main() {
         if (vidRefs.every((r) => rec[r].present)) { got = Date.now() - downAt; break; }
         await sleep(1000);
       }
-      gate(`multirelay: video completes after R_A died [${n}]`, n, got, BUDGET.mediaBlob);
+      // Two different scenarios share this leg, and they belong in different perf baselines: with no
+      // reader caught on R_A the video was already coming from another relay (~3 s); with a reader
+      // caught mid-download, that reader must notice the dead connection first — through the
+      // emulator's adb reverse the killed relay's socket evidently isn't reset (Android sat out its
+      // full 60 s read timeout, 2026-10-07). Mixing them made the ledger call that a 20x "regression".
+      gate(`multirelay: video completes after R_A died [${n}]${caught ? ' (reader caught mid-download)' : ''}`, n, got, BUDGET.mediaBlob);
       for (const r of vidRefs) {
         const x = rec[r] || { got: [] };
         score(`multirelay: progress never goes backwards across the failover [${n} ${r.slice(0, 10)}]`,

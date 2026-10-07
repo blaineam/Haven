@@ -7,7 +7,7 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 2.0.0 — final (unreleased)
+## 2.0.0 (2026-10-07)
 
 ### Fixed — iPhone, iPad and Mac stop going back to a relay's old address
 

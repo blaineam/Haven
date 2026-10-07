@@ -153,7 +153,9 @@ for (const [code] of LOCALES) {
   const put = (field, val) => { const r = fieldRow.get(field); if (r) { while (r.length < col) r.push(''); r[col] = val ?? ''; } else if (val) console.log(`⚠ template has no row "${field}" — skipped for ${code}`); };
   put('Description', cap(m.description, 10000));
   put('ReleaseNotes', cap(m.whats_new, 1500));
-  put('Title', m.name || 'Haven 〇');
+  // Store titles must be a RESERVED product name (Partner Center rejects anything else, e.g. the
+  // localized App Store names) — every language keeps the live en-us title.
+  put('Title', enCell('Title') || 'Haven 〇');
   put('ShortTitle', 'Haven');
   put('ShortDescription', cap(m.promotional_text || m.subtitle, 200));
   put('DevStudio', enCell('DevStudio'));

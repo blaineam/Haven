@@ -185,7 +185,26 @@ final class CallManager: NSObject, ObservableObject {
     /// The relay produced a decoded remote video track for a hairpin peer — publish it into the
     /// same map the call UI renders, so relayed video appears with no view changes.
     func adoptHairpinRemoteVideo(peer: String, track: RTCVideoTrack) {
-        remoteVideoTracks[peer] = track
+        hairpinVideoTracks[peer] = track
+        routeVideoSlots(peer)
+    }
+
+    /// Video tracks as WebRTC SIGNALLED them, per peer — kept apart from the published slots so the
+    /// relay can borrow a slot and give it back (HairpinVideoRouting).
+    private var signalledCameraTracks: [String: RTCVideoTrack] = [:]
+    private var signalledScreenTracks: [String: RTCVideoTrack] = [:]
+    /// The relay's decoded video per peer (CallMediaBridge), present only while it is relaying.
+    private var hairpinVideoTracks: [String: RTCVideoTrack] = [:]
+
+    /// Publish the camera/screen slots for `peer` from what WebRTC signalled and what the relay
+    /// decoded. The one place the two slot dictionaries are written for a live peer.
+    private func routeVideoSlots(_ peer: String) {
+        let s = HairpinVideoRouting.slots(webrtcCamera: signalledCameraTracks[peer],
+                                          webrtcScreen: signalledScreenTracks[peer],
+                                          hairpin: hairpinVideoTracks[peer],
+                                          relaying: hairpinPeers.contains(peer))
+        if remoteVideoTracks[peer] !== s.camera { remoteVideoTracks[peer] = s.camera }
+        if remoteScreenTracks[peer] !== s.screen { remoteScreenTracks[peer] = s.screen }
     }
 
     /// Hand the mic between WebRTC's audio unit and the hairpin bridge's `AVAudioEngine`. Two
@@ -1267,17 +1286,19 @@ final class CallManager: NSObject, ObservableObject {
                 // `isScreen` is decided by STREAM id (WebRTCCall.isScreenTrack) — never let a
                 // screen track overwrite the camera slot.
                 if isScreen {
-                    self.remoteScreenTracks[peer] = track
+                    self.signalledScreenTracks[peer] = track
                 } else {
-                    self.remoteVideoTracks[peer] = track
+                    self.signalledCameraTracks[peer] = track
                 }
+                self.routeVideoSlots(peer)
             }
         }
         c.onRemoteVideoTrackEnded = { [weak self] isScreen in
             Task { @MainActor in
                 guard let self else { return }
-                if isScreen { self.remoteScreenTracks[peer] = nil }
-                else { self.remoteVideoTracks[peer] = nil }
+                if isScreen { self.signalledScreenTracks[peer] = nil }
+                else { self.signalledCameraTracks[peer] = nil }
+                self.routeVideoSlots(peer)
             }
         }
         c.onRemoteReady = { [weak self] in
@@ -1311,6 +1332,8 @@ final class CallManager: NSObject, ObservableObject {
                     if self.hairpinPeers.contains(peer), !Self.forceHairpin {
                         CallMediaBridge.shared.deactivate(remote: peer)
                         self.hairpinPeers.remove(peer)
+                        self.hairpinVideoTracks[peer] = nil
+                        self.routeVideoSlots(peer)   // WebRTC's own tracks take their slots back
                         HavenLog.relay("ice recovered \(peer.prefix(8)) — hairpin relay stopped")
                     } else if self.hairpinPeers.contains(peer) {
                         HavenLog.relay("ice recovered \(peer.prefix(8)) — STAYING on the hairpin (forceHairpin)")
@@ -1444,6 +1467,9 @@ final class CallManager: NSObject, ObservableObject {
         if let c = peers[peer]?.call { retire(c) }
         peers[peer] = nil
         if hairpinPeers.remove(peer) != nil { CallMediaBridge.shared.deactivate(remote: peer) }
+        hairpinVideoTracks[peer] = nil
+        signalledCameraTracks[peer] = nil
+        signalledScreenTracks[peer] = nil
         remoteVideoTracks[peer] = nil
         remoteScreenTracks[peer] = nil
         remoteCameraOff.remove(peer)
@@ -1891,19 +1917,42 @@ final class CallManager: NSObject, ObservableObject {
         // camera whose stream_ids contain "screen".
         var remoteTracks: [String: [String: Any]] = [:]
         for hex in Set(remoteVideoTracks.keys).union(remoteScreenTracks.keys) {
-            func slot(_ t: RTCVideoTrack?) -> Any {
+            func slot(_ t: RTCVideoTrack?, signalled: RTCVideoTrack?) -> Any {
                 guard let t else { return NSNull() }
                 var row: [String: Any] = qaTrackStats[hex]?[t.trackId] ?? ["frames_decoded": 0, "width": 0, "height": 0, "stream_ids": []]
+                if t === hairpinVideoTracks[hex] {
+                    // Relayed video: frames come from the relay's decoder, never from inbound-rtp.
+                    // The stream ids stay those of the track WebRTC signalled for this slot.
+                    let d = CallMediaBridge.shared.qaDecodedStats(hex)
+                    row = ["frames_decoded": d?.frames ?? 0, "width": d?.width ?? 0, "height": d?.height ?? 0,
+                           "stream_ids": signalled.flatMap { qaTrackStats[hex]?[$0.trackId]?["stream_ids"] } ?? [],
+                           "via": "hairpin"]
+                }
                 row["track_id"] = t.trackId
                 return row
             }
-            remoteTracks[hex] = ["camera": slot(remoteVideoTracks[hex]), "screen": slot(remoteScreenTracks[hex])]
+            remoteTracks[hex] = ["camera": slot(remoteVideoTracks[hex], signalled: signalledCameraTracks[hex]),
+                                 "screen": slot(remoteScreenTracks[hex], signalled: signalledScreenTracks[hex])]
         }
         var audioTotal = 0, videoTotal = 0, framesTotal = 0
         var perPeer: [String: [String: Int]] = [:]
         for (hex, m) in qaInbound {
             audioTotal += m.audio; videoTotal += m.video; framesTotal += m.frames
             perPeer[hex] = ["audio_bytes": m.audio, "video_bytes": m.video, "video_frames": m.frames]
+        }
+        // Media the hairpin relay carried counts too: a relayed call is a real call, and its bytes
+        // never show up in WebRTC's inbound-rtp stats. Split out as hairpin_* for diagnosis.
+        var hpAudio = 0, hpVideo = 0
+        for (hex, m) in CallMediaBridge.shared.qaHairpinInbound() {
+            audioTotal += m.audio; videoTotal += m.video; framesTotal += m.frames
+            hpAudio += m.audio; hpVideo += m.video
+            var row = perPeer[hex] ?? ["audio_bytes": 0, "video_bytes": 0, "video_frames": 0]
+            row["audio_bytes", default: 0] += m.audio
+            row["video_bytes", default: 0] += m.video
+            row["video_frames", default: 0] += m.frames
+            row["hairpin_audio_bytes"] = m.audio
+            row["hairpin_video_bytes"] = m.video
+            perPeer[hex] = row
         }
         return [
             "session": sessionId,
@@ -2023,6 +2072,10 @@ final class CallManager: NSObject, ObservableObject {
         }
         #endif
         remoteVideoTracks.removeAll(); remoteScreenTracks.removeAll(); remoteCameraOff.removeAll(); participants = []
+        signalledCameraTracks.removeAll(); signalledScreenTracks.removeAll(); hairpinVideoTracks.removeAll()
+        #if DEBUG
+        CallMediaBridge.shared.qaResetCallStats()
+        #endif
         localVideoTrack = nil; videoOn = false; screenShareOn = false
         ringing = false; speakerOn = false; muted = false; minimized = false
         isCaller = false; mediaStarted = false

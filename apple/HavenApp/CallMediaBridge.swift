@@ -31,6 +31,10 @@ final class CallMediaBridge {
 
     // Audio: one engine so voice-processing AEC sees remote playout as its echo reference.
     private var audioEngine: AVAudioEngine?
+    /// Paces silent uplink frames while the relay runs WITHOUT a microphone (see startListenOnlyAudio).
+    private var silenceTimer: Timer?
+    /// When the microphone last produced a captured buffer (written on the tap's audio thread).
+    private let lastCapture = CaptureClock()
     private var playerNode: AVAudioPlayerNode?
     private let wireFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000,
                                            channels: 1, interleaved: true)!
@@ -115,6 +119,22 @@ final class CallMediaBridge {
     /// falls back to this when WebRTC delivered no track for that peer).
     func remoteVideoTrack(_ remote: String) -> RTCVideoTrack? { remoteTracks[remote] }
 
+    #if DEBUG
+    /// Frames the relay decoded per peer + the latest frame size — the hairpin twin of WebRTC's
+    /// inbound-rtp `framesDecoded`, which never counts relayed video.
+    private var qaDecoded: [String: (frames: Int, width: Int, height: Int)] = [:]
+    func qaDecodedStats(_ remote: String) -> (frames: Int, width: Int, height: Int)? { qaDecoded[remote] }
+    /// Media bytes the relay delivered per peer — the hairpin twin of inbound-rtp `bytesReceived`.
+    /// Kept for the whole call (not cleared on deactivate) so a dump never sees the count go backwards.
+    private var qaInboundBytes: [String: (audio: Int, video: Int)] = [:]
+    func qaHairpinInbound() -> [String: (audio: Int, video: Int, frames: Int)] {
+        var out: [String: (audio: Int, video: Int, frames: Int)] = [:]
+        for (r, b) in qaInboundBytes { out[r] = (b.audio, b.video, qaDecoded[r]?.frames ?? 0) }
+        return out
+    }
+    func qaResetCallStats() { qaInboundBytes.removeAll(); qaDecoded.removeAll() }
+    #endif
+
     // MARK: - Audio
 
     /// How many times [startAudio] has deferred waiting for a usable input format.
@@ -135,6 +155,16 @@ final class CallMediaBridge {
         guard CallManager.shared.callAudioAvailable else {
             HavenLog.call("hairpin audio: waiting for the audio gate — relaying video only for now")
             CallManager.shared.requestCallAudio(reason: "hairpin")
+            return
+        }
+        // No microphone access (denied / restricted in Privacy settings) → the voice-processing I/O
+        // unit can't open the input device and `engine.start()` throws -10875, which used to leave a
+        // relayed call with NO audio in EITHER direction ("relaying video only"). The far end must
+        // still be heard, so go listen-only instead of touching the input at all.
+        let micAuth = AVCaptureDevice.authorizationStatus(for: .audio)
+        if micAuth == .denied || micAuth == .restricted {
+            HavenLog.call("hairpin audio: microphone access \(micAuth == .denied ? "denied" : "restricted") — listen-only")
+            startListenOnlyAudio()
             return
         }
         let engine = AVAudioEngine()
@@ -188,17 +218,81 @@ final class CallMediaBridge {
         }
         engine.prepare()
         do { try engine.start() } catch {
-            HavenLog.call("hairpin audio engine start failed: \(error.localizedDescription)")
+            // Typically -10875 (kAudioUnitErr_FailedInitialization) when the input device refused
+            // this client — e.g. microphone access not granted. Don't drop the call's audio entirely:
+            // play the far end through an output-only engine.
+            HavenLog.call("hairpin audio engine start failed: \(error.localizedDescription) — falling back to listen-only")
+            input.removeTap(onBus: 0)
+            engine.stop()
+            captureConverter = nil
+            startListenOnlyAudio()
             return
         }
         player.play()
         audioEngine = engine
         playerNode = player
         jitter.reset()
+        // An engine that STARTS is not proof the mic delivers anything: an input the OS silently
+        // withholds (seen on the iOS simulator) runs the graph without ever calling the tap. Keep
+        // the far end fed — silence fills in whenever capture has gone quiet (see startSilenceUplink).
+        startSilenceUplink()
+    }
+
+    /// Output-only relay audio: the far end plays through a plain player → mixer graph (no input node,
+    /// so no microphone and no voice-processing unit), and we send SILENCE upstream on a 60 ms cadence.
+    /// The silence is not filler: it is what a muted WebRTC sender emits too, and the far end's relay
+    /// liveness clock (`silenceSecs`, which ends a relayed call after 20 s of nothing) must keep seeing
+    /// us while we are present but cannot talk.
+    private func startListenOnlyAudio() {
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: wireFormat)
+        engine.prepare()
+        do { try engine.start() } catch {
+            HavenLog.call("hairpin audio: listen-only engine failed too: \(error.localizedDescription) — sending silence only")
+            startSilenceUplink()
+            return
+        }
+        player.play()
+        audioEngine = engine
+        playerNode = player
+        jitter.reset()
+        startSilenceUplink()
+    }
+
+    private func startSilenceUplink() {
+        silenceTimer?.invalidate()
+        let frame = Data(count: Self.silenceFrameBytes)
+        lastCapture.reset()
+        let t = Timer(timeInterval: Self.silenceFrameSecs, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // Real capture wins: silence only while the mic has produced nothing recently.
+                if self.lastCapture.secondsSince() < Self.silenceFrameSecs * 3 { return }
+                self.sendAudioPayload(frame)
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        silenceTimer = t
+    }
+
+    /// 60 ms of 16 kHz mono Int16.
+    nonisolated static let silenceFrameSecs: TimeInterval = 0.06
+    nonisolated static let silenceFrameBytes = 16_000 * 60 / 1000 * 2
+
+    private func sendAudioPayload(_ payload: Data) {
+        guard !activePeers.isEmpty else { return }
+        audioSeq &+= 1
+        let frame = Self.pack(.audio, seq: audioSeq, ptsMs: 0, payload: payload)
+        for r in activePeers { CallHairpin.shared.send(remote: r, frame) }
     }
 
     private func stopAudio() {
-        audioEngine?.inputNode.removeTap(onBus: 0)
+        silenceTimer?.invalidate(); silenceTimer = nil
+        // Only a full-duplex engine has a tap; a listen-only one never instantiated its input node
+        // (and touching `inputNode` here would create one — opening the very device we can't use).
+        if captureConverter != nil { audioEngine?.inputNode.removeTap(onBus: 0) }
         // `AVAudioEngine.stop()` reaches `AURemoteIO::Stop`, which aborts on an audio server that
         // wedged mid-call — park it behind the call's audio closer (no-op wait when it's healthy).
         if let engine = audioEngine, let player = playerNode {
@@ -215,6 +309,7 @@ final class CallMediaBridge {
     /// Downsample a HW capture buffer to 16 kHz mono Int16 and ship 20 ms frames.
     private func onCapturedAudio(_ buf: AVAudioPCMBuffer) {
         guard !activePeers.isEmpty, let conv = captureConverter else { return }
+        lastCapture.mark()
         let ratio = wireFormat.sampleRate / buf.format.sampleRate
         let outCap = AVAudioFrameCount(Double(buf.frameLength) * ratio) + 16
         guard let out = AVAudioPCMBuffer(pcmFormat: wireFormat, frameCapacity: outCap) else { return }
@@ -233,10 +328,7 @@ final class CallMediaBridge {
         if let err { HavenLog.call("hairpin audio convert: \(err.localizedDescription)"); return }
         guard out.frameLength > 0, let ch = out.int16ChannelData else { return }
         let bytes = Int(out.frameLength) * 2
-        let payload = Data(bytes: ch[0], count: bytes)
-        audioSeq &+= 1
-        let frame = Self.pack(.audio, seq: audioSeq, ptsMs: 0, payload: payload)
-        for r in activePeers { CallHairpin.shared.send(remote: r, frame) }
+        sendAudioPayload(Data(bytes: ch[0], count: bytes))
     }
 
     private func playAudio(seq: UInt16, payload: Data) {
@@ -367,6 +459,11 @@ final class CallMediaBridge {
     private func ingest(remote: String, frame: Data) {
         guard let (type, seq, _, payload) = Self.unpack(frame) else { return }
         lastInboundAt[remote] = Date()
+        #if DEBUG
+        var b = qaInboundBytes[remote] ?? (0, 0)
+        if type == .audio { b.audio += payload.count } else { b.video += payload.count }
+        qaInboundBytes[remote] = b
+        #endif
         switch type {
         case .audio:
             playAudio(seq: seq, payload: payload)
@@ -376,6 +473,19 @@ final class CallMediaBridge {
     }
 
     private func decodeRemote(remote: String, annexB: Data, isKey: Bool) {
+        // The far end's ONE relayed stream changes shape mid-call: camera (e.g. 640x480) → screen
+        // share (576x1280) → camera. A decompression session is bound to the SPS it was created
+        // from, so a keyframe declaring different dimensions gets a fresh decoder; reusing the old
+        // one decoded nothing at all after the switch.
+        if isKey, let existing = decoders[remote],
+           let fmt = Self.formatDescription(fromAnnexBKeyframe: annexB) {
+            let a = CMVideoFormatDescriptionGetDimensions(existing.fmt)
+            let b = CMVideoFormatDescriptionGetDimensions(fmt)
+            if a.width != b.width || a.height != b.height {
+                VTDecompressionSessionInvalidate(existing.session)
+                decoders[remote] = nil
+            }
+        }
         // A decoder needs SPS/PPS from a keyframe to initialize; ignore deltas until one arrives.
         if decoders[remote] == nil {
             guard isKey, let dec = Self.makeDecoder(fromAnnexBKeyframe: annexB, sink: { [weak self] pb, r in
@@ -397,6 +507,11 @@ final class CallMediaBridge {
             remoteTracks[remote] = track
             CallManager.shared.adoptHairpinRemoteVideo(peer: remote, track: track)
         }
+        #if DEBUG
+        var st = qaDecoded[remote] ?? (0, 0, 0)
+        st = (st.frames + 1, CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer))
+        qaDecoded[remote] = st
+        #endif
         let rtc = RTCCVPixelBuffer(pixelBuffer: pixelBuffer)
         let frame = RTCVideoFrame(buffer: rtc, rotation: ._0, timeStampNs: Int64(Date().timeIntervalSince1970 * 1_000_000_000))
         let capturer = RTCVideoCapturer(delegate: source)
@@ -469,6 +584,12 @@ extension CallMediaBridge {
     fileprivate static func makeDecoder(fromAnnexBKeyframe annexB: Data,
                             sink: @escaping (CVPixelBuffer, String) -> Void,
                             remote: String) -> Decoder? {
+        guard let fmt = formatDescription(fromAnnexBKeyframe: annexB) else { return nil }
+        return makeDecoder(fmt: fmt, sink: sink, remote: remote)
+    }
+
+    /// The H.264 format (SPS/PPS → dimensions, profile) a keyframe declares, or nil if it carries none.
+    fileprivate static func formatDescription(fromAnnexBKeyframe annexB: Data) -> CMVideoFormatDescription? {
         let nals = splitAnnexB(annexB)
         var sps: [UInt8]?; var pps: [UInt8]?
         for n in nals {
@@ -496,6 +617,12 @@ extension CallMediaBridge {
             }
         }
         guard created == noErr, let fmt else { return nil }
+        return fmt
+    }
+
+    fileprivate static func makeDecoder(fmt: CMVideoFormatDescription,
+                                        sink: @escaping (CVPixelBuffer, String) -> Void,
+                                        remote: String) -> Decoder? {
         let attrs: [String: Any] = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
         let box = DecodeSink(sink: sink, remote: remote)
         var record = VTDecompressionOutputCallbackRecord(
@@ -572,3 +699,15 @@ private final class DecodeSink {
     init(sink: @escaping (CVPixelBuffer, String) -> Void, remote: String) { self.sink = sink; self.remote = remote }
 }
 
+
+/// A timestamp written from the audio tap's thread and read on the main actor.
+private final class CaptureClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var at: TimeInterval = 0
+    func mark() { lock.lock(); at = ProcessInfo.processInfo.systemUptime; lock.unlock() }
+    func reset() { lock.lock(); at = 0; lock.unlock() }
+    func secondsSince() -> TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        return ProcessInfo.processInfo.systemUptime - at
+    }
+}

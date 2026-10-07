@@ -242,7 +242,32 @@ final class WebRTCCall: NSObject {
     }
 
     func addRemoteCandidate(_ candidate: RTCIceCandidate) {
+        #if DEBUG
+        HavenLog.call("ice remote \(WebRTCCall.candidateSummary(candidate.sdp))")
+        #endif
         pc.add(candidate) { _ in }
+    }
+
+    /// `udp 10.0.0.86:5000 host` from an `a=candidate` line — enough to see why two peers did or
+    /// did not pair, without the foundation/priority noise. DEBUG logs only (addresses are private).
+    nonisolated static func candidateSummary(_ sdp: String) -> String {
+        let f = sdp.split(separator: " ").map(String.init)
+        guard f.count >= 8 else { return sdp }
+        return "\(f[2].lowercased()) \(f[4]):\(f[5]) \(f[7])"
+    }
+
+    nonisolated static func iceStateName(_ s: RTCIceConnectionState) -> String {
+        switch s {
+        case .new: return "new"
+        case .checking: return "checking"
+        case .connected: return "connected"
+        case .completed: return "completed"
+        case .failed: return "failed"
+        case .disconnected: return "disconnected"
+        case .closed: return "closed"
+        case .count: return "count"
+        @unknown default: return "unknown(\(s.rawValue))"
+        }
     }
 
     /// Mute/unmute the mic by disabling the audio track (instant, no renegotiation).
@@ -544,9 +569,13 @@ final class WebRTCCall: NSObject {
 
 extension WebRTCCall: RTCPeerConnectionDelegate {
     func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
+        #if DEBUG
+        HavenLog.call("ice local \(WebRTCCall.candidateSummary(candidate.sdp))")
+        #endif
         onLocalCandidate?(candidate)
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
+        HavenLog.call("ice state → \(WebRTCCall.iceStateName(newState))")
         onStateChange?(newState)
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didAdd rtpReceiver: RTCRtpReceiver,

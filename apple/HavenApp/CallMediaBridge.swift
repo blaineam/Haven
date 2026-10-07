@@ -118,13 +118,11 @@ final class CallMediaBridge {
 
     // MARK: - Audio
 
-    /// How many times [startAudio] has deferred waiting for a usable input format.
-    private var audioStartAttempts = 0
     /// The voice-processing unit is being created off-main; `audioSetupToken` names the attempt.
     private var audioSetupInFlight = false
     private var audioSetupToken = 0
     private let audioSetupQueue = DispatchQueue(label: "com.blaineam.haven.hairpin.audio-setup", qos: .userInitiated)
-    /// Units that arrived after their watchdog: retained, never stopped or released (see `engineCreated`).
+    /// Units that arrived after their watchdog: retained, never stopped or released (see `engineBuilt`).
     private var abandonedEngines: [AVAudioEngine] = []
     private static let audioSetupDeadline: TimeInterval = 5
 
@@ -175,11 +173,15 @@ final class CallMediaBridge {
         audioSetupInFlight = true
         audioSetupToken &+= 1
         let token = audioSetupToken
+        let wire = wireFormat
+        // The tap fires on Core Audio's own thread — exactly as before this moved off-main — so the
+        // handler is formed here and called directly, never through a main-actor assertion.
+        let onCapture: (AVAudioPCMBuffer) -> Void = { [weak self] buf in self?.onCapturedAudio(buf) }
         audioSetupQueue.async { [weak self] in
-            let engine = AVAudioEngine()
-            try? engine.inputNode.setVoiceProcessingEnabled(true)
-            let box = EngineBox(engine)
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.engineCreated(box.engine, token: token) } }
+            // One thread builds AND starts the engine: AVAudioEngine created on one thread and
+            // started from another failed to initialize (-10875, e2e 2026-10-07).
+            let built = Self.buildEngine(wire: wire, onCapture: onCapture)
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.engineBuilt(built, token: token) } }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.audioSetupDeadline) { [weak self] in
             MainActor.assumeIsolated {
@@ -191,61 +193,78 @@ final class CallMediaBridge {
         }
     }
 
-    /// The voice-processing unit exists (created off-main by `startAudio`): finish wiring the engine.
-    private func engineCreated(_ engine: AVAudioEngine, token: Int) {
+    /// What the audio thread built: a started engine, or why not.
+    private enum BuiltEngine: @unchecked Sendable {
+        case started(AVAudioEngine, AVAudioPlayerNode, AVAudioConverter?)
+        case failed(AVAudioEngine?, String)
+    }
+
+    /// Build, wire and start the hairpin engine on the CALLING thread (the audio setup queue).
+    /// Everything that reaches the audio server — creating the voice-processing unit, reading the
+    /// input format, installing the tap, starting — happens here, never on the main thread.
+    nonisolated private static func buildEngine(wire: AVAudioFormat, onCapture: @escaping (AVAudioPCMBuffer) -> Void) -> BuiltEngine {
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        // Hardware echo cancellation / noise suppression / AGC — the same processing WebRTC uses.
+        // Enabling it on the input also enables it on the output, so the player node below becomes
+        // the echo reference. Without this a speaker call echoes badly.
+        try? input.setVoiceProcessingEnabled(true)
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: wire)
+
+        // The input format reads 0 Hz / 0 ch until the audio session is live (iOS: CallKit activates
+        // it a few hundred ms after an answer), and installTap on that format raises an uncatchable
+        // Objective-C exception. Poll briefly instead of crashing or giving up.
+        var hwFormat = input.outputFormat(forBus: 0)
+        var attempts = 0
+        while !(hwFormat.sampleRate > 0 && hwFormat.channelCount > 0) && attempts < 20 {
+            attempts += 1
+            Thread.sleep(forTimeInterval: 0.1)
+            hwFormat = input.outputFormat(forBus: 0)
+        }
+        guard hwFormat.sampleRate > 0, hwFormat.channelCount > 0 else {
+            return .failed(engine, "input format never became valid")
+        }
+        let converter = AVAudioConverter(from: hwFormat, to: wire)
+        input.installTap(onBus: 0, bufferSize: 1024, format: hwFormat) { buf, _ in onCapture(buf) }
+        engine.prepare()
+        do { try engine.start() } catch {
+            input.removeTap(onBus: 0)
+            return .failed(engine, "engine start failed: \(error.localizedDescription)")
+        }
+        player.play()
+        return .started(engine, player, converter)
+    }
+
+    /// The audio thread finished (see `startAudio`): adopt the engine, or report why the relay
+    /// carries video only.
+    private func engineBuilt(_ built: BuiltEngine, token: Int) {
         guard audioSetupInFlight, token == audioSetupToken else {
-            // Arrived after the watchdog gave up: keep it alive and untouched — releasing or stopping
-            // a unit the server is slow on reaches the same RPCs that hung.
-            abandonedEngines.append(engine)
-            HavenLog.call("hairpin audio: a late voice-processing unit arrived after the watchdog — left unused")
+            // Arrived after the watchdog gave up (or the call ended): keep whatever it built alive and
+            // untouched — stopping a unit the server is slow on reaches the same RPCs that hung.
+            if case .started(let e, _, _) = built { abandonedEngines.append(e) }
+            if case .failed(let e?, _) = built { abandonedEngines.append(e) }
+            HavenLog.call("hairpin audio: the engine arrived after its watchdog — left unused")
             return
         }
         audioSetupInFlight = false
-        guard !activePeers.isEmpty, audioEngine == nil else {
-            // The call ended while the unit was being made: dispose of it through the audio closer.
-            CallManager.shared.retireCallAudio("hairpin engine (unused)", audioLive: true) { _ = engine }
-            return
-        }
-        let input = engine.inputNode
-
-        // Hardware echo cancellation / noise suppression / AGC — the same processing WebRTC uses —
-        // was enabled on the input when the unit was created (see `startAudio`). Enabling it on the
-        // input also enables it on the output, so the player node below becomes the echo reference.
-        // Without this a speaker call echoes badly.
-        let player = AVAudioPlayerNode()
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: wireFormat)
-
-        let hwFormat = input.outputFormat(forBus: 0)
-        guard hwFormat.sampleRate > 0, hwFormat.channelCount > 0 else {
-            // Still not ready. Retry on a short bounded schedule instead of crashing or giving up:
-            // CallKit usually activates the session within a few hundred ms of the answer.
-            audioStartAttempts += 1
-            guard audioStartAttempts <= 20 else {
-                HavenLog.call("hairpin audio: input format never became valid — relaying video only")
+        switch built {
+        case .failed(_, let why):
+            HavenLog.call("hairpin audio: \(why) — relaying video only")
+        case .started(let engine, let player, let converter):
+            guard !activePeers.isEmpty, audioEngine == nil else {
+                // The call ended while the engine was being built: stop it through the audio closer.
+                CallManager.shared.retireCallAudio("hairpin engine (unused)", audioLive: true) {
+                    player.stop(); engine.stop()
+                }
                 return
             }
-            HavenLog.call("hairpin audio: input format not ready (\(hwFormat.sampleRate) Hz, \(hwFormat.channelCount) ch) — retry \(audioStartAttempts)/20")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                guard let self, !self.activePeers.isEmpty, self.audioEngine == nil else { return }
-                self.startAudio()
-            }
-            return
+            captureConverter = converter
+            audioEngine = engine
+            playerNode = player
+            jitter.reset()
         }
-        audioStartAttempts = 0
-        captureConverter = AVAudioConverter(from: hwFormat, to: wireFormat)
-        input.installTap(onBus: 0, bufferSize: 1024, format: hwFormat) { [weak self] buf, _ in
-            self?.onCapturedAudio(buf)
-        }
-        engine.prepare()
-        do { try engine.start() } catch {
-            HavenLog.call("hairpin audio engine start failed: \(error.localizedDescription)")
-            return
-        }
-        player.play()
-        audioEngine = engine
-        playerNode = player
-        jitter.reset()
     }
 
     private func stopAudio() {
@@ -621,11 +640,4 @@ private final class DecodeSink {
     let sink: (CVPixelBuffer, String) -> Void
     let remote: String
     init(sink: @escaping (CVPixelBuffer, String) -> Void, remote: String) { self.sink = sink; self.remote = remote }
-}
-
-/// Carries an `AVAudioEngine` from the setup queue back to the main actor. It is created there and
-/// handed over exactly once, never used concurrently.
-private struct EngineBox: @unchecked Sendable {
-    let engine: AVAudioEngine
-    init(_ engine: AVAudioEngine) { self.engine = engine }
 }

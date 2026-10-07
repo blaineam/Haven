@@ -118,6 +118,9 @@ final class HavenAppDelegate: NSObject, UIApplicationDelegate {
 /// orientation lock (irrelevant on Mac); no background-fetch completion handler on macOS.
 final class HavenAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if DEBUG && HAVEN_QA_STUB
+        QaExitTrace.install()
+        #endif
         // Before anything can start the relay's tunnel: reap a cloudflared a previous run left
         // behind, and make sure this run's connectors die with the app (quit or crash).
         MainActor.assumeIsolated { CloudflaredTunnel.shared.installLifecycleGuards() }
@@ -134,6 +137,12 @@ final class HavenAppDelegate: NSObject, NSApplicationDelegate {
     /// the LAST window, and accepting swaps it out — which quit Haven mid-call (e2e 2026-10-06:
     /// HavenStub exited cleanly 0.7 s after "caller goes LIVE", no crash report, exit context
     /// "unknown"). While ringing, connecting or in a call, closing the last window never quits.
+    #if DEBUG && HAVEN_QA_STUB
+    func applicationWillTerminate(_ notification: Notification) {
+        QaExitTrace.note("applicationWillTerminate (calls: inCall=\(CallManager.shared.inCall) ringing=\(CallManager.shared.ringing))")
+    }
+    #endif
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         if RelayHost.shared.enabled { MacAgent.goInvisible(); return false }
         let call = CallManager.shared

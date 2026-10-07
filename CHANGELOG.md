@@ -9,6 +9,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.0 — final (unreleased)
 
+### Fixed — Mac and iPhone: a sick audio system could freeze Haven during a call
+
+When a call falls back to the relay's own audio path, Haven turns on the system's echo cancellation.
+If macOS's audio server didn't answer (a stuck audio device, or two calls' audio units starting at
+once), that request blocked Haven's main thread until the app died. It now runs on its own thread
+with a 5-second limit: if the audio system doesn't answer, that call carries on with video only and
+the app stays responsive.
+
 ### Fixed — Mac: accepting a call could quit Haven
 
 With Haven's main window closed and the relay off, the incoming-call window was the app's last

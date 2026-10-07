@@ -101,6 +101,7 @@ final class CallMediaBridge {
 
     func stopAll() {
         let wasActive = !activePeers.isEmpty
+        if audioSetupInFlight { audioSetupInFlight = false; audioSetupToken &+= 1 }
         activePeers.removeAll()
         lastInboundAt.removeAll()
         stopAudio()
@@ -119,6 +120,13 @@ final class CallMediaBridge {
 
     /// How many times [startAudio] has deferred waiting for a usable input format.
     private var audioStartAttempts = 0
+    /// The voice-processing unit is being created off-main; `audioSetupToken` names the attempt.
+    private var audioSetupInFlight = false
+    private var audioSetupToken = 0
+    private let audioSetupQueue = DispatchQueue(label: "com.blaineam.haven.hairpin.audio-setup", qos: .userInitiated)
+    /// Units that arrived after their watchdog: retained, never stopped or released (see `engineCreated`).
+    private var abandonedEngines: [AVAudioEngine] = []
+    private static let audioSetupDeadline: TimeInterval = 5
 
     /// The call's audio gate cleared (see CallAudioGate.swift): start the relay's engine if a relay
     /// is running and its audio was held back.
@@ -137,8 +145,15 @@ final class CallMediaBridge {
             CallManager.shared.requestCallAudio(reason: "hairpin")
             return
         }
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
+        guard !audioSetupInFlight else { return }
+
+        // Creating the voice-processing IO unit (`setVoiceProcessingEnabled(true)` →
+        // `AudioComponentInstanceNew`) is a synchronous RPC to the audio server, and the gate above
+        // only proves the OUTPUT device answers. With WebRTC's own voice-processing unit opening for
+        // the same call, that RPC sat on the main thread until the app died (e2e 2026-10-06: the second
+        // call's `startAudio` hung in `HALC_ProxyObject::HasProperty`). So the unit is created on its
+        // own queue under a watchdog; a unit that never arrives costs this call its relayed audio,
+        // never the main thread.
 
         // The audio session must be LIVE before we ask the input node anything.
         //
@@ -157,10 +172,46 @@ final class CallMediaBridge {
                                  options: [.allowBluetoothHFP, .defaultToSpeaker])
         try? session.setActive(true, options: [])
         #endif
-        // Hardware echo cancellation / noise suppression / AGC — the same processing WebRTC uses.
-        // Enabling it on the input also enables it on the output, so the player node below becomes
-        // the echo reference. Without this a speaker call echoes badly.
-        try? input.setVoiceProcessingEnabled(true)
+        audioSetupInFlight = true
+        audioSetupToken &+= 1
+        let token = audioSetupToken
+        audioSetupQueue.async { [weak self] in
+            let engine = AVAudioEngine()
+            try? engine.inputNode.setVoiceProcessingEnabled(true)
+            let box = EngineBox(engine)
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.engineCreated(box.engine, token: token) } }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.audioSetupDeadline) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.audioSetupInFlight, self.audioSetupToken == token else { return }
+                self.audioSetupInFlight = false
+                self.audioSetupToken &+= 1   // a unit that turns up later is abandoned, never touched
+                HavenLog.call("hairpin audio: the audio server did not create the voice-processing unit within \(Int(Self.audioSetupDeadline)) s — this call relays video only")
+            }
+        }
+    }
+
+    /// The voice-processing unit exists (created off-main by `startAudio`): finish wiring the engine.
+    private func engineCreated(_ engine: AVAudioEngine, token: Int) {
+        guard audioSetupInFlight, token == audioSetupToken else {
+            // Arrived after the watchdog gave up: keep it alive and untouched — releasing or stopping
+            // a unit the server is slow on reaches the same RPCs that hung.
+            abandonedEngines.append(engine)
+            HavenLog.call("hairpin audio: a late voice-processing unit arrived after the watchdog — left unused")
+            return
+        }
+        audioSetupInFlight = false
+        guard !activePeers.isEmpty, audioEngine == nil else {
+            // The call ended while the unit was being made: dispose of it through the audio closer.
+            CallManager.shared.retireCallAudio("hairpin engine (unused)", audioLive: true) { _ = engine }
+            return
+        }
+        let input = engine.inputNode
+
+        // Hardware echo cancellation / noise suppression / AGC — the same processing WebRTC uses —
+        // was enabled on the input when the unit was created (see `startAudio`). Enabling it on the
+        // input also enables it on the output, so the player node below becomes the echo reference.
+        // Without this a speaker call echoes badly.
         let player = AVAudioPlayerNode()
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: wireFormat)
@@ -572,3 +623,9 @@ private final class DecodeSink {
     init(sink: @escaping (CVPixelBuffer, String) -> Void, remote: String) { self.sink = sink; self.remote = remote }
 }
 
+/// Carries an `AVAudioEngine` from the setup queue back to the main actor. It is created there and
+/// handed over exactly once, never used concurrently.
+private struct EngineBox: @unchecked Sendable {
+    let engine: AVAudioEngine
+    init(_ engine: AVAudioEngine) { self.engine = engine }
+}

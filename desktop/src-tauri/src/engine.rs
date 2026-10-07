@@ -7960,6 +7960,10 @@ impl Engine {
             return true;
         }
         let mut landed = false;
+        // Per-relay outcome, logged only when the envelope landed NOWHERE (it then waits for the
+        // next backfill sweep, minutes away) — the e2e otherwise sees a post that "never" arrived
+        // with nothing in the log to say why.
+        let mut misses: Vec<String> = Vec::new();
         // 1) Mirror to EVERY configured Haven relay (redundancy). Content-addressed keys make
         //    re-puts idempotent, and a relay in backoff is skipped — graceful fallback.
         //    SYMMETRIC with poll_mailbox's ephemeral fallback: a selfsync-learned circle whose
@@ -8025,6 +8029,7 @@ impl Engine {
             if let Some((bases, token)) = self.relay_http_reachable(&node_hex) {
                 for base in &bases {
                     if self.http_url_bad(base) {
+                        misses.push(format!("{}:{}=cooldown", &node_hex[..8.min(node_hex.len())], base));
                         continue;
                     }
                     match self.http_put(base, &token, &key, env.to_vec()).await {
@@ -8043,7 +8048,10 @@ impl Engine {
                             put_ok = true; // "handled" — skip the iroh leg for a refusal
                             break;
                         }
-                        Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
+                        Err(RelayErr::Unreachable) => {
+                            misses.push(format!("{}:{}=unreachable", &node_hex[..8.min(node_hex.len())], base));
+                            self.mark_http_url_bad(base)
+                        }
                     }
                 }
             }
@@ -8058,6 +8066,7 @@ impl Engine {
                         }
                         Err(e) => {
                             log::debug!("mailbox put failed ({node_hex}): {e}");
+                            misses.push(format!("{}:iroh={e}", &node_hex[..8.min(node_hex.len())]));
                             self.relay_failed(&node_hex).await;
                         }
                     }
@@ -8073,6 +8082,12 @@ impl Engine {
         }
         if landed {
             self.mark_mailbox_seen(key);
+        } else if !misses.is_empty() {
+            log::warn!(
+                "upload_event circle={} landed nowhere: {}",
+                &circle_id.chars().take(16).collect::<String>(),
+                misses.join(", ")
+            );
         }
         landed
     }

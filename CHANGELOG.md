@@ -9,6 +9,28 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.0 — final (unreleased)
 
+### Fixed — a screen share over the relay now shows up on the other side
+
+When two devices can't connect directly, Haven carries the call over your relay. A screen share in
+such a call reached the other device, but iPhone, iPad and Mac put the shared screen into the small
+camera tile and left the big screen-share stage black. A share that switched size (camera to screen
+and back) could also stop showing anything. Shared screens now fill the stage over the relay just as
+they do on a direct connection.
+
+### Fixed — Android calls switch to the relay in seconds when a direct path isn't working
+
+Android only moved a call onto the relay once the direct connection had completely given up, which
+can take half a minute or never happen at all. Until then the other side might already be sending
+over the relay while Android wasn't listening, so you heard or saw nothing. Like iPhone, iPad and Mac,
+Android now brings the relay up after a short head start and drops it again if the direct path
+connects.
+
+### Fixed — iPhone, iPad and Mac: no microphone access no longer silences a relayed call
+
+If Haven isn't allowed to use the microphone, a call carried over the relay used to drop audio in
+both directions. You now still hear the other person, and the call stays connected (Haven sends
+silence where your voice would be).
+
 ### Fixed — iPhone and Mac: Haven could vanish mid-call
 
 When a call ran over the relay and the other side's connection dropped, a write to that closed

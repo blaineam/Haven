@@ -10,7 +10,8 @@ enum QaExitTrace {
         atexit {
             QaExitTrace.note("atexit: process exiting")
         }
-        for sig in [SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGABRT, SIGPIPE] {
+        // SIGPIPE is deliberately absent: the app ignores it (HavenApp.init) and must keep doing so.
+        for sig in [SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGABRT] {
             signal(sig) { s in
                 // Async-signal-safe: a fixed message straight to stdout, then the default action.
                 let msg = "[QaExitTrace] signal \(s) received\n"

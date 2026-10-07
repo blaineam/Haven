@@ -9,6 +9,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.0 — final (unreleased)
 
+### Fixed — iPhone and Mac: Haven could vanish mid-call
+
+When a call ran over the relay and the other side's connection dropped, a write to that closed
+connection made macOS/iOS end Haven on the spot — no crash report, it was just gone. Haven now treats
+that as an ordinary network error. The notification extension gets the same protection.
+
 ### Fixed — Mac and iPhone: a sick audio system could freeze Haven during a call
 
 When a call falls back to the relay's own audio path, Haven turns on the system's echo cancellation.

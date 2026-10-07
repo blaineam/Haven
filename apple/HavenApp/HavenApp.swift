@@ -250,6 +250,13 @@ struct HavenApp: App {
     #endif
 
     init() {
+        // A write to a socket the other side already closed raises SIGPIPE, whose default action
+        // ends the process silently — no crash report, exit reason "unknown". Rust ignores it in its
+        // own binaries, but not as a library inside this app, so a call's relay socket dropping
+        // killed Haven mid-call (e2e 2026-10-07: HavenStub, signal 13, a second after "hairpin
+        // paired"). Ignored process-wide, before any networking starts: the write fails with EPIPE
+        // and the existing error paths handle it.
+        signal(SIGPIPE, SIG_IGN)
         // UI-test launches (DEBUG only): wipe this app's own state BEFORE any store reads it, and
         // turn animations off. A no-op for every other launch, and compiled out of Release.
         UITestMode.applyAtLaunch()

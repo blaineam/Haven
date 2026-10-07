@@ -22,8 +22,13 @@ final class NotificationService: UNNotificationServiceExtension {
     private var contentHandler: ((UNNotificationContent) -> Void)?
     private var bestAttempt: UNMutableNotificationContent?
 
+    /// SIGPIPE ignored like the app (see HavenApp.init): the extension fetches over the same
+    /// sockets, and an extension killed by SIGPIPE just shows nothing.
+    private static let ignoreSIGPIPE: Void = { signal(SIGPIPE, SIG_IGN) }()
+
     override func didReceive(_ request: UNNotificationRequest,
                              withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void) {
+        _ = Self.ignoreSIGPIPE
         self.contentHandler = contentHandler
         let best = (request.content.mutableCopy() as? UNMutableNotificationContent)
             ?? UNMutableNotificationContent()

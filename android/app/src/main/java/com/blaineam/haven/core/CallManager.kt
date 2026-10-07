@@ -205,6 +205,8 @@ object CallManager {
 
     /** Peers whose media is currently relayed over the /webrtc/hairpin WebSocket (ICE failed). */
     private val hairpinPeers = HashSet<String>()
+    /** Last ICE state per peer (call thread) — what [scheduleHairpinRace] reads. */
+    private val lastIce = HashMap<String, PeerConnection.IceConnectionState>()
 
     // Active-speaker detection (Apple parity). Same threshold and debounce, so a group call
     // highlights the same person on every platform at the same moment.
@@ -909,6 +911,7 @@ object CallManager {
             // Apple parity (CallManager.swift `c.polite = myHex > peer`): the larger hex yields.
             polite = myHex > peer,
         ).also { conn ->
+            scheduleHairpinRace(peer, conn)
             // Joined while I'm already sharing: the screen rides this peer's first negotiation
             // (no immediate offer — that would collide with the initial one).
             screenTrack?.let {
@@ -936,7 +939,29 @@ object CallManager {
         callHandler.post { onPeerIceStateOnCall(peer, s) }
     }
 
+    /** Race the relay against the direct path for [peer] (see [HairpinRace]). Call thread. */
+    private fun scheduleHairpinRace(peer: String, conn: WebRTCPeer, check: Int = 1) {
+        callHandler.postDelayed({
+            when (HairpinRace.decide(
+                peerAlive = peers[peer] === conn,
+                relaying = hairpinPeers.contains(peer),
+                ice = lastIce[peer],
+                ringing = ringing.value,
+                inCall = inCall.value,
+            )) {
+                HairpinRace.Verdict.RELAY -> {
+                    Log.i(TAG, "direct media not up in ${HairpinRace.GRACE_MS}ms — racing hairpin for ${peer.take(8)}")
+                    startHairpin(peer)
+                }
+                HairpinRace.Verdict.WAIT ->
+                    if (check < HairpinRace.MAX_CHECKS) scheduleHairpinRace(peer, conn, check + 1)
+                HairpinRace.Verdict.DONE -> Unit
+            }
+        }, HairpinRace.GRACE_MS)
+    }
+
     private fun onPeerIceStateOnCall(peer: String, s: PeerConnection.IceConnectionState) {
+        if (peers.containsKey(peer)) lastIce[peer] = s
         when (s) {
             PeerConnection.IceConnectionState.CONNECTED,
             PeerConnection.IceConnectionState.COMPLETED -> {
@@ -1122,6 +1147,7 @@ object CallManager {
 
     private fun dropPeer(peer: String) {
         if (hairpinPeers.remove(peer)) CallMediaBridge.deactivate(peer)
+        lastIce.remove(peer)
         CallHairpin.close(peer)
         peers.remove(peer)?.close()
         roster.remove(peer)
@@ -1462,6 +1488,7 @@ object CallManager {
         runCatching { CallMediaBridge.stopAll() }
         runCatching { CallHairpin.closeAll() }
         hairpinPeers.clear()
+        lastIce.clear()
         peers.values.forEach { it.close() }; peers.clear()
         releaseScreenCapture()
         screenShareStarting = false

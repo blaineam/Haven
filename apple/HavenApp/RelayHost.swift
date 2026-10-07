@@ -34,6 +34,11 @@ final class RelayHost: ObservableObject {
     /// Bumps on every stop/start so in-flight `startHttpInterface` Tasks cannot resurrect
     /// dual free tunnels or a dead path-proxy after the user toggled hosting.
     private var startGeneration: UInt64 = 0
+    /// The start generation whose front door finished publishing (urls applied, DERP finalized,
+    /// reannounce burst sent). QA: the e2e waits on it after toggling hosting, so the next step
+    /// doesn't race the host's own tunnel setup + the fabric rebind it triggers.
+    private(set) var frontDoorSettledGen: UInt64 = 0
+    var frontDoorSettled: Bool { serving && frontDoorSettledGen == startGeneration }
     /// Media HTTP bind port (usually 8674) — watchdog verifies it stays up.
     private(set) var mediaHttpPort: UInt16?
     /// Front-door local port (path router 8675 when unified, else media).
@@ -400,6 +405,7 @@ final class RelayHost: ObservableObject {
             // Free trycloudflare rotates on every restart — burst reannounce so peers drop the
             // dead hostname and learn the new one (frame 19).
             self.reannounceBurst()
+            self.frontDoorSettledGen = generation
             #else
             var urls = Self.reachableHttpUrls(port: port)
             HavenLog.relay(
@@ -410,6 +416,7 @@ final class RelayHost: ObservableObject {
             self.publishOwnInterface(urls: urls, token: token)
             SharedStore.clearAllHttpUrlBad()
             self.reannounceBurst()
+            self.frontDoorSettledGen = generation
             #endif
         }
     }

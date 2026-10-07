@@ -9,6 +9,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.0 — final (unreleased)
 
+### Fixed — iPhone, iPad and Mac stop going back to a relay's old address
+
+When a relay moved to a new address, older announcements of its previous address kept arriving
+from the circle and the mailbox, and iPhone, iPad and Mac could switch back to the dead address
+and keep trying it. They now ignore an echo of an address they just moved off for ten minutes, as
+Android already did. The relay's own description of itself still always wins.
+
 ### Fixed — a screen share over the relay now shows up on the other side
 
 When two devices can't connect directly, Haven carries the call over your relay. A screen share in

@@ -88,6 +88,32 @@ enum RelayAddress {
         return announced.filter { !old.contains($0) }
     }
 
+    /// How long an interface we moved AWAY from stays a known-stale echo. Outlasts the 5-minute
+    /// re-announce tail members keep up for a relay, plus mailbox replays of older frame-19s.
+    static let revertGuardMs: UInt64 = 10 * 60_000
+
+    /// The interface (urls + token) we replaced, and when.
+    struct Replaced: Equatable {
+        let urls: [String]
+        let token: String
+        let atMs: UInt64
+    }
+
+    /// Is a frame-19 announce of `announced`/`token` just a STALE ECHO of the interface we moved off?
+    ///
+    /// Announces carry no generation, every member re-announces whatever URLs it holds, and the
+    /// mailbox re-offers older frame-19 copies — so for a while after a relay moves its door the old
+    /// and new interfaces arrive interleaved, and adopting whichever spoke last flip-flopped us
+    /// between them (2026-10-07 gate: the Mac kept LISTing R_A's abandoned port after it had learned
+    /// the new one). Only an exact revert to the set we replaced, inside `revertGuardMs`, is refused;
+    /// the relay's own self-published interface doc is authoritative and bypasses this. Android
+    /// parity (`RelayUrls.isStaleRevert`).
+    static func isStaleRevert(_ replaced: Replaced?, announced: [String], token: String, nowMs: UInt64) -> Bool {
+        guard let replaced else { return false }
+        if nowMs < replaced.atMs || nowMs - replaced.atMs >= revertGuardMs { return false }
+        return replaced.token == token && Set(replaced.urls) == Set(announced)
+    }
+
     /// Which of a circle's relay entries a newly learned relay SUPERSEDES: entries equal to a member's
     /// (or my own) ACCOUNT id — pre-device-seed leftovers nothing serves. Never one that is a live
     /// relay (announced to us as a relay, or with an announced HTTP interface): a Mac hosting its

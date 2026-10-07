@@ -100,6 +100,29 @@ final class RelayAddressTests: XCTestCase {
                        ["https://x.example"], "a relay we never held")
     }
 
+    // MARK: - Stale echoes of an interface we moved off (Android `RelayUrls.isStaleRevert` parity)
+
+    func testAnEchoOfTheDoorWeMovedOffIsRefusedForTheGuardWindow() {
+        let oldDoor = ["http://127.0.0.1:8684", "http://10.0.0.86:18684"]
+        let r = RelayAddress.Replaced(urls: oldDoor, token: "t", atMs: 1_000)
+        XCTAssertTrue(RelayAddress.isStaleRevert(r, announced: oldDoor, token: "t", nowMs: 2_000))
+        XCTAssertTrue(RelayAddress.isStaleRevert(r, announced: oldDoor.reversed(), token: "t", nowMs: 2_000),
+                      "order does not matter")
+        XCTAssertFalse(RelayAddress.isStaleRevert(r, announced: oldDoor, token: "t",
+                                                  nowMs: 1_000 + RelayAddress.revertGuardMs),
+                       "after the guard window a revert is believed again")
+    }
+
+    func testANewDoorARotatedTokenOrNoHistoryIsNotAnEcho() {
+        let oldDoor = ["http://127.0.0.1:8684"]
+        let r = RelayAddress.Replaced(urls: oldDoor, token: "t", atMs: 1_000)
+        XCTAssertFalse(RelayAddress.isStaleRevert(r, announced: ["http://127.0.0.1:8688"], token: "t", nowMs: 2_000))
+        XCTAssertFalse(RelayAddress.isStaleRevert(r, announced: oldDoor, token: "t2", nowMs: 2_000))
+        XCTAssertFalse(RelayAddress.isStaleRevert(nil, announced: oldDoor, token: "t", nowMs: 2_000))
+        XCTAssertFalse(RelayAddress.isStaleRevert(r, announced: oldDoor, token: "t", nowMs: 500),
+                       "a clock that went backwards proves nothing")
+    }
+
     private let acct = String(repeating: "f", count: 64)
     private let device = String(repeating: "d", count: 64)
 

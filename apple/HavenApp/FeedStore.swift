@@ -4383,7 +4383,9 @@ final class FeedStore: ObservableObject {
             "relay_stats": SharedStore.qaRelayStats(),
             "relay_link": Self.qaRelayLink,
             "hosted_relay": ["node": RelayHost.shared.nodeId, "serving": RelayHost.shared.serving,
-                             "enabled": RelayHost.shared.enabled, "httpPort": Int(RelayHost.shared.mediaHttpPort ?? 0)],
+                             "enabled": RelayHost.shared.enabled, "httpPort": Int(RelayHost.shared.mediaHttpPort ?? 0),
+                             "front_door_settled": RelayHost.shared.frontDoorSettled,
+                             "fabric_rebinding": fabricRebindPending || fabricRebindInFlight],
             "relay_probe": Self.qaRelayProbe,
             // Liveness: strictly increasing while the driver is healthy. The orchestrator watches it
             // to tell a FROZEN dump apart from a device that genuinely received nothing — they are
@@ -8423,12 +8425,23 @@ final class FeedStore: ObservableObject {
         }()
         if !announcedUrls.isEmpty, !announcedToken.isEmpty {
             let held = RelayMailboxStore.shared.httpInterface(lower)
-            RelayMailboxStore.shared.setHttpInterface(lower, urls: announcedUrls, token: announcedToken)
-            // New/rotated free CF hostname — stop skipping the old cool-down window. ONLY for a
-            // changed interface: a plain re-announce of a relay that just died must not send us
-            // straight back to its dead door (see `RelayAddress.urlsToForgive`).
-            for u in RelayAddress.urlsToForgive(held: held, announced: announcedUrls, token: announcedToken) {
-                SharedStore.clearHttpUrlBad(u)
+            let entry = RelayMailboxStore.shared.entries[lower]
+            let nowMs = now()
+            if RelayAddress.isStaleRevert(replacedInterfaces[lower], announced: announcedUrls,
+                                          token: announcedToken, nowMs: nowMs) {
+                HavenLog.relay("relay \(lower.prefix(8)): ignoring a stale echo of the http interface it moved off")
+            } else {
+                if let oldUrls = entry?.httpUrls, !oldUrls.isEmpty,
+                   oldUrls != announcedUrls || entry?.httpToken != announcedToken {
+                    replacedInterfaces[lower] = RelayAddress.Replaced(urls: oldUrls, token: entry?.httpToken ?? "", atMs: nowMs)
+                }
+                RelayMailboxStore.shared.setHttpInterface(lower, urls: announcedUrls, token: announcedToken)
+                // New/rotated free CF hostname — stop skipping the old cool-down window. ONLY for a
+                // changed interface: a plain re-announce of a relay that just died must not send us
+                // straight back to its dead door (see `RelayAddress.urlsToForgive`).
+                for u in RelayAddress.urlsToForgive(held: held, announced: announcedUrls, token: announcedToken) {
+                    SharedStore.clearHttpUrlBad(u)
+                }
             }
         }
         let nowPublicHttp = announcedUrls.contains { $0.hasPrefix("https://") }
@@ -8471,6 +8484,9 @@ final class FeedStore: ObservableObject {
 
     /// Last fetch attempt per relay, so a media-miss storm can't hammer the same relay.
     private var relayInterfaceRefreshMs: [String: UInt64] = [:]
+    /// Per relay: the HTTP interface a frame-19 (or the relay's own doc) moved us OFF, and when —
+    /// so a stale echo of it can't flip us back (`RelayAddress.isStaleRevert`).
+    private var replacedInterfaces: [String: RelayAddress.Replaced] = [:]
 
     /// Fetch a relay's SELF-PUBLISHED interface (`haven/relay/__interface__` — its current public
     /// HTTP URLs + token + DERP/TURN, written by the relay process at startup) over the iroh
@@ -8512,6 +8528,14 @@ final class FeedStore: ObservableObject {
                   let token = obj["token"] as? String, !token.isEmpty
             else { return }
             HavenLog.relay("relay interface \(lower.prefix(10)): learned \(urls.count) url(s) over iroh — adopting + re-announcing")
+            // The relay's own doc is authoritative: adopt it even over a guarded revert, and guard
+            // what it replaced against stale frame-19 echoes (RelayAddress.isStaleRevert).
+            if let e = RelayMailboxStore.shared.entries[lower], let oldUrls = e.httpUrls, !oldUrls.isEmpty,
+               oldUrls != urls || e.httpToken != token {
+                self.replacedInterfaces[lower] = RelayAddress.Replaced(urls: oldUrls, token: e.httpToken ?? "", atMs: self.now())
+            } else if let r = self.replacedInterfaces[lower], Set(r.urls) == Set(urls), r.token == token {
+                self.replacedInterfaces[lower] = nil   // the relay really did move back
+            }
             RelayMailboxStore.shared.setHttpInterface(lower, urls: urls, token: token)
             for u in urls { SharedStore.clearHttpUrlBad(u) }
             if let derp = obj["derp"] as? String, !derp.isEmpty {

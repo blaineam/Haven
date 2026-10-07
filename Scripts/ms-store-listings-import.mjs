@@ -139,6 +139,8 @@ const enMeta = await loadMetadata(`${ROOT}/appstore-metadata.md`);
 const version = (enMeta.whats_new || '').match(/^\d+\.\d+\.\d+/)?.[0] || die('en whats_new does not start with a version');
 fieldRow.get('ReleaseNotes')[enIdx] = enMeta.whats_new.slice(0, 1500);
 
+const STORE_TITLE = 'Haven Private Circles';
+fieldRow.get('Title')[enIdx] = STORE_TITLE;
 const cap = (v, n) => (v && v.length > n ? v.slice(0, n) : v || '');
 for (const [code] of LOCALES) {
   // A re-export after a previous import already carries the language column — update it in
@@ -153,9 +155,9 @@ for (const [code] of LOCALES) {
   const put = (field, val) => { const r = fieldRow.get(field); if (r) { while (r.length < col) r.push(''); r[col] = val ?? ''; } else if (val) console.log(`⚠ template has no row "${field}" — skipped for ${code}`); };
   put('Description', cap(m.description, 10000));
   put('ReleaseNotes', cap(m.whats_new, 1500));
-  // Store titles must be a RESERVED product name (Partner Center rejects anything else, e.g. the
-  // localized App Store names) — every language keeps the live en-us title.
-  put('Title', enCell('Title') || 'Haven 〇');
+  // Store titles must be a RESERVED product name — Partner Center rejects anything else (the
+  // localized App Store names, and the old "Haven 〇"). The reserved name is "Haven Private Circles".
+  put('Title', STORE_TITLE);
   put('ShortTitle', 'Haven');
   put('ShortDescription', cap(m.promotional_text || m.subtitle, 200));
   put('DevStudio', enCell('DevStudio'));

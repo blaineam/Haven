@@ -129,8 +129,15 @@ final class HavenAppDelegate: NSObject, NSApplicationDelegate {
     /// When the relay is ON, closing the window must NOT quit — Haven keeps forwarding INVISIBLY (no
     /// dock icon, no menu bar); re-launching brings the window back. With the relay off it behaves like
     /// a normal Mac app and quits when the last window closes.
+    ///
+    /// A call is never ended by window bookkeeping: with the main window closed, the ring window is
+    /// the LAST window, and accepting swaps it out — which quit Haven mid-call (e2e 2026-10-06:
+    /// HavenStub exited cleanly 0.7 s after "caller goes LIVE", no crash report, exit context
+    /// "unknown"). While ringing, connecting or in a call, closing the last window never quits.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         if RelayHost.shared.enabled { MacAgent.goInvisible(); return false }
+        let call = CallManager.shared
+        if call.inCall || call.connecting || call.ringing { return false }
         return true
     }
 

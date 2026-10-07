@@ -9,6 +9,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.0 — final (unreleased)
 
+### Fixed — Mac: accepting a call could quit Haven
+
+With Haven's main window closed and the relay off, the incoming-call window was the app's last
+window — and accepting the call swapped it out, so macOS's "quit when the last window closes" ended
+Haven mid-call. Haven now never quits that way while a call is ringing, connecting or live.
+
 ### Fixed — your other devices learn a circle's new relay in seconds
 
 Adding a relay to a circle (or changing the default, deactivating, deleting or re-adding one) told

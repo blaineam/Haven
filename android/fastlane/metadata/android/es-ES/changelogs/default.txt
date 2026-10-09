@@ -1,7 +1,3 @@
-2.0.0 — Más ligero, más rápido, más claro.
-• Fotos y vídeos se suben una vez al relay de tu círculo y tus amigos los bajan de allí: el móvil se calienta menos.
-• Las transferencias grandes paran en llamadas, con calor o en Ahorro de batería.
-• Ve a quién llega cada publicación y escribe a alguien desde su perfil.
-• Nuevos amigos conectados en segundos.
-• Arranque más rápido, desplazamiento fluido, sincronización honesta.
-• Compartir pantalla desde Android ya llega a todos.
+2.0.1 — Más fluida y ligera.
+• Las portadas de canciones usan mucha menos memoria, así que el desplazamiento sigue siendo fluido.
+• Mejoras internas que hacen Haven más rápida y ligera en memoria.

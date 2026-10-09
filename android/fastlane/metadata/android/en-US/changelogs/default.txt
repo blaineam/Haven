@@ -1,7 +1,3 @@
-2.0.0 — Lighter, faster, clearer.
-• Photos and videos go up to your circle's relay once and friends fetch them there, so your phone runs cooler.
-• Big transfers pause during calls, when your phone is hot, or in Battery Saver.
-• See exactly who a post reaches, and message people right from their profile.
-• New friends connect in seconds.
-• Faster launch, smoother scrolling, honest sync status.
-• Screen sharing from Android now reaches everyone on the call.
+2.0.1 — Smoother and lighter.
+• Song artwork uses much less memory, so scrolling past songs stays smooth.
+• Under-the-hood updates that make Haven faster and lighter on memory.

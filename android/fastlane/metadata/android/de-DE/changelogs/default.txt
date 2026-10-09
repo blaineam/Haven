@@ -1,7 +1,3 @@
-2.0.0 — Leichter, schneller, klarer.
-• Fotos und Videos gehen einmal aufs Relay deines Kreises, Freunde holen sie dort ab – dein Handy bleibt kühler.
-• Große Übertragungen pausieren bei Anrufen, Hitze oder im Energiesparmodus.
-• Sieh, wen ein Beitrag erreicht, und schreib Leuten direkt aus ihrem Profil.
-• Neue Freunde verbinden sich in Sekunden.
-• Schnellerer Start, flüssigeres Scrollen, ehrlicher Sync-Status.
-• Bildschirmfreigabe von Android erreicht jetzt alle im Anruf.
+2.0.1 – Flüssiger und schlanker.
+• Song-Cover brauchen deutlich weniger Speicher, damit das Scrollen an Songs vorbei flüssig bleibt.
+• Technische Verbesserungen, die Haven schneller machen und weniger Speicher brauchen.

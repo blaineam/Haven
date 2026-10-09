@@ -82,11 +82,42 @@ fun rememberArtwork(raw: String?): ImageBitmap? {
         // otherwise fetch remote artwork. No art is the honest render for an offline run.
         if (com.blaineam.haven.core.HavenOffline.enabled) return@LaunchedEffect
         val b = withContext(Dispatchers.IO) {
-            runCatching { URL(url).openStream().use { BitmapFactory.decodeStream(it) }?.asImageBitmap() }.getOrNull()
+            runCatching { fetchArtwork(url) }.getOrNull()
         }
         artCache[url] = b; bmp = b
     }
     return bmp
+}
+
+private const val ARTWORK_MAX_BYTES = 4 * 1024 * 1024
+private const val ARTWORK_TARGET_PX = 512
+
+/**
+ * Fetch and decode album art without trusting the server's dimensions: the download is byte-capped,
+ * the header is measured first, and the pixels are downsampled toward what a song chip draws. A
+ * straight decodeStream would rasterize whatever the URL claims at full size.
+ */
+private fun fetchArtwork(url: String): ImageBitmap? {
+    val raw = URL(url).openStream().use { input ->
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(16 * 1024)
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            out.write(buf, 0, n)
+            if (out.size() > ARTWORK_MAX_BYTES) return null
+        }
+        out.toByteArray()
+    }
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(raw, 0, raw.size, bounds)
+    val w = bounds.outWidth
+    val h = bounds.outHeight
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return null
+    var sample = 1
+    while (w / (sample * 2) >= ARTWORK_TARGET_PX && h / (sample * 2) >= ARTWORK_TARGET_PX) sample *= 2
+    val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+    return BitmapFactory.decodeByteArray(raw, 0, raw.size, opts)?.asImageBitmap()
 }
 
 /**

@@ -7,6 +7,14 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 2.0.1 (unreleased)
+
+### Fixed — Android album artwork no longer decodes at full size
+
+Song artwork on Android was downloaded and decoded at whatever size the server sent. It is now
+capped at 4 MB, its dimensions are checked before decoding, and it is scaled down to about the size
+a song chip draws, which keeps memory use low when many song chips scroll past.
+
 ## 2.0.0 (2026-10-07)
 
 ### Fixed — iPhone, iPad and Mac stop going back to a relay's old address

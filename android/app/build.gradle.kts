@@ -1,6 +1,5 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
@@ -91,15 +90,13 @@ android {
     sourceSets {
         // The demo dataset's photos/avatars live with the debug-only assets; the minified smoke
         // run seeds the same dataset, so it needs them too. Release never sees them.
-        getByName("minified").assets.srcDir("src/debug/assets")
+        getByName("minified").assets.directories += "src/debug/assets"
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = "17"
+        // Built-in Kotlin takes its jvmTarget from targetCompatibility, so no kotlinOptions block.
     }
     buildFeatures {
         compose = true
@@ -112,9 +109,14 @@ android {
     }
 
     // Per-ABI APKs so a sideloadable arm64 build is ~half the size of the universal one.
+    // Off for app-bundle builds: AGP 9's optimized resource shrinking refuses to bundle while ABI
+    // splits are on ("Multiple shrunk-resources files found", issuetracker 402800800), and Play
+    // splits a bundle per ABI itself. CI builds the .aab in its own Gradle invocation, so
+    // `bundleRelease` and `assembleRelease` never share this switch.
+    val buildingBundle = gradle.startParameter.taskNames.any { it.substringAfterLast(':').startsWith("bundle") }
     splits {
         abi {
-            isEnable = true
+            isEnable = !buildingBundle
             reset()
             include("arm64-v8a", "x86_64")
             isUniversalApk = true   // also keep a universal one for the emulator

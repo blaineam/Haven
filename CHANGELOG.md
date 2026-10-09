@@ -15,6 +15,12 @@ Song artwork on Android was downloaded and decoded at whatever size the server s
 capped at 4 MB, its dimensions are checked before decoding, and it is scaled down to about the size
 a song chip draws, which keeps memory use low when many song chips scroll past.
 
+### Changed — Android build toolchain moved to Android Gradle Plugin 9
+
+The Android app now builds with Android Gradle Plugin 9.4.1, Gradle 9.6.0 and Kotlin 2.2.21, using
+the plugin's built-in Kotlin support. This brings R8's newer code and resource shrinking, which
+Google Play recommended to reduce the app's memory use and improve its performance.
+
 ## 2.0.0 (2026-10-07)
 
 ### Fixed — iPhone, iPad and Mac stop going back to a relay's old address

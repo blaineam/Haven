@@ -116,3 +116,11 @@
 -keep class com.blaineam.haven.core.SyncWorker {
     public <init>(android.content.Context, androidx.work.WorkerParameters);
 }
+
+# AGP 9 / R8 strict full mode: a body-less `-keep class A` no longer keeps A's no-arg constructor.
+# Room and WorkManager ship exactly such rules (`-keep class * extends androidx.room.RoomDatabase`,
+# `-keep class * extends androidx.work.InputMerger`) and then instantiate those classes reflectively
+# through `<init>()` — WorkDatabase_Impl at WorkManager startup (every launch crashed in
+# androidx.room.Room.getGeneratedImplementation) and OverwritingInputMerger when work is enqueued.
+-keep class * extends androidx.room.RoomDatabase { <init>(); }
+-keep class * extends androidx.work.InputMerger { <init>(); }

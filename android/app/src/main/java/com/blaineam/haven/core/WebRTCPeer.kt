@@ -233,20 +233,20 @@ class WebRTCPeer(
         }
     }
 
-    private fun applyRemoteOffer(pc: PeerConnection, sdp: String) {
+    private fun applyRemoteOffer(pc: PeerConnection, offerSdp: String) {
         pc.setRemoteDescription(object : SimpleSdp() {
             override fun onSetSuccess() {
                 remoteSet = true; flushCandidates()
                 pc.createAnswer(object : SimpleSdp() {
-                    override fun onCreateSuccess(answer: SessionDescription) {
+                    override fun onCreateSuccess(sdp: SessionDescription) {
                         pc.setLocalDescription(object : SimpleSdp() {
                             override fun onSetSuccess() { renegotiateIfPending() }
-                        }, answer)
-                        onLocalSdp("answer", answer.description)
+                        }, sdp)
+                        onLocalSdp("answer", sdp.description)
                     }
                 }, mediaConstraints())
             }
-        }, SessionDescription(SessionDescription.Type.OFFER, sdp))
+        }, SessionDescription(SessionDescription.Type.OFFER, offerSdp))
     }
 
     fun onRemoteAnswer(sdp: String) {

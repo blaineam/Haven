@@ -2848,9 +2848,15 @@ final class FeedStore: ObservableObject {
         guard var root = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any],
               let circles = root["circles"] as? [[String: Any]] else { return nil }
         let ownLower = Set(own.map { $0.lowercased() })
+        // A member bundle is base64 (current core) or an array of byte values (state files written
+        // before the compact encoding — see `persist_bytes` in the core).
         func bundleHex(_ v: Any) -> String {
-            guard let bytes = v as? [NSNumber], bytes.count >= 32 else { return "" }
-            return bytes.prefix(32).map { String(format: "%02x", $0.uint8Value) }.joined()
+            let bytes: [UInt8]
+            if let s = v as? String, let d = Data(base64Encoded: s) { bytes = Array(d) }
+            else if let nums = v as? [NSNumber] { bytes = nums.map(\.uint8Value) }
+            else { return "" }
+            guard bytes.count >= 32 else { return "" }
+            return bytes.prefix(32).map { String(format: "%02x", $0) }.joined()
         }
         var events = 0
         root["circles"] = circles.map { c -> [String: Any] in

@@ -5298,33 +5298,189 @@ pub struct ProfileCardFfi {
     pub emoji: String,
 }
 
+/// The byte fields of the persisted state, written as base64 strings.
+///
+/// `serde_json` renders a `Vec<u8>` / `[u8; 32]` as an array of decimal numbers — ~3.6 bytes per
+/// byte — and those fields (member bundles, parked envelopes, tree commits / Welcomes, rosters, the
+/// profile card) are nearly the whole state file: 98% of a real 1.0.6 state. The file is rewritten
+/// whole on every export, so that was most of the app's disk writes (App Store disk-write report,
+/// 2.0.0 b633: 50 MB from one persist path). Reads accept both forms, so every older state file
+/// still loads and is rewritten compact on the next save.
+///
+/// `#[serde(with = "persist_bytes")]` on a field encodes each byte leaf inside it (through `Vec`,
+/// `Option` and tuples); the other values keep their plain serde form.
+mod persist_bytes {
+    use data_encoding::BASE64;
+    use serde::de::{self, Deserializer, SeqAccess, Visitor};
+    use serde::ser::{SerializeSeq, SerializeTuple, Serializer};
+    use serde::{Deserialize, Serialize};
+    use std::marker::PhantomData;
+
+    pub trait Repr: Sized {
+        fn ser<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error>;
+        fn de<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error>;
+    }
+
+    pub fn serialize<T: Repr, S: Serializer>(v: &T, s: S) -> Result<S::Ok, S::Error> {
+        v.ser(s)
+    }
+    pub fn deserialize<'de, T: Repr, D: Deserializer<'de>>(d: D) -> Result<T, D::Error> {
+        T::de(d)
+    }
+
+    /// Serialize / deserialize a `Repr` as a nested element.
+    struct Out<'a, T>(&'a T);
+    impl<T: Repr> Serialize for Out<'_, T> {
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            self.0.ser(s)
+        }
+    }
+    struct In<T>(T);
+    impl<'de, T: Repr> Deserialize<'de> for In<T> {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            T::de(d).map(In)
+        }
+    }
+
+    /// A byte leaf: base64 string, or (as every earlier build wrote it) an array of numbers.
+    struct BytesVisitor;
+    impl<'de> Visitor<'de> for BytesVisitor {
+        type Value = Vec<u8>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("base64 bytes or an array of byte values")
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<u8>, E> {
+            BASE64.decode(v.as_bytes()).map_err(E::custom)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(b) = seq.next_element::<u8>()? {
+                out.push(b);
+            }
+            Ok(out)
+        }
+    }
+
+    impl Repr for Vec<u8> {
+        fn ser<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            s.serialize_str(&BASE64.encode(self))
+        }
+        fn de<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            d.deserialize_any(BytesVisitor)
+        }
+    }
+    impl Repr for [u8; 32] {
+        fn ser<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            s.serialize_str(&BASE64.encode(self))
+        }
+        fn de<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            let v = d.deserialize_any(BytesVisitor)?;
+            v.try_into().map_err(|v: Vec<u8>| de::Error::invalid_length(v.len(), &"32 bytes"))
+        }
+    }
+
+    /// Non-byte values riding alongside byte leaves in a tuple keep their plain form.
+    macro_rules! plain {
+        ($($t:ty),*) => {$(
+            impl Repr for $t {
+                fn ser<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { self.serialize(s) }
+                fn de<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> { <$t>::deserialize(d) }
+            }
+        )*};
+    }
+    plain!(u64, String);
+
+    impl<T: Repr> Repr for Vec<T> {
+        fn ser<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            let mut seq = s.serialize_seq(Some(self.len()))?;
+            for x in self {
+                seq.serialize_element(&Out(x))?;
+            }
+            seq.end()
+        }
+        fn de<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            Ok(Vec::<In<T>>::deserialize(d)?.into_iter().map(|x| x.0).collect())
+        }
+    }
+    impl<T: Repr> Repr for Option<T> {
+        fn ser<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            match self {
+                Some(x) => s.serialize_some(&Out(x)),
+                None => s.serialize_none(),
+            }
+        }
+        fn de<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            Ok(Option::<In<T>>::deserialize(d)?.map(|x| x.0))
+        }
+    }
+
+    macro_rules! tuple {
+        ($n:literal: $($t:ident $i:tt),+) => {
+            impl<$($t: Repr),+> Repr for ($($t,)+) {
+                fn ser<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                    let mut tup = s.serialize_tuple($n)?;
+                    $(tup.serialize_element(&Out(&self.$i))?;)+
+                    tup.end()
+                }
+                fn de<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                    struct V<$($t),+>(PhantomData<($($t,)+)>);
+                    impl<'de, $($t: Repr),+> Visitor<'de> for V<$($t),+> {
+                        type Value = ($($t,)+);
+                        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                            write!(f, "a {}-tuple", $n)
+                        }
+                        fn visit_seq<Q: SeqAccess<'de>>(self, mut seq: Q) -> Result<Self::Value, Q::Error> {
+                            Ok(($(
+                                seq.next_element::<In<$t>>()?
+                                    .ok_or_else(|| de::Error::invalid_length($i, &self))?
+                                    .0,
+                            )+))
+                        }
+                    }
+                    d.deserialize_tuple($n, V(PhantomData))
+                }
+            }
+        };
+    }
+    tuple!(2: T0 0, T1 1);
+    tuple!(3: T0 0, T1 1, T2 2);
+}
+
 /// On-disk form, per circle, so circles/posts/contacts survive restarts and updates.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistCircle {
     id: String,
     name: String,
     /// Members as their public-bundle bytes (HavenId isn't directly Serialize).
+    #[serde(with = "persist_bytes")]
     members: Vec<Vec<u8>>,
     /// Removed-member tombstones (bundle bytes). Defaulted so older state files load with none.
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     removed_members: Vec<Vec<u8>>,
     events: Vec<Event>,
     /// Sender-keys epoch ratchet (defaulted so pre-epoch state files still load → bootstrap on next post).
     #[serde(default)]
     my_epoch: u64,
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     my_epoch_keys: Vec<(u64, [u8; 32])>,
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     peer_epoch_keys: Vec<(String, u64, [u8; 32])>,
     /// Losing candidates per epoch slot (see `Circle::my_epoch_keys_alt`). Defaulted so state files
     /// from before slot convergence load with none; older builds simply ignore the field.
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     my_epoch_keys_alt: Vec<(u64, [u8; 32])>,
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     peer_epoch_keys_alt: Vec<(String, u64, [u8; 32])>,
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     my_circle_secret: [u8; 32],
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     peer_circle_secrets: Vec<(String, [u8; 32])>,
     /// Unix seconds of the last epoch advance, so the periodic rotation window survives a relaunch
     /// (otherwise every launch would restart the week and a frequently-restarted client would never
@@ -5337,6 +5493,7 @@ struct PersistCircle {
     /// devices) is unchanged. Without this the KEM's randomness minted a new content-addressed
     /// mailbox entry per backfill run. Defaulted so older state files load (re-seal once).
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     cached_commit: Option<([u8; 32], Vec<u8>)>,
     /// Epoch events received before their key commit / the sender's roster arrived. Persisted so
     /// the retry buffer SURVIVES a restart — without this, an event fetched from the mailbox (which
@@ -5346,16 +5503,20 @@ struct PersistCircle {
     /// circle member never gets a post". Now the buffer is durable and re-drained on every key-commit
     /// AND roster arrival, so late keys/rosters still unlock it. Defaulted so old state files load.
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     pending_epoch: Vec<Vec<u8>>,
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     pending_tree: Vec<Vec<u8>>,
     /// Key commits parked because their committer wasn't resolvable yet (see `Circle::pending_commit`).
     /// Defaulted so older state files load with none; older builds ignore the field.
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     pending_commit: Vec<Vec<u8>>,
     /// MLS M3: the pinned circle creator (Remove/Add authority root, §4.3). Defaulted so old state
     /// files load with no creator (⇒ no tree Remove is accepted until one is learned).
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     creator: Option<[u8; 32]>,
     /// AUDIT M2: whether `creator` is DEFINITION-bound (authoritative) vs weakly TOFU-learned. Defaulted
     /// false so old state files load with today's TOFU semantics (an authentic definition re-pins it).
@@ -5363,6 +5524,7 @@ struct PersistCircle {
     creator_pinned: bool,
     /// MLS M3: verified admin-grant wire bytes (the delegation edges). Defaulted so old state loads.
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     admin_grants: Vec<Vec<u8>>,
 }
 /// On-disk form of one circle's [`ShadowTree`]. Welcomes ride their own wire encoding
@@ -5370,16 +5532,25 @@ struct PersistCircle {
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct PersistShadow {
     circle: String,
+    #[serde(with = "persist_bytes")]
     commits: Vec<Vec<u8>>,
+    #[serde(with = "persist_bytes")]
     welcomes: Vec<Vec<u8>>,
+    #[serde(with = "persist_bytes")]
     my_genesis: Option<[u8; 32]>,
+    #[serde(with = "persist_bytes")]
     my_secret_root: Option<[u8; 32]>,
+    #[serde(with = "persist_bytes")]
     genesis_devices: Vec<[u8; 32]>,
     /// Byte-stable re-emission: a Welcome wraps under a random KEM, so re-sealing it after a
     /// restart mints a NEW content-addressed mailbox key for the same Welcome.
+    #[serde(with = "persist_bytes")]
     emit_cache: Vec<Vec<u8>>,
+    #[serde(with = "persist_bytes")]
     joined: Vec<[u8; 32]>,
+    #[serde(with = "persist_bytes")]
     joined_genesis: Vec<([u8; 32], [u8; 32])>,
+    #[serde(with = "persist_bytes")]
     rewelcomed: Vec<([u8; 32], [u8; 32])>,
 }
 
@@ -5442,14 +5613,17 @@ struct PersistState {
     /// Verified device rosters (account_bundle, device_list_bytes, credential_bytes), so multi-device
     /// state survives restarts WITHOUT re-rotating epochs (those persist alongside in PersistCircle).
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     device_rosters: Vec<(Vec<u8>, Vec<u8>, Vec<Vec<u8>>)>,
     /// A3: the primary-signed roster WIRE (incl. capability trailer) a SEEDLESS device rebroadcasts
     /// verbatim (it has no account key to re-mint one). `None` on a primary. Defaulted so old state loads.
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     seedless_roster_wire: Option<Vec<u8>>,
     /// D8: my signed profile card, cached so a seedless device serves the primary's card verbatim (and a
     /// primary re-serves the same bytes). Defaulted so old state loads.
     #[serde(default)]
+    #[serde(with = "persist_bytes")]
     cached_profile: Option<Vec<u8>>,
 }
 /// Legacy single-circle on-disk form — migrated into the default circle on load.

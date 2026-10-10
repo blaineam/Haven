@@ -666,7 +666,7 @@ final class CloudflaredTunnel: ObservableObject {
         req.timeoutInterval = 5
         let sem = DispatchSemaphore(value: 0)
         var ips: [String] = []
-        let task = URLSession.shared.dataTask(with: req) { data, _, _ in
+        let task = HavenHTTP.session.dataTask(with: req) { data, _, _ in
             defer { sem.signal() }
             guard let data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

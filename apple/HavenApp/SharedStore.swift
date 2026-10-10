@@ -2111,7 +2111,7 @@ enum SharedStore {
         req.setValue(auth, forHTTPHeaderField: "Authorization")
         if let digest, !digest.isEmpty { req.setValue(digest, forHTTPHeaderField: "X-Haven-List-Digest") }
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await HavenHTTP.session.data(for: req)
             let http = resp as? HTTPURLResponse
             let respDigest = http?.value(forHTTPHeaderField: "X-Haven-List-Digest")
             let code = http?.statusCode ?? 0
@@ -2167,7 +2167,7 @@ enum SharedStore {
         var req = URLRequest(url: url, timeoutInterval: 20)
         req.setValue(auth, forHTTPHeaderField: "Authorization")
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await HavenHTTP.session.data(for: req)
             switch (resp as? HTTPURLResponse)?.statusCode ?? 0 {
             case 200...299: qaCount(base, "getOk"); return .success(data)
             case 404: qaCount(base, "getMiss"); return .success(nil)
@@ -2191,7 +2191,7 @@ enum SharedStore {
         req.httpMethod = "HEAD"
         req.setValue(auth, forHTTPHeaderField: "Authorization")
         do {
-            let (_, resp) = try await URLSession.shared.data(for: req)
+            let (_, resp) = try await HavenHTTP.session.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             switch code {
             case 200...299: qaCount(base, "headOk"); return .present
@@ -2257,7 +2257,7 @@ enum SharedStore {
         req.setValue(auth, forHTTPHeaderField: "Authorization")
         req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         do {
-            let (_, resp) = try await URLSession.shared.upload(for: req, from: body)
+            let (_, resp) = try await HavenHTTP.session.upload(for: req, from: body)
             switch (resp as? HTTPURLResponse)?.statusCode ?? 0 {
             case 200...299: qaCount(base, "putOk"); return .success(())
             case 401, 403:
@@ -2357,7 +2357,7 @@ enum SharedStore {
             req.setValue(auth, forHTTPHeaderField: "Authorization")
             if wireMethod == "PUT" { req.httpBody = body }
             do {
-                let (_, resp) = try await URLSession.shared.data(for: req)
+                let (_, resp) = try await HavenHTTP.session.data(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 last = ["relay": node, "method": method, "key": key, "status": code, "url": base]
                 return last

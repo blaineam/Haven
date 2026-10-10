@@ -24,6 +24,7 @@ final class CallHairpin {
         let c = URLSessionConfiguration.default
         c.waitsForConnectivity = true
         c.timeoutIntervalForRequest = 90
+        c.urlCache = nil   // WebSocket only — never let it open the on-disk Cache.db
         return URLSession(configuration: c)
     }()
 

@@ -39,7 +39,7 @@ enum ModerationLedger {
             "sig": sig.base64EncodedString(),
         ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        URLSession.shared.dataTask(with: req).resume()   // fire and forget — never blocks moderation
+        HavenHTTP.session.dataTask(with: req).resume()   // fire and forget — never blocks moderation
     }
 }
 

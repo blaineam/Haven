@@ -197,7 +197,7 @@ final class PushManager: NSObject, ObservableObject {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        URLSession.shared.dataTask(with: req) { data, resp, err in
+        HavenHTTP.session.dataTask(with: req) { data, resp, err in
             if let err {
                 HavenLog.call("push \(path) FAILED to send: \(err.localizedDescription)")
                 return

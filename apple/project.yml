@@ -494,6 +494,8 @@ targets:
       - path: WatchShared/WatchBridge.swift
       # Device-id dial hints on invite links (byte-format parity with Android + desktop).
       - path: HavenApp/InviteHints.swift
+      # The cache-less HTTP session every relay/S3 call uses (the CFNetwork Cache.db disk writes).
+      - path: Shared/HavenHTTP.swift
       - path: HavenLogicTests
     settings:
       base:

@@ -192,7 +192,7 @@ enum SharedPushPrefetch {
                                                      key: key, body: Data()) else { continue }
                 var req = URLRequest(url: url, timeoutInterval: 8)
                 req.setValue(auth, forHTTPHeaderField: "Authorization")
-                guard let (data, resp) = try? await URLSession.shared.data(for: req),
+                guard let (data, resp) = try? await HavenHTTP.session.data(for: req),
                       (200...299).contains((resp as? HTTPURLResponse)?.statusCode ?? 0),
                       !data.isEmpty else { continue }
                 return data

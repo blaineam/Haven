@@ -257,6 +257,9 @@ struct HavenApp: App {
         // paired"). Ignored process-wide, before any networking starts: the write fails with EPIPE
         // and the existing error paths handle it.
         signal(SIGPIPE, SIG_IGN)
+        // Before any request: keep the framework-default URLCache in memory only (Cache.db disk
+        // writes, 2.0.0 (633) diagnostic). Our own traffic uses the cache-less HavenHTTP.session.
+        HavenHTTP.disableSharedDiskCache()
         // UI-test launches (DEBUG only): wipe this app's own state BEFORE any store reads it, and
         // turn animations off. A no-op for every other launch, and compiled out of Release.
         UITestMode.applyAtLaunch()

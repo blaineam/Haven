@@ -45,13 +45,13 @@ struct S3Client {
     func putObject(key: String, data: Data) async throws {
         var req = try signedRequest(method: "PUT", path: "/\(bucket)/\(encodePath(key))", query: [], payload: data)
         req.httpBody = data
-        let (_, resp) = try await URLSession.shared.data(for: req)
+        let (_, resp) = try await HavenHTTP.session.data(for: req)
         try check(resp, "PUT \(key)")
     }
 
     func getObject(key: String) async throws -> Data {
         let req = try signedRequest(method: "GET", path: "/\(bucket)/\(encodePath(key))", query: [], payload: Data())
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await HavenHTTP.session.data(for: req)
         try check(resp, "GET \(key)")
         return data
     }
@@ -66,7 +66,7 @@ struct S3Client {
     /// reached anyway — a plain false would force the upload attempt.
     func headObjectExists(key: String) async -> Bool? {
         guard let req = try? signedRequest(method: "HEAD", path: "/\(bucket)/\(encodePath(key))", query: [], payload: Data()) else { return nil }
-        guard let (_, resp) = try? await URLSession.shared.data(for: req), let http = resp as? HTTPURLResponse else { return nil }
+        guard let (_, resp) = try? await HavenHTTP.session.data(for: req), let http = resp as? HTTPURLResponse else { return nil }
         return (200..<300).contains(http.statusCode)
     }
 
@@ -74,7 +74,7 @@ struct S3Client {
     func listKeys(prefix: String) async throws -> [String] {
         let query = [("list-type", "2"), ("prefix", prefix), ("max-keys", "1000")]
         let req = try signedRequest(method: "GET", path: "/\(bucket)", query: query, payload: Data())
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await HavenHTTP.session.data(for: req)
         try check(resp, "LIST \(prefix)")
         return Self.parseKeys(data)
     }
@@ -177,7 +177,7 @@ struct S3Client {
     /// Plain HTTPS GET of a pre-signed URL (members fetching the mailbox).
     static func getURL(_ url: URL) async -> Data? {
         guard !HavenNet.offline else { return nil }
-        guard let (data, resp) = try? await URLSession.shared.data(from: url),
+        guard let (data, resp) = try? await HavenHTTP.session.data(from: url),
               let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
         return data
     }
@@ -185,7 +185,7 @@ struct S3Client {
     static func putURL(_ url: URL, data: Data) async -> Bool {
         guard !HavenNet.offline else { return false }
         var req = URLRequest(url: url); req.httpMethod = "PUT"; req.httpBody = data
-        guard let (_, resp) = try? await URLSession.shared.upload(for: req, from: data),
+        guard let (_, resp) = try? await HavenHTTP.session.upload(for: req, from: data),
               let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return false }
         return true
     }

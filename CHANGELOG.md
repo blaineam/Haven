@@ -9,6 +9,24 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.1 (unreleased)
 
+### Fixed — iPhone, iPad and Mac save your feed in less than half the space
+
+Haven saves your circles, contacts and keys to one file, and rewrites the whole file each time it
+saves. Inside it, every key, member card and waiting message was written out as a long list of
+numbers, which took about two and a half times the space the data needs. Those parts are now
+stored compactly, so each save writes less than half as much to the phone's storage. Android and
+desktop save the same way and get the same saving. Files from earlier versions still load and are
+rewritten in the new form the next time Haven saves.
+
+### Fixed — iPhone and Mac stop writing every relay response to a disk cache
+
+Every relay check, media download and upload went through the system's default network session,
+which saves each response to a cache on disk. Haven never reads those copies back: each request is
+signed once, and each response is an encrypted blob that Haven already stores itself. On 2.0.0 that
+cache was a large share of the app's disk writes. Haven's network requests, including those from
+the notification extension, now use a session with no cache, and the system's shared cache stays
+in memory only.
+
 ### Fixed — Android album artwork no longer decodes at full size
 
 Song artwork on Android was downloaded and decoded at whatever size the server sent. It is now

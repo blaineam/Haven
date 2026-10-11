@@ -35,14 +35,9 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Nouveau en 2.0 : votre relay prend en charge photos et vidéos pour que votre téléphone reste frais, et vous voyez toujours qui atteint chaque publication. Gratuit.
 
 ## whats_new
-2.0.0 — Plus léger pour votre téléphone, plus clair sur qui voit quoi.
-• Votre relay fait le gros du travail : si votre cercle a un relay, les photos et vidéos y sont envoyées une seule fois, et vos amis les récupèrent là-bas. Votre téléphone n’envoie plus chaque fichier à chaque ami : il chauffe moins et ménage la batterie.
-• Haven sait se faire discret : pendant les appels, ou quand votre appareil chauffe ou est en mode économie d’énergie, les gros transferts en arrière-plan se mettent en pause et reprennent plus tard.
-• Vous savez toujours qui voit une publication : l’éditeur indique exactement qui elle atteint — le cercle et le nombre de personnes — et le bouton de publication le rappelle. La première fois que vous publiez dans un cercle, Haven vous demande de confirmer, une seule fois. Les réponses sont signalées comme visibles par le cercle, « Envoyer plutôt en privé » est à portée de doigt, et les profils comme les listes de membres ont un bouton Message.
-• Les nouveaux amis se connectent et voient leurs publications en quelques secondes au lieu de plusieurs minutes.
-• Lancement plus rapide, défilement plus fluide et gestes qui répondent immédiatement.
-• Un état de synchronisation honnête : de vrais chiffres sur ce qui s’envoie et se reçoit, et une progression qui avance vraiment.
-• Partage d’écran plus fiable pendant les appels.
+2.0.1 — Plus légère pour votre stockage.
+• Haven enregistre désormais vos cercles, contacts et messages dans moins de la moitié de l'espace : chaque sauvegarde écrit beaucoup moins sur le stockage de votre appareil. Vos données existantes sont reprises automatiquement.
+• L'activité réseau ne s'accumule plus dans un cache disque, ce qui réduit encore les écritures en arrière-plan.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

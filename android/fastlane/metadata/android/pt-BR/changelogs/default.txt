@@ -1,3 +1,4 @@
 2.0.1 — Mais fluido e leve.
+• O Haven salva seus círculos, contatos e mensagens em menos da metade do espaço, gravando muito menos no armazenamento. Seus dados são mantidos automaticamente.
 • As capas das músicas usam muito menos memória, então a rolagem continua fluida.
 • Melhorias internas que deixam o Haven mais rápido e leve na memória.

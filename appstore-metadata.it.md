@@ -35,14 +35,9 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Novità della 2.0: il tuo relay fa il lavoro pesante con foto e video, così il telefono resta fresco, e vedi sempre chi raggiunge un post. Sempre gratis.
 
 ## whats_new
-2.0.0 — Più leggero per il telefono, più chiaro su chi vede cosa.
-• Il tuo relay fa il lavoro pesante: se la tua cerchia ha un relay, foto e video vengono caricati lì una sola volta e gli amici li scaricano da lì. Il telefono non invia più i file a ogni amico, quindi si scalda meno e risparmia batteria.
-• Haven non ti intralcia: durante le chiamate, o quando il dispositivo è caldo o in modalità Risparmio energetico, i trasferimenti pesanti in background si mettono in pausa e riprendono più tardi.
-• Sai sempre chi vede un post: l’editor mostra esattamente chi raggiunge — la cerchia e quante persone — e lo dice anche il pulsante per pubblicare. La prima volta che pubblichi in una cerchia, Haven ti chiede conferma una sola volta. Le risposte sono segnate come visibili alla cerchia, «Invia invece in privato» è a un tocco e profili ed elenchi dei membri hanno un pulsante Messaggio.
-• I nuovi amici si collegano e vedono i rispettivi post in pochi secondi invece che in minuti.
-• Avvio più rapido, scorrimento più fluido e tocchi che rispondono subito.
-• Stato della sincronizzazione onesto: numeri reali di ciò che si sta inviando e ricevendo, e un avanzamento che si muove davvero.
-• Condivisione dello schermo più affidabile nelle chiamate.
+2.0.1 — Più leggera sulla memoria del dispositivo.
+• Haven ora salva cerchie, contatti e messaggi in meno della metà dello spazio, così ogni salvataggio scrive molto meno sulla memoria del dispositivo. I dati esistenti vengono mantenuti automaticamente.
+• L'attività di rete non si accumula più in una cache su disco, riducendo ulteriormente le scritture in background.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

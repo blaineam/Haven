@@ -1,3 +1,4 @@
 2.0.1 — Smoother and lighter.
+• Haven saves your circles, contacts and messages in less than half the space, so it writes far less to storage. Existing data carries over automatically.
 • Song artwork uses much less memory, so scrolling past songs stays smooth.
 • Under-the-hood updates that make Haven faster and lighter on memory.

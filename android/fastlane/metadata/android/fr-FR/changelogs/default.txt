@@ -1,3 +1,4 @@
 2.0.1 — Plus fluide et plus légère.
+• Haven enregistre vos cercles, contacts et messages dans moins de la moitié de l'espace et écrit donc beaucoup moins sur le stockage. Vos données sont reprises automatiquement.
 • Les pochettes des morceaux utilisent beaucoup moins de mémoire : le défilement reste fluide.
 • Des améliorations internes qui rendent Haven plus rapide et moins gourmande en mémoire.

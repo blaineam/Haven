@@ -1,3 +1,4 @@
 2.0.1 – Flüssiger und schlanker.
+• Haven speichert Kreise, Kontakte und Nachrichten in weniger als der Hälfte des Platzes und schreibt so viel weniger auf den Speicher. Bisherige Daten werden automatisch übernommen.
 • Song-Cover brauchen deutlich weniger Speicher, damit das Scrollen an Songs vorbei flüssig bleibt.
 • Technische Verbesserungen, die Haven schneller machen und weniger Speicher brauchen.

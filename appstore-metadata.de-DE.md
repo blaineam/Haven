@@ -35,14 +35,9 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit dein Handy kühl bleibt – und du siehst immer genau, wen ein Beitrag erreicht. Kostenlos.
 
 ## whats_new
-2.0.0 — Leichter für dein Gerät, klarer, wer was sieht.
-• Dein Relay übernimmt die schwere Arbeit: Hat dein Kreis ein Relay, landen Fotos und Videos einmal dort, und deine Freunde holen sie sich von dort. Dein Gerät streamt Medien nicht mehr an jeden einzeln – es bleibt kühler und schont den Akku.
-• Haven hält sich zurück: Während Anrufen oder wenn dein Gerät heiß ist oder im Stromsparmodus läuft, pausieren große Übertragungen im Hintergrund und laufen später weiter.
-• Du weißt immer, wer einen Beitrag sieht: Der Editor zeigt genau, wen er erreicht – den Kreis und wie viele Personen –, und die Schaltfläche zum Posten sagt es auch. Beim ersten Beitrag in einem Kreis fragt Haven einmal nach. Antworten sind als für den Kreis sichtbar gekennzeichnet, „Stattdessen privat senden“ ist nur einen Fingertipp entfernt, und Profile und Mitgliederlisten haben eine Nachricht-Taste.
-• Neue Freunde verbinden sich und sehen gegenseitig ihre Beiträge in Sekunden statt Minuten.
-• Schnellerer Start, flüssigeres Scrollen und Fingertipps, die sofort reagieren.
-• Ehrlicher Sync-Status: echte Zahlen dazu, was gesendet und empfangen wird, und ein Fortschritt, der sich wirklich bewegt.
-• Zuverlässigere Bildschirmfreigabe bei Anrufen.
+2.0.1 – Schonender für deinen Speicher.
+• Haven speichert deine Kreise, Kontakte und Nachrichten jetzt in weniger als der Hälfte des Platzes, sodass jedes Speichern viel weniger auf dein Gerät schreibt. Deine bisherigen Daten werden automatisch übernommen.
+• Netzwerkzugriffe landen nicht mehr in einem Festplatten-Cache – das senkt die Schreibvorgänge im Hintergrund zusätzlich.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

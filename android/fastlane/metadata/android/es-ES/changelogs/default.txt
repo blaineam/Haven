@@ -1,3 +1,4 @@
 2.0.1 — Más fluida y ligera.
+• Haven guarda tus círculos, contactos y mensajes en menos de la mitad del espacio, así que escribe mucho menos en el almacenamiento. Tus datos se conservan automáticamente.
 • Las portadas de canciones usan mucha menos memoria, así que el desplazamiento sigue siendo fluido.
 • Mejoras internas que hacen Haven más rápida y ligera en memoria.

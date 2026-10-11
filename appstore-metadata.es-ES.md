@@ -35,14 +35,9 @@ privado,cifrado,familia,amigos,mensajería,seguro,sin conexión,llamadas,sin anu
 Novedad en 2.0: tu relay hace el trabajo pesado con fotos y vídeos para que tu móvil no se caliente, y siempre ves a quién llega cada publicación. Sigue siendo gratis.
 
 ## whats_new
-2.0.0 — Más ligero para tu móvil y más claro sobre quién ve qué.
-• Tu relay hace el trabajo pesado: si tu círculo tiene un relay, las fotos y los vídeos se suben a él una sola vez y tus amigos los descargan desde allí. Tu móvil ya no envía los archivos a cada amigo por separado, así que se calienta menos y ahorra batería.
-• Haven no estorba: durante las llamadas, o cuando tu dispositivo está caliente o en modo de bajo consumo, las transferencias grandes en segundo plano se pausan y continúan más tarde.
-• Ten siempre claro quién ve cada publicación: el editor muestra exactamente a quién llega —el círculo y cuántas personas— y el botón de publicar también lo indica. La primera vez que publicas en un círculo, Haven te pide confirmación una sola vez. Las respuestas indican que son visibles para el círculo, «Enviar en privado» está a un toque y los perfiles y las listas de miembros tienen un botón de Mensaje.
-• Los nuevos amigos se conectan y ven sus publicaciones en segundos, no en minutos.
-• Arranque más rápido, desplazamiento más fluido y toques que responden al instante.
-• Estado de sincronización honesto: cifras reales de lo que se envía y se recibe, y un progreso que de verdad avanza.
-• Pantalla compartida más fiable en las llamadas.
+2.0.1 — Más ligera con tu almacenamiento.
+• Haven ahora guarda tus círculos, contactos y mensajes en menos de la mitad del espacio, así que cada guardado escribe mucho menos en el almacenamiento de tu dispositivo. Tus datos actuales se conservan automáticamente.
+• La actividad de red ya no se acumula en una caché de disco, lo que reduce aún más las escrituras en segundo plano.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

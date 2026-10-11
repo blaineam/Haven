@@ -33,6 +33,11 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 New in 2.0: your relay does the heavy lifting for photos and videos, so your phone stays cool — and you always see exactly who a post reaches. Still free.
 
 ## whats_new
+2.0.1 — Lighter on your storage.
+• Haven now saves your circles, contacts and messages in less than half the space, so each save writes far less to your device's storage. Your existing data carries over automatically.
+• Network activity no longer piles up in a disk cache, which cuts background disk writes even further.
+
+## whats_new_previous
 2.0.0 — Lighter on your phone, clearer about who sees what.
 • Your relay does the heavy lifting: when your circle has a relay, photos and videos go up to it once and friends fetch them from there. Your phone no longer streams media to each friend, so it stays cooler and easier on the battery.
 • Haven stays out of the way: during calls, or when your device is hot or in Low Power Mode, big background transfers pause and pick up again later.
@@ -41,11 +46,6 @@ New in 2.0: your relay does the heavy lifting for photos and videos, so your pho
 • Faster launch, smoother scrolling, and taps that respond right away.
 • Honest sync status: real counts of what's sending and receiving, and progress that actually moves.
 • More reliable screen sharing on calls.
-
-## whats_new_previous
-1.8.11 — Better video calls.
-- Everyone on a video call now sees their own mirrored camera preview in the corner, so you can check how you look while you talk.
-- With your camera off, the preview shows a camera-off icon instead of an empty box.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

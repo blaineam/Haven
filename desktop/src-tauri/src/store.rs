@@ -1642,3 +1642,60 @@ mod tests {
         assert!(!ids.rename("zzzz", "Nope"));
     }
 }
+
+/// 2.0.1 moved the persisted engine state's byte fields from decimal arrays to base64. A state
+/// file a 2.0.0 (or older) desktop wrote must load through this module's read/write path, be
+/// rewritten compact on the next save, and reload with the same circles and posts.
+#[cfg(test)]
+mod state_format_migration_tests {
+    use super::*;
+    use haven_ffi::HavenSocial;
+    use std::sync::Arc;
+
+    fn engine(state: Option<Vec<u8>>) -> Arc<HavenSocial> {
+        // The fixture's own identity (see core/haven-ffi/tests/state_size.rs).
+        let s = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        assert!(s.use_device_identity([91u8; 32].to_vec()));
+        if let Some(st) = state {
+            s.import_state(st);
+        }
+        s
+    }
+
+    fn view(s: &HavenSocial) -> Vec<(String, usize, usize)> {
+        s.circles()
+            .into_iter()
+            .map(|c| {
+                let n = s.feed(c.id.clone(), 10_000_000, None).len();
+                (c.id, c.member_count as usize, n)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_decimal_array_state_file_loads_and_saves_compact() {
+        let legacy = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/haven-ffi/tests/fixtures/real_106_state.bin"),
+        )
+        .expect("legacy state fixture");
+        let dir = std::env::temp_dir().join(format!("haven-state-fmt-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let paths = Paths { base: dir.clone(), root: dir.clone() };
+
+        // What 2.0.0 left on disk.
+        write_state(&paths, &legacy).unwrap();
+        let old = engine(read_state(&paths));
+        let before = view(&old);
+        assert!(!before.is_empty() && before.iter().any(|c| c.2 > 0), "legacy state loaded no circles/posts");
+
+        // The next save rewrites it in the compact form.
+        write_state(&paths, &old.export_state()).unwrap();
+        let compact = read_state(&paths).unwrap();
+        assert!(compact.len() * 2 < legacy.len(), "{} bytes vs {} legacy", compact.len(), legacy.len());
+
+        // …and the compact file reloads to the same circles, members and posts.
+        let again = engine(read_state(&paths));
+        assert_eq!(view(&again), before);
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

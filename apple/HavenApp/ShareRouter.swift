@@ -24,7 +24,7 @@ final class ShareRouter: ObservableObject {
     /// A caption typed in the extension, carried into whichever composer opens.
     @Published var pendingCaption = ""
     /// Remaining "wait for the engine" attempts before giving up until the next foreground.
-    private var retriesLeft = 10
+    private var retriesLeft = ShareRoutingRules.maxReadinessRetries
     /// Reentrancy guard. `ingest` is kicked from five places (open-URL, foreground, onAppear,
     /// sheet dismissal, draft consumption) and two overlapping drains would process the same
     /// queued share twice.
@@ -49,17 +49,18 @@ final class ShareRouter: ObservableObject {
         // exist to HAND ANYTHING to a composer. Either missing means wait, not proceed-and-lose.
         guard FeedStore.shared.isConfigured, uiReady else {
             let waiting = ShareInbox.drain().count
-            guard waiting > 0 else { return }
-            HavenLog.sync("share: not ready (engine=\(FeedStore.shared.isConfigured) ui=\(uiReady)) — \(waiting) queued, retrying")
+            if waiting > 0 {
+                HavenLog.sync("share: not ready (engine=\(FeedStore.shared.isConfigured) ui=\(uiReady)) — \(waiting) queued, retrying")
+            }
             // Don't rely on some later caller happening to run in the right order: come back for it.
             // Bounded so a device that never configures (no identity yet) doesn't spin.
-            guard retriesLeft > 0 else { return }
+            guard ShareRoutingRules.shouldRetryLater(queued: waiting, retriesLeft: retriesLeft) else { return }
             retriesLeft -= 1
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            try? await Task.sleep(nanoseconds: ShareRoutingRules.readinessRetryDelayNs)
             await ingest()
             return
         }
-        retriesLeft = 10
+        retriesLeft = ShareRoutingRules.maxReadinessRetries
         guard !draining else { return }
         draining = true
         defer { draining = false }
@@ -73,27 +74,13 @@ final class ShareRouter: ObservableObject {
         // (it also checks on `onAppear`, not just via the publisher), which unblocks everything
         // behind it. Without this a single missed draft wedged the queue permanently.
         if postDraft != nil { openPostComposer = true }
-        for queued in queue {
-            // A composer is already up (our sheet, the story editor, or the feed's own with a
-            // handed-over draft) — the rest keep until it's done rather than clobbering unsent work.
-            if present || postDraft != nil || openStoryDirectly { return }
-            switch await consume(queued) {
-            case .done:
-                ShareInbox.clear(queued.id)
-            case .needsUser:
-                // It's on screen and the router holds the content now, so the queue entry has done
-                // its job. Stop draining and let the user finish.
-                ShareInbox.clear(queued.id)
-                return
-            case .retry:
-                // Nothing was delivered and nothing is on screen — KEEP it. Better a share that
-                // arrives late than one that quietly never arrives.
-                return
-            }
-        }
+        await ShareDrain.run(queue,
+                             isBlocked: { present || postDraft != nil || openStoryDirectly },
+                             consume: { await consume($0) },
+                             clear: { ShareInbox.clear($0.id) })
     }
 
-    private enum Outcome { case done, needsUser, retry }
+    private typealias Outcome = ShareConsumeOutcome
 
     /// Import one share and act on it.
     private func consume(_ queued: ShareInbox.Queued) async -> Outcome {

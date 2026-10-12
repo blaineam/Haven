@@ -70,4 +70,54 @@ enum ShareRoutingRules {
     static func stagedAttachmentName(original clean: String, uniquifier: String) -> String {
         "\(uniquifier.prefix(8))-\(clean)"
     }
+
+    // MARK: Queue draining
+
+    /// Wait-and-retry rule for a share that arrives before the engine / tab UI exist (a cold launch,
+    /// where `onOpenURL` fires before the identity is configured). Draining then would consume the
+    /// share and lose the message, so wait — but only when something is actually queued, and only a
+    /// bounded number of times, so a device that never configures (no identity yet) doesn't spin.
+    static func shouldRetryLater(queued: Int, retriesLeft: Int) -> Bool {
+        queued > 0 && retriesLeft > 0
+    }
+
+    static let maxReadinessRetries = 10
+    static let readinessRetryDelayNs: UInt64 = 1_500_000_000
+}
+
+/// What importing one queued share resulted in.
+enum ShareConsumeOutcome: Equatable {
+    /// Delivered (or nothing usable): the queue entry is finished.
+    case done
+    /// It is on screen and the router holds the content now; the entry has done its job.
+    case needsUser
+    /// Nothing was delivered and nothing is on screen: KEEP it. Better a share that arrives late than
+    /// one that quietly never arrives.
+    case retry
+}
+
+enum ShareDrain {
+    /// Drain `queue` oldest-first. Every share is processed, not just the newest: a share that only
+    /// needs sending goes out immediately and silently; the first one that needs the user, needs the
+    /// user, so anything after it stays queued for the next pass rather than fighting over one sheet.
+    /// `isBlocked` is checked BEFORE each entry — a composer already up (the sheet, the story editor,
+    /// the feed's own with a handed-over draft) must not be clobbered with unsent work.
+    @MainActor
+    static func run<Q>(_ queue: [Q],
+                       isBlocked: () -> Bool,
+                       consume: (Q) async -> ShareConsumeOutcome,
+                       clear: (Q) -> Void) async {
+        for queued in queue {
+            if isBlocked() { return }
+            switch await consume(queued) {
+            case .done:
+                clear(queued)
+            case .needsUser:
+                clear(queued)
+                return
+            case .retry:
+                return
+            }
+        }
+    }
 }

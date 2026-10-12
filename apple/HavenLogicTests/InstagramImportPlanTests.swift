@@ -186,4 +186,27 @@ final class InstagramImportPlanTests: XCTestCase {
         DispatchQueue.concurrentPerform(iterations: 200) { i in l.record("ig:\(i % 50):1") }
         XCTAssertEqual(l.alreadyImported((0..<50).map { "ig:\($0):1" }), 50)
     }
+
+    // MARK: Phase
+
+    func testStartPhaseClampsTheResumePoint() {
+        XCTAssertEqual(P.startPhase(startAt: 0, total: 10), .importing(done: 0, total: 10))
+        XCTAssertEqual(P.startPhase(startAt: 4, total: 10), .importing(done: 4, total: 10))
+        XCTAssertEqual(P.startPhase(startAt: 50, total: 10), .importing(done: 10, total: 10), "never reads as more than done")
+        XCTAssertEqual(P.startPhase(startAt: -3, total: 10), .importing(done: 0, total: 10))
+    }
+
+    func testOnlyAnActiveImportIsRunning() {
+        XCTAssertTrue(InstagramImportPhase.importing(done: 1, total: 5).isRunning)
+        for p: InstagramImportPhase in [.idle, .reading, .previewing, .finished(imported: 1, skipped: 0), .failed("x")] {
+            XCTAssertFalse(p.isRunning, "\(p)")
+        }
+    }
+
+    func testResumableOnlyWhileItemsRemain() {
+        XCTAssertTrue(P.isResumable(done: 0, itemCount: 5))
+        XCTAssertTrue(P.isResumable(done: 4, itemCount: 5))
+        XCTAssertFalse(P.isResumable(done: 5, itemCount: 5), "a finished import has nothing to resume")
+        XCTAssertFalse(P.isResumable(done: 9, itemCount: 5))
+    }
 }

@@ -72,4 +72,66 @@ final class ShareRoutingRulesTests: XCTestCase {
         XCTAssertNotEqual(a, b)
         XCTAssertTrue(a.hasSuffix("-report.pdf"))
     }
+
+    // MARK: Readiness
+
+    func testRetryLaterOnlyWhenSomethingIsQueuedAndRetriesRemain() {
+        XCTAssertTrue(R.shouldRetryLater(queued: 1, retriesLeft: 10))
+        XCTAssertFalse(R.shouldRetryLater(queued: 0, retriesLeft: 10), "nothing waiting: no reason to come back")
+        XCTAssertFalse(R.shouldRetryLater(queued: 3, retriesLeft: 0), "a device that never configures must not spin")
+        XCTAssertEqual(R.maxReadinessRetries, 10)
+        XCTAssertEqual(R.readinessRetryDelayNs, 1_500_000_000)
+    }
+}
+
+/// The drain loop's contract, driven with plain integers standing in for queued shares.
+@MainActor
+final class ShareDrainTests: XCTestCase {
+    private final class Log { var consumed: [Int] = []; var cleared: [Int] = [] }
+
+    private func run(_ queue: [Int], blocked: @escaping (Log) -> Bool = { _ in false },
+                     outcome: @escaping (Int, Log) -> ShareConsumeOutcome) async -> Log {
+        let log = Log()
+        await ShareDrain.run(queue,
+                             isBlocked: { blocked(log) },
+                             consume: { n in log.consumed.append(n); return outcome(n, log) },
+                             clear: { log.cleared.append($0) })
+        return log
+    }
+
+    func testEveryDeliverableShareIsProcessedOldestFirst() async {
+        let log = await run([1, 2, 3]) { _, _ in .done }
+        XCTAssertEqual(log.consumed, [1, 2, 3], "not just the newest")
+        XCTAssertEqual(log.cleared, [1, 2, 3])
+    }
+
+    func testTheFirstShareThatNeedsTheUserStopsTheDrainButIsCleared() async {
+        let log = await run([1, 2, 3]) { n, _ in n == 2 ? .needsUser : .done }
+        XCTAssertEqual(log.consumed, [1, 2])
+        XCTAssertEqual(log.cleared, [1, 2], "the router holds its content now; the entry has done its job")
+    }
+
+    func testARetryKeepsTheShareAndEverythingAfterIt() async {
+        let log = await run([1, 2, 3]) { n, _ in n == 2 ? .retry : .done }
+        XCTAssertEqual(log.consumed, [1, 2])
+        XCTAssertEqual(log.cleared, [1], "a share that was not delivered must stay queued")
+    }
+
+    func testABlockedDrainTouchesNothing() async {
+        let log = await run([1, 2], blocked: { _ in true }) { _, _ in .done }
+        XCTAssertEqual(log.consumed, [])
+        XCTAssertEqual(log.cleared, [])
+    }
+
+    func testAComposerOpenedMidDrainStopsTheRest() async {
+        // After the first share is consumed a composer is on screen: the rest must wait, not clobber it.
+        let log = await run([1, 2, 3], blocked: { !$0.consumed.isEmpty }) { _, _ in .done }
+        XCTAssertEqual(log.consumed, [1])
+        XCTAssertEqual(log.cleared, [1])
+    }
+
+    func testEmptyQueueIsANoOp() async {
+        let log = await run([]) { _, _ in .done }
+        XCTAssertEqual(log.consumed, [])
+    }
 }

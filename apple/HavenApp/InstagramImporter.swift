@@ -18,14 +18,7 @@ import SwiftUI
 final class InstagramImporter: ObservableObject {
     static let shared = InstagramImporter()
 
-    enum Phase: Equatable {
-        case idle
-        case reading
-        case previewing
-        case importing(done: Int, total: Int)
-        case finished(imported: Int, skipped: Int)
-        case failed(String)
-    }
+    typealias Phase = InstagramImportPhase
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var summary: InstagramArchive.Summary?
@@ -35,7 +28,7 @@ final class InstagramImporter: ObservableObject {
 
     /// True while an import is running — the app-wide banner watches this, and the sheet uses it to
     /// offer "continue in the background" rather than holding the user on a progress bar.
-    var isRunning: Bool { if case .importing = phase { return true }; return false }
+    var isRunning: Bool { phase.isRunning }
 
     // MARK: - Resume across launches
 
@@ -70,7 +63,7 @@ final class InstagramImporter: ObservableObject {
                 HavenLog.sync("ig-import: pending import DROPPED — archive no longer parses")
                 self?.clearPending(); return
             }
-            guard p.done < s.items.count else { self.clearPending(); return }
+            guard InstagramImportPlan.isResumable(done: p.done, itemCount: s.items.count) else { self.clearPending(); return }
             self.archiveURL = url
             self.summary = s
             self.phase = .previewing          // `run` requires this state
@@ -160,7 +153,7 @@ final class InstagramImporter: ObservableObject {
         // untouched — which is the behaviour wanted, achieved by the ordering rather than by
         // fighting the scroll view.
         let items = InstagramImportPlan.importOrder(summary.items, includeStories: includeStories)
-        phase = .importing(done: min(startAt, items.count), total: items.count)
+        phase = InstagramImportPlan.startPhase(startAt: startAt, total: items.count)
         cancelled = false
 
         // Record the job BEFORE any work, so a crash on the very first item still resumes.

@@ -59,7 +59,30 @@ struct InstagramImportCheckpoint: Codable, Equatable {
     static func clear(from d: UserDefaults) { d.removeObject(forKey: defaultsKey) }
 }
 
+/// Where an import is, for the sheet and the app-wide banner.
+enum InstagramImportPhase: Equatable {
+    case idle
+    case reading
+    case previewing
+    case importing(done: Int, total: Int)
+    case finished(imported: Int, skipped: Int)
+    case failed(String)
+
+    /// True while an import is running — the banner watches this, and the sheet uses it to offer
+    /// "continue in the background" rather than holding the user on a progress bar.
+    var isRunning: Bool { if case .importing = self { return true }; return false }
+}
+
 enum InstagramImportPlan {
+    /// The phase a run starts in: resuming at `startAt` shows that much already done, never more than
+    /// the total (a checkpoint from a larger selection must not read as "120%").
+    static func startPhase(startAt: Int, total: Int) -> InstagramImportPhase {
+        .importing(done: max(0, min(startAt, total)), total: total)
+    }
+
+    /// A checkpoint is resumable only if there is still something left to import.
+    static func isResumable(done: Int, itemCount: Int) -> Bool { done < itemCount }
+
     /// The items an import covers. Stories are OFF unless asked for, and that default is
     /// load-bearing: an Instagram archive holds EVERY story ever posted (no highlight flag in the
     /// export), so importing them by default would resurrect years of stories the user let expire.

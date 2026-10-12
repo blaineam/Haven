@@ -2289,3 +2289,139 @@ test('re-optimize: byte accounting helpers', async () => {
   assert.equal(app.ev('base64ByteLength("QUI=")'), 2);
   assert.equal(app.ev('base64ByteLength("QUJD")'), 3);
 });
+
+// ── DM thread details ───────────────────────────────────────────────────────────────────────────
+const openThread = async (msgs, extra = {}) => {
+  const base = withDm();
+  const h = await boot({ ...base, state: { ...base.state, dms: { [DM]: msgs }, ...(extra.state ?? {}) }, be: extra.be });
+  await tab(h.app, 'messages');
+  await click(h.app, '.thread-item');
+  return h;
+};
+const dmMsg = (over = {}) => post({ id: 'x' + Math.random().toString(36).slice(2, 6), is_me: false, author_short: BO.slice(0, 8), author_name: 'Bo', body: 'hi', created_at: NOW - 1000, ...over });
+const ctxMenu = async (app, bubble) => { bubble.dispatchEvent(new app.ctx.Event('contextmenu', { bubbles: true, clientX: 10, clientY: 10 })); await app.settle(); };
+
+test('dm thread: my own message can be edited in place, keeping its attachments, or deleted', async () => {
+  const mine = dmMsg({ id: 'mine1', is_me: true, body: 'typo here', media: ['img_pic'], music: { catalog_id: 'c', title: 'T', artist: 'A', artwork_url: '', duration_ms: 1 } });
+  const { app } = await openThread([mine]);
+  const col = app.q('.bubble-row.me .bubble-col');
+  await ctxMenu(app, col);
+  assert.ok(menuBtn(app, /^Edit/i) && menuBtn(app, /Delete/i));
+  await click(app, menuBtn(app, /^Edit/i));
+  const ta = app.q('.dm-composer textarea');
+  assert.equal(ta.value, 'typo here');
+  assert.notEqual(app.q('.edit-bar').style.display, 'none');
+  ta.value = 'fixed';
+  ta.dispatchEvent(new app.ctx.Event('keydown', { bubbles: true, key: 'Enter' }));
+  await app.settle();
+  const c = lastCall(app, 'edit_post').args;
+  assert.deepEqual(J({ ...c, music: undefined }), { circleId: DM, target: 'mine1', body: 'fixed', media: ['img_pic'] });
+  assert.equal(c.music.title, 'T', 'an edit carries the existing song so it is not stripped');
+  assert.equal(app.q('.edit-bar').style.display, 'none');
+  assert.equal(lastCall(app, 'send_dm'), undefined, 'an edit is not a new message');
+
+  await ctxMenu(app, app.q('.bubble-row.me .bubble-col'));
+  await click(app, menuBtn(app, /Delete/i));
+  assert.deepEqual(J(lastCall(app, 'unsend_post').args), { circleId: DM, target: 'mine1' });
+});
+
+test("dm thread: someone else's message offers reactions but no edit or delete; cancelling an edit clears the box", async () => {
+  const theirs = dmMsg({ id: 't1', body: 'from bo' });
+  const mine = dmMsg({ id: 'm9', is_me: true, body: 'mine' });
+  const { app } = await openThread([theirs, mine]);
+  await ctxMenu(app, app.qa('.bubble-col')[0]);
+  assert.ok(menuBtn(app, /React/i));
+  assert.ok(!menuBtn(app, /^Edit/i) && !menuBtn(app, /Delete/i));
+  await click(app, [...app.qa('#menu-root button')].find((b) => /React/i.test(b.textContent)));
+  assert.equal(lastCall(app, 'react').args.target, 't1');
+  await ctxMenu(app, app.qa('.bubble-col')[1]);
+  await click(app, menuBtn(app, /^Edit/i));
+  await click(app, [...app.qa('.edit-bar button')].find((b) => /Cancel/i.test(b.textContent)));
+  assert.equal(app.q('.dm-composer textarea').value, '');
+});
+
+test('dm thread: group threads label each incoming sender, 1:1 threads do not', async () => {
+  const CY = HEX('c');
+  const group = `dm:${[ME, BO, CY].sort().join('-')}`;
+  const base = withDm();
+  const { app } = await boot({ state: { ...base.state, threads: [{ circle_id: group, name: 'Bo, Cy', last_body: 'yo', last_at: NOW, member_count: 3, unread: 0 }], dms: { [group]: [dmMsg({ author_name: 'Bo', body: 'hello team' }), dmMsg({ is_me: true, body: 'hi' })] } } });
+  await tab(app, 'messages');
+  await click(app, '.thread-item');
+  const senders = app.qa('.chat-sender');
+  assert.equal(senders.length, 1, 'only incoming messages are labelled');
+  assert.equal(senders[0].textContent, 'Bo');
+  const one = await openThread([dmMsg({ body: 'one to one' })]);
+  assert.equal(one.app.qa('.chat-sender').length, 0);
+});
+
+test('dm thread: a secret message stays hidden until tapped, then hides itself again', async () => {
+  const { app } = await openThread([dmMsg({ body: '\u0002the plan' })]);
+  const bubble = app.q('.chat-bubble.secret');
+  assert.match(bubble.textContent, /reveal/i);
+  assert.ok(!/the plan/.test(app.q('.chat').textContent));
+  await click(app, bubble);
+  assert.match(bubble.textContent, /the plan/);
+  await app.timers.advance(5100);
+  assert.match(bubble.textContent, /reveal/i, 'it re-hides after five seconds');
+  const preview = await boot({ state: { ...withDm().state, threads: [{ circle_id: DM, name: 'Bo', last_body: '\u0002secret words', last_at: NOW, member_count: 2, unread: 0 }] } });
+  await tab(preview.app, 'messages');
+  assert.ok(!/secret words/.test(preview.app.q('.thread-item').textContent), 'a secret never leaks into the thread list preview');
+});
+
+test('dm thread: send-secretly marks the outgoing body and the disappearing timer rides along', async () => {
+  const { app } = await openThread([dmMsg()]);
+  await click(app, '.dm-composer .composer-plus');
+  await click(app, menuBtn(app, /secretly/i));
+  const ta = app.q('.dm-composer textarea');
+  assert.match(ta.placeholder, /secret/i);
+  await click(app, '.dm-composer .composer-plus');
+  await click(app, menuBtn(app, /Disappears/i));
+  await click(app, menuBtn(app, /1 hour/i));
+  ta.value = 'shh';
+  ta.dispatchEvent(new app.ctx.Event('keydown', { bubbles: true, key: 'Enter' }));
+  await app.settle();
+  const c = lastCall(app, 'send_dm').args;
+  assert.equal(c.body, '\u0002shh');
+  assert.equal(c.retentionSecs, 3600);
+  // The disappearing setting is sticky for the conversation (Apple parity).
+  ta.value = 'again';
+  ta.dispatchEvent(new app.ctx.Event('keydown', { bubbles: true, key: 'Enter' }));
+  await app.settle();
+  assert.equal(lastCall(app, 'send_dm').args.retentionSecs, 3600);
+});
+
+test('dm thread: reactions, an unsent tombstone, a song chip and a location chip render', async () => {
+  const msgs = [
+    dmMsg({ id: 'r1', body: 'react to me', reactions: [{ emoji: '🔥', count: 3, mine: true, authors: [] }, { emoji: '👍', count: 1, mine: false, authors: [] }] }),
+    dmMsg({ id: 'u1', unsent: true, body: 'x' }),
+    dmMsg({ id: 'mu', body: 'with song', music: { catalog_id: 'https://music.apple.com/x', title: 'Tune', artist: 'Band', artwork_url: '', duration_ms: 1 } }),
+    dmMsg({ id: 'g', body: '', media: ['geo:37.5,-122.25,Golden Gate'] }),
+  ];
+  const { app } = await openThread(msgs);
+  const chips = app.qa('.msg-react');
+  assert.equal(chips.length, 2);
+  assert.match(chips[0].textContent, /🔥 3/);
+  assert.ok(chips[0].classList.contains('mine'));
+  assert.equal(chips[1].textContent, '👍', 'a count of one is not printed');
+  await click(app, chips[0]);
+  assert.equal(lastCall(app, 'unreact').args.emoji, '🔥');
+  await click(app, chips[1]);
+  assert.equal(lastCall(app, 'react').args.emoji, '👍');
+  assert.match(app.q('.chat-bubble.tombstone').textContent, /unsent/i);
+  const song = app.q('.chat .song-chip');
+  assert.match(song.textContent, /Tune/);
+  await click(app, song);
+  assert.equal(app.opened.at(-1), 'https://music.apple.com/x');
+  assert.match(app.q('.chat').textContent, /Golden Gate/);
+});
+
+test('dm thread: the back button returns to the list and a pending draft is consumed exactly once', async () => {
+  const h = await boot({ ...withDm(), be: { message_author: () => ({ dm: DM, name: 'Bo', draft: 'link-to-post' }) }, state: { ...withDm().state, feeds: { default: [BO_POST()] } } });
+  const { app } = h;
+  await click(app, '.card[data-post="bp1"] .kebab');
+  await click(app, menuBtn(app, /Message Bo/i));
+  assert.equal(app.q('.dm-composer textarea').value, 'link-to-post');
+  assert.equal(app.ev('state.pendingDraft'), null, 'consumed once');
+  await click(app, app.q('.dm-head .icon-btn'));                      // back
+  assert.ok(app.q('.thread-list'), 'the list is showing again');
+});

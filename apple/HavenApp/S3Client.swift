@@ -99,7 +99,7 @@ struct S3Client {
     func signedRequest(method: String, path: String, query: [(String, String)], payload: Data, now: Date = Date()) throws -> URLRequest {
         // HAVEN_NO_NET: every bucket op is signed here first, so one guard closes PUT/GET/HEAD/LIST.
         // `headObjectExists` reads the throw as nil — "no HTTP response at all", which is the truth.
-        guard !HavenNet.offline else { throw S3Error.bad("offline (HAVEN_NO_NET)") }
+        guard !HavenNet.httpOffline else { throw S3Error.bad("offline (HAVEN_NO_NET)") }
         let host = endpoint
         let amzDate = Self.iso8601.string(from: now)
         let dateStamp = String(amzDate.prefix(8))
@@ -179,14 +179,14 @@ struct S3Client {
 
     /// Plain HTTPS GET of a pre-signed URL (members fetching the mailbox).
     static func getURL(_ url: URL, session: URLSession = HavenHTTP.session) async -> Data? {
-        guard !HavenNet.offline else { return nil }
+        guard !HavenNet.httpOffline else { return nil }
         guard let (data, resp) = try? await session.data(from: url),
               let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
         return data
     }
     /// Plain HTTPS PUT to a pre-signed URL (members writing to the mailbox).
     static func putURL(_ url: URL, data: Data, session: URLSession = HavenHTTP.session) async -> Bool {
-        guard !HavenNet.offline else { return false }
+        guard !HavenNet.httpOffline else { return false }
         var req = URLRequest(url: url); req.httpMethod = "PUT"   // the body goes via upload(for:from:) — an upload task must not also carry httpBody
         guard let (_, resp) = try? await session.upload(for: req, from: data),
               let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return false }

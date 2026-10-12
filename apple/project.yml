@@ -598,6 +598,12 @@ targets:
         "EXCLUDED_ARCHS[sdk=macosx*]": x86_64
         CODE_SIGN_ENTITLEMENTS: HavenApp/Haven.macOS.uitesthost.entitlements
         SKIP_INSTALL: YES
+        # One plain executable. Xcode's default debug build splits the app into a stub plus
+        # `<name>.debug.dylib` and hides the profile runtime inside the dylib, where the test runner
+        # cannot find it to write coverage — a hosted unit-test run then reports none.
+        ENABLE_DEBUG_DYLIB: NO
+        # Turns on HavenApp/CoverageHook.c (empty in every other target).
+        OTHER_CFLAGS: "$(inherited) -DHAVEN_UNIT_TEST_HOST"
 
   HavenMacUITests:
     type: bundle.ui-testing
@@ -613,6 +619,29 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: HavenMacUITestHost
         "EXCLUDED_ARCHS[sdk=macosx*]": x86_64
+
+  # Unit tests HOSTED in the isolated UI-test host (same sources, same HavenFFI macOS slice, own
+  # bundle id/container/keychain group). The FFI-backed stores (FeedStore, SharedStore, ...) are
+  # singletons that need the real app process, so these tests run INSIDE it: no simulator, no UI
+  # automation, no network (the scheme sets HAVEN_NO_NET) and a wiped container per run.
+  HavenMacUnitTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: HavenMacUnitTests
+    dependencies:
+      - target: HavenMacUITestHost
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.uitesthost.unittests
+        GENERATE_INFOPLIST_FILE: YES
+        "EXCLUDED_ARCHS[sdk=macosx*]": x86_64
+        SWIFT_VERSION: "5.0"
+        # The host's PRODUCT_NAME is HavenUITestHost (the target is HavenMacUITestHost), so the
+        # default TEST_HOST xcodegen derives from the target name points at a bundle that is never built.
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/HavenUITestHost.app/Contents/MacOS/HavenUITestHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
 
   HavenWatchUITests:
     type: bundle.ui-testing
@@ -709,6 +738,19 @@ schemes:
     test:
       targets:
         - HavenMacUITests
+  # Hosted macOS unit tests (FFI-backed stores) inside the isolated host. Offline + wiped container.
+  HavenMacUnitTests:
+    build:
+      targets:
+        HavenMacUITestHost: all
+        HavenMacUnitTests: [test]
+    test:
+      environmentVariables:
+        HAVEN_NO_NET: "1"
+        HAVEN_SKIP_ONBOARDING: "1"
+        HAVEN_UI_TEST_RESET: "1"
+      targets:
+        - HavenMacUnitTests
   # watchOS UI tests, against the HavenWatch app in its DEBUG demo (no paired iPhone).
   HavenWatchUITests:
     build:

@@ -42,4 +42,20 @@ enum HavenNet {
     /// True when this process must talk to nothing. Read once — this is consulted on hot paths.
     /// (`UITestMode.isOn` is constant `false` outside DEBUG, so release behaviour is unchanged.)
     static let offline: Bool = ProcessInfo.processInfo.environment["HAVEN_NO_NET"] == "1" || UITestMode.isOn
+
+    #if DEBUG
+    /// Hosted unit tests only (`HavenMacUnitTests`): let the relay and S3 HTTP primitives run, but
+    /// only against `HavenHTTP`'s in-process test transport (an in-memory relay / bucket) — never the
+    /// network. Every other transport (iroh, Multipeer, push, tunnels) keeps refusing on `offline`.
+    nonisolated(unsafe) static var testHTTPLane = false
+    #endif
+
+    /// The gate the relay / S3 HTTP primitives consult. Identical to `offline` in a release build.
+    static var httpOffline: Bool {
+        #if DEBUG
+        return offline && !testHTTPLane
+        #else
+        return offline
+        #endif
+    }
 }

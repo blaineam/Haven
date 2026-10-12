@@ -160,6 +160,24 @@ export default {
       description: 'Host-less Swift logic tests (HavenLogicTests, macOS)',
     },
 
+    // ── macOS hosted unit tests for the FFI-backed stores (FeedStore, SharedStore, MediaStore,
+    //    RelayMailboxStore, SelfSync, HistoryHandoff, CallManager signalling…). The stores are process
+    //    singletons over the real HavenFFI macOS slice, so the tests run INSIDE the isolated UI-test
+    //    host (com.blaineam.kith.uitesthost — never com.blaineam.kith or the qa.stub), against a wiped
+    //    container, offline (HAVEN_NO_NET in the scheme), with second HavenSocial identities standing
+    //    in for friends. No simulator and no UI automation.
+    //    Runs through Scripts/apple-unit-cov.mjs (a cmd suite, not xcodebuild-test): the sandboxed host's
+    //    coverage archive is unreadable to xccov, so the script runs the tests AND turns the host's own
+    //    flushed profile (CoverageHook.c) into `soren-coverage` lines for apple/HavenApp + apple/Shared.
+    'apple-unit': {
+      type: 'cmd',
+      cmd: 'node',
+      args: ['Scripts/apple-unit-cov.mjs'],
+      env: { DEVELOPER_DIR: '/Applications/Xcode.app/Contents/Developer' },
+      description: 'macOS hosted unit tests (HavenMacUnitTests inside the isolated UI-test host) + hosted line coverage',
+      tags: ['apple'],
+    },
+
     // ── Apple Watch companion: compile gate. HavenWatch ships embedded in the iOS app but no other
     //    suite builds its scheme, so a watch-only compile error would first surface at archive time.
     //    Generic destination → no simulator is booted.
@@ -399,7 +417,7 @@ export default {
     // "the fixes should land on main and be part of the release gate"). ui-mac needs macOS Automation
     // Mode without an auth prompt on the gate Mac (`automationmodetool enable-automationmode-without-authentication`).
     requireGreen: [
-      'core', 'fabric', 'apple-logic', 'ios', 'ui-ipad', 'ui-mac', 'ui-watch', 'macos', 'watch-build', 'android-native', 'android', 'android-minified',
+      'core', 'fabric', 'apple-logic', 'apple-unit', 'ios', 'ui-ipad', 'ui-mac', 'ui-watch', 'macos', 'watch-build', 'android-native', 'android', 'android-minified',
       'desktop', 'desktop-ui', 'desktop-ui-test', 'desktop-build', 'push-worker', 'web', 'qa-harness', 'e2e',
     ],
   },

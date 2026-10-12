@@ -14,6 +14,19 @@
 	<true/>
 	<key>com.apple.security.get-task-allow</key>
 	<true/>
+	<!-- Code-coverage output ONLY. A sandboxed host cannot write the .profraw Xcode asks the test
+	     process for (`<DerivedData>/Build/ProfileData/…`), so a hosted unit-test run produced no
+	     coverage at all. These two build-output roots are the only paths outside the container the
+	     host may write: soren's derived data lives under /tmp, Xcode's default under
+	     ~/Library/Developer/Xcode/DerivedData. Debug/test host only — never shipped or archived. -->
+	<key>com.apple.security.temporary-exception.files.absolute-path.read-write</key>
+	<array>
+		<string>/private/tmp/</string>
+	</array>
+	<key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+	<array>
+		<string>/Library/Developer/Xcode/DerivedData/</string>
+	</array>
 	<!-- Its own keychain group, so the data-protection keychain (the identity seed) works and is
 	     wiped by UI-test reset without touching any other app's items. -->
 	<key>keychain-access-groups</key>

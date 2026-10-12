@@ -52,6 +52,7 @@ final class HeavyWorkMonitor: NSObject {
         c.heat = HeavyWorkPolicy.Heat(ProcessInfo.processInfo.thermalState)
         c.lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
         #if DEBUG
+        if ThermalPolicy.testPinned { c.heat = .nominal; c.lowPower = false }   // hosted unit tests only
         c.forced = qaForcedReason
         #endif
         return c

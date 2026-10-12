@@ -1202,6 +1202,13 @@ final class HistoryHandoff: ObservableObject {
         ledger = HandoffCancelLedger()
         UserDefaults.standard.removeObject(forKey: Self.serveKey)
         sourceMediaCache = nil
+        // The source side's "I sent something a moment ago" memory belongs to the run just dropped.
+        // Left behind, `refreshStatus` kept reporting `.sending` for two minutes after an identity
+        // switch or factory reset, with no run behind it and the screen held awake for it.
+        lastSendingAt = 0
+        needsPending = false
+        lastManifestTouch.removeAll()
+        refreshActive()
         refreshStatus()
     }
 }

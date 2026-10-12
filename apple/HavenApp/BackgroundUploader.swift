@@ -137,7 +137,7 @@ final class BackgroundUploader: ObservableObject {
         // HAVEN_NO_NET: authoring still queues (and the queue is persisted, so nothing is lost —
         // a later online run delivers it), but a flush that cannot reach a relay would just
         // re-arm `scheduleRetry` every few seconds for the length of a UI-test run.
-        guard !HavenNet.offline || Self.qaSimulated else { return }
+        guard !HavenNet.httpOffline || Self.qaSimulated else { return }
         guard !flushing, !queue.isEmpty else { return }
         flushing = true
         passTotal = [:]; passDone = [:]

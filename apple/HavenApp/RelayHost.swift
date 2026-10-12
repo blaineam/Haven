@@ -1655,7 +1655,7 @@ final class RelayMailboxStore: ObservableObject {
         // LIST/GET, announce, self-sync slots, media. Refusing here retires all of it through the
         // branch every caller already handles, and (unlike failing the requests) records no health
         // and marks no URL bad, so a harness run leaves the persisted relay state untouched.
-        guard !HavenNet.offline else { return nil }
+        guard !HavenNet.httpOffline else { return nil }
         guard let e = entries[hex], let t = e.httpToken, !t.isEmpty,
               let u = e.httpUrls, !u.isEmpty else { return nil }
         let usable = u.filter { Self.urlPlausiblyReachable($0) }
@@ -1920,15 +1920,17 @@ final class RelayMailboxStore: ObservableObject {
     /// its caches. Used by "Delete now" in the Relays screen and by purgeStale.
     func eraseNow(_ nodeHex: String) {
         let hex = nodeHex.hasPrefix("s3:") ? nodeHex : nodeHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // The circles it served, read BEFORE the associations are dropped below — read after, the
+        // archive named no circle at all and Restore put the relay back nowhere.
+        let servedCircles = relaysByCircle.filter { $0.value.contains(hex) }.map(\.key)
         for cid in relaysByCircle.keys {
             relaysByCircle[cid]?.removeAll { $0 == hex }
             if relaysByCircle[cid]?.isEmpty == true { relaysByCircle[cid] = nil }
         }
-        // Archive BEFORE the entry and its associations are dropped — afterwards there is nothing
-        // left to reconstruct it from.
+        // Archive BEFORE the entry is dropped — afterwards there is nothing left to reconstruct it from.
         if let e = entries[hex] {
             erased[hex] = ErasedRelay(entry: e,
-                                      circles: relaysByCircle.filter { $0.value.contains(hex) }.map(\.key),
+                                      circles: servedCircles,
                                       wasDefault: defaultNodeHex == hex,
                                       erasedAt: nowMs())
             pruneErased()

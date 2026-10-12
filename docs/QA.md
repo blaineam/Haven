@@ -56,6 +56,7 @@ npm link`), it's just `soren run Haven`.
 | `ios` | xcodebuild-test | the `Haven` scheme's tests (HavenUITests) on an iOS simulator | macOS + Xcode + a simulator |
 | `ui-ipad` | xcodebuild-test | the same HavenUITests on a dedicated iOS 26.5 iPad simulator (shut down after) | macOS + Xcode + that simulator |
 | `ui-mac` | xcodebuild-test | `HavenMacUITests` against **HavenMacUITestHost** (`com.blaineam.kith.uitesthost` — never the personal `com.blaineam.kith`, never the fleet's `qa.stub`) | macOS + Xcode; the runner's one-time Accessibility approval |
+| `apple-unit` | xcodebuild-test | `HavenMacUnitTests` — **hosted** unit tests of the FFI-backed Apple stores (FeedStore, SharedStore, MediaStore, RelayMailboxStore, SelfSync, HistoryHandoff, CallManager signalling, the qa-cmd driver) running *inside* HavenMacUITestHost against the real HavenFFI macOS slice. No simulator, no UI automation, no network | macOS + Xcode |
 | `ui-watch` | xcodebuild-test | `HavenWatchUITests` against HavenWatch's DEBUG demo, on a dedicated watchOS 26.5 simulator (shut down after) | macOS + Xcode + that simulator |
 | `macos` | xcodebuild-test | the native `HavenMac` scheme, macOS destination | macOS + Xcode |
 | `android` | gradle | `testDebugUnitTest` always; `connectedDebugAndroidTest` after reusing/booting the `haven_phone` AVD (skipped, never hung, if it can't boot) | JDK 17, Android SDK/NDK, the Rust `.so` from `android/build-rust.sh` |
@@ -102,6 +103,31 @@ xcrun simctl spawn <udid> log stream --predicate 'subsystem == "com.blaineam.hav
 ```
 
 `http-put`, `fan-out` and `hello claim` lines mean something is not gated.
+
+### The `apple-unit` suite (hosted macOS unit tests)
+
+`apple/HavenMacUnitTests` is an XCTest bundle **hosted by `HavenMacUITestHost`**: the stores
+(`FeedStore.shared`, `SharedStore`, `MediaStore.shared`, …) are process singletons over the real
+HavenFFI engine, so they can only be tested inside the app process. The scheme launches the host
+with `HAVEN_NO_NET=1`, `HAVEN_SKIP_ONBOARDING=1` and `HAVEN_UI_TEST_RESET=1` (a wiped container,
+no demo cast), and the host refuses to run under any bundle id that does not end in `.uitesthost`.
+
+* **Friends are real engines.** `Peer` (in `Harness.swift`) is a second `HavenSocial` identity that
+  befriends the store through the real approval path, authors sealed posts and replays them in —
+  the way core's net tests do — so the receive path is exercised with real crypto.
+* **Frames go in through a DEBUG seam.** `FeedStore.deliverFrameForTesting` hands the inbound
+  dispatcher a `[type][payload]` frame exactly as a transport would.
+* **The wire is faked, not skipped.** `FakeWire` is an in-memory relay and S3 bucket behind
+  `HavenHTTP`'s DEBUG test transport. A test that wants the relay/bucket lanes calls
+  `FakeWire.shared.install()`, which opens ONLY the HTTP lane (`HavenNet.testHTTPLane`; the
+  relay/S3 primitives consult `HavenNet.httpOffline`). iroh, Multipeer, push and tunnels keep
+  refusing on `HavenNet.offline`, and the test transport answers any other host with 503.
+* **The machine's mood is pinned.** `ThermalPolicy.testPinned` makes a hot or Low-Power-Mode Mac
+  look nominal, so the handoff/self-sync/serve gates behave the same everywhere.
+* **Coverage** needs the host to write its `.profraw` outside the container, which the host's
+  entitlements allow for build-output roots only (`/private/tmp/`, `~/Library/Developer/Xcode/DerivedData/`).
+
+Run it with `node _shared/soren/soren.mjs run Haven apple-unit` (through `buildq`).
 
 ### The other two clients
 

@@ -179,7 +179,7 @@ final class MediaBackupQueue {
         // HAVEN_NO_NET: media backup is an outbound lane, and `configureForCurrentIdentity` calls
         // `drainPersisted` BEFORE its offline guard. The queue is persisted, so refusing here only
         // defers the work to a run that can actually deliver it — it never drops anything.
-        guard !HavenNet.offline else { return }
+        guard !HavenNet.httpOffline else { return }
         guard !draining, !pending.isEmpty || !priorityPending.isEmpty else { return }
         draining = true
         Task { @MainActor in
@@ -2104,7 +2104,7 @@ enum SharedStore {
     /// speak the header simply never answers 204 and never hands us a digest — today's behavior.
     private static func httpListDelta(_ base: String, _ token: String, _ prefix: String,
                                       digest: String?) async -> Result<(keys: [String]?, digest: String?), Error> {
-        guard !HavenNet.offline else { return .failure(URLError(.notConnectedToInternet)) }
+        guard !HavenNet.httpOffline else { return .failure(URLError(.notConnectedToInternet)) }
         guard let url = httpListURL(base, prefix) else { return .failure(URLError(.badURL)) }
         guard let auth = httpAuth(token, "GET", prefix, Data()) else { return .failure(URLError(.userAuthenticationRequired)) }
         var req = URLRequest(url: url, timeoutInterval: 60)
@@ -2159,7 +2159,7 @@ enum SharedStore {
     struct RelayForbidden: Error {}
 
     private static func httpGet(_ base: String, _ token: String, _ key: String) async -> Result<Data?, Error> {
-        guard !HavenNet.offline else { return .failure(URLError(.notConnectedToInternet)) }
+        guard !HavenNet.httpOffline else { return .failure(URLError(.notConnectedToInternet)) }
         guard let url = httpKeyURL(base, key) else { return .failure(URLError(.badURL)) }
         guard let auth = httpAuth(token, "GET", key, Data()) else { return .failure(URLError(.userAuthenticationRequired)) }
         // 20s not 60s: a dead NAS / expired trycloudflare was burning a full minute *before*
@@ -2184,7 +2184,7 @@ enum SharedStore {
     /// (signed exactly like a GET, method "HEAD") since its HTTP interface shipped. 400/405/501 — an
     /// old relay or a proxy that won't pass HEAD — is `.unsupported`, and the caller falls back to GET.
     private static func httpHead(_ base: String, _ token: String, _ key: String) async -> MediaHolding.Head {
-        guard !HavenNet.offline else { return .unreachable }
+        guard !HavenNet.httpOffline else { return .unreachable }
         guard let url = httpKeyURL(base, key) else { return .unreachable }
         guard let auth = httpAuth(token, "HEAD", key, Data()) else { return .unreachable }
         var req = URLRequest(url: url, timeoutInterval: 20)
@@ -2248,7 +2248,7 @@ enum SharedStore {
         // HAVEN_NO_NET backstop. `httpInterface` already refuses, so no live caller reaches here —
         // but these four primitives are the only place the app's own bytes hit the relay wire, and
         // a future route built from a base URL and token some other way must not slip past.
-        guard !HavenNet.offline else { return .failure(URLError(.notConnectedToInternet)) }
+        guard !HavenNet.httpOffline else { return .failure(URLError(.notConnectedToInternet)) }
         guard let url = httpKeyURL(base, key) else { return .failure(URLError(.badURL)) }
         // Digest over the EXACT bytes that go on the wire — `upload(for:from:)` sends `body` verbatim.
         guard let auth = httpAuth(token, "PUT", key, body) else { return .failure(URLError(.userAuthenticationRequired)) }

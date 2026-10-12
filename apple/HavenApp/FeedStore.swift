@@ -5435,7 +5435,7 @@ final class FeedStore: ObservableObject {
         // guard — this is where `hello fan-out circle=… accounts=…` came from in a UI test. The
         // pass is also real hybrid-PQ sealing per member, so refuse before doing that work for a
         // lane that would drop it. `force: true` is a user action and offline is still offline.
-        guard !HavenNet.offline else { return }
+        guard !HavenNet.httpOffline else { return }
         #if os(iOS)
         // Pocketed: never fan hello/roster. Event-driven callers (relay learned, fabric rebind,
         // member change) used to bypass the timer gate and keep the radio warm under a leftover
@@ -6448,7 +6448,7 @@ final class FeedStore: ObservableObject {
     /// listing every circle to discover nothing was the bulk of an idle wake's radio time.
     /// Push HINTS are still fetched in both cases: those are targeted single-key GETs.
     func slimBackgroundSync(allowMailboxPull: Bool = true) async -> Bool {
-        guard !HavenNet.offline else { return false }   // HAVEN_NO_NET — see `armMailboxTimer`
+        guard !HavenNet.httpOffline else { return false }   // HAVEN_NO_NET — see `armMailboxTimer`
         // Re-pin the park at the start of every wake. A concurrent scenePhase blip or an
         // earlier configure that raced us must not leave Multipeer / media timers warm.
         #if os(iOS)
@@ -6496,7 +6496,7 @@ final class FeedStore: ObservableObject {
 
     func pollMailboxNow() {
         guard engine != nil else { return }
-        guard !HavenNet.offline else { return }   // HAVEN_NO_NET — see `armMailboxTimer`
+        guard !HavenNet.httpOffline else { return }   // HAVEN_NO_NET — see `armMailboxTimer`
         // History handoff: a bounded step each poll while either role has work; otherwise a cheap
         // LIST of a tiny account-lane prefix once a minute, so an open device answers a new one fast.
         let tickNow = now()
@@ -6563,7 +6563,7 @@ final class FeedStore: ObservableObject {
     /// sweep of all circles after the current pass (and its marks) complete.
     @discardableResult
     @MainActor func pullMailbox(circleIds ids: [String]) async -> Int {
-        guard !HavenNet.offline else { return 0 }   // HAVEN_NO_NET — see `armMailboxTimer`
+        guard !HavenNet.httpOffline else { return 0 }   // HAVEN_NO_NET — see `armMailboxTimer`
         // THE EPOCH MOVED -> re-seal my history under it, so a member who joined or advanced past
         // the old epoch can still read what I already posted. Asked of the engine directly rather
         // than inferred from a roster change: the epoch also advances on periodic rotation and on
@@ -7275,6 +7275,19 @@ final class FeedStore: ObservableObject {
         }
         dispatchInboundFrame(type, payload, viaNearby: viaNearby, senderDevice: senderDevice)
     }
+
+    #if DEBUG
+    /// Hosted unit tests: run the missing-media scan as if a transport were up. The test supplies the
+    /// real fetch lane (an in-process relay behind `HavenHTTP`); there is no iroh node or Multipeer
+    /// session in the harness, which is what the scan otherwise waits for.
+    var debugAssumeTransport = false
+    /// Test seam (hosted unit tests, `HavenMacUnitTests`): hand the store a wire frame exactly as a
+    /// transport would — `[type][payload]` — so the inbound handlers can be driven without a
+    /// network. DEBUG only; a release build has no way in that skips the transports.
+    func deliverFrameForTesting(_ data: Data, viaNearby: Bool = false, senderDevice: String? = nil) {
+        handleInbound(data, viaNearby: viaNearby, senderDevice: senderDevice)
+    }
+    #endif
 
     /// Route one authenticated inbound frame to its handler. Call-signaling frames arrive here
     /// AFTER the sealed-open + signer checks in `handleInbound` (with `payload` already the opened
@@ -9376,7 +9389,12 @@ final class FeedStore: ObservableObject {
         // push wake re-arm the 5s lane and keep the radio warm past completionHandler.
         guard appIsForeground else { return }
         #endif
-        guard let engine, node != nil || nearby != nil else { return }
+        #if DEBUG
+        let hasTransport = node != nil || nearby != nil || debugAssumeTransport
+        #else
+        let hasTransport = node != nil || nearby != nil
+        #endif
+        guard let engine, hasTransport else { return }
         // The scan below is O(items × media) with a stat() per ref (MediaStore.has) — cap it to
         // once per 2s on the main actor; per-ref request throttles below stay unchanged.
         let nowMs = now()

@@ -14,7 +14,17 @@ import Foundation
 /// Cross-platform: `thermalState` exists on macOS too (a hosting Mac under load reports .fair),
 /// so the gates apply everywhere; explicit user actions bypass them via their own `force` paths.
 enum ThermalPolicy {
-    static var state: ProcessInfo.ThermalState { ProcessInfo.processInfo.thermalState }
+    #if DEBUG
+    /// Hosted unit tests (`HavenMacUnitTests`): pin the thermal state and ignore Low Power Mode, so a
+    /// hot or low-power dev Mac cannot change what a deterministic test observes.
+    nonisolated(unsafe) static var testPinned = false
+    #endif
+    static var state: ProcessInfo.ThermalState {
+        #if DEBUG
+        if testPinned { return .nominal }
+        #endif
+        return ProcessInfo.processInfo.thermalState
+    }
 
     /// Warm or worse — the "stop doing optional radio work" line.
     static var isFairOrWorse: Bool {

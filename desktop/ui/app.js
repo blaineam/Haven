@@ -3390,6 +3390,12 @@ function postCard(it, circleId, reports = []) {
   const media = el("div", { class: "post-media" + (carousel ? " carousel" : mediaCount > 1 ? " masonry" : mediaCount === 1 ? " single" : ""), style: "position:relative" });
   if (carousel) mediaCarousel(visualRefs, media);
   else if (mediaCount === 1) mediaSingle(visualRefs[0], media);
+  // The masonry column tiles are width-driven with `height: auto`, so an un-decoded one lays out at
+  // ZERO height and then shoves the rest of the feed down as it lands. Reserve each tile's shape up
+  // front from the remembered pixel size (iOS parity: the grid gets its aspect from the persisted
+  // map rather than from a main-thread decode). Eleven or more photos used to render NOTHING: this
+  // branch was dropped by an unrelated hunk (4a580cc5) while the `masonry` class stayed behind.
+  else for (const ref of visualRefs) media.append(guardSensitive(reserveAspect(mediaNode(ref), ref), ref));
   const audio = el("div", {});
   for (const ref of audioRefs) audio.append(mediaNode(ref));
   // Double-tap a photo to ❤️ it (Instagram-style), like the iOS gesture.

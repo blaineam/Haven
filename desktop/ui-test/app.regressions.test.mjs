@@ -73,3 +73,11 @@ test('story captions: a caption anchored at the left or top edge stays there', a
   assert.equal(d.spec.y, 0);
 });
 
+
+test('a post with more than ten photos renders every tile in the masonry grid (it rendered nothing)', async () => {
+  const refs = Array.from({ length: 12 }, (_, i) => `img_${i}`);
+  const { app } = await boot({ state: { feeds: { default: [post({ media: refs })] } }, be: { media_data_url: 'data:image/jpeg;base64,AA' } });
+  const grid = app.q('.card[data-post="p1"] .post-media.masonry');
+  assert.ok(grid, 'the grid is present');
+  assert.equal(grid.querySelectorAll('img').length, 12, 'one tile per photo');
+});

@@ -258,8 +258,8 @@ export default {
     'desktop-ui-test': {
       type: 'cmd',
       cmd: 'node',
-      args: ['--test', 'desktop/ui/ui.test.mjs'],
-      description: 'Desktop UI i18n + pure-helper tests (node --test)',
+      args: ['--test', 'desktop/ui/ui.test.mjs', 'desktop/ui-test/app.dom.test.mjs', 'desktop/ui-test/app.regressions.test.mjs'],
+      description: 'Desktop UI i18n + pure-helper tests + whole-app.js DOM-stub tests (node --test)',
     },
 
     // ── Website /open landing page: the #fragment → haven:// link detection every shared link

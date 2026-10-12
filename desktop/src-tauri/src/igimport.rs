@@ -777,3 +777,7 @@ mod smoke {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
+
+#[cfg(test)]
+#[path = "tests_igimport.rs"]
+mod cov_igimport_tests;

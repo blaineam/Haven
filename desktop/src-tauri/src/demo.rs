@@ -554,3 +554,7 @@ mod tests {
         assert!(bare <= replayed);
     }
 }
+
+#[cfg(test)]
+#[path = "tests_demo.rs"]
+mod cov_demo_tests;

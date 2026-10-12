@@ -101,6 +101,11 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
+[dev-dependencies]
+# `tauri::test::mock_app()` lets the command bodies be called with a real `State<Arc<Engine>>`
+# (tests only — the shipped binary does not get the mock runtime).
+tauri = { version = "2", features = ["test"] }
+
 [features]
 # Default to a custom binary protocol for the heavier media payloads later.
 default = ["custom-protocol"]

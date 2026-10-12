@@ -3,7 +3,7 @@
 // `soren-coverage:` lines (docs/config.md, "Coverage from cmd suites").
 //
 //   Rust  desktop/src-tauri/src/*.rs  — `cargo test --lib` built with `-C instrument-coverage`, read by
-//         Xcode's llvm-cov (no cargo-llvm-cov installed). Counted: the crate's own non-test source. NOT
+//         llvm-cov (matching rustc's LLVM) (no cargo-llvm-cov installed). Counted: the crate's own non-test source. NOT
 //         counted: the Rust core (its own suites measure it), any other path dependency, the test-only
 //         modules (tests_*.rs, covtest_util.rs) and every `#[cfg(test)]` item inside a source file — an
 //         inline test module is covered by definition and would inflate the number.
@@ -68,7 +68,20 @@ export function cfgTestRanges(src) {
   return ranges;
 }
 
-// ── Rust ─────────────────────────────────────────────────────────────────────────────────────────
+// ── Rust ──
+/** llvm-profdata / llvm-cov must be new enough for the raw-profile format rustc's LLVM writes (Xcode's
+ *  lags it, which fails with "raw profile version mismatch"). Prefer the rustup llvm-tools copy, then
+ *  Homebrew's llvm, then Xcode's. */
+function llvmTool(name) {
+  const sysroot = run('rustc', ['--print', 'sysroot']).stdout.trim();
+  const host = /^host: (.+)$/m.exec(run('rustc', ['-vV']).stdout)?.[1];
+  const candidates = [
+    process.env.LLVM_BIN && join(process.env.LLVM_BIN, name),
+    host && join(sysroot, 'lib/rustlib', host, 'bin', name),
+    join('/opt/homebrew/opt/llvm/bin', name),
+  ].filter(Boolean).filter((p) => existsSync(p));
+  return candidates.length ? [candidates[0]] : ['xcrun', name];
+}
 function rustCoverage() {
   // A skip is only a skip when the tests themselves passed; otherwise the failure wins.
   const bail = (msg) => { console.log(msg); process.exit(rustFailed); };
@@ -93,9 +106,11 @@ function rustCoverage() {
   const raws = readdirSync(prof).filter((f) => f.endsWith('.profraw')).map((f) => join(prof, f));
   if (!raws.length) { bail('soren-skip: the instrumented run produced no profile data'); }
   const merged = join(prof, 'merged.profdata');
-  const pm = run('xcrun', ['llvm-profdata', 'merge', '-sparse', ...raws, '-o', merged]);
+  const [pdBin, ...pdPre] = llvmTool('llvm-profdata');
+  const pm = run(pdBin, [...pdPre, 'merge', '-sparse', ...raws, '-o', merged]);
   if (pm.status !== 0) { bail('soren-skip: llvm-profdata failed: ' + pm.stderr.slice(0, 200)); }
-  const ex = run('xcrun', ['llvm-cov', 'export', exe, `-instr-profile=${merged}`, '-format=lcov']);
+  const [cvBin, ...cvPre] = llvmTool('llvm-cov');
+  const ex = run(cvBin, [...cvPre, 'export', exe, `-instr-profile=${merged}`, '-format=lcov']);
   if (ex.status !== 0) { bail('soren-skip: llvm-cov failed: ' + ex.stderr.slice(0, 200)); }
   // DESKTOP_COV_LCOV=<path> keeps the raw lcov for digging into which functions are still dark.
   if (process.env.DESKTOP_COV_LCOV) writeFileSync(process.env.DESKTOP_COV_LCOV, ex.stdout);

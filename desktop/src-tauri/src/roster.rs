@@ -336,3 +336,7 @@ mod seedless_tests {
         let _ = std::fs::remove_dir_all(&paths.root);
     }
 }
+
+#[cfg(test)]
+#[path = "tests_roster.rs"]
+mod cov_roster_tests;

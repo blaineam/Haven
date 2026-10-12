@@ -1993,3 +1993,7 @@ pub fn set_foreground(engine: Eng, fg: bool) {
 pub fn reset(engine: Eng) {
     engine.reset();
 }
+
+#[cfg(test)]
+#[path = "tests_commands.rs"]
+mod cov_command_tests;

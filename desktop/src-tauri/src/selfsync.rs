@@ -820,3 +820,7 @@ mod tests {
         assert!(DYNAMIC_PREFIXES.contains(&"circle:"));
     }
 }
+
+#[cfg(test)]
+#[path = "tests_selfsync.rs"]
+mod cov_selfsync_tests;

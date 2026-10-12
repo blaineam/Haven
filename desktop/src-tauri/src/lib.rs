@@ -35,6 +35,12 @@ mod selfsyncrot;
 mod songsuggest;
 mod store;
 mod wire;
+#[cfg(test)]
+mod covtest_util;
+#[cfg(test)]
+mod tests_store;
+#[cfg(test)]
+mod tests_lib;
 
 use std::sync::Arc;
 

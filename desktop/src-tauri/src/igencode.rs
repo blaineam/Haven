@@ -128,3 +128,70 @@ pub fn fulfill(job: u64, refs: Option<Refs>) {
         let _ = tx.send(refs); // the receiver may already have timed out; that is not an error
     }
 }
+
+/// Test hook: answer every outstanding optimize request with "could not", the way a closed or
+/// refusing webview would, so the importer falls back to its own path without waiting out a timeout.
+#[cfg(test)]
+pub(crate) fn decline_all() {
+    let jobs: Vec<_> = match pending().lock() {
+        Ok(mut p) => p.drain().collect(),
+        Err(_) => return,
+    };
+    for (_, tx) in jobs {
+        let _ = tx.send(None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::covtest_util::{engine, IGENCODE_LOCK};
+
+    fn wait_for_job() -> u64 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(job) = pending().lock().unwrap().keys().next().copied() {
+                return job;
+            }
+            assert!(std::time::Instant::now() < deadline, "the request never registered");
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn a_reply_from_the_webview_reaches_the_request_that_is_waiting() {
+        let _g = IGENCODE_LOCK.lock();
+        let (e, _) = engine(170);
+        let e2 = e.clone();
+        let asker = std::thread::spawn(move || image(&e2, "default", b"some bytes"));
+        let job = wait_for_job();
+        fulfill(job, Some(vec!["img_x".into(), "thumb:img_x:img_t".into()]));
+        assert_eq!(asker.join().unwrap(), Some(vec!["img_x".to_string(), "thumb:img_x:img_t".to_string()]));
+        assert!(pending().lock().unwrap().is_empty(), "the slot is released once answered");
+    }
+
+    #[test]
+    fn a_refusal_degrades_to_none_for_every_kind_of_request() {
+        let _g = IGENCODE_LOCK.lock();
+        let (e, _) = engine(171);
+        for kind in 0..3 {
+            let e2 = e.clone();
+            let asker = std::thread::spawn(move || match kind {
+                0 => image(&e2, "default", b"x"),
+                1 => video(&e2, "default", b"x"),
+                _ => poster(&e2, "default", "vid_ref"),
+            });
+            let job = wait_for_job();
+            fulfill(job, None);
+            assert_eq!(asker.join().unwrap(), None, "kind {kind}: the importer falls back to sealing the raw bytes");
+        }
+    }
+
+    #[test]
+    fn answering_an_unknown_or_already_answered_job_is_harmless() {
+        let _g = IGENCODE_LOCK.lock();
+        fulfill(u64::MAX, Some(vec!["late".into()]));
+        decline_all();
+        assert!(pending().lock().unwrap().is_empty());
+    }
+}

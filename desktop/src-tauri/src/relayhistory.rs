@@ -655,3 +655,7 @@ mod tests {
         assert_eq!(RelayHistoryProgress { phase: "cancelled", ..Default::default() }.to_json()["retention_caveat"], json!(false));
     }
 }
+
+#[cfg(test)]
+#[path = "tests_relayhistory.rs"]
+mod cov_relayhistory_tests;

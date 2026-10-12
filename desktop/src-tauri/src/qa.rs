@@ -575,3 +575,7 @@ fn write_dump(engine: &Arc<Engine>) -> DumpTiming {
         total_ms,
     }
 }
+
+#[cfg(test)]
+#[path = "tests_qa.rs"]
+mod cov_qa_tests;

@@ -10943,7 +10943,22 @@ impl Engine {
             return;
         };
         let body = body.as_slice();
-        let ev = match t {
+        let Some(ev) = self.call_event(t, body) else { return };
+        if !self.call_event_allowed(t, &ev) {
+            return;
+        }
+        if let Err(e) = app.emit("haven:call", ev) {
+            *self.qa_last_call_event.lock() = format!("emit-failed:{t}:{e}");
+        } else {
+            *self.qa_last_call_event.lock() = format!("emitted:{t}");
+        }
+    }
+
+    /// Parse one OPENED call frame into the event the webview consumes (`haven:call`), or `None` when
+    /// it is malformed, stale, or not a call frame. Also settles the dialing retransmit loop for the
+    /// frames that answer it. Split out of `handle_call` so the parsing is testable without a window.
+    fn call_event(&self, t: u8, body: &[u8]) -> Option<serde_json::Value> {
+        match t {
             wire::CALL_INVITE => callwire::parse_invite_name(body).map(|(from, name)| {
                 serde_json::json!({ "kind": "invite", "from": from, "name": name, "sessionId": format!("legacy:{from}"), "roster": [from] })
             }),
@@ -10989,35 +11004,35 @@ impl Engine {
                 serde_json::json!({ "kind": "camera", "from": from, "on": on })
             }),
             _ => None,
-        };
-        if let Some(ev) = ev {
-            // Only a known contact's call frames reach the UI — a stranger can't ring, inject, or
-            // negotiate a call (audit F3, iOS/Android parity). These frames are unsealed, so the
-            // self-asserted `from` is gated against the contact list here.
-            let from = ev.get("from").and_then(|v| v.as_str()).unwrap_or("");
-            // Frame 30 comes from MY OWN account, which is never in my contact list — gate it on that
-            // instead. Narrow on purpose: only my own account may silence my ring, and the signature
-            // verified above is what proves it. (The UI then refuses to act on one for a call it has
-            // already answered, so a late copy can never hang up a live conversation.)
-            // 30 AND 35 come from MY OWN account, which is never in my contact list. When 35 was
-            // added, only 30 got the own-account exemption — so the teardown frame was received,
-            // opened, verified… and silently dropped three lines from the webview. The engine's own
-            // diagnostic said "recv:35" while the UI never heard a thing, which is exactly the split
-            // the call_engine dump block finally made visible.
-            if t == wire::CALL_HANDLED || t == wire::CALL_ENDED_ELSEWHERE {
-                if !from.eq_ignore_ascii_case(&self.social.my_node_hex()) {
-                    return;
-                }
-            } else if !self.is_contact(from) {
-                log::warn!("call-frame t={t} DROPPED at contact gate (from={})", &from.chars().take(12).collect::<String>());
-                return;
-            }
-            if let Err(e) = app.emit("haven:call", ev) {
-                *self.qa_last_call_event.lock() = format!("emit-failed:{t}:{e}");
-            } else {
-                *self.qa_last_call_event.lock() = format!("emitted:{t}");
-            }
         }
+    }
+
+    /// The gate between a parsed call event and the webview: only a known contact's frames pass (a
+    /// stranger can't ring, inject, or negotiate a call), and frames 30/35 pass only from MY OWN
+    /// account. Split out of `handle_call` for the same reason as [`Self::call_event`].
+    fn call_event_allowed(&self, t: u8, ev: &serde_json::Value) -> bool {
+        // Only a known contact's call frames reach the UI — a stranger can't ring, inject, or
+        // negotiate a call (audit F3, iOS/Android parity). These frames are unsealed, so the
+        // self-asserted `from` is gated against the contact list here.
+        let from = ev.get("from").and_then(|v| v.as_str()).unwrap_or("");
+        // Frame 30 comes from MY OWN account, which is never in my contact list — gate it on that
+        // instead. Narrow on purpose: only my own account may silence my ring, and the signature
+        // verified above is what proves it. (The UI then refuses to act on one for a call it has
+        // already answered, so a late copy can never hang up a live conversation.)
+        // 30 AND 35 come from MY OWN account, which is never in my contact list. When 35 was
+        // added, only 30 got the own-account exemption — so the teardown frame was received,
+        // opened, verified… and silently dropped three lines from the webview. The engine's own
+        // diagnostic said "recv:35" while the UI never heard a thing, which is exactly the split
+        // the call_engine dump block finally made visible.
+        if t == wire::CALL_HANDLED || t == wire::CALL_ENDED_ELSEWHERE {
+            if !from.eq_ignore_ascii_case(&self.social.my_node_hex()) {
+                return false;
+            }
+        } else if !self.is_contact(from) {
+            log::warn!("call-frame t={t} DROPPED at contact gate (from={})", &from.chars().take(12).collect::<String>());
+            return false;
+        }
+        true
     }
 
     // ---- "Tell me when this media is back" (frames 31/32) --------------------------------
@@ -12246,6 +12261,13 @@ impl InboundListener for NodeListener {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests_engine.rs"]
+pub(crate) mod cov_engine_tests;
+#[cfg(test)]
+#[path = "tests_engine_media.rs"]
+mod cov_engine_media_tests;
 
 #[cfg(test)]
 mod flag_tests {

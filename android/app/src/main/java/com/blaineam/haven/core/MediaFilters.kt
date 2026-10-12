@@ -56,11 +56,9 @@ void main() {
 }
 """
 
-    /** A glsl float literal (always has a decimal point). */
-    private fun g(v: Double): String {
-        val s = "%.5f".format(v)
-        return s
-    }
+    /** A glsl float literal (always has a decimal point). Locale.ROOT, not the device locale: on a
+     *  German/French phone `%.5f` wrote `1,50000`, which is not GLSL, so the shader failed to compile. */
+    private fun g(v: Double): String = "%.5f".format(java.util.Locale.ROOT, v)
 
     /** White balance (temperature/tint) → per-channel gains, matching iOS temperatureAndTint feel. */
     private fun wbGains(tempK: Double, tint: Double): Triple<Double, Double, Double> {

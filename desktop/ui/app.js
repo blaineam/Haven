@@ -3205,9 +3205,13 @@ const Reoptimize = {
 
   /// Re-render in place. The row owns a single host element and repaints it, which is how the rest
   /// of this file handles live state without a framework.
-  draw() {
+  /** `initial` is the first paint, made while the row is still DETACHED (the sheet that will hold it
+   *  does not exist yet). The connected check exists to stop later progress ticks writing into a row
+   *  whose sheet was closed; applying it to the first paint left the row empty — no button, so the
+   *  feature could not be started at all. */
+  draw(initial = false) {
     const host = this._host;
-    if (!host || !host.isConnected) return;
+    if (!host || (!initial && !host.isConnected)) return;
     const busy = this.scanning || this.running;
     const kids = [];
 
@@ -3251,7 +3255,7 @@ const Reoptimize = {
     // the scan RESULT, which the backend can reproduce anyway.
     if (!this.running && !this.scanning) { this.lastSummary = null; this.lastWarning = null; }
     this._host = el("div", { class: "col", style: "gap:6px" });
-    this.draw();
+    this.draw(true);
     return this._host;
   },
 };

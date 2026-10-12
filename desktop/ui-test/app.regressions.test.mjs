@@ -81,3 +81,13 @@ test('a post with more than ten photos renders every tile in the masonry grid (i
   assert.ok(grid, 'the grid is present');
   assert.equal(grid.querySelectorAll('img').length, 12, 'one tile per photo');
 });
+
+test('Advanced > Re-optimize media is drawn: the row was empty because its first paint was skipped while detached', async () => {
+  const { app } = await boot();
+  await tab(app, 'you');
+  await click(app, '#tb-right button.icon-btn');
+  await click(app, app.qa('#modal-root .set-row').find((r) => /Advanced/.test(r.textContent)));
+  const btn = [...app.qa('#modal-root button')].find((b) => /Re-?optimi/i.test(b.textContent));
+  assert.ok(btn, 'the Re-optimize button is present');
+  assert.ok(!btn.disabled, 'and usable');
+});

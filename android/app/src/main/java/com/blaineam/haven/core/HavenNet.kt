@@ -4928,7 +4928,8 @@ object HavenNet : InboundListener {
         }
         if (setDefault) defaultRelayHex = hex
         scope.launch {
-            for (c in social.circles()) {
+            // runCatching: an uncaught throw here would take the whole process down, not just this adopt.
+            for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {
                 val cid = c.id
                 val list = relayNodes.getOrPut(cid) { RelayNodeMap.newList() }
                 if (!list.contains(hex)) list.add(hex)
@@ -7380,9 +7381,16 @@ object HavenNet : InboundListener {
      * (un-encoded) store key — the relay percent-decodes the path before it verifies.
      */
     private fun httpAuth(token: String, method: String, key: String, body: ByteArray): String? =
-        runCatching {
-            httpAuthHeader(DeviceKeyStore.deviceAccount().secretSeed(), token, method, key, body)
-        }.getOrNull()
+        httpAuthSigner(token, method, key, body)
+
+    /** Signs one relay request. A var only so a JVM test can stand in for the device key, which lives
+     *  behind the native core; production never reassigns it. */
+    internal var httpAuthSigner: (token: String, method: String, key: String, body: ByteArray) -> String? =
+        { token, method, key, body ->
+            runCatching {
+                httpAuthHeader(DeviceKeyStore.deviceAccount().secretSeed(), token, method, key, body)
+            }.getOrNull()
+        }
 
     /**
      * The relay REFUSED us — it is reachable and healthy, we are simply not (yet) a member it
@@ -7395,7 +7403,7 @@ object HavenNet : InboundListener {
      */
     class RelayForbidden : java.io.IOException("relay refused (401/403)")
 
-    private fun relayHttpGet(base: String, token: String, key: String): Result<ByteArray?> = runCatching {
+    internal fun relayHttpGet(base: String, token: String, key: String): Result<ByteArray?> = runCatching {
         if (HavenOffline.enabled) throw java.io.IOException("offline (haven_no_net)")
         val auth = httpAuth(token, "GET", key, ByteArray(0)) ?: throw java.io.IOException("cannot sign relay GET")
         val c = (java.net.URL(httpKeyUrl(base, key)).openConnection() as java.net.HttpURLConnection).apply {
@@ -7422,7 +7430,7 @@ object HavenNet : InboundListener {
     /** HEAD one key — held or not, no body. haven-relay serves `HEAD /k/<key>` (signed like GET, method
      *  "HEAD"); 400/405/501 (an old relay or a proxy) → UNSUPPORTED and the caller falls back to GET.
      *  Apple `SharedStore.httpHead` parity. */
-    private fun relayHttpHead(base: String, token: String, key: String): MediaHolding.Head {
+    internal fun relayHttpHead(base: String, token: String, key: String): MediaHolding.Head {
         if (HavenOffline.enabled) return MediaHolding.Head.UNREACHABLE
         val auth = httpAuth(token, "HEAD", key, ByteArray(0)) ?: return MediaHolding.Head.UNREACHABLE
         return try {
@@ -7450,7 +7458,7 @@ object HavenNet : InboundListener {
     }
 
     /** Plain existence of one key (a chunk window), HEAD-first; GET only where HEAD is unsupported. */
-    private fun relayHttpExists(base: String, token: String, key: String): Boolean =
+    internal fun relayHttpExists(base: String, token: String, key: String): Boolean =
         when (relayHttpHead(base, token, key)) {
             MediaHolding.Head.PRESENT -> true
             MediaHolding.Head.UNSUPPORTED -> {
@@ -7481,7 +7489,7 @@ object HavenNet : InboundListener {
     }
 
     /** LIST keys under a prefix via the relay's plain-HTTP interface (`GET /l/<prefix>`). */
-    private fun relayHttpList(base: String, token: String, prefix: String): Result<List<String>> =
+    internal fun relayHttpList(base: String, token: String, prefix: String): Result<List<String>> =
         relayHttpListDelta(base, token, prefix, digest = null).map { it.first ?: emptyList() }
 
     /** Last-seen LIST digest per `(relay node, prefix)`. Only committed once a listing's keys were
@@ -7504,7 +7512,7 @@ object HavenNet : InboundListener {
      * next time. A relay that doesn't speak the header simply never answers 204 and never hands us
      * a digest — today's behavior. Apple SharedStore.httpListDelta parity.
      */
-    private fun relayHttpListDelta(base: String, token: String, prefix: String,
+    internal fun relayHttpListDelta(base: String, token: String, prefix: String,
                                    digest: String?): Result<Pair<List<String>?, String?>> = runCatching {
         if (HavenOffline.enabled) throw java.io.IOException("offline (haven_no_net)")
         val auth = httpAuth(token, "GET", prefix, ByteArray(0))
@@ -7714,7 +7722,7 @@ object HavenNet : InboundListener {
      * never lands, and the damage surfaces much later as a fetch that genuinely 404s. A real absence,
      * manufactured by a permissions problem. iOS SharedStore.httpPut parity.
      */
-    private fun relayHttpPut(base: String, token: String, key: String, body: ByteArray): Result<Unit> = runCatching {
+    internal fun relayHttpPut(base: String, token: String, key: String, body: ByteArray): Result<Unit> = runCatching {
         // haven_no_net backstop. `httpUrlsFor` already refuses, so no live caller reaches here — but
         // these three primitives are the only place our own bytes hit the relay wire, and a future
         // route built from a base and token some other way must not slip past.
@@ -7812,7 +7820,7 @@ object HavenNet : InboundListener {
      *  [sealFp] identifies the bytes being sent, so an interrupted upload can resume against them and
      *  only against them; see [MediaUploadPlan] for why "the relay already has window i" is not on its
      *  own a reason to skip it. */
-    private suspend fun httpUploadMedia(e: RelayEntry, nodeHex: String, ref: String, key: String, blob: ByteArray,
+    internal suspend fun httpUploadMedia(e: RelayEntry, nodeHex: String, ref: String, key: String, blob: ByteArray,
                                         chunked: Boolean, sealFp: String = "", force: Boolean = false): Result<Unit> {
         var last: Result<Unit> = Result.failure(java.io.IOException("relay has no usable HTTP interface"))
         for (base in httpUrlsFor(e)) {
@@ -8617,7 +8625,7 @@ object HavenNet : InboundListener {
             opened
         }
 
-    private suspend fun fetchMediaFromRelay(circleId: String, ref: String): Boolean {
+    internal suspend fun fetchMediaFromRelay(circleId: String, ref: String): Boolean {
         val key = mediaKey(ref)   // "haven/media/<ref>" — matches the iOS S3 upload key
         val relays = mediaRelaysFor(circleId)   // S3/HTTP first (default), iroh blob = fast-path
         val mineId = runCatching { node?.nodeIdHex() ?: social.myNodeHex() }.getOrNull()?.take(12)

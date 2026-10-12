@@ -9,6 +9,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.1 (unreleased)
 
+### Fixed — Android: photo and video filters work on phones set to German, French, Arabic and other comma-decimal languages
+
+The filter shaders were assembled with the phone's number formatting, so on a device whose language writes
+a decimal comma the shader failed to compile and a filtered photo or video came out blank. They are built
+with fixed formatting now.
+
 ### Fixed — Windows and Linux: six app bugs found by running the whole UI under test
 
 The desktop UI is now exercised end to end against a stand-in for its backend, which turned up bugs

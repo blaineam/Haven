@@ -309,4 +309,46 @@ class HavenNetRelayTableTest {
         boot()
         assertTrue("an old deletion must not leak back for lack of a timestamp", HavenNet.relayForgottenRecords()[relayA]!! >= before)
     }
+
+    // ---- adopting a relay (the paste box) ------------------------------------------------------------------
+
+    @Test fun pasting_a_bare_node_id_adopts_it_as_an_active_relay() {
+        settle { HavenNet.adoptRelay("  ${relayA.uppercase()}  ", name = "Home") }
+        val e = entry(relayA)!!
+        assertTrue(e.active); assertEquals("Home", e.name)
+        assertTrue(e.httpUrls.isEmpty())
+    }
+
+    @Test fun pasting_the_relays_interface_blob_learns_http_derp_and_turn_in_one_go() {
+        val blob = JSONObject().put("node", relayB.uppercase())
+            .put("urls", JSONArray(listOf("https://r.example", "gopher://nope")))
+            .put("token", "tok").put("derp", " https://derp.example/ ")
+            .put("turn", JSONArray(listOf("turn:t.example:3478", "stun:no"))).toString()
+        settle { HavenNet.adoptRelay(blob, setDefault = true) }
+        val e = entry(relayB)!!
+        assertEquals(listOf("https://r.example"), e.httpUrls); assertEquals("tok", e.httpToken)
+        assertEquals("https://derp.example", e.derpUrl)
+        assertEquals(listOf("turn:t.example:3478"), e.turnUrls)
+        assertEquals("haven", e.turnUser); assertEquals("tok", e.turnPass)
+        assertEquals(relayB, HavenNet.defaultRelay())
+    }
+
+    @Test fun a_blob_without_urls_and_token_adds_no_http_interface() {
+        settle { HavenNet.adoptRelay(JSONObject().put("node", relayA).put("urls", JSONArray(listOf("https://x"))).toString()) }
+        assertTrue("urls without a token cannot be used", entry(relayA)!!.httpUrls.isEmpty())
+    }
+
+    @Test fun garbage_pastes_are_ignored() {
+        HavenNet.adoptRelay("not a relay"); HavenNet.adoptRelay("{broken"); HavenNet.adoptRelay(""); HavenNet.adoptRelay("ab".repeat(31))
+        assertTrue(HavenNet.allRelayEntries().isEmpty())
+    }
+
+    @Test fun adopting_a_deleted_relay_again_overrides_the_deletion() {
+        HavenNet.reactivateRelay(relayA)
+        settle { HavenNet.forgetRelay(relayA) }
+        settle { HavenNet.adoptRelay(relayA) }
+        assertTrue(HavenNet.isRelayActive(relayA))
+        assertNull(HavenNet.relayForgottenRecords()[relayA])
+        assertTrue(HavenNet.relayClearedForgetRecords()[relayA]!! > 0)
+    }
 }

@@ -54,11 +54,13 @@ public class Uri {
         return out;
     }
 
-    public static String encode(String s) {
+    public static String encode(String s) { return encode(s, null); }
+
+    public static String encode(String s, String allow) {
         StringBuilder b = new StringBuilder();
         for (byte x : s.getBytes(StandardCharsets.UTF_8)) {
             int c = x & 0xFF;
-            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || "_-!.~'()*".indexOf(c) >= 0)
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || "_-!.~'()*".indexOf(c) >= 0 || (allow != null && allow.indexOf(c) >= 0))
                 b.append((char) c);
             else b.append('%').append("0123456789ABCDEF".charAt(c >> 4)).append("0123456789ABCDEF".charAt(c & 15));
         }

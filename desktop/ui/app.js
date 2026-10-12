@@ -583,7 +583,7 @@ async function activityPanel() {
       case "story": return t("shared_a_story");
       // A `dm:` id encodes its participants as sorted node hexes joined by `-`, so 3+ means a GROUP
       // thread, where "sent you a message" is wrong — nobody sent it to you specifically.
-      case "dm": return isGroupDm(r.circleId) ? t("messaged_the_group") : t("sent_you_a_message");
+      case "dm": return isGroupDm(r.circle_id) ? t("messaged_the_group") : t("sent_you_a_message");
       default: return t("posted_verb");
     }
   };
@@ -885,9 +885,9 @@ async function openStoryLink(circleId, postId) {
 // and land in Messages with the thread open — the same plumbing a row tap uses.
 async function openDmThread(circleId) {
   const threads = await invoke("dm_threads").catch(() => []);
-  const t = threads.find((x) => x.circle_id === circleId);
-  if (!t) { toast(t("convo_not_on_device")); state.activeDm = null; switchView("messages"); return; }
-  state.activeDm = { id: t.circle_id, name: t.name };
+  const thread = threads.find((x) => x.circle_id === circleId);   // not `t`: that shadows translate
+  if (!thread) { toast(t("convo_not_on_device")); state.activeDm = null; switchView("messages"); return; }
+  state.activeDm = { id: thread.circle_id, name: thread.name };
   switchView("messages");
 }
 
@@ -1219,7 +1219,10 @@ async function renderFeed() {
   });
   // Refreshed even on the early-out: the reader scrolls into these without a repaint.
   state.feedItems = items;
-  if (state.feedSig === sig && !state.focusPost && root.querySelector(".feed-list")) {
+  // The composer slot is part of the early-out's contract: leaving the Circle tab empties it
+  // (render() ▸ "renderFeed puts it back"), so an unchanged feed on return must still rebuild —
+  // returning early here left the tab with no composer at all until something else changed the feed.
+  if (state.feedSig === sig && !state.focusPost && root.querySelector(".feed-list") && $("#composer-slot").firstChild) {
     state.feedNudge?.();   // head unchanged, but a tail may have landed — append, never repaint
     return;
   }
@@ -1281,7 +1284,7 @@ async function renderFeed() {
       // Lazy history: adding someone no longer ships their whole backlog, so the tail of the feed is
       // the cue to fetch more, exactly the way media is fetched when a tile appears. Idempotent per
       // cursor on the Rust side, so paging to the end repeatedly does not re-ask.
-      const oldest = all.length ? all[all.length - 1].createdAt : 0;
+      const oldest = all.length ? all[all.length - 1].created_at : 0;   // feed DTOs are snake_case
       if (oldest) invoke("request_older_history", { circleId: state.activeCircle, oldestCreatedAt: oldest }).catch(() => {});
     }
   };
@@ -3683,13 +3686,14 @@ function postMenu(anchor, it, circleId) {
     it.is_me || !author ? null : {
       label: t("message_name", author.name), icon: "bubble.left",
       on: async () => {
-        const t = await invoke("message_author",
+        // Not `t`: that would shadow the translate function, and the failure branch below calls it.
+        const target = await invoke("message_author",
           { authorShort: it.author_short, circleId, postId: it.id }).catch(() => null);
-        if (!t || !t.dm) { toast(t("couldnt_open_message")); return; }
+        if (!target || !target.dm) { toast(t("couldnt_open_message")); return; }
         // Consumed once by renderThread's composer — appended there, never assigned, so re-entering
         // a thread cannot discard something half-typed.
-        if (t.draft) state.pendingDraft = { id: t.dm, text: t.draft };
-        state.activeDm = { id: t.dm, name: t.name || author.name };
+        if (target.draft) state.pendingDraft = { id: target.dm, text: target.draft };
+        state.activeDm = { id: target.dm, name: target.name || author.name };
         switchView("messages");
       },
     },
@@ -3995,7 +3999,11 @@ const StoryCaptions = {
     if ((style === 0 || style === 1) && n.length === 6) style = style === 1 ? 4 : 1;  // legacy bit
     return { text: body.slice(sep + 1), spec: {
       color: parseInt(n[0], 10) || 0, font: parseInt(n[1], 10) || 0, style,
-      x: parseFloat(n[3]) || 0.5, y: parseFloat(n[4]) || 0.5, size: parseFloat(n[5]) || 1,
+      // x / y: 0 is a real position (the left / top edge), so only a NON-number falls back to centre —
+      // `|| 0.5` here moved an edge-anchored caption to the middle.
+      x: Number.isFinite(parseFloat(n[3])) ? parseFloat(n[3]) : 0.5,
+      y: Number.isFinite(parseFloat(n[4])) ? parseFloat(n[4]) : 0.5,
+      size: parseFloat(n[5]) || 1,
       // Author's media framing (fields 6-8, the composer's zoom + pan). Absent on legacy/6-field
       // bodies → identity, so old stories render exactly as before.
       mediaScale: parseFloat(n[6]) || 1, mediaOffX: parseFloat(n[7]) || 0, mediaOffY: parseFloat(n[8]) || 0,

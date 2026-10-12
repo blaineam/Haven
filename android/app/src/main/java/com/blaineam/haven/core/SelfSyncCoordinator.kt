@@ -317,6 +317,7 @@ object SelfSyncCoordinator {
 
         // Roster reconciliation (set-like — enumerate the converged state via entries()).
         val live = h.entries()
+        val liveKV = live.map { it.key to it.value }
 
         // Contact rosters synced from another of my devices → ingest so THIS device can also dial + seal to
         // each friend's CURRENT devices (verified against the account bundle carried inside the wire). This
@@ -341,30 +342,9 @@ object SelfSyncCoordinator {
         // Contact removals — LWW by timestamp, applied BEFORE the upsert so a removed contact is
         // tombstoned and the upsert refuses to resurrect them (contacts are otherwise additive-only, which
         // is exactly why deletes never stuck on a multi-device account). Newest of removed-vs-readd wins.
-        run {
-            val removedMs = HashMap<String, Long>()
-            val readdMs = HashMap<String, Long>()
-            for (e in live) if (e.value.size == 8) {
-                when {
-                    e.key.startsWith("contact-removed:") -> {
-                        val hex = e.key.removePrefix("contact-removed:")
-                        if (hex.isNotEmpty()) removedMs[hex] = maxOf(removedMs[hex] ?: 0L, int64LEValue(e.value))
-                    }
-                    e.key.startsWith("contact-readd:") -> {
-                        val hex = e.key.removePrefix("contact-readd:")
-                        if (hex.isNotEmpty()) readdMs[hex] = maxOf(readdMs[hex] ?: 0L, int64LEValue(e.value))
-                    }
-                }
-            }
-            for (hex in removedMs.keys + readdMs.keys) {
-                val rem = removedMs[hex] ?: 0L
-                val readd = readdMs[hex] ?: 0L
-                if (rem >= readd && rem > 0L) {
-                    if (ContactRemovals.mergeRemovedAt(hex, rem)) HavenNet.selfSyncRemoveContact(hex)
-                } else if (readd > 0L) {
-                    ContactRemovals.mergeReaddedAt(hex, readd)
-                }
-            }
+        for (r in SelfSyncWire.resolve(liveKV, "contact-removed:", "contact-readd:", tieRemoves = true)) {
+            if (r.removed) { if (ContactRemovals.mergeRemovedAt(r.id, r.ts)) HavenNet.selfSyncRemoveContact(r.id) }
+            else ContactRemovals.mergeReaddedAt(r.id, r.ts)
         }
 
         // Contacts: upsert everyone present that isn't tombstone-removed (selfSyncUpsertContact enforces
@@ -392,48 +372,20 @@ object SelfSyncCoordinator {
         // from the timestamped keys (plus legacy `removal:` = 1/0 mapped to ts=1 so it loses to any real
         // write), pick the newest per key, then apply. This is the fix for "removals don't sync to my other
         // device" AND the older "a sibling re-severs a re-added friend". Mirrors iOS SelfSync.applyLocal.
-        run {
-            val removedMs = HashMap<String, Long>()
-            val readdMs = HashMap<String, Long>()
-            fun norm(entry: String): String {
-                val bar = entry.indexOf('|'); if (bar < 0) return entry
-                return entry.substring(0, bar) + "|" + entry.substring(bar + 1).lowercase()
-            }
-            for (e in live) {
-                when {
-                    e.key.startsWith("circle-removed:") && e.value.size == 8 -> {
-                        val k = norm(e.key.removePrefix("circle-removed:"))
-                        removedMs[k] = maxOf(removedMs[k] ?: 0L, int64LEValue(e.value))
-                    }
-                    e.key.startsWith("circle-readd:") && e.value.size == 8 -> {
-                        val k = norm(e.key.removePrefix("circle-readd:"))
-                        readdMs[k] = maxOf(readdMs[k] ?: 0L, int64LEValue(e.value))
-                    }
-                    e.key.startsWith("removal:") && e.value.size == 1 -> {   // legacy pre-LWW record → ts=1
-                        val k = norm(e.key.removePrefix("removal:"))
-                        if (e.value[0].toInt() == 1) removedMs[k] = maxOf(removedMs[k] ?: 0L, 1L)
-                        else readdMs[k] = maxOf(readdMs[k] ?: 0L, 1L)
-                    }
+        for (r in SelfSyncWire.resolve(liveKV, "circle-removed:", "circle-readd:", tieRemoves = true,
+            legacyPrefix = "removal:", normalize = SelfSyncWire::normalizeSeveranceId)) {
+            val (cid, hex) = SelfSyncWire.splitSeveranceId(r.id) ?: continue
+            if (r.removed) {
+                if (CircleRemovals.mergeRemovedAt(r.id, r.ts) && social != null) {
+                    runCatching { social.removeFromCircle(cid, hex) }   // purge + engine tombstone
                 }
-            }
-            for (key in removedMs.keys + readdMs.keys) {
-                val bar = key.indexOf('|'); if (bar <= 0 || bar >= key.length - 1) continue
-                val cid = key.substring(0, bar)
-                val hex = key.substring(bar + 1)
-                val rem = removedMs[key] ?: 0L
-                val readd = readdMs[key] ?: 0L
-                if (rem >= readd && rem > 0L) {
-                    if (CircleRemovals.mergeRemovedAt(key, rem) && social != null) {
-                        runCatching { social.removeFromCircle(cid, hex) }   // purge + engine tombstone
-                    }
-                } else if (readd > 0L) {
-                    // Newest is a re-add: merge the client re-add ts AND lift the engine tombstone —
-                    // without the clear, a re-add made on my OTHER device left this engine dropping
-                    // the member's hellos/events forever (SelfSync.swift parity). The member's
-                    // bundle comes back via the additive circle: record.
-                    CircleRemovals.mergeReaddedAt(key, readd)
-                    if (social != null) runCatching { social.clearCircleRemoval(cid, hex) }
-                }
+            } else {
+                // Newest is a re-add: merge the client re-add ts AND lift the engine tombstone —
+                // without the clear, a re-add made on my OTHER device left this engine dropping
+                // the member's hellos/events forever (SelfSync.swift parity). The member's
+                // bundle comes back via the additive circle: record.
+                CircleRemovals.mergeReaddedAt(r.id, r.ts)
+                if (social != null) runCatching { social.clearCircleRemoval(cid, hex) }
             }
         }
 
@@ -441,57 +393,21 @@ object SelfSyncCoordinator {
         // time vs re-add time) — NOT by which device synced last. Gather both sides, newest wins per relay.
         // Applied BEFORE the circle: records below re-add relays, so a relay whose newest verdict is
         // "deleted" stays gone. A passive re-announce never auto-resurrects it. iOS SelfSync parity.
-        val relayRemovalMs = HashMap<String, Long>()
-        val relayReaddMs = HashMap<String, Long>()
-        for (e in live) if (e.value.size == 8) {
-            when {
-                e.key.startsWith("relay-removal:") -> {
-                    val hex = e.key.removePrefix("relay-removal:")
-                    if (hex.isNotEmpty()) relayRemovalMs[hex] = maxOf(relayRemovalMs[hex] ?: 0L, int64LEValue(e.value))
-                }
-                e.key.startsWith("relay-readd:") -> {
-                    val hex = e.key.removePrefix("relay-readd:")
-                    if (hex.isNotEmpty()) relayReaddMs[hex] = maxOf(relayReaddMs[hex] ?: 0L, int64LEValue(e.value))
-                }
-            }
-        }
-        for (hex in (relayRemovalMs.keys + relayReaddMs.keys)) {
-            val del = relayRemovalMs[hex] ?: 0L
-            val readd = relayReaddMs[hex] ?: 0L
-            if (del > readd) HavenNet.applyRelayForgottenTombstone(hex, del)   // deleted, newer than any re-add
-            else if (readd > 0L) HavenNet.applyRelayClearedForget(hex, readd)  // re-added, newer than any delete
+        for (r in SelfSyncWire.resolve(liveKV, "relay-removal:", "relay-readd:", tieRemoves = false)) {
+            if (r.removed) HavenNet.applyRelayForgottenTombstone(r.id, r.ts)   // deleted, newer than any re-add
+            else HavenNet.applyRelayClearedForget(r.id, r.ts)                  // re-added, newer than any delete
         }
 
         // Whole-circle / DM deletions — LWW, applied BEFORE the circle: upsert. A deletion newer than any
         // re-creation deletes the circle locally too (so deleting a DM on one device deletes it on the
         // others); the circle: loop below then skips re-creating anything still tombstone-deleted.
-        run {
-            val deletedMs = HashMap<String, Long>()
-            val recreatedMs = HashMap<String, Long>()
-            for (e in live) if (e.value.size == 8) {
-                when {
-                    e.key.startsWith("circle-deleted:") -> {
-                        val id = e.key.removePrefix("circle-deleted:")
-                        if (id.isNotEmpty()) deletedMs[id] = int64LEValue(e.value)
-                    }
-                    e.key.startsWith("circle-recreated:") -> {
-                        val id = e.key.removePrefix("circle-recreated:")
-                        if (id.isNotEmpty()) recreatedMs[id] = int64LEValue(e.value)
-                    }
+        for (r in SelfSyncWire.resolve(liveKV, "circle-deleted:", "circle-recreated:", tieRemoves = true)) {
+            if (r.removed) {
+                if (CircleDeletion.mergeDeletedAt(r.id, r.ts) &&
+                    social?.circles()?.any { it.id == r.id } == true) {
+                    runCatching { social.leaveCircle(r.id) }
                 }
-            }
-            for (id in deletedMs.keys + recreatedMs.keys) {
-                val del = deletedMs[id] ?: 0L
-                val rec = recreatedMs[id] ?: 0L
-                if (del >= rec && del > 0L) {
-                    if (CircleDeletion.mergeDeletedAt(id, del) &&
-                        social?.circles()?.any { it.id == id } == true) {
-                        runCatching { social.leaveCircle(id) }
-                    }
-                } else if (rec > 0L) {
-                    CircleDeletion.mergeRecreatedAt(id, rec)
-                }
-            }
+            } else CircleDeletion.mergeRecreatedAt(r.id, r.ts)
         }
 
         // Circles: reconcile each synced circle — create it + register every member's bundle so this
@@ -779,66 +695,16 @@ object SelfSyncCoordinator {
         return changed
     }
 
-    // MARK: encodings (byte-identical to iOS)
-
-    /** Stable Android contact JSON. Need NOT match iOS (structs differ) — just stable on Android. */
-    private fun encodeContact(c: Contact): ByteArray =
-        JSONObject().apply {
-            put("id_hex", c.idHex)
-            put("name", c.name)
-            put("verify", c.verifyHex)
-        }.toString().toByteArray(Charsets.UTF_8)
-
-    private fun decodeContact(bytes: ByteArray): Contact? = runCatching {
-        val o = JSONObject(String(bytes, Charsets.UTF_8))
-        Contact(o.getString("id_hex"), o.optString("name", ""), o.optString("verify", ""))
-    }.getOrNull()
-
-    private fun int32LE(v: Int): ByteArray = byteArrayOf(
-        (v and 0xFF).toByte(),
-        ((v ushr 8) and 0xFF).toByte(),
-        ((v ushr 16) and 0xFF).toByte(),
-        ((v ushr 24) and 0xFF).toByte(),
-    )
-
-    private fun int32LEValue(b: ByteArray): Int =
-        (b[0].toInt() and 0xFF) or
-            ((b[1].toInt() and 0xFF) shl 8) or
-            ((b[2].toInt() and 0xFF) shl 16) or
-            ((b[3].toInt() and 0xFF) shl 24)
-
-    /** 8-byte little-endian encoding of an unsigned ms timestamp (byte-identical to iOS's LE UInt64). */
-    private fun int64LE(v: Long): ByteArray = ByteArray(8) { i -> ((v ushr (i * 8)) and 0xFF).toByte() }
-
-    private fun int64LEValue(b: ByteArray): Long {
-        var v = 0L
-        for (i in 0 until 8) v = v or ((b[i].toLong() and 0xFF) shl (i * 8))
-        return v
-    }
-
-    private fun boolValue(h: AccountStateHandle, key: String): Boolean? {
-        val v = h.get(key) ?: return null
-        if (v.isEmpty()) return null
-        return v[0].toInt() == 1
-    }
-
+    // MARK: encodings (byte-identical to iOS) — see [SelfSyncWire]
+    private fun encodeContact(c: Contact) = SelfSyncWire.encodeContact(c)
+    private fun decodeContact(bytes: ByteArray) = SelfSyncWire.decodeContact(bytes)
+    private fun int32LE(v: Int) = SelfSyncWire.int32LE(v)
+    private fun int32LEValue(b: ByteArray) = SelfSyncWire.int32LEValue(b)
+    private fun int64LE(v: Long) = SelfSyncWire.int64LE(v)
+    private fun int64LEValue(b: ByteArray) = SelfSyncWire.int64LEValue(b)
+    private fun boolValue(h: AccountStateHandle, key: String): Boolean? = SelfSyncWire.boolValue(h.get(key))
     private fun strValue(h: AccountStateHandle, key: String): String? =
         h.get(key)?.let { String(it, Charsets.UTF_8) }
-
-    // MARK: hex helpers
-
-    private fun toHex(b: ByteArray): String =
-        b.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
-
-    private fun fromHex(hex: String): ByteArray? {
-        if (hex.length % 2 != 0) return null
-        val out = ByteArray(hex.length / 2)
-        var i = 0
-        while (i < hex.length) {
-            val byte = hex.substring(i, i + 2).toIntOrNull(16) ?: return null
-            out[i / 2] = byte.toByte()
-            i += 2
-        }
-        return out
-    }
+    private fun toHex(b: ByteArray) = SelfSyncWire.toHex(b)
+    private fun fromHex(hex: String) = SelfSyncWire.fromHex(hex)
 }

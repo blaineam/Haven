@@ -841,26 +841,12 @@ object HavenNet : InboundListener {
      */
     private fun adaptiveInterval(base: Long): Long {
         val idle = System.currentTimeMillis() - lastActivityMs
-        var mult = when {
-            idle < 180_000 -> 1L
-            idle < 900_000 -> 3L
-            else -> 6L
-        }
         // Thermal: PowerManager.getCurrentThermalStatus (API 29+)
-        if (android.os.Build.VERSION.SDK_INT >= 29) {
-            val pm = appContext.getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
-            when (pm?.currentThermalStatus) {
-                android.os.PowerManager.THERMAL_STATUS_SEVERE,
-                android.os.PowerManager.THERMAL_STATUS_CRITICAL,
-                android.os.PowerManager.THERMAL_STATUS_EMERGENCY,
-                android.os.PowerManager.THERMAL_STATUS_SHUTDOWN -> mult *= 2
-                android.os.PowerManager.THERMAL_STATUS_MODERATE -> mult = (mult * 3) / 2
-            }
-        }
-        if (runCatching { ProfileStore.get(appContext).dataSaverActive }.getOrDefault(false)) {
-            mult = (mult * 3) / 2
-        }
-        return base * mult.coerceAtLeast(1L)
+        val thermal: Int? = if (android.os.Build.VERSION.SDK_INT >= 29) {
+            (appContext.getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager)?.currentThermalStatus
+        } else null
+        val saver = runCatching { ProfileStore.get(appContext).dataSaverActive }.getOrDefault(false)
+        return base * PollCadence.multiplier(idle, thermal, saver)
     }
     /**
      * How long until the next MAILBOX poll — deliberately not [adaptiveInterval].
@@ -874,10 +860,8 @@ object HavenNet : InboundListener {
      * backgrounded, the full stretch stands, because then nobody is waiting and push wakes us.
      * iOS parity (FeedStore.mailboxPollInterval).
      */
-    private fun mailboxPollInterval(base: Long): Long {
-        val full = adaptiveInterval(base)
-        return if (isForeground) minOf(full, base * 2) else full
-    }
+    private fun mailboxPollInterval(base: Long): Long =
+        PollCadence.mailboxInterval(adaptiveInterval(base), base, isForeground)
 
     /** Mark "something is happening" → snap both timers back to their tight base cadence immediately. */
     fun bumpActivity() {
@@ -1049,21 +1033,10 @@ object HavenNet : InboundListener {
     private fun friendInviteEmbed(link: String): String {
         val t = friendInviteLinkValue() ?: return link
         beginFirstContactFastPoll(180_000)   // the link is being shown: someone may accept any second
-        val hash = link.indexOf('#').let { if (it < 0) link.length else it }
-        val sep = if (link.substring(0, hash).contains('?')) "&" else "?"
-        return link.substring(0, hash) + sep + "t=" + t + link.substring(hash)
+        return HavenKeys.embedInviteTicket(link, t)
     }
 
-    private fun friendInviteExtract(link: String): String? {
-        val q = link.indexOf('?').takeIf { it >= 0 } ?: return null
-        val end = link.indexOf('#').let { if (it < 0) link.length else it }
-        if (q >= end) return null
-        for (pair in link.substring(q + 1, end).split('&')) {
-            val kv = pair.split('=', limit = 2)
-            if (kv.size == 2 && kv[0] == "t" && kv[1].isNotEmpty()) return kv[1]
-        }
-        return null
-    }
+    private fun friendInviteExtract(link: String): String? = HavenKeys.extractInviteTicket(link)
 
     private fun friendInviteAccept(linkValue: String) {
         loadInvites()
@@ -1732,29 +1705,12 @@ object HavenNet : InboundListener {
     // ---- "Tell me when this media is back" (frames 31/32; iOS parity) ---------------------
 
     /** Body of both media frames: `[hex64 me][LP ref][LP circleId][LP postId]`. */
-    private fun mediaFrameBody(ref: String, circleId: String, postId: String): ByteArray {
-        val out = ArrayList<Byte>()
-        nodeIdHex.toByteArray(Charsets.UTF_8).forEach { out.add(it) }
-        Wire.lpAppend(out, ref.toByteArray(Charsets.UTF_8))
-        Wire.lpAppend(out, circleId.toByteArray(Charsets.UTF_8))
-        Wire.lpAppend(out, postId.toByteArray(Charsets.UTF_8))
-        return out.toByteArray()
-    }
+    private fun mediaFrameBody(ref: String, circleId: String, postId: String): ByteArray =
+        HavenKeys.mediaFrameBody(nodeIdHex, ref, circleId, postId)
 
     /** (from, ref, circleId, postId) — null if the frame is malformed. */
-    private fun parseMediaFrame(body: ByteArray): Quadruple? {
-        if (body.size <= 64) return null
-        val from = runCatching { String(body.copyOfRange(0, 64), Charsets.UTF_8) }.getOrNull() ?: return null
-        if (from.length != 64) return null
-        val r = Wire.Reader(body, 64)
-        val ref = r.lp()?.let { String(it, Charsets.UTF_8) } ?: return null
-        val circleId = r.lp()?.let { String(it, Charsets.UTF_8) } ?: return null
-        val postId = r.lp()?.let { String(it, Charsets.UTF_8) } ?: return null
-        if (ref.isEmpty() || circleId.isEmpty()) return null
-        return Quadruple(from.lowercase(), ref, circleId, postId)
-    }
+    private fun parseMediaFrame(body: ByteArray): HavenKeys.MediaFrame? = HavenKeys.parseMediaFrame(body)
 
-    private data class Quadruple(val from: String, val ref: String, val circleId: String, val postId: String)
 
     /**
      * Ask a post's AUTHOR to re-upload media a relay has swept, and remember that I asked.
@@ -1966,11 +1922,8 @@ object HavenNet : InboundListener {
 
     private val seenRelay = SharedCollections.set()
 
-    private fun hexToBytes32(hex: String): ByteArray? {
-        if (hex.length != 64) return null
-        return runCatching { ByteArray(32) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() } }.getOrNull()
-    }
-    private fun bytesToHex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
+    private fun hexToBytes32(hex: String): ByteArray? = HavenKeys.hexToBytes32(hex)
+    private fun bytesToHex(b: ByteArray): String = HavenKeys.bytesToHex(b)
 
     /** Originate a live frame-9 forward of [inner] to [dests] via up to 3 adopted internet relays. */
     private fun originateRelayInternet(dests: List<String>, inner: ByteArray) {
@@ -2162,16 +2115,9 @@ object HavenNet : InboundListener {
     // ---- DMs (a DM is a private 2-person circle, id encodes both node ids) ----------------
 
     /** Deterministic DM circle id — identical on both sides (full sorted node ids). */
-    fun dmCircleId(idHex: String): String {
-        val pair = listOf(nodeIdHex, idHex).sorted()
-        return "dm:${pair[0]}-${pair[1]}"
-    }
+    fun dmCircleId(idHex: String): String = HavenKeys.dmCircleId(nodeIdHex, idHex)
 
-    private fun dmAllows(circleId: String, nodeHex: String): Boolean {
-        // 2+ members so group DMs are admitted too; the sender must be one of the encoded members.
-        val parts = circleId.removePrefix("dm:").split("-")
-        return parts.size >= 2 && parts.contains(nodeHex)
-    }
+    private fun dmAllows(circleId: String, nodeHex: String): Boolean = HavenKeys.dmAllows(circleId, nodeHex)
 
     /** Open (or create) a DM with a known contact; returns the dm circle id. */
     fun startDm(contact: Contact): String {
@@ -2216,14 +2162,10 @@ object HavenNet : InboundListener {
 
     /** Deterministic GROUP-DM circle id — sorted full node ids of every member (me + others), so the
      *  same set of people always maps to the same thread on every device. */
-    fun groupDMCircleId(otherHexes: List<String>): String {
-        val all = (otherHexes + nodeIdHex).map { it.lowercase() }.distinct().sorted()
-        return "dm:" + all.joinToString("-")
-    }
+    fun groupDMCircleId(otherHexes: List<String>): String = HavenKeys.groupDmCircleId(nodeIdHex, otherHexes)
 
     /** The member node ids encoded in a dm: circle id (includes me). */
-    fun dmMemberHexes(circleId: String): List<String> =
-        circleId.removePrefix("dm:").split("-").filter { it.length == 64 }
+    fun dmMemberHexes(circleId: String): List<String> = HavenKeys.dmMemberHexes(circleId)
 
     /** A friendly title for a dm thread: the OTHER members' display names, joined. */
     fun dmPartnerName(circleId: String): String {
@@ -3764,10 +3706,8 @@ object HavenNet : InboundListener {
      *  layout [pollMailbox] claims on the receiving side (iOS helloMailboxKey parity). Content-
      *  addressed over the hello body: the profile signature is deterministic, so the digest is
      *  stable across sync ticks and re-offers dedupe instead of minting a fresh key per pass. */
-    private fun helloMailboxKey(circleId: String, toHex: String, fromHex: String, body: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(body).joinToString("") { "%02x".format(it) }
-        return "haven/mailbox/$circleId/__hello__/${toHex.lowercase()}/${fromHex.lowercase()}/$digest"
-    }
+    private fun helloMailboxKey(circleId: String, toHex: String, fromHex: String, body: ByteArray): String =
+        HavenKeys.helloMailboxKey(circleId, toHex, fromHex, body)
 
     /** `<relayHex>|<key>` pairs that LANDED. The re-offer skip is per-RELAY, deliberately NOT the
      *  global seen-set: a relay adopted AFTER a hello landed elsewhere must still be offered it,
@@ -4435,17 +4375,8 @@ object HavenNet : InboundListener {
     /** The Apple `PushBanner.jsonObject` shape (`{t,b,bp,c,k,e?,p?}`) — sealed per recipient below
      *  so the worker never sees it and the recipient's NSE verifies the signer. `p` = the authored/
      *  PARENT post id, so the recipient's tap opens the exact post (Apple parity). */
-    private fun bannerJson(copy: PushBanner.Copy, circleId: String): ByteArray? = runCatching {
-        val o = JSONObject()
-            .put("t", profile.displayName.ifBlank { "Someone" })
-            .put("b", copy.body)
-            .put("bp", copy.privateBody)
-            .put("c", circleId)
-            .put("k", copy.kind)
-        copy.emoji?.let { o.put("e", it) }
-        copy.postId?.takeIf { it.isNotEmpty() }?.let { o.put("p", it) }
-        o.toString().toByteArray(Charsets.UTF_8)
-    }.getOrNull()
+    private fun bannerJson(copy: PushBanner.Copy, circleId: String): ByteArray? =
+        PushBannerJson.encode(profile.displayName, copy, circleId)
 
     /** Ask the push relay to wake a (possibly offline) peer. [ciphertextB64] = the banner sealed to
      *  THAT peer (worker forwards it blind); null + [silent] = a bannerless content-available wake. */
@@ -4692,38 +4623,16 @@ object HavenNet : InboundListener {
         val opened = runCatching { social.openCircleMediaSender(circleId, sealed) }.getOrNull() ?: return
         val announcerHex = opened.senderHex.lowercase()   // authenticated envelope sender (account id)
         val text = String(opened.data, Charsets.UTF_8).trim()
-        // Extended announce: JSON {node, urls, token, derp, turn, turnUser, turnPass}.
-        var announcedUrls: List<String> = emptyList()
-        var announcedToken = ""
-        var announcedAddedAt = 0L
-        var announcedDerp: String? = null
-        var announcedTurn: List<String> = emptyList()
-        var announcedTurnUser = ""
-        var announcedTurnPass = ""
-        val nodeHex: String = if (text.startsWith("{")) {
-            val o = runCatching { JSONObject(text) }.getOrNull() ?: return
-            announcedUrls = o.optJSONArray("urls")?.let { a ->
-                (0 until a.length()).mapNotNull { i -> a.optString(i).takeIf { u -> u.startsWith("http") } }
-            } ?: emptyList()
-            announcedToken = o.optString("token", "")
-            announcedAddedAt = o.optLong("addedAt", 0L)
-            val d = o.optString("derp", "").trim()
-            if (d.startsWith("http")) announcedDerp = d.trimEnd('/')
-            announcedTurn = o.optJSONArray("turn")?.let { a ->
-                (0 until a.length()).mapNotNull { i ->
-                    a.optString(i).takeIf { u -> u.startsWith("turn:") || u.startsWith("turns:") }
-                }
-            } ?: o.optString("turn", "").takeIf { it.startsWith("turn:") || it.startsWith("turns:") }
-                ?.let { listOf(it) } ?: emptyList()
-            announcedTurnUser = o.optString("turnUser", "")
-            announcedTurnPass = o.optString("turnPass", "")
-            if (announcedTurnUser.isEmpty() && announcedTurn.isNotEmpty()) announcedTurnUser = "haven"
-            if (announcedTurnPass.isEmpty() && announcedTurn.isNotEmpty() && announcedToken.isNotEmpty()) {
-                announcedTurnPass = announcedToken
-            }
-            o.optString("node", "").trim().lowercase()
-        } else text.lowercase()
-        if (nodeHex.length != 64) return
+        // Extended announce: JSON {node, urls, token, derp, turn, turnUser, turnPass} — see [RelayAnnounce].
+        val ann = RelayAnnounce.parse(text) ?: return
+        val nodeHex = ann.nodeHex
+        val announcedUrls = ann.urls
+        val announcedToken = ann.token
+        val announcedAddedAt = ann.addedAt
+        val announcedDerp = ann.derp
+        val announcedTurn = ann.turn
+        val announcedTurnUser = ann.turnUser
+        val announcedTurnPass = ann.turnPass
         // Announced by a member = we're in; retry what a pending-enrollment relay refused (no-op
         // for any relay not pending).
         triggerPendingEnrollment(listOf(nodeHex), "relay announce")
@@ -4736,23 +4645,18 @@ object HavenNet : InboundListener {
         // RUNNING somewhere (an old docker container, a forgotten daemon) — bounced back within one
         // sync tick, forever. Non-owner announces of a tombstoned relay are dropped; brand-new relays
         // still auto-pool below. iOS parity.
-        if (suppressedRelays.contains(nodeHex)) {
-            // The user DELIBERATELY DELETED this relay. It comes back ONLY on a genuine re-add whose
-            // adoption stamp is NEWER than our deletion (pure LWW) — NOT because its owner merely
-            // reopened the app (that re-announces the relay's ORIGINAL, older adoption time). A stale
-            // third-party echo and a legacy announce (addedAt=0) also lose. iOS parity (the "deleted
-            // relays came back when mom opened the app" fix).
-            if (announcedAddedAt <= relayForgottenAtMs(nodeHex)) return
-            reactivateRelay(nodeHex, adoptedAtMs = announcedAddedAt)
-        } else if (!isRelayActive(nodeHex)) {
-            // Merely INACTIVE (deactivated, not deleted) — the owner may bring it back, or a newer
-            // re-add. Keeps a Mac's relay coming back on the phone when the Mac re-announces it.
-            val ownerDevices = runCatching { social.deviceNodeIdsFor(announcerHex) }
-                .getOrDefault(emptyList()).map { it.lowercase() }
-            val announcerOwnsRelay = nodeHex == announcerHex || nodeHex in ownerDevices
-            val newerReAdd = announcedAddedAt > 0 && announcedAddedAt > relayForgottenAtMs(nodeHex)
-            if (!announcerOwnsRelay && !newerReAdd) return
-            reactivateRelay(nodeHex, adoptedAtMs = announcedAddedAt)
+        val wasSuppressed = suppressedRelays.contains(nodeHex)
+        val wasActive = isRelayActive(nodeHex)
+        // (Deleted relays return only on a genuinely NEWER re-add; merely-inactive ones also for their
+        // owner — the rules and the reasons live on RelayAnnounce.reactivation.)
+        val ownerDevices = if (!wasSuppressed && !wasActive)
+            runCatching { social.deviceNodeIdsFor(announcerHex) }.getOrDefault(emptyList()).map { it.lowercase() }
+        else emptyList()
+        when (RelayAnnounce.reactivation(wasSuppressed, wasActive, announcedAddedAt, relayForgottenAtMs(nodeHex),
+            nodeHex, announcerHex, ownerDevices)) {
+            RelayAnnounce.Decision.DROP -> return
+            RelayAnnounce.Decision.REACTIVATE -> reactivateRelay(nodeHex, adoptedAtMs = announcedAddedAt)
+            RelayAnnounce.Decision.KEEP -> {}
         }
         // A contact advertised their circle relay → ADD it to our redundant set for this circle,
         // so members automatically pool relays (more redundancy, no manual setup). Append, never
@@ -5192,9 +5096,7 @@ object HavenNet : InboundListener {
     /** Epoch-ms as a Long for relay bookkeeping (the top-level nowMs() returns ULong for the FFI). */
     private fun relayNow() = System.currentTimeMillis()
 
-    private fun shortRelayName(hex: String): String =
-        if (hex.startsWith("s3:")) "S3 · " + hex.removePrefix("s3:").take(16)
-        else "Relay · " + hex.take(8) + "…"
+    private fun shortRelayName(hex: String): String = RelayEntryCodec.shortName(hex)
 
     /** True when a relay is recorded + currently active. Unknown hexes are treated active (nothing breaks). */
     fun isRelayActive(hex: String): Boolean = relayEntries[hex]?.active ?: true
@@ -5683,10 +5585,7 @@ object HavenNet : InboundListener {
         Unit
     }
 
-    private fun mailboxKey(circleId: String, env: ByteArray): String {
-        val h = MessageDigest.getInstance("SHA-256").digest(env).joinToString("") { "%02x".format(it) }
-        return "haven/mailbox/$circleId/$h"
-    }
+    private fun mailboxKey(circleId: String, env: ByteArray): String = HavenKeys.mailboxKey(circleId, env)
 
     /** Drop a sealed event into the circle's mailbox (Haven relay node and/or S3 pre-signed pool). */
     private suspend fun uploadEvent(circleId: String, env: ByteArray): Boolean {
@@ -5889,11 +5788,7 @@ object HavenNet : InboundListener {
     }
 
     /** Control-plane keys rank first — they unlock everything else (iOS pullMailbox parity). */
-    private fun mailboxKeyRank(key: String): Int = when {
-        key.contains("/__hello__/") -> 0
-        key.contains("/__relay__/") -> 1
-        else -> 2
-    }
+    private fun mailboxKeyRank(key: String): Int = HavenKeys.mailboxKeyRank(key)
 
     /** Poll every circle's mailbox; ingest envelopes we haven't seen. */
     suspend fun pollMailbox() {
@@ -6304,17 +6199,17 @@ object HavenNet : InboundListener {
     private val servedAt = SharedCollections.map<Long>()      // ref -> last nearby-serve ms (25s rate-limit)
     private val pushedNearby = SharedCollections.set()        // refs already pushed to nearby siblings this session
 
-    private fun mediaKey(ref: String) = "haven/media/$ref"
+    private fun mediaKey(ref: String) = HavenKeys.mediaKey(ref)
     // Chunks live in a SIBLING dir "<ref>.p/", not nested under the manifest key "haven/media/<ref>":
     // a disk relay maps each key segment to a directory, so "<ref>/<i>" would force "<ref>" to be both a
     // manifest FILE and a chunk DIRECTORY (a collision that fails the manifest write). "<ref>.p" is distinct.
-    private fun mediaChunkKey(ref: String, i: Int) = "haven/media/$ref.p/$i"
+    private fun mediaChunkKey(ref: String, i: Int) = HavenKeys.mediaChunkKey(ref, i)
     // Scope marker (core blobstore `media_scope_key`): written to a relay BEFORE the blob, it scopes
     // the ref to the circle it was posted in, so relay mesh replication carries it only to relays that
     // serve that circle — never to a friend's relay that merely shares some OTHER circle with us. A
     // relay that doesn't serve the circle refuses the marker (403); it is then no destination for this
     // circle's media. Blob keys are unchanged, so readers (and older clients/relays) are unaffected.
-    private fun mediaScopeKey(ref: String, circleId: String) = "haven/media/$ref.c/$circleId"
+    private fun mediaScopeKey(ref: String, circleId: String) = HavenKeys.mediaScopeKey(ref, circleId)
     private val mediaScopeBody = "1".toByteArray()
     /** "<node>|<circle>" -> until-ms: this relay refused to scope media into this circle (it doesn't
      *  serve it), so it is skipped as an upload destination for the circle for a while. */
@@ -6337,14 +6232,9 @@ object HavenNet : InboundListener {
     // BYTE-IDENTICAL to iOS/macOS + desktop (same 8 MB size, key scheme, and manifest bytes).
     private val mediaChunkBytes = MediaUploadPlan.CHUNK_BYTES   // 8 MB — under MAX_BLOB, memory-safe
     // 9-byte ASCII magic marking a manifest. A sealed envelope is JSON starting with '{', so no collision.
-    private val manifestMagic = "HVCHUNK1\n".toByteArray(Charsets.US_ASCII)
+    private val manifestMagic = HavenKeys.manifestMagic
 
-    private fun makeManifest(sizes: List<Int>): ByteArray {
-        val json = org.json.JSONObject()
-            .put("v", 1).put("chunks", sizes.size).put("total", sizes.sum())
-            .put("sizes", org.json.JSONArray(sizes))
-        return manifestMagic + json.toString().toByteArray(Charsets.UTF_8)
-    }
+    private fun makeManifest(sizes: List<Int>): ByteArray = HavenKeys.makeManifest(sizes)
     /**
      * True when a destination holds a COMPLETE copy of [ref] — every chunk, not merely the manifest.
      *
@@ -6371,14 +6261,7 @@ object HavenNet : InboundListener {
     }
 
     /** If [blob] is a chunk manifest, return its chunk count; else null (legacy/small single blob). */
-    private fun parseManifest(blob: ByteArray): Int? {
-        if (blob.size <= manifestMagic.size) return null
-        for (i in manifestMagic.indices) if (blob[i] != manifestMagic[i]) return null
-        return runCatching {
-            val body = String(blob, manifestMagic.size, blob.size - manifestMagic.size, Charsets.UTF_8)
-            org.json.JSONObject(body).getInt("chunks").takeIf { it > 0 }
-        }.getOrNull()
-    }
+    private fun parseManifest(blob: ByteArray): Int? = HavenKeys.parseManifest(blob)
 
     // ---- Serial media-transfer queue (OOM guard) ------------------------------------------------
     // Backups (uploadMedia) and relay restores (fetchMediaFromRelay) each load a FULL media blob
@@ -7082,7 +6965,7 @@ object HavenNet : InboundListener {
     private val mediaRefBornAt = HashMap<String, Long>()
     /** Direct asks sent per ref this session (drives the author-first → everyone widening). */
     private val directAskCount = HashMap<String, Int>()
-    private val SELF_AUTHOR = "<me>"
+    private val SELF_AUTHOR = MediaAsk.SELF_AUTHOR
 
     private fun noteMediaOrigin(ref: String, authorShort: String, isMe: Boolean, createdAt: ULong) {
         synchronized(mediaRefAuthor) {
@@ -7120,9 +7003,7 @@ object HavenNet : InboundListener {
             if (directAskCount.size > 2000) directAskCount.clear()
             n to mediaRefAuthor[ref]
         }
-        if (n > HeavyWorkPolicy.TARGETED_ASKS_BEFORE_BROADCAST || author == null) return all
-        if (author == SELF_AUTHOR) return emptyList()
-        return all.firstOrNull { it.startsWith(author, ignoreCase = true) }?.let { listOf(it) } ?: all
+        return MediaAsk.targets(all, n, author, HeavyWorkPolicy.TARGETED_ASKS_BEFORE_BROADCAST)
     }
 
     fun downloadEvicted(ref: String) {
@@ -8874,9 +8755,7 @@ object HavenNet : InboundListener {
      * the total, so hashing it distinguishes the seals. Mirror of iOS `SharedStore.manifestFingerprint`
      * and desktop `manifest_fingerprint`.
      */
-    private fun manifestFingerprint(head: ByteArray): String =
-        MessageDigest.getInstance("SHA-256").digest(head)
-            .joinToString("") { "%02x".format(it) }.take(16)
+    private fun manifestFingerprint(head: ByteArray): String = HavenKeys.manifestFingerprint(head)
 
     /**
      * Leading chunks of THIS seal already in the .part file. [fp] is what makes that "of this seal"
@@ -8922,7 +8801,7 @@ object HavenNet : InboundListener {
      * failure fetches only the missing chunks instead of restarting a multi-hundred-MB pull.
      * Returns false on any missing chunk so the caller can try the next relay (the partial is KEPT).
      */
-    private suspend fun reassembleInto(ref: String, head: ByteArray, getChunk: suspend (Int) -> ByteArray?): Boolean {
+    internal suspend fun reassembleInto(ref: String, head: ByteArray, getChunk: suspend (Int) -> ByteArray?): Boolean {
         val count = parseManifest(head)
         // An EMPTY body (or a failed local write) is a miss — the caller moves on to the next source
         // instead of leaving a 0-byte file that "opens for no circle" and gets quarantined.
@@ -9031,8 +8910,8 @@ object HavenNet : InboundListener {
     // ---- Relay-first serving (Apple FeedStore.relayFirstServe parity) ---------------------------
 
     /** Relay hints (frame 32) sent per "ref|requester": (count, window start ms). */
-    private val relayHintsSent = HashMap<String, Pair<Int, Long>>()
     private val RELAY_HINT_WINDOW_MS = 30 * 60_000L
+    private val relayHints = RelayHintBudget(RELAY_HINT_WINDOW_MS, HeavyWorkPolicy.MAX_RELAY_HINTS)
     /** Requesters waiting for OUR upload of a ref to land: ref → (requester → circleId). */
     private val hintOnUpload = HashMap<String, HashMap<String, String>>()
     /** ref → circle, for refs we have been asked to serve (the feed walk is not free). */
@@ -9040,22 +8919,10 @@ object HavenNet : InboundListener {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 1000
     }
 
-    private fun relayHintCount(ref: String, requester: String): Int = synchronized(relayHintsSent) {
-        val e = relayHintsSent["$ref|$requester"] ?: return 0
-        if (System.currentTimeMillis() - e.second >= RELAY_HINT_WINDOW_MS) 0 else e.first
-    }
+    private fun relayHintCount(ref: String, requester: String): Int = relayHints.count(ref, requester)
 
     /** Record one hint; false once the per-window budget is spent (the caller stays quiet). */
-    private fun noteRelayHint(ref: String, requester: String): Boolean = synchronized(relayHintsSent) {
-        val key = "$ref|$requester"
-        val now = System.currentTimeMillis()
-        var e = relayHintsSent[key] ?: (0 to now)
-        if (now - e.second >= RELAY_HINT_WINDOW_MS) e = 0 to now
-        if (e.first >= HeavyWorkPolicy.MAX_RELAY_HINTS) return false
-        relayHintsSent[key] = (e.first + 1) to e.second
-        if (relayHintsSent.size > 2000) relayHintsSent.clear()
-        true
-    }
+    private fun noteRelayHint(ref: String, requester: String): Boolean = relayHints.note(ref, requester)
 
     /** ref → what it is to its post (QA attribution of direct serves, `relay_first`). */
     private val serveRoleCache = object : LinkedHashMap<String, String>(64, 0.75f, true) {
@@ -9281,32 +9148,13 @@ object HavenNet : InboundListener {
         }
     }
 
-    private fun chunkFrame(refBytes: ByteArray, index: Int, total: Int, sealed: ByteArray): ByteArray {
-        val out = ArrayList<Byte>(2 + refBytes.size + 8 + sealed.size)
-        out.add((refBytes.size and 0xFF).toByte()); out.add(((refBytes.size ushr 8) and 0xFF).toByte())
-        refBytes.forEach { out.add(it) }
-        for (v in intArrayOf(index, total)) {
-            out.add((v and 0xFF).toByte()); out.add(((v ushr 8) and 0xFF).toByte())
-            out.add(((v ushr 16) and 0xFF).toByte()); out.add(((v ushr 24) and 0xFF).toByte())
-        }
-        sealed.forEach { out.add(it) }
-        return out.toByteArray()
-    }
+    private fun chunkFrame(refBytes: ByteArray, index: Int, total: Int, sealed: ByteArray): ByteArray =
+        ChunkFrame.encode(refBytes, index, total, sealed)
 
     /** Frame 5: reassemble sealed chunks; store the media when complete. */
     private fun handleMediaChunk(body: ByteArray) {
-        if (body.size < 2) return
-        val refLen = (body[0].toInt() and 0xFF) or ((body[1].toInt() and 0xFF) shl 8)
-        if (body.size < 2 + refLen + 8) return
-        val ref = String(body.copyOfRange(2, 2 + refLen), Charsets.UTF_8)
-        var off = 2 + refLen
-        fun u32(): Int {
-            val v = (body[off].toInt() and 0xFF) or ((body[off + 1].toInt() and 0xFF) shl 8) or
-                ((body[off + 2].toInt() and 0xFF) shl 16) or ((body[off + 3].toInt() and 0xFF) shl 24)
-            off += 4; return v
-        }
-        val index = u32(); val total = u32()
-        val sealed = body.copyOfRange(off, body.size)
+        val frame = ChunkFrame.decode(body) ?: return
+        val ref = frame.ref; val index = frame.index; val total = frame.total; val sealed = frame.sealed
         // Bound every peer-controlled field before it indexes a file offset or sizes an allocation.
         if (ref.isEmpty() || total <= 0 || total > MediaResume.MAX_CHUNKS) return
         if (index < 0 || index >= total) return
@@ -9639,28 +9487,8 @@ object HavenNet : InboundListener {
             runCatching {
                 val a = JSONArray(raw)
                 for (i in 0 until a.length()) {
-                    val o = a.getJSONObject(i)
-                    val hex = o.getString("hex")
-                    relayEntries[hex] = RelayEntry(
-                        hex = hex,
-                        name = o.optString("name", shortRelayName(hex)),
-                        active = o.optBoolean("active", true),
-                        lastSeenMs = o.optLong("lastSeenMs", relayNow()),
-                        isS3 = o.optBoolean("isS3", hex.startsWith("s3:")),
-                        httpUrls = o.optJSONArray("httpUrls")?.let { a ->
-                            (0 until a.length()).mapNotNull { i -> a.optString(i).takeIf { it.isNotEmpty() } }
-                        } ?: emptyList(),
-                        httpToken = o.optString("httpToken", ""),
-                        addedAtMs = o.optLong("addedAtMs", 0L),
-                        derpUrl = o.optString("derpUrl", "").trim().trimEnd('/'),
-                        turnUrls = o.optJSONArray("turnUrls")?.let { a ->
-                            (0 until a.length()).mapNotNull { i ->
-                                a.optString(i).takeIf { u -> u.startsWith("turn:") || u.startsWith("turns:") }
-                            }
-                        } ?: emptyList(),
-                        turnUser = o.optString("turnUser", ""),
-                        turnPass = o.optString("turnPass", ""),
-                    )
+                    val e = RelayEntryCodec.decode(a.getJSONObject(i), relayNow())
+                    relayEntries[e.hex] = e
                 }
             }
         }
@@ -9902,17 +9730,7 @@ object HavenNet : InboundListener {
             val bare = e.copy(lastSeenMs = 0L, addedAtMs = 0L)
             shapes[e.hex] = bare
             entriesShape.append(bare.toString()).append('\n')
-            entriesArr.put(JSONObject().apply {
-                put("hex", e.hex); put("name", e.name); put("active", e.active)
-                put("lastSeenMs", e.lastSeenMs); put("isS3", e.isS3)
-                if (e.httpUrls.isNotEmpty()) put("httpUrls", JSONArray(e.httpUrls))
-                if (e.httpToken.isNotEmpty()) put("httpToken", e.httpToken)
-                if (e.addedAtMs > 0) put("addedAtMs", e.addedAtMs)
-                if (e.derpUrl.isNotEmpty()) put("derpUrl", e.derpUrl)
-                if (e.turnUrls.isNotEmpty()) put("turnUrls", JSONArray(e.turnUrls))
-                if (e.turnUser.isNotEmpty()) put("turnUser", e.turnUser)
-                if (e.turnPass.isNotEmpty()) put("turnPass", e.turnPass)
-            })
+            entriesArr.put(RelayEntryCodec.encode(e))
         }
         val erasedArr = JSONArray()
         erasedRelays.values.forEach { r ->

@@ -127,6 +127,20 @@ final class InstagramImportPlanTests: XCTestCase {
         XCTAssertTrue(cp.identifySongs, "naming a reel's real song is on by default")
     }
 
+    func testCheckpointFromBeforeSongMatchingStillDecodes() throws {
+        // Written by a build that predates `matchSongs` / `identifySongs`: those keys are absent.
+        // The doc on the struct promises this resumes; a failed decode silently drops the import.
+        let legacy = Data(#"{"bookmark":"AQID","circleId":"default","includeStories":false,"done":42}"#.utf8)
+        let d = freshDefaults()
+        d.set(legacy, forKey: InstagramImportCheckpoint.defaultsKey)
+        let cp = try XCTUnwrap(InstagramImportCheckpoint.load(from: d), "a pre-song-matching checkpoint must still resume")
+        XCTAssertEqual(cp.done, 42)
+        XCTAssertEqual(cp.circleId, "default")
+        XCTAssertEqual(cp.bookmark, Data([1, 2, 3]))
+        XCTAssertFalse(cp.matchSongs)
+        XCTAssertTrue(cp.identifySongs)
+    }
+
     func testCorruptCheckpointLoadsAsNil() {
         let d = freshDefaults()
         d.set(Data("garbage".utf8), forKey: InstagramImportCheckpoint.defaultsKey)

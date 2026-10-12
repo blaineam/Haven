@@ -31,6 +31,19 @@ struct InstagramImportCheckpoint: Codable, Equatable {
         self.done = done
     }
 
+    /// Synthesized decoding REQUIRES every key even when the property has a default, so a checkpoint
+    /// written before `matchSongs` / `identifySongs` existed would fail to decode and the interrupted
+    /// import would silently never resume. Decode those two optionally.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        bookmark = try c.decode(Data.self, forKey: .bookmark)
+        circleId = try c.decode(String.self, forKey: .circleId)
+        includeStories = try c.decode(Bool.self, forKey: .includeStories)
+        matchSongs = try c.decodeIfPresent(Bool.self, forKey: .matchSongs) ?? false
+        identifySongs = try c.decodeIfPresent(Bool.self, forKey: .identifySongs) ?? true
+        done = try c.decode(Int.self, forKey: .done)
+    }
+
     static let defaultsKey = "haven.instagram.import.pending"
 
     static func load(from d: UserDefaults) -> InstagramImportCheckpoint? {

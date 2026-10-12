@@ -26,6 +26,12 @@ nothing had been checking:
 - **Message author / opening a chat from a link** that could not be opened threw an internal error
   instead of telling you; a story caption pinned to the very left or top edge slid to the middle.
 
+### Fixed — an interrupted Instagram import resumes after an update
+
+If Haven was updated (or reinstalled over itself) while an Instagram import was paused, the
+saved place in the import could not be read by the new version, so the import quietly never
+picked back up. It now reads older saved imports and carries on where it stopped.
+
 ### Fixed — iPhone, iPad and Mac save your feed in less than half the space
 
 Haven saves your circles, contacts and keys to one file, and rewrites the whole file each time it

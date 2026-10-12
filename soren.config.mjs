@@ -223,6 +223,17 @@ export default {
       description: 'Android JVM unit tests (no emulator)',
     },
 
+    // ── Android JVM unit-test LINE COVERAGE (JaCoCo). Prints soren-coverage for Haven's own app
+    //    sources — generated UniFFI Kotlin and tests excluded; instrumented tests not counted.
+    'android-cov': {
+      type: 'cmd',
+      cmd: 'node',
+      args: ['Scripts/android-cov.mjs'],
+      env: { JAVA_HOME: '/opt/homebrew/opt/openjdk@17', ANDROID_HOME: '/opt/homebrew/share/android-commandlinetools' },
+      description: 'Android JVM unit-test coverage (JaCoCo) for Haven app sources',
+      tags: ['android'],
+    },
+
     // ── Android RELEASE configuration (R8 minify + obfuscation), run on an emulator. Every suite
     //    above tests the debug build, which R8 never touches — yet Haven's FFI (JNA + UniFFI) and
     //    its JNI entry point look classes, fields and methods up BY NAME, so a missing keep rule in

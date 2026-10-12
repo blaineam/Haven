@@ -45,6 +45,8 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
+            // JaCoCo on the JVM unit tests (createDebugUnitTestCoverageReport) — the `android-cov` suite.
+            enableUnitTestCoverage = true
             // QA/demo hooks (demo seeding, the haven_no_net gate) — see the `minified` type below.
             buildConfigField("boolean", "QA_HOOKS", "true")
         }

@@ -190,6 +190,7 @@ final class MediaOptimizationTargetTests: XCTestCase {
         XCTAssertEqual(shape.seconds, 20, accuracy: 0.1)
         XCTAssertEqual(shape.aboveTargetReason, "lpcm, not AAC")
         XCTAssertTrue(shape.summary.contains("kbps"), shape.summary)
+        XCTAssertFalse(shape.summary.contains("px"), "audio has no dimensions")
     }
 
     func testShortUncompressedAudioIsNotWorthRewriting() async throws {

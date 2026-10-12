@@ -89,10 +89,10 @@ enum MediaOptimizationTarget {
         var aboveTarget: Bool { aboveTargetReason != nil }
         var summary: String {
             let mb = String(format: "%.1f", Double(bytes) / 1_048_576)
-            if bitrate > 0 {
-                return "\(mb) MB · \(codec) · \(maxDimension)px · \(bitrate / 1000) kbps"
-            }
-            return maxDimension > 0 ? "\(mb) MB · \(codec) · \(maxDimension)px" : "\(mb) MB · \(codec)"
+            var parts = ["\(mb) MB", codec]
+            if maxDimension > 0 { parts.append("\(maxDimension)px") }   // audio has no dimensions
+            if bitrate > 0 { parts.append("\(bitrate / 1000) kbps") }
+            return parts.joined(separator: " · ")
         }
     }
 

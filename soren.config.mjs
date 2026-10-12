@@ -246,6 +246,15 @@ export default {
       cwd: 'desktop/src-tauri',
       description: 'Tauri desktop Rust tests',
     },
+    // Line coverage of the desktop client's OWN code (Rust src-tauri/src via instrument-coverage +
+    // Xcode llvm-cov; ui/app.js via node coverage), as `soren-coverage:` lines. Heavy — a full
+    // instrumented build of the crate — so run it through buildq. See Scripts/desktop-cov.mjs.
+    'desktop-cov': {
+      type: 'cmd',
+      cmd: 'node',
+      args: ['Scripts/desktop-cov.mjs'],
+      description: 'Desktop (Tauri) own-code line coverage: Rust src-tauri + ui/app.js',
+    },
     'desktop-ui': {
       type: 'node-check',
       files: ['desktop/ui/app.js'],
@@ -258,7 +267,7 @@ export default {
     'desktop-ui-test': {
       type: 'cmd',
       cmd: 'node',
-      args: ['--test', 'desktop/ui/ui.test.mjs', 'desktop/ui-test/app.dom.test.mjs', 'desktop/ui-test/app.regressions.test.mjs'],
+      args: ['--test', 'desktop/ui/ui.test.mjs', 'desktop/ui-test/app.dom.test.mjs', 'desktop/ui-test/app.regressions.test.mjs', 'desktop/ui-test/desktop-cov.test.mjs'],
       description: 'Desktop UI i18n + pure-helper tests + whole-app.js DOM-stub tests (node --test)',
     },
 

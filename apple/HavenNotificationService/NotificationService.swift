@@ -98,18 +98,15 @@ final class NotificationService: UNNotificationServiceExtension {
     /// Best-effort content prefetch bounded to ~10s of the NSE budget; always calls `deliver`.
     private static func prefetchThenDeliver(_ decoded: Decoded, hasInlineEvent: Bool,
                                             deliver: @escaping () -> Void) {
-        let wantEnvelope = !hasInlineEvent && decoded.mailboxKey != nil
-        let mediaRefs = decoded.mediaRefs ?? []
-        guard !decoded.redactedForLock, wantEnvelope || !mediaRefs.isEmpty,
-              let cid = decoded.circleId, !cid.isEmpty else {
+        guard let plan = NotificationPayloadCodec.prefetchPlan(decoded, hasInlineEvent: hasInlineEvent) else {
             deliver()
             return
         }
         Task {
             await withTaskGroup(of: Void.self) { group in
                 group.addTask {
-                    await SharedPushPrefetch.run(circleId: cid, mailboxKey: decoded.mailboxKey,
-                                                 mediaRefs: mediaRefs, skipEnvelope: hasInlineEvent)
+                    await SharedPushPrefetch.run(circleId: plan.circleId, mailboxKey: plan.mailboxKey,
+                                                 mediaRefs: plan.mediaRefs, skipEnvelope: plan.skipEnvelope)
                 }
                 group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000) }
                 await group.next()      // whichever finishes first — fetch done, or budget spent
@@ -132,24 +129,10 @@ final class NotificationService: UNNotificationServiceExtension {
         // is tight. If the system doesn't answer in time, fall back to Haven's preference.
         let box = DetailBox()
         center.getNotificationSettings { settings in
-            let resolved: SharedNotificationPrivacy.Detail
-            switch settings.showPreviewsSetting {
-            case .never:
-                // User asked the OS to never show notification content — honor that fully.
-                resolved = .minimal
-            case .whenAuthenticated:
-                // Previews only when unlocked. An NSE cannot reliably know lock state
-                // (UIApplication is unavailable / unprotected-data is still readable after first
-                // unlock), so we use the private body: name + kind, no message text. That way a
-                // glance at the lock screen never quotes a DM; the user opens Haven for the rest.
-                resolved = .privateDetail
-            case .always:
-                resolved = .full
-            @unknown default:
-                resolved = .privateDetail
-            }
-            // Haven preference can only tighten, never loosen, past what the system allows.
-            box.set(SharedNotificationPrivacy.stricter(haven, resolved))
+            // Haven preference can only tighten, never loosen, past what the system allows (see
+            // `NotificationPayloadCodec.detail` for the mapping). An NSE cannot reliably know lock
+            // state, so "when unlocked" maps to the private body: name + kind, no message text.
+            box.set(NotificationPayloadCodec.detail(haven: haven, systemPreviews: settings.showPreviewsSetting))
         }
         // Wait up to 1.5s for settings; otherwise use Haven preference alone.
         let detail = box.wait(timeout: 1.5) ?? haven

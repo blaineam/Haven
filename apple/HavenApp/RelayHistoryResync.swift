@@ -241,12 +241,6 @@ final class RelayHistoryResync: ObservableObject {
 
     /// QA dump block (`relay_history`).
     var qaSnapshot: [String: Any] {
-        let p = progress
-        return ["state": p.phase.rawValue, "circles_done": p.circlesDone, "circles_total": p.circlesTotal,
-                "entries_found": p.entriesFound, "entries_checked": p.entriesChecked,
-                "posts_added": p.postsAdded, "unreadable": p.unreadable, "waiting": p.waiting,
-                "media_done": p.mediaDone, "media_total": p.mediaTotal, "media_missing": p.mediaMissing,
-                "relay_errors": p.relayErrors, "started_ms": p.startedAtMs, "finished_ms": p.finishedAtMs,
-                "journal_keys": planner.ingestedCount()]
+        progress.qaFields(journalKeys: Int(planner.ingestedCount()))
     }
 }

@@ -257,4 +257,13 @@ final class DeepLinkTests: XCTestCase {
         XCTAssertTrue(HavenSite.inviteDomain.hasPrefix(HavenSite.host + HavenSite.sitePath),
                       "emitted links must sit under the matched prefix")
     }
+
+    // MARK: Lock gate
+
+    func testLockGateNeverOpensALockedCircle() {
+        XCTAssertEqual(DeepLinkLockGate.decide(biometricRequired: true, alreadyUnlocked: false), .showLockScreen)
+        XCTAssertEqual(DeepLinkLockGate.decide(biometricRequired: true, alreadyUnlocked: true), .open)
+        XCTAssertEqual(DeepLinkLockGate.decide(biometricRequired: false, alreadyUnlocked: false), .open)
+        XCTAssertEqual(DeepLinkLockGate.decide(biometricRequired: false, alreadyUnlocked: true), .open)
+    }
 }

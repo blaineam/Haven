@@ -1,4 +1,5 @@
 import Foundation
+import UserNotifications
 
 /// What the Notification Service Extension makes of a sealed push payload, without UserNotifications,
 /// the Keychain or the network: decode the tiny JSON object, redact a biometric-locked circle, build
@@ -25,6 +26,38 @@ struct NotificationPayload {
 }
 
 enum NotificationPayloadCodec {
+    /// What the system's own "Show Previews" setting allows, combined with Haven's: the STRICTER wins.
+    /// An unknown future setting is treated as the middle level rather than as full previews.
+    static func detail(haven: SharedNotificationPrivacy.Detail,
+                       systemPreviews: UNShowPreviewsSetting) -> SharedNotificationPrivacy.Detail {
+        let system: SharedNotificationPrivacy.Detail
+        switch systemPreviews {
+        case .never: system = .minimal
+        case .whenAuthenticated: system = .privateDetail
+        case .always: system = .full
+        @unknown default: system = .privateDetail
+        }
+        return SharedNotificationPrivacy.stricter(haven, system)
+    }
+
+    /// What the extension should prefetch before delivering the banner, so the post is already on the
+    /// device when the notification is tapped. Nil = deliver immediately.
+    struct PrefetchPlan: Equatable {
+        let circleId: String
+        let mailboxKey: String?
+        let mediaRefs: [String]
+        /// The envelope rode inline in the push, so only media remains to fetch.
+        let skipEnvelope: Bool
+    }
+
+    static func prefetchPlan(_ p: NotificationPayload, hasInlineEvent: Bool) -> PrefetchPlan? {
+        let wantEnvelope = !hasInlineEvent && p.mailboxKey != nil
+        let mediaRefs = p.mediaRefs ?? []
+        guard !p.redactedForLock, wantEnvelope || !mediaRefs.isEmpty,
+              let cid = p.circleId, !cid.isEmpty else { return nil }
+        return PrefetchPlan(circleId: cid, mailboxKey: p.mailboxKey, mediaRefs: mediaRefs, skipEnvelope: hasInlineEvent)
+    }
+
     static func applyPrivacy(_ decoded: NotificationPayload,
                              detail: SharedNotificationPrivacy.Detail) -> (title: String, body: String) {
         // Biometric-locked circles always win — never quote their content.

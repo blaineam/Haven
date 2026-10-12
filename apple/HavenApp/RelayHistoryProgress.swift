@@ -84,6 +84,16 @@ struct RelayHistoryProgress: Equatable, Sendable {
     /// provably "everything you ever posted" — the line shows on every finished run, and it is the
     /// only line when nothing came back at all.
     var showsRetentionCaveat: Bool { phase == .done }
+
+    /// The QA dump row (`docs/QA.md`, op `relay_history`) — field names are what the e2e harness reads.
+    func qaFields(journalKeys: Int) -> [String: Any] {
+        ["state": phase.rawValue, "circles_done": circlesDone, "circles_total": circlesTotal,
+         "entries_found": entriesFound, "entries_checked": entriesChecked,
+         "posts_added": postsAdded, "unreadable": unreadable, "waiting": waiting,
+         "media_done": mediaDone, "media_total": mediaTotal, "media_missing": mediaMissing,
+         "relay_errors": relayErrors, "started_ms": startedAtMs, "finished_ms": finishedAtMs,
+         "journal_keys": journalKeys]
+    }
 }
 
 /// Pure planning helpers for the resync driver.

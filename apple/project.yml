@@ -506,6 +506,8 @@ targets:
       - path: Shared/UITestMode.swift
       # Offline friend-invite ticket lifecycle (the FFI-backed minting/relay I/O stays in FriendInvites.swift).
       - path: HavenApp/FriendInviteLedger.swift
+      # The S3 mailbox's pre-signed URL pool (mint / freshness / single-use PUT slots).
+      - path: HavenApp/PresignPool.swift
       # Chunked-transfer resume record + frame-33 codec (`ReassemblyStore.shared` is app-only).
       - path: HavenApp/MediaReassembly.swift
       # Instagram import: selection/order, checkpoint, ledger, song policy, timeout.

@@ -215,6 +215,18 @@ enum DeepLinkTarget: Equatable {
     }
 }
 
+/// What a deep link may do for a biometric-locked circle. A link is a POINTER, never a way around a
+/// circle's lock: a locked circle routes to its lock screen, and only an already-unlocked (or
+/// unlocked-by-nature) circle may open its post, story or thread.
+enum DeepLinkLockGate: Equatable {
+    case open
+    case showLockScreen
+
+    static func decide(biometricRequired: Bool, alreadyUnlocked: Bool) -> DeepLinkLockGate {
+        biometricRequired && !alreadyUnlocked ? .showLockScreen : .open
+    }
+}
+
 /// The matching rules for recovering which story a pre-1.4.5 DM reply was about (the reply resealed
 /// the media with no pointer). Pure so the window/author arithmetic is covered.
 enum LegacyStoryMatch {

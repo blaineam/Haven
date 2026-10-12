@@ -206,8 +206,7 @@ final class DeepLinkRouter: ObservableObject {
         FeedStore.shared.setActiveCircle(circleId)
         tab = "circle"
         requestedTab = "circle"
-        if CircleSettingsStore.shared.biometricRequired(circleId),
-           !BiometricGate.shared.unlocked.contains(circleId) {
+        if lockGate(circleId) == .showLockScreen {
             BiometricGate.shared.unlock(circleId)
         }
     }
@@ -215,8 +214,7 @@ final class DeepLinkRouter: ObservableObject {
     /// Open a story in the viewer (haven://s/…). Biometric rules match posts: a locked circle
     /// routes to its lock screen, never to the story.
     private func openStory(circleId: String, postId: String, tab: inout String) {
-        if CircleSettingsStore.shared.biometricRequired(circleId),
-           !BiometricGate.shared.unlocked.contains(circleId) {
+        if lockGate(circleId) == .showLockScreen {
             FeedStore.shared.setActiveCircle(circleId)
             BiometricGate.shared.unlock(circleId)
             tab = "circle"
@@ -224,6 +222,11 @@ final class DeepLinkRouter: ObservableObject {
             return
         }
         route = .story(circleId: circleId, postId: postId)
+    }
+
+    private func lockGate(_ circleId: String) -> DeepLinkLockGate {
+        DeepLinkLockGate.decide(biometricRequired: CircleSettingsStore.shared.biometricRequired(circleId),
+                                alreadyUnlocked: BiometricGate.shared.unlocked.contains(circleId))
     }
 
     private func openPost(circleId: String, postId: String, tab: inout String) {
@@ -239,8 +242,7 @@ final class DeepLinkRouter: ObservableObject {
 
     /// Shared body of both entry points. Returns a tab for the caller to switch to, if any.
     private func resolvePost(circleId: String, postId: String) -> String? {
-        if CircleSettingsStore.shared.biometricRequired(circleId),
-           !BiometricGate.shared.unlocked.contains(circleId) {
+        if lockGate(circleId) == .showLockScreen {
             // Locked: route the user to the circle's lock screen rather than the post.
             FeedStore.shared.setActiveCircle(circleId)
             BiometricGate.shared.unlock(circleId)

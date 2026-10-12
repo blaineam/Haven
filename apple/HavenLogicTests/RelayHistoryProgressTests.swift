@@ -143,4 +143,34 @@ final class RelayHistoryProgressTests: XCTestCase {
         XCTAssertTrue(tally.record(item: "a", ok: true) == (1, 0))
         XCTAssertTrue(tally.record(item: "x", ok: false) == (0, 1), "every ref of x failed → one missing item")
     }
+
+    func testQaFieldsCarryEveryCounterUnderTheNamesTheHarnessReads() {
+        var p = RelayHistoryProgress(phase: .media, startedAtMs: 100)
+        p.circlesDone = 2; p.circlesTotal = 3; p.entriesFound = 40; p.entriesChecked = 38
+        p.postsAdded = 5; p.unreadable = 1; p.waiting = 2
+        p.mediaDone = 7; p.mediaTotal = 9; p.mediaMissing = 1; p.relayErrors = 4; p.finishedAtMs = 900
+        let q = p.qaFields(journalKeys: 123)
+        XCTAssertEqual(q["state"] as? String, "media")
+        XCTAssertEqual(q["circles_done"] as? Int, 2)
+        XCTAssertEqual(q["circles_total"] as? Int, 3)
+        XCTAssertEqual(q["entries_found"] as? Int, 40)
+        XCTAssertEqual(q["entries_checked"] as? Int, 38)
+        XCTAssertEqual(q["posts_added"] as? Int, 5)
+        XCTAssertEqual(q["unreadable"] as? Int, 1)
+        XCTAssertEqual(q["waiting"] as? Int, 2)
+        XCTAssertEqual(q["media_done"] as? Int, 7)
+        XCTAssertEqual(q["media_total"] as? Int, 9)
+        XCTAssertEqual(q["media_missing"] as? Int, 1)
+        XCTAssertEqual(q["relay_errors"] as? Int, 4)
+        XCTAssertEqual(q["started_ms"] as? UInt64, 100)
+        XCTAssertEqual(q["finished_ms"] as? UInt64, 900)
+        XCTAssertEqual(q["journal_keys"] as? Int, 123)
+        XCTAssertEqual(q.count, 15)
+    }
+
+    func testQaFieldsOfAnIdleRun() {
+        let q = RelayHistoryProgress().qaFields(journalKeys: 0)
+        XCTAssertEqual(q["state"] as? String, "idle")
+        XCTAssertEqual(q["posts_added"] as? Int, 0)
+    }
 }

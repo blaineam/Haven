@@ -174,4 +174,51 @@ final class NotificationPayloadTests: XCTestCase {
         XCTAssertEqual(["react", "comment", "story", "dm", "post", "call", "other"].map(C.summaryLabel),
                        ["reactions", "comments", "stories", "messages", "posts", "calls", "updates"])
     }
+
+    // MARK: System preview setting
+
+    func testDetailTakesTheStricterOfHavenAndTheSystem() {
+        typealias D = SharedNotificationPrivacy.Detail
+        XCTAssertEqual(C.detail(haven: .full, systemPreviews: .always), .full)
+        XCTAssertEqual(C.detail(haven: .full, systemPreviews: .whenAuthenticated), .privateDetail)
+        XCTAssertEqual(C.detail(haven: .full, systemPreviews: .never), .minimal)
+        // Haven can only tighten, never loosen.
+        XCTAssertEqual(C.detail(haven: .minimal, systemPreviews: .always), .minimal)
+        XCTAssertEqual(C.detail(haven: .privateDetail, systemPreviews: .always), .privateDetail)
+        XCTAssertEqual(C.detail(haven: .privateDetail, systemPreviews: .never), .minimal)
+        XCTAssertEqual(C.detail(haven: .minimal, systemPreviews: .never), .minimal)
+    }
+
+    // MARK: Prefetch plan
+
+    private func payload(_ o: [String: Any], locked: Set<String> = []) -> NotificationPayload {
+        try! XCTUnwrap(decode(o, locked: locked))
+    }
+
+    func testPrefetchEnvelopeAndMedia() {
+        let p = payload(["b": "x", "c": "circ", "mk": "haven/mailbox/k", "mr": ["img_1"]])
+        XCTAssertEqual(C.prefetchPlan(p, hasInlineEvent: false),
+                       .init(circleId: "circ", mailboxKey: "haven/mailbox/k", mediaRefs: ["img_1"], skipEnvelope: false))
+    }
+
+    func testPrefetchSkipsTheEnvelopeWhenItRodeInline() {
+        let p = payload(["b": "x", "c": "circ", "mk": "k", "mr": ["img_1"]])
+        let plan = C.prefetchPlan(p, hasInlineEvent: true)
+        XCTAssertEqual(plan?.skipEnvelope, true)
+        XCTAssertEqual(plan?.mediaRefs, ["img_1"])
+        XCTAssertNil(C.prefetchPlan(payload(["b": "x", "c": "circ", "mk": "k"]), hasInlineEvent: true),
+                     "inline envelope and no media: nothing left to fetch")
+    }
+
+    func testPrefetchNeedsSomethingToFetchAndACircle() {
+        XCTAssertNil(C.prefetchPlan(payload(["b": "x", "c": "circ"]), hasInlineEvent: false), "no mailbox key, no media")
+        XCTAssertNil(C.prefetchPlan(payload(["b": "x", "mk": "k"]), hasInlineEvent: false), "no circle id")
+        XCTAssertNil(C.prefetchPlan(payload(["b": "x", "c": "", "mk": "k"]), hasInlineEvent: false), "empty circle id")
+        XCTAssertNotNil(C.prefetchPlan(payload(["b": "x", "c": "circ", "mr": ["a"]]), hasInlineEvent: false), "media alone is enough")
+    }
+
+    func testPrefetchNeverRunsForALockedCircle() {
+        let p = payload(["b": "secret", "c": "vault", "mk": "k", "mr": ["img"]], locked: ["vault"])
+        XCTAssertNil(C.prefetchPlan(p, hasInlineEvent: false), "a locked circle's content must not be pulled onto the device by a push")
+    }
 }

@@ -14,16 +14,9 @@ import UserNotifications
 final class PresignStore: ObservableObject {
     static let shared = PresignStore()
     private let d = UserDefaults.standard
-    private let slotsPerMember = 60
-    static let ttl: TimeInterval = 604_800   // 7 days (SigV4 max)
+    static let ttl = PresignPool.ttl
 
-    struct Pool: Codable {
-        let circleId: String
-        let expires: Double            // unix seconds
-        var puts: [String: [String]]   // memberHex → [pre-signed PUT url]
-        let gets: [String: String]     // key → pre-signed GET url
-        let listURL: String            // pre-signed LIST url for the mailbox prefix
-    }
+    typealias Pool = PresignPool
 
     private var pools: [String: Pool] = [:]   // in-memory cache, per circle
     private func bootKey(_ c: String) -> String { "haven.presign.boot.\(c)" }
@@ -49,7 +42,7 @@ final class PresignStore: ObservableObject {
 
     /// The current pool (cached, else fetched + unsealed via the bootstrap URL).
     func pool(_ circleId: String) async -> Pool? {
-        if let p = pools[circleId], p.expires > Date().timeIntervalSince1970 + 60 { return p }
+        if let p = pools[circleId], p.isFresh() { return p }
         guard let boot = d.string(forKey: bootKey(circleId)), let url = URL(string: boot),
               let sealed = await S3Client.getURL(url),
               let data = await FeedStore.shared.openCirclePresign(circleId: circleId, sealed: sealed),
@@ -60,11 +53,11 @@ final class PresignStore: ObservableObject {
 
     /// Next unused PUT URL for *my* slot pool (first-come-first-use within my own namespace).
     func nextPutURL(circleId: String, myHex: String) async -> URL? {
-        guard let p = await pool(circleId), let mine = p.puts[myHex], !mine.isEmpty else { return nil }
+        guard let p = await pool(circleId) else { return nil }
         let used = d.integer(forKey: usedKey(circleId))
-        guard used < mine.count else { return nil }   // exhausted until the owner re-mints
+        guard let url = p.putURL(forMember: myHex, used: used) else { return nil }   // exhausted until the owner re-mints
         d.set(used + 1, forKey: usedKey(circleId))
-        return URL(string: mine[used])
+        return url
     }
 
     func listURL(_ circleId: String) async -> URL? {
@@ -80,28 +73,15 @@ final class PresignStore: ObservableObject {
 
     /// Mint a fresh pool for a circle, seal + park it in the bucket, and broadcast the bootstrap.
     func mintAndPublish(circleId: String, members: [String], s3: S3Client) async {
-        var puts: [String: [String]] = [:]
-        var gets: [String: String] = [:]
-        for m in members {
-            var urls: [String] = []
-            for n in 0..<slotsPerMember {
-                let key = "haven/mailbox/\(circleId)/\(m)/\(n)"
-                if let put = s3.presignedURL(method: "PUT", key: key) { urls.append(put.absoluteString) }
-                if let get = s3.presignedURL(method: "GET", key: key) { gets[key] = get.absoluteString }
-            }
-            puts[m] = urls
-        }
-        let listURL = s3.presignedURL(method: "GET", key: "", listPrefix: "haven/mailbox/\(circleId)/")?.absoluteString ?? ""
-        let pool = Pool(circleId: circleId, expires: Date().timeIntervalSince1970 + Self.ttl,
-                        puts: puts, gets: gets, listURL: listURL)
+        let pool = PresignPool.mint(circleId: circleId, members: members, s3: s3)
         guard let data = try? JSONEncoder().encode(pool),
               let sealed = await FeedStore.shared.sealCirclePresign(circleId: circleId, data: data) else { return }
-        let poolKey = "haven/presign/\(circleId)/pool"
+        let poolKey = PresignPool.poolKey(circleId: circleId)
         try? await s3.putObject(key: poolKey, data: sealed)
         guard let boot = s3.presignedURL(method: "GET", key: poolKey) else { return }
         setBootstrap(circleId: circleId, getURL: boot.absoluteString)         // owner uses it too
         FeedStore.shared.broadcastPresignBootstrap(circleId: circleId, getURL: boot.absoluteString)
-        scheduleReminder(at: pool.expires - 86_400)
+        scheduleReminder(at: pool.reminderAt)
     }
 
     /// Re-mint every circle this device owns the bucket for (on launch + on the silent push).

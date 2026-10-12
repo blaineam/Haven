@@ -362,4 +362,62 @@ class HavenNetRelayHttpTest {
         assertTrue(bad.containsKey("http://127.0.0.1:1"))
         liftCooldown()
     }
+
+    // ---- authored events: the mailbox write path -------------------------------------------------------------
+
+    private fun seenMailbox() = HavenNet::class.java.getDeclaredField("seenMailbox").apply { isAccessible = true }.get(HavenNet) as MutableSet<*>
+    private fun prepareMailbox() {
+        useAsDefaultRelay()
+        Presign.init(ctx)
+        seenMailbox().clear()
+        HavenNet::class.java.getDeclaredField("seenMailboxLoaded").apply { isAccessible = true }.setBoolean(HavenNet, true)
+    }
+    private fun uploadEvent(env: ByteArray) = runBlocking { net.uploadEvent("circ", env) }
+
+    @Test fun an_authored_event_lands_in_the_relays_mailbox_under_its_content_hash() {
+        prepareMailbox()
+        val env = "sealed event".toByteArray()
+        assertTrue(uploadEvent(env))
+        assertArrayEquals(env, store[HavenKeys.mailboxKey("circ", env)])
+        assertTrue("the key is remembered so our own poll skips it", seenMailbox().contains(HavenKeys.mailboxKey("circ", env)))
+    }
+
+    @Test fun re_uploading_a_landed_event_costs_no_request() {
+        prepareMailbox()
+        val env = "sealed event".toByteArray()
+        assertTrue(uploadEvent(env)); hits.clear()
+        assertTrue(uploadEvent(env))
+        assertTrue(hits.isEmpty())
+    }
+
+    @Test fun a_relay_that_refuses_us_does_not_count_as_landed_and_is_not_marked_bad() {
+        prepareMailbox()
+        forceStatus = 403
+        assertFalse(uploadEvent("e".toByteArray()))
+        val bad = HavenNet::class.java.getDeclaredField("httpUrlBad").apply { isAccessible = true }.get(HavenNet) as MutableMap<*, *>
+        assertTrue(bad.isEmpty())
+    }
+
+    @Test fun a_broken_relay_is_backed_off_and_the_event_stays_unlanded() {
+        prepareMailbox()
+        forceStatus = 500
+        assertFalse(uploadEvent("e2".toByteArray()))
+        val bad = HavenNet::class.java.getDeclaredField("httpUrlBad").apply { isAccessible = true }.get(HavenNet) as MutableMap<*, *>
+        assertTrue(bad.containsKey(base)); liftCooldown()
+    }
+
+    @Test fun a_circle_with_no_relay_of_its_own_falls_back_to_every_active_relay() {
+        prepareMailbox()
+        HavenNet.setDefaultRelay(null)             // no default, no per-circle association...
+        val env = "orphan circle".toByteArray()
+        assertTrue("...but the device still knows an active relay", uploadEvent(env))
+        assertTrue(store.containsKey(HavenKeys.mailboxKey("circ", env)))
+    }
+
+    @Test fun a_device_that_knows_no_relay_has_nowhere_to_put_it() {
+        prepareMailbox()
+        relayEntries().clear(); HavenNet.setDefaultRelay(null)
+        assertFalse(uploadEvent("nowhere".toByteArray()))
+        assertTrue(hits.isEmpty())
+    }
 }

@@ -5589,7 +5589,7 @@ object HavenNet : InboundListener {
     private fun mailboxKey(circleId: String, env: ByteArray): String = HavenKeys.mailboxKey(circleId, env)
 
     /** Drop a sealed event into the circle's mailbox (Haven relay node and/or S3 pre-signed pool). */
-    private suspend fun uploadEvent(circleId: String, env: ByteArray): Boolean {
+    internal suspend fun uploadEvent(circleId: String, env: ByteArray): Boolean {
         // Skip anything already confirmed in a mailbox: envelopes re-seal deterministically now, so
         // a backfill reproduces the same content-addressed key and the persisted seen-set makes the
         // whole re-upload a no-op instead of a network sweep (and, before determinism, a fresh

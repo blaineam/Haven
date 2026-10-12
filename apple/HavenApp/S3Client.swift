@@ -187,7 +187,7 @@ struct S3Client {
     /// Plain HTTPS PUT to a pre-signed URL (members writing to the mailbox).
     static func putURL(_ url: URL, data: Data, session: URLSession = HavenHTTP.session) async -> Bool {
         guard !HavenNet.offline else { return false }
-        var req = URLRequest(url: url); req.httpMethod = "PUT"; req.httpBody = data
+        var req = URLRequest(url: url); req.httpMethod = "PUT"   // the body goes via upload(for:from:) — an upload task must not also carry httpBody
         guard let (_, resp) = try? await session.upload(for: req, from: data),
               let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return false }
         return true

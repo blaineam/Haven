@@ -24,6 +24,7 @@ const crate = join(root, 'desktop/src-tauri');
 const srcDir = join(crate, 'src');
 const args = new Set(process.argv.slice(2));
 const targets = [];
+let rustFailed = 0;
 
 const run = (cmd, argv, opts = {}) => {
   const r = spawnSync(cmd, argv, { encoding: 'utf8', maxBuffer: 1 << 29, ...opts });
@@ -69,6 +70,8 @@ export function cfgTestRanges(src) {
 
 // ── Rust ─────────────────────────────────────────────────────────────────────────────────────────
 function rustCoverage() {
+  // A skip is only a skip when the tests themselves passed; otherwise the failure wins.
+  const bail = (msg) => { console.log(msg); process.exit(rustFailed); };
   const tdir = join(crate, 'target/cov');
   const prof = join(tmpdir(), `haven-desktop-cov-${process.pid}`);
   rmSync(prof, { recursive: true, force: true }); mkdirSync(prof, { recursive: true });
@@ -80,18 +83,20 @@ function rustCoverage() {
     HAVEN_NO_NET: '1',
   };
   const t = run('cargo', ['test', '--lib'], { cwd: crate, env });
-  process.stdout.write(t.stdout.split('\n').filter((l) => /test result|FAILED|failed|panicked/.test(l)).join('\n') + '\n');
-  if (t.status !== 0) { process.stdout.write(t.stderr.split('\n').slice(-40).join('\n') + '\n'); process.exit(t.status || 1); }
-  const bin = /Running unittests .* \((.+haven_desktop_lib-[0-9a-f]+)\)/.exec(t.stdout + t.stderr)?.[1];
+  const all = t.stdout + '\n' + t.stderr;
+  process.stdout.write(all.split('\n').filter((l) => /^test result|^test .* FAILED|panicked at|^error(\[|:)/.test(l)).join('\n') + '\n');
+  // A failing test must not hide the coverage of everything that ran — but it still fails the suite.
+  if (t.status !== 0) rustFailed = t.status || 1;
+  const bin = /Running unittests .* \((.+haven_desktop_lib-[0-9a-f]+)\)/.exec(all)?.[1];
   const exe = bin ? resolve(crate, bin) : null;
-  if (!exe || !existsSync(exe)) { console.log('soren-skip: could not locate the instrumented test binary'); process.exit(0); }
+  if (!exe || !existsSync(exe)) { bail('soren-skip: could not locate the instrumented test binary'); }
   const raws = readdirSync(prof).filter((f) => f.endsWith('.profraw')).map((f) => join(prof, f));
-  if (!raws.length) { console.log('soren-skip: the instrumented run produced no profile data'); process.exit(0); }
+  if (!raws.length) { bail('soren-skip: the instrumented run produced no profile data'); }
   const merged = join(prof, 'merged.profdata');
   const pm = run('xcrun', ['llvm-profdata', 'merge', '-sparse', ...raws, '-o', merged]);
-  if (pm.status !== 0) { console.log('soren-skip: llvm-profdata failed: ' + pm.stderr.slice(0, 200)); process.exit(0); }
+  if (pm.status !== 0) { bail('soren-skip: llvm-profdata failed: ' + pm.stderr.slice(0, 200)); }
   const ex = run('xcrun', ['llvm-cov', 'export', exe, `-instr-profile=${merged}`, '-format=lcov']);
-  if (ex.status !== 0) { console.log('soren-skip: llvm-cov failed: ' + ex.stderr.slice(0, 200)); process.exit(0); }
+  if (ex.status !== 0) { bail('soren-skip: llvm-cov failed: ' + ex.stderr.slice(0, 200)); }
   const files = new Map();                                              // path -> Map(line -> count)
   let cur = null;
   for (const l of ex.stdout.split('\n')) {
@@ -151,5 +156,6 @@ function main() {
   const covered = targets.reduce((a, t) => a + t.covered, 0), executable = targets.reduce((a, t) => a + t.executable, 0);
   for (const t of targets) console.log(`${t.name}: ${t.covered}/${t.executable} lines (${(100 * t.covered / Math.max(t.executable, 1)).toFixed(1)}%)`);
   console.log('soren-coverage: ' + JSON.stringify({ covered, executable, targets }));
+  if (rustFailed) process.exit(rustFailed);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

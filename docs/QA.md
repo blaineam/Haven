@@ -61,6 +61,8 @@ npm link`), it's just `soren run Haven`.
 | `android` | gradle | `testDebugUnitTest` always; `connectedDebugAndroidTest` after reusing/booting the `haven_phone` AVD (skipped, never hung, if it can't boot) | JDK 17, Android SDK/NDK, the Rust `.so` from `android/build-rust.sh` |
 | `desktop` | cargo | the Tauri Rust side (`desktop/src-tauri`) | Rust + (Linux) the WebKitGTK build deps |
 | `desktop-ui` | node-check | `desktop/ui/app.js` syntax gate | node |
+| `desktop-ui-test` | cmd | desktop web-UI logic: the i18n tables and pure helpers (`desktop/ui/ui.test.mjs`) **and the whole of `app.js` run against a stub DOM + a fake Tauri backend** (`desktop/ui-test/`: boot, tabs, feed, DMs, stories, circles, every settings sheet, onboarding/terms, deep links, calls over a fake WebRTC stack). No browser, no network | node |
+| `desktop-cov` | cmd | own-code line coverage of the desktop client as `soren-coverage:` lines — Rust `src-tauri/src` (instrumented `cargo test --lib`, Xcode llvm-cov; test modules and `#[cfg(test)]` items excluded) and `ui/app.js` (node coverage, code lines only). Heavy: a full instrumented build, so run it through `buildq` | Rust + Xcode command-line tools + node |
 | `fabric` | cargo | Path proxy + WebSocket hairpin + Haven-first DERP policy (`haven-net` integration) | Rust |
 | `vm-linux` | utm | **launches** the `haven-linux` UTM VM and confirms it reaches `started` (reuses an already-running VM) | UTM + the VM present |
 | `vm-windows` | utm | **launches** the `Windows` UTM VM and confirms `started` | UTM + the VM present |

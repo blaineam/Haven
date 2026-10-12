@@ -9,6 +9,23 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.1 (unreleased)
 
+### Fixed — Windows and Linux: six app bugs found by running the whole UI under test
+
+The desktop UI is now exercised end to end against a stand-in for its backend, which turned up bugs
+nothing had been checking:
+
+- **The composer disappeared** after you left the Circle tab and came back, until something changed
+  the feed. It is rebuilt on return now.
+- **Posts with more than ten photos showed no photos at all.** The photo grid for large albums had
+  been dropped by an unrelated change; it is back.
+- **Settings ▸ Advanced ▸ Re-optimize media I already shared had no button**, so the feature could
+  not be started. It is drawn now.
+- **Older posts were never requested** when you scrolled to the end of a feed, so a newly added
+  friend's history never filled in from the desktop app. The request is sent now.
+- **Group-chat activity rows read "sent you a message"** instead of "messaged the group".
+- **Message author / opening a chat from a link** that could not be opened threw an internal error
+  instead of telling you; a story caption pinned to the very left or top edge slid to the middle.
+
 ### Fixed — iPhone, iPad and Mac save your feed in less than half the space
 
 Haven saves your circles, contacts and keys to one file, and rewrites the whole file each time it

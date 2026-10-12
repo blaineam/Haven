@@ -23,33 +23,17 @@ import Foundation
 final class FriendInviteStore: ObservableObject {
     static let shared = FriendInviteStore()
 
-    struct Issued: Codable {
-        let ticket: String
-        let issuedAt: UInt64
-        var consumedAt: UInt64?
-        /// The acceptor's account hex once their drop arrived — the join key `noteApproved` uses
-        /// to find which ticket's grant to write when the user taps Approve.
-        var acceptorHex: String?
-    }
-    struct Accepted: Codable {
-        let ticket: String
-        let acceptedAt: UInt64
-        var dropLanded: Bool
-        var granted: Bool
-    }
+    typealias Issued = FriendInviteIssued
+    typealias Accepted = FriendInviteAccepted
 
     @Published private(set) var issued: [Issued] = []
     @Published private(set) var accepted: [Accepted] = []
 
-    private let issuedKey = "haven.friendInvites.issued"
-    private let acceptedKey = "haven.friendInvites.accepted"
-    private let expiryKey = "haven.friendInvites.expirySecs"
-    private let maxLive = 16   // cap outstanding tickets; oldest unconsumed pruned first
     private var ticking = false
 
     /// "Never expire" sentinel (~a century). A real u64 timestamp, so the sealed blob's `expires`
     /// field and the relay's `expires > now` check both stay valid — the link simply never lapses.
-    static let neverExpirySecs: UInt64 = 100 * 365 * 24 * 3600
+    static let neverExpirySecs: UInt64 = FriendInviteRules.neverExpirySecs
 
     /// How long a freshly-minted invite link stays valid. User-configurable (Settings ▸ invite):
     /// 7d / 30d / 90d / 1yr / Never. Applied consistently to both the reuse/prune "is it still
@@ -57,29 +41,25 @@ final class FriendInviteStore: ObservableObject {
     /// the CURRENT link (e.g. "Never" makes the link you're already sharing permanent). The link
     /// is otherwise stable — reused until it lapses or you roll it by hand; it never auto-rotates.
     @Published var expirySecs: UInt64 {
-        didSet { UserDefaults.standard.set(String(expirySecs), forKey: expiryKey) }
+        didSet { FriendInviteRules.saveExpiry(expirySecs, to: UserDefaults.standard) }
     }
 
     private init() {
-        let d = UserDefaults.standard
-        if let s = d.string(forKey: expiryKey), let v = UInt64(s) { expirySecs = v }
-        else { expirySecs = friendInviteDefaultTtlSecs() }   // 30 days
-        if let raw = d.data(forKey: issuedKey), let v = try? JSONDecoder().decode([Issued].self, from: raw) { issued = v }
-        if let raw = d.data(forKey: acceptedKey), let v = try? JSONDecoder().decode([Accepted].self, from: raw) { accepted = v }
+        let snap = FriendInviteRules.load(from: UserDefaults.standard, defaultExpirySecs: friendInviteDefaultTtlSecs())   // 30 days
+        expirySecs = snap.expirySecs
+        issued = snap.issued
+        accepted = snap.accepted
     }
 
     private func save() {
-        let d = UserDefaults.standard
-        if let raw = try? JSONEncoder().encode(issued) { d.set(raw, forKey: issuedKey) }
-        if let raw = try? JSONEncoder().encode(accepted) { d.set(raw, forKey: acceptedKey) }
+        FriendInviteRules.save(issued: issued, accepted: accepted, to: UserDefaults.standard)
     }
 
     private static func now() -> UInt64 { UInt64(Date().timeIntervalSince1970) }
     private static func ticket(_ text: String) -> FriendTicketFfi? { try? friendTicketParse(text: text) }
     /// Instance (not static) so it reads the user's configured `expirySecs`. "Never" always live.
     private func isLive(_ issuedAt: UInt64) -> Bool {
-        if expirySecs >= Self.neverExpirySecs { return true }
-        return Self.now() - min(issuedAt, Self.now()) <= expirySecs
+        FriendInviteRules.isLive(issuedAt, expirySecs: expirySecs, now: Self.now())
     }
 
     // MARK: - Inviter: minting + the share-link value
@@ -90,7 +70,7 @@ final class FriendInviteStore: ObservableObject {
     /// and the plain live-only link still works.
     func currentTicketLinkValue() -> String? {
         prune()
-        if let live = issued.last(where: { $0.consumedAt == nil && isLive($0.issuedAt) }) {
+        if let live = FriendInviteRules.newestLive(issued, expirySecs: expirySecs, now: Self.now()) {
             if let v = Self.linkValue(live.ticket) { return v }
             HavenLog.net("friend-invite: live ticket has no haven-friend: prefix — minting a fresh one")
         }
@@ -108,7 +88,7 @@ final class FriendInviteStore: ObservableObject {
     /// link still work. Returns the new `?t=` value (nil if this device has no relays).
     @discardableResult
     func rollInviteLink() -> String? {
-        for i in issued.indices where issued[i].consumedAt == nil { issued[i].consumedAt = Self.now() }
+        FriendInviteRules.retireAll(&issued, now: Self.now())
         save()
         guard let text = mint() else { return nil }
         HavenLog.net("friend-invite: link rolled by user")
@@ -118,14 +98,10 @@ final class FriendInviteStore: ObservableObject {
     /// When the current live link lapses (nil = none live, or Never). For the settings UI.
     func currentLinkExpiry() -> Date? {
         prune()
-        guard expirySecs < Self.neverExpirySecs,
-              let live = issued.last(where: { $0.consumedAt == nil && isLive($0.issuedAt) }) else { return nil }
-        return Date(timeIntervalSince1970: TimeInterval(live.issuedAt + expirySecs))
+        return FriendInviteRules.linkExpiry(issued, expirySecs: expirySecs, now: Self.now())
     }
 
-    private static func linkValue(_ text: String) -> String? {
-        text.hasPrefix("haven-friend:") ? String(text.dropFirst("haven-friend:".count)) : nil
-    }
+    private static func linkValue(_ text: String) -> String? { FriendInviteRules.linkValue(text) }
 
     /// Reassemble a ticket from a link's `?t=` value.
     static func ticket(fromLinkValue v: String) -> FriendTicketFfi? {
@@ -142,7 +118,7 @@ final class FriendInviteStore: ObservableObject {
         prune()
         // The invite link is on screen: someone may accept it any second.
         beginFirstContactFastPoll(seconds: 180)
-        if let live = issued.last(where: { $0.consumedAt == nil && isLive($0.issuedAt) }),
+        if let live = FriendInviteRules.newestLive(issued, expirySecs: expirySecs, now: Self.now()),
            let v = Self.linkValue(live.ticket) { return v }
         guard let material = mintMaterial() else { return nil }
         let issuedAt = Self.now()
@@ -166,7 +142,7 @@ final class FriendInviteStore: ObservableObject {
     /// Roll to a fresh ticket without blocking the main thread. Same contract as `rollInviteLink`.
     @discardableResult
     func rollInviteLinkAsync() async -> String? {
-        for i in issued.indices where issued[i].consumedAt == nil { issued[i].consumedAt = Self.now() }
+        FriendInviteRules.retireAll(&issued, now: Self.now())
         save()
         return await currentTicketLinkValueAsync()
     }
@@ -212,19 +188,7 @@ final class FriendInviteStore: ObservableObject {
     }
 
     private func prune() {
-        let before = issued.count
-        issued.removeAll { $0.consumedAt == nil && !isLive($0.issuedAt) }
-        while issued.filter({ $0.consumedAt == nil }).count > maxLive,
-              let idx = issued.firstIndex(where: { $0.consumedAt == nil }) {
-            issued.remove(at: idx)
-        }
-        // Completed acceptances linger for a day instead of vanishing on the next tick: a re-scan
-        // of the same ticket then de-dups (the friendship is already made) instead of parking a
-        // fresh drop, and the QA dump can observe `granted` — pruning it on the tick right after
-        // pollGrants set it made the e2e's "friendship async-complete" step a race (2026-09-01).
-        let grantedLinger: UInt64 = 24 * 3600
-        accepted.removeAll { ($0.granted && Self.now() - min($0.acceptedAt, Self.now()) > grantedLinger) || !isLive($0.acceptedAt) }
-        if issued.count != before { save() }
+        if FriendInviteRules.prune(issued: &issued, accepted: &accepted, expirySecs: expirySecs, now: Self.now()) { save() }
     }
 
     // MARK: - Acceptor: accept + drop write + grant poll
@@ -233,8 +197,7 @@ final class FriendInviteStore: ObservableObject {
     func acceptTicket(linkValue: String) {
         guard let t = Self.ticket(fromLinkValue: linkValue),
               let text = try? friendTicketEncode(ticket: t) else { return }
-        guard !accepted.contains(where: { $0.ticket == text }) else { return }
-        accepted.append(Accepted(ticket: text, acceptedAt: Self.now(), dropLanded: false, granted: false))
+        guard FriendInviteRules.recordAccepted(&accepted, ticket: text, now: Self.now()) else { return }
         save()
         HavenLog.net("friend-invite: accepted ticket (relays=\(t.relays.count)) — parking drop")
         // Adopt the inviter's relays NOW, into the default circle — not at grant time, and not only
@@ -435,7 +398,7 @@ final class FriendInviteStore: ObservableObject {
     /// acceptor's poll completes the friendship whenever they next come online.
     func noteApproved(accountHex: String) {
         let hex = accountHex.lowercased()
-        let matches = issued.enumerated().filter { $0.element.consumedAt == nil && $0.element.acceptorHex == hex }
+        let matches = FriendInviteRules.pendingAcceptances(issued, accountHex: hex)
         HavenLog.net("friend-invite: noteApproved(\(hex.prefix(8))) matches=\(matches.count)")
         guard !matches.isEmpty else { return }
         Task { [weak self] in
@@ -478,22 +441,9 @@ final class FriendInviteStore: ObservableObject {
     /// Relays written/read at once by the handshake legs (tickets carry a handful).
     private static let relayFanOut = 6
 
-    private static func hexString(_ d: Data) -> String {
-        d.map { String(format: "%02x", $0) }.joined()
-    }
+    private static func hexString(_ d: Data) -> String { FriendInviteRules.hexString(d) }
 
-    private static func hexData(_ s: String) -> Data? {
-        let chars = Array(s.lowercased())
-        guard chars.count % 2 == 0 else { return nil }
-        var out = Data(capacity: chars.count / 2)
-        var i = 0
-        while i < chars.count {
-            guard let hi = chars[i].hexDigitValue, let lo = chars[i + 1].hexDigitValue else { return nil }
-            out.append(UInt8(hi << 4 | lo))
-            i += 2
-        }
-        return out
-    }
+    private static func hexData(_ s: String) -> Data? { FriendInviteRules.hexData(s) }
 }
 
 /// App-side holder of `PendingEnrollment` (see ReachPolicy.swift): which friend-invite relays are

@@ -30,8 +30,8 @@ struct ReassemblyRecord: Codable {
 /// `liveParts()` is deliberately `nonisolated` so the launch scratch sweep — which runs detached and
 /// off-main — can ask which partials to spare without hopping actors.
 final class ReassemblyStore {
-    static let shared = ReassemblyStore()
-    private static let key = "haven.mediaReassembly"
+    // `shared` lives in MediaReassemblyShared.swift (it needs MediaStore.storageDir, which drags in the app).
+    static let key = "haven.mediaReassembly"
     /// Abandoned partials expire rather than accumulating: a transfer nobody has fed in a day is
     /// one whose sender is gone, and its bytes are just unaccountable disk.
     static let expiry: TimeInterval = 24 * 3600
@@ -45,8 +45,17 @@ final class ReassemblyStore {
     private var lastSaveAt: Date = .distantPast
     private static let saveInterval: TimeInterval = 2
 
-    private init() {
-        if let d = SpilledDefaults.shared.data(forKey: Self.key),
+    private let defaults: SpilledDefaults
+    /// Where part files live; injected so the store is testable without the app's `MediaStore`.
+    private let storageDir: () -> URL
+
+    private let now: () -> Date
+
+    init(defaults: SpilledDefaults, storageDir: @escaping () -> URL, now: @escaping () -> Date = { Date() }) {
+        self.defaults = defaults
+        self.storageDir = storageDir
+        self.now = now
+        if let d = defaults.data(forKey: Self.key),
            let list = try? JSONDecoder().decode([String: ReassemblyRecord].self, from: d) {
             records = list
         } else {
@@ -128,14 +137,14 @@ final class ReassemblyStore {
     @MainActor func note(ref: String, part: String, total: Int, got: Set<Int>, force: Bool = false) {
         records[ref] = ReassemblyRecord(ref: ref, part: part, total: total,
                                         got: Self.bitmap(got, total: total),
-                                        updated: Date().timeIntervalSince1970)
+                                        updated: now().timeIntervalSince1970)
         // Bound the index itself — a peer that starts thousands of transfers we never finish must not
         // grow this without limit. Oldest progress goes first.
         if records.count > 512 {
             let doomed = records.values.sorted { $0.updated < $1.updated }.prefix(records.count - 512)
             for r in doomed { records[r.ref] = nil }
         }
-        if force || Date().timeIntervalSince(lastSaveAt) > Self.saveInterval { save() }
+        if force || now().timeIntervalSince(lastSaveAt) > Self.saveInterval { save() }
     }
 
     /// Forget a transfer — completed, or its partial rejected — and flush immediately, so a relaunch
@@ -149,11 +158,11 @@ final class ReassemblyStore {
     /// Reload the persisted transfers that still have their part file on disk and haven't been
     /// abandoned. Anything whose part vanished is dropped — the bitmap without the bytes is a lie.
     @MainActor func restore() -> [ReassemblyRecord] {
-        let cutoff = Date().timeIntervalSince1970 - Self.expiry
+        let cutoff = now().timeIntervalSince1970 - Self.expiry
         var alive: [ReassemblyRecord] = []
         var changed = false
         for (ref, r) in records {
-            let url = MediaStore.storageDir.appendingPathComponent(r.part)
+            let url = storageDir().appendingPathComponent(r.part)
             let exists = FileManager.default.fileExists(atPath: url.path)
             if !exists || r.updated < cutoff {
                 if exists { try? FileManager.default.removeItem(at: url) }
@@ -173,8 +182,8 @@ final class ReassemblyStore {
     /// harmless because the sweep's own mtime grace already spares anything being actively written —
     /// this only ever decides the fate of a partial that is STALLED, which by definition has no
     /// in-flight write to race with.
-    nonisolated static func liveParts() -> [String: Double] {
-        guard let d = SpilledDefaults.shared.data(forKey: key),
+    nonisolated static func liveParts(defaults: SpilledDefaults = .shared) -> [String: Double] {
+        guard let d = defaults.data(forKey: key),
               let list = try? JSONDecoder().decode([String: ReassemblyRecord].self, from: d) else { return [:] }
         var out: [String: Double] = [:]
         for r in list.values { out[r.part] = r.updated }
@@ -182,7 +191,7 @@ final class ReassemblyStore {
     }
 
     private func save() {
-        lastSaveAt = Date()
-        if let d = try? JSONEncoder().encode(records) { SpilledDefaults.shared.set(d, forKey: Self.key) }
+        lastSaveAt = now()
+        if let d = try? JSONEncoder().encode(records) { defaults.set(d, forKey: Self.key) }
     }
 }

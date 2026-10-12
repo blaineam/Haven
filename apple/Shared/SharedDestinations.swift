@@ -30,8 +30,12 @@ enum SharedDestinations {
         var emoji: String = ""
     }
 
+    /// Test seam: stands in for the App Group container. Always nil in the app and the extension.
+    nonisolated(unsafe) static var containerOverride: URL?
+
     private static var dir: URL? {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
+        if let containerOverride { return containerOverride.appendingPathComponent("ShareDestinations", isDirectory: true) }
+        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
             .appendingPathComponent("ShareDestinations", isDirectory: true)
     }
 

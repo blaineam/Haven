@@ -39,34 +39,11 @@ final class InstagramImporter: ObservableObject {
 
     // MARK: - Resume across launches
 
-    /// Everything needed to pick a half-finished import back up after the app is killed.
-    ///
-    /// The archive is stored as a security-scoped BOOKMARK, not a path: the file lives outside the
-    /// sandbox (Files, iCloud Drive, a download) and a bare path would be unreadable on the next
-    /// launch. `done` is an index into the deterministic item order — see `InstagramArchive.read`,
-    /// which sorts with a tiebreak precisely so this index means the same thing on every run.
-    private struct Pending: Codable {
-        var bookmark: Data
-        var circleId: String
-        var includeStories: Bool
-        /// Defaulted so a checkpoint written before song matching existed still decodes.
-        var matchSongs: Bool = false
-        /// Name the song in reels via Shazam (default on — needs no MusicKit authorization).
-        var identifySongs: Bool = true
-        var done: Int
-    }
+    private typealias Pending = InstagramImportCheckpoint
 
-    private static let pendingKey = "haven.instagram.import.pending"
-
-    private func savePending(_ p: Pending) {
-        guard let d = try? JSONEncoder().encode(p) else { return }
-        UserDefaults.standard.set(d, forKey: Self.pendingKey)
-    }
-    private func loadPending() -> Pending? {
-        guard let d = UserDefaults.standard.data(forKey: Self.pendingKey) else { return nil }
-        return try? JSONDecoder().decode(Pending.self, from: d)
-    }
-    private func clearPending() { UserDefaults.standard.removeObject(forKey: Self.pendingKey) }
+    private func savePending(_ p: Pending) { p.save(to: .standard) }
+    private func loadPending() -> Pending? { Pending.load(from: .standard) }
+    private func clearPending() { Pending.clear(from: .standard) }
 
     /// Restart an import that was interrupted by the app being killed or backgrounded out.
     ///
@@ -182,8 +159,7 @@ final class InstagramImporter: ObservableObject {
         // where new arrivals cost them nothing. The feed grows downwards and their position is
         // untouched — which is the behaviour wanted, achieved by the ordering rather than by
         // fighting the scroll view.
-        let ordered = includeStories ? summary.items : summary.items.filter { $0.kind != .story }
-        let items = ordered.reversed().map { $0 }
+        let items = InstagramImportPlan.importOrder(summary.items, includeStories: includeStories)
         phase = .importing(done: min(startAt, items.count), total: items.count)
         cancelled = false
 
@@ -252,8 +228,8 @@ final class InstagramImporter: ObservableObject {
                 // this comes before `stage`, so a re-run does not decode, transcode or Shazam its way
                 // through an archive it has already imported. That is the difference between a
                 // re-import taking seconds and taking the same hour as the first one.
-                let identity = Self.importIdentity(item)
-                if Ledger.contains(identity) {
+                let identity = InstagramImportPlan.importIdentity(item)
+                if Self.ledger.contains(identity) {
                     alreadyHad += 1
                     skipped += 1
                     await MainActor.run { [weak self] in
@@ -293,9 +269,12 @@ final class InstagramImporter: ObservableObject {
                     // Music, opt-in). They used to be ONE switch, so the credit only ever existed for
                     // users who had also opted into guessed songs.
                     var music: TrackRefFfi? = nil
-                    if hasAudio {
-                        if identifySongs { music = detected }   // the real song as a credit — or nil, retried below
-                    } else if matchSongs {
+                    switch InstagramImportPlan.songPlan(hasAudio: hasAudio, identifySongs: identifySongs, matchSongs: matchSongs) {
+                    case .credit:
+                        music = detected   // the real song as a credit — or nil, retried below
+                    case .none:
+                        break
+                    case .suggest:
                         let when = Date(timeIntervalSince1970: TimeInterval(at) / 1000)
                         let parts = Calendar.current.dateComponents([.year, .month], from: when)
                         music = await SongSuggester.song(themes: themes, genre: item.musicGenre,
@@ -311,7 +290,7 @@ final class InstagramImporter: ObservableObject {
                     // circle is not asked to carry them at all.
                     //
                     // Posts and reels ARE feed content and publish normally (silent + backdated).
-                    let keptId = Self.keptIdentity(item)
+                    let keptId = InstagramImportPlan.keptIdentity(item)
                     // Frozen before the hop: `music` is a var, and capturing a mutable local in
                     // concurrently-executing code is a Swift 6 error.
                     let picked = music
@@ -337,7 +316,7 @@ final class InstagramImporter: ObservableObject {
                     }
                     // AFTER the post exists, never before: a kill between staging and authoring must
                     // re-import this item, not skip it forever.
-                    Ledger.record(identity)
+                    Self.ledger.record(identity)
                     imported += 1
                 }
                 // Checkpoint after EVERY item. The unit of work is one post, so the most a kill can
@@ -421,11 +400,11 @@ final class InstagramImporter: ObservableObject {
             // Disk read + CRC over the entry — the expensive part, and the reason this is detached.
             guard let bytes = zip.data(for: entry) else { continue }
 
-            if isVideo(name) {
+            if InstagramImportPlan.isVideo(name) {
                 // prepareVideo transcodes with AVFoundation and needs a file URL, so the clip is
                 // spilled to scratch and removed as soon as it is staged.
                 let scratch = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("igimport_\(UUID().uuidString).\(ext(name))")
+                    .appendingPathComponent("igimport_\(UUID().uuidString).\(InstagramImportPlan.fileExtension(name))")
                 guard (try? bytes.write(to: scratch)) != nil else { continue }
                 // NOT removed here: the identification task started below reads this file, and it
                 // outlives this iteration. Cleaned up at the end of the post instead.
@@ -468,12 +447,12 @@ final class InstagramImporter: ObservableObject {
                 // running it through Haven's ladder is what stops a 1.2 GB archive from landing on
                 // the relay as-is. alsoOriginal: false — shipping the originals too would double an
                 // already large import, for bytes that are themselves a compressed re-encode.
-                let prepared = await withTimeout(videoStageTimeout) {
+                let prepared = await InstagramImportPlan.withTimeout(InstagramImportPlan.videoStageTimeout) {
                     await MediaStore.shared.prepareVideo(url: scratch, forceOptimize: true,
                                                          alsoOriginal: false)
                 }
                 if prepared == nil {
-                    HavenLog.sync("ig-import: video staging TIMED OUT after \(Int(videoStageTimeout))s — skipping \(name)")
+                    HavenLog.sync("ig-import: video staging TIMED OUT after \(Int(InstagramImportPlan.videoStageTimeout))s — skipping \(name)")
                 }
                 // mediaRefs already carries poster + poster marker + clip in the order the feed
                 // expects (poster first — MediaVariants.composeVideoMedia), so a video tile has its
@@ -519,84 +498,13 @@ final class InstagramImporter: ObservableObject {
         return (refs, anyAudio, detected, themes, retryable ? firstVideoRef : nil)
     }
 
-    /// Every archive item this device has already published, so importing the same export twice is a
-    /// no-op instead of a duplicate feed.
-    ///
-    /// Resuming by INDEX was the only guard before this, and an index only helps the one run it was
-    /// written for: pick the same archive again — because the first attempt was killed, or because
-    /// the bookmark did not survive, or simply to import the stories you skipped the first time —
-    /// and every post lands a second time. There is nothing on a published post that says which
-    /// archive entry it came from, so nothing downstream can deduplicate it either.
-    ///
-    /// Identity is the archive's own: the first media entry's path plus the capture time. Both are
-    /// properties of the export, so the same export yields the same identity on every run and on
-    /// every device, and two genuinely different posts cannot collide (entry paths are unique within
-    /// the zip; the timestamp disambiguates the no-media case).
-    ///
-    /// Recorded only AFTER the post is authored, so a kill mid-item re-imports that item rather than
-    /// losing it — the same trade the per-item checkpoint already makes.
-    enum Ledger {
-        private static let key = "haven.instagram.imported.ids"
-        private static let lock = NSLock()
-        nonisolated(unsafe) private static var cache: Set<String>?
-
-        private static func load() -> Set<String> {
-            if let c = cache { return c }
-            let c = Set(SpilledDefaults.shared.stringArray(forKey: key) ?? [])
-            cache = c
-            return c
-        }
-
-        static func contains(_ id: String) -> Bool {
-            lock.lock(); defer { lock.unlock() }
-            return load().contains(id)
-        }
-
-        static func record(_ id: String) {
-            lock.lock(); defer { lock.unlock() }
-            var c = load()
-            guard c.insert(id).inserted else { return }
-            cache = c
-            SpilledDefaults.shared.set(Array(c), forKey: key)
-        }
-
-        /// How many of these the device has already published — what the preview screen reports so
-        /// "nothing happened" is never the whole message.
-        static func alreadyImported(_ ids: [String]) -> Int {
-            lock.lock(); defer { lock.unlock() }
-            let c = load()
-            return ids.reduce(0) { $0 + (c.contains($1) ? 1 : 0) }
-        }
-
-        /// Deliberate re-import: forget this archive's items so they publish again.
-        static func forget(_ ids: [String]) {
-            lock.lock(); defer { lock.unlock() }
-            var c = load()
-            for id in ids { c.remove(id) }
-            cache = c
-            SpilledDefaults.shared.set(Array(c), forKey: key)
-        }
-    }
-
-    /// Identity for the ledger — see `Ledger`. Distinct from `keptIdentity`, which is a KeptStories
-    /// key and must keep its existing shape or every already-kept story would be kept again.
-    nonisolated static func importIdentity(_ item: InstagramArchive.Item) -> String {
-        "ig:\(item.mediaNames.first ?? "-"):\(item.createdAt)"
-    }
+    /// Every archive item this device has already published (see `InstagramImportLedger`).
+    private nonisolated static let ledger = InstagramImportLedger.shared
 
     /// How many items of `summary` this device has already imported, for the preview screen.
     func alreadyImportedCount(_ summary: InstagramArchive.Summary, includeStories: Bool) -> Int {
-        let items = includeStories ? summary.items : summary.items.filter { $0.kind != .story }
-        return Ledger.alreadyImported(items.map(Self.importIdentity))
-    }
-
-    /// Stable id for a kept story, derived from the archive entry it came from.
-    ///
-    /// `KeptStoriesStore.keep` is keyed on the original event id so a story is kept at most once —
-    /// an import has no Haven event to point at, so the archive path stands in. It is stable across
-    /// runs, which makes re-importing the same export idempotent instead of doubling every story.
-    private nonisolated static func keptIdentity(_ item: InstagramArchive.Item) -> String {
-        "ig:" + (item.mediaNames.first ?? "\(item.createdAt)")
+        let items = InstagramImportPlan.selectable(summary.items, includeStories: includeStories)
+        return Self.ledger.alreadyImported(items.map(InstagramImportPlan.importIdentity))
     }
 
     /// Holds an identification result for collection without ever blocking on it.
@@ -609,45 +517,5 @@ final class InstagramImporter: ObservableObject {
         /// True when identification was REFUSED (rate limited) rather than answered — worth asking
         /// again later, unlike "not in catalog" which will never change.
         func shouldRetry() -> Bool { retryable }
-    }
-
-    /// Run `work`, giving up after `seconds`.
-    ///
-    /// One item must never be able to wedge a 372-item import. Video staging is the risk: the
-    /// encoder ladder can fall back through several export presets, and poster generation waits on
-    /// a semaphore with a 15s timeout PER config — so a clip AVFoundation dislikes can sit there for
-    /// a minute or more, and a clip it hangs on sits there forever. The simulator's software
-    /// encoder makes both far likelier than on a device.
-    ///
-    /// Losing the race does not kill the underlying work (an AVAssetExportSession does not
-    /// meaningfully honour cancellation) — it just stops the LOOP waiting on it, so the import
-    /// continues and the offending post is skipped rather than taking everything else down with it.
-    private nonisolated static func withTimeout<T: Sendable>(
-        _ seconds: Double, _ work: @escaping @Sendable () async -> T?) async -> T? {
-        await withTaskGroup(of: T?.self) { group in
-            group.addTask { await work() }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
-        }
-    }
-
-    /// How long one video may take to stage before the import moves on. Generous — a large clip on a
-    /// slow device legitimately takes a while, and skipping a post the user wanted is worse than
-    /// waiting — but bounded, which is the part that was missing.
-    /// `nonisolated`: read from the nonisolated `stage`, and an implicitly main-actor-isolated
-    /// static cannot be touched from outside the actor.
-    private nonisolated static let videoStageTimeout: Double = 180
-
-    private nonisolated static func ext(_ name: String) -> String {
-        let e = (name as NSString).pathExtension.lowercased()
-        return e.isEmpty ? "mp4" : e
-    }
-    private nonisolated static func isVideo(_ name: String) -> Bool {
-        ["mp4", "mov", "m4v"].contains(ext(name))
     }
 }

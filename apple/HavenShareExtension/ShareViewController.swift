@@ -88,10 +88,11 @@ final class ShareViewController: UIViewController {
                 //   • `public.file-url` BEFORE `public.url` — a document shared from Files conforms to
                 //     both, and the URL branch would have turned a real attachment into a `file:///…`
                 //     string nobody can open.
-                if provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
+                // The order of the checks lives in `ShareExtractionRules.classify` (and is unit-tested).
+                switch ShareExtractionRules.classify(conforms: { provider.hasItemConformingToTypeIdentifier($0.identifier) }) {
+                case .video:
                     if let src = await loadFile(provider, UTType.movie.identifier) {
-                        let ext = src.pathExtension.isEmpty ? "mov" : src.pathExtension
-                        let name = "vid-\(fileIdx).\(ext)"; fileIdx += 1
+                        let name = ShareExtractionRules.videoName(index: fileIdx, pathExtension: src.pathExtension); fileIdx += 1
                         if let dst = ShareInbox.fileURL(name, in: shareId) {
                             try? FileManager.default.removeItem(at: dst)
                             try? FileManager.default.copyItem(at: src, to: dst)
@@ -99,27 +100,29 @@ final class ShareViewController: UIViewController {
                             if let poster = videoPoster(dst) { addPreview(poster) }
                         }
                     }
-                } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                case .image:
                     if let data = await loadData(provider, UTType.image.identifier) {
-                        let name = "img-\(fileIdx).dat"; fileIdx += 1
+                        let name = ShareExtractionRules.imageName(index: fileIdx); fileIdx += 1
                         if let dst = ShareInbox.fileURL(name, in: shareId) {
                             try? data.write(to: dst)
                             payload.items.append(.init(kind: .image, file: name))
                             if let thumb = UIImage(data: data) { addPreview(thumb) }
                         }
                     }
-                } else if let type = fileType(of: provider) {
+                case .document(let type):
                     if let item = await stashDocument(provider, type: type, index: &fileIdx) {
                         payload.items.append(item)
                     }
-                } else if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
+                case .url:
                     if let url = await loadURL(provider) {
                         payload.items.append(.init(kind: .text, text: url.absoluteString))
                     }
-                } else if provider.hasItemConformingToTypeIdentifier(UTType.text.identifier) {
+                case .text:
                     if let s = await loadText(provider), !s.isEmpty {
                         payload.items.append(.init(kind: .text, text: s))
                     }
+                case .unsupported:
+                    break
                 }
             }
         }
@@ -131,9 +134,8 @@ final class ShareViewController: UIViewController {
     /// Downscaled thumbnails for the composer. Capped — a 10-photo share should not hold ten
     /// full-resolution bitmaps in an extension's small memory budget just to draw 64pt tiles.
     private func addPreview(_ image: UIImage) {
-        guard previews.count < 10 else { return }
-        let side: CGFloat = 200
-        let scale = min(side / max(image.size.width, 1), side / max(image.size.height, 1), 1)
+        guard ShareExtractionRules.canAddPreview(currentCount: previews.count) else { return }
+        let scale = ShareExtractionRules.previewScale(width: image.size.width, height: image.size.height)
         let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
         let small = UIGraphicsImageRenderer(size: size).image { _ in
             image.draw(in: CGRect(origin: .zero, size: size))
@@ -154,28 +156,11 @@ final class ShareViewController: UIViewController {
     /// from one. Anything that isn't one of our donated DM ids is ignored — the app falls back to
     /// the normal "where should this go" sheet rather than trusting a foreign identifier.
     private func chosenConversationId() -> String? {
-        guard let intent = extensionContext?.intent as? INSendMessageIntent,
-              let id = intent.conversationIdentifier, id.hasPrefix("dm:") else { return nil }
-        return id
+        guard let intent = extensionContext?.intent as? INSendMessageIntent else { return nil }
+        return ShareExtractionRules.conversationId(fromIntent: intent.conversationIdentifier)
     }
 
-    /// The type identifier to pull a *document* out of this provider with, or nil when it isn't a
-    /// document at all. `public.file-url` first (it names a real file on disk), then anything that
-    /// is `public.data`-backed — PDFs, zips, .docx, source files, whatever the source app vends.
-    private func fileType(of p: NSItemProvider) -> String? {
-        if p.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) { return UTType.fileURL.identifier }
-        // A web link is a link, not a download: it conforms to public.url but never to
-        // public.file-url, and it belongs in the message body.
-        if p.hasItemConformingToTypeIdentifier(UTType.url.identifier) { return nil }
-        // Plain text also conforms to public.data; let the text branch keep it so a shared snippet
-        // stays a message body instead of becoming a .txt attachment.
-        if p.hasItemConformingToTypeIdentifier(UTType.text.identifier) { return nil }
-        if p.hasItemConformingToTypeIdentifier(UTType.data.identifier) { return UTType.data.identifier }
-        return nil
-    }
-
-    /// Copy a shared document into the App Group inbox under a collision-proof name, remembering the
-    /// name the source app gave it so the attachment arrives called what the sender saw.
+    /// Stash a document attachment in the share's directory under a collision-proof name.
     private func stashDocument(_ p: NSItemProvider, type: String, index: inout Int) async
         -> ShareInbox.Item?
     {
@@ -191,9 +176,8 @@ final class ShareViewController: UIViewController {
         }
         guard let src else { return nil }
         defer { try? FileManager.default.removeItem(at: src) }
-        let original = p.suggestedName ?? src.lastPathComponent
-        let ext = src.pathExtension
-        let stored = "doc-\(index)" + (ext.isEmpty ? "" : ".\(ext)")
+        let original = ShareExtractionRules.originalDocumentName(suggested: p.suggestedName, fileName: src.lastPathComponent)
+        let stored = ShareExtractionRules.documentName(index: index, pathExtension: src.pathExtension)
         index += 1
         guard let dst = ShareInbox.fileURL(stored, in: shareId) else { return nil }
         try? FileManager.default.removeItem(at: dst)

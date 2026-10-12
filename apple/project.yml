@@ -497,6 +497,40 @@ targets:
       - path: HavenApp/InviteHints.swift
       # The cache-less HTTP session every relay/S3 call uses (the CFNetwork Cache.db disk writes).
       - path: Shared/HavenHTTP.swift
+      # --- Coverage round 1 (2026-10): Foundation-only seams split out of FFI/SwiftUI-coupled files. ---
+      # Deep-link building/parsing + the router's classification table (HavenSite lives here too).
+      - path: HavenApp/DeepLinkWire.swift
+      # SigV4 request building + the S3 transport (the StorageStore convenience init is app-only).
+      - path: HavenApp/S3Client.swift
+      - path: Shared/OfflineGate.swift
+      - path: Shared/UITestMode.swift
+      # Offline friend-invite ticket lifecycle (the FFI-backed minting/relay I/O stays in FriendInvites.swift).
+      - path: HavenApp/FriendInviteLedger.swift
+      # Chunked-transfer resume record + frame-33 codec (`ReassemblyStore.shared` is app-only).
+      - path: HavenApp/MediaReassembly.swift
+      # Instagram import: selection/order, checkpoint, ledger, song policy, timeout.
+      - path: HavenApp/InstagramImportPlan.swift
+      # Song suggester's text half (captions, search terms, language filter); MusicKit/Vision stay app-only.
+      - path: HavenApp/SongThemes.swift
+      # Share Extension hand-off: routing rules, the App-Group inbox queue, the destination mirror.
+      - path: HavenApp/ShareRoutingRules.swift
+      - path: Shared/ShareInbox.swift
+      - path: Shared/SharedDestinations.swift
+      # NSE payload decode / redaction / tap-route builder (the extension keeps only the system wiring).
+      - path: HavenNotificationService/NotificationPayload.swift
+      # Watch client: inbound message meaning + the offline demo scene.
+      - path: WatchShared/WatchClientLogic.swift
+      # Low Data Mode preference x path resolution; Shazam retry queue rules.
+      - path: HavenApp/LowDataPolicy.swift
+      - path: HavenApp/ShazamRetryPolicy.swift
+      # "Already optimized" probe (+ the encoder constants it measures against).
+      - path: HavenApp/MediaOptimizationTarget.swift
+      - path: HavenApp/VideoEncoderTargets.swift
+      # Seedless / self-sync key load discipline (locked or erroring is never "absent") + switch-flip bookkeeping.
+      - path: HavenApp/KeychainDiscipline.swift
+      - path: HavenApp/SwitchFlipStores.swift
+      # Share Extension attachment classification + staged names.
+      - path: HavenShareExtension/ShareExtractionRules.swift
       - path: HavenLogicTests
     settings:
       base:

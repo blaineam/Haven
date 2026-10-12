@@ -1,139 +1,6 @@
 import SwiftUI
 
-/// In-app deep links so people can share a pointer to a friend's profile or a specific post:
-///   • `haven://u/<nodeIdHex>`            → open that person's profile
-///   • `haven://p/<circleId>/<postId>`    → open a specific post (legacy; still accepted forever)
-///   • `https://wemiller.com/apps/haven/open/#p/<circleId>.<postId>` → the same post, shareable
-///     "online" — the static landing page bounces it into the app on iOS *and* Android, and
-///     shows a "get Haven" card to anyone without it. `/open` is the DEDICATED landing path and
-///     the only one the apps claim; the rest of the site is marketing and stays in the browser
-///     (see `HavenSite` for why). Links in the older `/apps/haven/#…` shape are still parsed —
-///     matching is on the wider `sitePath` — they just no longer auto-launch the app.
-///
-/// Like invite links (`haven://invite#<id>.<verify>` / `https://…/#<id>.<verify>`), the web post
-/// link keeps its payload in the URL **fragment**, and the same `.` delimiter.
-///
-/// ⚠️ THE FRAGMENT IS NOT COSMETIC — DO NOT "TIDY" IT INTO A PATH. ⚠️
-/// A browser never sends the `#fragment` to the server, so wemiller.com's access logs (and every
-/// CDN/proxy in between) see only `/apps/haven/` — never *which* post. A path form like
-/// `/apps/haven/p/<circle>/<post>` would hand the host a readership map: who fetched which post
-/// of which circle, from which IP. That map is exactly what Haven exists to not create. Keep it
-/// in the fragment.
-///
-/// The link is a **pointer, not a capability**: it carries no key. Only a device already in the
-/// circle can decrypt the post; everyone else lands on "post not found". A post link also still
-/// respects the circle's biometric lock — it can never be used to peek into a locked circle.
-enum DeepLink {
-    /// Fragment-safe token charset: unreserved characters *minus* `.` and `/`, so those two stay
-    /// unambiguous as our delimiters (`p/<circle>.<post>`) no matter what an id contains.
-    private static let fragmentToken = CharacterSet(charactersIn:
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_~")
-
-    static func profileURL(_ nodeHex: String) -> URL? { URL(string: "haven://u/\(nodeHex)") }
-
-    /// Tap-target for a notification: DMs open the Messages thread; circle posts open the post.
-    /// Percent-encode path components so `dm:hex-hex` survives URL parsing.
-    static func interactionLink(circleId: String, postId: String? = nil) -> String {
-        let encCid = circleId.addingPercentEncoding(withAllowedCharacters: fragmentToken) ?? circleId
-        if circleId.hasPrefix("dm:") {
-            if let postId, !postId.isEmpty,
-               let encPid = postId.addingPercentEncoding(withAllowedCharacters: fragmentToken) {
-                return "haven://m/\(encCid)/\(encPid)"
-            }
-            return "haven://m/\(encCid)"
-        }
-        if let postId, !postId.isEmpty,
-           let encPid = postId.addingPercentEncoding(withAllowedCharacters: fragmentToken) {
-            return "haven://p/\(encCid)/\(encPid)"
-        }
-        return "haven://c/\(encCid)"
-    }
-
-    /// Tap-target for a STORY notification / activity row: opens the story viewer, not the feed.
-    /// Same encoding rules as `interactionLink`; the NSE mirrors this shape (keep in sync).
-    static func storyLink(circleId: String, postId: String) -> String {
-        let encCid = circleId.addingPercentEncoding(withAllowedCharacters: fragmentToken) ?? circleId
-        let encPid = postId.addingPercentEncoding(withAllowedCharacters: fragmentToken) ?? postId
-        return "haven://s/\(encCid)/\(encPid)"
-    }
-
-    /// Shareable story pointer — same web-routed form as `postURL`, payload in the `#` fragment
-    /// (`#s/<circle>.<post>`). Used when a story reply attaches a reference in a DM so the bubble
-    /// can open the real story (music, caption framing, progress) instead of resealing a permanent
-    /// media copy into the thread. Inverse of `parseStory`.
-    static func storyURL(circleId: String, postId: String) -> URL? {
-        guard let c = circleId.addingPercentEncoding(withAllowedCharacters: fragmentToken),
-              let p = postId.addingPercentEncoding(withAllowedCharacters: fragmentToken) else { return nil }
-        return URL(string: "https://\(HavenSite.inviteDomain)/#s/\(c).\(p)")
-    }
-
-    /// The link shown in the post's share sheet — web-routed so it crosses the iOS/Android
-    /// boundary and survives being pasted anywhere.
-    static func postURL(circleId: String, postId: String) -> URL? {
-        guard let c = circleId.addingPercentEncoding(withAllowedCharacters: fragmentToken),
-              let p = postId.addingPercentEncoding(withAllowedCharacters: fragmentToken) else { return nil }
-        return URL(string: "https://\(HavenSite.inviteDomain)/#p/\(c).\(p)")
-    }
-
-    /// → (circleId, postId) for either story form (`haven://s/…` or the web `#s/…` link), else nil.
-    static func parseStory(_ raw: String) -> (circleId: String, postId: String)? {
-        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, let url = URL(string: text) else { return nil }
-        return parseStory(url)
-    }
-
-    static func parseStory(_ url: URL) -> (circleId: String, postId: String)? {
-        if let web = webStory(url) { return web }
-        guard url.scheme?.lowercased() == "haven", url.host == "s" else { return nil }
-        let parts = url.pathComponents.filter { $0 != "/" }.map { $0.removingPercentEncoding ?? $0 }
-        guard parts.count >= 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
-        return (parts[0], parts[1])
-    }
-
-    /// First story pointer embedded in free-form body text (a story reply's DM body is
-    /// `"words\nhttps://…#s/…"`). Scans both the web form and `haven://s/…`.
-    static func firstStory(in text: String) -> (circleId: String, postId: String, raw: String)? {
-        // Prefer the web form (what we emit) — walk whitespace-separated tokens then substrings.
-        for token in text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).map(String.init) {
-            if let s = parseStory(token) { return (s.circleId, s.postId, token) }
-        }
-        // Fall back: link may sit mid-string without whitespace (paste).
-        for prefix in ["https://", "haven://s/"] {
-            guard let r = text.range(of: prefix) else { continue }
-            let end = text[r.lowerBound...].firstIndex(where: { $0.isWhitespace || $0.isNewline })
-                ?? text.endIndex
-            let sub = String(text[r.lowerBound..<end])
-            if let s = parseStory(sub) { return (s.circleId, s.postId, sub) }
-        }
-        return nil
-    }
-
-    /// Pull `s/<circle>.<post>` out of an https link's fragment (mirror of `webPost`).
-    private static func webStory(_ url: URL) -> (String, String)? {
-        guard url.scheme == "https", url.host?.lowercased() == HavenSite.host,
-              url.path.hasPrefix(HavenSite.path),
-              let frag = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedFragment,
-              frag.hasPrefix("s/") else { return nil }
-        let body = String(frag.dropFirst(2))
-        guard let dot = body.firstIndex(of: "."), dot > body.startIndex else { return nil }
-        let c = String(body[body.startIndex..<dot]).removingPercentEncoding
-        let p = String(body[body.index(after: dot)...]).removingPercentEncoding
-        guard let c, let p, !c.isEmpty, !p.isEmpty else { return nil }
-        return (c, p)
-    }
-
-    // MARK: Story reply resolution (new deep links + legacy media attaches)
-
-    /// Stories live 24h from `createdAt` (core retention). After that they must not surface as a
-    /// playable reply card unless the author kept them — even if a feed quirk still returns the event.
-    static let storyLifetimeMs: UInt64 = 24 * 60 * 60 * 1000
-
-    static func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
-
-    static func isPastStoryWindow(createdAt: UInt64, now: UInt64 = nowMs()) -> Bool {
-        now > createdAt && now &- createdAt > storyLifetimeMs
-    }
-
+extension DeepLink {
     /// Resolve which story a DM message is about — explicit deep link, remembered association,
     /// then **retroactive** inference for older replies that resealed media without a pointer.
     ///
@@ -216,34 +83,23 @@ enum DeepLink {
 
         let store = FeedStore.shared
         let replyAt = message.createdAt
-        let dayMs: UInt64 = 24 * 60 * 60 * 1000
 
         // I replied → story is the peer's. They replied → story is mine (incl. kept).
         let lookingForMine = !message.isMe
         let peerHex = store.dmPartnerHex(dmCircleId)?.lowercased()
-        let peerShort = peerHex.map { String($0.prefix(12)) }
 
-        struct Cand { let circleId: String; let id: String; let createdAt: UInt64 }
+        typealias Cand = LegacyStoryMatch.Candidate
         var cands: [Cand] = []
 
         for circle in store.circles where !circle.id.hasPrefix("dm:") {
             let stories = store.messages(in: circle.id)
                 .filter { $0.story && !$0.unsent && !$0.media.isEmpty }
             for s in stories {
-                // Story must already exist when the reply was sent, and still be in its 24h window
-                // at that moment (otherwise it wouldn't have been on the tray).
-                guard s.createdAt <= replyAt, replyAt &- s.createdAt <= dayMs else { continue }
+                guard LegacyStoryMatch.storyWasLive(createdAt: s.createdAt, replyAt: replyAt) else { continue }
                 if lookingForMine {
                     guard s.isMe else { continue }
                 } else {
-                    // Peer authored: match short prefix or full hex start.
-                    let a = s.authorShort.lowercased()
-                    let ok: Bool = {
-                        if let peerShort, a.hasPrefix(peerShort) || peerShort.hasPrefix(a) { return true }
-                        if let peerHex, peerHex.hasPrefix(a) || a.hasPrefix(String(peerHex.prefix(a.count))) { return true }
-                        return false
-                    }()
-                    guard ok else { continue }
+                    guard LegacyStoryMatch.authorIsPeer(s.authorShort, peerHex: peerHex) else { continue }
                 }
                 cands.append(Cand(circleId: circle.id, id: s.id, createdAt: s.createdAt))
             }
@@ -252,7 +108,8 @@ enum DeepLink {
         // Kept snapshots: only for replies to MY stories after the live event is gone.
         if lookingForMine {
             for k in KeptStoriesStore.shared.kept where !k.media.isEmpty {
-                guard k.createdAt <= replyAt, replyAt &- k.createdAt <= dayMs * 7 else { continue }
+                guard LegacyStoryMatch.storyWasLive(createdAt: k.createdAt, replyAt: replyAt,
+                                                    windowMs: LegacyStoryMatch.keptWindowMs) else { continue }
                 // Prefer active circle / default if we can place it; circle id is only needed for
                 // resolve — keptItem ignores circle for the snapshot itself.
                 let cid = store.activeCircleId.hasPrefix("dm:") ? "default" : store.activeCircleId
@@ -260,22 +117,8 @@ enum DeepLink {
             }
         }
 
-        // Most recent story before the reply = the one they were almost certainly watching.
-        guard let best = cands.max(by: { $0.createdAt < $1.createdAt }) else { return nil }
+        guard let best = LegacyStoryMatch.best(cands) else { return nil }
         return (best.circleId, best.id)
-    }
-}
-
-enum DeepLinkRoute: Identifiable {
-    case profile(nodeHex: String)
-    case post(circleId: String, postId: String)
-    case story(circleId: String, postId: String)
-    var id: String {
-        switch self {
-        case .profile(let h): return "u:\(h)"
-        case .post(let c, let p): return "p:\(c):\(p)"
-        case .story(let c, let p): return "s:\(c):\(p)"
-        }
     }
 }
 
@@ -294,48 +137,24 @@ final class DeepLinkRouter: ObservableObject {
     /// screen takes over) instead of revealing the post.
     @discardableResult
     func handle(_ url: URL, tab: inout String) -> Bool {
-        // Both link generations normalize to the same internal route before anything else looks
-        // at them, so `haven://p/…` links shared years ago keep working untouched.
-        if let (circleId, postId) = Self.webPost(url) {
+        // Both link generations normalize to the same target before anything else looks at them
+        // (`DeepLinkTarget.classify`), so `haven://p/…` links shared years ago keep working untouched.
+        guard let target = DeepLinkTarget.classify(url) else { return false }
+        switch target {
+        case .ignored:
+            break
+        case .profile(let nodeHex):
+            route = .profile(nodeHex: nodeHex)
+        case .post(let circleId, let postId):
             openPost(circleId: circleId, postId: postId, tab: &tab)
-            return true
-        }
-        // Story web form (`#s/<c>.<p>`) before falling through — same privacy rule as posts.
-        if let (circleId, postId) = DeepLink.parseStory(url),
-           url.scheme?.lowercased() == "https" {
+        case .dm(let circleId, let messageId):
+            openDM(circleId: circleId, messageId: messageId, tab: &tab)
+        case .story(let circleId, let postId):
             openStory(circleId: circleId, postId: postId, tab: &tab)
-            return true
+        case .circle(let circleId):
+            openCircle(circleId: circleId, tab: &tab)
         }
-        guard url.scheme == "haven" else { return false }
-        let parts = url.pathComponents.filter { $0 != "/" }.map {
-            $0.removingPercentEncoding ?? $0
-        }
-        switch url.host {
-        case "u":
-            guard let id = parts.first, id.count >= 6 else { return true }
-            route = .profile(nodeHex: id)
-            return true
-        case "p":
-            guard parts.count >= 2 else { return true }
-            openPost(circleId: parts[0], postId: parts[1], tab: &tab)
-            return true
-        case "m":
-            // DM thread (optional message id → scroll-to inside the thread).
-            guard let cid = parts.first, cid.hasPrefix("dm:") else { return true }
-            openDM(circleId: cid, messageId: parts.count >= 2 ? parts[1] : nil, tab: &tab)
-            return true
-        case "s":
-            // Story (haven://s/<cid>/<postId>) — opens the story viewer, not the feed.
-            guard parts.count >= 2, !parts[0].isEmpty, !parts[1].isEmpty else { return true }
-            openStory(circleId: parts[0], postId: parts[1], tab: &tab)
-            return true
-        case "c":
-            guard let cid = parts.first, !cid.isEmpty else { return true }
-            openCircle(circleId: cid, tab: &tab)
-            return true
-        default:
-            return false
-        }
+        return true
     }
 
     /// Open a DM conversation (Messages tab). Used by notification taps. A message id scrolls the
@@ -377,18 +196,7 @@ final class DeepLinkRouter: ObservableObject {
     /// back to the id as given, which is still correct — that's genuinely a thread we haven't synced,
     /// and `DMThreadView` says so rather than pretending.
     static func resolveDMCircle(_ circleId: String) -> String {
-        let known = FeedStore.shared.circles.map(\.id).filter { $0.hasPrefix("dm:") }
-        if known.contains(circleId) { return circleId }
-        let wanted = participantSet(circleId)
-        guard !wanted.isEmpty else { return circleId }
-        if let match = known.first(where: { participantSet($0) == wanted }) { return match }
-        return circleId
-    }
-
-    /// The participants a `dm:` id names, lowercased and order-independent.
-    private static func participantSet(_ circleId: String) -> Set<String> {
-        guard circleId.hasPrefix("dm:") else { return [] }
-        return Set(circleId.dropFirst(3).split(separator: "-").map { $0.lowercased() })
+        DeepLinkTarget.resolveDMCircle(circleId, known: FeedStore.shared.circles.map(\.id))
     }
 
     /// Open a feed circle (Circle tab). Used when a notification only carries the circle id.
@@ -416,23 +224,6 @@ final class DeepLinkRouter: ObservableObject {
             return
         }
         route = .story(circleId: circleId, postId: postId)
-    }
-
-    /// Pull `p/<circle>.<post>` out of an https link's fragment. Anything else (an invite's
-    /// bare `<id>.<verify>`, a plain visit to the site) returns nil and falls through.
-    private static func webPost(_ url: URL) -> (String, String)? {
-        // percentEncodedFragment (not .fragment) — we want the raw text so we decode exactly once,
-        // after splitting on the delimiters.
-        guard url.scheme == "https", url.host?.lowercased() == HavenSite.host,
-              url.path.hasPrefix(HavenSite.path),
-              let frag = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedFragment,
-              frag.hasPrefix("p/") else { return nil }
-        let body = String(frag.dropFirst(2))
-        guard let dot = body.firstIndex(of: "."), dot > body.startIndex else { return nil }
-        let c = String(body[body.startIndex..<dot]).removingPercentEncoding
-        let p = String(body[body.index(after: dot)...]).removingPercentEncoding
-        guard let c, let p, !c.isEmpty, !p.isEmpty else { return nil }
-        return (c, p)
     }
 
     private func openPost(circleId: String, postId: String, tab: inout String) {

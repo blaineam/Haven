@@ -24,8 +24,12 @@ struct S3Client {
     let bucket: String
     let accessKey: String
     let secret: String
+    /// The URLSession every call goes through. Injected so tests can attach a stub protocol; the
+    /// app always uses the cache-less `HavenHTTP.session`.
+    let session: URLSession
 
-    init(config c: S3Config) {
+    init(config c: S3Config, session: URLSession = HavenHTTP.session) {
+        self.session = session
         endpoint = c.endpoint.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: "")
         region = c.region.isEmpty ? "us-east-1" : c.region
         bucket = c.bucket
@@ -33,25 +37,18 @@ struct S3Client {
         secret = c.secret
     }
 
-    @MainActor
-    init?(_ s: StorageStore) {
-        guard s.s3Configured else { return nil }
-        self.init(config: S3Config(endpoint: s.s3Endpoint, region: s.s3Region, bucket: s.s3Bucket,
-                                   accessKey: s.s3AccessKey, secret: s.s3Secret))
-    }
-
     // MARK: - Public API
 
     func putObject(key: String, data: Data) async throws {
         var req = try signedRequest(method: "PUT", path: "/\(bucket)/\(encodePath(key))", query: [], payload: data)
         req.httpBody = data
-        let (_, resp) = try await HavenHTTP.session.data(for: req)
+        let (_, resp) = try await session.data(for: req)
         try check(resp, "PUT \(key)")
     }
 
     func getObject(key: String) async throws -> Data {
         let req = try signedRequest(method: "GET", path: "/\(bucket)/\(encodePath(key))", query: [], payload: Data())
-        let (data, resp) = try await HavenHTTP.session.data(for: req)
+        let (data, resp) = try await session.data(for: req)
         try check(resp, "GET \(key)")
         return data
     }
@@ -66,7 +63,7 @@ struct S3Client {
     /// reached anyway — a plain false would force the upload attempt.
     func headObjectExists(key: String) async -> Bool? {
         guard let req = try? signedRequest(method: "HEAD", path: "/\(bucket)/\(encodePath(key))", query: [], payload: Data()) else { return nil }
-        guard let (_, resp) = try? await HavenHTTP.session.data(for: req), let http = resp as? HTTPURLResponse else { return nil }
+        guard let (_, resp) = try? await session.data(for: req), let http = resp as? HTTPURLResponse else { return nil }
         return (200..<300).contains(http.statusCode)
     }
 
@@ -74,7 +71,7 @@ struct S3Client {
     func listKeys(prefix: String) async throws -> [String] {
         let query = [("list-type", "2"), ("prefix", prefix), ("max-keys", "1000")]
         let req = try signedRequest(method: "GET", path: "/\(bucket)", query: query, payload: Data())
-        let (data, resp) = try await HavenHTTP.session.data(for: req)
+        let (data, resp) = try await session.data(for: req)
         try check(resp, "LIST \(prefix)")
         return Self.parseKeys(data)
     }
@@ -85,7 +82,7 @@ struct S3Client {
     }
 
     /// Minimal XML scrape of <Key>…</Key> from a ListObjectsV2 response.
-    private static func parseKeys(_ data: Data) -> [String] {
+    static func parseKeys(_ data: Data) -> [String] {
         guard let xml = String(data: data, encoding: .utf8) else { return [] }
         var keys: [String] = []
         var rest = Substring(xml)
@@ -99,12 +96,11 @@ struct S3Client {
 
     // MARK: - SigV4
 
-    private func signedRequest(method: String, path: String, query: [(String, String)], payload: Data) throws -> URLRequest {
+    func signedRequest(method: String, path: String, query: [(String, String)], payload: Data, now: Date = Date()) throws -> URLRequest {
         // HAVEN_NO_NET: every bucket op is signed here first, so one guard closes PUT/GET/HEAD/LIST.
         // `headObjectExists` reads the throw as nil — "no HTTP response at all", which is the truth.
         guard !HavenNet.offline else { throw S3Error.bad("offline (HAVEN_NO_NET)") }
         let host = endpoint
-        let now = Date()
         let amzDate = Self.iso8601.string(from: now)
         let dateStamp = String(amzDate.prefix(8))
         let payloadHash = sha256Hex(payload)
@@ -143,22 +139,29 @@ struct S3Client {
     // circle — so members conduct mailbox ops without ever seeing the access key/secret.
 
     /// A pre-signed URL for `method` ("GET"/"PUT") on `key`, valid `expires` seconds (≤7 days).
-    func presignedURL(method: String, key: String, expires: Int = 604_800, listPrefix: String? = nil) -> URL? {
+    func presignedURL(method: String, key: String, expires: Int = 604_800, listPrefix: String? = nil,
+                      now: Date = Date()) -> URL? {
+        let path = listPrefix != nil ? "/\(bucket)" : "/\(bucket)/\(encodePath(key))"
+        var extra: [(String, String)] = []
+        if let p = listPrefix { extra = [("list-type", "2"), ("prefix", p), ("max-keys", "1000")] }
+        return presign(method: method, path: path, expires: expires, extraQuery: extra, now: now)
+    }
+
+    /// Query-string SigV4 over an explicit canonical `path` (already percent-encoded).
+    func presign(method: String, path: String, expires: Int, extraQuery: [(String, String)] = [],
+                 now: Date = Date()) -> URL? {
         let host = endpoint
-        let now = Date()
         let amzDate = Self.iso8601.string(from: now)
         let dateStamp = String(amzDate.prefix(8))
         let scope = "\(dateStamp)/\(region)/s3/aws4_request"
-        let path = listPrefix != nil ? "/\(bucket)" : "/\(bucket)/\(encodePath(key))"
 
-        var query: [(String, String)] = [
+        let query: [(String, String)] = [
             ("X-Amz-Algorithm", "AWS4-HMAC-SHA256"),
             ("X-Amz-Credential", "\(accessKey)/\(scope)"),
             ("X-Amz-Date", amzDate),
             ("X-Amz-Expires", "\(min(max(expires, 1), 604_800))"),
             ("X-Amz-SignedHeaders", "host"),
-        ]
-        if let p = listPrefix { query.append(("list-type", "2")); query.append(("prefix", p)); query.append(("max-keys", "1000")) }
+        ] + extraQuery
 
         let canonicalQuery = query
             .map { (encodeStrict($0.0), encodeStrict($0.1)) }
@@ -175,17 +178,17 @@ struct S3Client {
     }
 
     /// Plain HTTPS GET of a pre-signed URL (members fetching the mailbox).
-    static func getURL(_ url: URL) async -> Data? {
+    static func getURL(_ url: URL, session: URLSession = HavenHTTP.session) async -> Data? {
         guard !HavenNet.offline else { return nil }
-        guard let (data, resp) = try? await HavenHTTP.session.data(from: url),
+        guard let (data, resp) = try? await session.data(from: url),
               let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
         return data
     }
     /// Plain HTTPS PUT to a pre-signed URL (members writing to the mailbox).
-    static func putURL(_ url: URL, data: Data) async -> Bool {
+    static func putURL(_ url: URL, data: Data, session: URLSession = HavenHTTP.session) async -> Bool {
         guard !HavenNet.offline else { return false }
         var req = URLRequest(url: url); req.httpMethod = "PUT"; req.httpBody = data
-        guard let (_, resp) = try? await HavenHTTP.session.upload(for: req, from: data),
+        guard let (_, resp) = try? await session.upload(for: req, from: data),
               let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return false }
         return true
     }
@@ -203,13 +206,13 @@ struct S3Client {
     private func sha256Hex(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 
     /// Path encoding keeps "/" as a separator (object keys are path-like).
-    private func encodePath(_ key: String) -> String {
+    func encodePath(_ key: String) -> String {
         key.split(separator: "/", omittingEmptySubsequences: false)
             .map { $0.addingPercentEncoding(withAllowedCharacters: Self.unreserved) ?? String($0) }
             .joined(separator: "/")
     }
     /// Strict encoding for canonical query (encodes "/" too), per SigV4.
-    private func encodeStrict(_ s: String) -> String {
+    func encodeStrict(_ s: String) -> String {
         s.addingPercentEncoding(withAllowedCharacters: Self.unreserved) ?? s
     }
 

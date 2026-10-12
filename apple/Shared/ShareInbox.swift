@@ -50,8 +50,13 @@ enum ShareInbox {
         let payload: Payload
     }
 
+    /// Test seam: a plain directory standing in for the App Group container (an unsigned test
+    /// bundle has no group). Always nil in the app and the extension.
+    nonisolated(unsafe) static var rootOverride: URL?
+
     private static var root: URL? {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
+        if let rootOverride { return rootOverride.appendingPathComponent("ShareInbox", isDirectory: true) }
+        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
             .appendingPathComponent("ShareInbox", isDirectory: true)
     }
 

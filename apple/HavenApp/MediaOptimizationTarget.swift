@@ -57,10 +57,10 @@ enum MediaOptimizationTarget {
     // reading "above target" and the button would offer the same clip forever, re-encoding it on
     // every run. The headroom below is what makes a second pass a no-op, and it is measured, not
     // guessed: real encoder output lands around 4.5–5.0 Mbps overall against a 6.0 Mbps trigger.
-    static let videoBitrateCeiling = Int(Double(VideoEncoder.videoBitrate + VideoEncoder.audioBitrate) * 1.30)
+    static let videoBitrateCeiling = Int(Double(VideoEncoderTargets.videoBitrate + VideoEncoderTargets.audioBitrate) * 1.30)
     /// Same idea for stills: JPEG q0.62 at 1600px measures well under 0.40 bytes per pixel.
     static let imageBytesPerPixelCeiling: Double = 0.40
-    static let audioBitrateCeiling = Int(Double(VideoEncoder.standaloneAudioBitrate) * 1.60)
+    static let audioBitrateCeiling = Int(Double(VideoEncoderTargets.standaloneAudioBitrate) * 1.60)
     /// Dimensions get 2% slack purely for even-number rounding in the encoder.
     static let dimensionSlack: CGFloat = 1.02
 

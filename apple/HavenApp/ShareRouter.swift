@@ -103,7 +103,7 @@ final class ShareRouter: ObservableObject {
         for item in payload.items {
             switch item.kind {
             case .text:
-                t = t.isEmpty ? item.text : t + "\n" + item.text
+                t = ShareRoutingRules.appendText(t, item.text)
             case .image:
                 if let url = ShareInbox.fileURL(item.file, in: queued.id), let data = try? Data(contentsOf: url),
                    let img = PlatformImage(data: data) {
@@ -126,7 +126,7 @@ final class ShareRouter: ObservableObject {
             }
         }
         // Nothing usable came out of it — drop it rather than retrying forever.
-        guard !t.isEmpty || !imported.isEmpty else { return .done }
+        guard ShareRoutingRules.hasContent(text: t, importedCount: imported.count) else { return .done }
         text = t
         refs = imported
 
@@ -148,15 +148,12 @@ final class ShareRouter: ObservableObject {
     /// silently eating someone's message because the engine wasn't up yet is the worst outcome here.
     private func deliver(_ payload: ShareInbox.Payload) async -> Outcome {
         let store = FeedStore.shared
-        let body = [payload.caption, text]
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
+        let body = ShareRoutingRules.body(caption: payload.caption, text: text)
         let target = payload.targetCircleId
-        switch payload.route {
-        case .undecided:
+        switch ShareRoutingRules.delivery(for: payload.route) {
+        case .askUser:
             return .needsUser
-        case .story:
+        case .storyEditor:
             // A full-screen cover on the ROOT, not a sheet — the same way every other story in the
             // app opens. Routing it through the share sheet meant presenting a full-screen editor
             // inside a sheet that was itself being presented, which is fragile at launch and left
@@ -166,7 +163,7 @@ final class ShareRouter: ObservableObject {
             openStoryDirectly = true
             HavenLog.sync("share: story → editor with \(refs.count) ref(s)")
             return .needsUser
-        case .post:
+        case .feedComposer:
             // Straight into the feed's own composer, with the media and caption already loaded —
             // no sheet at all, because everything a post needs (circle, music, location, schedule)
             // is already attached to that composer and a second one would only be a worse copy.
@@ -175,11 +172,11 @@ final class ShareRouter: ObservableObject {
             HavenLog.sync("share: post → feed composer with \(refs.count) ref(s)")
             text = ""; refs = []
             return .needsUser
-        case .dm:
+        case .directMessage:
             // A thread that vanished or got locked between the share sheet opening and Haven coming
             // up. Rare, but the answer is to ask, not to send somewhere unintended.
-            guard store.circles.contains(where: { $0.id == target }),
-                  !CircleSettingsStore.shared.biometricRequired(target) else {
+            guard ShareRoutingRules.isDeliverableDM(target, existingCircleIds: store.circles.map(\.id),
+                                                    locked: CircleSettingsStore.shared.biometricRequired(target)) else {
                 preselectedThread = nil
                 present = true
                 return .needsUser
@@ -226,21 +223,16 @@ final class ShareRouter: ObservableObject {
     /// is a collision-proof placeholder (`doc-0.pdf`). Put the sender's own filename back before
     /// handing it over, so the recipient sees what was actually shared.
     private func renamedForAttachment(_ url: URL, to original: String) -> URL {
-        let clean = original
-            .replacingOccurrences(of: "/", with: "-")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty, clean != url.lastPathComponent else { return url }
+        guard let clean = ShareRoutingRules.attachmentName(original: original, storedName: url.lastPathComponent) else { return url }
         let dest = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString.prefix(8) + "-" + clean)
+            .appendingPathComponent(ShareRoutingRules.stagedAttachmentName(original: clean, uniquifier: UUID().uuidString))
         do { try FileManager.default.copyItem(at: url, to: dest) } catch { return url }
         return dest
     }
 
     private func validThread(_ id: String) -> String? {
-        guard id.hasPrefix("dm:"),
-              FeedStore.shared.dmCircles.contains(where: { $0.id == id }),
-              !CircleSettingsStore.shared.biometricRequired(id) else { return nil }
-        return id
+        ShareRoutingRules.validThread(id, dmCircleIds: FeedStore.shared.dmCircles.map(\.id),
+                                      locked: CircleSettingsStore.shared.biometricRequired(id))
     }
 }
 

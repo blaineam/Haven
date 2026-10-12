@@ -36,7 +36,7 @@ enum AccountPublicStore {
 
     /// Distinguish present-and-readable from absent from unreadable-right-now, so a locked read can
     /// never look like "no account" and drop a seedless device back into linking mode.
-    enum LoadStatus { case found(Data), notFound, lockedOrError }
+    typealias LoadStatus = AccountBundleLoad
 
     private static func query() -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
@@ -46,15 +46,8 @@ enum AccountPublicStore {
     static func loadStatus() -> LoadStatus {
         var q = query(); q[kSecReturnData as String] = true; q[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
-        switch SecItemCopyMatching(q as CFDictionary, &item) {
-        case errSecSuccess:
-            guard let d = item as? Data, d.count >= 32 else { return .lockedOrError }
-            return .found(d)
-        case errSecItemNotFound:
-            return .notFound
-        default:
-            return .lockedOrError   // errSecInteractionNotAllowed etc. — never "absent"
-        }
+        let status = SecItemCopyMatching(q as CFDictionary, &item)
+        return AccountBundleLoad.resolve(KeychainRead(status: status, item: item))   // locked/error is never "absent"
     }
 
     static func load() -> Data? { if case .found(let d) = loadStatus() { return d }; return nil }
@@ -108,7 +101,7 @@ enum SelfSyncKeyStore {
     ///   • `.lockedOrError`— keychain unreadable right now (locked / errSecInteractionNotAllowed).
     ///   • `.seError`      — an SE-wrapped key exists but the Enclave couldn't unwrap it this launch.
     /// A real key exists in the last two; a caller must NEVER regenerate or delete on them.
-    enum LoadStatus { case found(Data), notFound, lockedOrError, seError }
+    typealias LoadStatus = SelfSyncKeyLoad
 
     private static func plainQuery() -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
@@ -120,35 +113,23 @@ enum SelfSyncKeyStore {
     }
 
     static func loadStatus() -> LoadStatus {
-        // 1. SE-wrapped ciphertext takes precedence over any plaintext fallback.
-        var wq = wrappedQuery(); wq[kSecReturnData as String] = true; wq[kSecMatchLimit as String] = kSecMatchLimitOne
-        var wItem: CFTypeRef?
-        switch SecItemCopyMatching(wq as CFDictionary, &wItem) {
-        case errSecSuccess:
-            guard let cipher = wItem as? Data else { return .lockedOrError }
-            switch box.open(cipher) {
-            case .ok(let key) where key.count == 32: return .found(key)
-            case .ok: return .seError                  // decrypted, wrong size — corrupt, not "new".
-            case .locked: return .lockedOrError
-            case .missingKey, .failed: return .seError // key present but unreadable — real secret exists.
-            }
-        case errSecItemNotFound:
-            break   // no wrapped key → fall through to the plaintext item.
-        default:
-            return .lockedOrError
+        func read(_ query: [String: Any]) -> (KeychainRead, CFTypeRef?) {
+            var q = query; q[kSecReturnData as String] = true; q[kSecMatchLimit as String] = kSecMatchLimitOne
+            var item: CFTypeRef?
+            let status = SecItemCopyMatching(q as CFDictionary, &item)
+            return (KeychainRead(status: status, item: item), item)
         }
-        // 2. Plaintext fallback (Simulator / no-Enclave hardware).
-        var pq = plainQuery(); pq[kSecReturnData as String] = true; pq[kSecMatchLimit as String] = kSecMatchLimitOne
-        var pItem: CFTypeRef?
-        switch SecItemCopyMatching(pq as CFDictionary, &pItem) {
-        case errSecSuccess:
-            guard let d = pItem as? Data, d.count == 32 else { return .lockedOrError }
-            return .found(d)
-        case errSecItemNotFound:
-            return .notFound
-        default:
-            return .lockedOrError
-        }
+        return SelfSyncKeyLoad.resolve(
+            wrapped: read(wrappedQuery()).0,
+            open: { cipher in
+                switch box.open(cipher) {
+                case .ok(let key): return .ok(key)
+                case .missingKey: return .missingKey
+                case .locked: return .locked
+                case .failed: return .failed
+                }
+            },
+            plain: { read(plainQuery()).0 })
     }
 
     static func load() -> Data? { if case .found(let k) = loadStatus() { return k }; return nil }

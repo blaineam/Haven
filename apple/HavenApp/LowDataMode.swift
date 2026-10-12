@@ -18,23 +18,7 @@ final class LowDataMonitor: ObservableObject {
     static let shared = LowDataMonitor()
 
     /// What the user asked for, independent of what the network is doing.
-    enum Preference: Int, CaseIterable, Identifiable {
-        /// Follow the network: on when the OS says the path is constrained. The default.
-        case automatic = 0
-        /// Always save data, even on good Wi-Fi.
-        case always = 1
-        /// Never save data, even on satellite. The user's call; we still show what it costs.
-        case off = 2
-
-        var id: Int { rawValue }
-        var label: String {
-            switch self {
-            case .automatic: return "Automatic"
-            case .always: return "Always on"
-            case .off: return "Off"
-            }
-        }
-    }
+    typealias Preference = LowDataPreference
 
     /// The constraint the OS reports for the current path, before the user's preference is applied.
     @Published private(set) var detected: LinkConstraint = .normal
@@ -60,7 +44,7 @@ final class LowDataMonitor: ObservableObject {
 
     private init() {
         let raw = UserDefaults.standard.object(forKey: Self.kPreference) as? Int
-        preference = Preference(rawValue: raw ?? 0) ?? .automatic
+        preference = LowDataPolicy.preference(fromStored: raw)
     }
 
     /// Posted when the PATH ITSELF changes (interface set / reachability), not just its
@@ -140,27 +124,13 @@ final class LowDataMonitor: ObservableObject {
     }
 
     private func recompute() {
-        let resolved: LinkConstraint
         #if DEBUG
         if let forced = debugForced {
             applyResolved(forced)
             return
         }
         #endif
-        switch preference {
-        case .automatic:
-            resolved = detected
-        case .always:
-            // "Always on" means the Low profile everywhere; it must never *weaken* a genuinely
-            // ultra-constrained path down to Low.
-            resolved = detected == .ultra ? .ultra : .low
-        case .off:
-            // The user opted out. Honour it — but a satellite bearer is not a preference we can
-            // pretend away: the OS will refuse the traffic regardless, so stay at ultra and let the
-            // UI explain rather than fail mysteriously.
-            resolved = detected == .ultra ? .ultra : .normal
-        }
-        applyResolved(resolved)
+        applyResolved(LinkConstraint(level: LowDataPolicy.resolve(preference: preference, detected: detected.level)))
     }
 
     /// Publish a resolved constraint: tell the core, update the UI, and — when the link IMPROVED —
@@ -176,7 +146,7 @@ final class LowDataMonitor: ObservableObject {
         // should complete itself, rather than waiting for whatever refreshes the feed next. Someone
         // who posted a preview-only photo off-grid and walked back into coverage expects the full
         // copy to follow on its own (`docs/PREVIEW-TIER-DESIGN.md` §4.3).
-        if Self.severity(resolved) < Self.severity(previous) {
+        if LowDataPolicy.improved(from: previous.level, to: resolved.level) {
             FeedStore.shared.nudgeMediaPrefetchNow()
         }
     }
@@ -200,15 +170,6 @@ final class LowDataMonitor: ObservableObject {
     }
     #endif
 
-    /// Ordering for "did the link improve?" — higher is more constrained.
-    private static func severity(_ l: LinkConstraint) -> Int {
-        switch l {
-        case .normal: return 0
-        case .low: return 1
-        case .ultra: return 2
-        }
-    }
-
     // MARK: - Asking permission
 
     /// May this kind of traffic go out right now, with no further prompting?
@@ -228,16 +189,25 @@ final class LowDataMonitor: ObservableObject {
 
     /// One line describing the current state, for the settings screen and the banner.
     var statusDescription: String {
-        switch effective {
-        case .ultra:
-            let q = linkQualityDescription.map { " (link \($0))" } ?? ""
-            return "Satellite or ultra-constrained link\(q) — text only."
-        case .low:
-            return preference == .always
-                ? "Low data mode is on for every network."
-                : "This network is metered or in Low Data Mode."
-        case .normal:
-            return "Full speed. Nothing is being held back."
+        LowDataPolicy.status(effective: effective.level, preference: preference, linkQuality: linkQualityDescription)
+    }
+}
+
+extension LinkConstraint {
+    /// The core's constraint as the policy's (FFI-free) level.
+    var level: LowDataLevel {
+        switch self {
+        case .normal: return .normal
+        case .low: return .low
+        case .ultra: return .ultra
+        }
+    }
+
+    init(level: LowDataLevel) {
+        switch level {
+        case .normal: self = .normal
+        case .low: self = .low
+        case .ultra: self = .ultra
         }
     }
 }

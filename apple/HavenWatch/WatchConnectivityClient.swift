@@ -43,7 +43,7 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
     }
 
     /// Every demo thread's contents, keyed by thread id, so opening any of them works offline.
-    private var demoThreads: [String: WatchThreadDetail] = [:]
+    private var demo = WatchDemoStore()
 
     /// HAVENWATCH_DEMO=1 (or a `-UITestMode` UI-test launch) — PII-free synthetic threads/messages
     /// so the UI is screenshottable and testable without a paired iPhone (mirrors the phone app's
@@ -53,31 +53,9 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
     private func seedDemoIfNeeded() -> Bool {
         guard WatchDemo.isOn else { return false }
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
-        threads = [
-            WatchThread(id: "dm:ari", title: "Ari", subtitle: "On my way 🚲", timestamp: now - 90_000, isDM: true, unread: 1),
-            WatchThread(id: "dm:noa", title: "Noa", subtitle: "❤️ that photo", timestamp: now - 1_800_000, isDM: true, unread: 0),
-            WatchThread(id: "circle:trail", title: "Trail Crew", subtitle: "Sunset hike Saturday?", timestamp: now - 5_400_000, isDM: false, unread: 0),
-        ]
-        let dm = WatchThreadDetail(threadId: "dm:ari", title: "Ari", isDM: true, messages: [
-            WatchMessage(id: "m1", author: "Ari", isMe: false, body: "Heading over now", timestamp: now - 240_000, hasMedia: false, reactions: "👍1"),
-            WatchMessage(id: "m2", author: "You", isMe: true, body: "Cool, door's open", timestamp: now - 180_000, hasMedia: false, reactions: ""),
-            WatchMessage(id: "m3", author: "Ari", isMe: false, body: "On my way 🚲", timestamp: now - 90_000, hasMedia: false, reactions: "❤️2"),
-            WatchMessage(id: "m4", author: "Ari", isMe: false, body: "Made it to the top!", timestamp: now - 60_000, hasMedia: true,
-                         reactions: "🔥3", media: Self.demoMedia()),
-        ])
-        let media = Self.demoMedia()
-        let circle = WatchThreadDetail(threadId: "circle:trail", title: "Trail Crew", isDM: false, messages: [
-            WatchMessage(id: "s1", author: "Noa", isMe: false, body: "golden hour up here", timestamp: now - 3_600_000,
-                         hasMedia: true, reactions: "", media: Array(media.prefix(1)), isStory: true),
-            WatchMessage(id: "p1", author: "Noa", isMe: false, body: "Sunset hike Saturday?", timestamp: now - 5_400_000,
-                         hasMedia: false, reactions: "👍2"),
-        ])
-        demoThreads = [dm.threadId: dm, circle.threadId: circle,
-                       "dm:noa": WatchThreadDetail(threadId: "dm:noa", title: "Noa", isDM: true, messages: [
-                           WatchMessage(id: "n1", author: "Noa", isMe: false, body: "❤️ that photo",
-                                        timestamp: now - 1_800_000, hasMedia: false, reactions: ""),
-                       ])]
-        openThread = dm
+        demo = WatchDemoStore.seed(now: now, media: Self.demoMedia())
+        threads = demo.threads
+        openThread = demo.details[WatchDemoStore.defaultOpenThreadId]
         reachable = true
         lastSyncedAt = now
         return true
@@ -112,7 +90,7 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
 
     func openThread(_ threadId: String) {
         if WatchDemo.isOn {
-            openThread = demoThreads[threadId]
+            openThread = demo.details[threadId]
             finishLoading()
             return
         }
@@ -138,15 +116,15 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
     }
 
     func sendReply(threadId: String, body: String, targetId: String? = nil) {
-        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        if WatchDemo.isOn, !trimmed.isEmpty {
+        let cleaned = WatchReplyRules.cleaned(body)
+        if WatchDemo.isOn, let trimmed = cleaned {
             // Demo: no phone to send to — echo the reply locally, as the phone's answer would.
             demoAppend(threadId, WatchMessage(id: "demo-\(UUID().uuidString)", author: "You", isMe: true, body: trimmed,
                                               timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
                                               hasMedia: false, reactions: ""))
             return
         }
-        guard !trimmed.isEmpty, activated else { return }
+        guard let trimmed = cleaned, activated else { return }
         loadingThread = true
         beginLoadTimeout()
         let payload = WatchCodec.encode(.quickReply, WatchReply(threadId: threadId, body: trimmed, targetId: targetId))
@@ -165,12 +143,8 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
 
     func react(threadId: String, messageId: String, emoji: String) {
         if WatchDemo.isOn {
-            guard var detail = demoThreads[threadId],
-                  let i = detail.messages.firstIndex(where: { $0.id == messageId }) else { return }
-            let r = detail.messages[i].reactions
-            detail.messages[i].reactions = r.isEmpty ? "\(emoji)1" : "\(r) \(emoji)1"
-            demoThreads[threadId] = detail
-            if openThread?.threadId == threadId { openThread = detail }
+            if let detail = demo.react(threadId: threadId, messageId: messageId, emoji: emoji),
+               openThread?.threadId == threadId { openThread = detail }
             return
         }
         guard activated else { return }
@@ -185,10 +159,7 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
     }
 
     private func demoAppend(_ threadId: String, _ message: WatchMessage) {
-        guard var detail = demoThreads[threadId] else { return }
-        detail.messages.append(message)
-        demoThreads[threadId] = detail
-        if openThread?.threadId == threadId { openThread = detail }
+        if let detail = demo.append(message, to: threadId), openThread?.threadId == threadId { openThread = detail }
     }
 
     // MARK: - Inbound
@@ -196,22 +167,16 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
     private var activated: Bool { session.activationState == .activated }
 
     private func ingest(_ message: [String: Any]) {
-        switch WatchCodec.kind(of: message) {
-        case .snapshot:
-            if let snap = WatchCodec.decode(WatchSnapshot.self, from: message) {
-                threads = snap.threads
-                lastSyncedAt = snap.generatedAt
-            }
-        case .thread:
-            if let detail = WatchCodec.decode(WatchThreadDetail.self, from: message) {
-                openThread = detail
-                finishLoading()
-            }
-        case .notify:
-            if let notice = WatchCodec.decode(WatchNotice.self, from: message) {
-                postLocalNotification(notice)
-            }
-        default:
+        switch WatchInbound.parse(message) {
+        case .snapshot(let snap):
+            threads = snap.threads
+            lastSyncedAt = snap.generatedAt
+        case .thread(let detail):
+            openThread = detail
+            finishLoading()
+        case .notice(let notice):
+            postLocalNotification(notice)
+        case .ignored:
             break
         }
     }
@@ -222,7 +187,7 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
         content.title = notice.title
         content.body = notice.body
         content.sound = .default
-        center.add(UNNotificationRequest(identifier: "wmirror-\(notice.dedupeKey)", content: content, trigger: nil))
+        center.add(UNNotificationRequest(identifier: WatchReplyRules.notificationId(for: notice), content: content, trigger: nil))
         refresh()   // freshen the thread list alongside the alert
     }
 }

@@ -14,9 +14,9 @@ import CoreImage
 enum VideoEncoder {
 
     /// 1080p at this rate is visually fine in a phone feed and roughly a third of a preset export.
-    static let videoBitrate = 4_500_000
+    static let videoBitrate = VideoEncoderTargets.videoBitrate
     /// Transparent for speech, and usually far leaner than the camera's original track.
-    static let audioBitrate = 128_000
+    static let audioBitrate = VideoEncoderTargets.audioBitrate
 
     /// Encode `src` to `dst`. Returns false on any failure — callers must keep a fallback path, so a
     /// video this cannot handle is still shareable rather than lost.
@@ -158,7 +158,7 @@ enum VideoEncoder {
     }
 
     /// Target for audio-only files. Speech-friendly and a fraction of an uncompressed source.
-    static let standaloneAudioBitrate = 96_000
+    static let standaloneAudioBitrate = VideoEncoderTargets.standaloneAudioBitrate
 
     /// Re-encode an audio FILE to AAC in an .m4a.
     ///

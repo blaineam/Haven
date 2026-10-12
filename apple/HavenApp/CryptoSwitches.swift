@@ -12,49 +12,6 @@ import Security
 //   • SwitchFlipMigration — the one-time §1 account-leaf-retirement flag (don't rebroadcast every launch).
 //   • SelfSyncEpochStore  — the §6 rotated self-sync key + epoch after a device revocation.
 
-/// Circle IDs THIS account created. `set_circle_creator` (§2) is session state, not a persisted keying
-/// decision, so it must be re-pinned on every launch — but only I can pin MY circles' creator (the pin
-/// rides a self-grant signed by my account key). A linked device learns OTHER people's circle creators
-/// from the propagated admin grant, so this only records circles I authored. Device-local; the default
-/// "My Circle" is implicitly mine and handled by the caller.
-enum CircleCreatorStore {
-    private static let key = "haven.switchflip.myCircles.v1"
-
-    static func markCreated(_ id: String) {
-        guard !id.isEmpty else { return }
-        var ids = Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
-        guard ids.insert(id).inserted else { return }
-        UserDefaults.standard.set(Array(ids), forKey: key)
-    }
-
-    static func iCreated(_ id: String) -> Bool {
-        (UserDefaults.standard.stringArray(forKey: key) ?? []).contains(id)
-    }
-    /// Every circle I created — a value snapshot for the boot pass, which re-pins their creator off-main.
-    static func createdIds() -> Set<String> { Set(UserDefaults.standard.stringArray(forKey: key) ?? []) }
-
-    static func clear() { UserDefaults.standard.removeObject(forKey: key) }
-}
-
-/// One-time migration bookkeeping for the §1 account-leaf retirement. `retire_account_leaf()` is
-/// idempotent + gated in core (a no-op until the fleet is fully device-capable), so calling it every
-/// launch is safe — this flag just avoids a needless roster rebroadcast once it has landed. The retire
-/// switch itself is always ON in 1.0.7 on the primary (`set_seed_drop_retire(true)`); kept as a named
-/// constant so the self-sync rotation gate reads clearly.
-enum SwitchFlipMigration {
-    private static let leafKey = "haven.switchflip.accountLeafRetired.v1"
-
-    /// The seed-drop retirement master switch — ON in 1.0.7 on a seed-holding (primary) device.
-    static let retireSwitchOn = true
-
-    static var accountLeafRetired: Bool {
-        get { UserDefaults.standard.bool(forKey: leafKey) }
-        set { UserDefaults.standard.set(newValue, forKey: leafKey) }
-    }
-
-    static func clear() { UserDefaults.standard.removeObject(forKey: leafKey) }
-}
-
 /// The ROTATED self-sync key + its epoch (§6). Absent (epoch 0) ⇒ NO rotation yet ⇒ the v0 path
 /// (seed-derived for a primary, granted key for a seedless device) — byte-identical to 1.0.6. Present
 /// (epoch ≥ 1) ⇒ seal/open switch to the v1 dual-key path (`seal_account_state_with_key_epoch` /
@@ -89,23 +46,23 @@ enum SelfSyncEpochStore {
     /// unavailable (locked / SE error — NEVER treated as "regenerate": there is no regenerating a
     /// primary-minted key). A nil here simply keeps the caller on whatever it can read this launch.
     static func currentKey() -> Data? {
-        var wq = wrappedQuery(); wq[kSecReturnData as String] = true; wq[kSecMatchLimit as String] = kSecMatchLimitOne
-        var wItem: CFTypeRef?
-        switch SecItemCopyMatching(wq as CFDictionary, &wItem) {
-        case errSecSuccess:
-            guard let cipher = wItem as? Data else { return nil }
-            if case .ok(let key) = box.open(cipher), key.count == 32 { return key }
-            return nil
-        case errSecItemNotFound:
-            break   // fall through to plaintext fallback
-        default:
-            return nil
+        func read(_ query: [String: Any]) -> KeychainRead {
+            var q = query; q[kSecReturnData as String] = true; q[kSecMatchLimit as String] = kSecMatchLimitOne
+            var item: CFTypeRef?
+            let status = SecItemCopyMatching(q as CFDictionary, &item)
+            return KeychainRead(status: status, item: item)
         }
-        var pq = plainQuery(); pq[kSecReturnData as String] = true; pq[kSecMatchLimit as String] = kSecMatchLimitOne
-        var pItem: CFTypeRef?
-        if SecItemCopyMatching(pq as CFDictionary, &pItem) == errSecSuccess,
-           let d = pItem as? Data, d.count == 32 { return d }
-        return nil
+        return SelfSyncEpochRules.currentKey(
+            wrapped: read(wrappedQuery()),
+            open: { cipher in
+                switch box.open(cipher) {
+                case .ok(let key): return .ok(key)
+                case .missingKey: return .missingKey
+                case .locked: return .locked
+                case .failed: return .failed
+                }
+            },
+            plain: { read(plainQuery()) })
     }
 
     /// Persist a rotated `key` at `epoch` (SE-wrapped, plaintext fallback only where no Enclave exists).
@@ -133,7 +90,7 @@ enum SelfSyncEpochStore {
     /// replayed or stale grant can never roll the channel back to a key a revoked device still holds.
     @discardableResult
     static func adoptIfNewer(epoch: UInt64, key: Data) -> Bool {
-        guard epoch > self.epoch else { return false }
+        guard SelfSyncEpochRules.shouldAdopt(epoch: epoch, current: self.epoch, key: key) else { return false }
         save(epoch: epoch, key: key)
         return true
     }

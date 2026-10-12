@@ -19,6 +19,8 @@ import UserNotifications
 /// it wasn't sealed to us, we fall back to the generic banner the relay supplied. We never
 /// fail the push.
 final class NotificationService: UNNotificationServiceExtension {
+    typealias Decoded = NotificationPayload
+
     private var contentHandler: ((UNNotificationContent) -> Void)?
     private var bestAttempt: UNMutableNotificationContent?
 
@@ -47,7 +49,7 @@ final class NotificationService: UNNotificationServiceExtension {
               // Authenticated open: rejects an alert that isn't validly SIGNED by its sender (audit
               // H2) — a forger who only knows our public key can no longer spoof a banner.
               let opened = openSignedNotificationWithSeed(seed: seed, blob: sealed),
-              let decoded = Self.decode(opened.data) else {
+              let decoded = NotificationPayloadCodec.decode(opened.data, lockedCircles: SharedLockedCircles.read()) else {
             // Couldn't decrypt — keep the relay's generic banner (don't leak/guess content).
             if best.body.isEmpty { best.body = "New activity" }
             contentHandler(best)
@@ -65,7 +67,7 @@ final class NotificationService: UNNotificationServiceExtension {
         // Resolve how much detail THIS device is allowed to show. Async because iOS notification
         // settings are. Cap wait so we never miss the NSE deadline if the system stalls.
         Self.resolveDetail { detail in
-            let shown = Self.applyPrivacy(decoded, detail: detail)
+            let shown = NotificationPayloadCodec.applyPrivacy(decoded, detail: detail)
             best.title = shown.title
             best.body = shown.body
             // Group notifications by conversation so a burst of DMs or reactions stacks sensibly
@@ -169,32 +171,7 @@ final class NotificationService: UNNotificationServiceExtension {
         }
     }
 
-    private static func applyPrivacy(_ decoded: Decoded,
-                                     detail: SharedNotificationPrivacy.Detail) -> (title: String, body: String) {
-        // Biometric-locked circles always win — never quote their content.
-        if decoded.redactedForLock {
-            return (decoded.title, decoded.body)
-        }
-        let pick = SharedNotificationPrivacy.displayBody(full: decoded.fullBody,
-                                                          privateBody: decoded.privateBody,
-                                                          kind: decoded.kind,
-                                                          detail: detail)
-        let title = pick.titleUsesName ? decoded.title : "Haven"
-        return (title, pick.body)
-    }
 
-    /// If the sealed payload names a circle the user has biometric-locked, hide its content —
-    /// a lock-screen banner spelling out the message would defeat the lock.
-    private static func redactIfLocked(_ obj: [String: Any]) -> Decoded? {
-        guard let circleId = obj["c"] as? String, SharedLockedCircles.read().contains(circleId) else {
-            return nil
-        }
-        return Decoded(title: "Haven", fullBody: "New activity in a locked circle",
-                       privateBody: "New activity in a locked circle",
-                       kind: "locked", emoji: nil, threadId: circleId,
-                       deepLink: deepLink(circleId: circleId, postId: nil),
-                       redactedForLock: true)
-    }
 
     override func serviceExtensionTimeWillExpire() {
         // Called just before the OS kills the extension — deliver our best effort.
@@ -203,102 +180,8 @@ final class NotificationService: UNNotificationServiceExtension {
         }
     }
 
-    struct Decoded {
-        let title: String
-        let fullBody: String
-        let privateBody: String?
-        let kind: String?
-        let emoji: String?
-        let threadId: String?
-        /// `haven://…` route for notification tap (Messages thread / post / story).
-        let deepLink: String?
-        var redactedForLock: Bool = false
-        /// Push-before-content coordinates (all from inside the sealed blob).
-        var circleId: String?
-        var postId: String?
-        var mailboxKey: String?
-        var mediaRefs: [String]?
-        /// Convenience when already fully redacted (locked circle / call).
-        var body: String { fullBody }
-    }
 
-    /// Build a tap route from banner fields. Mirror of `DeepLink.interactionLink` /
-    /// `DeepLink.storyLink` (NSE can't import the app target) — keep encodings in sync.
-    private static func deepLink(circleId: String?, postId: String?, kind: String? = nil) -> String? {
-        guard let circleId, !circleId.isEmpty else { return nil }
-        let allowed = CharacterSet(charactersIn:
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_~")
-        let encCid = circleId.addingPercentEncoding(withAllowedCharacters: allowed) ?? circleId
-        if circleId.hasPrefix("dm:") {
-            if let postId, !postId.isEmpty,
-               let encPid = postId.addingPercentEncoding(withAllowedCharacters: allowed) {
-                return "haven://m/\(encCid)/\(encPid)"
-            }
-            return "haven://m/\(encCid)"
-        }
-        if let postId, !postId.isEmpty,
-           let encPid = postId.addingPercentEncoding(withAllowedCharacters: allowed) {
-            // A story tap lands in the story viewer, not the feed.
-            return kind == "story" ? "haven://s/\(encCid)/\(encPid)" : "haven://p/\(encCid)/\(encPid)"
-        }
-        return "haven://c/\(encCid)"
-    }
 
-    /// The sealed payload is a tiny JSON object:
-    /// - Message/post: `{ "t", "b", "bp"?, "c", "k"?, "e"?, "p"?, "mk"?, "mr"? }` — built by
-    ///   `PushBanner`. `p`/`mk`/`mr` are the deep-link + prefetch coordinates.
-    /// - Call fallback: `{ "t": <caller name>, "h": <caller hex> }` — no `b`.
-    private static func decode(_ data: Data) -> Decoded? {
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        if let redacted = redactIfLocked(obj) { return redacted }
-        let title = (obj["t"] as? String) ?? "Haven"
-        let kind = obj["k"] as? String
-        let emoji = obj["e"] as? String
-        let circleId = obj["c"] as? String
-        let postId = obj["p"] as? String
-        let privateBody = obj["bp"] as? String
-        // Call payload: no body, has peer hex.
-        if obj["b"] == nil, obj["h"] is String {
-            return Decoded(title: title, fullBody: "📞 Incoming call — open Haven to answer",
-                           privateBody: "Incoming call",
-                           kind: "call", emoji: nil, threadId: obj["h"] as? String, deepLink: nil)
-        }
-        var full = (obj["b"] as? String) ?? "New message"
-        if full.isEmpty, let kind {
-            full = fallbackBody(kind: kind, emoji: emoji)
-        }
-        let thread = circleId ?? kind
-        return Decoded(title: title, fullBody: full, privateBody: privateBody,
-                       kind: kind, emoji: emoji, threadId: thread,
-                       deepLink: deepLink(circleId: circleId, postId: postId, kind: kind),
-                       circleId: circleId, postId: postId,
-                       mailboxKey: obj["mk"] as? String,
-                       mediaRefs: obj["mr"] as? [String])
-    }
 
-    private static func fallbackBody(kind: String, emoji: String?) -> String {
-        switch kind {
-        case "story":   return "Shared a story"
-        case "react":   return "Reacted \(emoji ?? "👍")"
-        case "comment": return "Left a comment"
-        case "dm":      return "Sent you a message"
-        case "edit":    return "Edited a message"
-        case "unsend":  return "Unsent a message"
-        case "post":    return "Shared something"
-        default:        return "New activity"
-        }
-    }
 
-    /// Summary labels stay kind-only (no emoji) so a collapsed stack doesn't re-leak detail.
-    private static func summaryLabel(kind: String) -> String {
-        switch kind {
-        case "react":   return "reactions"
-        case "comment": return "comments"
-        case "story":   return "stories"
-        case "dm":      return "messages"
-        case "post":    return "posts"
-        case "call":    return "calls"
-        default:        return "updates"
-        }
-    }
 }

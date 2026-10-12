@@ -19,24 +19,12 @@ import Foundation
 final class ShazamRetryQueue: ObservableObject {
     static let shared = ShazamRetryQueue()
 
-    private struct Item: Codable {
-        let postId: String
-        let circleId: String
-        /// The STAGED media ref, not a temp path. Temp clips are deleted as soon as a post is
-        /// staged, and the archive may be long gone by the time a retry runs — but the video Haven
-        /// stored is still there, and it is the same audio.
-        let videoRef: String
-        var attempts: Int
-        var nextAttemptAt: TimeInterval
-    }
+    private typealias Item = ShazamRetryPolicy.Item
 
     private static let key = "haven.shazam.retryQueue"
     /// Posted on main whenever an entry leaves the queue for good — `postId` + `matched` — so the
     /// manual rescan can keep its "n of m checked · k named" line honest.
     nonisolated static let itemFinished = Notification.Name("haven.shazam.itemFinished")
-    /// Give up after this many refusals. Six attempts spans roughly an hour of backoff, which is
-    /// long enough to outlast a throttling window without retrying forever.
-    private static let maxAttempts = 6
 
     private var items: [Item] = []
     private var draining = false
@@ -60,18 +48,13 @@ final class ShazamRetryQueue: ObservableObject {
     /// `firstDelay` defaults to the refusal back-off; a FRESH post that has never been asked about
     /// (user-authored video — see `FeedStore.identifyAndAttachSong`) passes 0 so the chip lands
     /// within seconds rather than minutes.
-    func enqueue(postId: String, circleId: String, videoRef: String, firstDelay: TimeInterval = ShazamRetryQueue.firstDelay) {
-        guard !postId.isEmpty, !videoRef.isEmpty else { return }
-        guard !items.contains(where: { $0.postId == postId }) else { return }
+    func enqueue(postId: String, circleId: String, videoRef: String, firstDelay: TimeInterval = ShazamRetryPolicy.firstDelay) {
+        guard ShazamRetryPolicy.accepts(postId: postId, videoRef: videoRef, existing: items) else { return }
         items.append(Item(postId: postId, circleId: circleId, videoRef: videoRef,
                           attempts: 0, nextAttemptAt: Date().timeIntervalSince1970 + firstDelay))
         save()
         HavenLog.sync("shazam-retry: queued \(postId.prefix(8)) (\(items.count) waiting)")
     }
-
-    /// The first RETRY waits a while on purpose. Being refused means Shazam wants us to stop asking,
-    /// and trying again immediately is what got us refused in the first place.
-    nonisolated private static let firstDelay: TimeInterval = 120   // a constant; usable as a default argument
 
     // MARK: - Draining
 
@@ -89,13 +72,12 @@ final class ShazamRetryQueue: ObservableObject {
     private func drain() async {
         while !items.isEmpty {
             // Earliest-due first, so a long backoff on one post doesn't hold up the others.
-            guard let idx = items.indices.min(by: { items[$0].nextAttemptAt < items[$1].nextAttemptAt })
-            else { return }
+            guard let idx = ShazamRetryPolicy.nextIndex(items) else { return }
             let item = items[idx]
 
-            let wait = item.nextAttemptAt - Date().timeIntervalSince1970
+            let wait = ShazamRetryPolicy.wait(until: item.nextAttemptAt, now: Date().timeIntervalSince1970)
             if wait > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(min(wait, 300) * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
                 continue                      // re-evaluate: something sooner may have been queued
             }
 
@@ -126,7 +108,7 @@ final class ShazamRetryQueue: ObservableObject {
             }
 
             // A definitive answer is not worth retrying — only a refusal is (see identifyDetailed).
-            guard refused, item.attempts + 1 < Self.maxAttempts else {
+            guard ShazamRetryPolicy.shouldRetry(refused: refused, attemptsSoFar: item.attempts) else {
                 HavenLog.sync("shazam-retry: giving up on \(item.postId.prefix(8)) — \(outcome.reason)")
                 // Remember the answer: a deterministic miss is never asked again; a refusal that
                 // exhausted the queue's own back-off gets the ledger's longer one.
@@ -137,7 +119,7 @@ final class ShazamRetryQueue: ObservableObject {
 
             // Exponential: 2m, 4m, 8m, 16m, 32m.
             let attempts = item.attempts + 1
-            let delay = Self.firstDelay * pow(2, Double(attempts))
+            let delay = ShazamRetryPolicy.delay(afterAttempt: attempts)
             if let i = items.firstIndex(where: { $0.postId == item.postId }) {
                 items[i].attempts = attempts
                 items[i].nextAttemptAt = Date().timeIntervalSince1970 + delay

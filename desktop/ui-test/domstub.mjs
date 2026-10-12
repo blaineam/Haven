@@ -10,6 +10,20 @@ import vm from 'node:vm';
 
 const here = join(dirname(fileURLToPath(import.meta.url)), '..', 'ui');   // the shipped sources under test
 
+const observers = new Set();
+/** childList MutationObserver: callbacks run in a microtask after the DOM changed under a watched node. */
+export class FakeMutationObserver {
+  constructor(cb) { this.cb = cb; this.targets = []; this.queued = false; }
+  observe(target, opts = {}) { this.targets.push({ target, subtree: !!opts.subtree }); observers.add(this); }
+  disconnect() { this.targets = []; observers.delete(this); }
+  takeRecords() { return []; }
+  deliver(changed) {
+    if (!this.targets.some((t) => t.target === changed || (t.subtree && t.target.contains(changed)))) return;
+    if (this.queued) return;
+    this.queued = true;
+    queueMicrotask(() => { this.queued = false; if (this.targets.length) this.cb([{ type: 'childList', target: changed }], this); });
+  }
+}
 const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
 
 // ── nodes ────────────────────────────────────────────────────────────────────────────────────────
@@ -151,11 +165,13 @@ export class Element {
   get selectedIndex() { const o = this.options; const i = o.findIndex((x) => x.value === this.value); return i; }
   get files() { return this._files ?? []; } set files(v) { this._files = v; }
 
-  _detach(n) { const i = this.childNodes.indexOf(n); if (i >= 0) { this.childNodes.splice(i, 1); n.parentNode = null; } }
+  _detach(n) { const i = this.childNodes.indexOf(n); if (i >= 0) { this.childNodes.splice(i, 1); n.parentNode = null; this._notify(); } }
+  _notify() { for (const e of observers) e.deliver(this); }
   _attach(n, at = this.childNodes.length) {
     if (n.nodeType === 11) { [...n.childNodes].forEach((c, i) => this._attach(c, at + i)); n.childNodes = []; return; }
     if (n.parentNode) n.parentNode._detach(n);
     n.parentNode = this; this.childNodes.splice(at, 0, n);
+    this._notify();
   }
   _norm(x) { return x && x.nodeType ? x : new Text(x); }
   append(...xs) { xs.flat().forEach((x) => { if (x != null) this._attach(this._norm(x)); }); }
@@ -289,7 +305,8 @@ export function makeTimers() {
         if (!due) break;
         const [id, t] = due; now = t.at;
         if (t.every) t.at = now + t.every; else q.delete(id);
-        await t.fn(...t.a);
+        Promise.resolve().then(() => t.fn(...t.a)).catch((e) => { throw e; });
+        for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
       }
       now = target;
     },
@@ -356,7 +373,7 @@ export async function loadApp({ backend = {}, lang = 'en-US', ua = 'Mozilla/5.0 
     navigator: { language: lang, languages: [lang], userAgent: ua, platform: 'MacIntel', clipboard: { writeText: async () => {}, readText: async () => '' }, mediaDevices: undefined, onLine: true, vibrate: () => true },
     matchMedia: (q) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }),
     getComputedStyle: () => ({ display: 'block', getPropertyValue: () => '' }),
-    IntersectionObserver: NoopObserver, MutationObserver: NoopObserver, ResizeObserver: NoopObserver,
+    IntersectionObserver: NoopObserver, MutationObserver: FakeMutationObserver, ResizeObserver: NoopObserver,
     Image: FakeImage, Audio: FakeAudio, FileReader: class { readAsDataURL() { this.result = 'data:;base64,AAAA'; queueMicrotask(() => this.onload?.()); } readAsArrayBuffer() { this.result = new ArrayBuffer(4); queueMicrotask(() => this.onload?.()); } },
     File: class extends Blob { constructor(parts, name, opts) { super(parts, opts); this.name = name; this.lastModified = 0; } },
     Event: DomEvent, CustomEvent: DomEvent, KeyboardEvent: DomEvent, MouseEvent: DomEvent, PointerEvent: DomEvent,

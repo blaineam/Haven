@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { boot, post, fakeBackend, ME, HEX, NOW, J, click, tab, lastCall, BO, DM, withDm, BO_POST, menuBtn } from './uiharness.mjs';
-import { loadApp } from './domstub.mjs';
+import { loadApp, Element as StubElement } from './domstub.mjs';
 
 test('boot renders the circle feed from the backend', async () => {
   const { app } = await boot();
@@ -2078,4 +2078,214 @@ test('calls: the hairpin URL is derived from the fabric origin and only for http
   assert.equal(app.ev('hairpinWsUrl()'), 'ws://10.0.0.5:8080/webrtc/hairpin');
   app.ctx.__havenFabricDerp = ['ftp://nope'];
   assert.equal(app.ev('hairpinWsUrl()'), '');
+});
+
+// ── story composer and song picker ─────────────────────────────────────────────────────────────
+const withRect = (fn) => {
+  const orig = StubElement.prototype.getBoundingClientRect;
+  StubElement.prototype.getBoundingClientRect = function () { return { x: 0, y: 0, left: 0, top: 0, right: 200, bottom: 356, width: 200, height: 356 }; };
+  return Promise.resolve(fn()).finally(() => { StubElement.prototype.getBoundingClientRect = orig; });
+};
+const ptr = (app, node, type, init) => node.dispatchEvent(new app.ctx.Event(type, { bubbles: true, pointerId: 1, buttons: 1, ...init }));
+
+test('story composer: typing shows a styled caption in the preview and posting encodes the wire caption', async () => {
+  await withRect(async () => {
+    const { app } = await boot({ be: { post_story: null } });
+    await click(app, '.story-ring.add');
+    const m = () => app.q('#modal-root');
+    assert.match(m().textContent, /New story/i);
+    const ta = m().querySelector('textarea');
+    ta.value = 'hello story';
+    ta.dispatchEvent(new app.ctx.Event('input', { bubbles: true }));
+    assert.equal(m().querySelector('.story-cap').textContent, 'hello story');
+    const frame = m().querySelector('.modal-body > .col > div[style*="aspect-ratio"]') ?? [...m().querySelectorAll('div')].find((d) => /aspect-ratio:9\/16/.test(d.getAttribute('style') || ''));
+    ptr(app, frame, 'pointerdown', { clientX: 50, clientY: 89 });          // 25% / 25%
+    assert.match(m().querySelector('.story-cap').style.cssText, /left:25%;top:25%/);
+    await click(app, [...m().querySelectorAll('button')].find((b) => b.title === 'Caption color' || /color/i.test(b.title)));
+    await click(app, [...m().querySelectorAll('button')].find((b) => /Aa ·/.test(b.textContent)));
+    await click(app, [...m().querySelectorAll('button')].find((b) => b.textContent === 'Ag'));
+    await click(app, '#modal-root .composer-send');
+    const c = lastCall(app, 'post_story').args;
+    const decoded = J(app.ev(`StoryCaptions.decode(${JSON.stringify(c.body)})`));
+    assert.equal(decoded.text, 'hello story');
+    assert.ok(Math.abs(decoded.spec.x - 0.25) < 1e-6 && Math.abs(decoded.spec.y - 0.25) < 1e-6);
+    assert.equal(decoded.spec.color, 0 + 0, 'the first swatch (index 0) is the default colour');
+    assert.equal(decoded.spec.font, 1, 'one tap on the font button');
+    assert.equal(decoded.spec.style, 2, 'one tap on style steps plain/glow/shadow from the default glow');
+    assert.equal(c.media, null);
+    assert.equal(m().children.length, 0, 'the dialog closes after posting');
+  });
+});
+
+test('story composer: zoom, rotate and pan frame the media, and Reset restores the identity', async () => {
+  await withRect(async () => {
+    const { app } = await boot({ be: { post_story: null, media_data_url: 'data:image/jpeg;base64,AA' } });
+    await click(app, '.story-ring.add');
+    await app.ev('state.composerAdd')('img_pic', false, false, null);
+    await app.settle();
+    const m = () => app.q('#modal-root');
+    const frame = [...m().querySelectorAll('div')].find((d) => /aspect-ratio:9\/16/.test(d.getAttribute('style') || ''));
+    const media = () => m().querySelector('[data-story-media]');
+    assert.ok(media(), 'the attached photo is previewed');
+    const wheel = (extra) => frame.dispatchEvent(new app.ctx.Event('wheel', { bubbles: true, deltaY: -40, ...extra }));
+    wheel({});
+    assert.match(media().style.transform, /scale\(1\.[1-9]/, 'wheel up zooms in');
+    wheel({ deltaY: 40, shiftKey: true });
+    assert.match(media().style.transform, /rotate\(12deg\)/);
+    ptr(app, frame, 'pointerdown', { clientX: 100, clientY: 100, altKey: true });
+    ptr(app, frame, 'pointermove', { clientX: 120, clientY: 100, altKey: true });
+    assert.match(media().style.transform, /translate\(10%/, 'alt-drag pans by a fraction of the frame');
+    const reset = [...m().querySelectorAll('button')].find((b) => /reset/i.test(b.textContent));
+    assert.notEqual(reset.style.display, 'none');
+    await click(app, reset);
+    assert.match(media().style.transform, /translate\(0%, 0%\) rotate\(0deg\) scale\(1\)/);
+    assert.equal(reset.style.display, 'none');
+    await click(app, '#modal-root .composer-send');
+    const c = lastCall(app, 'post_story').args;
+    assert.equal(c.media, 'img_pic');
+    assert.equal(J(app.ev(`StoryCaptions.decode(${JSON.stringify(c.body)})`)).spec.mediaScale, 1);
+  });
+});
+
+test('song picker: typing debounces the search; a late answer never overwrites a newer one', async () => {
+  const hits = (n) => Array.from({ length: n }, (_, i) => ({ catalog_id: 'c' + i, title: 'Song ' + i, artist: 'Band', artwork_url: '', duration_ms: 1000, preview_url: 'https://a.example/' + i }));
+  let resolveFirst;
+  const { app } = await boot({ be: { music_search: (a) => a.query === 'one' ? new Promise((r) => { resolveFirst = () => r(hits(1)); }) : hits(3) } });
+  await app.ev('musicDialog(() => {}, {})');
+  const input = app.q('#modal-root input');
+  input.value = 'one'; input.dispatchEvent(new app.ctx.Event('input', { bubbles: true }));
+  await app.timers.advance(200);
+  assert.equal(lastCall(app, 'music_search'), undefined, 'the debounce waits');
+  await app.timers.advance(150); await app.settle();
+  assert.equal(lastCall(app, 'music_search').args.query, 'one');
+  input.value = 'two';
+  input.dispatchEvent(new app.ctx.Event('keydown', { bubbles: true, key: 'Enter' }));
+  await app.settle();
+  assert.equal(app.qa('#modal-root .song-chip').length, 3, 'the newer search shows');
+  resolveFirst(); await app.settle();
+  assert.equal(app.qa('#modal-root .song-chip').length, 3, 'the stale answer is discarded');
+});
+
+test('song picker: picking a song hands it to the caller and closes; art auditions one preview at a time', async () => {
+  const hits = [{ catalog_id: 'c1', title: 'Alpha', artist: 'A', artwork_url: 'https://x/a.jpg', duration_ms: 5, preview_url: 'https://p/1' }, { catalog_id: 'c2', title: 'Beta', artist: '', artwork_url: '', duration_ms: 0, preview_url: 'https://p/2' }];
+  const picked = [];
+  const { app } = await boot({ be: { music_search: hits, music_suggestions: [hits[1]] } });
+  app.ctx.__picked = picked;
+  await app.ev('musicDialog((m) => __picked.push(m), { caption: () => "beach day" })');
+  const input = app.q('#modal-root input');
+  input.value = 'a'; input.dispatchEvent(new app.ctx.Event('keydown', { bubbles: true, key: 'Enter' }));
+  await app.settle();
+  const arts = app.qa('#modal-root .song-art-btn.playable');
+  assert.equal(arts.length, 2);
+  await click(app, arts[0]);
+  assert.match(app.qa('#modal-root .song-art-glyph')[0].innerHTML, /./);
+  await click(app, arts[1]);                                            // starting another stops the first
+  await click(app, arts[1]);                                            // tapping again stops it
+  assert.equal(picked.length, 0, 'auditioning never attaches');
+  await click(app, app.qa('#modal-root .song-chip')[0]);
+  assert.deepEqual(J(picked[0]), { catalog_id: 'c1', title: 'Alpha', artist: 'A', artwork_url: 'https://x/a.jpg', duration_ms: 5 });
+  assert.equal(app.q('#modal-root').children.length, 0);
+  await app.ev('musicDialog(() => {}, { caption: () => "beach day", genre: "Pop", createdAt: 123 })');
+  await click(app, [...app.qa('#modal-root .picker-tabs button')].find((b) => /Suggest/i.test(b.textContent)));
+  const sug = lastCall(app, 'music_suggestions').args;
+  assert.deepEqual(J(sug), { caption: 'beach day', genre: 'Pop', createdAtMs: 123, limit: 12 });
+  assert.equal(app.qa('#modal-root .song-chip').length, 1);
+});
+
+test('song picker: an empty search clears results, and no hits says so', async () => {
+  const { app } = await boot({ be: { music_search: [] } });
+  await app.ev('musicDialog(() => {}, {})');
+  const input = app.q('#modal-root input');
+  input.value = '   '; input.dispatchEvent(new app.ctx.Event('keydown', { bubbles: true, key: 'Enter' }));
+  await app.settle();
+  assert.equal(lastCall(app, 'music_search'), undefined);
+  input.value = 'nothing'; input.dispatchEvent(new app.ctx.Event('keydown', { bubbles: true, key: 'Enter' }));
+  await app.settle();
+  assert.match(app.q('#modal-root').textContent, /No songs|no results|found/i);
+});
+
+test('songs: artwork and links tolerate every platform\'s encoding of the track fields', async () => {
+  const { app } = await boot();
+  assert.equal(app.ev('musicArtwork({ artwork_url: "https://a/x.jpg" })'), 'https://a/x.jpg');
+  assert.equal(app.ev('musicArtwork({ artwork_url: "start:1500;https://a/x.jpg" })'), 'https://a/x.jpg', 'Apple packs the story section start in front');
+  assert.equal(app.ev('musicArtwork({ artwork_url: "start:1500" })'), '', 'a bare section marker is not a URL');
+  assert.equal(app.ev('musicArtwork(null)'), '');
+  assert.equal(app.ev('musicLink({ catalog_id: "https://music.apple.com/x", title: "t" })'), 'https://music.apple.com/x');
+  assert.equal(app.ev('musicLink({ catalog_id: "12345", title: "Hello World", artist: "Adele" })'), 'https://music.apple.com/search?term=Hello%20World%20Adele');
+  assert.equal(app.ev('musicLink({ catalog_id: "1", title: "", artist: "" })'), null);
+  assert.equal(app.ev('musicLink(null)'), null);
+});
+
+// ── re-optimize media I already shared ─────────────────────────────────────────────────────────
+const CAND = (n, bytes = 5_000_000) => Array.from({ length: n }, (_, i) => ({ reference: `img_c${i}`, circle_id: 'default', bytes, width: 4000, height: 3000, format: 'jpeg', reason: 'oversized', first_shared_ms: 1, legacy_by_age: i === 0 }));
+const reoptOpen = async (be = {}) => {
+  const h = await boot({ be: { media_data_url: 'data:image/jpeg;base64,AAAA', ...be } });
+  await openSettingsRow(h.app, /Advanced/);
+  return h;
+};
+const reoptBtn = (app) => app.q('#modal-root .card .col > button.btn');
+
+test('re-optimize: scanning reports what can shrink, and a clean library says so', async () => {
+  const clean = await reoptOpen({ reoptimize_scan: { candidates: [], videos_above_target: 0, video_bytes: 0, batch_limit: 25 } });
+  await click(clean.app, modalBtn(clean.app, /Re-?optimi[sz]e|Shrink|Check/i));
+  assert.match(clean.app.q('#modal-root').textContent, /already|small|✓/i);
+
+  const some = await reoptOpen({ reoptimize_scan: { candidates: CAND(3), videos_above_target: 2, video_bytes: 90_000_000, batch_limit: 25 } });
+  await click(some.app, modalBtn(some.app, /Re-?optimi[sz]e|Shrink|Check/i));
+  const txt = some.app.q('#modal-root').textContent;
+  assert.match(txt, /3 photos/);
+  assert.match(txt, /14 MB|15 MB/, 'total bytes');
+  assert.match(txt, /legacy|older/i, 'age-based candidates are called out');
+  assert.match(txt, /2 videos|video/i, 'videos are reported but not re-encoded here');
+  assert.match(modalBtn(some.app, /Shrink/i).textContent, /3 photos/);
+});
+
+test('re-optimize: a run re-encodes each photo, swaps the refs, re-shares the posts and summarises', async () => {
+  const { app, be } = await reoptOpen({
+    reoptimize_scan: { candidates: CAND(2), videos_above_target: 0, video_bytes: 0, batch_limit: 25 },
+    reoptimize_headroom: true,
+    reoptimize_accept: ({ reference }) => 'new_' + reference,
+    reoptimize_targets: [{ circle_id: 'default', event_id: 'ev1', media: ['img_c0', 'thumb:img_c0:img_t'] }, { circle_id: 'default', event_id: 'ev2', media: ['img_other'] }],
+    reoptimize_apply: true,
+  });
+  await click(app, modalBtn(app, /Re-?optimi[sz]e|Shrink|Check/i));
+  be.reoptimize_scan = { candidates: [], videos_above_target: 0, video_bytes: 0, batch_limit: 25 };      // after the run, nothing is left
+  await click(app, modalBtn(app, /Shrink/i));
+  await app.settle();
+  const accepts = app.calls.filter((c) => c.cmd === 'reoptimize_accept');
+  assert.deepEqual(accepts.map((c) => c.args.reference), ['img_c0', 'img_c1']);
+  assert.equal(accepts[0].args.dataBase64, 'AAAA', 'the re-encoded JPEG goes to the engine');
+  const apply = app.calls.filter((c) => c.cmd === 'reoptimize_apply');
+  assert.equal(apply.length, 1, 'only the post that carried a swapped photo is re-shared');
+  assert.deepEqual(J(apply[0].args), { circleId: 'default', eventId: 'ev1', media: ['new_img_c0', 'thumb:img_c0:img_t'] });
+  assert.match(app.q('#modal-root').textContent, /✓.*2 (photos|items)/s, 'a summary is shown');
+});
+
+test('re-optimize: running out of disk stops the batch with a warning; a declined photo is skipped', async () => {
+  const lowDisk = await reoptOpen({ reoptimize_scan: { candidates: CAND(2), videos_above_target: 0, video_bytes: 0, batch_limit: 25 }, reoptimize_headroom: false });
+  await click(lowDisk.app, modalBtn(lowDisk.app, /Re-?optimi/i));
+  await click(lowDisk.app, modalBtn(lowDisk.app, /Shrink/i));
+  assert.equal(lastCall(lowDisk.app, 'reoptimize_accept'), undefined);
+  assert.match(lowDisk.app.q('#modal-root').textContent, /⚠️/);
+
+  const declines = await reoptOpen({ reoptimize_scan: { candidates: CAND(1), videos_above_target: 0, video_bytes: 0, batch_limit: 25 }, reoptimize_headroom: true, reoptimize_accept: null });
+  await click(declines.app, modalBtn(declines.app, /Re-?optimi/i));
+  await click(declines.app, modalBtn(declines.app, /Shrink/i));
+  assert.equal(lastCall(declines.app, 'reoptimize_skip').args.reference, 'img_c0', 'a photo that cannot be shrunk is remembered so it is not retried forever');
+  assert.equal(lastCall(declines.app, 'reoptimize_apply'), undefined, 'nothing changed, nothing re-shared');
+  assert.match(declines.app.q('#modal-root').textContent, /smaller|nothing/i);
+});
+
+test('re-optimize: a failed scan is reported instead of throwing', async () => {
+  const { app } = await reoptOpen({ reoptimize_scan: () => { throw new Error('disk busy'); } });
+  await click(app, modalBtn(app, /Re-?optimi/i));
+  assert.match(app.q('#modal-root').textContent, /disk busy/);
+});
+
+test('re-optimize: byte accounting helpers', async () => {
+  const { app } = await boot();
+  assert.equal(app.ev('base64ByteLength("")'), 0);
+  assert.equal(app.ev('base64ByteLength("QQ==")'), 1);
+  assert.equal(app.ev('base64ByteLength("QUI=")'), 2);
+  assert.equal(app.ev('base64ByteLength("QUJD")'), 3);
 });

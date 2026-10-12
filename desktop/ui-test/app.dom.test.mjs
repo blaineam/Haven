@@ -2425,3 +2425,95 @@ test('dm thread: the back button returns to the list and a pending draft is cons
   await click(app, app.q('.dm-head .icon-btn'));                      // back
   assert.ok(app.q('.thread-list'), 'the list is showing again');
 });
+
+// ── in-call devices, screen share and adding people ────────────────────────────────────────────
+const inCall = async () => {
+  const h = await callOn();
+  await ev(h.app, 'invite', { roster: [BO, ME] });
+  await click(h.app, [...h.app.qa('#modal-root .call-overlay button')].find((b) => /Accept/i.test(b.textContent)));
+  return h;
+};
+
+test('call devices: the lists come from the OS and the chosen mic is swapped into the live call and remembered', async () => {
+  const { app } = await inCall();
+  await app.ev('refreshAudioDevices()');
+  assert.deepEqual(J(app.ev('call.audioIns.map(d => d.label)')), ['Mic One']);
+  assert.deepEqual(J(app.ev('call.audioOuts.map(d => d.label)')), ['Speaker One']);
+  const oldTrack = app.ev('call.localStream.getAudioTracks()[0]');
+  await app.ev('call.micOn = false');
+  await app.ev('applyMicDevice("mic1")');
+  const fresh = app.ev('call.localStream.getAudioTracks()[0]');
+  assert.notEqual(fresh, oldTrack, 'a new track replaced the old one');
+  assert.equal(oldTrack.stopped, true, 'and the old microphone was released');
+  assert.equal(fresh.enabled, false, 'a muted mic stays muted across the swap');
+  assert.equal(app.rtc.at(-1).senders.find((s) => s.track?.kind === 'audio').track, fresh, 'every peer connection got the new track');
+  assert.equal(app.localStorage.getItem('haven-mic-device'), 'mic1');
+  assert.deepEqual(J(app.ctx.__media.gum.at(-1)), { audio: { deviceId: { exact: 'mic1' } } });
+  app.ev('applySpeakerDevice("spk1")');
+  assert.equal(app.localStorage.getItem('haven-spk-device'), 'spk1');
+  // The screen offers the pickers with the remembered device selected.
+  await app.ev('renderCallOverlay()');
+  const selects = app.qa('.call-devices select');
+  assert.equal(selects.length, 2);
+  assert.equal(selects[0].querySelectorAll('option').length, 2, 'default + the one microphone');
+});
+
+test('call devices: a refused microphone swap is reported without breaking the call', async () => {
+  const { app } = await inCall();
+  app.ctx.__media.deny = true;
+  await app.ev('applyMicDevice("mic1")');
+  assert.match(app.q('#toast').textContent, /./);
+  assert.equal(callState(app).inCall, true);
+});
+
+test('call screen share: shares replace the camera track for everyone and stopping restores it', async () => {
+  const { app } = await inCall();
+  await app.ev('toggleCam()');                                          // camera on, so there is a track to restore
+  const cam = app.ev('call.localStream.getVideoTracks()[0]');
+  await app.ev('toggleScreen()');
+  assert.equal(app.ev('call.screenOn'), true);
+  const screen = app.ev('call.screenStream.getVideoTracks()[0]');
+  const videoSender = app.rtc.at(-1).senders.find((s) => s.track?.kind === 'video');
+  assert.ok(videoSender, 'the peer connection publishes a video track');
+  assert.equal(videoSender.track, screen, 'peers now receive the screen');
+  assert.ok(app.ev('call.localStream.getVideoTracks().includes(call.screenStream.getVideoTracks()[0])'));
+  await app.ev('toggleScreen()');
+  assert.equal(app.ev('call.screenOn'), false);
+  assert.equal(screen.stopped, true, 'the capture is released');
+  assert.ok(app.ev('call.localStream.getVideoTracks()').includes(cam), 'the camera is put back');
+  // The OS "stop sharing" button ends it the same way.
+  await app.ev('toggleScreen()');
+  app.ev('call.screenStream.getVideoTracks()[0].onended()');
+  assert.equal(app.ev('call.screenOn'), false);
+});
+
+test('call screen share: a refused or empty capture toasts and leaves the call alone', async () => {
+  const { app } = await inCall();
+  app.ctx.navigator.mediaDevices.getDisplayMedia = async () => { throw new Error('denied'); };
+  await app.ev('toggleScreen()');
+  assert.match(app.q('#toast').textContent, /denied/);
+  assert.equal(app.ev('call.screenOn'), false);
+  app.ctx.navigator.mediaDevices.getDisplayMedia = async () => new app.FakeStream([]);
+  await app.ev('toggleScreen()');
+  assert.equal(app.ev('call.screenOn'), false);
+  await app.ev('stopScreenShare()');                                    // not sharing: no-op
+});
+
+test('call: adding someone mid-call lists only contacts not already in it', async () => {
+  const CY = HEX('c');
+  const { app } = await callOn({ state: { ...withDm().state, contacts: [...withDm().state.contacts, { id_hex: CY, name: 'Cy', verify_hex: 'v', emoji: '', avatar: '', bio: '', link: '' }] } });
+  await ev(app, 'invite', { roster: [BO, ME] });
+  await click(app, [...app.qa('#modal-root .call-overlay button')].find((b) => /Accept/i.test(b.textContent)));
+  app.ev('state.contacts = ' + JSON.stringify([{ id_hex: BO, name: 'Bo' }, { id_hex: CY, name: 'Cy' }]));
+  app.ev('addToCallDialog()');
+  const rows = app.qa('#modal-root .list-item');
+  assert.equal(rows.length, 1, 'Bo is already on the call');
+  assert.match(rows[0].textContent, /Cy/);
+  await click(app, rows[0].querySelector('button'));
+  assert.ok(J(lastCall(app, 'call_group_invite').args.roster).includes(CY));
+  assert.ok(rows[0].querySelector('button').disabled, 'a person is only added once');
+  app.ev('state.contacts = [{ id_hex: "' + BO + '", name: "Bo" }]');
+  app.q('#modal-root').replaceChildren();
+  app.ev('addToCallDialog()');
+  assert.match(app.q('#toast').textContent, /./, 'nobody left to add says so');
+});

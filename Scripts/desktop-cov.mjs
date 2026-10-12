@@ -14,7 +14,7 @@
 // Usage: node Scripts/desktop-cov.mjs [--rust-only|--js-only]
 // Heavy (a full instrumented build of the crate): run it through `buildq`.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -97,6 +97,8 @@ function rustCoverage() {
   if (pm.status !== 0) { bail('soren-skip: llvm-profdata failed: ' + pm.stderr.slice(0, 200)); }
   const ex = run('xcrun', ['llvm-cov', 'export', exe, `-instr-profile=${merged}`, '-format=lcov']);
   if (ex.status !== 0) { bail('soren-skip: llvm-cov failed: ' + ex.stderr.slice(0, 200)); }
+  // DESKTOP_COV_LCOV=<path> keeps the raw lcov for digging into which functions are still dark.
+  if (process.env.DESKTOP_COV_LCOV) writeFileSync(process.env.DESKTOP_COV_LCOV, ex.stdout);
   const files = new Map();                                              // path -> Map(line -> count)
   let cur = null;
   for (const l of ex.stdout.split('\n')) {

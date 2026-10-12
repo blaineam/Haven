@@ -350,7 +350,7 @@ export async function loadApp({ backend = {}, lang = 'en-US', ua = 'Mozilla/5.0 
   class NoopObserver { constructor(cb) { this.cb = cb; } observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } }
   class FakeImage { constructor() { this.naturalWidth = 100; this.naturalHeight = 100; this.width = 100; this.height = 100; this.complete = true; setTimeout; } set src(v) { this._src = v; queueMicrotask(() => this.onload?.()); } get src() { return this._src; } decode() { return Promise.resolve(); } }
   class FakeAudio { constructor(src) { this.src = src; this.paused = true; this.volume = 1; this.currentTime = 0; this.duration = 0; } play() { this.paused = false; return Promise.resolve(); } pause() { this.paused = true; } addEventListener() {} removeEventListener() {} load() {} }
-  class FakeTrack { constructor(kind) { this.kind = kind; this.enabled = true; this.id = kind + '0'; this.stopped = false; } stop() { this.stopped = true; } }
+  class FakeTrack { constructor(kind) { this.kind = kind; this.enabled = true; this.id = kind + '0'; this.stopped = false; this.readyState = 'live'; } stop() { this.stopped = true; this.readyState = 'ended'; } }
   class FakeStream { constructor(tracks = []) { this._t = [...tracks]; this.id = 'stream'; } getTracks() { return [...this._t]; } getAudioTracks() { return this._t.filter((t) => t.kind === 'audio'); } getVideoTracks() { return this._t.filter((t) => t.kind === 'video'); } addTrack(t) { this._t.push(t); } removeTrack(t) { this._t = this._t.filter((x) => x !== t); } }
   const rtc = [];
   class FakePC {

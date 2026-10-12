@@ -333,6 +333,19 @@ export async function loadApp({ backend = {}, lang = 'en-US', ua = 'Mozilla/5.0 
   class NoopObserver { constructor(cb) { this.cb = cb; } observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } }
   class FakeImage { constructor() { this.naturalWidth = 100; this.naturalHeight = 100; this.width = 100; this.height = 100; this.complete = true; setTimeout; } set src(v) { this._src = v; queueMicrotask(() => this.onload?.()); } get src() { return this._src; } decode() { return Promise.resolve(); } }
   class FakeAudio { constructor(src) { this.src = src; this.paused = true; this.volume = 1; this.currentTime = 0; this.duration = 0; } play() { this.paused = false; return Promise.resolve(); } pause() { this.paused = true; } addEventListener() {} removeEventListener() {} load() {} }
+  class FakeTrack { constructor(kind) { this.kind = kind; this.enabled = true; this.id = kind + '0'; this.stopped = false; } stop() { this.stopped = true; } }
+  class FakeStream { constructor(tracks = []) { this._t = [...tracks]; this.id = 'stream'; } getTracks() { return [...this._t]; } getAudioTracks() { return this._t.filter((t) => t.kind === 'audio'); } getVideoTracks() { return this._t.filter((t) => t.kind === 'video'); } addTrack(t) { this._t.push(t); } removeTrack(t) { this._t = this._t.filter((x) => x !== t); } }
+  const rtc = [];
+  class FakePC {
+    constructor(cfg) { this.cfg = cfg; this.senders = []; this.tr = []; this.connectionState = 'new'; this.closed = false; this.remote = null; this.local = null; this.ice = []; rtc.push(this); }
+    addTrack(t) { const sn = { track: t, replaceTrack: async (x) => { sn.track = x; } }; this.senders.push(sn); return sn; }
+    addTransceiver(kind) { const tr = { sender: { track: null, replaceTrack: async (x) => { tr.sender.track = x; } }, receiver: { track: { kind } } }; this.tr.push(tr); return tr; }
+    getSenders() { return this.senders; } getTransceivers() { return this.tr; }
+    async createOffer() { return { type: 'offer', sdp: 'offer-sdp' }; } async createAnswer() { return { type: 'answer', sdp: 'answer-sdp' }; }
+    async setLocalDescription(d) { this.local = d; } async setRemoteDescription(d) { this.remote = d; } async addIceCandidate(c) { this.ice.push(c); }
+    async getStats() { const m = new Map(); (this.statsRows ?? []).forEach((r, i) => m.set(i, r)); return m; }
+    close() { this.closed = true; }
+  }
   const sandbox = {
     document, localStorage, console, URL, URLSearchParams, Blob, TextEncoder, TextDecoder, Uint8Array, Promise, JSON, Math, Date, Intl, atob, btoa,
     structuredClone, AbortController, Map, Set, WeakMap, WeakSet, Symbol, Proxy, Reflect, Array, Object, String, Number, Boolean, RegExp, Error,
@@ -349,6 +362,7 @@ export async function loadApp({ backend = {}, lang = 'en-US', ua = 'Mozilla/5.0 
     Event: DomEvent, CustomEvent: DomEvent, KeyboardEvent: DomEvent, MouseEvent: DomEvent, PointerEvent: DomEvent,
     HTMLElement: Element, Element, Node: Element, HTMLInputElement: Element, HTMLImageElement: Element, HTMLVideoElement: Element,
     fetch: async () => { throw new Error('domstub: no network'); },
+    RTCPeerConnection: FakePC, MediaStream: FakeStream,
     performance: { now: () => 0 },
     __TAURI__: { core: { invoke }, event: { listen }, opener: { openUrl: (u) => { opened.push(u); } }, dialog: { open: async (o) => { dialogOpens.push(o); return sandbox.__pick ?? null; } } },
   };
@@ -364,12 +378,24 @@ export async function loadApp({ backend = {}, lang = 'en-US', ua = 'Mozilla/5.0 
   const ctx = vm.createContext(sandbox);
   sandbox.window = ctx; sandbox.self = ctx; sandbox.globalThis = ctx; sandbox.parent = ctx;
 
+  sandbox.__media = { denyVideo: false, deny: false, gum: [] };
+  sandbox.navigator.mediaDevices = {
+    getUserMedia: async (c) => {
+      sandbox.__media.gum.push(c);
+      if (sandbox.__media.deny) throw new Error('NotAllowedError');
+      if (c.video && sandbox.__media.denyVideo) throw new Error('NotFoundError');
+      return new FakeStream([...(c.audio ? [new FakeTrack('audio')] : []), ...(c.video ? [new FakeTrack('video')] : [])]);
+    },
+    enumerateDevices: async () => [{ kind: 'audioinput', deviceId: 'mic1', label: 'Mic One' }, { kind: 'audiooutput', deviceId: 'spk1', label: 'Speaker One' }],
+    getDisplayMedia: async () => new FakeStream([new FakeTrack('video')]),
+    addEventListener() {}, removeEventListener() {},
+  };
   const run = (file, src) => new vm.Script(src ?? readFileSync(join(here, file), 'utf8'), { filename: pathToFileURL(join(here, file)).href }).runInContext(ctx);
   run('strings.js');
   run('vendor/qrcode.js');
   run('app.js');
   const api = {
-    ctx, document, timers, calls, dialogs, opened, dialogOpens, localStorage, listeners,
+    ctx, document, timers, calls, dialogs, opened, dialogOpens, rtc, FakeTrack, FakeStream, localStorage, listeners,
     /** Evaluate an expression inside the app's global scope (reaches app.js `const`/`let` bindings). */
     ev: (code) => vm.runInContext(code, ctx),
     /** Deliver a Tauri event to every listener the app registered for it. */

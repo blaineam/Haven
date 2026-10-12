@@ -1483,3 +1483,599 @@ test('stories: a story reply card in a DM opens the viewer, or explains that it 
   const cards = app.qa('.story-reply-card');
   assert.ok(cards.length >= 1, 'story pointers render as cards');
 });
+
+// ── composer ────────────────────────────────────────────────────────────────────────────────────
+const composerMenu = async (app) => click(app, '#composer-slot .composer-plus');
+const composerItem = (app, re) => menuBtn(app, re);
+
+test('composer: the + menu offers every attachment path, in the macOS order', async () => {
+  const { app } = await boot();
+  await composerMenu(app);
+  const labels = app.qa('#menu-root button').map((b) => b.textContent.trim());
+  assert.match(labels.join('|'), /Photo or Video.*Camera.*Voice.*song.*Disappears.*Send later/i);
+});
+
+test('composer: a post carries its attachment, thumb companion, music and retention to the backend', async () => {
+  const { app } = await boot();
+  const add = app.ev('state.composerAdd');
+  await add('img_one', false, false, 'img_thumb');
+  assert.equal(app.qa('#composer-slot .attach-preview .chip').length, 1);
+  await composerMenu(app);
+  await click(app, composerItem(app, /Disappears/i));
+  await click(app, composerItem(app, /1 day|day/i));
+  assert.match(app.q('#composer-slot').textContent, /1d/, 'the chosen lifetime is shown as a chip');
+  app.q('#composer-slot textarea').value = 'with a photo';
+  await click(app, '.composer-send');
+  const c = lastCall(app, 'post').args;
+  assert.equal(c.body, 'with a photo');
+  assert.deepEqual(J(c.media), ['img_one', 'thumb:img_one:img_thumb']);
+  assert.equal(c.retentionSecs, 86400);
+  assert.equal(app.qa('#composer-slot .attach-preview .chip').length, 0, 'attachments clear after sending');
+  assert.ok(!/1d/.test(app.q('#composer-slot').textContent), 'retention is per-post and resets');
+});
+
+test('composer: an attachment can be removed before sending, and a video reveals the mute toggle', async () => {
+  const { app } = await boot();
+  const add = app.ev('state.composerAdd');
+  await add('vid_clip', true, false, null);
+  const mute = app.q('#composer-slot .row button.btn');
+  assert.notEqual(mute.style.display, 'none', 'a video can be muted');
+  await click(app, mute);
+  assert.ok(mute.classList.contains('primary'));
+  app.q('#composer-slot textarea').value = 'clip';
+  await click(app, app.q('#composer-slot .chip .x'));
+  assert.equal(app.qa('#composer-slot .chip').length, 0);
+  assert.equal(mute.style.display, 'none');
+  await click(app, '.composer-send');
+  assert.equal(lastCall(app, 'post').args.muteVideo, false, 'removing the video resets the mute choice');
+});
+
+test('composer: Enter posts, Shift+Enter does not, and a blank composer posts nothing', async () => {
+  const { app } = await boot();
+  const ta = app.q('#composer-slot textarea');
+  const key = (extra = {}) => ta.dispatchEvent(new app.ctx.Event('keydown', { bubbles: true, key: 'Enter', ...extra }));
+  ta.value = 'hello'; key({ shiftKey: true }); await app.settle();
+  assert.equal(lastCall(app, 'post'), undefined);
+  key(); await app.settle();
+  assert.equal(lastCall(app, 'post').args.body, 'hello');
+  assert.match(app.q('#toast').textContent, /posted/i);
+});
+
+test('composer: Send later needs content, validates the time, and queues through the backend', async () => {
+  const { app } = await boot();
+  await composerMenu(app);
+  await click(app, composerItem(app, /Send later/i));
+  assert.match(app.q('#toast').textContent, /something/i, 'nothing to schedule yet');
+  app.q('#composer-slot textarea').value = 'for later';
+  await composerMenu(app);
+  await click(app, composerItem(app, /Send later/i));
+  const dlg = app.q('#modal-root');
+  const input = dlg.querySelector('input');
+  input.value = '2001-01-01T00:00';
+  await click(app, dlg.querySelector('.btn.primary'));
+  assert.equal(lastCall(app, 'schedule_message'), undefined, 'a time in the past is refused');
+  assert.match(app.q('#toast').textContent, /future/i);
+  const d = new Date(Date.now() + 7_200_000), p = (n) => String(n).padStart(2, '0');
+  input.value = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  await click(app, dlg.querySelector('.btn.primary'));
+  const c = lastCall(app, 'schedule_message').args;
+  assert.equal(c.kind, 'post');
+  assert.equal(c.body, 'for later');
+  assert.ok(c.sendAtMs > Date.now());
+  assert.equal(app.q('#composer-slot textarea').value, '', 'the composer clears once scheduled');
+});
+
+test('composer: the sync badge appears only when the circle is device-only or still syncing', async () => {
+  const { app, be } = await boot({ be: { sync_status: 'local' } });
+  await app.timers.advance(2600);
+  await app.settle();
+  const badge = app.q('#composer-slot .sync-badge');
+  assert.ok(!badge.classList.contains('hide'));
+  assert.match(badge.textContent, /device/i);
+  be.sync_status = 'syncing';
+  await app.timers.advance(2600); await app.settle();
+  assert.match(app.q('#composer-slot .sync-badge').textContent, /sync/i);
+  be.sync_status = 'synced';
+  await app.timers.advance(2600); await app.settle();
+  assert.ok(app.q('#composer-slot .sync-badge').classList.contains('hide'), 'green says nothing at all');
+});
+
+// ── reactions: emoji store and picker ──────────────────────────────────────────────────────────
+test('reactions: the quick row learns the emoji you use and the picker records picks', async () => {
+  const { app } = await social();
+  assert.deepEqual(J(app.ev('frequentEmoji(3)')), ['❤️', '😂', '👍']);
+  const card = () => app.q('.card[data-post="bp1"]');
+  const quick = () => [...card().querySelectorAll('.quick button')].filter((b) => b.title && /React/i.test(b.title));
+  await click(app, quick()[2]);                                          // 👍
+  assert.equal(lastCall(app, 'react').args.emoji, '👍');
+  assert.equal(app.ev('frequentEmoji(1)')[0], '👍', 'it moves to the front');
+  assert.equal(JSON.parse(app.localStorage.getItem('haven-emoji-freq'))['👍'], 1);
+  await click(app, card().querySelector('.quick .more'));
+  const grid = app.qa('#menu-root .menu button');
+  assert.equal(grid.length, 12);
+  await click(app, grid.find((b) => b.textContent === '🎉'));
+  assert.equal(lastCall(app, 'react').args.emoji, '🎉');
+  assert.equal(app.q('#menu-root').children.length, 0, 'the picker closes after a pick');
+});
+
+test('reactions: quick-react never removes an existing reaction of mine', async () => {
+  const { app } = await social();
+  await app.ev('quickReact("default", "bp1", "😂", [{ emoji: "😂", count: 1, mine: true }])');
+  assert.equal(lastCall(app, 'react'), undefined);
+  assert.equal(lastCall(app, 'unreact'), undefined);
+});
+
+test('reactions: a post with many distinct emoji caps the pills but always keeps mine', async () => {
+  const many = ['a', 'b', 'c', 'd', 'e', 'f'].map((e, i) => ({ emoji: e, count: 10 - i, mine: false, authors: [] }));
+  many.push({ emoji: 'z', count: 1, mine: true, authors: [] });
+  const { app } = await boot({ state: { feeds: { default: [post({ reactions: many })] } } });
+  const pills = app.qa('.card[data-post="p1"] .react-pill');
+  assert.equal(pills.length, 5, 'four chips plus the overflow counter');
+  assert.ok([...pills].some((p) => p.classList.contains('mine')), 'my own reaction is never hidden');
+  assert.match(pills.at(-1).textContent, /\+3/);
+});
+
+// ── media refs and tiles ────────────────────────────────────────────────────────────────────────
+test('media refs: kinds are told apart by prefix, including the legacy single-letter schemes', async () => {
+  const { app } = await boot();
+  const k = (r) => J(app.ev(`[isVideoRef(${JSON.stringify(r)}), isAudioRef(${JSON.stringify(r)}), isFileRef(${JSON.stringify(r)}), isSyntheticMedia(${JSON.stringify(r)})]`));
+  assert.deepEqual(k('vid_ab'), [true, false, false, false]);
+  assert.deepEqual(k('v:ab'), [true, false, false, false]);
+  assert.deepEqual(k('aud_ab'), [false, true, false, false]);
+  assert.deepEqual(k('a:ab'), [false, true, false, false]);
+  assert.deepEqual(k('file_ab'), [false, false, true, false]);
+  assert.deepEqual(k('img_ab'), [false, false, false, false]);
+  assert.deepEqual(k('thumb:img_a:img_b'), [false, false, false, true]);
+  assert.deepEqual(k('geo:1,2,x'), [false, false, false, true]);
+  assert.deepEqual(k('i:abc'), [false, false, false, false], 'a one-letter scheme is a legacy media ref, not a marker');
+});
+
+test('media refs: companions are learned and hidden from the visible set', async () => {
+  const { app } = await boot();
+  const media = ['img_full', 'thumb:img_full:img_tiny', 'vid_clip', 'poster:vid_clip:img_still', 'img_still', 'orig:img_full:img_orig', 'img_orig', 'preview:img_full:img_prev', 'img_prev', 'geo:1,2,Place', 'img_tiny'];
+  const shown = J(app.ev(`displayMediaRefs(${JSON.stringify(media)})`));
+  assert.deepEqual(shown, ['img_full', 'vid_clip'], 'only the real content is shown');
+  assert.equal(app.ev('ThumbIndex.thumbFor("img_full")'), 'img_prev', 'a 512px preview outranks the thumb');
+  assert.equal(app.ev('PosterIndex.posterFor("vid_clip")'), 'img_still');
+  assert.equal(app.ev(`posterRefFor(${JSON.stringify(media)}, "vid_clip")`), 'img_still');
+  app.ev('ThumbIndex.learn(["thumb:img_full:img_downgrade"])');
+  assert.equal(app.ev('ThumbIndex.thumbFor("img_full")'), 'img_prev', 'a later thumb cannot downgrade a preview');
+  assert.equal(app.ev('ThumbIndex.thumbFor("nope")'), null);
+});
+
+test('media tiles: a ready blob becomes the image source', async () => {
+  const { app } = await boot({ state: { feeds: { default: [BO_POST({ media: ['img_ready'], reactions: [] })] } }, be: { media_data_url: 'data:image/jpeg;base64,AAAA' } });
+  const img = app.q('.card[data-post="bp1"] .post-media img, .card[data-post="bp1"] .post-media video');
+  assert.ok(img, 'a tile was rendered');
+  assert.equal(img.src, 'data:image/jpeg;base64,AAAA');
+  assert.ok(app.calls.some((c) => c.cmd === 'media_data_url' && c.args.reference === 'img_ready'));
+});
+
+test('media tiles: a blob that has not arrived shows a loading box that polls, then gives up with a retry', async () => {
+  const { app, be } = await boot({ state: { feeds: { default: [BO_POST({ media: ['img_late'], reactions: [] })] } }, be: { media_data_url: null, media_evicted_size: null } });
+  const box = () => app.q('.card[data-post="bp1"] .media-evicted');
+  assert.ok(box(), 'a placeholder, not a broken image');
+  assert.match(box().textContent, /loading/i);
+  await app.timers.advance(2100);
+  await app.settle();
+  assert.ok(box(), 'still waiting after the first poll');
+  await app.timers.advance(46_000);
+  await app.settle();
+  assert.match(box().textContent, /not available yet/i, 'it does not spin forever');
+  be.media_data_url = 'data:image/jpeg;base64,BBBB';
+  await click(app, box().querySelector('button'));                       // Retry
+  assert.ok(lastCall(app, 'media_download'), 'retry asks the engine to fetch again');
+  await app.timers.advance(2100);
+  await app.settle();
+  assert.ok(!box(), 'the placeholder is replaced once the bytes land');
+});
+
+test('media tiles: a deliberately evicted blob offers a sized Download instead of silently refetching', async () => {
+  const { app, be } = await boot({ state: { feeds: { default: [BO_POST({ media: ['img_gone'], reactions: [] })] } }, be: { media_data_url: null, media_evicted_size: 3_500_000, media_is_wanted: false } });
+  const box = () => app.q('.card[data-post="bp1"] .media-evicted');
+  assert.match(box().textContent, /3\.3 MB|3\.4 MB|MB/);
+  assert.equal(lastCall(app, 'media_download'), undefined, 'nothing is fetched until the user asks');
+  await click(app, box().querySelector('button'));
+  assert.ok(lastCall(app, 'media_download'));
+  await app.timers.advance(46_500);
+  await app.settle();
+  assert.match(box().textContent, /no longer available/i);
+  const ask = [...box().querySelectorAll('button')].find((b) => /ask/i.test(b.textContent));
+  assert.ok(ask, "someone else's post offers to ask the author for it back");
+  be.media_is_wanted = true;
+  await click(app, ask);
+  assert.deepEqual(J(lastCall(app, 'media_request_when_available').args), { reference: 'img_gone', circleId: 'default', postId: 'bp1', authorShort: BO.slice(0, 8) });
+  assert.match(box().textContent, /🔔/, 'then it says it will tell you when it is back');
+});
+
+test('media tiles: my own missing blob does not offer to ask myself for it', async () => {
+  const { app } = await boot({ state: { feeds: { default: [post({ media: ['img_mine'], reactions: [] })] } }, be: { media_data_url: null, media_evicted_size: 1000, media_is_wanted: false } });
+  const box = () => app.q('.card[data-post="p1"] .media-evicted');
+  await click(app, box().querySelector('button'));
+  await app.timers.advance(46_500); await app.settle();
+  assert.ok(![...box().querySelectorAll('button')].some((b) => /ask/i.test(b.textContent)));
+});
+
+test('media: a post with several photos renders a carousel; one photo a single tile; a location alone no empty box', async () => {
+  const some = (n) => Array.from({ length: n }, (_, i) => `img_${i}`);
+  const c3 = await boot({ state: { feeds: { default: [post({ media: some(3) })] } }, be: { media_data_url: 'data:image/jpeg;base64,AA' } });
+  assert.ok(c3.app.q('.post-media.carousel'));
+  const one = await boot({ state: { feeds: { default: [post({ media: some(1) })] } }, be: { media_data_url: 'data:image/jpeg;base64,AA' } });
+  assert.ok(one.app.q('.post-media.single'));
+  const geoOnly = await boot({ state: { feeds: { default: [post({ media: ['geo:37.5,-122.2,Golden Gate'] })] } } });
+  assert.ok(!geoOnly.app.q('.post-media.carousel') && !geoOnly.app.q('.post-media.single'), 'a location-only post draws no empty media box');
+  assert.match(geoOnly.app.q('.card[data-post="p1"]').textContent, /Golden Gate/);
+});
+
+test('media: a post with a song shows the now-playing chip, and its sound toggle follows the global setting', async () => {
+  const music = { catalog_id: 'c', title: 'Tune', artist: 'Band', artwork_url: '', duration_ms: 1 };
+  const { app } = await boot({ state: { feeds: { default: [post({ music })] } } });
+  const chip = app.q('.song-chip');
+  assert.match(chip.textContent, /Tune.*Band/);
+  await click(app, chip.querySelector('.song-sound'));
+  assert.equal(lastCall(app, 'set_video_sound').args.on, true);
+});
+
+test('media: my own post with attachments links to where it is stored', async () => {
+  const { app } = await boot({ state: { feeds: { default: [post({ media: ['img_x'] })] } }, be: { media_data_url: 'data:image/jpeg;base64,AA', media_backup_rows: { rows: [{ dest: HEX('e'), have: 3 }], ownRelay: '' } } });
+  const stored = app.q('.card[data-post="p1"] .post-head .icon-btn');
+  assert.ok(stored, 'the cloud badge is offered on my own posts with media');
+  await click(app, stored);
+  assert.ok(lastCall(app, 'media_backup_rows'), 'the sheet asks where each blob lives');
+  assert.equal(lastCall(app, 'media_backup_rows').args.refs[0], 'img_x');
+});
+
+// ── Instagram import sheet ──────────────────────────────────────────────────────────────────────
+const IG_SUMMARY = { posts: 12, reels: 3, stories: 5, items: 20, mediaCount: 40, totalBytes: 123_000_000, missing: 2, earliest: Date.UTC(2015, 2, 1), latest: Date.UTC(2024, 5, 1) };
+const igOpen = async (status) => {
+  const h = await boot({ be: { instagram_status: status, instagram_read: null, instagram_run: null, instagram_reset: null, instagram_cancel: null, instagram_resume: null } });
+  await openSettingsRow(h.app, /Instagram/);
+  return h;
+};
+
+test('instagram: the walkthrough takes three steps and the last one picks the archive', async () => {
+  const { app } = await igOpen({ phase: 'idle' });
+  assert.match(app.q('#modal-root').textContent, /JSON/);
+  assert.equal(app.qa('#modal-root .ig-dot.on').length, 1);
+  await click(app, modalBtn(app, /Open Instagram|Instagram/i) && [...app.qa('#modal-root .btn.primary')][0]);
+  assert.match(app.opened.at(-1), /accountscenter\.instagram\.com/);
+  await click(app, modalBtn(app, /requested/i));
+  assert.match(app.q('#modal-root').textContent, /wait|email|hours/i);
+  await click(app, modalBtn(app, /have the file|have it/i));
+  app.ctx.__pick = null;
+  await click(app, [...app.qa('#modal-root .btn.primary')][0]);
+  assert.equal(lastCall(app, 'instagram_read'), undefined, 'cancelling the picker reads nothing');
+  assert.deepEqual(J(app.dialogOpens.at(-1).filters), [{ name: 'Zip', extensions: ['zip'] }]);
+  app.ctx.__pick = '/Users/me/instagram-export.zip';
+  await click(app, [...app.qa('#modal-root .btn.primary')][0]);
+  assert.equal(lastCall(app, 'instagram_read').args.path, '/Users/me/instagram-export.zip');
+});
+
+test('instagram: a previewed archive shows what is in it and imports into the active circle', async () => {
+  const { app } = await igOpen({ phase: 'previewing', summary: IG_SUMMARY });
+  const m = app.q('#modal-root');
+  assert.match(m.textContent, /12/);
+  assert.match(m.textContent, /117 MB/, 'size is human-readable');
+  assert.match(m.textContent, /2015.*2024/s, 'the date span');
+  assert.match(m.textContent, /2.*(missing|not)/i, 'files named by the archive but absent are called out');
+  const btn = () => app.qa('#modal-root .modal-foot .btn.primary')[0];
+  assert.match(btn().textContent, /15/, 'stories are excluded by default: 20 items minus 5 stories');
+  const stories = app.qa('#modal-root input[type="checkbox"]')[0];
+  stories.checked = true; stories.onchange();
+  await app.settle();
+  assert.match(btn().textContent, /20/, 'including stories counts them');
+  await click(app, btn());
+  assert.deepEqual(J(lastCall(app, 'instagram_run').args), { circleId: 'default', includeStories: true, matchSongs: false });
+  await click(app, modalBtn(app, /different file/i));
+  assert.ok(lastCall(app, 'instagram_reset'));
+});
+
+test('instagram: a one-item archive uses the singular button', async () => {
+  const { app } = await igOpen({ phase: 'previewing', summary: { ...IG_SUMMARY, items: 1, stories: 0, posts: 1, reels: 0, missing: 0 } });
+  assert.match(app.qa('#modal-root .modal-foot .btn.primary')[0].textContent, /1\b/);
+});
+
+test('instagram: while importing, progress updates in place and Stop is confirmed', async () => {
+  const { app } = await igOpen({ phase: 'importing', done: 3, total: 10, running: true });
+  assert.equal(app.q('#modal-root .ig-big').textContent, '3');
+  const bigBefore = app.q('#modal-root .ig-big');
+  await app.emit('haven:import', { phase: 'importing', done: 7, total: 10, running: true });
+  assert.equal(app.q('#modal-root .ig-big'), bigBefore, 'the open sheet is updated, not torn down and rebuilt');
+  assert.equal(bigBefore.textContent, '7');
+  assert.equal(app.q('#modal-root .ig-bar i').style.width, '70%');
+  assert.ok(app.q('#import-pill'), 'a pill shows progress elsewhere');
+  assert.match(app.q('#import-pill .ip-count').textContent, /7.*10/);
+  app.ctx.__confirm = false;
+  await click(app, modalBtn(app, /^Stop/i));
+  assert.equal(lastCall(app, 'instagram_cancel'), undefined);
+  app.ctx.__confirm = true;
+  await click(app, modalBtn(app, /^Stop/i));
+  assert.ok(lastCall(app, 'instagram_cancel'));
+  await click(app, modalBtn(app, /Browse|while/i));
+  assert.equal(app.q('#modal-root').children.length, 0, 'the run carries on without the sheet');
+});
+
+test('instagram: the progress pill clears when the run ends and reopens the sheet when tapped', async () => {
+  const { app } = await boot({ be: { instagram_status: { phase: 'importing', done: 1, total: 4, running: true } } });
+  const pill = app.q('#import-pill');
+  assert.ok(pill, 'a run in flight at launch is surfaced');
+  await click(app, pill);
+  assert.match(app.q('#modal-root').textContent, /Instagram/i);
+  await app.emit('haven:import', { phase: 'finished', imported: 4, skipped: 0 });
+  assert.equal(app.q('#import-pill'), null);
+});
+
+test('instagram: a finished run reports counts, can resume a stopped one, and Done resets', async () => {
+  const { app } = await igOpen({ phase: 'finished', imported: 18, skipped: 2, resumeFrom: 5 });
+  const m = app.q('#modal-root').textContent;
+  assert.match(m, /18/);
+  assert.match(m, /2/);
+  await click(app, modalBtn(app, /Pick up where it stopped/i));
+  assert.ok(lastCall(app, 'instagram_resume'));
+  await click(app, [...app.qa('#modal-root button')].find((b) => /^Done$/i.test(b.textContent)));
+  assert.ok(lastCall(app, 'instagram_reset'));
+  const clean = await igOpen({ phase: 'finished', imported: 3, skipped: 0 });
+  assert.ok(!clean.app.qa('#modal-root button').some((b) => /Pick up/i.test(b.textContent)), 'nothing to resume');
+});
+
+test('instagram: a failure shows its message and offers another file', async () => {
+  const { app } = await igOpen({ phase: 'failed', message: 'That file isn’t a readable Instagram archive.' });
+  assert.match(app.q('#modal-root').textContent, /readable Instagram archive/);
+  await click(app, modalBtn(app, /another|try/i));
+  assert.ok(lastCall(app, 'instagram_reset'));
+});
+
+test('instagram: a missing file dialog is reported rather than failing silently', async () => {
+  const { app } = await igOpen({ phase: 'idle' });
+  delete app.ctx.__TAURI__.dialog;
+  app.ev('IG.step = 2');
+  await app.ev('instagramImportSheet()');
+  await click(app, [...app.qa('#modal-root .btn.primary')][0]);
+  assert.ok(app.q('#toast').textContent.length > 0);
+});
+
+// ── calls: signalling state machine, with a fake WebRTC stack ──────────────────────────────────
+const SESSION = 'sess-1';
+const callOn = (over = {}) => boot({ ...withDm(), ...over });
+const ev = (app, kind, extra = {}) => app.emit('haven:call', { kind, sessionId: SESSION, from: BO, ...extra });
+const callState = (app) => J(app.ev('({ringing: call.ringing, connecting: call.connecting, inCall: call.inCall, session: call.session, roster: [...call.roster].sort(), name: call.name})'));
+
+test('calls: an incoming invite rings with the caller\'s name, and declining silences it everywhere', async () => {
+  const { app } = await callOn();
+  await ev(app, 'invite', { roster: [BO, ME], groupName: 'Bo' });
+  assert.deepEqual(callState(app).ringing, true);
+  assert.match(app.q('#modal-root .call-overlay').textContent, /Incoming call/i);
+  assert.match(app.q('#modal-root .call-overlay').textContent, /Bo/);
+  assert.equal(lastCall(app, 'qa_set_call_state').args.ringing, true, 'the QA channel is told');
+  await click(app, [...app.qa('#modal-root .call-overlay button')].find((b) => /Decline/i.test(b.textContent)));
+  assert.equal(callState(app).ringing, false);
+  assert.equal(app.q('#modal-root').children.length, 0);
+  assert.ok(lastCall(app, 'call_handled_elsewhere'), 'my other devices stop ringing');
+  assert.equal(lastCall(app, 'call_hangup').args.sessionId, SESSION);
+});
+
+test('calls: a session already left is not re-rung by retransmitted invites', async () => {
+  const { app } = await callOn();
+  await ev(app, 'invite', { roster: [BO, ME] });
+  await click(app, [...app.qa('#modal-root .call-overlay button')].find((b) => /Decline/i.test(b.textContent)));
+  await ev(app, 'invite', { roster: [BO, ME] });
+  assert.equal(callState(app).ringing, false, 'the tombstone suppresses a replay');
+  await ev(app, 'invite', { sessionId: 'other-session', roster: [BO, ME] });
+  assert.equal(callState(app).ringing, true, 'a genuinely new session still rings');
+});
+
+test('calls: an unanswered ring ends as a missed call after the ring timeout', async () => {
+  const { app } = await callOn();
+  await ev(app, 'invite', { roster: [BO, ME], groupName: 'Bo' });
+  await app.timers.advance(59_000);
+  assert.equal(callState(app).ringing, true);
+  await app.timers.advance(2_000);
+  assert.equal(callState(app).ringing, false);
+  assert.match(app.q('#toast').textContent, /Missed call/i);
+});
+
+test('calls: another of my devices answering silences this ring, but never ends an answered call', async () => {
+  const { app } = await callOn();
+  await ev(app, 'invite', { roster: [BO, ME] });
+  await ev(app, 'handledElsewhere', { sessionId: 'someone-else' });
+  assert.equal(callState(app).ringing, true, 'a different session is ignored');
+  await ev(app, 'handledElsewhere');
+  assert.equal(callState(app).ringing, false);
+
+  const b = await callOn();
+  await ev(b.app, 'invite', { sessionId: 's2', roster: [BO, ME] });
+  await click(b.app, [...b.app.qa('#modal-root .call-overlay button')].find((x) => /Accept/i.test(x.textContent)));
+  assert.equal(callState(b.app).inCall, true);
+  await ev(b.app, 'handledElsewhere', { sessionId: 's2' });
+  assert.equal(callState(b.app).inCall, true, 'a late "handled elsewhere" cannot hang up a conversation in progress');
+  await ev(b.app, 'endedElsewhere', { sessionId: 'unrelated' });
+  assert.equal(callState(b.app).inCall, true);
+  await ev(b.app, 'endedElsewhere', { sessionId: 's2' });
+  assert.equal(callState(b.app).inCall, false, 'but my account ending the session does end it');
+});
+
+test('calls: accepting acquires media, tells the caller, and joins the mesh with a connection per peer', async () => {
+  const { app } = await callOn();
+  await ev(app, 'invite', { roster: [BO, ME], groupName: 'Bo' });
+  await click(app, [...app.qa('#modal-root .call-overlay button')].find((b) => /Accept/i.test(b.textContent)));
+  assert.deepEqual(callState(app).inCall, true);
+  assert.deepEqual(J(lastCall(app, 'call_accept').args), { sessionId: SESSION, to: [BO] });
+  assert.ok(lastCall(app, 'call_handled_elsewhere'));
+  assert.ok(app.rtc.length >= 1, 'a peer connection exists for the caller');
+  assert.ok(app.q('#modal-root .call-screen'), 'the in-call screen replaced the ring');
+  assert.equal(app.ctx.__media.gum[0].audio, true);
+  assert.equal(lastCall(app, 'call_camera_state').args.on, false, 'calls start audio-only and say so');
+  // the smaller hex is the offerer: ME (aaaa…) < BO (bbbb…) so we send the offer
+  assert.equal(lastCall(app, 'call_signal').args.kind, 'offer');
+});
+
+test('calls: the callee side answers an offer and applies ICE candidates only for the live session', async () => {
+  const { app } = await callOn();
+  await ev(app, 'invite', { roster: [BO, ME] });
+  await click(app, [...app.qa('#modal-root .call-overlay button')].find((b) => /Accept/i.test(b.textContent)));
+  const n0 = app.calls.filter((c) => c.cmd === 'call_signal').length;
+  await ev(app, 'offer', { sessionId: 'stale', json: JSON.stringify({ sdp: 'x' }) });
+  assert.equal(app.calls.filter((c) => c.cmd === 'call_signal').length, n0, 'a signal for another session is dropped');
+  await ev(app, 'offer', { json: JSON.stringify({ t: 'offer', sdp: 'their-offer' }) });
+  const pc = app.rtc.at(-1);
+  assert.equal(pc.remote.sdp, 'their-offer');
+  assert.equal(lastCall(app, 'call_signal').args.kind, 'answer');
+  assert.equal(JSON.parse(lastCall(app, 'call_signal').args.json).sdp, 'answer-sdp');
+  await ev(app, 'ice', { json: JSON.stringify({ c: 'cand', m: 0, i: 'audio' }) });
+  assert.equal(pc.ice.length, 1);
+  await ev(app, 'ice', { sessionId: 'stale', json: JSON.stringify({ c: 'late' }) });
+  assert.equal(pc.ice.length, 1);
+  await ev(app, 'answer', { json: JSON.stringify({ sdp: 'their-answer' }) });
+  assert.equal(pc.remote.sdp, 'their-answer');
+});
+
+test('calls: a peer hanging up the last other participant ends the call; a stale BYE is ignored', async () => {
+  const { app } = await callOn();
+  await ev(app, 'invite', { roster: [BO, ME] });
+  await click(app, [...app.qa('#modal-root .call-overlay button')].find((b) => /Accept/i.test(b.textContent)));
+  await ev(app, 'hangup', { sessionId: 'old-call' });
+  assert.equal(callState(app).inCall, true, 'a BYE from an earlier call does not hang up this one');
+  const tracks = app.ev('call.localStream.getTracks()');
+  assert.ok(tracks.length > 0);
+  await ev(app, 'hangup', {});
+  assert.equal(callState(app).inCall, false);
+  assert.equal(app.rtc.at(-1).closed, true, 'connections are closed');
+  assert.equal(app.ev('call.localStream'), null);
+  assert.ok(tracks.every((t) => t.stopped), 'the microphone is released');
+});
+
+test('calls: hanging up tears down locally first, even if the backend call fails', async () => {
+  const { app } = await callOn({ be: { call_hangup: () => { throw new Error('boom'); } } });
+  await ev(app, 'invite', { roster: [BO, ME] });
+  await click(app, [...app.qa('#modal-root .call-overlay button')].find((b) => /Accept/i.test(b.textContent)));
+  await app.ev('callHangup()');
+  await app.settle();
+  assert.equal(callState(app).inCall, false, 'leaving a call is a right, not a request');
+  assert.equal(app.q('#modal-root').children.length, 0);
+});
+
+test('calls: both people calling each other at once connect instead of ringing forever (glare)', async () => {
+  const { app } = await callOn();
+  await app.ev(`callStart([${JSON.stringify(BO)}], "Bo", false)`);
+  assert.equal(callState(app).connecting || callState(app).inCall, true);
+  assert.equal(lastCall(app, 'call_group_invite').args.to[0], BO);
+  await ev(app, 'invite', { sessionId: 'their-own-session', roster: [BO, ME] });
+  const s = callState(app);
+  assert.equal(s.inCall, true);
+  assert.equal(s.session, `glare:${ME}-${BO}`, 'both ends derive the same session id from the sorted hexes');
+  assert.equal(lastCall(app, 'call_accept').args.sessionId, s.session);
+});
+
+test('calls: an outgoing call that nobody answers hangs up after the dial timeout', async () => {
+  const { app } = await callOn({ be: { call_group_invite: null } });
+  app.ctx.__media.deny = true;
+  await app.ev(`callStart([${JSON.stringify(BO)}], "Bo", false)`);
+  assert.equal(callState(app).connecting, true);
+  assert.match(app.q('#modal-root .call-screen').textContent, /Calling Bo/i);
+  await app.timers.advance(61_000);
+  assert.equal(callState(app).connecting, false);
+  assert.match(app.q('#toast').textContent, /No answer/i);
+  assert.ok(lastCall(app, 'call_hangup'), 'the far side stops ringing');
+});
+
+test('calls: when the other side accepts our call the mesh connects and sends an offer', async () => {
+  const { app } = await callOn();
+  await app.ev(`callStart([${JSON.stringify(BO)}], "Bo", false)`);
+  const session = app.ev('call.session');
+  await app.emit('haven:call', { kind: 'accept', sessionId: session, from: BO });
+  assert.equal(callState(app).inCall, true);
+  assert.equal(lastCall(app, 'call_signal').args.kind, 'offer', 'the smaller hex offers');
+  await app.emit('haven:call', { kind: 'camera', sessionId: session, from: BO, on: false });
+  assert.equal(app.ev('call.camOff["' + BO + '"]'), true, 'their camera-off state is remembered');
+  await app.emit('haven:call', { kind: 'camera', sessionId: session, from: BO, on: true });
+  assert.equal(app.ev('call.camOff["' + BO + '"]'), undefined);
+});
+
+test('calls: mic, camera and minimize controls behave', async () => {
+  const { app } = await callOn();
+  await ev(app, 'invite', { roster: [BO, ME] });
+  await click(app, [...app.qa('#modal-root .call-overlay button')].find((b) => /Accept/i.test(b.textContent)));
+  await app.ev('toggleMic()');
+  assert.equal(app.ev('call.micOn'), false);
+  assert.equal(app.ev('call.localStream.getAudioTracks()[0].enabled'), false);
+  await app.ev('toggleMic()');
+  assert.equal(app.ev('call.micOn'), true);
+  await app.ev('toggleCam()');
+  assert.equal(app.ev('call.camOn'), true);
+  assert.equal(lastCall(app, 'call_camera_state').args.on, true, 'peers are told the camera went on');
+  await click(app, app.q('.call-topbar .call-chip'));
+  assert.equal(app.ev('call.minimized'), true);
+  assert.equal(app.q('#tab-call').hidden, false, 'the call docks into a Call tab');
+  await click(app, '#tab-call');
+  assert.equal(app.ev('call.minimized'), false);
+  assert.ok(app.q('#modal-root .call-screen'));
+});
+
+test('calls: the QA driver can place, answer and end calls and report the rendered layout', async () => {
+  const { app } = await callOn();
+  await app.emit('haven:qa-ui', { action: 'call_start', to: BO.toUpperCase() });
+  assert.equal(callState(app).connecting || callState(app).inCall, true);
+  await app.emit('haven:qa-ui', { action: 'call_minimize' });
+  assert.equal(app.ev('call.minimized'), true);
+  await app.emit('haven:qa-ui', { action: 'call_expand' });
+  assert.equal(app.ev('call.minimized'), false);
+  await app.emit('haven:qa-ui', { action: 'probe' });
+  const probe = JSON.parse(lastCall(app, 'qa_set_call_state').args.trail.replace(/^probe:/, ''));
+  assert.equal(probe.screen, true);
+  assert.equal(probe.solo, true, 'a 1:1 call is the full-bleed layout');
+  assert.equal(probe.grid, false);
+  await app.emit('haven:qa-ui', { action: 'call_end' });
+  assert.equal(callState(app).connecting || callState(app).inCall, false);
+});
+
+test('calls: three or more people use the tile grid, and adding to a call re-broadcasts the roster', async () => {
+  const CY = HEX('c');
+  const { app } = await callOn({ state: { ...withDm().state, contacts: [...withDm().state.contacts, { id_hex: CY, name: 'Cy', verify_hex: 'v', emoji: '', avatar: '', bio: '', link: '' }] } });
+  await ev(app, 'invite', { roster: [BO, CY, ME] });
+  await click(app, [...app.qa('#modal-root .call-overlay button')].find((b) => /Accept/i.test(b.textContent)));
+  assert.ok(app.q('.call-grid'), 'a group call uses the grid');
+  assert.match(app.q('.call-title .st').textContent, /3/);
+  const before = app.calls.filter((c) => c.cmd === 'call_group_invite').length;
+  await app.ev('addToCall(["' + HEX('d') + '"])');
+  assert.equal(app.calls.filter((c) => c.cmd === 'call_group_invite').length, before + 1);
+  assert.ok(J(lastCall(app, 'call_group_invite').args.roster).includes(HEX('d')));
+  await app.ev('addToCall(["' + HEX('d') + '"])');
+  assert.equal(app.calls.filter((c) => c.cmd === 'call_group_invite').length, before + 1, 'an existing participant is not re-invited');
+});
+
+test('calls: the loudest participant is highlighted only after two consecutive polls', async () => {
+  const { app } = await callOn();
+  await ev(app, 'invite', { roster: [BO, ME] });
+  await click(app, [...app.qa('#modal-root .call-overlay button')].find((b) => /Accept/i.test(b.textContent)));
+  const pc = app.rtc.at(-1);
+  pc.statsRows = [{ type: 'inbound-rtp', kind: 'audio', audioLevel: 0.2 }];
+  await app.timers.advance(1000); await app.settle();
+  assert.equal(app.ev('call.activeSpeaker'), null, 'one poll is not enough');
+  await app.timers.advance(1000); await app.settle();
+  assert.equal(app.ev('call.activeSpeaker'), BO);
+  pc.statsRows = [{ type: 'inbound-rtp', kind: 'audio', audioLevel: 0.001 }];
+  await app.timers.advance(1000); await app.settle();
+  assert.equal(app.ev('call.activeSpeaker'), null, 'silence clears it');
+});
+
+test('calls: hairpin frames are byte-compatible with the phones (7-byte header, 16-bit seq, 32-bit pts)', async () => {
+  const { app } = await boot();
+  const packed = app.ev('new Uint8Array(packHairpin(1, 0x0102, 0x0A0B0C0D, new Uint8Array([9, 8, 7])))');
+  assert.deepEqual([...packed], [1, 0x01, 0x02, 0x0A, 0x0B, 0x0C, 0x0D, 9, 8, 7]);
+  const back = app.ev('(() => { const u = unpackHairpin(packHairpin(2, 65535, 5, new Uint8Array([1, 2]))); return { type: u.type, seq: u.seq, payload: [...u.payload] }; })()');
+  assert.deepEqual(J(back), { type: 2, seq: 65535, payload: [1, 2] });
+  assert.equal(app.ev('unpackHairpin(new Uint8Array([1, 0, 0]).buffer)'), null, 'shorter than the header');
+  assert.equal(app.ev('unpackHairpin(new Uint8Array([9, 0, 0, 0, 0, 0, 0, 1]).buffer)'), null, 'unknown frame type');
+});
+
+test('calls: the hairpin URL is derived from the fabric origin and only for http(s)', async () => {
+  const { app } = await boot();
+  assert.equal(app.ev('hairpinWsUrl()'), '');
+  app.ctx.__havenFabricDerp = ['https://relay.example.com/'];
+  assert.equal(app.ev('fabricPublicBase()'), 'https://relay.example.com');
+  assert.equal(app.ev('hairpinWsUrl()'), 'wss://relay.example.com/webrtc/hairpin');
+  app.ctx.__havenFabricDerp = ['http://10.0.0.5:8080'];
+  assert.equal(app.ev('hairpinWsUrl()'), 'ws://10.0.0.5:8080/webrtc/hairpin');
+  app.ctx.__havenFabricDerp = ['ftp://nope'];
+  assert.equal(app.ev('hairpinWsUrl()'), '');
+});

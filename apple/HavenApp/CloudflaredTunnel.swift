@@ -23,6 +23,13 @@ import AppKit
 final class CloudflaredTunnel: ObservableObject {
     static let shared = CloudflaredTunnel()
 
+    #if DEBUG
+    /// Hosted unit tests only: let `apply` / `startQuickDerp` run offline, with `testBinary` (a stand-in
+    /// script) as the only thing they may spawn — never a real connector, never the network.
+    nonisolated(unsafe) static var testAllowOffline = false
+    nonisolated(unsafe) static var testBinary: URL?
+    #endif
+
     // Foundation.Process (subprocess spawn) exists on macOS only — never declare it on iOS
     // or Xcode Cloud's Haven iOS archive fails with "Cannot find type 'Process' in scope".
     #if os(macOS)
@@ -168,7 +175,12 @@ final class CloudflaredTunnel: ObservableObject {
         // HAVEN_NO_NET: a front door is a `cloudflared` connector process holding a live tunnel to
         // Cloudflare's edge — the most outward-facing thing the app can do. `RelayHost` is the only
         // caller and is already gated; this is the door itself.
-        guard !HavenNet.offline else { return FrontDoorResult(announceURL: nil, spawnedConnector: false) }
+        #if DEBUG
+        let allowed = !HavenNet.offline || Self.testAllowOffline
+        #else
+        let allowed = !HavenNet.offline
+        #endif
+        guard allowed else { return FrontDoorResult(announceURL: nil, spawnedConnector: false) }
         await stopFully()
         // Brief settle so the previous free hostname/edge releases before we mint a new one.
         try? await Task.sleep(nanoseconds: 500_000_000)
@@ -316,7 +328,12 @@ final class CloudflaredTunnel: ObservableObject {
     /// Sets `derpPublicURL` + `dualTunnelNote` so Settings shows **both** live hostnames —
     /// dual free tunnels must never be invisible.
     func startQuickDerp(port: UInt16) async -> String? {
-        guard !HavenNet.offline else { return nil }   // HAVEN_NO_NET: no second free tunnel either
+        #if DEBUG
+        let allowed = !HavenNet.offline || Self.testAllowOffline
+        #else
+        let allowed = !HavenNet.offline
+        #endif
+        guard allowed else { return nil }   // HAVEN_NO_NET: no second free tunnel either
         #if os(macOS)
         stopDerpOnly()
         usesPathProxy = false
@@ -779,9 +796,9 @@ final class CloudflaredTunnel: ObservableObject {
         return nil
     }
 
-    private enum Mode { case quick, named }
+    enum Mode { case quick, named }
 
-    private func attach(proc: Process, ready: ReadyBox, mode: Mode, teeLog: URL? = nil) -> Bool {
+    func attach(proc: Process, ready: ReadyBox, mode: Mode, teeLog: URL? = nil) -> Bool {
         let out = Pipe()
         let err = Pipe()
         proc.standardOutput = out
@@ -824,7 +841,7 @@ final class CloudflaredTunnel: ObservableObject {
     }
 
     /// Rotate if huge, truncate-create, return path for a named log under logs/.
-    nonisolated private static func prepareLogFile(name: String) -> URL {
+    nonisolated static func prepareLogFile(name: String) -> URL {
         let dir = logsDirectory()
         let url = dir.appendingPathComponent(name)
         let fm = FileManager.default
@@ -841,11 +858,11 @@ final class CloudflaredTunnel: ObservableObject {
         return url
     }
 
-    nonisolated private static func appendLogFile(_ url: URL, line: String) {
+    nonisolated static func appendLogFile(_ url: URL, line: String) {
         appendLogFile(url, text: line.hasSuffix("\n") ? line : line + "\n")
     }
 
-    nonisolated private static func appendLogFile(_ url: URL, text: String) {
+    nonisolated static func appendLogFile(_ url: URL, text: String) {
         guard let data = text.data(using: .utf8) else { return }
         guard let fh = try? FileHandle(forWritingTo: url) else {
             // Create if missing (race with prepare).
@@ -862,7 +879,7 @@ final class CloudflaredTunnel: ObservableObject {
     /// **Never** assign `standardOutput` / `standardError` after `run()` — Foundation's
     /// NOCOPY_SETTER throws and aborts the whole app (crash we hit on stopFully/health recover).
     /// Call from a background queue (blocks up to ~1.5s).
-    nonisolated private static func hardStopProcess(_ proc: Process?) {
+    nonisolated static func hardStopProcess(_ proc: Process?) {
         guard let proc else { return }
         let pid = proc.processIdentifier
         guard pid > 1 else { return }
@@ -1012,6 +1029,9 @@ final class CloudflaredTunnel: ObservableObject {
     }
 
     nonisolated private static func findBinary() -> URL? {
+        #if DEBUG
+        if let stand = testBinary { return stand }
+        #endif
         let name = "cloudflared"
         if let helpers = Bundle.main.privateFrameworksURL?
             .deletingLastPathComponent()
@@ -1066,7 +1086,7 @@ final class CloudflaredTunnel: ObservableObject {
         return nil
     }
 
-    private final class ReadyBox: @unchecked Sendable {
+    final class ReadyBox: @unchecked Sendable {
         private let lock = NSLock()
         private var _url: String?
         private var _named = false

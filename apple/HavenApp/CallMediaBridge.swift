@@ -25,7 +25,7 @@ final class CallMediaBridge {
     enum FrameType: UInt8 { case audio = 1, videoKey = 2, videoDelta = 3 }
 
     /// Remotes we are actively relaying to/from (ICE failed for these peers).
-    private var activePeers: Set<String> = []
+    private(set) var activePeers: Set<String> = []
     private var audioSeq: UInt16 = 0
     private var videoSeq: UInt16 = 0
 
@@ -133,6 +133,12 @@ final class CallMediaBridge {
         return out
     }
     func qaResetCallStats() { qaInboundBytes.removeAll(); qaDecoded.removeAll() }
+    /// Tests only: count `remote` as relayed without opening a hairpin or starting the audio engine.
+    func qaAttachPeer(_ remote: String) { activePeers.insert(remote) }
+    /// Tests only: the capture-side converter the full-duplex engine builds, without starting an engine.
+    func qaInstallCaptureConverter(from format: AVAudioFormat) {
+        captureConverter = AVAudioConverter(from: format, to: wireFormat)
+    }
     #endif
 
     // MARK: - Audio
@@ -147,7 +153,17 @@ final class CallMediaBridge {
         startAudio()
     }
 
+    #if DEBUG
+    /// Hosted unit tests only: never start the relay's audio engines. A voice-processing engine started
+    /// in the sandboxed test host (no microphone entitlement) can park the main thread on the audio HAL
+    /// for minutes, and nothing in a test wants sound.
+    nonisolated(unsafe) static var suppressAudioEngineForTests = false
+    #endif
+
     private func startAudio() {
+        #if DEBUG
+        if Self.suppressAudioEngineForTests { return }
+        #endif
         // `AVAudioEngine.start()` reaches RemoteIO, which ABORTS the process when the audio server
         // doesn't answer (a field crash: `AURemoteIO::Start` → `_ReportRPCTimeout`). Only start it
         // once the call's audio gate has seen the device answer; until then the relay carries video
@@ -244,6 +260,9 @@ final class CallMediaBridge {
     /// liveness clock (`silenceSecs`, which ends a relayed call after 20 s of nothing) must keep seeing
     /// us while we are present but cannot talk.
     private func startListenOnlyAudio() {
+        #if DEBUG
+        if Self.suppressAudioEngineForTests { return }
+        #endif
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         engine.attach(player)
@@ -261,7 +280,7 @@ final class CallMediaBridge {
         startSilenceUplink()
     }
 
-    private func startSilenceUplink() {
+    func startSilenceUplink() {
         silenceTimer?.invalidate()
         let frame = Data(count: Self.silenceFrameBytes)
         lastCapture.reset()
@@ -307,7 +326,7 @@ final class CallMediaBridge {
     }
 
     /// Downsample a HW capture buffer to 16 kHz mono Int16 and ship 20 ms frames.
-    private func onCapturedAudio(_ buf: AVAudioPCMBuffer) {
+    func onCapturedAudio(_ buf: AVAudioPCMBuffer) {
         guard !activePeers.isEmpty, let conv = captureConverter else { return }
         lastCapture.mark()
         let ratio = wireFormat.sampleRate / buf.format.sampleRate
@@ -401,7 +420,7 @@ final class CallMediaBridge {
         return s
     }
 
-    private func encodeLocal(_ pixelBuffer: CVPixelBuffer, ptsNs: Int64) {
+    func encodeLocal(_ pixelBuffer: CVPixelBuffer, ptsNs: Int64) {
         guard !activePeers.isEmpty else { return }
         let w = Int32(CVPixelBufferGetWidth(pixelBuffer)), h = Int32(CVPixelBufferGetHeight(pixelBuffer))
         guard let session = ensureEncoder(width: w, height: h) else { return }
@@ -456,7 +475,7 @@ final class CallMediaBridge {
 
     // MARK: - Inbound
 
-    private func ingest(remote: String, frame: Data) {
+    func ingest(remote: String, frame: Data) {
         guard let (type, seq, _, payload) = Self.unpack(frame) else { return }
         lastInboundAt[remote] = Date()
         #if DEBUG
@@ -472,7 +491,7 @@ final class CallMediaBridge {
         }
     }
 
-    private func decodeRemote(remote: String, annexB: Data, isKey: Bool) {
+    func decodeRemote(remote: String, annexB: Data, isKey: Bool) {
         // The far end's ONE relayed stream changes shape mid-call: camera (e.g. 640x480) → screen
         // share (576x1280) → camera. A decompression session is bound to the SPS it was created
         // from, so a keyframe declaring different dimensions gets a fresh decoder; reusing the old
@@ -542,24 +561,44 @@ final class CallMediaBridge {
 /// Reorders audio frames within a small window and paces them out, so brief loss/jitter on the
 /// WebSocket doesn't turn into stutter. Deliberately shallow (≈60 ms) — a voice call values low
 /// latency over gap-free playout.
-private struct JitterBuffer {
+struct JitterBuffer {
     private var pending: [UInt16: Data] = [:]
     private var next: UInt16?
     private let depth = 3
 
     mutating func reset() { pending.removeAll(); next = nil }
 
+    /// The sequence number that comes first among `keys` in 16-bit serial-number order (RFC 1982 style),
+    /// so a window straddling the 65535 -> 0 wrap still starts at 65534, not at 0.
+    private func earliest() -> UInt16? {
+        pending.keys.reduce(nil as UInt16?) { best, k in
+            guard let best else { return k }
+            let d = best &- k
+            return (d != 0 && d < 0x8000) ? k : best
+        }
+    }
+
     mutating func push(seq: UInt16, payload: Data) -> [Data] {
+        // A frame behind the playhead (late, or a duplicate of one already played) can never be
+        // played; keeping it would only count towards the overflow and drag the playhead backwards.
+        if let n = next, n != seq, n &- seq < 0x8000 { return [] }
         pending[seq] = payload
         if next == nil, pending.count >= depth {
-            next = pending.keys.min()
+            next = earliest()
         }
         var out: [Data] = []
-        while let n = next, let p = pending.removeValue(forKey: n) {
-            out.append(p)
-            next = n &+ 1
-            // Drop the buffer if it grows unbounded (a lost frame we'll never get).
-            if pending.count > depth * 4, let lowest = pending.keys.min() { next = lowest }
+        while let n = next {
+            if let p = pending.removeValue(forKey: n) {
+                out.append(p)
+                next = n &+ 1
+            } else if pending.count > depth * 4, let first = earliest() {
+                // The frame we are waiting for is lost for good (the sender drops a failed send, it
+                // never retries): skip the hole instead of stalling playback and growing the buffer
+                // without bound behind it.
+                next = first
+            } else {
+                break
+            }
         }
         return out
     }
@@ -671,7 +710,7 @@ extension CallMediaBridge {
         return sample
     }
 
-    private static func splitAnnexB(_ data: Data) -> [[UInt8]] {
+    static func splitAnnexB(_ data: Data) -> [[UInt8]] {
         let b = [UInt8](data)
         var nals: [[UInt8]] = []
         var i = 0

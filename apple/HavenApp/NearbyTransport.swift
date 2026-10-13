@@ -510,9 +510,17 @@ extension NearbyTransport: MCNearbyServiceAdvertiserDelegate {
     }
 }
 
+extension NearbyTransport {
+    /// Both sides of a pair discover each other at once; if both invited, Multipeer would build two
+    /// sessions that fight. Only the lexicographically smaller display name (the node id hex) invites,
+    /// so for any two distinct peers exactly one of them does. Equal names (the same identity on two
+    /// devices) never invite either way — see reference_multipeer_same_identity_tiebreak.
+    static func shouldInvite(local: String, remote: String) -> Bool { local < remote }
+}
+
 extension NearbyTransport: MCNearbyServiceBrowserDelegate {
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
-        if self.peerID.displayName < peerID.displayName {
+        if Self.shouldInvite(local: self.peerID.displayName, remote: peerID.displayName) {
             browser.invitePeer(peerID, to: session, withContext: nil, timeout: 15)
         }
     }

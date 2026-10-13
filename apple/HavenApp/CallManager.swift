@@ -756,7 +756,7 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     /// Nobody answered and no hangup ever arrived — stop ringing and record a missed call.
-    private func ringTimedOut() {
+    func ringTimedOut() {
         guard active, ringing, !inCall else { return }
         HavenLog.call("ring timeout after \(Int(Self.ringTimeoutSecs))s — ending as missed (session=\(sessionId.prefix(12)))")
         let who = peerName
@@ -1209,7 +1209,7 @@ final class CallManager: NSObject, ObservableObject {
 
     /// Decide the active speaker from this poll's loudest remote peer and our own mic level, with a
     /// short debounce so a momentary blip doesn't steal the highlight.
-    private func resolveActiveSpeaker(bestPeer: String, bestRemote: Double, myLevel: Double) {
+    func resolveActiveSpeaker(bestPeer: String, bestRemote: Double, myLevel: Double) {
         // Candidate = whoever is loudest this tick, if above threshold. "" represents me.
         var candidate: String?
         if myLevel >= speakingThreshold && (!muted) && myLevel >= bestRemote {
@@ -1902,6 +1902,9 @@ final class CallManager: NSObject, ObservableObject {
     /// in, and every teardown handler is gated on the session id matching.
     private(set) var qaLastCallEvent: String = "none"
     func qaNoteCallEvent(_ what: String) { qaLastCallEvent = what }
+    /// Tests only: the pairwise connection to `hex`, so a test can play WebRTC's part (ICE state changes,
+    /// remote tracks arriving) against the real call state machine.
+    func qaPeerCall(_ hex: String) -> WebRTCCall? { peers[hex]?.call }
 
     func qaSnapshot() -> [String: Any] {
         for (hex, conn) in peers {
@@ -2055,6 +2058,9 @@ final class CallManager: NSObject, ObservableObject {
         stopSpeakerDetection()
         CallMediaBridge.shared.stopAll()
         hairpinPeers.removeAll()
+        // The last call's ICE verdicts die with it: `mediaConnected` reads them, and a stale
+        // `.connected` would have the next call (and an idle phone) claim media it does not have.
+        lastPeerState.removeAll()
         CallHairpin.shared.closeAll()
         inviteTimer?.invalidate(); inviteTimer = nil
         if screenShareOn { ScreenShareManager.shared.stop() }

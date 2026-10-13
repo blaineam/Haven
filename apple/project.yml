@@ -525,6 +525,8 @@ targets:
       # Low Data Mode preference x path resolution; Shazam retry queue rules.
       - path: HavenApp/LowDataPolicy.swift
       - path: HavenApp/ShazamRetryPolicy.swift
+      # Feed column width cap for wide canvases (pure CoreGraphics).
+      - path: HavenApp/FeedColumnWidth.swift
       # "Already optimized" probe (+ the encoder constants it measures against).
       - path: HavenApp/MediaOptimizationTarget.swift
       - path: HavenApp/VideoEncoderTargets.swift

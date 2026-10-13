@@ -260,6 +260,14 @@ struct SyncDetailView: View {
     }
 }
 
+extension View {
+    /// Caps a feed-width block to `FeedColumnWidth.maxColumn` and centers it; narrower canvases are
+    /// left exactly as they were (the cap is a max, not a fixed width).
+    func havenFeedColumn() -> some View {
+        frame(maxWidth: FeedColumnWidth.maxColumn).frame(maxWidth: .infinity)
+    }
+}
+
 struct FeedView: View {
     @ObservedObject private var store = FeedStore.shared
     @ObservedObject private var settings = SettingsStore.shared
@@ -440,6 +448,7 @@ struct FeedView: View {
                     .animation(bulkArriving ? nil : HavenTheme.bouncy, value: store.items.count)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 130)
+                    .havenFeedColumn()
                 }
                 // KEEP THE READER'S PLACE when posts arrive.
                 //
@@ -830,6 +839,7 @@ struct FeedView: View {
                 }
             }
             .padding(.horizontal, 16).padding(.vertical, 12)
+            .havenFeedColumn()
             // NO band behind the composer: a material slab here read as a detached grey bar pasted
             // under the gradient. The field / + / send each carry their own surface and float over
             // the backdrop instead. contentShape keeps the whole bar a drop target without one.
@@ -2612,6 +2622,7 @@ struct UserProfileView: View {
                 }
                 .scrollTargetLayout()
                 .padding(16)
+                .havenFeedColumn()
             }
             // Hold the reader's place when posts arrive — same reasoning as the main feed: this
             // list is newest-first, so anything new is inserted ABOVE what is being read, and a

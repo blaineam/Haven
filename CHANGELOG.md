@@ -9,6 +9,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.1 (unreleased)
 
+### Changed — wide screens: the feed is a centered 600pt column instead of edge to edge
+
+On iPad, a Mac window, a folded-open dual-screen phone and large Android tablets / desktop windows the post
+column used to span the whole canvas, so every photo and video was huge and you scrolled constantly to see one
+in full. The feed is still ONE column (the centered-post autoplay depends on it) but is now capped at 600 and
+centered, with the backdrop still full-bleed; the composer follows the same column and the title bar stays full
+width. Phones and any canvas 600 wide or narrower are unchanged. The width comes from the layout, not a size
+class (`FeedColumnWidth` on Apple, `FeedColumn` on Android, `--feed-col` on desktop). Posts on a person's profile
+use the same cap.
+
 ### Fixed — iPhone and Mac: a finished call no longer leaves the next one reading "Connected"
 
 The call screen decides between "Connecting media…" and "Connected" from the ICE state of each person in

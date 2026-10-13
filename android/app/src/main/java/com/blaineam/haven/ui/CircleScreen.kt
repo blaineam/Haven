@@ -315,10 +315,13 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                     }
                 }
                 // Stories + pending scroll WITH the posts so there's maximum room to browse.
+                BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
+                // Wide canvases cap the single column and centre it (FeedColumn); phones keep 16dp.
+                val feedPad = com.blaineam.haven.core.FeedColumn.horizontalPaddingDp(maxWidth.value).dp
                 LazyColumn(
-                    Modifier.fillMaxWidth().weight(1f),
+                    Modifier.fillMaxSize(),
                     state = feedState,
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = feedPad, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     item { StoriesTray(groups = storyGroups, onAddStory = { openStoryCamera() }, onOpen = { viewingStory = it }) }
@@ -353,9 +356,12 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                         PostCard(post, active, reportsByTarget[post.id].orEmpty(), videoActive = post.id == centeredPost)
                     }
                 }
+                }
             }
 
             if (!locked) {
+            // Composer block follows the capped feed column on wide canvases (no-op on phones).
+            Column(Modifier.widthIn(max = com.blaineam.haven.core.FeedColumn.MAX_DP.dp).fillMaxWidth().align(Alignment.CenterHorizontally)) {
             // Sits ABOVE the staged previews: while it is showing, the thumbnails for those items
             // don't exist yet, so this is the only thing telling you the attach is alive.
             MediaProcessingCard(Modifier.padding(horizontal = 16.dp))
@@ -448,6 +454,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                 canPost = draft.isNotBlank() || pendingMedia.isNotEmpty() || pendingMusic != null,
                 onPost = { postNow() },
             )
+            }
             }
         }
 

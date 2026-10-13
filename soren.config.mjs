@@ -174,6 +174,7 @@ export default {
       cmd: 'node',
       args: ['Scripts/apple-unit-cov.mjs'],
       env: { DEVELOPER_DIR: '/Applications/Xcode.app/Contents/Developer' },
+      coverageFloor: 66, // ratchet up, never down; measured 66.5% 2026-10-12
       description: 'macOS hosted unit tests (HavenMacUnitTests inside the isolated UI-test host) + hosted line coverage',
       tags: ['apple'],
     },
@@ -248,6 +249,7 @@ export default {
       cmd: 'node',
       args: ['Scripts/android-cov.mjs'],
       env: { JAVA_HOME: '/opt/homebrew/opt/openjdk@17', ANDROID_HOME: '/opt/homebrew/share/android-commandlinetools' },
+      coverageFloor: 21.5, // ratchet up, never down; measured 21.9% 2026-10-12
       description: 'Android JVM unit-test coverage (JaCoCo) for Haven app sources',
       tags: ['android'],
     },
@@ -282,6 +284,7 @@ export default {
       type: 'cmd',
       cmd: 'node',
       args: ['Scripts/desktop-cov.mjs'],
+      coverageFloor: 67.5, // ratchet up, never down; measured 68% (rust + app.js) 2026-10-12
       description: 'Desktop (Tauri) own-code line coverage: Rust src-tauri + ui/app.js',
     },
     'desktop-ui': {

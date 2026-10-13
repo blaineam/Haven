@@ -2800,6 +2800,7 @@ struct ProfileView: View {
                     }
                 }
                 .padding(16)
+                .havenFeedColumn()
             }
         }
         .navigationTitle("Your posts")

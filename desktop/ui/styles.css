@@ -708,7 +708,7 @@ input:focus, textarea:focus, select:focus {
 .composer.floating { max-width: var(--feed-max); margin: 0 auto; }
 .composer.floating > * { pointer-events: auto; }
 /* Circle feed only: post column + its composer share the 600px cap; DMs / You keep --feed-max. */
-#view-circle > .col-wrap { max-width: var(--feed-col); }
+#view-circle > .col-wrap, #view-you > .col-wrap { max-width: var(--feed-col); }
 .content:has(#view-circle.active) #composer-slot .composer.floating { max-width: var(--feed-col); }
 .composer-row { display: flex; gap: 10px; align-items: flex-end; }
 /* plus.circle.fill — a FILLED pink circle with a knocked-out plus. It is its own surface: no glass. */

@@ -43,6 +43,7 @@ struct YouView: View {
                     // before the process disappears is evidence rather than a hypothesis.
                     .memoryTrace { "you-tab \(feed.myPosts.count) posts / \(feed.myStories.count) stories" }
                     .padding(20)
+                    .havenFeedColumn()   // wide canvases: 600pt centered column (same cap as the home feed)
                     // Pin the content lane to EXACTLY the viewport width. A vertical ScrollView proposes
                     // UNBOUNDED width to its content, so any child that reports an intrinsic width wider
                     // than the screen made the whole page horizontally pannable (you could swipe it

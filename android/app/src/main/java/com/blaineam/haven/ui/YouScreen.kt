@@ -122,6 +122,9 @@ fun YouScreen(onAddFriend: () -> Unit) {
     }
 
     HavenBackground {
+        androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+        // Wide canvases: same centered 600dp column as the home feed (phones keep 20dp).
+        val pagePad = com.blaineam.haven.core.FeedColumn.horizontalPaddingDp(maxWidth.value, 20f).dp
         Column(
             Modifier
                 .onGloballyPositioned {
@@ -129,7 +132,7 @@ fun YouScreen(onAddFriend: () -> Unit) {
                 }
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(20.dp),
+                .padding(horizontal = pagePad, vertical = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             // Top bar: settings gear (parity with the iOS You toolbar).
@@ -233,6 +236,7 @@ fun YouScreen(onAddFriend: () -> Unit) {
 
             // (Under the hood + privacy check moved into Settings — nested where iOS keeps them.)
             Spacer(Modifier.height(24.dp))
+        }
         }
     }
 

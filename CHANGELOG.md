@@ -17,7 +17,7 @@ in full. The feed is still ONE column (the centered-post autoplay depends on it)
 centered, with the backdrop still full-bleed; the composer follows the same column and the title bar stays full
 width. Phones and any canvas 600 wide or narrower are unchanged. The width comes from the layout, not a size
 class (`FeedColumnWidth` on Apple, `FeedColumn` on Android, `--feed-col` on desktop). Posts on a person's profile
-use the same cap.
+use the same cap, and so does the whole You screen (header card, stories strip, your posts) on Apple, Android and desktop.
 
 ### Fixed — iPhone and Mac: a finished call no longer leaves the next one reading "Connected"
 

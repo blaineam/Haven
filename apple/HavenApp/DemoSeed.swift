@@ -230,10 +230,16 @@ enum DemoSeedEngine {
             p.engine?.createCircle(id: crew, name: "Weekend Crew")
             _ = try? p.engine?.addContactBundle(circleId: crew, bundle: main.myBundle())
         }
-        if let env = try? valid.first?.engine?.post(circleId: crew, body: "who's in for the cabin this weekend? ⛰️",
-                                                     media: [], music: nil, retentionSecs: nil, story: false,
-                                                     muteVideo: false, createdAt: msAgo(mins(220))) {
-            _ = try? main.receive(circleId: crew, envelope: env)
+        // Epoch-sealed, like every other friend post above: a bare post envelope cannot be opened without
+        // the author's key commit, so replay the friend's whole sync bundle (commit + re-sealed events).
+        // The bare `receive` this used to do silently dropped the cabin message from Weekend Crew.
+        if let friend = valid.first?.engine,
+           (try? friend.post(circleId: crew, body: "who's in for the cabin this weekend? ⛰️",
+                             media: [], music: nil, retentionSecs: nil, story: false,
+                             muteVideo: false, createdAt: msAgo(mins(220)))) != nil {
+            for env in friend.syncEnvelopes(circleId: crew) {
+                _ = try? main.receive(circleId: crew, envelope: env)
+            }
         }
         _ = try? main.post(circleId: crew, body: "me!! bringing the sourdough 🍞", media: [], music: nil,
                            retentionSecs: nil, story: false, muteVideo: false, createdAt: msAgo(mins(210)))

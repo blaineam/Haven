@@ -20,6 +20,14 @@ final class CallHairpin {
     var onBinary: ((_ remote: String, _ data: Data) -> Void)?
     /// Fired the instant a remote pairs, so the media bridge can start pushing frames.
     var onPaired: ((_ remote: String) -> Void)?
+    #if DEBUG
+    /// Hosted unit tests only: let `open` dial even under HAVEN_NO_NET — at a closed loopback port, never out.
+    nonisolated(unsafe) static var testAllowOffline = false
+    /// Remotes with a socket currently open or opening.
+    var qaOpenRemotes: Set<String> { Set(tasks.keys) }
+    /// Tests only: sees every frame handed to `send`, paired or not.
+    var outboundTap: ((_ remote: String, _ data: Data) -> Void)?
+    #endif
     private let session: URLSession = {
         let c = URLSessionConfiguration.default
         c.waitsForConnectivity = true
@@ -39,7 +47,12 @@ final class CallHairpin {
 
     /// Open (or keep) a hairpin to `remote` for this call session.
     func open(sessionId: String, me: String, remote: String) {
-        guard !HavenNet.offline else { return }   // HAVEN_NO_NET: no WSS to the path proxy
+        #if DEBUG
+        let allowed = !HavenNet.offline || Self.testAllowOffline
+        #else
+        let allowed = !HavenNet.offline
+        #endif
+        guard allowed else { return }   // HAVEN_NO_NET: no WSS to the path proxy
         guard !sessionId.isEmpty, !me.isEmpty, !remote.isEmpty, me != remote else { return }
         if tasks[remote] != nil { return }
         guard let base = Self.fabricBase(),
@@ -92,6 +105,9 @@ final class CallHairpin {
     /// Send one media frame to a paired remote (fire-and-forget; real-time media tolerates loss,
     /// so a failed send is dropped, not retried — retrying would only add latency to a live call).
     func send(remote: String, _ data: Data) {
+        #if DEBUG
+        outboundTap?(remote, data)
+        #endif
         guard paired.contains(remote), let task = tasks[remote] else { return }
         task.send(.data(data)) { _ in }
     }
@@ -110,6 +126,32 @@ final class CallHairpin {
         paired.removeAll()
     }
 
+    /// One inbound WebSocket message from `remote`: a JSON control line (pairing, errors) or an
+    /// opaque binary media frame. Internal so tests can drive it without a socket.
+    func handleMessage(_ message: URLSessionWebSocketTask.Message, remote: String) {
+        switch message {
+        case .string(let text):
+            if let data = text.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if obj["paired"] as? Bool == true
+                    || (obj["ok"] as? Bool == true && obj["waiting"] as? Bool != true) {
+                    if paired.insert(remote).inserted {
+                        HavenLog.relay("hairpin paired \(remote.prefix(8))…")
+                        onPaired?(remote)
+                    }
+                }
+                if let err = obj["err"] as? String {
+                    HavenLog.relay("hairpin err \(remote.prefix(8)): \(err)")
+                }
+            }
+        case .data(let d):
+            // Inbound media frame — hand to the bridge to decode into audio/video.
+            onBinary?(remote, d)
+        @unknown default:
+            break
+        }
+    }
+
     private func receiveLoop(remote: String, task: URLSessionWebSocketTask) {
         task.receive { [weak self] result in
             guard let self else { return }
@@ -118,27 +160,7 @@ final class CallHairpin {
                 Task { @MainActor in self.close(remote: remote) }
             case .success(let message):
                 Task { @MainActor in
-                    switch message {
-                    case .string(let text):
-                        if let data = text.data(using: .utf8),
-                           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                            if obj["paired"] as? Bool == true
-                                || (obj["ok"] as? Bool == true && obj["waiting"] as? Bool != true) {
-                                if self.paired.insert(remote).inserted {
-                                    HavenLog.relay("hairpin paired \(remote.prefix(8))…")
-                                    self.onPaired?(remote)
-                                }
-                            }
-                            if let err = obj["err"] as? String {
-                                HavenLog.relay("hairpin err \(remote.prefix(8)): \(err)")
-                            }
-                        }
-                    case .data(let d):
-                        // Inbound media frame — hand to the bridge to decode into audio/video.
-                        self.onBinary?(remote, d)
-                    @unknown default:
-                        break
-                    }
+                    self.handleMessage(message, remote: remote)
                     // Keep reading while task still tracked.
                     if self.tasks[remote] === task {
                         self.receiveLoop(remote: remote, task: task)

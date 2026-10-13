@@ -988,7 +988,7 @@ final class RelayHost: ObservableObject {
     /// File: `qa-authorize-members.txt` in the QA files directory (`QaFiles.dir` — Application
     /// Support, or the shared `HavenQA/stub` directory for the e2e fleet's HavenStub), one 64-hex id
     /// per line. Nothing reads another app's container any more: macOS App Data protection forbids it.
-    private static func qaAuthorizeMembers() -> [String] {
+    static func qaAuthorizeMembers() -> [String] {
         #if DEBUG
         var candidates: [URL] = []
         if let base = QaFiles.dir {

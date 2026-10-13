@@ -4397,13 +4397,17 @@ object HavenNet : InboundListener {
             .put("silent", true))
     }
 
+    /** The push worker's base URL. A seam for the JVM tests, which point it at an in-process server so no
+     *  test ever posts to the real worker; production never assigns it. */
+    internal var pushRelayBase: String = PUSH_RELAY
+
     /** Fire-and-forget POST to the push worker ([PUSH_RELAY]) — failures only log (polling is the
      *  fallback lane, exactly as on Apple when push is unconfigured). */
     private fun pushPost(path: String, body: JSONObject) {
         val payload = body.toString().toByteArray(Charsets.UTF_8)
         scope.launch {
             runCatching {
-                val c = (java.net.URL(PUSH_RELAY + path).openConnection() as java.net.HttpURLConnection).apply {
+                val c = (java.net.URL(pushRelayBase + path).openConnection() as java.net.HttpURLConnection).apply {
                     requestMethod = "POST"; doOutput = true; connectTimeout = 8000; readTimeout = 8000
                     setRequestProperty("Content-Type", "application/json")
                 }

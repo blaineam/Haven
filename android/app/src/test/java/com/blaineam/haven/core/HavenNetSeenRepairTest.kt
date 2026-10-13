@@ -2,7 +2,6 @@ package com.blaineam.haven.core
 
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -54,6 +53,6 @@ class HavenNetSeenRepairTest {
         seen.add(feed)
         call("repairStormBurnedSeenOnce")
         assertTrue(feed in seen)
-        assertFalse(!prefs.getBoolean("haven.repair.stormBurnedSeen.v1", false))
+        assertTrue(prefs.getBoolean("haven.repair.stormBurnedSeen.v1", false))
     }
 }

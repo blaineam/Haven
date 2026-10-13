@@ -73,21 +73,25 @@ final class FakeWireTests: XCTestCase {
     }
 
     func testARefusingRelayIsReachableButNotAFailure() async {
+        // Fresh bytes every run: a landed envelope is remembered as seen on disk, and a remembered
+        // one is (rightly) never re-sent, which would turn this into a test of the memory.
+        let refused = Data(UUID().uuidString.utf8)
+        let outage = Data(UUID().uuidString.utf8)
         wire.refuse = true
-        let env = Data([1, 2, 3, 4, 5, 6, 7, 8])
-        let ok = await SharedStore.uploadEvent(circleId: "default", env: env)
+        let ok = await SharedStore.uploadEvent(circleId: "default", env: refused)
         XCTAssertFalse(ok, "a 403 does not count as delivered")
         XCTAssertFalse(SharedStore.httpUrlBad(FakeWire.relayBase), "a refusal is not an outage: the URL isn't marked bad")
         wire.refuse = false
         wire.unreachable = true
-        let down = await SharedStore.uploadEvent(circleId: "default", env: Data([9, 9, 9, 9, 9]))
+        let down = await SharedStore.uploadEvent(circleId: "default", env: outage)
         XCTAssertFalse(down)
         XCTAssertTrue(SharedStore.httpUrlBad(FakeWire.relayBase), "a dead relay is skipped for a while")
         wire.unreachable = false
         SharedStore.clearAllHttpUrlBad()
-        let back = await SharedStore.uploadEvent(circleId: "default", env: Data([9, 9, 9, 9, 9]))
+        let back = await SharedStore.uploadEvent(circleId: "default", env: outage)
         XCTAssertTrue(back, "…and recovers once it answers")
-        XCTAssertEqual(wire.relayData(SharedStore.mailboxKeyHint(circleId: "default", env: Data([9, 9, 9, 9, 9]))), Data([9, 9, 9, 9, 9]))
+        XCTAssertEqual(wire.relayData(SharedStore.mailboxKeyHint(circleId: "default", env: outage)), outage)
+        XCTAssertNil(wire.relayData(SharedStore.mailboxKeyHint(circleId: "default", env: refused)), "the refused envelope never landed")
     }
 
     // MARK: Pulling a friend's posts, hellos and rosters

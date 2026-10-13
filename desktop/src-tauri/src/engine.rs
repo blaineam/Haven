@@ -6294,7 +6294,7 @@ impl Engine {
         // LIST/GET, announce, self-sync slots, media. Refusing here retires all of it through the
         // branch every caller already handles, and (unlike failing the requests) marks no URL bad
         // and records no health, so a harness run leaves prefs exactly as it found them.
-        if crate::netgate::offline() {
+        if crate::netgate::relay_http_offline() {
             return None;
         }
         let (urls, token) = self.prefs.lock().relay_http(hex)?;
@@ -9423,7 +9423,7 @@ impl Engine {
     /// serves the same store, so skip dialing it), `Err(Unreachable)` = dead endpoint,
     /// `Err(Forbidden)` = the relay REFUSED us.
     async fn http_get(self: &Arc<Self>, base: &str, token: &str, key: &str) -> Result<Option<Vec<u8>>, RelayErr> {
-        if crate::netgate::offline() {
+        if crate::netgate::relay_http_offline() {
             return Err(RelayErr::Unreachable);
         }
         let auth = self.http_auth(token, "GET", key, b"").ok_or(RelayErr::Unreachable)?;
@@ -9452,7 +9452,7 @@ impl Engine {
     /// back to GET. Apple `SharedStore.httpHead` parity.
     async fn http_head(self: &Arc<Self>, base: &str, token: &str, key: &str) -> crate::mediaholding::Head {
         use crate::mediaholding::Head;
-        if crate::netgate::offline() {
+        if crate::netgate::relay_http_offline() {
             return Head::Unreachable;
         }
         let Some(auth) = self.http_auth(token, "HEAD", key, b"") else { return Head::Unreachable };
@@ -9530,7 +9530,7 @@ impl Engine {
         prefix: &str,
         digest: Option<&str>,
     ) -> Result<(Option<Vec<String>>, Option<String>), RelayErr> {
-        if crate::netgate::offline() {
+        if crate::netgate::relay_http_offline() {
             return Err(RelayErr::Unreachable);
         }
         let auth = self.http_auth(token, "GET", prefix, b"").ok_or(RelayErr::Unreachable)?;
@@ -9632,7 +9632,7 @@ impl Engine {
         // HAVEN_NO_NET backstop. `relay_http_reachable` already refuses, so no live caller reaches
         // here — but these three primitives are the only place our own bytes hit the relay wire, and
         // a future route built from a base and token some other way must not slip past.
-        if crate::netgate::offline() {
+        if crate::netgate::relay_http_offline() {
             return Err(RelayErr::Unreachable);
         }
         // Digest over the EXACT bytes sent — `.body(body)` puts this buffer on the wire verbatim.
@@ -12268,6 +12268,9 @@ pub(crate) mod cov_engine_tests;
 #[cfg(test)]
 #[path = "tests_engine_media.rs"]
 mod cov_engine_media_tests;
+#[cfg(test)]
+#[path = "tests_engine_http.rs"]
+mod cov_engine_http_tests;
 
 #[cfg(test)]
 mod flag_tests {

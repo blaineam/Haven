@@ -45,6 +45,43 @@ pub fn offline() -> bool {
     }
 }
 
+/// The gate for the relay HTTP lane only (`relay_http_reachable`, `http_get/put/head/list_delta`).
+/// In a release build, and in a test that has not opted in, this is exactly [`offline`]. A unit test
+/// can open just this lane against a loopback stub with [`open_relay_http_for_test`]; every other
+/// transport (iroh dials, S3, push worker, iTunes) stays gated, so a test can never reach a real host.
+pub fn relay_http_offline() -> bool {
+    #[cfg(test)]
+    {
+        if RELAY_HTTP_OPEN.with(|c| c.get()) {
+            return false;
+        }
+    }
+    offline()
+}
+
+#[cfg(test)]
+thread_local! {
+    static RELAY_HTTP_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test-only: open the relay HTTP lane on THIS thread until the guard drops. Tests using it run on a
+/// current-thread tokio runtime (the `#[tokio::test]` default), so every task they spawn shares the thread.
+#[cfg(test)]
+pub struct RelayHttpGuard;
+
+#[cfg(test)]
+impl Drop for RelayHttpGuard {
+    fn drop(&mut self) {
+        RELAY_HTTP_OPEN.with(|c| c.set(false));
+    }
+}
+
+#[cfg(test)]
+pub fn open_relay_http_for_test() -> RelayHttpGuard {
+    RELAY_HTTP_OPEN.with(|c| c.set(true));
+    RelayHttpGuard
+}
+
 /// The rule itself, kept pure so it is testable — `offline()` caches its answer in a `OnceLock`, so
 /// a test that set env vars around it would depend on which test happened to run first.
 ///

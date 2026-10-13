@@ -12270,7 +12270,10 @@ pub(crate) mod cov_engine_tests;
 mod cov_engine_media_tests;
 #[cfg(test)]
 #[path = "tests_engine_http.rs"]
-mod cov_engine_http_tests;
+pub(crate) mod cov_engine_http_tests;
+#[cfg(test)]
+#[path = "tests_engine_peermedia.rs"]
+mod cov_engine_peermedia_tests;
 
 #[cfg(test)]
 mod flag_tests {

@@ -13,7 +13,7 @@ use crate::engine::cov_engine_tests::befriend;
 use std::collections::BTreeMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const RELAY: &str = "5151515151515151515151515151515151515151515151515151515151515151";
+pub(crate) const RELAY: &str = "5151515151515151515151515151515151515151515151515151515151515151";
 const TOKEN: &str = "stub-token";
 
 /// What the stub does with the next requests, whatever they ask for.
@@ -27,9 +27,9 @@ struct Knobs {
     log: Vec<String>,
 }
 
-struct Stub {
-    base: String,
-    store: Arc<parking_lot::Mutex<BTreeMap<String, Vec<u8>>>>,
+pub(crate) struct Stub {
+    pub(crate) base: String,
+    pub(crate) store: Arc<parking_lot::Mutex<BTreeMap<String, Vec<u8>>>>,
     knobs: Arc<parking_lot::Mutex<Knobs>>,
 }
 
@@ -52,7 +52,7 @@ fn pct_decode(s: &str) -> String {
 }
 
 impl Stub {
-    async fn start() -> Stub {
+    pub(crate) async fn start() -> Stub {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("binds loopback");
         let base = format!("http://{}", listener.local_addr().unwrap());
         let store: Arc<parking_lot::Mutex<BTreeMap<String, Vec<u8>>>> = Default::default();
@@ -149,19 +149,19 @@ impl Stub {
         Stub { base, store, knobs }
     }
 
-    fn force(&self, status: Option<u16>) {
+    pub(crate) fn force(&self, status: Option<u16>) {
         self.knobs.lock().force_status = status;
     }
-    fn count(&self, prefix: &str) -> usize {
+    pub(crate) fn count(&self, prefix: &str) -> usize {
         self.knobs.lock().log.iter().filter(|l| l.starts_with(prefix)).count()
     }
-    fn keys_with(&self, needle: &str) -> Vec<String> {
+    pub(crate) fn keys_with(&self, needle: &str) -> Vec<String> {
         self.store.lock().keys().filter(|k| k.contains(needle)).cloned().collect()
     }
 }
 
 /// Teach `e` the stub as an active relay of every circle, with its HTTP interface.
-async fn wire_to(e: &Arc<Engine>, stub: &Stub) {
+pub(crate) async fn wire_to(e: &Arc<Engine>, stub: &Stub) {
     let json = serde_json::json!({ "node": RELAY, "urls": [stub.base], "token": TOKEN });
     e.adopt_relay(json.to_string()).await;
     assert_eq!(e.prefs.lock().relay_http(RELAY).map(|(u, t)| (u, t)), Some((vec![stub.base.clone()], TOKEN.to_string())));

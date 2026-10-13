@@ -59,6 +59,14 @@ SCENES=(
   "messages||07-messages.png"  # the DM list
 )
 
+# Partial retakes: SHOT_SCENES="01-feed 02-story" captures only those iPhone/iPad scenes (file
+# stems from the table above); default (unset) = every scene. A partial run overlays the existing
+# frames instead of wiping the device dir, so the other scenes stay on disk.
+shot_wanted() { # <file.png>
+  [ -z "${SHOT_SCENES:-}" ] && return 0
+  case " $SHOT_SCENES " in *" ${1%.png} "*) return 0 ;; *) return 1 ;; esac
+}
+
 # ── Audio: simulators play app audio aloud. Mute the Mac for the capture window only
 #    and restore the user's exact previous state (even on abnormal exit).
 SAVED_MUTED=""
@@ -115,7 +123,8 @@ capture_sim() {
   app="$(find "$derived/Build/Products/Debug-iphonesimulator" -maxdepth 1 -name "*.app" | head -1)"
   [ -n "$app" ] || { echo "  no .app produced" >&2; return 1; }
 
-  rm -rf "${OUT:?}/$key"; mkdir -p "$OUT/$key"
+  [ -n "${SHOT_SCENES:-}" ] || rm -rf "${OUT:?}/$key"
+  mkdir -p "$OUT/$key"
   mute_on
   cap_boot "$udid"
   xcrun simctl terminate "$udid" "$BUNDLE_ID" >/dev/null 2>&1 || true
@@ -133,6 +142,7 @@ capture_sim() {
   for entry in "${SCENES[@]}"; do
     local tab="${entry%%|*}" rest="${entry#*|}"
     local scene="${rest%%|*}" file="${rest#*|}"
+    shot_wanted "$file" || continue
     xcrun simctl terminate "$udid" "$BUNDLE_ID" >/dev/null 2>&1 || true
     sleep 0.6
     env SIMCTL_CHILD_HAVEN_DEMO=1 SIMCTL_CHILD_HAVEN_SKIP_ONBOARDING=1 SIMCTL_CHILD_HAVEN_NO_NET=1 \
@@ -162,6 +172,7 @@ capture_sim() {
       for lentry in "${SCENES[@]}"; do
         local ltab="${lentry%%|*}" lrest="${lentry#*|}"
         local lscene="${lrest%%|*}" lfile="${lrest#*|}"
+        shot_wanted "$lfile" || continue
         xcrun simctl terminate "$udid" "$BUNDLE_ID" >/dev/null 2>&1 || true
         sleep 0.6
         # shellcheck disable=SC2046

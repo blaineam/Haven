@@ -2058,6 +2058,9 @@ final class CallManager: NSObject, ObservableObject {
         CallHairpin.shared.closeAll()
         inviteTimer?.invalidate(); inviteTimer = nil
         if screenShareOn { ScreenShareManager.shared.stop() }
+        // The last call's ICE verdicts die with it: `mediaConnected` reads them, and a stale
+        // `.connected` would have the next call (and an idle phone) claim media it does not have.
+        lastPeerState.removeAll()
         ScreenShareManager.shared.onFrame = nil
         ScreenShareManager.shared.onStop = nil
         let wasLive = webRTCAudioLive

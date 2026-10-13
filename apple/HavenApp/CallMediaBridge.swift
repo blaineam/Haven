@@ -542,7 +542,7 @@ final class CallMediaBridge {
 /// Reorders audio frames within a small window and paces them out, so brief loss/jitter on the
 /// WebSocket doesn't turn into stutter. Deliberately shallow (≈60 ms) — a voice call values low
 /// latency over gap-free playout.
-private struct JitterBuffer {
+struct JitterBuffer {
     private var pending: [UInt16: Data] = [:]
     private var next: UInt16?
     private let depth = 3
@@ -552,14 +552,21 @@ private struct JitterBuffer {
     mutating func push(seq: UInt16, payload: Data) -> [Data] {
         pending[seq] = payload
         if next == nil, pending.count >= depth {
-            next = pending.keys.min()
+            next = earliest()
         }
         var out: [Data] = []
-        while let n = next, let p = pending.removeValue(forKey: n) {
-            out.append(p)
-            next = n &+ 1
-            // Drop the buffer if it grows unbounded (a lost frame we'll never get).
-            if pending.count > depth * 4, let lowest = pending.keys.min() { next = lowest }
+        while let n = next {
+            if let p = pending.removeValue(forKey: n) {
+                out.append(p)
+                next = n &+ 1
+            } else if pending.count > depth * 4, let first = earliest() {
+                // The frame we are waiting for is lost for good (the sender drops a failed send, it
+                // never retries): skip the hole instead of stalling playback and growing the buffer
+                // without bound behind it.
+                next = first
+            } else {
+                break
+            }
         }
         return out
     }
@@ -568,7 +575,20 @@ private struct JitterBuffer {
 /// A WebRTC renderer that hands each local camera frame's pixel buffer to a callback — how we
 /// tap WebRTC's existing capture without running a second AVCaptureSession.
 private final class LocalFrameTap: NSObject, RTCVideoRenderer {
+    /// The sequence number that comes first among `keys` in 16-bit serial-number order (RFC 1982 style),
+    /// so a window straddling the 65535 -> 0 wrap still starts at 65534, not at 0.
+    private func earliest() -> UInt16? {
+        pending.keys.reduce(nil as UInt16?) { best, k in
+            guard let best else { return k }
+            let d = best &- k
+            return (d != 0 && d < 0x8000) ? k : best
+        }
+    }
+
     private let onFrame: (CVPixelBuffer, Int64) -> Void
+        // A frame behind the playhead (late, or a duplicate of one already played) can never be
+        // played; keeping it would only count towards the overflow and drag the playhead backwards.
+        if let n = next, n != seq, n &- seq < 0x8000 { return [] }
     init(onFrame: @escaping (CVPixelBuffer, Int64) -> Void) { self.onFrame = onFrame }
     func setSize(_ size: CGSize) {}
     func renderFrame(_ frame: RTCVideoFrame?) {

@@ -9,6 +9,21 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## 2.0.1 (unreleased)
 
+### Fixed — iPhone and Mac: a finished call no longer leaves the next one reading "Connected"
+
+The call screen decides between "Connecting media…" and "Connected" from the ICE state of each person in
+the call, and that state outlived the call that earned it. After hanging up, the next call with the same
+person could say "Connected" the moment they answered, before any media path existed. The state is now
+cleared when a call ends.
+
+### Fixed — iPhone and Mac: relayed call audio no longer stalls for good behind one lost frame
+
+When a call's media travels over the relay (two phones on networks that cannot connect directly), the
+audio reorder window waited forever for a frame that was never coming: one dropped frame froze playback
+and let the queue grow without bound, and a window that happened to straddle the 16-bit sequence wrap
+could start in the wrong place. Playback now skips the hole, starts at the right frame across the wrap,
+and ignores frames that arrive after their turn.
+
 ### Fixed — iPhone and Mac: Undo after "Delete now" on a relay puts it back in its circles
 
 Deleting a relay for good keeps a record so the delete can be undone. That record forgot which

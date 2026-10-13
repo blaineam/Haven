@@ -56,7 +56,7 @@ npm link`), it's just `soren run Haven`.
 | `ios` | xcodebuild-test | the `Haven` scheme's tests (HavenUITests) on an iOS simulator | macOS + Xcode + a simulator |
 | `ui-ipad` | xcodebuild-test | the same HavenUITests on a dedicated iOS 26.5 iPad simulator (shut down after) | macOS + Xcode + that simulator |
 | `ui-mac` | xcodebuild-test | `HavenMacUITests` against **HavenMacUITestHost** (`com.blaineam.kith.uitesthost` — never the personal `com.blaineam.kith`, never the fleet's `qa.stub`) | macOS + Xcode; the runner's one-time Accessibility approval |
-| `apple-unit` | xcodebuild-test | `HavenMacUnitTests` — **hosted** unit tests of the FFI-backed Apple stores (FeedStore, SharedStore, MediaStore, RelayMailboxStore, SelfSync, HistoryHandoff, CallManager signalling, the qa-cmd driver) running *inside* HavenMacUITestHost against the real HavenFFI macOS slice. No simulator, no UI automation, no network | macOS + Xcode |
+| `apple-unit` | cmd (`Scripts/apple-unit-cov.mjs`) | `HavenMacUnitTests` — **hosted** unit tests of the FFI-backed Apple stores (FeedStore, SharedStore, MediaStore, RelayMailboxStore, SelfSync, HistoryHandoff, CallManager signalling, the qa-cmd driver) running *inside* HavenMacUITestHost against the real HavenFFI macOS slice. No simulator, no UI automation, no network. Prints hosted line coverage of `apple/HavenApp` + `apple/Shared` | macOS + Xcode |
 | `ui-watch` | xcodebuild-test | `HavenWatchUITests` against HavenWatch's DEBUG demo, on a dedicated watchOS 26.5 simulator (shut down after) | macOS + Xcode + that simulator |
 | `macos` | xcodebuild-test | the native `HavenMac` scheme, macOS destination | macOS + Xcode |
 | `android` | gradle | `testDebugUnitTest` always; `connectedDebugAndroidTest` after reusing/booting the `haven_phone` AVD (skipped, never hung, if it can't boot) | JDK 17, Android SDK/NDK, the Rust `.so` from `android/build-rust.sh` |
@@ -126,6 +126,14 @@ no demo cast), and the host refuses to run under any bundle id that does not end
   look nominal, so the handoff/self-sync/serve gates behave the same everywhere.
 * **Coverage** needs the host to write its `.profraw` outside the container, which the host's
   entitlements allow for build-output roots only (`/private/tmp/`, `~/Library/Developer/Xcode/DerivedData/`).
+  Xcode's own coverage archive is unreadable to `xccov` for a sandboxed host, so the suite is a `cmd`
+  suite: `Scripts/apple-unit-cov.mjs` runs the tests, then takes the profile the test bundle flushed
+  (`CoverageHook.c` via `CoverageFlusher`), trims the buffer's trailing padding to the length its header
+  describes (`llvm-profdata` rejects the padding as a second, bad-magic profile), merges it with
+  Xcode.app's `llvm-profdata`, and reads per-file lines with `llvm-cov export` against the built host.
+  `HAVEN_COV_SKIP_RUN=1` re-reads the last profile; `HAVEN_COV_FILES=1` / `HAVEN_COV_AREA=FeedStore,SharedStore`
+  list files. **Peers need distinct seed bytes across the whole bundle** (`Peer(byte:)` — `grep` before
+  picking one): two tests that share a byte share a contact, and "a stranger's hello" stops being strange.
 
 Run it with `node _shared/soren/soren.mjs run Haven apple-unit` (through `buildq`).
 

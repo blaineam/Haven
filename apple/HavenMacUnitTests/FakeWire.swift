@@ -9,6 +9,9 @@ final class FakeWire: @unchecked Sendable {
     static let shared = FakeWire()
     static let relayHost = "relay.fake.test"
     static let relayBase = "https://relay.fake.test"
+    /// A second relay with its OWN store (a circle served by two relays: mirroring, fan-out, failover).
+    static let relay2Host = "relay2.fake.test"
+    static let relay2Base = "https://relay2.fake.test"
     static let s3Host = "s3.fake.test"
     static let bucket = "fakebucket"
 
@@ -16,6 +19,9 @@ final class FakeWire: @unchecked Sendable {
 
     private let lock = NSLock()
     private var relay: [String: Data] = [:]
+    private var relay2: [String: Data] = [:]
+    private var down2 = false
+    private var refusing2 = false
     private var bucketKV: [String: Data] = [:]
     private var log: [Request] = []
     private var _refuse = false
@@ -25,6 +31,10 @@ final class FakeWire: @unchecked Sendable {
     var refuse: Bool { get { lock.withLock { _refuse } } set { lock.withLock { _refuse = newValue } } }
     /// Fail every connection (the relay is down).
     var unreachable: Bool { get { lock.withLock { _unreachable } } set { lock.withLock { _unreachable = newValue } } }
+
+    /// The second relay's switches (the primary's are `refuse` / `unreachable`).
+    var refuse2: Bool { get { lock.withLock { refusing2 } } set { lock.withLock { refusing2 = newValue } } }
+    var unreachable2: Bool { get { lock.withLock { down2 } } set { lock.withLock { down2 = newValue } } }
 
     func install() {
         reset()
@@ -37,14 +47,27 @@ final class FakeWire: @unchecked Sendable {
         reset()
     }
     func reset() {
-        lock.withLock { relay = [:]; bucketKV = [:]; log = []; _refuse = false; _unreachable = false }
+        lock.withLock { relay = [:]; relay2 = [:]; bucketKV = [:]; log = []; _refuse = false; _unreachable = false; down2 = false; refusing2 = false }
     }
 
     // MARK: Inspecting and seeding the stores
 
-    func relayKeys(prefix: String = "") -> [String] { lock.withLock { relay.keys.filter { $0.hasPrefix(prefix) }.sorted() } }
-    func relayData(_ key: String) -> Data? { lock.withLock { relay[key] } }
-    func putRelay(_ key: String, _ data: Data) { lock.withLock { relay[key] = data } }
+    func relayKeys(prefix: String = "", host: String = FakeWire.relayHost) -> [String] {
+        lock.withLock { (host == Self.relay2Host ? relay2 : relay).keys.filter { $0.hasPrefix(prefix) }.sorted() }
+    }
+    func relayData(_ key: String, host: String = FakeWire.relayHost) -> Data? {
+        lock.withLock { (host == Self.relay2Host ? relay2 : relay)[key] }
+    }
+    func putRelay(_ key: String, _ data: Data, host: String = FakeWire.relayHost) {
+        lock.withLock { if host == Self.relay2Host { relay2[key] = data } else { relay[key] = data } }
+    }
+    /// Drop every key under `prefix` on one relay (a relay that lost its disk, or never held it).
+    func removeRelay(prefix: String, host: String = FakeWire.relayHost) {
+        lock.withLock {
+            if host == Self.relay2Host { relay2 = relay2.filter { !$0.key.hasPrefix(prefix) } }
+            else { relay = relay.filter { !$0.key.hasPrefix(prefix) } }
+        }
+    }
     func bucketKeys(prefix: String = "") -> [String] { lock.withLock { bucketKV.keys.filter { $0.hasPrefix(prefix) }.sorted() } }
     func bucketData(_ key: String) -> Data? { lock.withLock { bucketKV[key] } }
     func putBucket(_ key: String, _ data: Data) { lock.withLock { bucketKV[key] = data } }
@@ -65,21 +88,22 @@ final class FakeWire: @unchecked Sendable {
             log.append(Request(method: method, host: host, path: path,
                                authorized: req.value(forHTTPHeaderField: "Authorization")?.isEmpty == false))
             switch host {
-            case Self.relayHost:
-                if _unreachable { return nil }
-                if _refuse { return ans(403) }
+            case Self.relayHost, Self.relay2Host:
+                let second = host == Self.relay2Host
+                if second ? down2 : _unreachable { return nil }
+                if second ? refusing2 : _refuse { return ans(403) }
                 if path.hasPrefix("/k/") {
                     let key = String(path.dropFirst(3))
                     switch method {
-                    case "PUT": relay[key] = body ?? Data(); return ans(200)
-                    case "GET": if let d = relay[key] { return ans(200, d) }; return ans(404)
-                    case "HEAD": return ans(relay[key] != nil ? 200 : 404)
+                    case "PUT": if second { relay2[key] = body ?? Data() } else { relay[key] = body ?? Data() }; return ans(200)
+                    case "GET": if let d = (second ? relay2 : relay)[key] { return ans(200, d) }; return ans(404)
+                    case "HEAD": return ans((second ? relay2 : relay)[key] != nil ? 200 : 404)
                     default: return ans(405)
                     }
                 }
                 if path.hasPrefix("/l/") {
                     let prefix = String(path.dropFirst(3))
-                    let keys = relay.keys.filter { $0.hasPrefix(prefix) }.sorted()
+                    let keys = (second ? relay2 : relay).keys.filter { $0.hasPrefix(prefix) }.sorted()
                     return ans(200, Data(keys.joined(separator: "\n").utf8))
                 }
                 return ans(404)

@@ -60,7 +60,11 @@ class FakeSocial : HavenSocial(NoHandle) {
                    val media: List<String> = emptyList(), val music: TrackRefFfi? = null,
                    val muteVideo: Boolean = false, val retentionSecs: ULong? = null)
     val authored = java.util.concurrent.CopyOnWriteArrayList<Authored>()
-    private fun refuse(a: Authored): Nothing { authored += a; throw IllegalStateException("engine refused ${a.verb}") }
+    /** When set the engine ACCEPTS what is authored and returns this envelope, so HavenNet runs its broadcast / upload legs. */
+    var authorOk: ByteArray? = null
+    var authoredId: String? = null
+    private fun refuse(a: Authored): ByteArray { authored += a; return authorOk ?: throw IllegalStateException("engine refused ${a.verb}") }
+    override fun `lastAuthoredEventId`(`circleId`: String, `createdAt`: ULong): String? = authoredId ?: super.`lastAuthoredEventId`(circleId, createdAt)
 
     override fun `post`(`circleId`: String, `body`: String, `media`: List<String>, `music`: TrackRefFfi?, `retentionSecs`: ULong?,
                         `story`: Boolean, `muteVideo`: Boolean, `createdAt`: ULong): ByteArray =
@@ -104,6 +108,42 @@ class FakeSocial : HavenSocial(NoHandle) {
     var sealCall: ((String, UByte, ByteArray) -> ByteArray)? = null
     val sealedCalls = java.util.concurrent.CopyOnWriteArrayList<Triple<String, UByte, ByteArray>>()
 
+    /** Opens a sealed media blob (the engine's `open_circle_media`); unscripted = it cannot be opened. */
+    var openMedia: ((String, ByteArray) -> ByteArray?)? = null
+    val openedMedia = java.util.concurrent.CopyOnWriteArrayList<String>()
+    override fun `openCircleMedia`(`circleId`: String, `sealed`: ByteArray): ByteArray? {
+        openedMedia += circleId
+        return openMedia?.invoke(circleId, sealed) ?: super.`openCircleMedia`(circleId, sealed)
+    }
+    var ownedCircleId: String? = null
+    override fun `createCircleOwned`(`name`: String): String = ownedCircleId?.also { calls += "createOwned $name" } ?: super.`createCircleOwned`(name)
+    /** File-to-file seal / open (the engine's native large-blob path): (circleId, inPath, outPath) -> ok. Unscripted = refuses. */
+    var sealFile: ((String, String, String) -> Boolean)? = null
+    var openFile: ((String, String, String) -> Boolean)? = null
+    override fun `sealCircleMediaFile`(`circleId`: String, `inPath`: String, `outPath`: String): Boolean =
+        sealFile?.invoke(circleId, inPath, outPath) ?: super.`sealCircleMediaFile`(circleId, inPath, outPath)
+    override fun `openCircleMediaFile`(`circleId`: String, `sealedPath`: String, `outPath`: String): Boolean =
+        openFile?.invoke(circleId, sealedPath, outPath) ?: super.`openCircleMediaFile`(circleId, sealedPath, outPath)
+    /** The peer (KEM) media path: open a chunk sealed to this device / seal a chunk to a recipient. */
+    var openPeer: ((ByteArray) -> ByteArray?)? = null
+    var sealPeer: ((String, ByteArray) -> ByteArray?)? = null
+    val sealedPeer = java.util.concurrent.CopyOnWriteArrayList<Pair<String, Int>>()
+    override fun `openMedia`(`sealed`: ByteArray): ByteArray? = openPeer?.invoke(sealed) ?: super.`openMedia`(sealed)
+    override fun `sealMedia`(`recipientNodeHex`: String, `data`: ByteArray): ByteArray {
+        sealedPeer += recipientNodeHex to data.size
+        return sealPeer?.invoke(recipientNodeHex, data) ?: super.`sealMedia`(recipientNodeHex, data)
+    }
+    /** What [purgeExpired] reports as dropped (their media refs), per circle; unscripted = the engine refuses. */
+    val purged = HashMap<String, List<String>>()
+    override fun `purgeExpired`(`circleId`: String, `viewerRetentionSecs`: ULong?, `nowMs`: ULong): List<String> =
+        purged[circleId] ?: super.`purgeExpired`(circleId, viewerRetentionSecs, nowMs)
+    /** History pages served by [syncEnvelopesPage] per circle, and what was asked for (circle, before, limit). */
+    val pages = HashMap<String, List<ByteArray>>()
+    val pageAsks = java.util.concurrent.CopyOnWriteArrayList<Triple<String, ULong, UInt>>()
+    override fun `syncEnvelopesPage`(`circleId`: String, `beforeMs`: ULong, `limit`: UInt): List<ByteArray> {
+        pageAsks += Triple(circleId, beforeMs, limit)
+        return pages[circleId] ?: super.`syncEnvelopesPage`(circleId, beforeMs, limit)
+    }
     var ownRoster: List<ContactRosterWire>? = null
     var contactRosters: List<ContactRosterWire>? = null
     var myRosterWire: ByteArray? = null

@@ -58,6 +58,8 @@ class NetEnv(
         PinnedMediaStore.init(ctx)
         Presign.init(ctx)
         CircleRemovals.init(ctx)
+        MediaWantedStore.init(ctx)
+        EvictedMediaStore.init(ctx)
         ContactRemovals.init(ctx)
         ctx.filesDir.resolve("media").mkdirs()
         field("ready").setBoolean(HavenNet, true)
@@ -91,6 +93,7 @@ class NetEnv(
         runBlocking {
             withTimeoutOrNull(20_000) {
                 job.children.toList().forEach { it.cancel() }
+                relay.stop()   // a job blocked in an HTTP call ignores cancellation until its socket closes
                 job.children.toList().joinAll()
             }
         }
@@ -107,7 +110,6 @@ class NetEnv(
         HavenNet.setDefaultRelay(null)
         HavenNet.httpAuthSigner = savedSigner
         HavenNet.pushRelayBase = savedPush
-        relay.stop()
         Dispatchers.resetMain()
         ctx.filesDir.deleteRecursively()
     }
@@ -121,13 +123,24 @@ class NetEnv(
         for (name in listOf("relayEntries", "relayNodes", "seenMailbox", "refusedUntilMs", "refusedStreak", "httpUrlBad",
             "mailboxListDigests", "relayHealth", "pendingSeenMarks", "deviceHints", "initiated", "helloOffered",
             "backedUp", "uploadProgress", "scopeRefusedUntil", "rosterNeeded", "rosterPublished", "rosterPullAt",
-            "lastEnrollMs", "lastEnrollRelays", "erasedRelays", "relayInterfaceRefreshMs", "replacedInterfaces")) {
+            "lastEnrollMs", "lastEnrollRelays", "erasedRelays", "relayInterfaceRefreshMs", "replacedInterfaces",
+            "mediaQueueKeys", "restoreInFlight", "fastReq", "mediaReqAt", "resealAskedAt", "resealTries", "unopenableMedia",
+            "mediaServedAt", "mediaServing", "announcedMediaAt", "countedArrivals", "requestedRefs", "pendingBackups",
+            "probedThisSession", "verifiedOpen", "fetchedFrom", "transferWatch", "waitingForSenderMedia", "unavailableMedia",
+            "forgotAtRelays", "clearedRelayForgets", "suppressedRelays", "announcedRelayNodes", "seenRelay", "incomingMedia", "chunkProgressAt", "servedAt", "servingNow", "hintOnUpload", "backupReverifiedAt", "serveCircleCache", "serveRoleCache", "purgedMediaCircles", "derpDeadUntilMs", "initiatedAt", "historyAskedBefore")) {
             when (val v = field(name).get(HavenNet)) {
                 is MutableMap<*, *> -> v.clear()
                 is MutableCollection<*> -> v.clear()
             }
         }
         HavenNet.contacts.clear(); HavenNet.blocked.clear(); HavenNet.pending.clear()
+        // The media queue has ONE consumer coroutine, started once per process. settle() cancels it, so the next
+        // boot must be allowed to start its own, and nothing the old one left queued may run in the new one.
+        field("mediaQueueStarted").setBoolean(HavenNet, false)
+        for (ch in listOf("mediaQueue", "mediaPriorityQueue")) {
+            val c = field(ch).get(HavenNet) as kotlinx.coroutines.channels.Channel<*>
+            while (c.tryReceive().isSuccess) { /* drop */ }
+        }
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -147,9 +160,12 @@ class NetEnv(
         fun set(name: String, v: Any?) { field(name).set(HavenNet, v) }
 
         /** Call a private (optionally suspending) HavenNet function by name. */
-        fun call(name: String, vararg args: Any?): Any? {
-            val plain = HavenNet::class.java.declaredMethods.firstOrNull { it.name == name && it.parameterCount == args.size }
-            val susp = HavenNet::class.java.declaredMethods.firstOrNull {
+        fun call(name: String, vararg args: Any?): Any? = callOn(HavenNet, name, *args)
+
+        /** Call a private (optionally suspending) function of any object by name. */
+        fun callOn(target: Any, name: String, vararg args: Any?): Any? {
+            val plain = target.javaClass.declaredMethods.firstOrNull { it.name == name && it.parameterCount == args.size }
+            val susp = target.javaClass.declaredMethods.firstOrNull {
                 it.name == name && it.parameterCount == args.size + 1 && it.parameterTypes.last() == kotlin.coroutines.Continuation::class.java
             }
             return try {
@@ -157,12 +173,12 @@ class NetEnv(
                     susp.isAccessible = true
                     suspendCancellableCoroutine<Any?> { c ->
                         try {
-                            val r = susp.invoke(HavenNet, *args, c)
+                            val r = susp.invoke(target, *args, c)
                             if (r !== COROUTINE_SUSPENDED) c.resume(r)
                         } catch (e: InvocationTargetException) { c.resumeWithException(e.targetException) }
                     }
                 } else {
-                    requireNotNull(plain) { "no HavenNet.$name/${args.size}" }.apply { isAccessible = true }.invoke(HavenNet, *args)
+                    requireNotNull(plain) { "no ${target.javaClass.simpleName}.$name/${args.size}" }.apply { isAccessible = true }.invoke(target, *args)
                 }
             } catch (e: InvocationTargetException) { throw e.targetException }
         }

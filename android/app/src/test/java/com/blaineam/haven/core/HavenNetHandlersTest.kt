@@ -26,7 +26,6 @@ class HavenNetHandlersTest {
         env.social.verifyHex = { "beef" }
         env.social.profileName = "Pat"
         CircleRemovals.clear()
-        ContactRemovals.markReadded(who)
     }
     @After fun tearDown() { env.down(); CircleRemovals.clear() }
 
@@ -241,5 +240,49 @@ class HavenNetHandlersTest {
         announce(announceJson())
         assertEquals(listOf(newRelay), relayNodes()[circle])
         assertTrue((NetEnv.field("suppressedRelays").get(HavenNet) as Set<*>).contains(staleAccount))
+    }
+
+    // ---- approving a held request -----------------------------------------------------------------
+
+    private fun until(cond: () -> Boolean) = kotlinx.coroutines.runBlocking {
+        kotlinx.coroutines.withTimeout(15_000) { while (!cond()) kotlinx.coroutines.yield() }
+    }
+
+    @Test fun approving_a_held_request_adds_the_contact_applies_the_named_circle_grant_and_wakes_them() {
+        env.social.lenient = true
+        assertEquals(false to "held-for-approval", hello(payload()))
+        val req = HavenNet.pending.single()
+        HavenNet.approve(req)
+        assertEquals(listOf(who), HavenNet.contacts.map { it.idHex })
+        assertTrue(HavenNet.pending.isEmpty())
+        assertTrue("the original circle grant the held hello carried is applied now", env.social.calls.contains("create $circle Family"))
+        assertTrue(env.social.calls.contains("addBundle $circle"))
+        until { env.relay.hits.any { it.method == "POST" && it.path == "/notify" && String(it.body).contains(who) } }
+    }
+
+    @Test fun approving_a_request_for_the_default_circle_forms_no_extra_circle_and_dismissing_just_removes_it() {
+        env.social.lenient = true
+        val b = ByteArray(40) { 0x41 }
+        val other = nodeHex(b)
+        hello(payload(c = DEFAULT_CIRCLE, b = b))
+        HavenNet.approve(HavenNet.pending.single { it.idHex == other })
+        assertTrue(env.social.calls.none { it.startsWith("create ") && !it.contains(DEFAULT_CIRCLE) })
+        val b2 = ByteArray(40) { 0x42 }
+        hello(payload(c = DEFAULT_CIRCLE, b = b2))
+        HavenNet.dismiss(HavenNet.pending.single { it.idHex == nodeHex(b2) })
+        assertTrue(HavenNet.pending.isEmpty())
+        assertTrue("dismissing adds no contact", HavenNet.contacts.none { it.idHex == nodeHex(b2) })
+    }
+
+    @Test fun blocking_purges_the_contact_tombstones_it_and_is_remembered() {
+        val victim = "ab".repeat(32)
+        HavenNet.contacts.add(Contact(victim, "Pat", "v"))
+        HavenNet.block(victim)
+        assertTrue(HavenNet.contacts.isEmpty())
+        assertTrue(HavenNet.blocked.contains(victim))
+        assertTrue(ContactRemovals.isRemoved(victim))
+        HavenNet.unblock(victim)
+        assertTrue(HavenNet.blocked.isEmpty())
+        ContactRemovals.markReadded(victim)
     }
 }

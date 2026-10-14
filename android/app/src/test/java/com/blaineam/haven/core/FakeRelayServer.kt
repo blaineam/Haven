@@ -26,6 +26,7 @@ class FakeRelayServer {
     /** Keys whose PUT is answered with this status (and not stored). */
     val putStatus = ConcurrentHashMap<String, Int>()
     private val puts = CopyOnWriteArrayList<CountDownLatch>()
+    private val getWaiters = CopyOnWriteArrayList<Pair<String, CountDownLatch>>()
     private lateinit var server: HttpServer
     lateinit var base: String
         private set
@@ -42,6 +43,9 @@ class FakeRelayServer {
 
     /** A latch that opens after [n] more PUTs land (the only way to wait on a fire-and-forget upload without sleeping). */
     fun latchForPuts(n: Int): CountDownLatch = CountDownLatch(n).also { puts += it }
+
+    /** A latch that opens when a GET of a key containing [part] arrives. */
+    fun latchForGet(part: String): CountDownLatch = CountDownLatch(1).also { getWaiters += part to it }
 
     fun awaitPuts(latch: CountDownLatch): Boolean = latch.await(10, TimeUnit.SECONDS)
 
@@ -76,5 +80,6 @@ class FakeRelayServer {
         else { ex.sendResponseHeaders(status, if (out.isEmpty()) -1 else out.size.toLong()); if (out.isNotEmpty()) ex.responseBody.use { it.write(out) } }
         ex.close()
         if (ex.requestMethod == "PUT") puts.forEach { it.countDown() }
+        if (ex.requestMethod == "GET" && key != null) getWaiters.forEach { (part, l) -> if (key.contains(part)) l.countDown() }
     }
 }

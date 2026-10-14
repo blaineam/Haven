@@ -27,12 +27,17 @@ public class Handler {
     }
     /** Test hook: run everything that is posted, immediate first and then delayed, until nothing is left. */
     public void drainAll() {
-        while (!queue.isEmpty() || !delayed.isEmpty()) {
+        for (int round = 0; !queue.isEmpty() || !delayed.isEmpty(); round++) {
+            if (round > 1000) throw new IllegalStateException("handler work never settled (a self-rescheduling poll?)");
             drain();
-            java.util.List<Runnable> later = new java.util.ArrayList<>(delayed);
-            delayed.clear();
-            for (Runnable r : later) r.run();
+            drainDelayed();
         }
+    }
+    /** Test hook: run the delayed work that is queued RIGHT NOW once, without running what that work schedules in turn. */
+    public void drainDelayed() {
+        java.util.List<Runnable> later = new java.util.ArrayList<>(delayed);
+        delayed.clear();
+        for (Runnable r : later) r.run();
     }
     public int pendingCount() { return queue.size() + delayed.size(); }
     public int pendingDelayed() { return delayed.size(); }

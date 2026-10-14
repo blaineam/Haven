@@ -157,6 +157,8 @@ class HavenNetRosterTest {
         HavenNet.contacts.add(Contact(friend, "Pat", "v"))
         env.relay.store["haven/devroster/$friend"] = v2
         env.social.rosterStatus = { 1 }
+        for (t in listOf("lastMediaBackfillMs", "lastHistoryResendMs", "lastRelayReannounceMs", "lastOwnDeviceCatchupMs"))
+            NetEnv.field(t).setLong(HavenNet, 0L)   // the sweep's own throttles are process-wide
         val published = env.relay.latchForPuts(1)
         HavenNet.syncWithContacts()
         assertTrue("the periodic sweep re-published my roster", env.relay.awaitPuts(published))

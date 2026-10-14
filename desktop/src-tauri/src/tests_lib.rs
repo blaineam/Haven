@@ -105,3 +105,48 @@ fn deep_links_queue_in_order_and_survive_a_panicking_holder() {
     q.0.lock().push("after".into());
     assert_eq!(q.0.lock().len(), 1);
 }
+
+#[test]
+fn percent_decoding_handles_utf8_literals_and_truncated_escapes() {
+    assert_eq!(super::percent_decode("plain"), "plain");
+    assert_eq!(super::percent_decode("v%3Aabc"), "v:abc");
+    assert_eq!(super::percent_decode("caf%C3%A9"), "café");
+    assert_eq!(super::percent_decode("100%zz"), "100%zz", "a bad escape stays as written");
+    assert_eq!(super::percent_decode("tail%4"), "tail%4", "a truncated escape stays as written");
+    assert_eq!(super::percent_decode(""), "");
+}
+
+#[test]
+fn the_stderr_logger_honours_its_level_and_keeps_dependency_chatter_out() {
+    use log::Log;
+    let logger = super::StderrLogger(log::LevelFilter::Info);
+    let meta = |level, target: &'static str| log::Metadata::builder().level(level).target(target).build();
+    assert!(logger.enabled(&meta(log::Level::Info, "haven_desktop_lib::engine")));
+    assert!(logger.enabled(&meta(log::Level::Warn, "hyper")));
+    assert!(!logger.enabled(&meta(log::Level::Debug, "haven_desktop_lib")));
+    for (level, target) in [
+        (log::Level::Info, "haven_desktop_lib::engine"), // ours: printed
+        (log::Level::Info, "hyper::client"),             // a dependency below Warn: dropped
+        (log::Level::Warn, "hyper::client"),             // a dependency at Warn: printed
+        (log::Level::Debug, "haven_desktop_lib"),        // below the filter: dropped
+    ] {
+        logger.log(&log::Record::builder().args(format_args!("line")).level(level).target(target).build());
+    }
+    logger.flush();
+    // Installing twice is harmless: the second set_boxed_logger just errs.
+    with_env(&[("RUST_LOG", "trace")], || super::init_logging());
+    super::init_logging();
+}
+
+#[test]
+fn the_window_helpers_are_inert_without_a_main_window_and_drive_one_when_present() {
+    let app = tauri::test::mock_app();
+    super::apply_window_chrome(app.handle());
+    super::restore_window(app.handle()); // no "main" window: returns quietly
+    let _w = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("a mock window builds");
+    super::apply_window_chrome(app.handle());
+    super::restore_window(app.handle());
+    assert!(super::no_net(), "the test process runs under HAVEN_NO_NET");
+}

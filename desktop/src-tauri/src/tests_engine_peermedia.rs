@@ -271,3 +271,56 @@ async fn the_missing_media_sweep_asks_on_a_fresh_ladder_and_repairs_what_it_hold
     assert!(d.dyn_state.lock().media_probed_session.contains(&r2));
     drop((a, c));
 }
+
+#[tokio::test]
+async fn a_signed_profile_card_in_a_hello_updates_the_contact_and_a_circle_member_is_adopted_without_approval() {
+    let (a, _) = new_engine(220);
+    let (b, _) = new_engine(221);
+    befriend(&a, &b);
+    let ah = a.node_id_hex();
+    let contact = |e: &Arc<Engine>| e.prefs.lock().contacts.iter().find(|c| c.id_hex == ah).cloned().expect("a is b's contact");
+
+    let mut p = a.get_profile();
+    p.name = "Ada".into();
+    p.bio = "climber".into();
+    p.link = "https://ada.example".into();
+    p.emoji = "🦊".into();
+    p.avatar = "QUJD".into(); // bare base64 rides the card and is re-wrapped as a data URL
+    a.set_profile(p.clone());
+    b.handle_hello(&a.hello_payload(DEFAULT_CIRCLE).unwrap());
+    let c = contact(&b);
+    assert_eq!((c.name.as_str(), c.bio.as_str(), c.link.as_str(), c.emoji.as_str()), ("Ada", "climber", "https://ada.example", "🦊"));
+    assert_eq!(c.avatar, "data:image/jpeg;base64,QUJD");
+
+    // A re-sent identical card changes nothing; a renamed one changes just the name.
+    b.handle_hello(&a.hello_payload(DEFAULT_CIRCLE).unwrap());
+    p.name = "Ada L.".into();
+    a.set_profile(p);
+    b.handle_hello(&a.hello_payload(DEFAULT_CIRCLE).unwrap());
+    assert_eq!(contact(&b).name, "Ada L.");
+
+    // An empty or unverifiable card is ignored outright.
+    let key = |c: crate::store::Contact| (c.name, c.bio, c.link, c.emoji, c.avatar);
+    let before = key(contact(&b));
+    b.apply_profile_card(&ah, &[], &[]);
+    b.apply_profile_card(&ah, &[1, 2, 3], &[4, 5, 6]);
+    assert_eq!(key(contact(&b)), before);
+
+    // A device whose contact list never converged (an adopted seed) still knows `a` from the circle:
+    // the hello is adopted as a contact instead of waiting as a connection request nobody sees.
+    b.prefs.lock().contacts.retain(|c| c.id_hex != ah);
+    b.handle_hello(&a.hello_payload(DEFAULT_CIRCLE).unwrap());
+    assert!(b.prefs.lock().contacts.iter().any(|c| c.id_hex == ah), "adopted as a contact");
+    assert!(b.pending().is_empty(), "and not left as a stranger's request");
+
+    // A blocked account's hello is dropped before anything else.
+    b.prefs.lock().blocked.push(ah.clone());
+    b.prefs.lock().contacts.retain(|c| c.id_hex != ah);
+    b.handle_hello(&a.hello_payload(DEFAULT_CIRCLE).unwrap());
+    assert!(!b.prefs.lock().contacts.iter().any(|c| c.id_hex == ah));
+    // A direct hello also teaches the sender's dialable device id.
+    b.prefs.lock().blocked.retain(|x| *x != ah);
+    let dev = a.social.my_device_node_hex();
+    b.handle_hello_from(Some(&dev), &a.hello_payload(DEFAULT_CIRCLE).unwrap());
+    assert!(!b.device_hints_for(&ah).is_empty() || dev.eq_ignore_ascii_case(&ah));
+}

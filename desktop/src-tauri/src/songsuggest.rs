@@ -851,3 +851,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+#[path = "tests_songsuggest.rs"]
+mod cov_songsuggest_tests;

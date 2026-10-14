@@ -290,7 +290,7 @@ fn active_identity_if_exists() -> Result<Option<Startup>> {
 /// we cannot draw: Win11 Snap Layouts on maximize-hover, the Alt-Space system menu, the user's
 /// titlebar accent/high-contrast colours, and RTL mirroring. The tab pill is unaffected either way —
 /// it lives in our own bar, which is why `decorations` was never what put it there.
-fn apply_window_chrome(app: &tauri::AppHandle) {
+fn apply_window_chrome<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     #[cfg(not(target_os = "macos"))]
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.set_decorations(true);
@@ -309,7 +309,7 @@ fn apply_window_chrome(app: &tauri::AppHandle) {
 /// window is mapped but never presented: it comes back unraised, behind everything, which is what
 /// "can't open Haven into a full window" was. Hence: show first, then re-assert focus from a short
 /// timer, once GTK has actually mapped it. The re-assert is idempotent when the first one landed.
-fn restore_window(app: &tauri::AppHandle) {
+fn restore_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     let Some(w) = app.get_webview_window("main") else {
         return;
     };

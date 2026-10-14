@@ -249,3 +249,7 @@ mod tests {
         assert!(encode_rgb8(&photo(4, 4), 100, 100).is_none(), "short buffer must be refused");
     }
 }
+
+#[cfg(test)]
+#[path = "tests_preview.rs"]
+mod cov_preview_tests;

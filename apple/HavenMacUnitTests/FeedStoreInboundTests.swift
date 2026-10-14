@@ -45,6 +45,10 @@ final class FeedStoreInboundTests: XCTestCase {
         let store = await Harness.feed()
         let stranger = Peer(byte: 0x72, name: "Stranger")
         let hello = lp("default") + lp("Their circle") + lp(stranger.bundle)
+        // Start from a clean slate for this identity: a block, pending request or contact record left
+        // by an earlier (killed or failed) run would swallow the hello and the wait below would time out.
+        ConnectionsStore.shared.unblock(stranger.hex)
+        defer { ConnectionsStore.shared.unblock(stranger.hex) }
         ConnectionsStore.shared.removePending(stranger.hex)
         store.deliverFrameForTesting(frame(0, hello))
         await Harness.until(store, "request surfaces") { ConnectionsStore.shared.pending.contains { $0.idHex == stranger.hex } }

@@ -87,8 +87,15 @@ final class FakeWireTests: XCTestCase {
         XCTAssertFalse(down)
         XCTAssertTrue(SharedStore.httpUrlBad(FakeWire.relayBase), "a dead relay is skipped for a while")
         wire.unreachable = false
-        SharedStore.clearAllHttpUrlBad()
-        let back = await SharedStore.uploadEvent(circleId: "default", env: outage)
+        // The store's own background polls share the fake relay: one that began during the outage
+        // can finish AFTER the clear below and re-mark the URL bad, so a single clear-then-upload
+        // is racy. Clear and retry, bounded, until the relay is seen to answer.
+        var back = false
+        for _ in 0..<20 where !back {
+            SharedStore.clearAllHttpUrlBad()
+            back = await SharedStore.uploadEvent(circleId: "default", env: outage)
+            if !back { try? await Task.sleep(nanoseconds: 100_000_000) }
+        }
         XCTAssertTrue(back, "…and recovers once it answers")
         XCTAssertEqual(wire.relayData(SharedStore.mailboxKeyHint(circleId: "default", env: outage)), outage)
         XCTAssertNil(wire.relayData(SharedStore.mailboxKeyHint(circleId: "default", env: refused)), "the refused envelope never landed")

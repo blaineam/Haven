@@ -284,7 +284,7 @@ export default {
       type: 'cmd',
       cmd: 'node',
       args: ['Scripts/desktop-cov.mjs'],
-      coverageFloor: 67.5, // ratchet up, never down; measured 68% (rust + app.js) 2026-10-12
+      coverageFloor: 78, // ratchet up, never down; measured 78.8% (rust 77.9 + app.js 80.8) 2026-10-13
       description: 'Desktop (Tauri) own-code line coverage: Rust src-tauri + ui/app.js',
     },
     'desktop-ui': {

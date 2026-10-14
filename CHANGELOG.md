@@ -7,7 +7,12 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 2.0.1 (unreleased)
+## 2.0.2 (2026-10-14)
+
+### Changed — Optimized for iPhone Duo
+
+The App Store listing now shows Haven on iPhone Duo, with its own screenshot set. With a dual-screen phone opened flat
+the feed and profile use the centered column described below.
 
 ### Changed — wide screens: the feed is a centered 600pt column instead of edge to edge
 
@@ -69,6 +74,8 @@ nothing had been checking:
 If Haven was updated (or reinstalled over itself) while an Instagram import was paused, the
 saved place in the import could not be read by the new version, so the import quietly never
 picked back up. It now reads older saved imports and carries on where it stopped.
+
+## 2.0.1 (2026-10-10)
 
 ### Fixed — iPhone, iPad and Mac save your feed in less than half the space
 

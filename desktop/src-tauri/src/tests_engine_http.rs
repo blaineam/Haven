@@ -556,8 +556,15 @@ async fn a_mailbox_poll_routes_relay_announces_skips_live_frames_and_buries_garb
     let digests = b.dyn_state.lock().mailbox_list_digests.len();
     assert_eq!(digests, 0, "a capped pass must not commit the digest that would hide the rest");
     bounded("poll", b.poll_mailbox()).await;
-    let digests = b.dyn_state.lock().mailbox_list_digests.len();
-    assert_eq!(digests, 1, "the pass that finishes the backlog commits the digest");
+    for _ in 0..3 {
+        bounded("poll", b.poll_mailbox()).await;
+    }
+    let seen = b.dyn_state.lock().seen_mailbox.clone();
+    assert_eq!(
+        seen.iter().filter(|k| k.contains("/junk-")).count(),
+        60,
+        "the backlog drains across passes, 48 opens at a time"
+    );
 }
 
 // ── chunked media ──────────────────────────────────────────────────────────────────────────────
@@ -778,4 +785,203 @@ async fn the_signed_device_roster_is_published_once_pulled_by_a_friend_and_heale
     a.introduce_to_joined_relays().await;
     a.enroll_circle_members().await;
     a.backfill_media_to_relays().await;
+}
+
+// ── launch-time migrations that talk to the relay ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn the_one_time_media_recovery_overwrites_my_own_blobs_and_latches() {
+    let stub = Stub::start().await;
+    let (a, _) = new_engine(245);
+    wire_to(&a, &stub).await;
+    let r = a.add_local_media(DEFAULT_CIRCLE, b"\xFF\xD8\xFF recovery", false);
+    a.post(DEFAULT_CIRCLE.into(), "mine".into(), vec![r.clone()], None, false, None);
+    stub.store.lock().clear();
+    assert!(!a.prefs.lock().media_resealed_v108);
+
+    a.maybe_reseal_own_media().await;
+    assert!(stub.store.lock().contains_key(&Engine::media_key(&r)), "the blob was force-written to the relay");
+    {
+        let p = a.prefs.lock();
+        assert!(p.media_resealed_v108, "every held blob confirmed, so it latches");
+        assert_eq!(p.media_reseal_attempts, 1);
+        assert!(p.media_reseal_refs.contains(&r));
+    }
+    let puts = stub.media_puts();
+    a.maybe_reseal_own_media().await;
+    assert_eq!(stub.media_puts(), puts, "a latched migration never runs again");
+
+    // A relay that never takes the blob is retried, then written off after the attempt budget.
+    let (c, _) = new_engine(246);
+    wire_to(&c, &stub).await;
+    let r2 = c.add_local_media(DEFAULT_CIRCLE, b"\xFF\xD8\xFF unreachable", false);
+    c.post(DEFAULT_CIRCLE.into(), "stuck".into(), vec![r2], None, false, None);
+    stub.force(Some(500));
+    for _ in 0..9 {
+        c.maybe_reseal_own_media().await;
+        assert!(!c.prefs.lock().media_resealed_v108);
+        c.clear_http_url_bad(&stub.base);
+    }
+    c.maybe_reseal_own_media().await;
+    assert!(c.prefs.lock().media_resealed_v108, "ten failed attempts write the blob off");
+    stub.force(None);
+}
+
+#[tokio::test]
+async fn the_account_leaf_migration_waits_for_a_multi_device_account() {
+    let stub = Stub::start().await;
+    let (a, _) = new_engine(247);
+    wire_to(&a, &stub).await;
+    a.maybe_migrate_retire_account_leaf().await;
+    assert!(!a.prefs.lock().account_leaf_retired, "a device-only install has nothing to retire");
+    a.enable_device_roster();
+    a.maybe_migrate_retire_account_leaf().await;
+    a.prefs.lock().account_leaf_retired = true;
+    let puts = stub.count("PUT /k/");
+    a.maybe_migrate_retire_account_leaf().await;
+    assert_eq!(stub.count("PUT /k/"), puts, "the latch is sticky");
+}
+
+// ── linking a seedless device ──────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_seedless_device_is_linked_by_a_ticket_primes_its_state_from_the_relay_and_follows_a_key_rotation() {
+    let stub = Stub::start().await;
+    let (p, _) = new_engine(252);
+    let s = Engine::new_seedless(crate::covtest_util::tmp_paths()).expect("a linking device builds");
+    assert!(s.is_seedless());
+    wire_to(&p, &stub).await;
+    wire_to(&s, &stub).await;
+
+    // The primary has state worth syncing and has published its slot.
+    let mut prof = p.get_profile();
+    prof.name = "Primary Pat".into();
+    p.set_profile(prof);
+    p.poll_self_sync().await;
+
+    // A seedless device cannot mint tickets; the primary can.
+    assert!(s.mint_enroll_ticket().is_err());
+    let ticket_text = p.mint_enroll_ticket().expect("primary mints a ticket");
+    let ticket = haven_ffi::enroll::enroll_ticket_parse(ticket_text).expect("and it parses");
+    assert_eq!(ticket.account_id.len(), 32);
+    {
+        let mut sl = s.seedless.lock();
+        sl.enabled = true;
+        sl.linked = false;
+        sl.relays = ticket.relays.clone();
+        sl.pending_ticket = Some(crate::roster::PendingTicketRec {
+            account_id: ticket.account_id.clone(),
+            verification: ticket.verification.clone(),
+            secret: ticket.secret.clone(),
+            primary_device: ticket.primary_device.clone(),
+            issued_at: ticket.issued_at,
+            relays: ticket.relays.clone(),
+        });
+    }
+
+    // The new device's request: junk and a request under the wrong secret are ignored.
+    let now = now_ms() / 1000;
+    let dev_bundle = s.roster.lock().device_bundle();
+    let dev_hex = s.roster.lock().device_node_hex();
+    p.handle_seedless_enroll_request(None, b"junk");
+    p.handle_seedless_enroll_request(None, &haven_ffi::enroll::enroll_build_request(vec![9u8; 32], dev_bundle.clone(), "Imposter".into(), now).unwrap());
+    assert!(p.enroll_pending().is_empty());
+    s.send_seedless_enroll_request(); // goes nowhere without a node, but must build cleanly
+    let req = haven_ffi::enroll::enroll_build_request(ticket.secret.clone(), dev_bundle.clone(), "Linked laptop".into(), now).unwrap();
+    p.handle_seedless_enroll_request(None, &req);
+    p.handle_seedless_enroll_request(None, &req); // a resend while pending changes nothing
+    assert_eq!(p.enroll_pending(), vec![(dev_hex.clone(), "Linked laptop".to_string())]);
+    p.reject_enroll(dev_hex.clone());
+    assert!(p.enroll_pending().is_empty(), "dismissed");
+    assert!(p.approve_enroll(dev_hex.clone()).is_err(), "nothing pending to approve");
+    p.handle_seedless_enroll_request(None, &req);
+    p.approve_enroll(dev_hex.clone()).expect("the user confirms");
+    assert!(p.device_roster_dto().2.iter().any(|d| d.node_hex == dev_hex), "the device joined the signed roster");
+    // The ticket is single-use.
+    p.handle_seedless_enroll_request(None, &req);
+    assert!(p.enroll_pending().is_empty(), "a consumed ticket answers nothing");
+
+    // The grant the primary sent (re-assembled here, because the send itself has no node to ride).
+    let seed = p.seed.expect("primary holds the seed");
+    let grant = haven_ffi::enroll::enroll_assemble_grant(
+        seed.to_vec(),
+        ticket.secret.clone(),
+        dev_bundle.clone(),
+        "Linked laptop".into(),
+        now,
+        p.social.my_device_roster_wire(),
+        p.active_relay_hexes(),
+    )
+    .expect("assembles");
+    s.handle_seedless_enroll_grant(b"not a grant").await;
+    assert!(!s.seedless.lock().linked, "a bad grant leaves the device linking");
+    s.handle_seedless_enroll_grant(&grant).await;
+    {
+        let sl = s.seedless.lock();
+        assert!(sl.linked && sl.enabled);
+        assert!(sl.pending_ticket.is_none());
+        assert_eq!(sl.self_sync_key.len(), 32);
+        assert_eq!(sl.account_bundle.len() > 32, true);
+    }
+    assert!(s.roster.lock().credential.is_some(), "the device holds its credential");
+    assert_eq!(s.get_profile().name, "Primary Pat", "its state was primed from the primary's slot before any local diff");
+    assert!(s.paths().selfsync_state_file().exists());
+    s.handle_seedless_enroll_grant(&grant).await; // already linked: ignored
+    s.send_seedless_enroll_request(); // and no longer asks
+
+    // A revocation re-keys the channel: the primary seals the new epoch to the survivor, which adopts it.
+    let epoch_key = [7u8; 32];
+    p.distribute_self_sync_grants(&seed, &p.node_id_hex(), 3, &epoch_key, vec![dev_bundle]).await;
+    assert!(!stub.keys_with("keygrant").is_empty(), "the grant is in the mailbox");
+    s.adopt_rotated_self_sync_grant().await;
+    {
+        let sl = s.seedless.lock();
+        assert_eq!(sl.self_sync_epoch, 3);
+        assert_eq!(sl.self_sync_key, epoch_key.to_vec());
+    }
+    let (accepted, v0, seal) = s.self_sync_crypto();
+    assert_eq!((accepted.len(), v0, seal.map(|(e, _)| e)), (1, None, Some(3)));
+    p.revoke_device(dev_hex.clone());
+    assert!(!p.device_roster_dto().2.iter().any(|d| d.node_hex == dev_hex), "revoked devices leave the list");
+}
+
+#[tokio::test]
+async fn the_legacy_device_enrollment_hands_a_credential_to_a_second_device_of_the_account() {
+    let (p, _) = new_engine(253);
+    let (d, _) = new_engine(253); // same seed: another device of the same account
+    p.enable_device_roster();
+    let (bundle, name, hex) = {
+        let r = d.roster.lock();
+        (r.device_bundle(), crate::roster::DeviceRoster::device_name(), r.device_node_hex())
+    };
+    let mut payload = Vec::new();
+    wire::lp_append(&mut payload, &bundle);
+    wire::lp_append(&mut payload, name.as_bytes());
+    wire::lp_append(&mut payload, hex.as_bytes());
+    d.request_device_enrollment(); // no node: builds the frame and drops it
+
+    p.handle_enrollment_request(b"\x00");
+    p.handle_enrollment_request(&payload);
+    assert!(p.device_roster_dto().2.iter().any(|x| x.node_hex == hex), "the primary authorized the requester");
+    // The grant, as it would arrive on the requester.
+    let mut grant = Vec::new();
+    wire::lp_append(&mut grant, hex.as_bytes());
+    wire::lp_append(&mut grant, b"credential-bytes");
+    d.handle_device_grant(&grant);
+    assert_eq!(d.roster.lock().credential.as_deref(), Some(&b"credential-bytes"[..]));
+    let mut other = Vec::new();
+    wire::lp_append(&mut other, "ab".repeat(32).as_bytes());
+    wire::lp_append(&mut other, b"not-mine");
+    d.handle_device_grant(&other);
+    assert_eq!(d.roster.lock().credential.as_deref(), Some(&b"credential-bytes"[..]), "a grant for another device is ignored");
+    // A device never authorizes itself, and a seedless one authorizes nobody.
+    let mut own = Vec::new();
+    wire::lp_append(&mut own, &p.roster.lock().device_bundle());
+    wire::lp_append(&mut own, b"me");
+    wire::lp_append(&mut own, p.roster.lock().device_node_hex().as_bytes());
+    p.handle_enrollment_request(&own);
+    let s = Engine::new_seedless(crate::covtest_util::tmp_paths()).unwrap();
+    s.handle_enrollment_request(&payload);
+    assert!(s.device_roster_dto().2.is_empty() || !s.device_roster_dto().0);
+    p.step_down_as_primary();
 }

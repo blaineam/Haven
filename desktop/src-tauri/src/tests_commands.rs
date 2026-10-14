@@ -554,3 +554,54 @@ fn onboarding_is_never_offered_in_demo_mode_or_with_a_qa_identity() {
     });
     crate::covtest_util::with_env(&[("HAVEN_DEMO", "0")], || assert!(!demo_mode()));
 }
+
+#[tokio::test]
+async fn circle_governance_report_and_housekeeping_commands_map_the_engine() {
+    with_engine(62, |st, e| {
+        let cid = create_circle(st.clone(), "Club".into());
+        // Upgrade offers: nothing pending, a made-up acceptance is refused, and a circle that is not a
+        // legacy one has nothing to carry over.
+        assert!(pending_circle_upgrades(st.clone(), cid.clone()).is_empty());
+        assert!(!accept_circle_upgrade(st.clone(), cid.clone(), "no-such-successor".into()));
+        assert_eq!(upgrade_circle(st.clone(), cid.clone()), e.upgrade_circle(cid.clone()));
+        // Membership and admin delegation pass straight through (an unknown account is simply not added).
+        let stranger = "cd".repeat(32);
+        add_to_circle(st.clone(), cid.clone(), stranger.clone());
+        remove_from_circle(st.clone(), cid.clone(), stranger.clone());
+        assert_eq!(grant_circle_admin(st.clone(), cid.clone(), stranger.clone()), e.circle_admins(&cid).contains(&stranger));
+
+        // A report names its target and shows up in the circle's shared list with a resolved name.
+        post(st.clone(), cid.clone(), "rude post".into(), vec![], None, None, None);
+        let target = feed(st.clone(), cid.clone())[0].id.clone();
+        let author = report(st.clone(), cid.clone(), target.clone(), "spam".into(), "looks like an ad".into());
+        assert!(author.is_some(), "a report of an existing post returns its author");
+        let rows = reports(st.clone(), cid.clone());
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].target.as_str(), rows[0].reason.as_str(), rows[0].comment.as_str()), (target.as_str(), "spam", "looks like an ad"));
+        assert!(!rows[0].reporter_name.is_empty());
+
+        // Housekeeping: an unknown ref downloads nothing, the re-encode scan of an empty library is empty,
+        // a bad preview payload is refused, and an ask for an unresolvable author is dropped.
+        media_download(st.clone(), "img_not_held".into());
+        let scan = reoptimize_scan(st.clone());
+        assert!(scan.candidates.is_empty());
+        assert!(reoptimize_targets(st.clone()).is_empty());
+        assert_eq!(mint_preview(st.clone(), String::new(), "!!not base64!!".into()), None);
+        media_request_when_available(st.clone(), "img_x".into(), cid.clone(), "p1".into(), "zzzzzzzz".into());
+        assert!(!media_is_wanted(st.clone(), "img_x".into()));
+        assert!(!relay_history_start(st.clone()), "no relay, so the history pass cannot run");
+        relay_history_cancel(st.clone());
+        relay_history_dismiss(st.clone());
+
+        // A scheduled post comes back with an id and is listed.
+        let sid = schedule_message(st.clone(), "post".into(), cid.clone(), "later".into(), vec![], None, None, now_ms_for_test() + 3_600_000);
+        assert!(!sid.is_empty());
+        let s3 = s3_status(st.clone());
+        assert!(!s3.configured && s3.bucket.is_empty());
+        request_device_enrollment(st);
+    });
+}
+
+fn now_ms_for_test() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+}

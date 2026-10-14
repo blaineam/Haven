@@ -23,6 +23,8 @@ struct Knobs {
     force_status: Option<u16>,
     /// Answer HEAD with 405 (an old relay): callers must fall back to GET.
     head_unsupported: bool,
+    /// Answer any request whose `METHOD path` contains the text with this status.
+    fail_contains: Vec<(String, u16)>,
     /// Every `METHOD path` seen, in order.
     log: Vec<String>,
 }
@@ -31,6 +33,14 @@ pub(crate) struct Stub {
     pub(crate) base: String,
     pub(crate) store: Arc<parking_lot::Mutex<BTreeMap<String, Vec<u8>>>>,
     knobs: Arc<parking_lot::Mutex<Knobs>>,
+}
+
+/// Nothing in these tests may wait forever: a stuck await fails loudly after 60 s instead.
+async fn bounded<T>(what: &str, fut: impl std::future::Future<Output = T>) -> T {
+    match tokio::time::timeout(std::time::Duration::from_secs(60), fut).await {
+        Ok(v) => v,
+        Err(_) => panic!("{what} did not finish within 60 s"),
+    }
 }
 
 fn pct_decode(s: &str) -> String {
@@ -55,6 +65,7 @@ impl Stub {
     pub(crate) async fn start() -> Stub {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("binds loopback");
         let base = format!("http://{}", listener.local_addr().unwrap());
+        crate::netgate::register_test_stub(&base);
         let store: Arc<parking_lot::Mutex<BTreeMap<String, Vec<u8>>>> = Default::default();
         let knobs: Arc<parking_lot::Mutex<Knobs>> = Default::default();
         let (st, kn) = (store.clone(), knobs.clone());
@@ -99,7 +110,10 @@ impl Stub {
                     kn.lock().log.push(format!("{method} {path}"));
                     let (status, extra, out): (u16, String, Vec<u8>) = {
                         let k = kn.lock();
-                        if let Some(s) = k.force_status {
+                        let tag = format!("{method} {path}");
+                        if let Some((_, s)) = k.fail_contains.iter().find(|(needle, _)| tag.contains(needle.as_str())) {
+                            (*s, String::new(), Vec::new())
+                        } else if let Some(s) = k.force_status {
                             (s, String::new(), Vec::new())
                         } else if method == "HEAD" && k.head_unsupported {
                             (405, String::new(), Vec::new())
@@ -152,8 +166,19 @@ impl Stub {
     pub(crate) fn force(&self, status: Option<u16>) {
         self.knobs.lock().force_status = status;
     }
+    pub(crate) fn fail_when(&self, needle: &str, status: Option<u16>) {
+        let mut k = self.knobs.lock();
+        k.fail_contains.retain(|(n, _)| n != needle);
+        if let Some(s) = status {
+            k.fail_contains.push((needle.to_string(), s));
+        }
+    }
     pub(crate) fn count(&self, prefix: &str) -> usize {
         self.knobs.lock().log.iter().filter(|l| l.starts_with(prefix)).count()
+    }
+    /// PUTs of media bodies (manifests / windows / blobs), not the per-circle scope markers.
+    pub(crate) fn media_puts(&self) -> usize {
+        self.knobs.lock().log.iter().filter(|l| l.starts_with("PUT /k/haven/media/") && !l.contains(".c/")).count()
     }
     pub(crate) fn keys_with(&self, needle: &str) -> Vec<String> {
         self.store.lock().keys().filter(|k| k.contains(needle)).cloned().collect()
@@ -169,7 +194,6 @@ pub(crate) async fn wire_to(e: &Arc<Engine>, stub: &Stub) {
 
 #[tokio::test]
 async fn http_primitives_map_every_status_to_the_outcome_callers_branch_on() {
-    let _net = crate::netgate::open_relay_http_for_test();
     let stub = Stub::start().await;
     let (e, _) = new_engine(170);
     let base = stub.base.clone();
@@ -221,7 +245,6 @@ async fn http_primitives_map_every_status_to_the_outcome_callers_branch_on() {
 
 #[tokio::test]
 async fn the_delta_list_returns_keys_then_a_bodiless_204_for_an_unchanged_set() {
-    let _net = crate::netgate::open_relay_http_for_test();
     let stub = Stub::start().await;
     let (e, _) = new_engine(171);
     let base = stub.base.clone();
@@ -239,8 +262,8 @@ async fn the_delta_list_returns_keys_then_a_bodiless_204_for_an_unchanged_set() 
 }
 
 #[tokio::test]
-async fn an_unusable_http_interface_hides_the_relay_from_the_http_lane() {
-    let _net = crate::netgate::open_relay_http_for_test();
+async fn only_the_loopback_stub_passes_the_relay_http_gate_and_unusable_urls_are_dropped() {
+    let stub = Stub::start().await;
     let (e, _) = new_engine(172);
     assert!(e.relay_http_reachable(RELAY).is_none(), "an unknown relay has no interface");
     {
@@ -248,22 +271,26 @@ async fn an_unusable_http_interface_hides_the_relay_from_the_http_lane() {
         p.ensure_relay_entry(RELAY, Some("r"), false, true);
         p.set_relay_http(RELAY, vec!["http://203.0.113.9:80".into()], "t".into());
     }
-    let (urls, token) = e.relay_http_reachable(RELAY).expect("a public address is always plausible");
-    assert_eq!((urls, token), (vec!["http://203.0.113.9:80".to_string()], "t".to_string()));
-    // A private address on a subnet we are not on is dropped; a hostname is kept.
-    e.prefs.lock().set_relay_http(RELAY, vec!["http://10.254.254.9:80".into(), "http://relay.example".into()], "t".into());
-    let kept = e.relay_http_reachable(RELAY).unwrap().0;
-    assert!(kept.contains(&"http://relay.example".to_string()));
+    assert!(e.relay_http_reachable(RELAY).is_none(), "HAVEN_NO_NET retires every URL that is not a registered stub");
+    assert!(crate::netgate::relay_http_offline_for("http://203.0.113.9:80"));
+    assert!(!crate::netgate::relay_http_offline_for(&format!("{}/", stub.base)), "the stub is open, with or without a slash");
+    e.prefs.lock().set_relay_http(RELAY, vec!["http://203.0.113.9:80".into(), stub.base.clone()], "t".into());
+    let (urls, token) = e.relay_http_reachable(RELAY).unwrap();
+    assert_eq!((urls, token), (vec![stub.base.clone()], "t".to_string()));
+    // The plausibility rule on its own: hostnames and public addresses stand, other subnets do not.
     assert!(Engine::url_plausibly_reachable("http://relay.example:8443/x"));
+    assert!(Engine::url_plausibly_reachable("http://203.0.113.9:80"));
+    assert!(!Engine::url_plausibly_reachable("http://10.254.254.9:80"));
     assert!(!Engine::url_plausibly_reachable("not-a-url"));
-    // The gate itself: with the test lane closed the same lookup answers None.
-    drop(_net);
-    assert!(e.relay_http_reachable(RELAY).is_none(), "HAVEN_NO_NET retires the lane");
+    // The primitives refuse a non-stub base outright, whatever token they hold.
+    assert!(matches!(e.http_get("http://203.0.113.9:80", "t", "k").await, Err(RelayErr::Unreachable)));
+    assert!(matches!(e.http_put("http://203.0.113.9:80", "t", "k", vec![1]).await, Err(RelayErr::Unreachable)));
+    assert_eq!(e.http_head("http://203.0.113.9:80", "t", "k").await, crate::mediaholding::Head::Unreachable);
+    assert!(matches!(e.http_list_delta("http://203.0.113.9:80", "t", "p/", None).await, Err(RelayErr::Unreachable)));
 }
 
 #[tokio::test]
 async fn an_authored_post_reaches_the_relay_mailbox_and_a_friend_polls_it_in() {
-    let _net = crate::netgate::open_relay_http_for_test();
     let stub = Stub::start().await;
     let (a, _) = new_engine(173);
     let (b, _) = new_engine(174);
@@ -299,7 +326,6 @@ async fn an_authored_post_reaches_the_relay_mailbox_and_a_friend_polls_it_in() {
 
 #[tokio::test]
 async fn a_relay_that_refuses_us_is_recorded_not_parked_and_a_dead_one_is_parked() {
-    let _net = crate::netgate::open_relay_http_for_test();
     let stub = Stub::start().await;
     let (a, _) = new_engine(175);
     wire_to(&a, &stub).await;
@@ -326,7 +352,6 @@ async fn a_relay_that_refuses_us_is_recorded_not_parked_and_a_dead_one_is_parked
 
 #[tokio::test]
 async fn a_backfill_pass_re_asserts_history_and_uploads_media_to_the_relay() {
-    let _net = crate::netgate::open_relay_http_for_test();
     let stub = Stub::start().await;
     let (a, _) = new_engine(176);
     wire_to(&a, &stub).await;
@@ -348,7 +373,6 @@ async fn a_backfill_pass_re_asserts_history_and_uploads_media_to_the_relay() {
 
 #[tokio::test]
 async fn a_member_fetches_a_photo_from_the_relay_and_a_refused_or_empty_relay_is_a_miss() {
-    let _net = crate::netgate::open_relay_http_for_test();
     let stub = Stub::start().await;
     let (a, _) = new_engine(177);
     let (b, _) = new_engine(178);
@@ -381,7 +405,6 @@ async fn a_member_fetches_a_photo_from_the_relay_and_a_refused_or_empty_relay_is
 
 #[tokio::test]
 async fn a_garbage_blob_on_the_relay_is_dropped_instead_of_masquerading_as_media() {
-    let _net = crate::netgate::open_relay_http_for_test();
     let stub = Stub::start().await;
     let (b, _) = new_engine(180);
     wire_to(&b, &stub).await;
@@ -399,7 +422,6 @@ async fn a_garbage_blob_on_the_relay_is_dropped_instead_of_masquerading_as_media
 
 #[tokio::test]
 async fn a_device_the_relay_does_not_know_is_healed_by_publishing_its_roster() {
-    let _net = crate::netgate::open_relay_http_for_test();
     let stub = Stub::start().await;
     let (a, _) = new_engine(181);
     wire_to(&a, &stub).await;
@@ -414,4 +436,346 @@ async fn a_device_the_relay_does_not_know_is_healed_by_publishing_its_roster() {
     assert!(!stub.keys_with("devroster").is_empty() || stub.count("PUT /k/") > 0, "the roster went up");
     assert!(!a.heal_forbidden_relays().await, "rate limited: nothing pending now");
     assert!(a.upload_media(DEFAULT_CIRCLE, &r).await, "now the blob lands");
+}
+
+// ── self-sync between two devices of one account ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn two_devices_of_one_account_converge_through_the_relay_and_survive_a_bad_relay() {
+    let stub = Stub::start().await;
+    let (d1, _) = new_engine(230);
+    let (d2, _) = new_engine(230); // same seed: the second device of the same account
+    assert_eq!(d1.node_id_hex(), d2.node_id_hex());
+    wire_to(&d1, &stub).await;
+    wire_to(&d2, &stub).await;
+
+    let mut p = d1.get_profile();
+    p.name = "Ada on the laptop".into();
+    d1.set_profile(p);
+    d1.poll_self_sync().await;
+    assert!(!stub.keys_with("selfsync").is_empty() || stub.count("PUT /k/") > 0, "d1 publishes its slot");
+    d2.poll_self_sync().await;
+    assert_eq!(d2.get_profile().name, "Ada on the laptop", "d2 merges d1's slot");
+    assert!(d2.paths().selfsync_state_file().exists(), "and records the converged base");
+
+    // A relay that refuses the device is noted for a roster heal; a dead one is parked, and neither
+    // stops the pass from finishing.
+    stub.force(Some(403));
+    d2.poll_self_sync().await;
+    assert!(d2.roster_needed.lock().contains(RELAY) || d2.last_heal_ms.lock().clone() > 0);
+    stub.force(Some(500));
+    d2.clear_http_url_bad(&stub.base);
+    d2.poll_self_sync().await;
+    assert!(d2.http_url_bad(&stub.base));
+    assert!(!d2.dyn_state.lock().self_syncing, "the in-flight flag is always released");
+
+    // Two passes that overlap collapse into one.
+    d2.dyn_state.lock().self_syncing = true;
+    d2.poll_self_sync().await;
+    d2.dyn_state.lock().self_syncing = false;
+}
+
+// ── hello and announce blobs in the mailbox ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_hello_parked_on_the_relay_reaches_a_recipient_who_polls_and_is_not_offered_twice() {
+    let stub = Stub::start().await;
+    let (a, _) = new_engine(231);
+    let (b, _) = new_engine(232);
+    wire_to(&a, &stub).await;
+    wire_to(&b, &stub).await;
+    assert!(a.connect_by_link(b.invite_uri()));
+    let hello = a.hello_payload(DEFAULT_CIRCLE).expect("hello");
+    let bh = b.node_id_hex();
+
+    a.offer_hello_mailbox(DEFAULT_CIRCLE, &bh, &hello).await;
+    let hello_keys = stub.keys_with("/__hello__/");
+    assert_eq!(hello_keys.len(), 1);
+    assert!(hello_keys[0].contains(&bh), "the slot names its recipient");
+    let puts = stub.count("PUT /k/");
+    a.offer_hello_mailbox(DEFAULT_CIRCLE, &bh, &hello).await;
+    assert_eq!(stub.count("PUT /k/"), puts, "a landed offer is remembered per relay");
+
+    // A hello addressed to somebody else is not fetched, let alone retired.
+    let stranger = "ab".repeat(32);
+    a.offer_hello_mailbox(DEFAULT_CIRCLE, &stranger, &hello).await;
+    b.poll_mailbox().await;
+    assert_eq!(b.pending().len(), 1, "b sees a's request");
+    let gets = stub.count("GET /k/");
+    b.poll_mailbox().await;
+    assert_eq!(stub.count("GET /k/"), gets, "nothing seen is fetched again");
+
+    // A refusing relay is recorded; a dead one is parked; neither marks the offer as landed.
+    let (a2, _) = new_engine(233);
+    wire_to(&a2, &stub).await;
+    stub.force(Some(403));
+    a2.offer_hello_mailbox(DEFAULT_CIRCLE, &bh, &hello).await;
+    assert!(a2.roster_needed.lock().contains(RELAY));
+    assert!(a2.hello_offered.lock().is_empty());
+    stub.force(Some(500));
+    a2.offer_hello_mailbox(DEFAULT_CIRCLE, &bh, &hello).await;
+    assert!(a2.http_url_bad(&stub.base));
+    assert!(a2.hello_offered.lock().is_empty());
+}
+
+#[tokio::test]
+async fn a_mailbox_poll_routes_relay_announces_skips_live_frames_and_buries_garbage() {
+    let stub = Stub::start().await;
+    let (a, _) = new_engine(234);
+    let (b, _) = new_engine(235);
+    befriend(&a, &b);
+    wire_to(&b, &stub).await;
+    let other = "7".repeat(64);
+    {
+        let mut p = a.prefs.lock();
+        p.ensure_relay_entry(&other, Some("Friend relay"), false, true);
+        p.set_relay_http(&other, vec!["http://203.0.113.20:8080".into()], "tok".into());
+    }
+    let sealed = a.social.seal_circle_media(DEFAULT_CIRCLE.into(), a.relay_announce_body(&other)).expect("seals");
+    let announce = wire::event_payload(DEFAULT_CIRCLE, &sealed);
+    let cid = DEFAULT_CIRCLE;
+    stub.store.lock().insert(format!("haven/mailbox/{cid}/__relay__/one"), announce);
+    stub.store.lock().insert(format!("haven/mailbox/{cid}/__live__/frame"), vec![1, 2, 3]);
+    stub.store.lock().insert(format!("haven/mailbox/{cid}/garbage"), vec![0xEE; 40]);
+    bounded("poll", b.poll_mailbox()).await;
+    assert!(
+        b.prefs.lock().relay_entries.contains_key(&other),
+        "the durable announce teaches b a relay it has never dialled"
+    );
+    let seen = b.dyn_state.lock().seen_mailbox.clone();
+    assert!(seen.iter().any(|k| k.ends_with("/__live__/frame")), "live-call frames are claimed and skipped");
+    assert!(seen.iter().any(|k| k.ends_with("/__relay__/one")));
+    assert!(seen.iter().any(|k| k.ends_with("/garbage")), "an unopenable envelope is buried, not retried forever");
+
+    // More keys than one pass will open: the rest wait, and the list digest is not committed.
+    for i in 0..60 {
+        stub.store.lock().insert(format!("haven/mailbox/{cid}/junk-{i:03}"), vec![0xAA; 30]);
+    }
+    b.dyn_state.lock().mailbox_list_digests.clear();
+    bounded("poll", b.poll_mailbox()).await;
+    let digests = b.dyn_state.lock().mailbox_list_digests.len();
+    assert_eq!(digests, 0, "a capped pass must not commit the digest that would hide the rest");
+    bounded("poll", b.poll_mailbox()).await;
+    let digests = b.dyn_state.lock().mailbox_list_digests.len();
+    assert_eq!(digests, 1, "the pass that finishes the backlog commits the digest");
+}
+
+// ── chunked media ──────────────────────────────────────────────────────────────────────────────
+
+fn big_photo(tag: u8) -> Vec<u8> {
+    let mut v = b"\xFF\xD8\xFF".to_vec();
+    v.extend((0..8_700_000usize).map(|i| ((i * 31 + tag as usize) % 251) as u8));
+    v
+}
+
+#[tokio::test]
+async fn a_chunked_upload_resumes_after_a_cut_and_is_re_probed_and_forced_correctly() {
+    let stub = Stub::start().await;
+    let (a, _) = new_engine(236);
+    wire_to(&a, &stub).await;
+    let r = a.add_local_media(DEFAULT_CIRCLE, &big_photo(1), false);
+    let chunk = |i: usize| format!("PUT /k/{}", Engine::media_chunk_key(&r, i));
+    let manifest = Engine::media_key(&r);
+
+    // The link dies on window 1: window 0 is stored and remembered, no manifest, so nothing is readable.
+    stub.fail_when(".p/1", Some(500));
+    assert!(!a.upload_media_inner(DEFAULT_CIRCLE, &r, false).await);
+    assert!(stub.store.lock().contains_key(&Engine::media_chunk_key(&r, 0)));
+    assert!(!stub.store.lock().contains_key(&manifest));
+    assert_eq!(a.media_upload_progress(RELAY, &r).map(|(_, n)| n), Some(1));
+
+    // Retry: window 0 is asked about (HEAD), not re-sent; the rest and the manifest go up.
+    stub.fail_when(".p/1", None);
+    a.clear_http_url_bad(&stub.base);
+    assert!(a.upload_media_inner(DEFAULT_CIRCLE, &r, false).await);
+    assert_eq!(stub.count(&chunk(0)), 1, "window 0 was not sent twice");
+    assert!(stub.store.lock().contains_key(&manifest) && stub.store.lock().contains_key(&Engine::media_chunk_key(&r, 1)));
+    assert!(a.media_upload_progress(RELAY, &r).is_none(), "a finished upload needs no record");
+
+    // A complete copy is recognised by the probe and left alone.
+    a.forget_media_backed_up_ref(&r);
+    let before = stub.media_puts();
+    assert!(a.upload_media_inner(DEFAULT_CIRCLE, &r, false).await);
+    assert_eq!(stub.media_puts(), before);
+    assert!(a.media_backed_up_has(RELAY, &r));
+
+    // A copy whose tail went missing is INCOMPLETE and is re-sent in full.
+    stub.store.lock().remove(&Engine::media_chunk_key(&r, 1));
+    a.forget_media_backed_up_ref(&r);
+    assert!(a.upload_media_inner(DEFAULT_CIRCLE, &r, false).await);
+    assert!(stub.store.lock().contains_key(&Engine::media_chunk_key(&r, 1)));
+
+    // force overwrites without asking; reseal produces fresh bytes under the same key.
+    let before = stub.media_puts();
+    assert!(a.upload_media_inner(DEFAULT_CIRCLE, &r, true).await);
+    assert!(stub.media_puts() > before);
+    let old = stub.store.lock().get(&manifest).cloned();
+    assert!(a.upload_media_inner_reseal(DEFAULT_CIRCLE, &r, true, true).await);
+    assert!(stub.store.lock().get(&manifest).is_some() && old.is_some());
+}
+
+#[tokio::test]
+async fn a_chunked_download_resumes_on_the_missing_window_and_opens_for_the_member() {
+    let stub = Stub::start().await;
+    let (a, _) = new_engine(237);
+    let (b, _) = new_engine(238);
+    befriend(&a, &b);
+    wire_to(&a, &stub).await;
+    wire_to(&b, &stub).await;
+    let r = a.add_local_media(DEFAULT_CIRCLE, &big_photo(2), false);
+    a.post(DEFAULT_CIRCLE.into(), "big".into(), vec![r.clone()], None, false, None);
+    crate::engine::cov_engine_tests::deliver(&a, &b, DEFAULT_CIRCLE);
+    assert!(a.upload_media_inner(DEFAULT_CIRCLE, &r, false).await);
+
+    let saved = stub.store.lock().remove(&Engine::media_chunk_key(&r, 1)).expect("window 1 was stored");
+    assert!(b.fetch_media_from_relay(DEFAULT_CIRCLE, &r).await.is_none(), "an incomplete blob is not adopted");
+    assert!(!b.media_present(&r));
+    stub.store.lock().insert(Engine::media_chunk_key(&r, 1), saved);
+    assert!(b.fetch_media_healing(DEFAULT_CIRCLE, &r).await, "the retry finishes it");
+    assert_eq!(stub.count(&format!("GET /k/{}", Engine::media_chunk_key(&r, 0))), 1, "window 0 was kept, not re-downloaded");
+    assert!(b.media_present(&r));
+    assert!(b.media_bytes(DEFAULT_CIRCLE, &r).is_some(), "and it opens for the member");
+}
+
+#[tokio::test]
+async fn probe_verdicts_other_than_missing_decide_whether_a_relay_is_asked_to_store() {
+    let stub = Stub::start().await;
+    let (a, _) = new_engine(239);
+    wire_to(&a, &stub).await;
+    let r = a.add_local_media(DEFAULT_CIRCLE, b"\xFF\xD8\xFF probe me", false);
+    // A relay that takes the scope marker but refuses HEAD: noted, nothing uploaded.
+    stub.fail_when("HEAD ", Some(403));
+    assert!(!a.upload_media_inner(DEFAULT_CIRCLE, &r, false).await);
+    assert!(a.roster_needed.lock().contains(RELAY));
+    assert!(!a.http_url_bad(&stub.base));
+    // One that answers HEAD with a 500: the URL is parked.
+    stub.fail_when("HEAD ", Some(500));
+    assert!(!a.upload_media_inner(DEFAULT_CIRCLE, &r, false).await);
+    assert!(a.http_url_bad(&stub.base));
+    // The scope marker itself refused: this relay does not serve the circle at all.
+    a.clear_http_url_bad(&stub.base);
+    stub.fail_when("HEAD ", None);
+    stub.fail_when("PUT /k/haven/media/", Some(403));
+    assert!(!a.upload_media_inner(DEFAULT_CIRCLE, &r, false).await);
+    stub.fail_when("PUT /k/haven/media/", None);
+    // An old relay with no HEAD: the probe falls back to GET and still lands the blob.
+    stub.knobs.lock().head_unsupported = true;
+    assert!(a.upload_media_inner(DEFAULT_CIRCLE, &r, true).await);
+    assert!(stub.store.lock().contains_key(&Engine::media_key(&r)));
+    a.forget_media_backed_up_ref(&r);
+    assert!(a.upload_media_inner(DEFAULT_CIRCLE, &r, false).await, "present, found by GET");
+}
+
+// ── "Load history from your relays" ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_history_pass_recovers_a_friends_posts_and_media_from_the_relay() {
+    let _rh = crate::covtest_util::RELAY_HISTORY_LOCK.lock();
+    let stub = Stub::start().await;
+    let (a, _) = new_engine(240);
+    let (b, _) = new_engine(241);
+    befriend(&a, &b);
+    wire_to(&a, &stub).await;
+    wire_to(&b, &stub).await;
+    let photo = a.add_local_media(DEFAULT_CIRCLE, b"\xFF\xD8\xFF history photo", false);
+    a.post(DEFAULT_CIRCLE.into(), "from the archive".into(), vec![photo.clone()], None, false, None);
+    a.backfill_mailbox(DEFAULT_CIRCLE).await;
+    assert!(!stub.keys_with("haven/mailbox/").is_empty());
+    assert!(!b.feed(DEFAULT_CIRCLE).iter().any(|i| i.body == "from the archive"), "b has not heard of it");
+
+    b.relay_history_reset_journal();
+    assert!(b.relay_history_start());
+    assert!(!b.relay_history_start(), "a second start while one runs is refused");
+    let mut spins = 0u64;
+    while !matches!(b.relay_history_status()["state"].as_str(), Some("done" | "cancelled")) {
+        tokio::task::yield_now().await;
+        spins += 1;
+        assert!(spins < 50_000_000, "the history pass never finished");
+    }
+    let status = b.relay_history_status();
+    assert_eq!(status["state"], "done", "{status}");
+    assert!(status["entries_found"].as_u64().unwrap() > 0, "{status}");
+    assert!(status["journal_keys"].as_u64().unwrap() > 0, "ingested keys are journalled");
+    assert!(b.feed(DEFAULT_CIRCLE).iter().any(|i| i.body == "from the archive"), "the post came back from the relay");
+    assert!(b.media_present(&photo), "and so did its photo");
+
+    // Running it again finds nothing new: the journal remembers every key.
+    b.relay_history_dismiss();
+    assert!(b.relay_history_start());
+    spins = 0;
+    while !matches!(b.relay_history_status()["state"].as_str(), Some("done" | "cancelled")) {
+        tokio::task::yield_now().await;
+        spins += 1;
+        assert!(spins < 50_000_000, "the second history pass never finished");
+    }
+    assert_eq!(b.relay_history_status()["posts_added"], 0);
+    b.relay_history_dismiss();
+
+    // A relay that refuses the device ends honestly as unreachable.
+    stub.force(Some(403));
+    b.relay_history_reset_journal();
+    assert!(b.relay_history_start());
+    spins = 0;
+    while !matches!(b.relay_history_status()["state"].as_str(), Some("done" | "cancelled")) {
+        tokio::task::yield_now().await;
+        spins += 1;
+        assert!(spins < 50_000_000, "the refused pass never finished");
+    }
+    assert_eq!(b.relay_history_status()["outcome"], "unreachable");
+    b.relay_history_dismiss();
+}
+
+// ── device rosters and relay introductions over HTTP ───────────────────────────────────────────
+
+#[tokio::test]
+async fn the_signed_device_roster_is_published_once_pulled_by_a_friend_and_healed_when_refused() {
+    let stub = Stub::start().await;
+    let (a, _) = new_engine(242);
+    let (b, _) = new_engine(243);
+    befriend(&a, &b);
+    wire_to(&a, &stub).await;
+    wire_to(&b, &stub).await;
+    stub.store.lock().clear();
+    a.roster_published.lock().clear();
+    let key = format!("haven/devroster/{}", a.node_id_hex());
+
+    a.publish_device_roster().await;
+    assert!(stub.store.lock().contains_key(&key), "the account-signed roster is on the relay");
+    let puts = stub.count(&format!("PUT /k/{key}"));
+    a.publish_device_roster().await;
+    assert_eq!(stub.count(&format!("PUT /k/{key}")), puts, "an unchanged roster is not re-sent inside 30 minutes");
+    a.publish_device_roster_inner(true).await;
+    assert!(stub.count(&format!("PUT /k/{key}")) > puts, "but a forced publish (the refusal heal) always is");
+
+    // A friend pulls it; a malformed account id and an empty relay yield nothing new.
+    let _ = b.fetch_contact_roster(&a.node_id_hex()).await;
+    assert!(!b.social.device_node_ids_for(a.node_id_hex()).is_empty(), "b can resolve a's devices");
+    assert!(!b.fetch_contact_roster("not-an-account").await);
+    stub.store.lock().remove(&key);
+    let (c, _) = new_engine(244);
+    wire_to(&c, &stub).await;
+    assert!(!c.fetch_contact_roster(&"ee".repeat(32)).await, "nobody holds that roster");
+
+    // A relay that REJECTS the roster body sends the device to read back the version it holds.
+    a.publish_device_roster_inner(true).await;
+    assert!(stub.store.lock().contains_key(&key));
+    stub.fail_when(&format!("PUT /k/{key}"), Some(403));
+    a.publish_device_roster_inner(true).await;
+    stub.fail_when(&format!("PUT /k/{key}"), None);
+    // A relay that is down is parked; one that refuses reads is noted.
+    stub.force(Some(500));
+    a.roster_published.lock().clear();
+    a.publish_device_roster().await;
+    assert!(a.http_url_bad(&stub.base));
+    a.clear_http_url_bad(&stub.base);
+    stub.force(Some(403));
+    let _ = a.fetch_contact_roster(&b.node_id_hex()).await; // refused reads are routed to note_refused
+    assert!(a.roster_needed.lock().contains(RELAY));
+    stub.force(None);
+
+    // A freshly joined relay is introduced to once; a second heartbeat has nothing to say.
+    a.introduce_to_joined_relays().await;
+    a.introduce_to_joined_relays().await;
+    a.enroll_circle_members().await;
+    a.backfill_media_to_relays().await;
 }

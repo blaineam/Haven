@@ -45,41 +45,31 @@ pub fn offline() -> bool {
     }
 }
 
-/// The gate for the relay HTTP lane only (`relay_http_reachable`, `http_get/put/head/list_delta`).
-/// In a release build, and in a test that has not opted in, this is exactly [`offline`]. A unit test
-/// can open just this lane against a loopback stub with [`open_relay_http_for_test`]; every other
-/// transport (iroh dials, S3, push worker, iTunes) stays gated, so a test can never reach a real host.
-pub fn relay_http_offline() -> bool {
+/// The gate for ONE relay HTTP base URL (`relay_http_reachable`, `http_get/put/head/list_delta`). In a
+/// release build this is exactly [`offline`]. In a unit test it additionally lets through the loopback
+/// stub relays a test registered with [`register_test_stub`] — and nothing else — so the lane can be
+/// exercised end to end while every other transport (iroh dials, S3, push worker, iTunes) and every
+/// non-stub URL stays behind `HAVEN_NO_NET`. A test can therefore never reach a real host.
+pub fn relay_http_offline_for(base: &str) -> bool {
     #[cfg(test)]
     {
-        if RELAY_HTTP_OPEN.with(|c| c.get()) {
+        let base = base.trim_end_matches('/');
+        if TEST_STUBS.lock().iter().any(|s| s == base) {
             return false;
         }
     }
+    let _ = base;
     offline()
 }
 
 #[cfg(test)]
-thread_local! {
-    static RELAY_HTTP_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
+static TEST_STUBS: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
 
-/// Test-only: open the relay HTTP lane on THIS thread until the guard drops. Tests using it run on a
-/// current-thread tokio runtime (the `#[tokio::test]` default), so every task they spawn shares the thread.
+/// Test-only: allow the relay HTTP lane to talk to this exact `http://127.0.0.1:<port>` stub.
 #[cfg(test)]
-pub struct RelayHttpGuard;
-
-#[cfg(test)]
-impl Drop for RelayHttpGuard {
-    fn drop(&mut self) {
-        RELAY_HTTP_OPEN.with(|c| c.set(false));
-    }
-}
-
-#[cfg(test)]
-pub fn open_relay_http_for_test() -> RelayHttpGuard {
-    RELAY_HTTP_OPEN.with(|c| c.set(true));
-    RelayHttpGuard
+pub fn register_test_stub(base: &str) {
+    assert!(base.starts_with("http://127.0.0.1:"), "only loopback stubs may open the lane");
+    TEST_STUBS.lock().push(base.trim_end_matches('/').to_string());
 }
 
 /// The rule itself, kept pure so it is testable — `offline()` caches its answer in a `OnceLock`, so

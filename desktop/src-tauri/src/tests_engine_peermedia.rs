@@ -152,7 +152,6 @@ async fn asking_peers_for_media_upgrades_to_a_resume_request_once_a_partial_exis
 
 #[tokio::test]
 async fn an_author_puts_swept_media_back_on_a_relay_when_a_member_asks() {
-    let _net = crate::netgate::open_relay_http_for_test();
     let stub = Stub::start().await;
     let (a, b, r, post_id) = friends_with_a_photo(210, 211, 3_000);
     wire_to(&a, &stub).await;

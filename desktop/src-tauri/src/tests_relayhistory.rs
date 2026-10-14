@@ -20,6 +20,7 @@ fn wait_for(done: impl Fn() -> bool) {
 
 #[tokio::test]
 async fn availability_status_and_a_full_offline_run() {
+    let _rh = crate::covtest_util::RELAY_HISTORY_LOCK.lock();
     let (e, _paths) = new_engine(80);
     relay_history_dismiss_all(&e);
 

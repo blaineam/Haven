@@ -65,3 +65,7 @@ pub fn with_env<T>(vars: &[(&str, &str)], f: impl FnOnce() -> T) -> T {
 /// requests (or answer them wholesale) hold this for their whole body so they cannot answer each
 /// other's.
 pub static IGENCODE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// The relay-history pass keeps ONE process-wide progress record. Every test that starts a pass
+/// (or edits that record) holds this for its whole body, so two of them cannot read each other's.
+pub static RELAY_HISTORY_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());

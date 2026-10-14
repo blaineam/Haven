@@ -1101,7 +1101,8 @@ object CallManager {
     fun setNativeAudioSuspendedForHairpin(suspended: Boolean) = onCall { setNativeAudioSuspendedForHairpinOnCall(suspended) }
 
     private fun setNativeAudioSuspendedForHairpinOnCall(suspended: Boolean) {
-        audioTrack?.setEnabled(!suspended && micOn.value)
+        nativeAudioSuspended = suspended
+        applyNativeMic()
     }
 
     /**
@@ -1163,7 +1164,13 @@ object CallManager {
 
     // ---- Controls ----
 
-    fun toggleMic() = onCall { micOn.value = !micOn.value; audioTrack?.setEnabled(micOn.value) }
+    fun toggleMic() = onCall { micOn.value = !micOn.value; applyNativeMic() }
+
+    /** Is WebRTC's own audio path parked because the hairpin relay owns the microphone? While it is, un-muting
+     *  must NOT re-enable the WebRTC track: two capture clients on one mic is the conflict the park exists to avoid. */
+    private var nativeAudioSuspended = false
+
+    private fun applyNativeMic() { audioTrack?.setEnabled(micOn.value && !nativeAudioSuspended) }
     fun toggleSpeaker() = onCall { speakerOn.value = !speakerOn.value; applySpeaker() }
 
     private fun audioManager(): android.media.AudioManager =
@@ -1510,7 +1517,7 @@ object CallManager {
             am.mode = android.media.AudioManager.MODE_NORMAL
         }
         speakerOn.value = true   // default for the next call
-        sessionId = ""; mediaStarted = false; isCaller = false
+        sessionId = ""; mediaStarted = false; isCaller = false; nativeAudioSuspended = false
         ringing.value = false; connecting.value = false; inCall.value = false; minimized.value = false
         peerName.value = ""
     }

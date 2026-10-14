@@ -302,9 +302,14 @@ object CallMediaBridge {
                     val payload = if (n == FRAME_BYTES) buf.copyOf() else buf.copyOf(n)
                     synchronized(CallMediaBridge) {
                         if (activePeers.isNotEmpty()) {
-                            audioSeq = (audioSeq + 1) and 0xFFFF
-                            val frame = pack(TYPE_AUDIO, audioSeq, 0, payload)
-                            activePeers.forEach { CallHairpin.send(it, frame) }
+                            val next = (audioSeq + 1) and 0xFFFF
+                            // A muted microphone sends nothing. The recorder keeps draining (so it never backs up),
+                            // but its frames must not reach the far end: WebRTC's own mute only silences WebRTC's track.
+                            val frame = micFrame(next, payload, CallManager.micOn.value)
+                            if (frame != null) {
+                                audioSeq = next
+                                activePeers.forEach { CallHairpin.send(it, frame) }
+                            }
                         }
                     }
                 }
@@ -613,6 +618,11 @@ object CallMediaBridge {
 
     // ---- Wire format --------------------------------------------------------------------------
 
+    /** The relay frame for one captured microphone frame, or null while the user has muted: muting has to hold on the
+     *  relayed path too, where the audio never touches WebRTC. */
+    internal fun micFrame(seq: Int, payload: ByteArray, micOn: Boolean): ByteArray? =
+        if (micOn) pack(TYPE_AUDIO, seq, 0, payload) else null
+
     private fun pack(type: Byte, seq: Int, ptsMs: Int, payload: ByteArray): ByteArray =
         HairpinFrame.pack(type, seq, ptsMs, payload)
 
@@ -634,7 +644,7 @@ object CallMediaBridge {
         @Synchronized
         fun push(seq: Int, payload: ByteArray): List<ByteArray> {
             pending[seq] = payload
-            if (next == null && pending.size >= depth) next = pending.keys.min()
+            if (next == null && pending.size >= depth) next = oldest()
             val out = ArrayList<ByteArray>()
             while (true) {
                 val n = next ?: break
@@ -645,9 +655,16 @@ object CallMediaBridge {
             // A gap that never fills would stall playout forever — once we are holding more than the
             // window, skip ahead to the oldest frame we actually have.
             if (out.isEmpty() && pending.size > depth * 2) {
-                next = pending.keys.min()
+                next = oldest()
             }
             return out
+        }
+
+        /** The oldest frame held, reading the 16-bit sequence as a circle: when the counter wraps just as playout
+         *  starts, 65534 and 65535 are OLDER than 0, and the numerically smallest key would strand them for good. */
+        private fun oldest(): Int {
+            val keys = pending.keys
+            return keys.firstOrNull { k -> keys.all { j -> ((j - k) and 0xFFFF) < 0x8000 } } ?: keys.min()
         }
     }
 }

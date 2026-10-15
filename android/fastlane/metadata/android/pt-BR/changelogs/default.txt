@@ -1,4 +1,4 @@
-2.0.1 — Mais fluido e leve.
-• O Haven salva seus círculos, contatos e mensagens em menos da metade do espaço, gravando muito menos no armazenamento. Seus dados são mantidos automaticamente.
-• As capas das músicas usam muito menos memória, então a rolagem continua fluida.
-• Melhorias internas que deixam o Haven mais rápido e leve na memória.
+2.0.2 — Mais confortável em telas grandes.
+• Em tablets e janelas largas, o feed e o seu perfil agora ficam numa coluna centralizada e fotos e vídeos não ficam mais enormes.
+• Chamadas pelo relay não travam mais quando um quadro de áudio se perde, e reativar o microfone funciona de forma confiável.
+• Os filtros de foto e vídeo agora funcionam em telefones com vírgula decimal, como alemão, francês e árabe.

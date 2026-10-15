@@ -1,4 +1,4 @@
-2.0.1 – Flüssiger und schlanker.
-• Haven speichert Kreise, Kontakte und Nachrichten in weniger als der Hälfte des Platzes und schreibt so viel weniger auf den Speicher. Bisherige Daten werden automatisch übernommen.
-• Song-Cover brauchen deutlich weniger Speicher, damit das Scrollen an Songs vorbei flüssig bleibt.
-• Technische Verbesserungen, die Haven schneller machen und weniger Speicher brauchen.
+2.0.2 – Ruhiger auf großen Displays.
+• Auf Tablets und breiten Fenstern sind Feed und Profil jetzt eine zentrierte Spalte, Fotos und Videos sind nicht mehr riesig.
+• Anrufe über das Relay bleiben nicht mehr hängen, wenn ein Audio-Frame verloren geht, und das Aufheben der Stummschaltung funktioniert zuverlässig.
+• Foto- und Videofilter funktionieren jetzt auch auf Geräten mit Dezimalkomma, etwa auf Deutsch, Französisch und Arabisch.

@@ -1,4 +1,4 @@
-2.0.1 — Smoother and lighter.
-• Haven saves your circles, contacts and messages in less than half the space, so it writes far less to storage. Existing data carries over automatically.
-• Song artwork uses much less memory, so scrolling past songs stays smooth.
-• Under-the-hood updates that make Haven faster and lighter on memory.
+2.0.2 — Calmer on big screens.
+• On tablets and wide windows the feed and your profile are now a centered column, so photos and videos are no longer huge.
+• Relayed calls no longer stall when one audio frame is lost, and un-muting works reliably.
+• Photo and video filters now work on phones set to German, French, Arabic and other comma-decimal languages.

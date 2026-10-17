@@ -7795,6 +7795,10 @@ final class FeedStore: ObservableObject {
     func confirmSeedlessEnroll(_ request: PendingEnrollRequest) {
         defer { pendingEnrollRequest = nil }
         guard let seed = AccountStore.storedSeed(), let ticket = activeEnrollTicket else { return }
+        // Consume the ticket NOW, not after the async roster/grant steps below: a replay of the same
+        // request arriving while they run must not raise a second confirmation sheet. A failed grant
+        // restores it (below) so the device stays re-scannable.
+        activeEnrollTicket = nil
         let now = UInt64(Date().timeIntervalSince1970)
         // Ensure roster is enabled (this device becomes/confirms primary) and union the new device in —
         // the same path legacy linking uses, so the roster wire we then export carries the new device.
@@ -7813,10 +7817,12 @@ final class FeedStore: ObservableObject {
             // Convenience path: issues the credential, unions the device, and seals the self-sync grant.
             guard let grant = try? enrollAssembleGrant(accountSeed: seed, ticketSecret: ticket.secret,
                                                        deviceBundle: request.deviceBundle, name: request.name,
-                                                       createdAt: now, rosterWire: rosterWire, relays: relays) else { return }
+                                                       createdAt: now, rosterWire: rosterWire, relays: relays) else {
+                if self.activeEnrollTicket == nil { self.activeEnrollTicket = ticket }   // failed grant: stay re-scannable
+                return
+            }
             self.nearbyBroadcast(29, grant)
             self.sendToDeviceHex(29, grant, request.deviceHex)   // directed to the requester
-            self.activeEnrollTicket = nil                          // single-use — consume it
             // Populate the newly-seedless device: its self-sync base initializes from this pushed slot.
             self.pushFullStateToMyDevices()
             NotificationManager.shared.notify(title: "New device linked",

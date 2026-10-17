@@ -21,7 +21,7 @@
 //
 // Usage: node Scripts/android-minified-smoke.mjs [--skip-build]
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -79,9 +79,31 @@ async function ensureEmulator() {
 // ── Build ─────────────────────────────────────────────────────────────────────────────────
 function build() {
   log('gradle :app:assembleMinified :app:assembleMinifiedAndroidTest (R8)…');
-  const r = run('./gradlew', [':app:assembleMinified', ':app:assembleMinifiedAndroidTest', '-PhavenTestBuildType=minified'],
+  const gradle = () => run('./gradlew', [':app:assembleMinified', ':app:assembleMinifiedAndroidTest', '-PhavenTestBuildType=minified'],
     { cwd: ANDROID, stdio: 'inherit' });
+  let r = gradle();
+  if (r.status !== 0) {
+    // The checkout lives in iCloud, which drops "<name> 2.class" duplicates of freshly compiled classes into
+    // build/ while a long build is still running (R8: "Type … is defined multiple times"). A pre-build sweep
+    // can't see them, so clear generated duplicates and retry once.
+    const swept = sweepBuildDuplicates(join(ANDROID, 'app', 'build'));
+    if (swept) { log(`gradle failed; removed ${swept} iCloud duplicate(s) from app/build — retrying once`); r = gradle(); }
+  }
   if (r.status !== 0) throw new Error(`gradle exited ${r.status}`);
+}
+
+function sweepBuildDuplicates(dir) {
+  let n = 0;
+  const walk = (d) => {
+    let entries; try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/ \d+(\.[^./ ]+)?$/.test(e.name)) { try { rmSync(p); n++; } catch { /* best effort */ } }
+    }
+  };
+  walk(dir);
+  return n;
 }
 
 function apks() {

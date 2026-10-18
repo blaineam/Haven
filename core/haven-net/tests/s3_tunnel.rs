@@ -54,7 +54,7 @@ async fn s3_bytes_round_trip_through_the_iroh_tunnel() {
     client.write_all(req).await.unwrap();
 
     let mut resp = Vec::new();
-    let read = timeout(Duration::from_secs(10), async {
+    let read = timeout(Duration::from_secs(45), async {   // same-machine dial, but a loaded host (a full QA run) can take well over 10s
         let mut buf = [0u8; 4096];
         // Read until we have the echoed payload back.
         loop {

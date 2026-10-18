@@ -71,7 +71,14 @@ async function ensureEmulator() {
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 3000));
     const s = runningEmulator();
-    if (s && sh('getprop sys.boot_completed') === '1') { log(`booted ${s}`); return { serial: s, booted: true }; }
+    if (s && sh('getprop sys.boot_completed') === '1') {
+      // A freshly booted emulator on a loaded host often ANRs its launcher ("Pixel Launcher isn't responding"),
+      // and that dialog sits over every test screen. Suppress system error dialogs for this run, and give it
+      // a moment to settle.
+      sh('settings put global hide_error_dialogs 1');
+      await new Promise((r) => setTimeout(r, 15_000));
+      log(`booted ${s}`); return { serial: s, booted: true };
+    }
   }
   throw new Error(`emulator ${AVD} did not boot within 240s`);
 }

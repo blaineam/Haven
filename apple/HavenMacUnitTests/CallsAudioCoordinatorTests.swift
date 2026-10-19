@@ -26,6 +26,11 @@ final class CallsAudioCoordinatorTests: XCTestCase {
         savedVideoSound = SettingsStore.shared.videoSoundOn
         SettingsStore.shared.silent = false
         SettingsStore.shared.videoSoundOn = true
+        // `dataSaverActive` reads the live network path: on a constrained or expensive link (a hotspot, Low Data
+        // Mode) the viewer never takes the stage and these tests fail through no fault of the coordinator. Pin
+        // the link to normal so the result doesn't depend on which network the Mac happens to be on.
+        LowDataMonitor.shared.debugForce(.normal)
+        SettingsStore.shared.superDataSaver = false
     }
 
     override func tearDown() async throws {
@@ -34,6 +39,7 @@ final class CallsAudioCoordinatorTests: XCTestCase {
         ac.center(nil)
         SettingsStore.shared.silent = savedSilent
         SettingsStore.shared.videoSoundOn = savedVideoSound
+        LowDataMonitor.shared.debugForce(nil)
     }
 
     private func player(volume: Float = 0.5) -> AVPlayer {

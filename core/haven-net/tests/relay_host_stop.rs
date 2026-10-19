@@ -158,6 +158,11 @@ async fn dropping_the_path_router_stops_it() {
     .expect("router");
     assert!(accepting(port));
     drop(router);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Closing the listener is asynchronous: a fixed 300ms was enough on an idle host and not on a loaded one
+    // (a full QA run alongside), so poll for up to 10s instead.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while accepting(port) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert!(!accepting(port), "a dropped path router is still accepting on :{port}");
 }

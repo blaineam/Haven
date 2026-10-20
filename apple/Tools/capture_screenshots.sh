@@ -36,8 +36,12 @@ set -uo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"   # → apple/
 cd "$PROJECT_ROOT"
 
+# macOS leg runs in the QA VM by default (isolated: no real Haven/keychain/windows/defaults on this Mac);
+# CAP_VM=0 runs it on this Mac. See _shared/screenshots/capture-vm.sh. Set before the lib is sourced.
+CAP_VM="${CAP_VM:-1}"
 # shellcheck disable=SC1091
 source "$PROJECT_ROOT/../../_shared/screenshots/capture-lib.sh"
+type cap_vm_enabled >/dev/null 2>&1 || cap_vm_enabled() { return 1; }
 
 PROJECT="$PROJECT_ROOT/Haven.xcodeproj"
 SCHEME="Haven"
@@ -45,7 +49,7 @@ BUNDLE_ID="com.blaineam.kith"
 
 IPHONE="iPhone 17 Pro Max"
 APPLETV=""   # (none)
-OUT="$PROJECT_ROOT/screenshots"
+OUT="${HAVEN_SHOTS_OUT:-$PROJECT_ROOT/screenshots}"   # HAVEN_SHOTS_OUT: capture elsewhere (test runs)
 ONLY="${1:-all}"
 
 # Scene table: "tab|scene|file". An empty scene just shows the tab.
@@ -211,26 +215,38 @@ capture_mac() {
   local SHARED="$PROJECT_ROOT/../../_shared/screenshots"
   [ -f "$SHARED/mac-window-id.swift" ] || { echo "  !! $SHARED/mac-window-id.swift missing" >&2; return 1; }
 
-  local LOCKED
-  LOCKED=$(swift - <<'SWIFT' 2>/dev/null
+  # Fail closed: VM mode must never silently run on this Mac.
+  if [ "${CAP_VM:-0}" = 1 ] && ! type cap_vm_enable >/dev/null 2>&1; then
+    echo "  !! CAP_VM=1 but the shared lib has no VM mode (use CAP_VM=0 to run on this Mac)" >&2; return 1
+  fi
+  _haven_locked_check() {
+    local LOCKED
+    LOCKED=$(swift - <<'SWIFT' 2>/dev/null
 import CoreGraphics; import Foundation
 if let d = CGSessionCopyCurrentDictionary() as? [String:Any] { print(d["CGSSessionScreenIsLocked"] as? Int ?? 0) } else { print(0) }
 SWIFT
 )
-  if [ "$LOCKED" = "1" ]; then
-    echo "  !! display is LOCKED — unlock + keep awake, then re-run \`./Tools/capture_screenshots.sh mac\`." >&2
-    return 1
-  fi
+    if [ "$LOCKED" = "1" ]; then
+      echo "  !! display is LOCKED — unlock + keep awake, then re-run \`./Tools/capture_screenshots.sh mac\`." >&2
+      return 1
+    fi
+  }
+  # VM mode checks the GUEST's session after cap_vm_enable (below, after the build).
+  [ "${CAP_VM:-0}" = 1 ] || _haven_locked_check || return 1
 
   local derived="/tmp/haven-shots-dd-mac"
   mkdir -p "$derived"
   echo "  Building HavenMac (native macOS)…"
   # Signed for the same reason as the sim leg: no entitlement ⇒ no identity ⇒ no demo engine ⇒
   # every scene captures empty.
+  # VM mode: the guest has no provisioning profile (AMFI kills a provisioned build), so build UNSIGNED (no Apple
+  # account used) and run an ad-hoc copy; the app falls back to a UserDefaults seed when the keychain is unavailable.
+  local -a signargs=(DEVELOPMENT_TEAM="${HAVEN_TEAM_ID:-8ZVSPZYSVF}" CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates)
+  [ "${CAP_VM:-0}" = 1 ] && signargs=(CODE_SIGNING_ALLOWED=NO)
   if ! xcodebuild -project "$PROJECT" -scheme HavenMac \
       -destination "platform=macOS" -configuration Debug \
       -derivedDataPath "$derived" \
-      DEVELOPMENT_TEAM="${HAVEN_TEAM_ID:-8ZVSPZYSVF}" CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates build \
+      "${signargs[@]}" build \
       >"$derived/mac-build.log" 2>&1; then
     echo "  mac build failed; tail of log:" >&2
     tail -40 "$derived/mac-build.log" >&2
@@ -243,7 +259,17 @@ SWIFT
   # NEVER touch the owner's installed Haven: the debug build shares its bundle id, container and
   # keychain group, and the window lookup matches by owner name. Refuse if a non-harness Haven runs,
   # and only ever kill OUR binary (a bare `pkill -f Haven.app/…` also killed /Applications/Haven.app).
-  local BIN="$APP/Contents/MacOS/Haven"
+  local BIN="$APP/Contents/MacOS/Haven" EXEC
+  EXEC="$BIN"
+  if [ "${CAP_VM:-0}" = 1 ]; then
+    # Built on this Mac (compile only); from here on everything runs in the QA VM, holding its lock.
+    cap_vm_enable || return 1
+    _haven_locked_check || return 1
+    APP="$(cap_vm_adhoc_copy "$APP" /tmp/haven-shots-adhoc/Haven.app)" || return 1
+    BIN="$APP/Contents/MacOS/Haven"
+    CAP_VM_ENV="HAVEN_DEMO HAVEN_SKIP_ONBOARDING HAVEN_NO_NET HAVEN_TAB HAVEN_SCENE"   # forwarded to the guest process
+    EXEC="$(cap_vm_bin "$BIN")"
+  fi
   if pgrep -fl "Haven.app/Contents/MacOS/Haven" | grep -v -F "$BIN" | grep -q .; then
     echo "  !! another Haven is running (the owner's real app) — quit it first; not capturing." >&2
     return 1
@@ -267,11 +293,14 @@ SWIFT
       # as an argument-domain default localizes this process only (the Mac's global prefs untouched).
       # shellcheck disable=SC2046
       HAVEN_DEMO=1 HAVEN_SKIP_ONBOARDING=1 HAVEN_NO_NET=1 HAVEN_TAB="$tab" HAVEN_SCENE="$scene" \
-        "$BIN" $( [ -n "$LOC" ] && cap_locale_args "$LOC" ) >/dev/null 2>&1 &
+        "$EXEC" $( [ -n "$LOC" ] && cap_locale_args "$LOC" ) >/dev/null 2>&1 &
       local hpid=$!
       sleep 9
+      cap_vm_enabled && { osascript -e "tell application id \"$BUNDLE_ID\" to activate" >/dev/null 2>&1; sleep 2; }   # active (coloured) title bar in the guest
       # By PID, not owner name — "Haven" would also match any other Haven window on screen.
-      local wid; wid="$(swift "$SHARED/mac-window-id.swift" "$hpid" 2>/dev/null)"
+      local wid winkey="$hpid"
+      cap_vm_enabled && winkey="Haven"   # the pid is the host-side wrapper's; the guest runs only the harness Haven
+      wid="$(swift "$SHARED/mac-window-id.swift" "$winkey" 2>/dev/null)"
       if [ -n "$wid" ]; then
         screencapture -o -x -l"$wid" "$dest/$file" 2>/dev/null && echo "  $key${LOC:+/$LOC}/$file (window $wid)"
       else

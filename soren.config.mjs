@@ -151,6 +151,7 @@ export default {
     //    Instagram import, Watch wire…) were never part of the release gate.
     'apple-logic': {
       type: 'xcodebuild-test',
+      vm: true, // macOS tests run in the QA VM (see _shared/qa-vm), not on this Mac
       platform: 'macos',
       project: 'apple/Haven.xcodeproj',
       scheme: 'HavenLogicTests',

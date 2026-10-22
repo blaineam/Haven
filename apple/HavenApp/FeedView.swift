@@ -279,6 +279,9 @@ struct FeedView: View {
 
     @State private var compose = ""
     @State private var attachedMedia: [String] = []
+    /// Picked items still being read/optimized off-main — one placeholder tile each, and the Post
+    /// button waits for zero so a post never goes out with half its photos.
+    @State private var pendingMedia = 0
     @State private var attachedTrack: TrackRefFfi?
     @State private var muteVideo = false   // author's audio choice for attached video(s)
     @State private var pendingSensitive: [String]?   // attachments SCA flagged, awaiting send-anyway
@@ -592,7 +595,9 @@ struct FeedView: View {
             .overlay { QATransferScene() }
             #endif
             .sheet(isPresented: $showMediaPicker) {
-                MediaPicker { refs in attachedMedia.append(contentsOf: refs) }.macSheetClose()
+                MediaPicker(onPicked: { refs in attachedMedia.append(contentsOf: refs) },
+                            onSelected: { n in pendingMedia += n },
+                            onSettled: { n in pendingMedia = max(0, pendingMedia - n) }).macSheetClose()
             }
             #if os(macOS)
             .sheet(isPresented: $showFilePicker) {
@@ -616,8 +621,10 @@ struct FeedView: View {
                           allowedContentTypes: [.image, .movie, .item, .data, .archive, .folder],
                           allowsMultipleSelection: true) { result in
                 guard case let .success(urls) = result else { return }
+                pendingMedia += urls.count
                 Task { @MainActor in
                     let refs = await MediaImport.importURLs(urls)
+                    pendingMedia = max(0, pendingMedia - urls.count)
                     if !refs.isEmpty { attachedMedia.append(contentsOf: refs) }
                 }
             }
@@ -768,7 +775,7 @@ struct FeedView: View {
                 // Delivery light: tap the yellow/red pill to dive into live sync detail (sent/received/waiting).
                 HStack { Spacer(); SyncStatusBadge(circleId: store.activeCircleId) }
                 MediaProcessingCard()   // spinner while a video encodes — see MediaProcessing
-                if !attachedMedia.isEmpty || attachedTrack != nil || composeRetention != nil { attachmentTray }
+                if !attachedMedia.isEmpty || pendingMedia > 0 || attachedTrack != nil || composeRetention != nil { attachmentTray }
                 // Opt-in location tag — only when a photo/video with GPS is attached. Default off.
                 if MediaStore.shared.anyLocated(attachedMedia) {
                     Toggle(isOn: $showLocation) {
@@ -797,7 +804,8 @@ struct FeedView: View {
                             Button("1 day") { composeRetention = 86_400 }
                             Button("1 week") { composeRetention = 604_800 }
                         } label: { Label("Disappears after…", systemImage: "timer") }
-                        if !compose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachedMedia.isEmpty {
+                        if pendingMedia == 0,
+                           !compose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachedMedia.isEmpty {
                             Button { showSchedule = true } label: { Label("Send later…", systemImage: "clock") }
                         }
                     } label: {
@@ -834,8 +842,13 @@ struct FeedView: View {
                             .shadow(color: HavenTheme.pink.opacity(0.4), radius: 8, y: 4)
                     }
                     .buttonStyle(PressableStyle())
+                    // Dimmed, not hidden, while picked media is still being prepared: the pill stays where
+                    // it is and the placeholders in the tray say what it is waiting for.
+                    .disabled(pendingMedia > 0)
+                    .opacity(pendingMedia > 0 ? 0.45 : 1)
                     .accessibilityIdentifier("composeSend")
                     .accessibilityLabel(Text("Post to everyone in \(store.activeCircleTitle)"))
+                    .accessibilityHint(pendingMedia > 0 ? Text("Preparing \(pendingMedia) attachments") : Text(""))
                 }
             }
             .padding(.horizontal, 16).padding(.vertical, 12)
@@ -900,6 +913,10 @@ struct FeedView: View {
                 ForEach(MediaVariants.displayRefs(attachedMedia), id: \.self) { ref in
                     attachmentChip(ref)
                 }
+                // One placeholder per picked item still being read and optimized. They sit AFTER the
+                // landed tiles because that is where each one's picture will appear: items land in
+                // selection order, so the tray fills left to right as the batch settles.
+                ForEach(0..<pendingMedia, id: \.self) { _ in ComposerPendingTile() }
                 if let track = attachedTrack {
                     HStack(spacing: 6) {
                         Image(systemName: "music.note")
@@ -1026,7 +1043,7 @@ struct FeedView: View {
     /// Queue the current composer contents to post at a future time, then clear the field.
     private func scheduleCurrentPost(at date: Date) {
         let text = compose.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty || !attachedMedia.isEmpty else { return }
+        guard pendingMedia == 0, !text.isEmpty || !attachedMedia.isEmpty else { return }
         ScheduledStore.shared.schedule(circleId: store.activeCircleId, isDM: false, body: text, media: attachedMedia, at: date)
         compose = ""; attachedMedia = []; attachedTrack = nil; composeRetention = nil; muteVideo = false; showLocation = false
         composeFocused = false
@@ -1034,6 +1051,7 @@ struct FeedView: View {
 
     private func send() {
         let text = compose.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard pendingMedia == 0 else { return }   // the button is disabled; belt and braces for the keyboard path
         guard !text.isEmpty || !attachedMedia.isEmpty || attachedTrack != nil else { return }
         // Sender-side check: if on-device Sensitive Content Analysis flags an attachment, ask before
         // sending. (Only when the user has SCA on; otherwise post straight away.)
@@ -1306,15 +1324,19 @@ struct PostCommentField: View {
 
     @State private var text = ""
     @State private var media: [String] = []
+    @State private var pendingMedia = 0   // picked, still being prepared off-main (placeholder chips)
     @State private var showMediaPicker = false
     @State private var showAudioRecorder = false
     @FocusState private var focused: Bool
 
     var body: some View {
         VStack(spacing: 6) {
-            if !media.isEmpty {
+            if !media.isEmpty || pendingMedia > 0 {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) { ForEach(media, id: \.self) { attachChip($0) } }
+                    HStack(spacing: 6) {
+                        ForEach(media, id: \.self) { attachChip($0) }
+                        ForEach(0..<pendingMedia, id: \.self) { _ in ComposerPendingTile(size: 44, cornerRadius: 8) }
+                    }
                 }
             }
             HStack(spacing: 8) {
@@ -1342,11 +1364,17 @@ struct PostCommentField: View {
                     Image(systemName: "arrow.up.circle.fill").imageScale(.large).foregroundStyle(HavenTheme.pink)
                 }
                 .buttonStyle(PressableStyle())
+                .disabled(pendingMedia > 0)
+                .opacity(pendingMedia > 0 ? 0.45 : 1)
                 .accessibilityIdentifier("replySend")
                 .accessibilityLabel("Send reply")
             }
         }
-        .sheet(isPresented: $showMediaPicker) { MediaPicker { refs in media.append(contentsOf: refs) }.macSheetFrame() }
+        .sheet(isPresented: $showMediaPicker) {
+            MediaPicker(onPicked: { refs in media.append(contentsOf: refs) },
+                        onSelected: { n in pendingMedia += n },
+                        onSettled: { n in pendingMedia = max(0, pendingMedia - n) }).macSheetFrame()
+        }
         .sheet(isPresented: $showAudioRecorder) { AudioRecorderView { ref in media.append(ref) }.macSheetFrame() }
     }
 

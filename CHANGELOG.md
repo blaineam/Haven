@@ -7,6 +7,25 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 2.0.3 (unreleased)
+
+### Fixed — iPhone: picking photos shows them being prepared, and a 48 MP pick no longer cooks the phone
+
+Choosing several photos from the library closed the picker on nothing. Behind the sheet, every photo
+was being decoded in full on the main thread — a 48 MP ProRAW frame is ~190 MB of pixels — then
+redrawn, downscaled, JPEG-encoded, thumbed and AVIF-encoded, one after another, and the composer only
+got the whole batch once the LAST one finished. With seven such frames that was half a minute of a
+composer that looked like the pick had failed, so the pick got repeated, and every abandoned batch kept
+grinding on the main thread long after the post went out. The phone was still hot minutes later, idle.
+
+Now the moment Add is tapped the tray shows one "Preparing" tile per chosen item and the Post button
+waits (dimmed) until they have all landed — a post never goes out with half its photos. Each photo is
+read as a file and decoded by ImageIO straight to the target size, off the main thread, with its
+orientation baked in; a ProRAW asset's rendered HEIC/JPEG is preferred over the DNG when the library
+offers one. Photos arrive in the tray in the order they were picked, each replacing its placeholder, so
+the first one shows within a second or two instead of after the batch. The same placeholders cover
+the Files importer and reply attachments. (`MediaStore.prepareImage` / `adopt`, `MediaPicker`.)
+
 ## 2.0.2 (2026-10-14)
 
 ### Changed — Optimized for iPhone Duo

@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import UniformTypeIdentifiers
 @testable import HavenUITestHost
 
 @MainActor
@@ -350,5 +351,79 @@ final class MediaStoreTests: XCTestCase {
         XCTAssertFalse(kept.isKept(newer))
         kept.applySynced(payload2)                   // keptAt is newer than my tombstone? equal-ish; either way no crash
         kept.unkeep(newer); kept.unkeep(newer)
+    }
+
+    // MARK: Off-main image preparation (the Photos picker path)
+
+    /// A large, noisy JPEG — big enough to need a thumb companion and a real downscale.
+    private func bigJPEG(width: Int, height: Int, orientation: Int? = nil) -> Data {
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8,
+                                   samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                   bytesPerRow: 0, bitsPerPixel: 0)!
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        var rng = SystemRandomNumberGenerator()
+        for _ in 0..<400 {   // noise, so the JPEG does not collapse to a few KB
+            NSColor(calibratedHue: CGFloat.random(in: 0...1, using: &rng), saturation: 0.9, brightness: 0.9, alpha: 1).setFill()
+            NSRect(x: Int.random(in: 0..<width, using: &rng), y: Int.random(in: 0..<height, using: &rng),
+                   width: Int.random(in: 10...200, using: &rng), height: Int.random(in: 10...200, using: &rng)).fill()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        let out = NSMutableData()
+        let dest = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil)!
+        var props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.9]
+        if let orientation { props[kCGImagePropertyOrientation] = orientation }
+        CGImageDestinationAddImage(dest, rep.cgImage!, props as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(dest))
+        return out as Data
+    }
+
+    func testPrepareImageOptimizedDownscalesToTargetAndMintsCompanions() {
+        let data = bigJPEG(width: 4000, height: 3000)
+        guard let p = MediaStore.prepareImage(data: data, optimize: true) else { return XCTFail("no prepared image") }
+        XCTAssertEqual(p.pixelSize.width, MediaOptimizationTarget.imageMaxDimension)
+        XCTAssertEqual(p.pixelSize.height, 1200)
+        XCTAssertTrue(p.ref.hasPrefix("img_"))
+        XCTAssertTrue(MediaStore.isVerifiable(p.ref))
+        XCTAssertTrue(MediaStore.verify(p.ref, p.jpeg), "the ref is the address of exactly the stored bytes")
+        XCTAssertGreaterThan(p.jpeg.count, 64 * 1024, "fixture must be big enough to earn a thumb")
+        XCTAssertNotNil(p.thumb)
+        XCTAssertLessThanOrEqual(p.thumb?.count ?? 0, 48 * 1024)
+        if PreviewCodec.canEncode { XCTAssertNotNil(p.preview) }
+        XCTAssertNil(p.location)
+
+        let store = MediaStore.shared
+        let ref = store.adopt(p)
+        XCTAssertEqual(ref, p.ref)
+        XCTAssertEqual(store.rawBytes(ref), p.jpeg)
+        XCTAssertNotNil(store.item(ref)?.image)
+        if let t = store.thumbCompanion(ref) { XCTAssertTrue(store.has(t)) } else { XCTFail("thumb companion not registered") }
+        if PreviewCodec.canEncode {
+            if let v = store.previewCompanion(ref) { XCTAssertTrue(store.has(v)) } else { XCTFail("preview companion not registered") }
+        }
+        store.delete(ref)
+    }
+
+    func testPrepareImageUnoptimizedKeepsTheSourceSize() {
+        let data = bigJPEG(width: 2400, height: 1800)
+        guard let p = MediaStore.prepareImage(data: data, optimize: false) else { return XCTFail("no prepared image") }
+        XCTAssertEqual(p.pixelSize, CGSize(width: 2400, height: 1800))
+        XCTAssertTrue(MediaStore.verify(p.ref, p.jpeg))
+    }
+
+    func testPrepareImageBakesExifOrientationIntoThePixels() {
+        // Orientation 6 = rotate 90° CW to display. A 1200×600 landscape frame tagged 6 is a portrait
+        // picture; the prepared pixels must already be portrait (Android ignores the tag).
+        let data = bigJPEG(width: 1200, height: 600, orientation: 6)
+        guard let p = MediaStore.prepareImage(data: data, optimize: true) else { return XCTFail("no prepared image") }
+        XCTAssertEqual(p.pixelSize, CGSize(width: 600, height: 1200))
+        guard let src = CGImageSourceCreateWithData(p.jpeg as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return XCTFail() }
+        let tag = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        XCTAssertEqual(tag, 1, "stored bytes carry no rotation left for a decoder to honour")
+    }
+
+    func testPrepareImageRejectsNonImages() {
+        XCTAssertNil(MediaStore.prepareImage(data: Data("not an image".utf8), optimize: true))
     }
 }

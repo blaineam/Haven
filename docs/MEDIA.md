@@ -96,6 +96,17 @@ transcoded output against the source and falls through to the lossless strip-rem
 All three re-encode from a decoded bitmap, which bakes in EXIF orientation and **drops all EXIF
 (orientation, GPS, device)**. So images never leak location, on any platform, in any mode.
 
+**Apple's Photos-picker path is off-main and incremental** (`MediaPicker` → `MediaStore.prepareImage`
+→ `MediaStore.adopt`). The picker asks the item provider for a *file* (a rendered HEIC/JPEG over the
+DNG when a ProRAW asset offers both) and ImageIO decodes it straight to the target size
+(`kCGImageSourceThumbnailMaxPixelSize`, orientation baked by `…ThumbnailWithTransform`) on a serial
+decode queue — a 48 MP frame never exists in memory as full pixels and the main thread only pays the
+atomic write. The JPEG, its content address, the ≤32 KB thumb and the ≤8 KB AVIF preview are all
+produced there; `adopt` lands them. The composer draws one placeholder tile per picked item the moment
+Add is tapped and retires them in selection order as each lands; Post is disabled until the count is
+zero. `addImage(_ image:)` remains the on-main path for callers that already hold a decoded picture
+(camera, paste, drag-and-drop, Instagram import, re-optimize) and hits the same size/quality targets.
+
 Avatars: 192px JPEG q0.70 (rides the signed profile card) — Apple `Profile.avatarBase64`, Android
 `loadAvatarB64`.
 

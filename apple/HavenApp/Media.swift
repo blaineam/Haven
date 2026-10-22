@@ -5,6 +5,7 @@ import CoreImage
 import CoreLocation
 import CryptoKit
 import ImageIO
+import UniformTypeIdentifiers
 #if canImport(UIKit)
 import UIKit
 #else
@@ -295,7 +296,14 @@ final class MediaStore: ObservableObject {
     /// `nonisolated` so picker decode queues can read EXIF without hopping to the MainActor.
     nonisolated static func gpsCoordinate(fromImageData data: Data) -> CLLocationCoordinate2D? {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil),
-              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return nil }
+        return gpsCoordinate(fromProperties: props)
+    }
+
+    /// The same read, from ImageIO properties already in hand (the picker's file-backed path reads
+    /// them once for the pixel size and reuses them here).
+    nonisolated static func gpsCoordinate(fromProperties props: [CFString: Any]?) -> CLLocationCoordinate2D? {
+        guard let props,
               let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any],
               let lat = gps[kCGImagePropertyGPSLatitude] as? Double,
               let lon = gps[kCGImagePropertyGPSLongitude] as? Double else { return nil }
@@ -745,6 +753,120 @@ final class MediaStore: ObservableObject {
         return ref
     }
 
+    // MARK: - Off-main image preparation (the Photos picker path)
+
+    /// Everything `addImage` computes — the stored JPEG, its content address, the decoded picture, the
+    /// thumb + preview companions and the EXIF GPS — produced OFF the main thread from the picked
+    /// file. `addImage` takes an already-decoded `PlatformImage`, which for a 48 MP photo meant ~190 MB
+    /// of pixels decoded on the picker's completion, then redrawn (orientation), downscaled, JPEG-encoded,
+    /// thumbed and AVIF-encoded, all on the main thread, one photo after another. Seven ProRAW frames
+    /// froze the composer for the duration and left the phone hot for minutes afterwards.
+    ///
+    /// Here ImageIO decodes straight to the target size (`kCGImageSourceThumbnailMaxPixelSize`): a JPEG
+    /// decodes at 1/2–1/8 scale and never materializes the full frame, a HEIC/DNG decodes once and
+    /// scales inside ImageIO. Orientation is baked by `kCGImageSourceCreateThumbnailWithTransform`, so
+    /// the result is always `.up` — the same promise `normalizedUp` makes for Android's sake.
+    struct PreparedImage: @unchecked Sendable {   // PlatformImage is a reference type; built here, read on main
+        let ref: String
+        let jpeg: Data
+        let image: PlatformImage
+        let thumb: Data?
+        let preview: Data?
+        let location: CLLocationCoordinate2D?
+        let pixelSize: CGSize
+    }
+
+    nonisolated static func prepareImage(fileURL: URL, optimize: Bool) -> PreparedImage? {
+        guard let src = CGImageSourceCreateWithURL(fileURL as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
+        else { return nil }
+        return prepareImage(source: src, optimize: optimize)
+    }
+
+    nonisolated static func prepareImage(data: Data, optimize: Bool) -> PreparedImage? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary)
+        else { return nil }
+        return prepareImage(source: src, optimize: optimize)
+    }
+
+    nonisolated static func prepareImage(source src: CGImageSource, optimize: Bool) -> PreparedImage? {
+        guard CGImageSourceGetCount(src) > 0 else { return nil }
+        let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+        let w = (props?[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue ?? 0
+        let h = (props?[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue ?? 0
+        let longest = max(w, h)
+        var opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,   // never the embedded (tiny) EXIF thumb
+            kCGImageSourceCreateThumbnailWithTransform: true,     // bake EXIF orientation into the pixels
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        // Auto-optimize → longest edge at the target. Off → the source's own size (ImageIO needs an
+        // explicit ceiling to keep the transform; without one it caps at a small default).
+        let target = Double(MediaOptimizationTarget.imageMaxDimension)
+        let ceiling = optimize ? min(longest > 0 ? longest : target, target)
+                               : longest
+        if ceiling > 0 { opts[kCGImageSourceThumbnailMaxPixelSize] = Int(ceiling.rounded(.up)) }
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+        let quality = optimize ? MediaOptimizationTarget.imageQuality : 0.95
+        guard let jpeg = encodeJPEG(cg, quality: quality) else { return nil }
+        let ref = contentRef(.image, jpeg)
+        // Same thresholds as `addImage` — the companions are a property of the stored bytes.
+        let thumb = jpeg.count > 64 * 1024 ? encodeThumbCompanion(fromJPEG: jpeg) : nil
+        let preview = jpeg.count > PreviewCodec.maxBytes * 2 ? PreviewCodec.encode(cg) : nil
+        return PreparedImage(ref: ref, jpeg: jpeg, image: PlatformImage(cgImage: cg),
+                             thumb: thumb, preview: preview,
+                             location: gpsCoordinate(fromProperties: props),
+                             pixelSize: CGSize(width: cg.width, height: cg.height))
+    }
+
+    /// JPEG via ImageIO (no UIKit/AppKit drawing), safe on any thread.
+    nonisolated static func encodeJPEG(_ image: CGImage, quality: CGFloat) -> Data? {
+        let out = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return out as Data
+    }
+
+    /// The ≤32 KB, ~256 px thumb companion, cut from the ALREADY-ENCODED JPEG so it is exactly what
+    /// `mintThumbCompanion` would produce from the stored picture — decoded at 256 px by ImageIO, so
+    /// it costs a few milliseconds whatever the source was.
+    nonisolated static func encodeThumbCompanion(fromJPEG jpeg: Data) -> Data? {
+        guard let src = CGImageSourceCreateWithData(jpeg as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let small = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 256,
+              ] as CFDictionary)
+        else { return nil }
+        return encodeThumbCompanion(from: small)
+    }
+
+    private nonisolated static func encodeThumbCompanion(from small: CGImage) -> Data? {
+        var quality: CGFloat = 0.6
+        guard var data = encodeJPEG(small, quality: quality) else { return nil }
+        while data.count > 32 * 1024, quality > 0.25 {
+            quality -= 0.15
+            guard let d = encodeJPEG(small, quality: quality) else { break }
+            data = d
+        }
+        return data.count <= 48 * 1024 ? data : nil
+    }
+
+    /// Land a prepared image: write the bytes, remember the picture, register its companions and
+    /// its location. Cheap — a couple of ~MB atomic writes — which is all the main actor should pay
+    /// per picked photo. Idempotent on the ref (same bytes, same address).
+    @discardableResult
+    func adopt(_ p: PreparedImage) -> String {
+        if let url = fileURL(p.ref), !FileManager.default.fileExists(atPath: url.path) {
+            try? p.jpeg.write(to: url, options: .atomic)
+        }
+        cachePut(p.ref, MediaItem(id: p.ref, kind: .image, image: p.image, videoURL: nil))
+        if let t = p.thumb { registerThumbCompanion(for: p.ref, data: t) }
+        if let v = p.preview { registerPreviewCompanion(for: p.ref, data: v) }
+        if let c = p.location { setLocation(c, for: p.ref) }
+        return p.ref
+    }
+
     // MARK: - Thumb companions (compose-time tiny previews — see MediaVariants `thumb:`)
 
     private static let thumbCompanionKey = "haven.media.thumbCompanions"
@@ -817,6 +939,13 @@ final class MediaStore: ObservableObject {
         // markers: [] run after run.
         if let existing = previewCompanions[ref], has(existing) { return }
         guard let data = PreviewCodec.encode(image) else { return }
+        registerPreviewCompanion(for: ref, data: data)
+    }
+
+    /// Store already-encoded preview bytes for `ref` and remember the pairing (the off-main picker
+    /// path encodes on its own queue and hands the bytes here).
+    private func registerPreviewCompanion(for ref: String, data: Data) {
+        if let existing = previewCompanions[ref], has(existing) { return }
         let previewRef = Self.contentRef(.image, data)
         // Record the pairing ONLY if the bytes actually landed. `try?` + an unconditional map write
         // produces a phantom companion: the map names a blob that does not exist, `withPreviewMarkers`
@@ -852,6 +981,12 @@ final class MediaStore: ObservableObject {
             data = d
         }
         guard data.count <= 48 * 1024 else { return }
+        registerThumbCompanion(for: ref, data: data)
+    }
+
+    /// Store already-encoded thumb bytes for `ref` and remember the pairing.
+    private func registerThumbCompanion(for ref: String, data: Data) {
+        if let existing = thumbCompanions[ref], has(existing) { return }
         let thumbRef = Self.contentRef(.image, data)
         // Same hazard as the preview path above: a swallowed write left the map naming a blob that
         // was never stored, so the post lost its thumb marker with no error anywhere.
@@ -2838,6 +2973,29 @@ struct FeedImage<Placeholder: View>: View {
 ///
 /// A tile you can't see is an attachment you don't trust. So: the picture when there is one, a
 /// labelled glyph when there isn't.
+/// The tile a picked item occupies while it is still being read and optimized off-main: the same
+/// footprint as `ComposerAttachmentTile`, a spinner, and the word "Preparing" so the person can see
+/// the picker did take their selection. One per item; retired as each one lands.
+struct ComposerPendingTile: View {
+    var size: CGFloat = 56
+    var cornerRadius: CGFloat = 10
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(Color(.tertiarySystemFill))
+            .overlay {
+                VStack(spacing: 3) {
+                    ProgressView().controlSize(.small)
+                    if size >= 56 {
+                        Text("Preparing").font(.system(size: 9)).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .frame(width: size, height: size)
+            .accessibilityLabel(Text("Preparing attachment"))
+    }
+}
+
 struct ComposerAttachmentTile: View {
     let ref: String
     /// The whole staged list, so a video can borrow the poster/thumb companion its bundle declared.

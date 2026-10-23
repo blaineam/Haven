@@ -17,7 +17,8 @@
 // screenshot captions have no per-locale source file; they are authored in the maps below with the
 // same terminology as the reviewed translations. Update them if the en-us features change.
 import { readFileSync, writeFileSync } from 'node:fs';
-import { loadMetadata } from './lib/metadata.mjs';
+import { readFile } from 'node:fs/promises';
+import { loadMetadata, sectionsOf } from './lib/metadata.mjs';
 
 const die = (m) => { console.error(m); process.exit(1); };
 
@@ -134,6 +135,11 @@ const enCell = (f) => fieldRow.get(f)?.[enIdx] ?? '';
 const metas = {};
 for (const [code, file] of LOCALES) metas[code] = await loadMetadata(`${ROOT}/${file}`);
 const enMeta = await loadMetadata(`${ROOT}/appstore-metadata.md`);
+// Microsoft Store release notes: `## whats_new_windows` when present (the Apple lanes' whats_new is
+// iPhone/Mac copy), else the shared whats_new.
+const winNotes = async (file) => (sectionsOf(await readFile(file, 'utf8')).whats_new_windows) || null;
+enMeta.whats_new = (await winNotes(`${ROOT}/appstore-metadata.md`)) || enMeta.whats_new;
+for (const [code, file] of LOCALES) metas[code].whats_new = (await winNotes(`${ROOT}/${file}`)) || metas[code].whats_new;
 
 // refresh en-us release notes to the current version, and hold every locale to the same version
 const version = (enMeta.whats_new || '').match(/^\d+\.\d+\.\d+/)?.[0] || die('en whats_new does not start with a version');

@@ -35,17 +35,24 @@ privado,cifrado,familia,amigos,mensajería,seguro,sin conexión,llamadas,sin anu
 Novedad en 2.0: tu relay hace el trabajo pesado con fotos y vídeos para que tu móvil no se caliente, y siempre ves a quién llega cada publicación. Sigue siendo gratis.
 
 ## whats_new
-Optimizado para iPhone Duo. Con un teléfono de doble pantalla abierto y en el iPad, el feed y el perfil ahora ocupan una columna centrada, así que las fotos y los vídeos ya no se ven enormes y te desplazas menos.
-• Una llamada terminada ya no hace que la siguiente indique «Conectado» antes de que fluyan los medios.
-• Las llamadas a través de tu relay siguen sonando si se pierde un solo fotograma de audio, en lugar de congelarse.
-• Deshacer tras eliminar un relay lo devuelve a sus círculos.
-• Una importación de Instagram interrumpida por una actualización continúa donde se quedó.
+Al elegir fotos de tu fototeca ahora ves cómo se preparan.
+• Cada foto que eliges recibe al instante un marcador en el compositor y se van rellenando una a una en el orden en que las elegiste, así que una selección grande nunca parece haber fallado.
+• Publicar espera a que todas las fotos estén listas, para que una publicación nunca salga con la mitad de sus fotos.
+• Las fotos grandes, incluidas las ProRAW de 48 MP, ahora se leen y optimizan en segundo plano, así que prepararlas ya no congela el compositor ni deja el teléfono caliente después.
 
 ## whats_new_macos
 El feed y el perfil ahora ocupan una columna centrada en las ventanas anchas, así que las fotos y los vídeos ya no se ven enormes y te desplazas menos. La pantalla Tú sigue la misma columna.
 • Una llamada terminada ya no hace que la siguiente indique «Conectado» antes de que fluyan los medios.
 • Las llamadas a través de tu relay siguen sonando si se pierde un solo fotograma de audio, en lugar de congelarse.
 • Deshacer tras eliminar un relay lo devuelve a sus círculos.
+• Una importación de Instagram interrumpida por una actualización continúa donde se quedó.
+
+## whats_new_windows
+2.0.2 — El feed y el perfil ahora ocupan una columna centrada en las ventanas anchas, así que las fotos y los vídeos ya no se ven enormes y te desplazas menos. La pantalla Tú sigue la misma columna.
+• El cuadro de redacción ya no desaparece al salir de la pestaña Círculo y volver.
+• Las publicaciones con más de diez fotos vuelven a mostrar sus fotos.
+• Ajustes ▸ Avanzado ▸ «Reoptimizar los medios que ya compartí» recupera su botón.
+• Al llegar al final de un feed ahora se piden las publicaciones anteriores, así que el historial de un amigo nuevo se completa.
 • Una importación de Instagram interrumpida por una actualización continúa donde se quedó.
 
 ## marketing_url

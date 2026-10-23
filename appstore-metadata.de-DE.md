@@ -35,17 +35,24 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit dein Handy kühl bleibt – und du siehst immer genau, wen ein Beitrag erreicht. Kostenlos.
 
 ## whats_new
-Optimiert für iPhone Duo. Auf einem aufgeklappten Dual-Screen-Handy und auf dem iPad stehen Feed und Profil jetzt in einer zentrierten Spalte, sodass Fotos und Videos nicht mehr riesig sind und du weniger scrollen musst.
-• Ein beendeter Anruf führt nicht mehr dazu, dass der nächste „Verbunden“ anzeigt, bevor Medien fließen.
-• Anrufe über dein Relay laufen weiter, wenn ein einzelnes Audio-Frame verloren geht, statt einzufrieren.
-• Rückgängig nach dem Löschen eines Relays stellt es wieder in seinen Kreisen her.
-• Ein durch ein Update unterbrochener Instagram-Import macht dort weiter, wo er aufgehört hat.
+Beim Auswählen von Fotos aus deiner Mediathek siehst du jetzt, wie sie vorbereitet werden.
+• Jedes ausgewählte Foto bekommt sofort einen Platzhalter im Eingabefeld und wird nacheinander in der gewählten Reihenfolge eingefügt, sodass eine große Auswahl nie so aussieht, als wäre sie fehlgeschlagen.
+• „Posten“ wartet, bis jedes Foto bereit ist, damit ein Beitrag nie nur mit der Hälfte seiner Fotos rausgeht.
+• Große Fotos, auch 48-MP-ProRAW, werden jetzt im Hintergrund gelesen und optimiert, sodass die Vorbereitung das Eingabefeld nicht mehr einfriert und dein Handy danach nicht mehr heiß wird.
 
 ## whats_new_macos
 Feed und Profil stehen in breiten Fenstern jetzt in einer zentrierten Spalte, sodass Fotos und Videos nicht mehr riesig sind und du weniger scrollen musst. Der Bildschirm „Du“ nutzt dieselbe Spalte.
 • Ein beendeter Anruf führt nicht mehr dazu, dass der nächste „Verbunden“ anzeigt, bevor Medien fließen.
 • Anrufe über dein Relay laufen weiter, wenn ein einzelnes Audio-Frame verloren geht, statt einzufrieren.
 • Rückgängig nach dem Löschen eines Relays stellt es wieder in seinen Kreisen her.
+• Ein durch ein Update unterbrochener Instagram-Import macht dort weiter, wo er aufgehört hat.
+
+## whats_new_windows
+2.0.2 — Feed und Profil stehen in breiten Fenstern jetzt in einer zentrierten Spalte, sodass Fotos und Videos nicht mehr riesig sind und du weniger scrollen musst. Der Bildschirm „Du“ nutzt dieselbe Spalte.
+• Das Eingabefeld verschwindet nicht mehr, wenn du den Kreis-Tab verlässt und zurückkehrst.
+• Beiträge mit mehr als zehn Fotos zeigen ihre Fotos wieder an.
+• Einstellungen ▸ Erweitert ▸ „Bereits geteilte Medien neu optimieren“ hat seine Schaltfläche zurück.
+• Am Ende eines Feeds werden jetzt ältere Beiträge angefordert, sodass sich der Verlauf neuer Freunde füllt.
 • Ein durch ein Update unterbrochener Instagram-Import macht dort weiter, wo er aufgehört hat.
 
 ## marketing_url

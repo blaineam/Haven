@@ -33,11 +33,10 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 New in 2.0: your relay does the heavy lifting for photos and videos, so your phone stays cool — and you always see exactly who a post reaches. Still free.
 
 ## whats_new
-Optimized for iPhone Duo. Opened flat on a dual-screen phone, and on iPad, the feed and profile now sit in a centered column, so photos and videos are no longer huge and you scroll less.
-• A finished call no longer leaves the next one saying "Connected" before the media is flowing.
-• Calls over your relay keep playing when a single audio frame is lost, instead of freezing.
-• Undo after deleting a relay now puts it back in its circles.
-• An Instagram import interrupted by an update picks up where it stopped.
+Picking photos from your library now shows them being prepared.
+• Each photo you choose gets a placeholder in the composer right away, and they fill in one by one in the order you picked them, so a big selection never looks like it failed.
+• Post waits until every photo is ready, so a post never goes out with half its photos.
+• Large photos, including 48 MP ProRAW, are now read and optimized in the background, so preparing them no longer freezes the composer or leaves your phone hot afterwards.
 
 ## whats_new_macos
 The feed and profile now sit in a centered column in wide windows, so photos and videos are no longer huge and you scroll less. The You screen follows the same column.
@@ -46,10 +45,20 @@ The feed and profile now sit in a centered column in wide windows, so photos and
 • Undo after deleting a relay now puts it back in its circles.
 • An Instagram import interrupted by an update picks up where it stopped.
 
+## whats_new_windows
+2.0.2 — The feed and profile now sit in a centered column in wide windows, so photos and videos are no longer huge and you scroll less. The You screen follows the same column.
+• The composer no longer disappears after you leave the Circle tab and come back.
+• Posts with more than ten photos show their photos again.
+• Settings ▸ Advanced ▸ Re-optimize media I already shared has its button back.
+• Scrolling to the end of a feed now requests older posts, so a new friend's history fills in.
+• An Instagram import interrupted by an update picks up where it stopped.
+
 ## whats_new_previous
-2.0.1 — Lighter on your storage.
-• Haven now saves your circles, contacts and messages in less than half the space, so each save writes far less to your device's storage. Your existing data carries over automatically.
-• Network activity no longer piles up in a disk cache, which cuts background disk writes even further.
+2.0.2 — Optimized for iPhone Duo. Opened flat on a dual-screen phone, and on iPad, the feed and profile now sit in a centered column, so photos and videos are no longer huge and you scroll less.
+• A finished call no longer leaves the next one saying "Connected" before the media is flowing.
+• Calls over your relay keep playing when a single audio frame is lost, instead of freezing.
+• Undo after deleting a relay now puts it back in its circles.
+• An Instagram import interrupted by an update picks up where it stopped.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

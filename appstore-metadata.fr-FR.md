@@ -35,17 +35,24 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Nouveau en 2.0 : votre relay prend en charge photos et vidéos pour que votre téléphone reste frais, et vous voyez toujours qui atteint chaque publication. Gratuit.
 
 ## whats_new
-Optimisé pour l'iPhone Duo. Sur un téléphone à double écran ouvert et sur iPad, le fil et le profil s'affichent désormais dans une colonne centrée : les photos et les vidéos ne sont plus énormes et vous faites défiler moins.
-• Un appel terminé n'entraîne plus l'affichage de « Connecté » pour le suivant avant que les médias ne circulent.
-• Les appels passant par votre relais continuent de jouer quand une image audio est perdue, au lieu de se figer.
-• Annuler après la suppression d'un relais le remet dans ses cercles.
-• Une importation Instagram interrompue par une mise à jour reprend là où elle s'était arrêtée.
+Quand vous choisissez des photos dans votre photothèque, vous les voyez maintenant se préparer.
+• Chaque photo choisie reçoit aussitôt un emplacement dans le compositeur, puis elles s'affichent une à une dans l'ordre choisi : une grande sélection n'a plus jamais l'air d'avoir échoué.
+• Publier attend que toutes les photos soient prêtes, pour qu'une publication ne parte jamais avec la moitié de ses photos.
+• Les grandes photos, y compris les ProRAW 48 Mpx, sont désormais lues et optimisées en arrière-plan : leur préparation ne fige plus le compositeur et ne laisse plus votre téléphone chaud.
 
 ## whats_new_macos
 Le fil et le profil s'affichent désormais dans une colonne centrée dans les fenêtres larges : les photos et les vidéos ne sont plus énormes et vous faites défiler moins. L'écran Vous suit la même colonne.
 • Un appel terminé n'entraîne plus l'affichage de « Connecté » pour le suivant avant que les médias ne circulent.
 • Les appels passant par votre relais continuent de jouer quand une image audio est perdue, au lieu de se figer.
 • Annuler après la suppression d'un relais le remet dans ses cercles.
+• Une importation Instagram interrompue par une mise à jour reprend là où elle s'était arrêtée.
+
+## whats_new_windows
+2.0.2 — Le fil et le profil s'affichent désormais dans une colonne centrée dans les fenêtres larges : les photos et les vidéos ne sont plus énormes et vous faites défiler moins. L'écran Vous suit la même colonne.
+• Le champ de rédaction ne disparaît plus quand vous quittez l'onglet Cercle puis y revenez.
+• Les publications de plus de dix photos affichent de nouveau leurs photos.
+• Réglages ▸ Avancé ▸ « Réoptimiser les médias déjà partagés » retrouve son bouton.
+• Arriver au bout d'un fil demande désormais les publications plus anciennes, ce qui remplit l'historique d'un nouvel ami.
 • Une importation Instagram interrompue par une mise à jour reprend là où elle s'était arrêtée.
 
 ## marketing_url

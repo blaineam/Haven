@@ -35,17 +35,24 @@ privado,criptografado,família,amigos,mensagens,seguro,offline,chamadas,sem anú
 Novo no 2.0: seu relay faz o trabalho pesado com fotos e vídeos para o celular não esquentar, e você sempre vê quem uma publicação alcança. Continua grátis.
 
 ## whats_new
-Otimizado para iPhone Duo. Com um celular de tela dupla aberto e no iPad, o feed e o perfil agora ficam em uma coluna centralizada, então fotos e vídeos não aparecem mais enormes e você rola menos.
-• Uma chamada encerrada não faz mais a próxima mostrar "Conectado" antes de a mídia começar a fluir.
-• Chamadas pelo seu relay continuam tocando quando um único quadro de áudio se perde, em vez de travar.
-• Desfazer depois de excluir um relay o coloca de volta nos seus círculos.
-• Uma importação do Instagram interrompida por uma atualização continua de onde parou.
+Ao escolher fotos da sua biblioteca, agora você vê que elas estão sendo preparadas.
+• Cada foto escolhida ganha na hora um espaço reservado no compositor, e elas vão aparecendo uma a uma na ordem em que você escolheu, então uma seleção grande nunca parece ter falhado.
+• Publicar espera até que todas as fotos estejam prontas, para que uma publicação nunca saia com metade das fotos.
+• Fotos grandes, incluindo ProRAW de 48 MP, agora são lidas e otimizadas em segundo plano, então prepará-las não trava mais o compositor nem deixa o celular quente depois.
 
 ## whats_new_macos
 O feed e o perfil agora ficam em uma coluna centralizada nas janelas largas, então fotos e vídeos não aparecem mais enormes e você rola menos. A tela Você segue a mesma coluna.
 • Uma chamada encerrada não faz mais a próxima mostrar "Conectado" antes de a mídia começar a fluir.
 • Chamadas pelo seu relay continuam tocando quando um único quadro de áudio se perde, em vez de travar.
 • Desfazer depois de excluir um relay o coloca de volta nos seus círculos.
+• Uma importação do Instagram interrompida por uma atualização continua de onde parou.
+
+## whats_new_windows
+2.0.2 — O feed e o perfil agora ficam em uma coluna centralizada nas janelas largas, então fotos e vídeos não aparecem mais enormes e você rola menos. A tela Você segue a mesma coluna.
+• O campo de escrita não desaparece mais quando você sai da aba Círculo e volta.
+• Publicações com mais de dez fotos voltam a mostrar as fotos.
+• Ajustes ▸ Avançado ▸ "Reotimizar mídia que já compartilhei" recuperou o botão.
+• Ao chegar ao fim de um feed, agora as publicações mais antigas são solicitadas, então o histórico de um novo amigo é preenchido.
 • Uma importação do Instagram interrompida por uma atualização continua de onde parou.
 
 ## marketing_url

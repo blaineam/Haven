@@ -7,7 +7,7 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 2.0.3 (unreleased)
+## 2.0.3 (2026-10-22)
 
 ### Fixed — iPhone: picking photos shows them being prepared, and a 48 MP pick no longer cooks the phone
 

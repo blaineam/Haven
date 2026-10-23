@@ -35,17 +35,24 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Novità della 2.0: il tuo relay fa il lavoro pesante con foto e video, così il telefono resta fresco, e vedi sempre chi raggiunge un post. Sempre gratis.
 
 ## whats_new
-Ottimizzato per iPhone Duo. Su un telefono a doppio schermo aperto e su iPad, il feed e il profilo ora occupano una colonna centrata, così foto e video non sono più enormi e scorri meno.
-• Una chiamata terminata non fa più comparire «Connesso» nella successiva prima che i contenuti multimediali scorrano.
-• Le chiamate tramite il tuo relay continuano a riprodursi se si perde un singolo frame audio, invece di bloccarsi.
-• Annulla dopo l'eliminazione di un relay lo rimette nelle sue cerchie.
-• Un'importazione da Instagram interrotta da un aggiornamento riprende da dove si era fermata.
+Quando scegli foto dalla libreria, ora le vedi mentre vengono preparate.
+• Ogni foto scelta riceve subito un segnaposto nel compositore e le foto compaiono una alla volta nell'ordine in cui le hai scelte, così una selezione grande non sembra mai fallita.
+• Pubblica attende che tutte le foto siano pronte, così un post non parte mai con metà delle foto.
+• Le foto grandi, comprese le ProRAW da 48 MP, ora vengono lette e ottimizzate in background: prepararle non blocca più il compositore e non lascia più il telefono caldo.
 
 ## whats_new_macos
 Il feed e il profilo ora occupano una colonna centrata nelle finestre larghe, così foto e video non sono più enormi e scorri meno. La schermata Tu segue la stessa colonna.
 • Una chiamata terminata non fa più comparire «Connesso» nella successiva prima che i contenuti multimediali scorrano.
 • Le chiamate tramite il tuo relay continuano a riprodursi se si perde un singolo frame audio, invece di bloccarsi.
 • Annulla dopo l'eliminazione di un relay lo rimette nelle sue cerchie.
+• Un'importazione da Instagram interrotta da un aggiornamento riprende da dove si era fermata.
+
+## whats_new_windows
+2.0.2 — Il feed e il profilo ora occupano una colonna centrata nelle finestre larghe, così foto e video non sono più enormi e scorri meno. La schermata Tu segue la stessa colonna.
+• Il campo di scrittura non scompare più quando esci dalla scheda Cerchia e ci torni.
+• I post con più di dieci foto mostrano di nuovo le loro foto.
+• Impostazioni ▸ Avanzate ▸ «Riottimizza i contenuti già condivisi» ha di nuovo il suo pulsante.
+• Arrivando in fondo a un feed ora si richiedono i post più vecchi, così la cronologia di un nuovo amico si riempie.
 • Un'importazione da Instagram interrotta da un aggiornamento riprende da dove si era fermata.
 
 ## marketing_url

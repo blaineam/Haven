@@ -41,11 +41,8 @@ Beim Auswählen von Fotos aus deiner Mediathek siehst du jetzt, wie sie vorberei
 • Große Fotos, auch 48-MP-ProRAW, werden jetzt im Hintergrund gelesen und optimiert, sodass die Vorbereitung das Eingabefeld nicht mehr einfriert und dein Handy danach nicht mehr heiß wird.
 
 ## whats_new_macos
-Feed und Profil stehen in breiten Fenstern jetzt in einer zentrierten Spalte, sodass Fotos und Videos nicht mehr riesig sind und du weniger scrollen musst. Der Bildschirm „Du“ nutzt dieselbe Spalte.
-• Ein beendeter Anruf führt nicht mehr dazu, dass der nächste „Verbunden“ anzeigt, bevor Medien fließen.
-• Anrufe über dein Relay laufen weiter, wenn ein einzelnes Audio-Frame verloren geht, statt einzufrieren.
-• Rückgängig nach dem Löschen eines Relays stellt es wieder in seinen Kreisen her.
-• Ein durch ein Update unterbrochener Instagram-Import macht dort weiter, wo er aufgehört hat.
+Das Posten wartet auf deine Fotos.
+• „Posten“ bleibt ausgegraut, bis jedes angehängte Foto bereit ist, damit ein Beitrag nie nur mit der Hälfte seiner Fotos rausgeht.
 
 ## whats_new_windows
 2.0.2 — Feed und Profil stehen in breiten Fenstern jetzt in einer zentrierten Spalte, sodass Fotos und Videos nicht mehr riesig sind und du weniger scrollen musst. Der Bildschirm „Du“ nutzt dieselbe Spalte.

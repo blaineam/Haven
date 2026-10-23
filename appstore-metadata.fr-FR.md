@@ -41,11 +41,8 @@ Quand vous choisissez des photos dans votre photothèque, vous les voyez mainten
 • Les grandes photos, y compris les ProRAW 48 Mpx, sont désormais lues et optimisées en arrière-plan : leur préparation ne fige plus le compositeur et ne laisse plus votre téléphone chaud.
 
 ## whats_new_macos
-Le fil et le profil s'affichent désormais dans une colonne centrée dans les fenêtres larges : les photos et les vidéos ne sont plus énormes et vous faites défiler moins. L'écran Vous suit la même colonne.
-• Un appel terminé n'entraîne plus l'affichage de « Connecté » pour le suivant avant que les médias ne circulent.
-• Les appels passant par votre relais continuent de jouer quand une image audio est perdue, au lieu de se figer.
-• Annuler après la suppression d'un relais le remet dans ses cercles.
-• Une importation Instagram interrompue par une mise à jour reprend là où elle s'était arrêtée.
+Publier attend vos photos.
+• Publier reste grisé tant que toutes les photos jointes ne sont pas prêtes, pour qu'une publication ne parte jamais avec la moitié de ses photos.
 
 ## whats_new_windows
 2.0.2 — Le fil et le profil s'affichent désormais dans une colonne centrée dans les fenêtres larges : les photos et les vidéos ne sont plus énormes et vous faites défiler moins. L'écran Vous suit la même colonne.

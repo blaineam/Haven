@@ -41,11 +41,8 @@ Ao escolher fotos da sua biblioteca, agora você vê que elas estão sendo prepa
 • Fotos grandes, incluindo ProRAW de 48 MP, agora são lidas e otimizadas em segundo plano, então prepará-las não trava mais o compositor nem deixa o celular quente depois.
 
 ## whats_new_macos
-O feed e o perfil agora ficam em uma coluna centralizada nas janelas largas, então fotos e vídeos não aparecem mais enormes e você rola menos. A tela Você segue a mesma coluna.
-• Uma chamada encerrada não faz mais a próxima mostrar "Conectado" antes de a mídia começar a fluir.
-• Chamadas pelo seu relay continuam tocando quando um único quadro de áudio se perde, em vez de travar.
-• Desfazer depois de excluir um relay o coloca de volta nos seus círculos.
-• Uma importação do Instagram interrompida por uma atualização continua de onde parou.
+Publicar espera pelas suas fotos.
+• Publicar fica esmaecido até que todas as fotos anexadas estejam prontas, para que uma publicação nunca saia com metade das fotos.
 
 ## whats_new_windows
 2.0.2 — O feed e o perfil agora ficam em uma coluna centralizada nas janelas largas, então fotos e vídeos não aparecem mais enormes e você rola menos. A tela Você segue a mesma coluna.

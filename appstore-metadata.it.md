@@ -41,11 +41,8 @@ Quando scegli foto dalla libreria, ora le vedi mentre vengono preparate.
 • Le foto grandi, comprese le ProRAW da 48 MP, ora vengono lette e ottimizzate in background: prepararle non blocca più il compositore e non lascia più il telefono caldo.
 
 ## whats_new_macos
-Il feed e il profilo ora occupano una colonna centrata nelle finestre larghe, così foto e video non sono più enormi e scorri meno. La schermata Tu segue la stessa colonna.
-• Una chiamata terminata non fa più comparire «Connesso» nella successiva prima che i contenuti multimediali scorrano.
-• Le chiamate tramite il tuo relay continuano a riprodursi se si perde un singolo frame audio, invece di bloccarsi.
-• Annulla dopo l'eliminazione di un relay lo rimette nelle sue cerchie.
-• Un'importazione da Instagram interrotta da un aggiornamento riprende da dove si era fermata.
+Pubblica attende le tue foto.
+• Pubblica resta disattivato finché tutte le foto allegate non sono pronte, così un post non parte mai con metà delle foto.
 
 ## whats_new_windows
 2.0.2 — Il feed e il profilo ora occupano una colonna centrata nelle finestre larghe, così foto e video non sono più enormi e scorri meno. La schermata Tu segue la stessa colonna.

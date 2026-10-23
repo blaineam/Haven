@@ -41,11 +41,8 @@ Al elegir fotos de tu fototeca ahora ves cómo se preparan.
 • Las fotos grandes, incluidas las ProRAW de 48 MP, ahora se leen y optimizan en segundo plano, así que prepararlas ya no congela el compositor ni deja el teléfono caliente después.
 
 ## whats_new_macos
-El feed y el perfil ahora ocupan una columna centrada en las ventanas anchas, así que las fotos y los vídeos ya no se ven enormes y te desplazas menos. La pantalla Tú sigue la misma columna.
-• Una llamada terminada ya no hace que la siguiente indique «Conectado» antes de que fluyan los medios.
-• Las llamadas a través de tu relay siguen sonando si se pierde un solo fotograma de audio, en lugar de congelarse.
-• Deshacer tras eliminar un relay lo devuelve a sus círculos.
-• Una importación de Instagram interrumpida por una actualización continúa donde se quedó.
+Publicar espera a tus fotos.
+• Publicar permanece atenuado hasta que todas las fotos adjuntas estén listas, para que una publicación nunca salga con la mitad de sus fotos.
 
 ## whats_new_windows
 2.0.2 — El feed y el perfil ahora ocupan una columna centrada en las ventanas anchas, así que las fotos y los vídeos ya no se ven enormes y te desplazas menos. La pantalla Tú sigue la misma columna.

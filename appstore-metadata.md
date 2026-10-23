@@ -39,11 +39,8 @@ Picking photos from your library now shows them being prepared.
 • Large photos, including 48 MP ProRAW, are now read and optimized in the background, so preparing them no longer freezes the composer or leaves your phone hot afterwards.
 
 ## whats_new_macos
-The feed and profile now sit in a centered column in wide windows, so photos and videos are no longer huge and you scroll less. The You screen follows the same column.
-• A finished call no longer leaves the next one saying "Connected" before the media is flowing.
-• Calls over your relay keep playing when a single audio frame is lost, instead of freezing.
-• Undo after deleting a relay now puts it back in its circles.
-• An Instagram import interrupted by an update picks up where it stopped.
+Posting waits for your photos.
+• Post stays dimmed until every photo you attached is ready, so a post never goes out with half its photos.
 
 ## whats_new_windows
 2.0.2 — The feed and profile now sit in a centered column in wide windows, so photos and videos are no longer huge and you scroll less. The You screen follows the same column.

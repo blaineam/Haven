@@ -633,7 +633,11 @@ async fn a_chunked_download_resumes_on_the_missing_window_and_opens_for_the_memb
     assert!(a.upload_media_inner(DEFAULT_CIRCLE, &r, false).await);
 
     // b does not know the post yet (so no background sweep competes): window 1 is missing on the relay.
-    let saved = stub.store.lock().remove(&Engine::media_chunk_key(&r, 1)).expect("window 1 was stored");
+    // Missing as the relay ANSWERS it (a 404 to every read and write of that window), not deleted from the store:
+    // `a.post` spawned its own authored-media upload, which under load is still running here and would PUT the
+    // window straight back, turning the "incomplete" blob into a complete one.
+    assert!(stub.store.lock().contains_key(&Engine::media_chunk_key(&r, 1)), "window 1 was stored");
+    stub.fail_when(".p/1", Some(404));
     assert!(b.fetch_media_from_relay(DEFAULT_CIRCLE, &r).await.is_none(), "an incomplete blob is not adopted");
     assert!(!b.media_present(&r));
     let head = stub.store.lock().get(&Engine::media_key(&r)).cloned().expect("manifest");
@@ -646,7 +650,7 @@ async fn a_chunked_download_resumes_on_the_missing_window_and_opens_for_the_memb
     );
 
     // The window comes back; b learns the post (and the keys); the retry downloads only what is left.
-    stub.store.lock().insert(Engine::media_chunk_key(&r, 1), saved);
+    stub.fail_when(".p/1", None);
     crate::engine::cov_engine_tests::deliver(&a, &b, DEFAULT_CIRCLE);
     assert!(b.fetch_media_healing(DEFAULT_CIRCLE, &r).await, "the retry finishes it");
     assert!(b.media_present(&r));

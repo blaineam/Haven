@@ -141,6 +141,9 @@ function instrument(target) {
   // -4 = assumption failure (skipped). Fine for ConnectionServiceTimeoutTest below API 35; never for
   // the smoke flows, which must actually run.
   const skippedAll = /OK \(0 tests\)/.test(out) || /INSTRUMENTATION_STATUS_CODE: -4/.test(out);
+// A THREAD_STATE line is one frame of a thread dump (ART writes one on SIGQUIT / a slow main thread) and lists every
+// thread, including JNA's idle Cleaner — a class name there is not an R8 failure.
+const NOT_R8 = /THREAD_STATE/;
   if (ok && skippedAll && target.includes('MinifiedSmokeTest')) { fail(`${target} was skipped — it must run`); return false; }
   if (!ok) {
     const stack = out.split('\n').filter((l) => /INSTRUMENTATION_STATUS: stack=|^\s+at |Error|Exception|FAIL/.test(l)).slice(0, 40).join('\n');
@@ -152,7 +155,7 @@ function instrument(target) {
 function logcatScan(label, mapping) {
   const uid = (sh(`pm list packages -U ${PKG}`).match(/uid:(\d+)/) || [])[1];
   const lines = (uid ? adb('logcat', '-d', '--uid', uid) : adb('logcat', '-d')).stdout || '';
-  const bad = lines.split('\n').filter((l) => R8_SIGNS.test(l) && (uid || l.includes(PKG)));
+  const bad = lines.split('\n').filter((l) => R8_SIGNS.test(l) && !NOT_R8.test(l) && (uid || l.includes(PKG)));
   if (!bad.length) { log(`✓ logcat clean (${label})`); return; }
   // Retrace through the mapping so the failure names real classes.
   const full = (uid ? adb('logcat', '-d', '--uid', uid) : adb('logcat', '-d')).stdout || '';

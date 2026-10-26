@@ -44443,6 +44443,129 @@
           }
         }
       }
+    },
+    "CarPlay and Siri messages" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "CarPlay- und Siri-Nachrichten"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mensajes de CarPlay y Siri"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Messaggi CarPlay e Siri"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "CarPlay と Siri のメッセージ"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "CarPlay 및 Siri 메시지"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mensagens no CarPlay e na Siri"
+          }
+        }
+      }
+    },
+    "Car and Siri" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Auto und Siri"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Coche y Siri"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Auto e Siri"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "車と Siri"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "자동차 및 Siri"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Carro e Siri"
+          }
+        }
+      }
+    },
+    "Lists your conversations on CarPlay and lets Siri read and send Haven messages by voice. Siri runs in a separate part of the app, so a few recent messages are kept in a protected file on this device while this is on; turning it off deletes it. Locked conversations show only “Locked”, and message text follows your lock-screen detail setting above." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zeigt deine Unterhaltungen in CarPlay an und lässt Siri Haven-Nachrichten per Sprache vorlesen und senden. Siri läuft in einem separaten Teil der App, daher werden einige aktuelle Nachrichten in einer geschützten Datei auf diesem Gerät gespeichert, solange dies aktiviert ist; beim Ausschalten wird sie gelöscht. Gesperrte Unterhaltungen zeigen nur „Gesperrt“, und der Nachrichtentext folgt deiner Detail-Einstellung für den Sperrbildschirm oben."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Muestra tus conversaciones en CarPlay y permite que Siri lea y envíe mensajes de Haven por voz. Siri se ejecuta en una parte independiente de la app, así que mientras esté activado se guardan algunos mensajes recientes en un archivo protegido de este dispositivo; al desactivarlo se elimina. Las conversaciones bloqueadas solo muestran “Bloqueada” y el texto de los mensajes sigue tu ajuste de detalle de la pantalla bloqueada."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mostra le tue conversazioni su CarPlay e consente a Siri di leggere e inviare messaggi Haven con la voce. Siri viene eseguita in una parte separata dell’app, quindi finché è attivo alcuni messaggi recenti restano in un file protetto su questo dispositivo; disattivandolo viene eliminato. Le conversazioni bloccate mostrano solo “Bloccata” e il testo dei messaggi segue l’impostazione di dettaglio della schermata di blocco."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "CarPlay に会話を表示し、Siri が声で Haven のメッセージを読み上げたり送信したりできるようにします。Siri はアプリとは別の部分で動作するため、オンの間は最近のメッセージの一部がこのデバイス上の保護されたファイルに保存され、オフにすると削除されます。ロックされた会話には「ロック中」とだけ表示され、メッセージの本文は上のロック画面の表示設定に従います。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "CarPlay에 대화를 표시하고 Siri가 음성으로 Haven 메시지를 읽고 보낼 수 있게 합니다. Siri는 앱과 별도로 실행되므로 켜 두는 동안 최근 메시지 일부가 이 기기의 보호된 파일에 저장되며, 끄면 삭제됩니다. 잠긴 대화에는 “잠김”만 표시되고 메시지 내용은 위의 잠금 화면 상세 설정을 따릅니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mostra suas conversas no CarPlay e permite que a Siri leia e envie mensagens do Haven por voz. A Siri roda em uma parte separada do app, então, enquanto estiver ativado, algumas mensagens recentes ficam em um arquivo protegido neste dispositivo; ao desativar, ele é apagado. Conversas bloqueadas mostram apenas “Bloqueada”, e o texto das mensagens segue sua configuração de detalhe da tela bloqueada."
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

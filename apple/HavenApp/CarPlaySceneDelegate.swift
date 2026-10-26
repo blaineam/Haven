@@ -30,7 +30,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
                                   didConnect interfaceController: CPInterfaceController) {
         HavenLog.sync("carplay: connected")
         self.interfaceController = interfaceController
-        let template = CPListTemplate(title: "Haven", sections: [Self.section(for: [], configured: false, enabled: true)])
+        let template = CPListTemplate(title: "Haven", sections: [CarPlayTemplates.section(for: [], configured: false, enabled: true)])
         template.emptyViewSubtitleVariants = ["No conversations yet"]
         listTemplate = template
         interfaceController.setRootTemplate(template, animated: false, completion: nil)
@@ -78,43 +78,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
                   let img = ContactsStore.shared.avatarImage(forNodePrefix: hex) else { return nil }
             return (row.conversationId, img)
         })
-        template.updateSections([Self.section(for: rows, configured: configured, enabled: enabled, avatars: avatars)])
-    }
-
-    // MARK: - Template building
-
-    private static func section(for rows: [CarPlayConversations.Row], configured: Bool, enabled: Bool,
-                                avatars: [String: UIImage] = [:]) -> CPListSection {
-        if !enabled {
-            return CPListSection(items: [CPListItem(text: "Turned off", detailText: "Turn on CarPlay and Siri messages in Haven Settings on your iPhone.")])
-        }
-        if !configured {
-            return CPListSection(items: [CPListItem(text: "Open Haven on your iPhone", detailText: "Finish setting up to see your conversations.")])
-        }
-        if rows.isEmpty {
-            return CPListSection(items: [CPListItem(text: "No conversations yet", detailText: "Say \u{201C}Hey Siri, send a message with Haven\u{201D} once you have someone to talk to.")])
-        }
-        let items: [CPListTemplateItem] = rows.map { row in
-            let leading = CPMessageListItemLeadingConfiguration(
-                leadingItem: .none,
-                leadingImage: avatars[row.conversationId].map(scaledForCar),
-                unread: row.unread)
-            return CPMessageListItem(conversationIdentifier: row.conversationId,
-                                     text: row.title,
-                                     leadingConfiguration: leading,
-                                     trailingConfiguration: nil,
-                                     detailText: row.detail.isEmpty ? nil : row.detail,
-                                     trailingText: row.trailing.isEmpty ? nil : row.trailing)
-        }
-        return CPListSection(items: items)
-    }
-
-    private static func scaledForCar(_ image: UIImage) -> UIImage {
-        let max = CPMaximumMessageItemImageSize
-        let scale = min(max.width / image.size.width, max.height / image.size.height, 1)
-        guard scale < 1 else { return image }
-        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
-        return UIGraphicsImageRenderer(size: size).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+        template.updateSections([CarPlayTemplates.section(for: rows, configured: configured, enabled: enabled, avatars: avatars)])
     }
 }
 #endif

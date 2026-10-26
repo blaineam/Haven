@@ -637,9 +637,13 @@ targets:
       - path: Shared/SharedNotificationPrivacy.swift
       - path: Shared/SharedLockedCircles.swift
       - path: HavenApp/SiriCallTarget.swift
+      # CarPlay list construction (CarPlay + UIKit only) and the row model it renders.
+      - path: HavenApp/CarPlayTemplates.swift
+      - path: HavenApp/CarPlayConversations.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.intentstests
+        LM_SKIP_METADATA_EXTRACTION: YES
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGNING_ALLOWED: NO
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"

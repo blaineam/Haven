@@ -9,6 +9,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added — iOS: CarPlay (Communication) and Siri messaging
+
+Haven now appears on CarPlay (`com.apple.developer.carplay-communication`): a list of direct-message
+conversations (`CPMessageListItem`, Siri-managed) with unread state and time, refreshed as the feed changes.
+A new `HavenIntents` extension lets Siri read (`INSearchForMessagesIntent`), send (`INSendMessageIntent`),
+mark read (`INSetMessageAttributeIntent`) and place calls (`INStartCallIntent`); it has no engine or seed -
+it reads a privacy-filtered App Group snapshot and queues requests the app applies, and Siri only says
+"sent" after the app acknowledges. Incoming DMs become communication notifications (Siri announce / voice
+reply) at the Full privacy level. Locked conversations show only "Locked" and are refused by Siri; message text
+follows the lock-screen detail setting. New switch: Settings -> Car and Siri. Scene manifest declares only the
+CarPlay role, so the SwiftUI phone window is unchanged. Architecture, portal steps and manual checks:
+`docs/CARPLAY.md`. Tests: `CarPlayConversationsTests` (HavenLogicTests), `HavenIntentsTests` (iOS simulator).
+
 ### Changed — bundled cloudflared 2026.7.2 → 2026.10.4
 
 One pin (`CLOUDFLARED_VERSION` in `core/haven-net/src/cfquicktunnel.rs`) feeds the desktop `externalBin`, the macOS

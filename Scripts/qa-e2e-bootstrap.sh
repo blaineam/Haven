@@ -87,7 +87,7 @@ if [[ "${E2E_FRESH:-1}" != "0" ]]; then
   rm -rf "$DATA_DIR" 2>/dev/null || true
   SIM_FRESH="$(haven_sim_udid || true)"
   if [[ -z "$SIM_FRESH" ]]; then
-    log "ERROR: no Haven QA simulator (HAVEN_IOS_UDID, the pinned 80289DC4…, or one named exactly 'iPhone 17 Pro')"
+    log "ERROR: no Haven QA simulator (HAVEN_IOS_UDID, the pinned B1F5F559…, or one named exactly 'iPhone 17 Pro')"
     exit 1
   fi
   haven_sim_ensure_booted "$SIM_FRESH"

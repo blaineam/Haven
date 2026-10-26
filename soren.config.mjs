@@ -64,7 +64,7 @@ export default {
       // By UDID, not name: 'name=iPhone 17 Pro' resolves to whichever runtime is installed first —
       // with the OS 27 beta present that was the iOS 27.0 device even under Xcode 26.6.
       // This is the iOS 26.5 iPhone 17 Pro (see `xcrun simctl list devices available`).
-      destination: 'platform=iOS Simulator,id=80289DC4-7E50-4C99-BE07-FDDCF3FF0CCF',
+      destination: 'platform=iOS Simulator,id=5994E551-3114-4CF6-84C9-51D616F49E6F',
       // Release toolchain, explicitly: xcode-select points at the OS 27 beta on this Mac, and its
       // iOS 27 simulator classifies glass buttons as PopUpButton / drops identifiers the UI tests
       // query by, so the gate went red on the runtime the store build does not even use.
@@ -85,7 +85,7 @@ export default {
       project: 'apple/Haven.xcodeproj',
       scheme: 'Haven',
       xcodegen: true,
-      destination: 'platform=iOS Simulator,id=ED680D09-0DDD-4D50-B4A0-61DF947B0DBB',   // iOS 26.5 iPad Pro 13-inch (M5)
+      destination: 'platform=iOS Simulator,id=6AADE30D-5EDB-4F06-9DF5-342253030C7B',   // iOS 26.5 iPad Pro 13-inch (M5)
       env: { DEVELOPER_DIR: '/Applications/Xcode.app/Contents/Developer' },
       signing: { team: '8ZVSPZYSVF' },   // real keychain identity, as for `ios`
       extraArgs: ['-parallel-testing-enabled', 'NO'],

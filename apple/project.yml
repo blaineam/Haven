@@ -502,6 +502,11 @@ targets:
       # Every VoIP push → ring / re-report / report-and-end (PushKit aborts on an unreported push).
       - path: HavenApp/VoipPushPolicy.swift
       - path: Shared/SharedNotificationPrivacy.swift
+      # CarPlay / Siri messaging: the privacy-filtered thread model, the App Group snapshot + Siri
+      # request queue, and the CarPlay list-row builder. Foundation only.
+      - path: Shared/MessagingSnapshot.swift
+      - path: HavenApp/CarPlayConversations.swift
+      - path: HavenApp/SiriCallTarget.swift
       # Link-preview SSRF guard + safety words (cross-platform golden vectors) + composer audience
       # labels — pure Foundation.
       - path: HavenApp/LinkSafety.swift

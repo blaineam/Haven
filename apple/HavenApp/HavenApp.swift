@@ -55,6 +55,9 @@ final class HavenAppDelegate: NSObject, UIApplicationDelegate {
         // Bring up the Apple Watch companion bridge (thin client over WCSession). No-op if
         // there's no paired Watch; it just vends recent threads + accepts quick replies.
         WatchSessionManager.shared.start()
+        // CarPlay + Siri: mirror a privacy-filtered thread snapshot for the Intents extension and
+        // drain what Siri queued (send / mark read). See docs/CARPLAY.md.
+        MainActor.assumeIsolated { CarPlayBridge.shared.start() }
         #endif
         #if targetEnvironment(macCatalyst)
         // Let the Mac app run as an invisible background relay (hide the dock icon when the window
@@ -486,6 +489,12 @@ struct RootView: View {
             }
         }
         .animation(.easeInOut(duration: 0.18), value: shouldPrivacyBlur)
+        #if os(iOS)
+        // Siri / CarPlay "call X on Haven": the Intents extension resolved who, the app places the call.
+        .onContinueUserActivity(SiriCallRouter.activityType) { activity in
+            SiriCallRouter.handle(activity)
+        }
+        #endif
         .onOpenURL { url in
             #if os(iOS)
             // The Share Extension handed off items via the App Group inbox — import + route them.
@@ -677,6 +686,7 @@ struct RootView: View {
             if phase == .active {
                 accountStore.reloadIfTemporary()
                 #if os(iOS)
+                CarPlayBridge.shared.drain()
                 Task { await ShareRouter.shared.ingest() }   // foreground fallback if open-URL didn't fire
                 // Refresh the share sheet's conversation suggestions. Messages that arrived while
                 // Haven was closed are exactly the ones the user is most likely to reply to, and
@@ -692,6 +702,8 @@ struct RootView: View {
             // `onOpenURL` BEFORE this, when there was no engine to send with.
             FeedStore.shared.configureForCurrentIdentity {   // seeded or seedless (S4)
                 #if os(iOS)
+                CarPlayBridge.shared.drain()
+                CarPlayBridge.shared.publish()
                 Task { await ShareRouter.shared.ingest() }
                 #endif
                 // Screenshot harness: bring up the group-call overlay over the seeded feed. This

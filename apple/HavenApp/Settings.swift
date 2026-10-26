@@ -68,6 +68,17 @@ final class SettingsStore: ObservableObject {
             #endif
         }
     }
+    /// Show conversations on CarPlay and let Siri read/send Haven messages (iOS). DEVICE-LOCAL, default
+    /// ON. Turning it on mirrors a small, privacy-filtered slice of recent messages into the App Group
+    /// for Siri's Intents extension (a separate process with no engine); turning it off deletes it.
+    @Published var carPlayAndSiri: Bool {
+        didSet {
+            d.set(carPlayAndSiri, forKey: kCarPlay)
+            #if os(iOS)
+            CarPlayBridge.shared.settingChanged()
+            #endif
+        }
+    }
     /// Auto-delete posts older than this many days (0 = keep forever).
     @Published var retentionDays: Int { didSet { d.set(retentionDays, forKey: kRet); stamp(kRet) } }
 
@@ -146,6 +157,7 @@ final class SettingsStore: ObservableObject {
     private let kLocMaxGB = "haven.localMediaMaxGB"
     private let kKeepAwake = "haven.relay.keepAwake"
     private let kShareSuggest = "haven.shareSuggestions"
+    private let kCarPlay = "haven.carPlayAndSiri"
 
     private init() {
         saveToPhotos = d.object(forKey: kSave) as? Bool ?? true   // default ON
@@ -158,6 +170,7 @@ final class SettingsStore: ObservableObject {
         sendOriginal = d.object(forKey: kSendOriginal) as? Bool ?? false
         notificationDetail = SharedNotificationPrivacy.detail
         shareSuggestions = d.object(forKey: kShareSuggest) as? Bool ?? true   // default ON
+        carPlayAndSiri = d.object(forKey: kCarPlay) as? Bool ?? true          // default ON
         retentionDays = d.object(forKey: kRet) as? Int ?? 0       // default forever
         keepMyPosts = d.object(forKey: kKeepMine) as? Bool ?? true   // default: always keep my own archive
         identifySongsInVideos = d.object(forKey: kIdentifySongs) as? Bool ?? true   // default ON; the switch is the opt-out
@@ -344,6 +357,13 @@ struct SettingsView: View {
                 } header: { Text("Share sheet") }
                 footer: {
                     Text("Puts your recent Haven conversations in the row at the top of any app's share sheet, so a photo or link is two taps from being sent. iOS keeps the name and photo on this device to draw that row; turning this off erases them. Locked circles are never suggested.")
+                }
+                Section {
+                    Toggle("CarPlay and Siri messages", isOn: $settings.carPlayAndSiri)
+                        .tint(HavenTheme.pink)
+                } header: { Text("Car and Siri") }
+                footer: {
+                    Text("Lists your conversations on CarPlay and lets Siri read and send Haven messages by voice. Siri runs in a separate part of the app, so a few recent messages are kept in a protected file on this device while this is on; turning it off deletes it. Locked conversations show only \u{201C}Locked\u{201D}, and message text follows your lock-screen detail setting above.")
                 }
                 #endif
                 Section {

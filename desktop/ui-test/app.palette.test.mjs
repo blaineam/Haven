@@ -65,7 +65,7 @@ test('palettes: no hard-coded violet/pink/amber colour left in the stylesheet or
 test('palettes: every palette has a runtime icon PNG and a translated name in all six languages', () => {
   for (const id of IDS) assert.ok(existsSync(join(root, 'desktop/ui/palette-icons', id + '.png')), id);
   const strings = ui('strings.js');
-  for (const k of ['palette_title', 'palette_foot', 'post_to_n_circles', 'post_to_circles_title', 'multipost_hint', ...IDS.map((i) => 'palette_' + i)]) {
+  for (const k of ['palette_title', 'palette_foot', 'post_to_n_circles', 'post_to_circles_title', 'multipost_hint', 'multipost_media_note', ...IDS.map((i) => 'palette_' + i)]) {
     assert.equal(strings.split(`"${k}":`).length - 1, 7, `${k} present in en + 6 languages`);
   }
 });
@@ -195,4 +195,23 @@ test('the one-time multi-circle hint shows only for 2+ circles, only once', asyn
   for (let i = 0; i < 5; i++) { type(two.app, 'p' + i); await click(two.app, '.composer-send'); if (/right-click/.test(two.app.q('#toast').textContent)) seen.push(i); two.app.q('#toast').textContent = ''; }
   assert.equal(two.app.localStorage.getItem('haven-multipost-hint'), 'done');
   assert.equal(seen.length, 1, 'shown exactly once');
+});
+
+test('with an attachment only the current circle is selectable; without one every circle is', async () => {
+  const { app } = await boot(twoCircles());
+  type(app, 'with photo');
+  app.ev('state.attachments.push({ ref: "r1", url: null, isVideo: false })');
+  await rightClickPost(app);
+  const [cur, fam] = app.qa('#menu-root .circle-pick input[type="checkbox"]');
+  assert.equal(cur.disabled, false);
+  assert.equal(fam.disabled, true, 'other circles are disabled while media is attached');
+  assert.equal(fam.checked, false);
+  assert.match(app.q('#menu-root .circle-pick').textContent, /current circle for now/);
+  await click(app, '#menu-root .circle-pick .btn');
+  assert.deepEqual(app.calls.filter((c) => c.cmd === 'post').map((c) => c.args.circleId), ['default']);
+  const free = await boot(twoCircles());
+  type(free.app, 'text only');
+  await rightClickPost(free.app);
+  assert.ok(free.app.qa('#menu-root .circle-pick input[type="checkbox"]').every((b) => !b.disabled));
+  assert.equal(free.app.qa('#menu-root .cp-note').length, 0);
 });

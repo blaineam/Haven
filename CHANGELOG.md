@@ -39,7 +39,7 @@ palette; the installed icon (Start menu, MSIX, Flatpak, launcher) is fixed — t
 **Post to several circles.** Right-click (or long-press) the Post button for a checklist of your circles
 (the current one is pre-ticked, DMs are excluded) and "Post to N circles". A plain click on Post is
 unchanged — no picker, no confirmation. The post is authored once per ticked circle through the normal
-per-circle path; the media is stored locally once and the same refs go to each circle. A one-time tip
+per-circle path. Posts with a photo, video or voice note can only go to the current circle (a media blob is sealed to one circle's key), so the other rows are disabled while something is attached; text, songs and locations can go to any. A one-time tip
 appears after a few posts, and only if you are in two or more circles. All new strings ship in every
 language.
 

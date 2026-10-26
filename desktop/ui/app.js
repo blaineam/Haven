@@ -1547,6 +1547,7 @@ async function pickCircles(anchor, currentId) {
   return new Promise((resolve) => {
     const root = $("#menu-root");
     const picked = new Set([currentId]);
+    const mediaLocked = state.attachments.length > 0;
     const go = el("button", { class: "btn primary" });
     const paint = () => {
       const n = picked.size;
@@ -1556,6 +1557,8 @@ async function pickCircles(anchor, currentId) {
     const rows = circles.map((c) => {
       const box = el("input", { type: "checkbox", "data-circle": c.id });
       box.checked = picked.has(c.id);
+      // A media blob is sealed to ONE circle's key, so with an attachment only this circle works.
+      if (mediaLocked && c.id !== currentId) box.disabled = true;
       box.addEventListener("change", () => { if (box.checked) picked.add(c.id); else picked.delete(c.id); paint(); });
       return el("label", {}, box, el("span", {}, circleDisplayName(c.id, c.name)));
     });
@@ -1563,7 +1566,8 @@ async function pickCircles(anchor, currentId) {
     go.addEventListener("click", () => { if (picked.size) done([...circles.map((c) => c.id).filter((id) => picked.has(id))]); });
     paint();
     const menu = el("div", { class: "menu glass circle-pick", role: "dialog", "aria-label": t("post_to_circles_title") },
-      el("div", { class: "cp-title muted" }, t("post_to_circles_title")), ...rows, go);
+      el("div", { class: "cp-title muted" }, t("post_to_circles_title")), ...rows,
+      mediaLocked ? el("div", { class: "cp-note muted small" }, t("multipost_media_note")) : null, go);
     const backdrop = el("div", { class: "menu-backdrop", onclick: () => done(null) });
     root.replaceChildren(backdrop, menu);
     const r = anchor.getBoundingClientRect();
@@ -1656,6 +1660,8 @@ function buildComposer(onPost, placeholder = t("share_something"), opts = {}) {
   const send = async (targets) => {
     const body = ta.value.trim();
     if (!body && !state.attachments.length && !music) return;
+    // Attachments are sealed to this circle's key: never fan them out, whatever the picker returned.
+    if (Array.isArray(targets) && state.attachments.length) targets = targets.filter((c) => c === circleId);
     const multi = opts.onPostTo && Array.isArray(targets) && targets.length
       && !(targets.length === 1 && targets[0] === circleId);
     if (multi) {

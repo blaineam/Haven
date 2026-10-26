@@ -1245,3 +1245,5 @@ body.drop-target::after {
 .circle-pick label:hover { background: var(--glass-pink); }
 .circle-pick input[type="checkbox"] { accent-color: var(--p2); width: 16px; height: 16px; }
 .circle-pick .btn { width: 100%; margin-top: 6px; }
+.circle-pick .cp-note { padding: 6px 8px 2px; line-height: 1.35; }
+.circle-pick label:has(input:disabled) { opacity: 0.5; cursor: default; }

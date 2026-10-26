@@ -760,7 +760,6 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="composer_circles_sheet_title">Publicar en círculos</string>
     <string name="composer_circles_post_button">Publicar en %1$d círculos</string>
     <string name="composer_circles_post_button_one">Publicar en 1 círculo</string>
-    <string name="composer_circles_media_note">Las fotos y los vídeos solo pueden ir a un círculo, así que los demás no están disponibles mientras haya algo adjunto.</string>
     <string name="composer_circles_current">Actual</string>
     <string name="composer_circles_hint">Consejo: mantén pulsado Publicar para compartir la misma publicación con más de un círculo.</string>
     <string name="composer_circles_hint_dismiss">Entendido</string>

@@ -20,7 +20,7 @@ class PostToCirclesSheetInstrumentedTest {
 
     @Test fun checklistPostsToSelectedCircles() {
         var posted: List<String>? = null
-        rule.setContent { PostToCirclesSheet(targets, "a", false, {}, { posted = it }) }
+        rule.setContent { PostToCirclesSheet(targets, "a", {}, { posted = it }) }
         rule.onNodeWithText("Sam").assertDoesNotExist()
         rule.onNodeWithText("Post to 1 circle").assertExists()
         rule.onNodeWithTag("postCircle:b").performClick()
@@ -28,9 +28,12 @@ class PostToCirclesSheetInstrumentedTest {
         assertEquals(listOf("a", "b"), posted)
     }
 
-    @Test fun mediaLocksOtherCircles() {
-        rule.setContent { PostToCirclesSheet(targets, "a", true, {}, {}) }
+    @Test fun anyCircleCanBeCheckedAndPostedToWithAttachments() {
+        // The sheet no longer knows about attachments: every circle is selectable.
+        var posted: List<String>? = null
+        rule.setContent { PostToCirclesSheet(targets, "a", {}, { posted = it }) }
         rule.onNodeWithTag("postCircle:b").performClick()
-        rule.onNodeWithText("Post to 1 circle").assertExists()
+        rule.onNodeWithText("Post to 2 circles").performClick()
+        assertEquals(listOf("a", "b"), posted)
     }
 }

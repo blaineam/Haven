@@ -41,6 +41,95 @@ object LocalMedia {
         plainDir = File(files, "media-plain").apply { mkdirs() }
         thumbPrefs = context.applicationContext
             .getSharedPreferences("haven.media.thumbs", Context.MODE_PRIVATE)
+        sealPrefs = context.applicationContext
+            .getSharedPreferences("haven.media.sealsets", Context.MODE_PRIVATE)
+    }
+
+    // ---- Which circles each at-rest blob is sealed for (multi-circle posts) ------------------------
+
+    private lateinit var sealPrefs: android.content.SharedPreferences
+
+    /** The circles [ref]'s at-rest blob was sealed for by THIS device; empty when unknown (received
+     *  blobs, pre-feature media) — unknown means "re-seal before trusting it covers a set". */
+    fun sealedCircles(ref: String): Set<String> =
+        if (this::sealPrefs.isInitialized) SealSets.decode(sealPrefs.getString("s|$ref", null)) else emptySet()
+
+    private fun recordSealSet(ref: String, circleIds: Collection<String>) {
+        if (!this::sealPrefs.isInitialized) return
+        // Absence is always safe (it only costs one re-seal), so the bound can simply start over.
+        if (sealPrefs.all.size > 4000) runCatching { sealPrefs.edit().clear().apply() }
+        sealPrefs.edit().putString("s|$ref", SealSets.encode(circleIds)).apply()
+    }
+
+    private fun forgetSealSet(ref: String) {
+        if (this::sealPrefs.isInitialized) sealPrefs.edit().remove("s|$ref").apply()
+    }
+
+    /** Outcome of [ensureSealedFor]. */
+    enum class Sealed { ALREADY, RESEALED, FAILED }
+
+    /**
+     * Make [ref]'s at-rest blob openable by EVERY circle in [circleIds] (first = primary), re-sealing it
+     * from its own plaintext when the set it was sealed for does not already cover them. The new seal
+     * covers the union with whatever it was sealed for before (see [SealSets.target]). One blob, one
+     * content-addressed relay key — the upload path just reads it back verbatim.
+     *
+     * Large blobs go file→file in native memory, like [sealToFile]. Nothing is written unless the new
+     * seal succeeded, so a failure leaves the previous (still-valid) seal in place.
+     */
+    fun ensureSealedFor(ref: String, circleIds: List<String>): Sealed {
+        val wanted = circleIds.filter { it.isNotBlank() }.distinct()
+        if (wanted.isEmpty() || isSynthetic(ref)) return Sealed.ALREADY
+        val dst = mediaFile(ref)
+        if (!dst.exists()) return Sealed.FAILED
+        val recorded = sealedCircles(ref)
+        if (SealSets.covers(recorded, wanted)) return Sealed.ALREADY
+        val target = SealSets.target(wanted, recorded)
+        val engine = HavenNet.engine
+        // Any circle the blob was sealed for opens it; wanted ids first (the common case: the staging circle).
+        val openers = (wanted + recorded.sorted()).distinct()
+        val ok = runCatching {
+            if (dst.length() > SEAL_TO_FILE_THRESHOLD) {
+                val plain = File(dst.parentFile, "${dst.name}.plain.tmp")
+                val sealed = MediaFiles.scratchFor(dst, "seal")
+                try {
+                    val opened = openers.any { runCatching { engine.openCircleMediaFile(it, dst.absolutePath, plain.absolutePath) }.getOrDefault(false) } && plain.exists()
+                    opened && engine.sealCircleMediaFileMulti(target, plain.absolutePath, sealed.absolutePath) &&
+                        sealed.exists() && MediaFiles.replace(dst, sealed)
+                } finally {
+                    runCatching { plain.delete() }
+                    runCatching { if (sealed.exists()) sealed.delete() }
+                }
+            } else {
+                val stored = dst.readBytes()
+                val plain = openers.firstNotNullOfOrNull { runCatching { engine.openCircleMedia(it, stored) }.getOrNull() }
+                    ?: stored.takeUnless { isSealedEnvelope(it) }   // legacy UNSEALED blob: already plaintext
+                plain != null && MediaFiles.writeAtomic(dst, engine.sealCircleMediaMulti(target, plain))
+            }
+        }.getOrDefault(false)
+        if (!ok) {
+            android.util.Log.w("LocalMedia", "multi-circle seal FAILED ${ref.take(12)} for ${target.size} circles — keeping the previous seal")
+            return Sealed.FAILED
+        }
+        recordSealSet(ref, target)
+        return Sealed.RESEALED
+    }
+
+    /** Seal [plain] for [circleId] PLUS every circle [ref] was already sealed for, so a repair re-seal
+     *  (new members, a friend's media-wanted ask) never locks out the other circles sharing the blob;
+     *  replaces our at-rest copy and returns the fresh envelope. Falls back to the single circle if the
+     *  wider set cannot be sealed (e.g. a circle since left). Null when nothing could be sealed. */
+    fun resealInPlace(circleId: String, ref: String, plain: ByteArray): ByteArray? {
+        val target = SealSets.target(listOf(circleId), sealedCircles(ref))
+        var used = target
+        var fresh = if (target.size > 1) runCatching { HavenNet.engine.sealCircleMediaMulti(target, plain) }.getOrNull() else null
+        if (fresh == null) {
+            used = listOf(circleId)
+            fresh = runCatching { HavenNet.engine.sealCircleMedia(circleId, plain) }.getOrNull() ?: return null
+        }
+        if (!MediaFiles.writeAtomic(mediaFile(ref), fresh)) return null
+        recordSealSet(ref, used)
+        return fresh
     }
 
     /** Above this plaintext size, seal file→file (off-heap) instead of holding the sealed envelope in RAM. */
@@ -84,6 +173,7 @@ object LocalMedia {
         // without an img_/vid_/aud_ prefix, so bare hashes were being dropped cross-platform.
         val ref = (if (isVideo) "vid_" else "img_") + sha256Hex(bytes)
         sealToFile(circleId, bytes, mediaFile(ref))   // large blobs seal file→file (off-heap) to avoid OOM
+        recordSealSet(ref, listOf(circleId))
         // Record the shape AT INGEST: reading an image header here is a few microseconds on bytes we
         // already hold, and it means the feed can lay this item's card out at the correct height the
         // very first time it draws — no 4:3 placeholder that later snaps and shifts the cards below it.
@@ -264,6 +354,7 @@ object LocalMedia {
     fun storeAudio(circleId: String, bytes: ByteArray): String {
         val ref = "aud_" + sha256Hex(bytes)
         sealToFile(circleId, bytes, mediaFile(ref))   // large blobs seal file→file (off-heap) to avoid OOM
+        recordSealSet(ref, listOf(circleId))
         return ref
     }
 
@@ -773,6 +864,7 @@ object LocalMedia {
     fun storeUnderRef(circleId: String, ref: String, bytes: ByteArray) {
         if (checked(ref, bytes) == null) return
         sealToFile(circleId, bytes, mediaFile(ref))   // large blobs seal file→file (off-heap) to avoid OOM
+        recordSealSet(ref, listOf(circleId))
     }
 
     /** The at-rest sealed blob for a ref — uploaded to the relay verbatim (same form iOS stores).
@@ -797,7 +889,10 @@ object LocalMedia {
      * of the same ref could read 0 bytes mid-write and quarantine a perfectly good blob (desktop
      * 85dd646b is the same race). Temp + rename: readers see the old file or the new one.
      */
-    fun writeRawSealed(ref: String, blob: ByteArray): Boolean = MediaFiles.writeAtomic(mediaFile(ref), blob)
+    fun writeRawSealed(ref: String, blob: ByteArray): Boolean {
+        forgetSealSet(ref)   // a fetched blob's recipient set is not ours to vouch for
+        return MediaFiles.writeAtomic(mediaFile(ref), blob)
+    }
 
     // ---- Chunked reassembly (large-media fix) ---------------------------------------------------
     // A relay/S3 blob is capped at MAX_BLOB = 256 MB, so large sealed videos are transferred as 8 MB
@@ -873,6 +968,7 @@ object LocalMedia {
         // that just cost the sender the whole file — exactly what [sealToFile] falls back to, and
         // [load] reads a raw at-rest blob fine. Never a silent drop.
         if (!sealed) runCatching { MediaFiles.replace(dst, part) }
+        else recordSealSet(ref, listOf(circleId))
         runCatching { part.delete() }
         return dst.exists()
     }
@@ -1114,6 +1210,7 @@ object LocalMedia {
             rm(File(plainDir, "${storageKey(ref)}.$ext"))
         }
         sizeCache.remove(ref)
+        forgetSealSet(ref)
         return freed
     }
 

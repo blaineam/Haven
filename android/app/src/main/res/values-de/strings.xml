@@ -754,7 +754,6 @@
     <string name="composer_circles_sheet_title">In Kreisen posten</string>
     <string name="composer_circles_post_button">In %1$d Kreisen posten</string>
     <string name="composer_circles_post_button_one">In 1 Kreis posten</string>
-    <string name="composer_circles_media_note">Fotos und Videos können nur an einen Kreis gehen, die anderen sind deshalb nicht verfügbar, solange etwas angehängt ist.</string>
     <string name="composer_circles_current">Aktuell</string>
     <string name="composer_circles_hint">Tipp: Halte „Posten“ gedrückt, um denselben Beitrag in mehreren Kreisen zu teilen.</string>
     <string name="composer_circles_hint_dismiss">Verstanden</string>

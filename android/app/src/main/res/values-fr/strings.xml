@@ -754,7 +754,6 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="composer_circles_sheet_title">Publier dans des cercles</string>
     <string name="composer_circles_post_button">Publier dans %1$d cercles</string>
     <string name="composer_circles_post_button_one">Publier dans 1 cercle</string>
-    <string name="composer_circles_media_note">Les photos et vidéos ne peuvent aller que dans un seul cercle ; les autres sont donc indisponibles tant qu’un média est joint.</string>
     <string name="composer_circles_current">Actuel</string>
     <string name="composer_circles_hint">Astuce : appuyez longuement sur Publier pour partager la même publication dans plusieurs cercles.</string>
     <string name="composer_circles_hint_dismiss">Compris</string>

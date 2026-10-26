@@ -22,18 +22,21 @@ class MultiCircleTest {
     @Test fun toggleAndOrdering() {
         val t = MultiCircle.targets(all)
         var sel = MultiCircle.initialSelection("b", t)
-        sel = MultiCircle.toggle(sel, "c", "b", false)
-        sel = MultiCircle.toggle(sel, "a", "b", false)
+        sel = MultiCircle.toggle(sel, "c")
+        sel = MultiCircle.toggle(sel, "a")
         assertEquals(listOf("b", "a", "c"), MultiCircle.orderedForPosting(sel, t, "b"))
-        sel = MultiCircle.toggle(sel, "b", "b", false)
+        sel = MultiCircle.toggle(sel, "b")
         assertEquals(listOf("a", "c"), MultiCircle.orderedForPosting(sel, t, "b"))
         assertEquals(listOf("a"), MultiCircle.orderedForPosting(setOf("a", "dm:x", "zzz"), t, "b"))
     }
 
-    @Test fun blobMediaLimitsToActive() {
-        assertTrue(MultiCircle.isSelectable("b", "b", true))
-        assertFalse(MultiCircle.isSelectable("a", "b", true))
-        assertEquals(setOf("b"), MultiCircle.toggle(setOf("b"), "a", "b", true))
+    @Test fun everyCircleIsSelectableWhateverIsAttached() {
+        // Attachments are sealed for the whole chosen set, so nothing is locked to the active circle.
+        val t = MultiCircle.targets(all)
+        var sel = MultiCircle.initialSelection("b", t)
+        for (id in listOf("a", "c")) sel = MultiCircle.toggle(sel, id)
+        assertEquals(setOf("a", "b", "c"), sel)
+        assertEquals(listOf("b", "a", "c"), MultiCircle.orderedForPosting(sel, t, "b"))
     }
 
     @Test fun hintOnlyForTwoPlusCirclesOnceAfterFewPosts() {

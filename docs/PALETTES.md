@@ -45,5 +45,6 @@ above — re-run it if a stop changes. Per platform:
 Long-press (right-click on desktop/macOS) the Post button → checklist of the user's circles (current
 one pre-checked, DMs excluded) → "Post to N circles". A plain tap is unchanged (this circle only; no
 picker or confirmation on the normal path). The post is authored once per selected circle with the same
-body/media/song/retention; media is stored/uploaded once and referenced per circle where the transport
-allows. Show a one-time hint after a few posts only when the user is in 2+ circles.
+body/media/song/retention. Attachments are sealed ONCE for the whole selection (core
+`seal_circle_media_multi`, first id = primary: one blob, one content-addressed ref, one upload) and the ref
+is scoped/announced into each selected circle — nothing is dropped or locked to the current circle. Show a one-time hint after a few posts only when the user is in 2+ circles.

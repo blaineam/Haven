@@ -754,7 +754,6 @@
     <string name="composer_circles_sheet_title">サークルに投稿</string>
     <string name="composer_circles_post_button">%1$d 個のサークルに投稿</string>
     <string name="composer_circles_post_button_one">1 個のサークルに投稿</string>
-    <string name="composer_circles_media_note">写真と動画は 1 つのサークルにしか送れないため、添付中は他のサークルを選べません。</string>
     <string name="composer_circles_current">現在</string>
     <string name="composer_circles_hint">ヒント：「投稿」を長押しすると、同じ投稿を複数のサークルに共有できます。</string>
     <string name="composer_circles_hint_dismiss">了解</string>

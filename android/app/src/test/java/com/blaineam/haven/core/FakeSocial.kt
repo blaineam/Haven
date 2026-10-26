@@ -63,7 +63,9 @@ class FakeSocial : HavenSocial(NoHandle) {
     /** When set the engine ACCEPTS what is authored and returns this envelope, so HavenNet runs its broadcast / upload legs. */
     var authorOk: ByteArray? = null
     var authoredId: String? = null
-    private fun refuse(a: Authored): ByteArray { authored += a; return authorOk ?: throw IllegalStateException("engine refused ${a.verb}") }
+    /** Runs as each authored event is recorded — lets a test observe what had happened BEFORE it. */
+    var onAuthor: (() -> Unit)? = null
+    private fun refuse(a: Authored): ByteArray { authored += a; onAuthor?.invoke(); return authorOk ?: throw IllegalStateException("engine refused ${a.verb}") }
     override fun `lastAuthoredEventId`(`circleId`: String, `createdAt`: ULong): String? = authoredId ?: super.`lastAuthoredEventId`(circleId, createdAt)
 
     override fun `post`(`circleId`: String, `body`: String, `media`: List<String>, `music`: TrackRefFfi?, `retentionSecs`: ULong?,
@@ -179,6 +181,18 @@ class FakeSocial : HavenSocial(NoHandle) {
     }
     override fun `openCircleMediaSender`(`circleId`: String, `sealed`: ByteArray): OpenedCircleBlobFfi? =
         openBlob?.invoke(circleId, sealed) ?: super.`openCircleMediaSender`(circleId, sealed)
+    /** Multi-circle media seals the engine was asked for (circle ids in the order given, primary first). */
+    val multiSeals = java.util.concurrent.CopyOnWriteArrayList<List<String>>()
+    var sealMulti: ((List<String>, ByteArray) -> ByteArray)? = null
+    var sealFileMulti: ((List<String>, String, String) -> Boolean)? = null
+    override fun `sealCircleMediaMulti`(`circleIds`: List<String>, `data`: ByteArray): ByteArray {
+        multiSeals += circleIds
+        return sealMulti?.invoke(circleIds, data) ?: super.`sealCircleMediaMulti`(circleIds, data)
+    }
+    override fun `sealCircleMediaFileMulti`(`circleIds`: List<String>, `inPath`: String, `outPath`: String): Boolean {
+        multiSeals += circleIds
+        return sealFileMulti?.invoke(circleIds, inPath, outPath) ?: super.`sealCircleMediaFileMulti`(circleIds, inPath, outPath)
+    }
     override fun `sealCircleMedia`(`circleId`: String, `data`: ByteArray): ByteArray =
         sealMedia?.invoke(circleId, data) ?: super.`sealCircleMedia`(circleId, data)
     override fun `takeEpochMovedCircles`(): List<String> =

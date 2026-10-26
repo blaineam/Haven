@@ -24,7 +24,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -43,7 +42,6 @@ import com.blaineam.haven.R
 fun PostToCirclesSheet(
     targets: List<PostTarget>,
     activeId: String,
-    hasBlobMedia: Boolean,
     onDismiss: () -> Unit,
     onPost: (List<String>) -> Unit,
 ) {
@@ -58,27 +56,21 @@ fun PostToCirclesSheet(
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
             Text(stringResource(R.string.composer_circles_sheet_title), color = HavenTheme.textPrimary,
                 fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-            if (hasBlobMedia) {
-                Spacer(Modifier.height(4.dp))
-                Text(stringResource(R.string.composer_circles_media_note), color = HavenTheme.textSecondary, fontSize = 12.sp)
-            }
             Spacer(Modifier.height(10.dp))
             Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
                 rows.forEach { t ->
-                    val enabled = MultiCircle.isSelectable(t.id, activeId, hasBlobMedia)
                     val checked = t.id in selection
                     Row(
                         Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(12.dp))
                             .background(if (checked) HavenTheme.pink.copy(alpha = 0.14f) else HavenTheme.background)
-                            .alpha(if (enabled) 1f else 0.45f)
-                            .clickable(enabled = enabled) { selection = MultiCircle.toggle(selection, t.id, activeId, hasBlobMedia) }
+                            .clickable { selection = MultiCircle.toggle(selection, t.id) }
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                             .testTag("postCircle:${t.id}"),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Checkbox(
-                            checked = checked, enabled = enabled,
-                            onCheckedChange = { selection = MultiCircle.toggle(selection, t.id, activeId, hasBlobMedia) },
+                            checked = checked,
+                            onCheckedChange = { selection = MultiCircle.toggle(selection, t.id) },
                             colors = CheckboxDefaults.colors(checkedColor = HavenTheme.pink),
                         )
                         Text(t.name, color = HavenTheme.textPrimary, fontSize = 15.sp, modifier = Modifier.weight(1f))

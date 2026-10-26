@@ -3851,6 +3851,57 @@ object HavenNet : InboundListener {
             scope.launch { media.forEach { MediaSaver.autoSave(appContext, it) } }
     }
 
+    /** Every blob ref [media] will upload when posted: contents plus the thumb/preview/poster/original
+     *  companions named inside its markers (bare refs only — markers themselves carry no bytes). */
+    internal fun postBlobRefs(media: List<String>): List<String> =
+        (MediaVariants.allPreviews(media) + MediaVariants.allThumbs(media) +
+            media.mapNotNull { MediaVariants.parsePoster(it)?.second } +
+            media.mapNotNull { MediaVariants.parseOriginal(it)?.second } +
+            MediaVariants.uploadOrder(media)).distinct().filter { !LocalMedia.isSynthetic(it) }
+
+    /**
+     * Seal every attachment of a post for ALL of [circleIds] (first = primary) BEFORE any circle's post
+     * or upload job exists. Each blob is one file / one content-addressed relay key / one upload, openable
+     * by every selected circle (engine `seal_circle_media_multi`); a blob first sealed for fewer circles is
+     * re-sealed for the union (see [LocalMedia.ensureSealedFor]). If a re-sealed blob had already reached
+     * a relay (re-posting an old photo), the stale one-circle copy there is overwritten by a forced upload.
+     */
+    internal fun sealMediaForCircles(circleIds: List<String>, media: List<String>) {
+        if (circleIds.size < 2) return
+        val withThumbs = withPreviewMarkers(withThumbMarkers(media))
+        for (ref in postBlobRefs(withThumbs)) {
+            if (!LocalMedia.has(ref)) continue
+            when (LocalMedia.ensureSealedFor(ref, circleIds)) {
+                LocalMedia.Sealed.RESEALED -> {
+                    if (everUploaded(ref)) {
+                        forgetBackedUpRef(ref)
+                        enqueueBackup(circleIds.first(), ref, force = true, priority = true)
+                    }
+                }
+                LocalMedia.Sealed.FAILED -> Log.w(TAG, "multi-circle post: ${ref.take(10)} could not be sealed for ${circleIds.size} circles")
+                LocalMedia.Sealed.ALREADY -> {}
+            }
+        }
+    }
+
+    /**
+     * Post ONE composed post into several circles (the long-press "Post to N circles"). Attachments are
+     * sealed once for the whole set up front ([sealMediaForCircles]); the post itself is then authored per
+     * circle through the ordinary [post] path, so each circle gets its own event, relay scope marker and
+     * announcement while the blob is uploaded once. [circleIds] order = authoring order; first = primary.
+     */
+    fun postToCircles(circleIds: List<String>, body: String, media: List<String> = emptyList(),
+                      music: uniffi.haven_ffi.TrackRefFfi? = null, retentionSecs: ULong? = null,
+                      onPublished: (() -> Unit)? = null) {
+        val ids = circleIds.filter { it.isNotBlank() }.distinct()
+        if (ids.isEmpty() || (body.isBlank() && media.isEmpty() && music == null)) return
+        if (authorOffMain { postToCircles(ids, body, media, music, retentionSecs, onPublished) }) return
+        runCatching { sealMediaForCircles(ids, media) }.onFailure { Log.w(TAG, "multi-circle seal failed", it) }
+        ids.forEachIndexed { i, id ->
+            post(id, body, media, music, retentionSecs, onPublished = if (i == 0) onPublished else null)
+        }
+    }
+
     /** Author a post that came from an ARCHIVE IMPORT (Instagram et al) — silent by construction.
      *
      *  An import republishes a whole back-catalogue at once: a 900-post Instagram archive would fire
@@ -7903,6 +7954,8 @@ object HavenNet : InboundListener {
      * it stays broken forever while this device keeps reporting the post as safely backed up. The
      * complement of [forgetBackedUp], which drops a whole destination rather than one ref.
      */
+    /** Any relay ever confirmed holding [ref]. */
+    private fun everUploaded(ref: String): Boolean { ensureLedger(); return synchronized(backedUp) { backedUp.any { it.endsWith("|$ref") } } }
     private fun forgetBackedUpRef(ref: String) {
         ensureLedger()
         if (backedUp.removeAll { it.endsWith("|$ref") }) {
@@ -7958,12 +8011,13 @@ object HavenNet : InboundListener {
             Log.i(TAG, "reseal ${ref.take(10)}: cannot open our own copy (missing, or too big for RAM) — sending the stored seal")
             return null
         }
-        val fresh = runCatching { social.sealCircleMedia(circleId, plain) }.getOrNull()
+        // Seals for this circle AND any other circle sharing the blob (multi-circle posts), and keeps
+        // our at-rest copy consistent with what peers now hold.
+        val fresh = LocalMedia.resealInPlace(circleId, ref, plain)
         if (fresh == null) {
             Log.w(TAG, "reseal ${ref.take(10)}: re-seal failed — sending the stored seal")
             return null
         }
-        LocalMedia.writeRawSealed(ref, fresh)   // keep our copy consistent with what peers now hold
         Log.i(TAG, "reseal ${ref.take(10)}: sealed afresh to the circle's current members (${plain.size}B plain → ${fresh.size}B)")
         return fresh
     }
@@ -7978,7 +8032,10 @@ object HavenNet : InboundListener {
         // none of its media (see mediaScopeKey).
         val circleRelays = relaysFor(circleId).toSet()
         val dests = mediaRelaysFor(circleId).filter { it in circleRelays || !scopeRefused(it, circleId) }
-        if (!force && dests.isNotEmpty() && dests.all { isBackedUp(it, ref) }) return true
+        // Holding the BYTES is not enough: the ref must also be authorized for THIS circle on the relay
+        // (the scope marker), or a second circle sharing the blob — a multi-circle post, a reshare —
+        // would find the relay "already has it" and never be scoped in.
+        if (!force && dests.isNotEmpty() && dests.all { isBackedUp(it, ref) && scopeConfirmed(it, ref, circleId) }) return true
         val key = mediaKey(ref)
         val scopeKey = mediaScopeKey(ref, circleId)
         val hostedHex = runCatching { relayHost?.nodeIdHex() }.getOrNull()
@@ -7995,7 +8052,12 @@ object HavenNet : InboundListener {
         val uploadHttp = ArrayList<Pair<String, RelayEntry>>()                // node → HTTP interface
         val uploadDial = ArrayList<Pair<String, RelayClient>>()               // node → connected client
         for (nodeHex in dests) {
-            if (!force && isBackedUp(nodeHex, ref)) { landed = true; continue }   // already confirmed on this relay
+            if (!force && isBackedUp(nodeHex, ref)) {   // bytes already confirmed on this relay
+                // …but another circle may still need its scope marker put there (no bytes move).
+                if (!scopeConfirmed(nodeHex, ref, circleId) &&
+                    !confirmScope(nodeHex, scopeKey, ref, circleId, nodeHex in circleRelays, hostedHex)) continue
+                landed = true; continue
+            }
             // S3-BUCKET relay: probe via the S3 FFI (relayClientFor can't dial an "s3:" pseudo-node).
             // success(bytes) = already mirrored, success(null) = reachable miss, failure = unreachable.
             if (nodeHex.startsWith("s3:")) {
@@ -8019,6 +8081,7 @@ object HavenNet : InboundListener {
                 // Scope first (our own store: no gate) — our relay must not offer this ref to siblings
                 // of other circles, including when it already holds it (a reshare into this circle).
                 relayHost?.localPut(scopeKey, mediaScopeBody)
+                markScoped(nodeHex, ref, circleId)
                 // COMPLETE, not merely present — see holdsCompleteBlob. localHas answers the chunk
                 // probes from the store index rather than reading an 8 MB window per question.
                 val head = if (force) null else relayHost?.localGet(key)
@@ -8048,6 +8111,7 @@ object HavenNet : InboundListener {
                 }
                 if (scopeRefusedHere) { noteScopeRefused(nodeHex, circleId, nodeHex in circleRelays); continue }
                 scopedOverHttp = scopeSettled
+                if (scopeSettled) markScoped(nodeHex, ref, circleId)
                 if (!scopeSettled) {
                     // No HTTP door answered: the iroh dial below (same store) scopes and probes instead.
                 } else if (force) {
@@ -8089,6 +8153,7 @@ object HavenNet : InboundListener {
                     else relayFailed(nodeHex)
                     continue
                 }
+                markScoped(nodeHex, ref, circleId)
             }
             if (force) { uploadDial.add(nodeHex to client); continue }
             runCatching {
@@ -8206,6 +8271,43 @@ object HavenNet : InboundListener {
                 .onFailure { if (!(isForbiddenError(it) && absorbPendingRefusal(nodeHex))) relayFailed(nodeHex) }
         }
         return landed
+    }
+
+    // ---- Per-circle relay scope confirmations ------------------------------------------------------
+    // The blob ledger ([isBackedUp]) is per (relay, ref); the relay's scope marker is per (relay, ref,
+    // circle). One blob sealed for several circles is uploaded ONCE but must be scoped into each. In
+    // memory only: after a restart the first job per (ref, circle) re-puts the idempotent marker.
+    private val scopedLedger: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private fun scopeConfirmed(node: String, ref: String, circleId: String): Boolean =
+        node.startsWith("s3:") || scopedLedger.contains("$node|$ref|$circleId")   // S3 has no scope gate
+    private fun markScoped(node: String, ref: String, circleId: String) {
+        if (scopedLedger.size > 20_000) scopedLedger.clear()
+        scopedLedger.add("$node|$ref|$circleId")
+    }
+
+    /** Put [ref]'s scope marker for [circleId] on one relay that already holds the bytes. True once the
+     *  marker is accepted; false when the relay refuses/doesn't answer (the caller skips the relay). */
+    private suspend fun confirmScope(nodeHex: String, scopeKey: String, ref: String, circleId: String,
+                             ownRelay: Boolean, hostedHex: String?): Boolean {
+        if (hostedHex != null && nodeHex == hostedHex) {
+            relayHost?.localPut(scopeKey, mediaScopeBody); markScoped(nodeHex, ref, circleId); return true
+        }
+        val entry = relayEntries[nodeHex]
+        if (entry != null) {
+            for (base in httpUrlsFor(entry)) {
+                val sr = relayHttpPut(base, entry.httpToken, scopeKey, mediaScopeBody)
+                if (sr.exceptionOrNull() is RelayForbidden) { noteScopeRefused(nodeHex, circleId, ownRelay); return false }
+                if (sr.isFailure) { markHttpUrlBad(base); continue }
+                markScoped(nodeHex, ref, circleId); return true
+            }
+        }
+        val client = RelayDialBound.bounded { relayClientFor(nodeHex) } ?: return false
+        val sr = runCatching { client.put(scopeKey, mediaScopeBody) }
+        if (sr.isFailure) {
+            if (isForbiddenError(sr.exceptionOrNull())) noteScopeRefused(nodeHex, circleId, ownRelay) else relayFailed(nodeHex)
+            return false
+        }
+        markScoped(nodeHex, ref, circleId); return true
     }
 
     /** Byte ranges of each 8 MB chunk over a blob of [size] bytes: list of (from, toExclusive). */

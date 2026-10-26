@@ -753,7 +753,6 @@
     <string name="composer_circles_sheet_title">发布到圈子</string>
     <string name="composer_circles_post_button">发布到 %1$d 个圈子</string>
     <string name="composer_circles_post_button_one">发布到 1 个圈子</string>
-    <string name="composer_circles_media_note">照片和视频只能发到一个圈子，因此添加附件时其他圈子不可选。</string>
     <string name="composer_circles_current">当前</string>
     <string name="composer_circles_hint">提示：长按“发布”，可将同一条帖子分享到多个圈子。</string>
     <string name="composer_circles_hint_dismiss">知道了</string>

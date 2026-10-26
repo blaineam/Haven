@@ -214,20 +214,17 @@ fun CircleScreen(onAddFriend: () -> Unit) {
         com.blaineam.haven.core.MultiCircleHint.notePost()
         draft = ""; pendingMedia.clear(); pendingMusic = null; disappearSecs = null
     }
-    // Long-press on Post: author the SAME post once per chosen circle through the ordinary per-circle
-    // path (HavenNet.post). The active circle goes first. Blob media is only ever offered for the
-    // circle it was sealed under (see MultiCircle), so each call reads a blob that circle can open.
+    // Long-press on Post: author the SAME post once per chosen circle (HavenNet.postToCircles). The
+    // active circle goes first. Attachments are sealed ONCE for every chosen circle up front, so the one
+    // blob opens in each of them and is uploaded a single time.
     var showCirclesSheet by remember { mutableStateOf(false) }
     val postTargets = remember(circlesVersion) {
         MultiCircle.targets(HavenNet.feedCircles().map { PostTarget(it.id, HavenNet.circleName(it.id)) })
     }
-    val hasBlobMedia = pendingMedia.any { !com.blaineam.haven.core.LocalMedia.isSynthetic(it) }
     fun postToCircles(ids: List<String>) {
         val body = draft.trim(); val media = pendingMedia.toList(); val music = pendingMusic; val secs = disappearSecs
-        ids.forEachIndexed { i, id ->
-            HavenNet.post(id, body, media, music, retentionSecs = secs,
-                onPublished = if (i == 0) ({ com.blaineam.haven.support.RatingManager.maybeAskAfterPublish(context) }) else null)
-        }
+        HavenNet.postToCircles(ids, body, media, music, retentionSecs = secs,
+            onPublished = { com.blaineam.haven.support.RatingManager.maybeAskAfterPublish(context) })
         com.blaineam.haven.core.MultiCircleHint.markShown()   // found the gesture — the tip is moot
         draft = ""; pendingMedia.clear(); pendingMusic = null; disappearSecs = null
     }
@@ -497,7 +494,7 @@ fun CircleScreen(onAddFriend: () -> Unit) {
 
     if (showCirclesSheet) {
         PostToCirclesSheet(
-            targets = postTargets, activeId = active, hasBlobMedia = hasBlobMedia,
+            targets = postTargets, activeId = active,
             onDismiss = { showCirclesSheet = false },
             onPost = { ids -> showCirclesSheet = false; postToCircles(ids) },
         )

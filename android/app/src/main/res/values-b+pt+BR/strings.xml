@@ -789,7 +789,6 @@ O que já tentei:
     <string name="composer_circles_sheet_title">Publicar em círculos</string>
     <string name="composer_circles_post_button">Publicar em %1$d círculos</string>
     <string name="composer_circles_post_button_one">Publicar em 1 círculo</string>
-    <string name="composer_circles_media_note">Fotos e vídeos só podem ir para um círculo, então os outros ficam indisponíveis enquanto houver algo anexado.</string>
     <string name="composer_circles_current">Atual</string>
     <string name="composer_circles_hint">Dica: mantenha Publicar pressionado para compartilhar a mesma publicação com mais de um círculo.</string>
     <string name="composer_circles_hint_dismiss">Entendi</string>

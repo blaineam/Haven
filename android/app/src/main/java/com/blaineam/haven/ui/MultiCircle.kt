@@ -7,10 +7,8 @@ data class PostTarget(val id: String, val name: String)
  * Selection rules for the long-press "Post to N circles" sheet. Pure, so the rules are unit-tested
  * on the JVM. A plain tap on Post never touches any of this — it posts to the active circle only.
  *
- * Media rule: Haven seals each media blob under ONE circle's key, and the blob is stored by ref
- * (one file per ref, uploaded by ref), so the same photo cannot be readable in two circles at once on
- * this transport. While a photo/video/file is attached the sheet therefore only allows the circle the
- * media was staged in (the active one). Songs, locations and text carry no blob and go anywhere.
+ * Media is NOT a limit: attachments are sealed once for every chosen circle (one blob, one upload —
+ * see HavenNet.postToCircles), so every circle is selectable with or without attachments.
  */
 object MultiCircle {
     const val HINT_AFTER_POSTS = 3
@@ -23,14 +21,8 @@ object MultiCircle {
     fun initialSelection(active: String, targets: List<PostTarget>): Set<String> =
         if (targets.any { it.id == active }) setOf(active) else emptySet()
 
-    /** Whether [id] may be toggled. With blob media attached only [active] is allowed. */
-    fun isSelectable(id: String, active: String, hasBlobMedia: Boolean): Boolean =
-        !hasBlobMedia || id == active
-
-    fun toggle(selection: Set<String>, id: String, active: String, hasBlobMedia: Boolean): Set<String> {
-        if (!isSelectable(id, active, hasBlobMedia)) return selection
-        return if (id in selection) selection - id else selection + id
-    }
+    fun toggle(selection: Set<String>, id: String): Set<String> =
+        if (id in selection) selection - id else selection + id
 
     /** The circles to author into, active first then the sheet's order; unknown/DM ids are dropped. */
     fun orderedForPosting(selection: Set<String>, targets: List<PostTarget>, active: String): List<String> {

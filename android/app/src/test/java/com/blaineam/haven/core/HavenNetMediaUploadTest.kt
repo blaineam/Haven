@@ -58,6 +58,20 @@ class HavenNetMediaUploadTest {
         assertTrue(backedUp().contains("${env.relayHex}|$ref"))
     }
 
+    @Test fun a_second_circle_sharing_the_blob_is_scoped_in_without_a_second_upload() {
+        // One blob sealed for two circles: the relay holds the bytes after the first circle's job, but the
+        // second circle still needs its own scope marker — "already backed up" must not skip it.
+        assertTrue(upload(circle = "default"))
+        env.relay.hits.clear()
+        assertTrue(upload(circle = "second"))
+        assertEquals("only the new circle's scope marker moves; the blob is not re-sent",
+            listOf("haven/media/$ref.c/second"), putPaths())
+        assertArrayEquals("1".toByteArray(), env.relay.store["haven/media/$ref.c/second"])
+        env.relay.hits.clear()
+        assertTrue(upload(circle = "second"))
+        assertTrue("once the scope is confirmed the ledger answers before any request", env.relay.hits.isEmpty())
+    }
+
     @Test fun a_manifest_over_missing_chunks_is_re_uploaded() {
         env.relay.store[mediaKey] = HavenKeys.makeManifest(listOf(10, 10))
         env.relay.store["haven/media/$ref.p/0"] = ByteArray(10)   // chunk 1 never arrived

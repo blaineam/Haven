@@ -24,7 +24,7 @@ runtime (Finder/Launchpad keep the bundled icon).
 "Post to N circles"; a tap is unchanged and nothing sits in front of a normal post. The post is authored once
 per circle. A media blob is sealed to one circle's key and its sealed copy is cached per file, so while a
 photo/video/file/voice note is attached only the current circle can be ticked (text, songs and locations can
-go anywhere) — same rule on Android and desktop. One-time tip after a few posts for people in 2+ circles.
+go anywhere); Android and desktop seal one blob for every ticked circle instead. One-time tip after a few posts for people in 2+ circles.
 
 ### Added — Android: color palettes, per-palette app icon, and posting to several circles at once
 
@@ -38,8 +38,13 @@ icon rendered from `packaging/palette-icons/`; the chosen alias is enabled and t
 
 **Multi-circle post.** Long-press the composer's Post button for a checklist of your circles (current one
 pre-checked, DMs excluded) and "Post to N circles". A plain tap is unchanged. The post is authored once per
-circle through the normal path. Media blobs are sealed under a single circle's key on Android, so while a
-photo/video/file is attached only the current circle is selectable (text, songs and locations go anywhere).
+circle through the normal path (`HavenNet.postToCircles`). Attachments go to EVERY ticked circle: before any
+post is authored each blob (content, thumb/preview/poster companions) is re-sealed once for the whole
+selection with the core's `seal_circle_media_multi` / `_file_multi` (first id = primary), so it stays ONE blob
+with one content-addressed ref and is uploaded once, then scoped into each circle's relay (the relay scope
+marker is now confirmed per circle even when the relay already holds the bytes). The set a blob was sealed
+for is remembered per ref; posting to a circle outside it re-seals for the union (earlier circles keep
+opening it) and overwrites a stale one-circle copy already on a relay; repair re-seals keep the set too.
 A one-time tip appears after a few posts, only when you are in 2+ circles. Localized in all shipped locales.
 
 ### Added — Desktop: color palettes and posting to several circles at once

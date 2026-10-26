@@ -19,7 +19,7 @@ add per-palette overrides unless a pair fails WCAG AA.
 | `ember` | Ember | #B91C1C | #F97316 | #FACC15 |
 | `sky` | Sky | #0EA5E9 | #6366F1 | #A78BFA |
 | `grape` | Grape | #6D28D9 | #A855F7 | #F472B6 |
-| `neutral` | Neutral | #374151 | #6B7280 | #9CA3AF |
+| `neutral` | Neutral | #404040 | #737373 | #A3A3A3 |
 
 `neutral` must also strip colour from decoration that is not a palette stop (glows tinted pink, the
 violet/pink avatar rings, gradient pills): they render in the grey stops. Semantic colours (ok green,

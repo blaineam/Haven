@@ -153,4 +153,32 @@ final class SettingsUITests: HavenUITestCase {
         XCTAssertTrue(version.label.range(of: #"\d+\.\d+"#, options: .regularExpression) != nil
                         || text(app, containing: "2.").exists, "with a version number")
     }
+
+    /// Settings ▸ Appearance: picking a palette marks it selected, survives leaving Settings (which is when the
+    /// rest of the app re-renders with the new colors) and a relaunch, and Neutral is offered.
+    func testAppearancePalettePicksAndPersists() {
+        let app = launch(tab: "you")
+        openSettings(app)
+
+        let ocean = element(app, "settings.palette.ocean")
+        XCTAssertTrue(scroll(app, to: ocean, up: false, max: 6) || ocean.waitForExistence(timeout: 5),
+                      "Appearance should list the Ocean palette")
+        XCTAssertTrue(element(app, "settings.palette.neutral").exists, "a Neutral (no color) palette should be offered")
+        ocean.tap()
+        XCTAssertTrue(wait(ocean, until: "isSelected == true"), "tapping a swatch selects it")
+
+        goBack(app)   // leaving Settings applies the palette app-wide; the You tab must still be there
+        XCTAssertTrue(element(app, "settingsButton").waitForExistence(timeout: 20), "the app survives the re-render")
+
+        app.terminate()
+        let again = XCUIApplication()
+        again.launchArguments = ["-UITestMode"]
+        again.launchEnvironment["HAVEN_TAB"] = "you"
+        again.launch()   // no -UITestReset: the choice must come back
+        openSettings(again)
+        let back = element(again, "settings.palette.ocean")
+        XCTAssertTrue(scroll(again, to: back, up: false, max: 6) || back.waitForExistence(timeout: 5))
+        XCTAssertTrue(back.isSelected, "the palette persists across launches")
+        element(again, "settings.palette.sunset").tap()   // leave the simulator on the default
+    }
 }

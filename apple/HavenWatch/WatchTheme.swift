@@ -3,14 +3,36 @@ import SwiftUI
 /// Haven's brand, ported to the wrist — same sunset palette (violet → pink → amber) as the
 /// iOS app's `HavenTheme`, tuned for the small always-dark watch screen.
 enum WTheme {
-    static let violet = Color(red: 0.486, green: 0.227, blue: 0.929) // #7C3AED
-    static let pink   = Color(red: 0.925, green: 0.282, blue: 0.600) // #EC4899
-    static let amber  = Color(red: 0.961, green: 0.620, blue: 0.043) // #F59E0B
+    /// The phone's palette (docs/PALETTES.md stops), persisted so a cold launch matches before the first sync.
+    private static let key = "appearance.palette"
+    private static let table: [String: [UInt32]] = [
+        "sunset": [0x7C3AED, 0xEC4899, 0xF59E0B], "ocean": [0x2563EB, 0x06B6D4, 0x14B8A6],
+        "forest": [0x047857, 0x10B981, 0x84CC16], "rose": [0xBE123C, 0xF43F5E, 0xFB923C],
+        "ember": [0xB91C1C, 0xF97316, 0xFACC15], "sky": [0x0EA5E9, 0x6366F1, 0xA78BFA],
+        "grape": [0x6D28D9, 0xA855F7, 0xF472B6], "neutral": [0x404040, 0x737373, 0xA3A3A3],
+    ]
+    nonisolated(unsafe) private static var stops: [UInt32] = table[UserDefaults.standard.string(forKey: key) ?? ""] ?? table["sunset"]!
+    /// Returns true when the palette changed (the caller bumps its render epoch).
+    @discardableResult static func setPalette(_ id: String?) -> Bool {
+        let next = table[id ?? "sunset"] ?? table["sunset"]!
+        guard next != stops else { return false }
+        stops = next
+        UserDefaults.standard.set(id ?? "sunset", forKey: key)
+        return true
+    }
+    private static func c(_ hex: UInt32) -> Color {
+        Color(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
+    }
+    static var violet: Color { c(stops[0]) }
+    static var pink: Color { c(stops[1]) }
+    static var amber: Color { c(stops[2]) }
 
-    static let brand = LinearGradient(colors: [violet, pink, amber],
-                                      startPoint: .topLeading, endPoint: .bottomTrailing)
-    static let brandH = LinearGradient(colors: [violet, pink, amber],
-                                       startPoint: .leading, endPoint: .trailing)
+    static var brand: LinearGradient {
+        LinearGradient(colors: [violet, pink, amber], startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+    static var brandH: LinearGradient {
+        LinearGradient(colors: [violet, pink, amber], startPoint: .leading, endPoint: .trailing)
+    }
 
     /// A stable two-stop gradient derived from a name, so each person gets a consistent,
     /// on-brand avatar without storing anything.

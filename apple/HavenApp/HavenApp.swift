@@ -417,6 +417,7 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var accountStore = AccountStore()
     @ObservedObject private var profile = ProfileStore.shared
+    @ObservedObject private var palette = PaletteStore.shared
     @ObservedObject private var contacts = ContactsStore.shared
     /// The root reads three values from the feed store (two badges + the active circle). It observes
     /// `FeedBadges`, which mirrors exactly those, instead of the whole store — every feed rebuild,
@@ -468,7 +469,9 @@ struct RootView: View {
                 TermsGateView()
                     .transition(.opacity)
             } else {
-                main
+                // Colours are read at draw time, not observed — a new palette needs the tree rebuilt.
+                // `tab` and the sheets' state live up here, so you land back on the same tab.
+                main.id(palette.epoch)
             }
         }
         .animation(HavenTheme.smooth, value: profile.onboarded)

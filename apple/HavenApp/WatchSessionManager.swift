@@ -70,7 +70,7 @@ final class WatchSessionManager: NSObject, WCSessionDelegate {
                                        isDM: false, unread: 0))
         }
         threads.sort { $0.timestamp > $1.timestamp }
-        return WatchSnapshot(threads: threads, generatedAt: nowMs())
+        return WatchSnapshot(threads: threads, generatedAt: nowMs(), palette: PaletteStore.current.id)
     }
 
     @MainActor static func buildThread(_ threadId: String) -> WatchThreadDetail {

@@ -187,4 +187,34 @@ final class FeedUITests: HavenUITestCase {
         XCTAssertFalse(text(app, containing: "first throw off the new wheel").exists,
                        "and not My Circle's")
     }
+
+    /// Hold Post → tick Weekend Crew → "Post to 2 circles": the same post lands in BOTH circles. A plain tap
+    /// still posts to this circle only, with no picker in front of it.
+    func testLongPressPostSharesToSeveralCircles() {
+        let app = launch()
+        waitForFeed(app)
+        let send = app.buttons["composeSend"]
+        XCTAssertTrue(send.waitForExistence(timeout: 20))
+
+        let note = "multi \(UUID().uuidString.prefix(8).lowercased())"
+        let field = type(note, into: app.textFields["composeField"])
+        _ = field
+        send.press(forDuration: 1.0)
+        let go = element(app, "circlePick.post")
+        XCTAssertTrue(go.waitForExistence(timeout: 10), "holding Post opens the circle checklist")
+        XCTAssertEqual(go.label, "Post to 1 circle", "the current circle starts ticked")
+        let crew = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND NOT identifier ENDSWITH %@", "circlePick.", "default"))
+            .matching(NSPredicate(format: "label CONTAINS[c] %@", "Weekend Crew")).firstMatch
+        XCTAssertTrue(crew.waitForExistence(timeout: 5), "the second circle is listed")
+        crew.tap()
+        XCTAssertTrue(wait(go, until: "label == %@", "Post to 2 circles"), "ticking adds it, got \(go.label)")
+        go.tap()
+        XCTAssertTrue(text(app, containing: note).waitForExistence(timeout: 20), "the post appears in this circle")
+
+        let switcher = element(app, "circleSwitcher")
+        switcher.tap()
+        app.buttons["Weekend Crew"].firstMatch.tap()
+        XCTAssertTrue(wait(send, until: "label == %@", "Post to everyone in Weekend Crew", timeout: 20))
+        XCTAssertTrue(text(app, containing: note).waitForExistence(timeout: 20), "and in the second circle")
+    }
 }

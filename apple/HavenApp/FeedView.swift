@@ -285,6 +285,11 @@ struct FeedView: View {
     @State private var attachedTrack: TrackRefFfi?
     @State private var muteVideo = false   // author's audio choice for attached video(s)
     @State private var pendingSensitive: [String]?   // attachments SCA flagged, awaiting send-anyway
+    /// Long-press Post: the circles this post goes to instead of just the active one (nil = normal tap).
+    @State private var showCirclePicker = false
+    @State private var sendTargets: [String]?
+    @AppStorage("composer.multiCircleHintShown") private var multiHintShown = false
+    @AppStorage("composer.postCount") private var postCount = 0
     @State private var showLocation = false   // opt-in: tag the post with a photo's reverse-geocoded place
     @State private var showSchedule = false   // "send later" date picker
     @State private var dropActive = false   // drag-and-drop media onto the composer (macOS/iPadOS)
@@ -594,7 +599,15 @@ struct FeedView: View {
             #if DEBUG
             .overlay { QATransferScene() }
             #endif
-            .sheet(isPresented: $showMediaPicker) {
+            .sheet(isPresented: $showCirclePicker) {
+            CirclePostPicker(activeId: store.activeCircleId,
+                             lockedToActive: MultiCirclePost.lockedToActive(attachedMedia: attachedMedia, isSynthetic: MediaStore.isSynthetic)) { ids in
+                sendTargets = ids
+                send()
+            }
+            .macSheetFrame()
+        }
+        .sheet(isPresented: $showMediaPicker) {
                 MediaPicker(onPicked: { refs in attachedMedia.append(contentsOf: refs) },
                             onSelected: { n in pendingMedia += n },
                             onSettled: { n in pendingMedia = max(0, pendingMedia - n) }).macSheetClose()
@@ -784,6 +797,12 @@ struct FeedView: View {
                     .tint(HavenTheme.pink)
                     .padding(.horizontal, 4)
                 }
+                if showMultiCircleHint {
+                    Text("Tip: hold Post to share to several circles")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .trailing).padding(.horizontal, 4)
+                        .accessibilityIdentifier("composeMultiHint")
+                }
                 HStack(spacing: 10) {
                     Menu {
                         Button { showMediaPicker = true } label: { Label("Photo or Video", systemImage: "photo.on.rectangle") }
@@ -833,18 +852,26 @@ struct FeedView: View {
 
                     // Labeled "Post", not a bare paper plane: the plane is what a private message's
                     // send looks like, and this goes to the whole circle.
-                    Button { send() } label: {
-                        Text(String(localized: "composer.postButton", defaultValue: "Post",
-                                    comment: "Feed composer send button — a verb: publish to the whole circle"))
-                            .font(.subheadline.weight(.bold)).foregroundStyle(.white)
-                            .padding(.horizontal, 16).padding(.vertical, 12)
-                            .background(HavenTheme.brand, in: Capsule())
-                            .shadow(color: HavenTheme.pink.opacity(0.4), radius: 8, y: 4)
-                    }
-                    .buttonStyle(PressableStyle())
+                    // A tap posts to THIS circle, exactly as before. Hold (right-click on a Mac) opens a
+                    // checklist to post the same thing to several circles — a hidden gesture on purpose:
+                    // nothing sits in front of the normal post.
+                    Text(String(localized: "composer.postButton", defaultValue: "Post",
+                                comment: "Feed composer send button — a verb: publish to the whole circle"))
+                        .font(.subheadline.weight(.bold)).foregroundStyle(.white)
+                        .padding(.horizontal, 16).padding(.vertical, 12)
+                        .background(HavenTheme.brand, in: Capsule())
+                        .shadow(color: HavenTheme.pink.opacity(0.4), radius: 8, y: 4)
+                        .contentShape(Capsule())
+                        .onTapGesture { if pendingMedia == 0 { sendTargets = nil; send() } }
+                        .onLongPressGesture(minimumDuration: 0.45) { if pendingMedia == 0 { openCirclePicker() } }
+                        #if os(macOS)
+                        .contextMenu { Button("Post to several circles…") { openCirclePicker() } }
+                        #endif
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityAction(named: Text("Post to several circles")) { openCirclePicker() }
                     // Dimmed, not hidden, while picked media is still being prepared: the pill stays where
                     // it is and the placeholders in the tray say what it is waiting for.
-                    .disabled(pendingMedia > 0)
+                    .allowsHitTesting(pendingMedia == 0)
                     .opacity(pendingMedia > 0 ? 0.45 : 1)
                     .accessibilityIdentifier("composeSend")
                     .accessibilityLabel(Text("Post to everyone in \(store.activeCircleTitle)"))
@@ -1049,6 +1076,20 @@ struct FeedView: View {
         composeFocused = false
     }
 
+    /// A passive, one-time nudge: only for people in 2+ circles, after a few posts, and gone for good once shown
+    /// through two more posts (or once they have used the gesture).
+    private var showMultiCircleHint: Bool {
+        !multiHintShown && postCount >= 3 && store.feedCircles.count >= 2
+    }
+
+    private func openCirclePicker() {
+        guard store.feedCircles.count >= 2 else { return }   // one circle: nothing to choose
+        let text = compose.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty || !attachedMedia.isEmpty || attachedTrack != nil else { return }
+        multiHintShown = true
+        showCirclePicker = true
+    }
+
     private func send() {
         let text = compose.trimmingCharacters(in: .whitespacesAndNewlines)
         guard pendingMedia == 0 else { return }   // the button is disabled; belt and braces for the keyboard path
@@ -1072,7 +1113,10 @@ struct FeedView: View {
         // Snapshot compose state, then clear the UI immediately (the geocode is async).
         let base = attachedMedia, track = attachedTrack, retention = composeRetention, mute = muteVideo
         let wantLocation = showLocation
-        let cid = store.activeCircleId
+        let targets = MultiCirclePost.targets(picked: sendTargets, active: store.activeCircleId)
+        sendTargets = nil
+        postCount += 1
+        if postCount >= 6 { multiHintShown = true }
         compose = ""; attachedMedia = []; attachedTrack = nil; composeRetention = nil; muteVideo = false
         showLocation = false; composeFocused = false
         Task { @MainActor in
@@ -1083,8 +1127,8 @@ struct FeedView: View {
                 let name = await SharedLocation.placeName(coord)
                 media.insert(SharedLocation.ref(lat: coord.latitude, lon: coord.longitude, label: name), at: 0)
             }
-            store.post(text, media: media, music: track, retentionSecs: retention, muteVideo: mute)
-            for ref in flagged { store.flagSensitive(circleId: cid, ref: ref) }
+            store.post(text, media: media, music: track, retentionSecs: retention, muteVideo: mute, toCircles: targets)
+            for cid in targets { for ref in flagged { store.flagSensitive(circleId: cid, ref: ref) } }
         }
     }
 }

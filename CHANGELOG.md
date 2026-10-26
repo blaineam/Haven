@@ -9,6 +9,23 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added — iOS / macOS / watchOS: color palettes, per-palette app icon, and posting to several circles at once
+
+**Palettes** (`docs/PALETTES.md`). Settings → Appearance offers eight palettes including a colorless
+Neutral. `HavenTheme.violet/pink/amber` are now palette stops 1/2/3 read from `PaletteStore`
+(`appearance.palette`, per device), so every gradient, glow, tint and pill follows the choice. The change shows
+on the swatches immediately and rebuilds the rest of the app when you leave Settings (a rebuild resets
+navigation, so it is deferred). The share extension reads the choice from the App Group; the Apple Watch
+follows via the WatchConnectivity snapshot. **App icon:** iOS alternate icons (`AppIcon-<id>`,
+`UIApplication.setAlternateIconName`; iOS shows its own "icon changed" notice) and the macOS Dock icon at
+runtime (Finder/Launchpad keep the bundled icon).
+
+**Multi-circle post.** Hold the Post pill (right-click on a Mac) for a checklist of your circles and
+"Post to N circles"; a tap is unchanged and nothing sits in front of a normal post. The post is authored once
+per circle. A media blob is sealed to one circle's key and its sealed copy is cached per file, so while a
+photo/video/file/voice note is attached only the current circle can be ticked (text, songs and locations can
+go anywhere) — same rule on Android and desktop. One-time tip after a few posts for people in 2+ circles.
+
 ### Added — Android: color palettes, per-palette app icon, and posting to several circles at once
 
 **Palettes** (`docs/PALETTES.md`). Settings → Appearance has eight swatches; `HavenTheme` reads the

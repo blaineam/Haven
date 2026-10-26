@@ -4955,18 +4955,22 @@ final class FeedStore: ObservableObject {
         }
     }
 
-    func post(_ body: String, media rawMedia: [String] = [], music: TrackRefFfi? = nil, retentionSecs: UInt64? = nil, story: Bool = false, muteVideo: Bool = false) {
+    func post(_ body: String, media rawMedia: [String] = [], music: TrackRefFfi? = nil, retentionSecs: UInt64? = nil, story: Bool = false, muteVideo: Bool = false, toCircles circleIds: [String]? = nil) {
         Task { @MainActor in
-            await self.postNow(body, media: rawMedia, music: music, retentionSecs: retentionSecs, story: story, muteVideo: muteVideo)
+            // Same post, once per chosen circle (long-press Post). Each is its own event in its own circle —
+            // circles have separate keys — in the order picked, the active circle first.
+            for cid in circleIds ?? [self.activeCircleId] {
+                await self.postNow(body, media: rawMedia, music: music, retentionSecs: retentionSecs, story: story, muteVideo: muteVideo, circleId: cid)
+            }
         }
     }
     /// The awaitable form of `post`: the new post's id once it is sealed and handed to every transport
     /// (nil when the engine is down or the seal failed). The QA driver dumps after it.
     @discardableResult
-    func postNow(_ body: String, media rawMedia: [String] = [], music: TrackRefFfi? = nil, retentionSecs: UInt64? = nil, story: Bool = false, muteVideo: Bool = false) async -> String? {
+    func postNow(_ body: String, media rawMedia: [String] = [], music: TrackRefFfi? = nil, retentionSecs: UInt64? = nil, story: Bool = false, muteVideo: Bool = false, circleId: String? = nil) async -> String? {
         let media = withPreviewMarkers(withThumbMarkers(rawMedia))
         let ts = now()
-        let cid = activeCircleId
+        let cid = circleId ?? activeCircleId
         guard let engine else { return nil }
         await awaitPendingCircleOp(cid)
         guard let a = await authorEvent(engine, circleId: cid, createdAt: ts, { s in

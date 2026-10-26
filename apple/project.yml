@@ -147,6 +147,8 @@ targets:
         MARKETING_VERSION: "2.0.4"
         CURRENT_PROJECT_VERSION: "641"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        # One alternate icon per non-default palette (docs/PALETTES.md); UIApplication.setAlternateIconName.
+        ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
         ENABLE_USER_SCRIPT_SANDBOXING: YES
         "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
         # macOS ships from the native HavenMac target — don't ALSO offer this iOS app on Mac
@@ -406,6 +408,9 @@ targets:
     deploymentTarget: "14.0"
     sources:
       - path: HavenApp/MediaUploadPlan.swift
+      # Palette table + resolve/fallback, and the long-press multi-circle target rule.
+      - path: HavenApp/Palette.swift
+      - path: HavenApp/MultiCirclePost.swift
       - path: HavenApp/RelayAddress.swift
       - path: HavenApp/MediaVariants.swift
       - path: HavenApp/FileArchive.swift

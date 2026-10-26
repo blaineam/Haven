@@ -210,6 +210,20 @@ private struct DestinationAvatar: View {
 /// and must not drag in the app's theme (and with it FeedStore, MediaStore, the FFI…). Keep in step
 /// with `HavenTheme`.
 enum HavenShareTheme {
-    static let pink = Color(red: 0.925, green: 0.282, blue: 0.600)   // #EC4899
-    static let amber = Color(red: 0.961, green: 0.620, blue: 0.043)  // #F59E0B
+    /// Stops 2 and 3 of the palette the app wrote to the App Group (`appearance.palette`); Sunset when absent.
+    /// Keep the table in step with `HavenPalette` / docs/PALETTES.md.
+    private static let stops: [String: (UInt32, UInt32)] = [
+        "sunset": (0xEC4899, 0xF59E0B), "ocean": (0x06B6D4, 0x14B8A6), "forest": (0x10B981, 0x84CC16),
+        "rose": (0xF43F5E, 0xFB923C), "ember": (0xF97316, 0xFACC15), "sky": (0x6366F1, 0xA78BFA),
+        "grape": (0xA855F7, 0xF472B6), "neutral": (0x737373, 0xA3A3A3),
+    ]
+    private static var current: (UInt32, UInt32) {
+        let id = UserDefaults(suiteName: "group.com.blaineam.kith")?.string(forKey: "appearance.palette") ?? "sunset"
+        return stops[id] ?? stops["sunset"]!
+    }
+    private static func color(_ hex: UInt32) -> Color {
+        Color(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
+    }
+    static var pink: Color { color(current.0) }
+    static var amber: Color { color(current.1) }
 }

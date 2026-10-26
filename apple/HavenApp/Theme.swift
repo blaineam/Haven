@@ -4,20 +4,20 @@ import SwiftUI
 /// tactile feel. Keeping it here makes the look consistent and portable to other
 /// platforms' UIs.
 enum HavenTheme {
-    static let violet = Color(red: 0.486, green: 0.227, blue: 0.929) // #7C3AED
-    static let pink = Color(red: 0.925, green: 0.282, blue: 0.600)   // #EC4899
-    static let amber = Color(red: 0.961, green: 0.620, blue: 0.043)  // #F59E0B
+    // Read from the selected palette (`PaletteStore`) at draw time; `HavenTheme.violet/pink/amber` keep
+    // their historical names — they are palette stops 1/2/3 now (default Sunset = the original colours).
+    static var violet: Color { PaletteStore.current.first }
+    static var pink: Color { PaletteStore.current.tint }
+    static var amber: Color { PaletteStore.current.last }
 
-    /// The signature sunset gradient (matches the app icon).
-    static let brand = LinearGradient(
-        colors: [violet, pink, amber],
-        startPoint: .topLeading, endPoint: .bottomTrailing
-    )
+    /// The signature gradient (matches the app icon).
+    static var brand: LinearGradient {
+        LinearGradient(colors: [violet, pink, amber], startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
 
-    static let brandHorizontal = LinearGradient(
-        colors: [violet, pink, amber],
-        startPoint: .leading, endPoint: .trailing
-    )
+    static var brandHorizontal: LinearGradient {
+        LinearGradient(colors: [violet, pink, amber], startPoint: .leading, endPoint: .trailing)
+    }
 
     // Motion vocabulary — a small set of springs used everywhere for cohesion.
     static let bouncy = Animation.spring(response: 0.42, dampingFraction: 0.68)

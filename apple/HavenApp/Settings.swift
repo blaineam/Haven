@@ -272,6 +272,7 @@ struct SettingsView: View {
                         }
                     }
                 }
+                AppearanceSection()
                 Section {
                     Toggle("Save your posts to Photos", isOn: $settings.saveToPhotos)
                         .tint(HavenTheme.pink)

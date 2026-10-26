@@ -14,6 +14,8 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
     @Published private(set) var openThread: WatchThreadDetail?
     @Published private(set) var reachable = false
     @Published private(set) var lastSyncedAt: UInt64 = 0
+    /// Bumped when the phone's palette changes so the watch UI rebuilds with the new colours.
+    @Published private(set) var themeEpoch = 0
     /// True while we're waiting on a reply for the currently-open thread.
     @Published private(set) var loadingThread = false
     /// Watchdog so a thread NEVER spins forever — e.g. when a media-heavy reply exceeds
@@ -171,6 +173,7 @@ final class WatchConnectivityClient: NSObject, ObservableObject {
         case .snapshot(let snap):
             threads = snap.threads
             lastSyncedAt = snap.generatedAt
+            if WTheme.setPalette(snap.palette) { themeEpoch += 1 }
         case .thread(let detail):
             openThread = detail
             finishLoading()

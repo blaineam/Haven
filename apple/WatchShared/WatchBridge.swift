@@ -43,9 +43,11 @@ public struct WatchThread: Codable, Identifiable, Hashable {
 public struct WatchSnapshot: Codable, Hashable {
     public var threads: [WatchThread]
     public var generatedAt: UInt64
+    /// The phone's `appearance.palette` id so the wrist matches (nil from an older phone → Sunset).
+    public var palette: String?
 
-    public init(threads: [WatchThread], generatedAt: UInt64) {
-        self.threads = threads; self.generatedAt = generatedAt
+    public init(threads: [WatchThread], generatedAt: UInt64, palette: String? = nil) {
+        self.threads = threads; self.generatedAt = generatedAt; self.palette = palette
     }
 }
 

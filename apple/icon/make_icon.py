@@ -28,9 +28,11 @@ def gradient(size, stops):
             px[x, y] = lerp(stops[i], stops[i + 1], lt)
     return small.resize((size, size), Image.BILINEAR)
 
-def main():
-    # Warm sunset: violet -> pink -> amber.
-    bg = gradient(S, [(124, 58, 237), (236, 72, 153), (245, 158, 11)])
+SUNSET = [(124, 58, 237), (236, 72, 153), (245, 158, 11)]
+
+def render(stops):
+    """The icon as a 1024 RGB image with the given three gradient stops."""
+    bg = gradient(S, stops)
 
     # Node layout (in 1024 space): a friendly cluster with a central "you" node.
     nodes = [
@@ -72,7 +74,10 @@ def main():
     canvas = Image.alpha_composite(canvas, lines)
     canvas = Image.alpha_composite(canvas, discs)
 
-    out = canvas.convert("RGB").resize((SIZE, SIZE), Image.LANCZOS)
+    return canvas.convert("RGB").resize((SIZE, SIZE), Image.LANCZOS)
+
+def main():
+    out = render(SUNSET)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     out.save(OUT, "PNG")
     print("wrote", os.path.normpath(OUT))

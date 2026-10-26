@@ -34,7 +34,7 @@ import {
   adbDeviceGone, qemuCrashSince, stubIdleRates, judgeIdleExports,
 } from './lib/e2e-steps.mjs';
 import {
-  portPlan, collisionVerdict, decodeComp, eventKeys, mailboxCircles, holdsMedia, misplacedCircles, keyDiff,
+  portPlan, collisionVerdict, decodeComp, eventKeys, mailboxCircles, holdsMedia, mediaKeys, misplacedCircles, keyDiff,
   stableCounts, tokenFingerprint, urlPort, attributionProblems, statsRow, statsCounter, knowsUrlPort, hitsBetween,
   herdVerdict, strangerIdentity, strangerAuth, isolationVerdict, inflightMedia, resurrected, freshMints,
 } from './lib/multirelay.mjs';
@@ -2180,7 +2180,8 @@ async function main() {
     const mediaMisplaced = (k) => [
       ...(refs.bPriv && holdsMedia(k.ra, refs.bPriv) ? ['B private photo on R_A'] : []),
       ...(refs.aPriv && holdsMedia(k.rc, refs.aPriv) ? ['A private photo on R_C'] : []),
-      ...(refs.aPriv && holdsMedia(k.rb, refs.aPriv) ? ['A private photo on R_B'] : []),
+      ...(refs.aPriv && holdsMedia(k.rb, refs.aPriv)
+        ? [`A private photo on R_B [keys: ${mediaKeys(k.rb, refs.aPriv).map((x) => x.slice(-48)).join(', ')}]`] : []),
     ];
     const mediaMis = mediaMisplaced(keysNow);
     score('multirelay: no private circle\'s media on a friend\'s relay that doesn\'t serve it', mediaMis.length === 0,

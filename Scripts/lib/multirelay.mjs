@@ -99,8 +99,13 @@ export function mailboxCircles(keys) {
 
 /** Media blob keys for a ref, including its chunk keys (`haven/media/<ref>` and `…/<ref>/…`). */
 export function holdsMedia(keys, ref) {
+  return mediaKeys(keys, ref).length > 0;
+}
+
+/** The store keys that make [holdsMedia] true — the blob, its chunk windows and its scope markers. */
+export function mediaKeys(keys, ref) {
   const base = `haven/media/${ref}`;
-  return keys.some((k) => k === base || k.startsWith(`${base}/`) || k.startsWith(`${base}.`));
+  return keys.filter((k) => k === base || k.startsWith(`${base}/`) || k.startsWith(`${base}.`));
 }
 
 /**

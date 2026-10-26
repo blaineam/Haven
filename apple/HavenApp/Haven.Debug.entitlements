@@ -13,6 +13,12 @@
 	     the macOS entitlement files. See docs/CARPLAY.md. -->
 	<key>com.apple.developer.carplay-communication</key>
 	<true/>
+	<!-- SiriKit (messaging + calls via the HavenIntents extension) and Communication Notifications
+	     (the NSE donates INSendMessageIntent so Siri can announce and reply). iOS only. -->
+	<key>com.apple.developer.siri</key>
+	<true/>
+	<key>com.apple.developer.usernotifications.communication</key>
+	<true/>
 	<!-- Carrier satellite (T-Satellite and the direct-to-cell services behind it). Declares Haven
 	     as optimised for a carrier-constrained network and names its category, which is what makes
 	     the app eligible for the bearer. iOS/iPadOS 26.0+; process-level, so it covers the core's

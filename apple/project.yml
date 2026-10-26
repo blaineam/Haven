@@ -79,6 +79,10 @@ targets:
       # App ID com.blaineam.kith.ShareExtension must carry the App Groups capability (group.com.blaineam.kith).
       - target: HavenShareExtension
         platformFilter: iOS
+      # SiriKit Intents extension: Siri / CarPlay read, send and mark-read Haven messages and start
+      # calls. No engine, no identity - it reads the App Group snapshot and queues requests for the app.
+      - target: HavenIntents
+        platformFilter: iOS
       # WebRTC for E2EE audio/video calls (media is P2P DTLS-SRTP; signaling over our channel).
       - package: WebRTC
     info:
@@ -97,8 +101,14 @@ targets:
         # Required for the donated INSendMessageIntent interactions that put Haven conversations in
         # the share sheet's suggestion row (ShareSuggestions.swift). Without this declaration the
         # donations are accepted but the system never draws a tile for them.
+        # INSendMessageIntent: donated share suggestions + Siri/CarPlay replies. The others are the
+        # SiriKit intents HavenIntents handles (read / mark read / call); INStartCallIntent is also the
+        # activity type the extension hands back with `.continueInApp` (SiriCallRouter).
         NSUserActivityTypes:
           - INSendMessageIntent
+          - INSearchForMessagesIntent
+          - INSetMessageAttributeIntent
+          - INStartCallIntent
         UILaunchScreen: {}
         # CarPlay (Communication category). Declaring a scene manifest at all turns scene
         # lifecycle on, so it is spelled out: multiple scenes allowed (the phone window + the
@@ -408,6 +418,52 @@ targets:
         "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
 
+  # SiriKit Intents extension (Siri + CarPlay messaging and calls). Runs in its own short-lived process
+  # with NO Rust engine and NO identity seed: it reads the privacy-filtered snapshot the app mirrors
+  # into the App Group (MessagingSnapshot), resolves recipients against it, and queues SiriRequests
+  # (send text / mark read) for the app, which does the sealing and sending. See docs/CARPLAY.md.
+  HavenIntents:
+    type: app-extension
+    platform: iOS
+    supportedDestinations: [iOS]
+    sources:
+      - path: HavenIntents
+      - path: Shared/MessagingSnapshot.swift
+      - path: Shared/SiriRequestSignal.swift
+      - path: Shared/SharedNotificationPrivacy.swift
+      # Live read of the biometric-locked circle set (shared keychain group), like the NSE.
+      - path: Shared/SharedLockedCircles.swift
+    info:
+      path: HavenIntents/Info.plist
+      properties:
+        CFBundleDisplayName: Haven
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.intents-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).IntentHandler
+          NSExtensionAttributes:
+            IntentsSupported:
+              - INSendMessageIntent
+              - INSearchForMessagesIntent
+              - INSetMessageAttributeIntent
+              - INStartCallIntent
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.Intents
+        # No App Intents in this target: skip appintentsmetadataprocessor, whose "Metadata
+        # extraction skipped" line is a `warning:` in every clean build log.
+        LM_SKIP_METADATA_EXTRACTION: YES
+        PRODUCT_MODULE_NAME: HavenIntents
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "2.0.4"
+        CURRENT_PROJECT_VERSION: "641"
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+        CODE_SIGN_ENTITLEMENTS: HavenIntents/Intents.entitlements
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+
   # Pure-logic unit tests. Deliberately host-LESS and FFI-less: the only app source it compiles is
   # MediaUploadPlan.swift, so `xcodebuild test -scheme HavenLogicTests -destination 'platform=macOS'`
   # runs on the host Mac in seconds with no simulator, no signed host app, and no HavenFFI. The rule
@@ -565,6 +621,29 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.logictests
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGNING_ALLOWED: NO
+
+  # Siri Intents handler tests. SiriKit's response/intent types do not exist on macOS, so these cannot
+  # live in the macOS HavenLogicTests; this is an iOS-simulator bundle that compiles the extension's
+  # handler directly (host-less - no app, no engine). Run:
+  #   xcodebuild test -scheme HavenIntentsTests -destination 'platform=iOS Simulator,name=<iPhone>'
+  HavenIntentsTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: HavenIntentsTests
+      - path: HavenIntents/IntentHandler.swift
+      - path: Shared/MessagingSnapshot.swift
+      - path: Shared/SiriRequestSignal.swift
+      - path: Shared/SharedNotificationPrivacy.swift
+      - path: Shared/SharedLockedCircles.swift
+      - path: HavenApp/SiriCallTarget.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.intentstests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: NO
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
 
   HavenUITests:
     type: bundle.ui-testing
@@ -747,6 +826,13 @@ schemes:
     test:
       targets:
         - HavenLogicTests
+  HavenIntentsTests:
+    build:
+      targets:
+        HavenIntentsTests: [test]
+    test:
+      targets:
+        - HavenIntentsTests
   HavenMac:
     build:
       targets:

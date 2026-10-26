@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App Group: read the messaging snapshot the app mirrors, queue Siri requests for it. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.blaineam.kith</string>
+	</array>
+	<!-- Shared keychain group: live read of the biometric-locked circle set (SharedLockedCircles),
+	     exactly as the Notification Service Extension does. No identity or seed lives here. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.blaineam.kith.shared</string>
+	</array>
+</dict>
+</plist>

@@ -71,6 +71,9 @@
 	<key>NSUserActivityTypes</key>
 	<array>
 		<string>INSendMessageIntent</string>
+		<string>INSearchForMessagesIntent</string>
+		<string>INSetMessageAttributeIntent</string>
+		<string>INStartCallIntent</string>
 	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>

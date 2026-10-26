@@ -23,7 +23,7 @@ use haven_p2p::transport;
 use haven_p2p::identity::{Identity, HavenId};
 use haven_p2p::link::HavenLink;
 use haven_p2p::social::{
-    open_bytes_with_epoch, seal_bytes_with_epoch,
+    open_bytes_with_epoch, seal_bytes_with_epochs,
     build_activity, build_feed, is_expired, open_bytes, open_event, seal_bytes, seal_event, Event,
     EventKind, FeedPoll, Group, SealedEnvelope, TrackRef,
 };
@@ -7840,41 +7840,18 @@ impl HavenSocial {
     /// store host stores the result opaquely — it can't read it. Returns the sealed
     /// envelope bytes to upload.
     pub fn seal_circle_media(&self, circle_id: String, data: Vec<u8>) -> Result<Vec<u8>, HavenError> {
-        let st = self.state.lock().unwrap();
-        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else {
-            return Err(HavenError::Invalid { msg: "unknown circle".into() });
-        };
-        // Media is ALWAYS dual-sealed (account bundles + authorized devices) and, when a seed is held,
-        // account-SIGNED — never device-only. The media ref lives inside the post event, which is itself
-        // epoch/tree-keyed and retirement-gated, so anyone who can't open the post never learns the ref
-        // to fetch the media: device-only-sealing the blob adds no confidentiality over the post's own
-        // gating, while it introduced a fragile per-blob dependency on holding the author's current
-        // device roster — and since a sealed blob is cached once and never re-sealed, any roster skew
-        // froze a friend's media as permanently unopenable. Account-signing keeps it openable by any
-        // authorized reader (the 1.0.6 robustness). Only a SEEDLESS device (no account key) signs under
-        // its device, as it must — its media still needs peers to hold its roster, which is inherent.
-        let under_device = st.me_secret.is_none();
-        let mut accounts = vec![st.me().clone()];
-        accounts.extend(st.circles[idx].members.iter().cloned());
-        let recipients = recipients_with_devices(&accounts, &st.device_lists);
-        let group = Group::new(circle_id, recipients);
-        let epoch_key = st.circles[idx].current_key();
-        let signer_seed = signer_of(&st, under_device).secret_seed();
-        drop(st);
-        // Lock released: the seal encrypts the whole blob. `Identity` is not `Clone`; its seed
-        // rebuilds it exactly (`from_seed` is its only constructor).
-        let signer = Identity::from_seed(&signer_seed);
-        // Wrap the content key to the recipient list AND to the circle EPOCH. The list keeps a
-        // friend whose epoch keys have not converged working exactly as before; the epoch entry is
-        // what finally lets a member who joined AFTER this blob was sealed open it, which the list
-        // alone can never do because content-addressed media is never re-sealed.
-        let sealed = match epoch_key {
-            Some(key) => seal_bytes_with_epoch(&signer, &group, &key, &data),
-            None => seal_bytes(&signer, &group, &data),
-        };
-        sealed
-            .map(|env| env.to_bytes())
-            .map_err(|e| HavenError::Invalid { msg: format!("{e}") })
+        self.seal_circle_media_multi(vec![circle_id], data)
+    }
+
+    /// [`Self::seal_circle_media`] for a post shared to SEVERAL circles: ONE blob that every listed circle
+    /// can open. The first id is the primary circle (recipient list + epoch entry, exactly the legacy
+    /// layout); every further circle adds an epoch entry under that circle's key. Fails — rather than
+    /// silently sealing for fewer circles — if any id is unknown, because a blob the chosen circle can't
+    /// open is the bug this exists to prevent.
+    pub fn seal_circle_media_multi(&self, circle_ids: Vec<String>, data: Vec<u8>) -> Result<Vec<u8>, HavenError> {
+        let plan = self.media_seal_plan(&circle_ids)
+            .ok_or_else(|| HavenError::Invalid { msg: "unknown circle".into() })?;
+        plan.seal(&data).map_err(|e| HavenError::Invalid { msg: format!("{e}") })
     }
 
     /// Seal a media blob from a FILE to another FILE, entirely in NATIVE (off-heap) memory —
@@ -7887,31 +7864,14 @@ impl HavenSocial {
     /// then streams the sealed FILE to the mailbox in fixed windows — never holding it whole. Returns
     /// whether it succeeded; writes atomically via a `.part` rename.
     pub fn seal_circle_media_file(&self, circle_id: String, in_path: String, out_path: String) -> bool {
+        self.seal_circle_media_file_multi(vec![circle_id], in_path, out_path)
+    }
+
+    /// [`Self::seal_circle_media_file`] for a post shared to several circles — see
+    /// [`Self::seal_circle_media_multi`]. Same off-heap, atomic `.part`-rename behaviour.
+    pub fn seal_circle_media_file_multi(&self, circle_ids: Vec<String>, in_path: String, out_path: String) -> bool {
         let Ok(data) = std::fs::read(&in_path) else { return false };
-        let sealed: Option<Vec<u8>> = (|| {
-            let (signer_seed, group, epoch_key) = {
-                let st = self.state.lock().unwrap();
-                let idx = st.circles.iter().position(|c| c.id == circle_id)?;
-                // Account-signed + dual-sealed, mirroring `seal_circle_media` (see the rationale there):
-                // media must stay openable by any authorized reader, not gated on holding a device roster.
-                let under_device = st.me_secret.is_none();
-                let mut accounts = vec![st.me().clone()];
-                accounts.extend(st.circles[idx].members.iter().cloned());
-                let recipients = recipients_with_devices(&accounts, &st.device_lists);
-                let group = Group::new(circle_id.clone(), recipients);
-                (signer_of(&st, under_device).secret_seed(), group, st.circles[idx].current_key())
-            };
-            // Lock released: sealing a large video must not park every other engine call.
-            let signer = Identity::from_seed(&signer_seed);
-            // Dual-wrapped, as in `seal_circle_media` — this is the variant used for large media and
-            // for every repair re-seal.
-            match epoch_key {
-                Some(key) => seal_bytes_with_epoch(&signer, &group, &key, &data),
-                None => seal_bytes(&signer, &group, &data),
-            }
-            .ok()
-            .map(|env| env.to_bytes())
-        })();
+        let sealed: Option<Vec<u8>> = self.media_seal_plan(&circle_ids).and_then(|plan| plan.seal(&data).ok());
         drop(data); // free the plaintext before allocating no further large buffers
         let Some(sealed) = sealed else { return false };
         let tmp = format!("{out_path}.part");
@@ -9308,6 +9268,74 @@ fn restore_roster(st: &mut NetState, account_bundle: &[u8], list_bytes: &[u8], c
         }
     }
     st.device_lists.insert(acct_id, ContactDevices { list, credentials });
+}
+
+/// Everything sealing a media blob needs, copied out from under the engine lock so the seal itself
+/// (the whole blob) runs with it released.
+///
+/// Media is ALWAYS dual-sealed (account bundles + authorized devices) and, when a seed is held,
+/// account-SIGNED — never device-only. The media ref lives inside the post event, which is itself
+/// epoch/tree-keyed and retirement-gated, so anyone who can't open the post never learns the ref to
+/// fetch the media: device-only-sealing the blob adds no confidentiality over the post's own gating,
+/// while it introduced a fragile per-blob dependency on holding the author's current device roster —
+/// and since a sealed blob is cached once and never re-sealed, any roster skew froze a friend's media
+/// as permanently unopenable. Account-signing keeps it openable by any authorized reader. Only a
+/// SEEDLESS device (no account key) signs under its device, as it must.
+///
+/// The wrap is to the recipient list AND the circle EPOCH: the list keeps a friend whose epoch keys have
+/// not converged working; the epoch entry lets a member who joined AFTER the blob was sealed open it.
+/// For a multi-circle post the first circle is exactly that, and each further circle adds an epoch entry.
+struct MediaSealPlan {
+    signer_seed: [u8; 32],
+    group: Group,
+    epoch_key: Option<[u8; 32]>,
+    extra_epoch_keys: Vec<[u8; 32]>,
+}
+
+impl MediaSealPlan {
+    fn seal(&self, data: &[u8]) -> haven_p2p::Result<Vec<u8>> {
+        // `Identity` is not `Clone`; its seed rebuilds it exactly (`from_seed` is its only constructor).
+        let signer = Identity::from_seed(&self.signer_seed);
+        match self.epoch_key {
+            Some(key) => seal_bytes_with_epochs(&signer, &self.group, &key, &self.extra_epoch_keys, data),
+            None => seal_bytes(&signer, &self.group, data),
+        }
+        .map(|env| env.to_bytes())
+    }
+}
+
+impl HavenSocial {
+    /// The plan for sealing one blob for `circle_ids` (first = primary). `None` for an empty list or any
+    /// unknown circle, or a further circle that holds no epoch key yet (it could not open the blob).
+    fn media_seal_plan(&self, circle_ids: &[String]) -> Option<MediaSealPlan> {
+        let primary = circle_ids.first()?;
+        let st = self.state.lock().unwrap();
+        let idx = st.circles.iter().position(|c| &c.id == primary)?;
+        let under_device = st.me_secret.is_none();
+        let mut accounts = vec![st.me().clone()];
+        accounts.extend(st.circles[idx].members.iter().cloned());
+        let mut extra_epoch_keys = Vec::new();
+        for id in &circle_ids[1..] {
+            if id == primary { continue; }
+            let c = st.circles.iter().find(|c| &c.id == id)?;
+            match c.current_key() {
+                Some(k) => extra_epoch_keys.push(k),
+                // A circle that has not keyed yet has no epoch to wrap to: fall back to the legacy
+                // per-member wrap for ITS members, so the blob still opens for them.
+                None => accounts.extend(c.members.iter().cloned()),
+            }
+        }
+        // `accounts` may now repeat a member who is in several circles; wrap once per node id.
+        let mut seen = std::collections::HashSet::new();
+        accounts.retain(|a| seen.insert(a.node_id_bytes()));
+        let recipients = recipients_with_devices(&accounts, &st.device_lists);
+        Some(MediaSealPlan {
+            signer_seed: signer_of(&st, under_device).secret_seed(),
+            group: Group::new(primary.clone(), recipients),
+            epoch_key: st.circles[idx].current_key(),
+            extra_epoch_keys,
+        })
+    }
 }
 
 /// What opening a circle-sealed blob needs, copied out from under the engine lock so the decrypt
@@ -12361,6 +12389,27 @@ mod net_tests {
         let g_wrong_root = AdminGrant::issue(&mallory, gid, mallory.public().node_id_bytes(), alice.public().node_id_bytes(), 5);
         assert!(matches!(feed_grant(&g_wrong_root), Ok(false)));
         assert!(!victim.circle_admins(cid.clone()).contains(&mallory_hex), "a foreign-root grant grants no authority");
+    }
+
+    /// A post shared to several circles seals ONE blob that opens from each selected circle, and the
+    /// whole seal is refused (not silently narrowed) if any selected circle is unknown.
+    #[test]
+    fn multi_circle_media_opens_from_every_selected_circle_and_refuses_unknown_ones() {
+        let alice = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        alice.create_circle("fam".into(), "Family".into());
+        alice.create_circle("work".into(), "Work".into());
+        let sealed = alice
+            .seal_circle_media_multi(vec!["fam".into(), "work".into()], b"one photo".to_vec())
+            .expect("seals for both");
+        for cid in ["fam", "work"] {
+            assert_eq!(alice.open_circle_media(cid.into(), sealed.clone()).as_deref(), Some(&b"one photo"[..]),
+                       "{cid} opens the shared blob");
+        }
+        assert!(alice.seal_circle_media_multi(vec!["fam".into(), "nope".into()], b"x".to_vec()).is_err(),
+                "an unknown extra circle must fail the seal, not narrow it");
+        assert!(alice.seal_circle_media_multi(vec![], b"x".to_vec()).is_err());
+        // One circle, listed twice, is still one circle.
+        assert!(alice.seal_circle_media_multi(vec!["fam".into(), "fam".into()], b"x".to_vec()).is_ok());
     }
 
     /// A friend's posted media opens even when you don't hold that friend's device roster. 1.0.7

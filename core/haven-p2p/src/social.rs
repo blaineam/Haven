@@ -262,6 +262,19 @@ fn epoch_wrap_kek(epoch_key: &[u8; 32]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
+/// Prefix of an ADDITIONAL-circle epoch entry (see [`seal_bytes_with_epochs`]). The entry's `member` is this
+/// prefix plus an 8-byte tag so the entries are distinguishable from each other; an older build matches
+/// recipients against its own node id (or [`EPOCH_RECIPIENT`]) and so simply ignores them.
+const EPOCH_XCIRCLE_PREFIX: &[u8; 24] = b"haven!epoch!xcircle!v1\0\0";
+
+/// Per-key tag for an additional-circle entry. Not secret and not security-relevant: it only keeps two
+/// entries in one envelope from being byte-identical.
+fn xcircle_member(epoch_key: &[u8; 32]) -> Vec<u8> {
+    let mut m = EPOCH_XCIRCLE_PREFIX.to_vec();
+    m.extend_from_slice(&blake3::hash(&epoch_wrap_kek(epoch_key)).as_bytes()[..8]);
+    m
+}
+
 /// [`seal_bytes`] plus an epoch-wrapped copy of the content key, so ANY holder of the circle epoch
 /// opens it — including members who joined after this blob was sealed.
 pub fn seal_bytes_with_epoch(
@@ -270,11 +283,32 @@ pub fn seal_bytes_with_epoch(
     epoch_key: &[u8; 32],
     bytes: &[u8],
 ) -> Result<SealedEnvelope> {
+    seal_bytes_with_epochs(sender, group, epoch_key, &[], bytes)
+}
+
+/// [`seal_bytes_with_epoch`] for a post shared to SEVERAL circles at once: the one blob (one ciphertext,
+/// one upload, one content-addressed key) is made openable by every selected circle by adding one extra
+/// epoch entry per additional circle, each wrapping the SAME content key under THAT circle's epoch key.
+///
+/// Why this shape and not a copy per circle: a media blob is content-addressed on its plaintext, so a
+/// second sealed copy would have to live under the same key and overwrite the first; and a 300 MB video
+/// would upload N times. Why epoch entries only for the additional circles (no per-member KEM wrap):
+/// the post that carries the media ref is itself epoch-sealed, so whoever can read it holds the epoch
+/// key — and a per-member list would put the other circles' member ids into an envelope that circle's
+/// members can read. The FIRST circle keeps the exact legacy layout (recipient list + [`EPOCH_RECIPIENT`]
+/// entry), so a blob for one circle is byte-for-byte what it always was and older builds still open it.
+pub fn seal_bytes_with_epochs(
+    sender: &Identity,
+    group: &Group,
+    epoch_key: &[u8; 32],
+    extra_epoch_keys: &[[u8; 32]],
+    bytes: &[u8],
+) -> Result<SealedEnvelope> {
     let mut content_key = [0u8; 32];
     OsRng.fill_bytes(&mut content_key);
     let ciphertext = seal(&content_key, bytes);
 
-    let mut recipients = Vec::with_capacity(group.members.len() + 1);
+    let mut recipients = Vec::with_capacity(group.members.len() + 1 + extra_epoch_keys.len());
     for member in &group.members {
         let (enc, kek) = encapsulate_to(member)?;
         recipients.push(RecipientKey {
@@ -290,6 +324,16 @@ pub fn seal_bytes_with_epoch(
         enc: EncWire { eph_x_pub: Vec::new(), pq_ct: Vec::new() },
         wrapped: seal(&epoch_wrap_kek(epoch_key), &content_key),
     });
+    let mut seen: Vec<[u8; 32]> = vec![*epoch_key];
+    for k in extra_epoch_keys {
+        if seen.contains(k) { continue; }   // the same circle twice is one entry
+        seen.push(*k);
+        recipients.push(RecipientKey {
+            member: xcircle_member(k),
+            enc: EncWire { eph_x_pub: Vec::new(), pq_ct: Vec::new() },
+            wrapped: seal(&epoch_wrap_kek(k), &content_key),
+        });
+    }
 
     let mut env = SealedEnvelope {
         sender: sender.public().node_id_bytes().to_vec(),
@@ -305,10 +349,20 @@ pub fn seal_bytes_with_epoch(
 /// Returns None when this envelope carries no epoch entry (every blob sealed before this shipped)
 /// or when `epoch_key` is not the epoch it was sealed under.
 pub fn open_bytes_with_epoch(epoch_key: &[u8; 32], env: &SealedEnvelope) -> Option<Vec<u8>> {
-    let entry = env.recipients.iter().find(|r| r.member == EPOCH_RECIPIENT)?;
-    let content_key = open(&epoch_wrap_kek(epoch_key), &entry.wrapped).ok()?;
-    let ck: [u8; 32] = content_key.try_into().ok()?;
-    open(&ck, &env.ciphertext).ok()
+    let kek = epoch_wrap_kek(epoch_key);
+    // The first circle's entry, then the additional-circle entries of a multi-circle post.
+    let entries = env
+        .recipients
+        .iter()
+        .filter(|r| r.member == EPOCH_RECIPIENT || r.member.starts_with(EPOCH_XCIRCLE_PREFIX));
+    for entry in entries {
+        let Ok(content_key) = open(&kek, &entry.wrapped) else { continue };
+        let Ok(ck) = <[u8; 32]>::try_from(content_key) else { continue };
+        if let Ok(plain) = open(&ck, &env.ciphertext) {
+            return Some(plain);
+        }
+    }
+    None
 }
 
 /// Seal arbitrary bytes (e.g. a media blob) to every member of a group — any member
@@ -1217,5 +1271,46 @@ mod epoch_recipient_tests {
         let group = Group::new("default".to_string(), vec![author.public()]);
         let env = seal_bytes(&author, &group, b"a photo").expect("seals");
         assert!(open_bytes_with_epoch(&[42u8; 32], &env).is_none());
+    }
+
+    /// A post shared to several circles: ONE blob, openable by each selected circle's epoch key — and by
+    /// nobody else's.
+    #[test]
+    fn a_multi_circle_blob_opens_under_each_selected_circles_epoch_only() {
+        let author = Identity::from_seed(&[1u8; 32]);
+        let group = Group::new("default".to_string(), vec![author.public()]);
+        let (a, b, c, outsider) = ([10u8; 32], [11u8; 32], [12u8; 32], [13u8; 32]);
+        let env = seal_bytes_with_epochs(&author, &group, &a, &[b, c], b"one photo, three circles").expect("seals");
+        for k in [&a, &b, &c] {
+            assert_eq!(open_bytes_with_epoch(k, &env).as_deref(), Some(&b"one photo, three circles"[..]));
+        }
+        assert!(open_bytes_with_epoch(&outsider, &env).is_none(), "an unselected circle must not open it");
+    }
+
+    /// The compatibility promise: a blob for ONE circle is the legacy layout, so older builds are
+    /// unaffected, and the extra entries of a multi-circle blob don't disturb the first circle's legacy
+    /// open or the listed-recipient open (an older build ignores entries it doesn't recognise).
+    #[test]
+    fn single_circle_layout_is_unchanged_and_extras_do_not_disturb_the_first() {
+        let author = Identity::from_seed(&[1u8; 32]);
+        let friend = Identity::from_seed(&[2u8; 32]);
+        let group = Group::new("default".to_string(), vec![author.public(), friend.public()]);
+        let one = seal_bytes_with_epochs(&author, &group, &[42u8; 32], &[], b"x").expect("seals");
+        assert_eq!(one.recipients.len(), group.members.len() + 1, "recipients + one legacy epoch entry");
+        let many = seal_bytes_with_epochs(&author, &group, &[42u8; 32], &[[7u8; 32], [8u8; 32]], b"x").expect("seals");
+        assert_eq!(many.recipients.len(), group.members.len() + 3);
+        assert!(many.recipients.iter().any(|r| r.member == EPOCH_RECIPIENT), "first circle keeps the legacy entry");
+        assert_eq!(open_bytes(&friend, &author.public(), &many).expect("opens by account key"), b"x");
+        // The signature covers every entry, so a stripped or added entry is detected by verifiers.
+        assert!(author.public().verify(&many.transcript(), &many.signature).is_ok());
+    }
+
+    /// The same circle named twice (or the first circle repeated) is one entry, not a duplicate.
+    #[test]
+    fn duplicate_circles_collapse_to_one_entry() {
+        let author = Identity::from_seed(&[1u8; 32]);
+        let group = Group::new("default".to_string(), vec![author.public()]);
+        let env = seal_bytes_with_epochs(&author, &group, &[1u8; 32], &[[1u8; 32], [2u8; 32], [2u8; 32]], b"x").expect("seals");
+        assert_eq!(env.recipients.len(), group.members.len() + 2);
     }
 }

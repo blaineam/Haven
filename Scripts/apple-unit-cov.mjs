@@ -16,6 +16,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -91,4 +92,34 @@ const covered = files.reduce((s, f) => s + f.covered, 0), executable = files.red
 console.log(`apple-unit-cov: ${covered}/${executable} lines (${(100 * covered / executable).toFixed(1)}%) hosted`);
 console.log(`soren-coverage: ${JSON.stringify({ covered, executable,
   targets: Object.entries(targets).map(([name, v]) => ({ name: `${name} (hosted unit tests)`, ...v })) })}`);
+
+// Per-line coverage for Hopps: it counts each source file once across suites (iOS, iPad, watch, macOS),
+// which needs covered/executable line numbers per file like the xcodebuild suites leave in
+// ~/.soren/lines/<project>/<suite>.json. Without this file the hosted figure is counted beside the
+// union as a second copy of the same sources. Only the main checkout writes it (paths must match the
+// other suites'); the headline figure never depends on it.
+if (root.includes('/Documents/')) {
+  try {
+    const lc = spawnSync(`${llvm}/llvm-cov`, ['export', '-format=lcov', `-instr-profile=${profdata}`, bin],
+      { encoding: 'utf8', env, maxBuffer: 1 << 30 });
+    const ranges = (ns) => { const out = []; for (let i = 0; i < ns.length;) { let j = i; while (j + 1 < ns.length && ns[j + 1] === ns[j] + 1) j++; out.push(i === j ? `${ns[i]}` : `${ns[i]}-${ns[j]}`); i = j + 1; } return out.join(','); };
+    const out = { endedAt: new Date().toISOString(), targets: {} };
+    for (const rec of lc.stdout.split('end_of_record')) {
+      const file = /^SF:(.+)$/m.exec(rec)?.[1];
+      if (!file) continue;
+      const rel = file.includes('/apple/') ? 'apple/' + file.split('/apple/').pop() : file;
+      const t = Object.keys(targets).find((k) => rel.startsWith(k + '/'));
+      if (!t) continue;
+      const ex = [], cv = [];
+      for (const m of rec.matchAll(/^DA:(\d+),(\d+)/gm)) { ex.push(Number(m[1])); if (Number(m[2]) > 0) cv.push(Number(m[1])); }
+      if (!ex.length) continue;
+      ex.sort((a, b) => a - b); cv.sort((a, b) => a - b);
+      let h = ''; try { h = createHash('sha1').update(readFileSync(file)).digest('hex').slice(0, 12); } catch { /* gone */ }
+      ((out.targets[`${t} (hosted unit tests)`] ||= { files: {} }).files)[file] = { h, e: ranges(ex), c: ranges(cv) };
+    }
+    const dest = join(process.env.SOREN_CONFIG_DIR || join(homedir(), '.soren'), 'lines', 'haven', 'apple-unit.json');
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, JSON.stringify(out));
+  } catch { /* best effort */ }
+}
 process.exit(testCode);

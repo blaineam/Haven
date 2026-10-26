@@ -1,3 +1,4 @@
+import Intents
 import UserNotifications
 
 /// The Notification Service Extension. When the blind push relay wakes this device, the
@@ -90,9 +91,41 @@ final class NotificationService: UNNotificationServiceExtension {
             // final either way; `serviceExtensionTimeWillExpire` still delivers it on overrun.
             let hasInlineEvent = request.content.userInfo["ev"] != nil
             Self.prefetchThenDeliver(decoded, hasInlineEvent: hasInlineEvent) {
-                contentHandler(best)
+                // Communication notification: lets Siri announce the message and reply by voice
+                // (AirPods, CarPlay). Only for plain DMs at full detail - see `communicationPlan`.
+                var outgoing: UNNotificationContent = best
+                if let plan = NotificationPayloadCodec.communicationPlan(decoded, detail: detail) {
+                    outgoing = Self.communicationContent(best, plan: plan)
+                }
+                contentHandler(outgoing)
             }
         }
+    }
+
+    /// Donate the incoming message as an `INSendMessageIntent` interaction and fold the intent into the
+    /// content (`updating(from:)`), which is what turns a banner into a communication notification:
+    /// sender avatar, "reply" by voice, and Siri announcement. `conversationIdentifier` is the DM
+    /// circle id - the same key `HavenIntents` and the CarPlay list use. Any failure returns the
+    /// ordinary banner untouched.
+    private static func communicationContent(_ content: UNNotificationContent,
+                                             plan: NotificationPayloadCodec.CommunicationPlan) -> UNNotificationContent {
+        let avatar: INImage? = SharedDestinations.read().first { $0.id == plan.conversationId }
+            .flatMap { SharedDestinations.avatarURL($0.avatarFile) }
+            .flatMap { try? Data(contentsOf: $0) }
+            .map { INImage(imageData: $0) }
+        let sender = INPerson(personHandle: INPersonHandle(value: plan.conversationId, type: .unknown),
+                              nameComponents: nil, displayName: plan.senderName, image: avatar,
+                              contactIdentifier: nil, customIdentifier: plan.conversationId)
+        let intent = INSendMessageIntent(recipients: nil, outgoingMessageType: .outgoingMessageText,
+                                         content: plan.text, speakableGroupName: nil,
+                                         conversationIdentifier: plan.conversationId, serviceName: "Haven",
+                                         sender: sender, attachments: nil)
+        if let avatar { intent.setImage(avatar, forParameterNamed: \.sender) }
+        let interaction = INInteraction(intent: intent, response: nil)
+        interaction.direction = .incoming
+        interaction.groupIdentifier = plan.conversationId
+        interaction.donate(completion: nil)
+        return (try? content.updating(from: intent)) ?? content
     }
 
     /// Best-effort content prefetch bounded to ~10s of the NSE budget; always calls `deliver`.

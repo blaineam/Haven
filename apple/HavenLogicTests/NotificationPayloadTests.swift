@@ -221,4 +221,27 @@ final class NotificationPayloadTests: XCTestCase {
         let p = payload(["b": "secret", "c": "vault", "mk": "k", "mr": ["img"]], locked: ["vault"])
         XCTAssertNil(C.prefetchPlan(p, hasInlineEvent: false), "a locked circle's content must not be pulled onto the device by a push")
     }
+
+    // MARK: communication notifications (Siri announce / CarPlay reply)
+
+    func testCommunicationPlanOnlyForPlainDMAtFullDetail() throws {
+        let dm = try XCTUnwrap(decode(["t": "Maya", "b": "dinner at 6?", "c": "dm:aa-bb", "k": "dm"]))
+        XCTAssertEqual(C.communicationPlan(dm, detail: .full),
+                       .init(conversationId: "dm:aa-bb", senderName: "Maya", text: "dinner at 6?"))
+        XCTAssertNil(C.communicationPlan(dm, detail: .privateDetail), "private detail must not put text in the intent")
+        XCTAssertNil(C.communicationPlan(dm, detail: .minimal))
+    }
+
+    func testCommunicationPlanNeverForLockedCircleOrNonDM() throws {
+        let locked = try XCTUnwrap(decode(["t": "Maya", "b": "secret", "c": "dm:aa-bb", "k": "dm"], locked: ["dm:aa-bb"]))
+        XCTAssertNil(C.communicationPlan(locked, detail: .full))
+        let react = try XCTUnwrap(decode(["t": "Maya", "b": "Reacted", "c": "dm:aa-bb", "k": "react"]))
+        XCTAssertNil(C.communicationPlan(react, detail: .full))
+        let circle = try XCTUnwrap(decode(["t": "Maya", "b": "hi", "c": "circle-1", "k": "dm"]))
+        XCTAssertNil(C.communicationPlan(circle, detail: .full), "only dm: conversations")
+        let anon = try XCTUnwrap(decode(["b": "hi", "c": "dm:aa-bb", "k": "dm"]))
+        XCTAssertNil(C.communicationPlan(anon, detail: .full), "no sender name -> nothing to announce")
+        let call = try XCTUnwrap(decode(["t": "Maya", "h": "abc"]))
+        XCTAssertNil(C.communicationPlan(call, detail: .full))
+    }
 }

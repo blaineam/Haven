@@ -164,4 +164,29 @@ enum NotificationPayloadCodec {
         default:        return "updates"
         }
     }
+
+    // MARK: - Communication notifications (Siri announce / reply, CarPlay)
+
+    /// What a communication notification may carry. Nil = post the ordinary banner.
+    struct CommunicationPlan: Equatable {
+        let conversationId: String
+        let senderName: String
+        let text: String
+    }
+
+    /// Only a plain inbound DM, on a device whose effective privacy level is `.full`, becomes a
+    /// communication notification. The donated `INSendMessageIntent` carries the message text, and
+    /// that is exactly what Siri may read aloud - so anything that hides content from the banner
+    /// (Private/Minimal, iOS Show Previews, a biometric-locked circle, a sealed call/story/reaction)
+    /// must also keep it out of the intent. The decision therefore takes the already-resolved
+    /// `detail` (Haven's preference tightened by the system's), never the raw preference.
+    static func communicationPlan(_ p: NotificationPayload,
+                                  detail: SharedNotificationPrivacy.Detail) -> CommunicationPlan? {
+        guard detail == .full, !p.redactedForLock, p.kind == "dm",
+              let cid = p.circleId, cid.hasPrefix("dm:") else { return nil }
+        let name = p.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = p.fullBody.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != "Haven", !text.isEmpty else { return nil }
+        return CommunicationPlan(conversationId: cid, senderName: name, text: text)
+    }
 }

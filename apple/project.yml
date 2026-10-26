@@ -411,6 +411,8 @@ targets:
       # Palette table + resolve/fallback, and the long-press multi-circle target rule.
       - path: HavenApp/Palette.swift
       - path: HavenApp/MultiCirclePost.swift
+      # Which circles a multi-circle post's media is sealed for (one blob, every selected circle).
+      - path: HavenApp/MediaCircleSets.swift
       - path: HavenApp/RelayAddress.swift
       - path: HavenApp/MediaVariants.swift
       - path: HavenApp/FileArchive.swift

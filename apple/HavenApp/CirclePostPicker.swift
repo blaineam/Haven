@@ -3,16 +3,14 @@ import SwiftUI
 /// Long-press Post: toggle which circles this one post goes to. The current circle starts checked.
 struct CirclePostPicker: View {
     let activeId: String
-    /// An attachment is on the post: only the current circle can take it (see `MultiCirclePost.lockedToActive`).
-    var lockedToActive = false
     let onPost: ([String]) -> Void
 
     @ObservedObject private var store = FeedStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var selected: Set<String>
 
-    init(activeId: String, lockedToActive: Bool = false, onPost: @escaping ([String]) -> Void) {
-        self.activeId = activeId; self.lockedToActive = lockedToActive; self.onPost = onPost
+    init(activeId: String, onPost: @escaping ([String]) -> Void) {
+        self.activeId = activeId; self.onPost = onPost
         _selected = State(initialValue: [activeId])
     }
 
@@ -32,19 +30,11 @@ struct CirclePostPicker: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .disabled(lockedToActive && c.id != activeId)
-                        .opacity(lockedToActive && c.id != activeId ? 0.4 : 1)
                         .accessibilityIdentifier("circlePick.\(c.id)")
                         .accessibilityAddTraits(selected.contains(c.id) ? .isSelected : [])
                     }
                 } header: { Text("Share this post to") }
-                footer: {
-                    if lockedToActive {
-                        Text("Photos, videos and voice notes can only go to the current circle for now. Text, songs and locations can go to any.")
-                    } else {
-                        Text("The same post goes to everyone in each circle you tick.")
-                    }
-                }
+                footer: { Text("The same post goes to everyone in each circle you tick.") }
             }
             .navigationTitle("Post to circles")
             .havenInlineNavTitle()

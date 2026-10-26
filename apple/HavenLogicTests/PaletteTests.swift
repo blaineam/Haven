@@ -57,11 +57,47 @@ final class MultiCirclePostTests: XCTestCase {
     func testPickWithoutActiveKeepsOnlyThePick() {
         XCTAssertEqual(MultiCirclePost.targets(picked: ["b", "c"], active: "a"), ["b", "c"])
     }
+}
 
-    func testMediaLocksThePostToItsCircleButLocationsAndTextDoNot() {
-        let synth: (String) -> Bool = { $0.hasPrefix("geo:") }
-        XCTAssertFalse(MultiCirclePost.lockedToActive(attachedMedia: [], isSynthetic: synth))
-        XCTAssertFalse(MultiCirclePost.lockedToActive(attachedMedia: ["geo:1,2"], isSynthetic: synth))
-        XCTAssertTrue(MultiCirclePost.lockedToActive(attachedMedia: ["geo:1,2", "img_abc"], isSynthetic: synth))
+final class MediaCircleSetsTests: XCTestCase {
+    private func fresh() -> MediaCircleSets { MediaCircleSets(defaults: UserDefaults(suiteName: "mcs-\(UUID().uuidString)")!) }
+
+    func testUnregisteredOrSingleCircleSealsForItselfAlone() {
+        let sets = fresh()
+        XCTAssertEqual(sets.sealSet(ref: "img_a", circleId: "A"), ["A"])
+        sets.register(refs: ["img_a"], circleIds: ["A"])
+        XCTAssertEqual(sets.sealSet(ref: "img_a", circleId: "A"), ["A"])
+        XCTAssertEqual(MediaCircleSets.tag(["A"]), "", "the legacy seal filename is unchanged for one circle")
+    }
+
+    func testEveryCirclesJobSealsForTheSameSetWithTheOriginFirst() {
+        let sets = fresh()
+        sets.register(refs: ["img_a", "thumb_a"], circleIds: ["A", "B", "C", "B"])
+        for cid in ["A", "B", "C"] {
+            XCTAssertEqual(sets.sealSet(ref: "img_a", circleId: cid), ["A", "B", "C"], "job for \(cid)")
+        }
+        XCTAssertEqual(sets.sealSet(ref: "thumb_a", circleId: "B"), ["A", "B", "C"])
+        XCTAssertEqual(sets.sealSet(ref: "img_a", circleId: "Z"), ["Z"], "a circle outside the set seals alone")
+    }
+
+    func testALaterWiderPostWidensButNeverNarrows() {
+        let sets = fresh()
+        sets.register(refs: ["r"], circleIds: ["A", "B"])
+        sets.register(refs: ["r"], circleIds: ["A", "C"])
+        XCTAssertEqual(sets.sealSet(ref: "r", circleId: "A"), ["A", "B", "C"])
+    }
+
+    func testTagDiffersPerSetAndSurvivesRelaunch() {
+        XCTAssertNotEqual(MediaCircleSets.tag(["A", "B"]), MediaCircleSets.tag(["A", "C"]))
+        let d = UserDefaults(suiteName: "mcs-\(UUID().uuidString)")!
+        MediaCircleSets(defaults: d).register(refs: ["r"], circleIds: ["A", "B"])
+        XCTAssertEqual(MediaCircleSets(defaults: d).sealSet(ref: "r", circleId: "B"), ["A", "B"])
+    }
+
+    func testRegistryIsBounded() {
+        let sets = fresh()
+        for i in 0..<600 { sets.register(refs: ["r\(i)"], circleIds: ["A", "B"]) }
+        XCTAssertEqual(sets.sealSet(ref: "r0", circleId: "A"), ["A"], "the oldest entries are pruned")
+        XCTAssertEqual(sets.sealSet(ref: "r599", circleId: "A"), ["A", "B"])
     }
 }

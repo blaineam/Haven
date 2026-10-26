@@ -22,9 +22,11 @@ runtime (Finder/Launchpad keep the bundled icon).
 
 **Multi-circle post.** Hold the Post pill (right-click on a Mac) for a checklist of your circles and
 "Post to N circles"; a tap is unchanged and nothing sits in front of a normal post. The post is authored once
-per circle. A media blob is sealed to one circle's key and its sealed copy is cached per file, so while a
-photo/video/file/voice note is attached only the current circle can be ticked (text, songs and locations can
-go anywhere); Android and desktop seal one blob for every ticked circle instead. One-time tip after a few posts for people in 2+ circles.
+per circle, attachments included: the file is sealed ONCE for every chosen circle (core
+`seal_circle_media_multi`: one blob, one upload, an extra epoch entry per additional circle, legacy layout
+unchanged for one circle) and each circle gets its own relay scope. `MediaCircleSets` records the set before the
+first upload job runs so no circle's job seals for itself alone. One-time tip after a few posts for people in 2+
+circles.
 
 ### Added — Android: color palettes, per-palette app icon, and posting to several circles at once
 

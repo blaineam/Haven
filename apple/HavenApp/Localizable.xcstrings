@@ -43716,58 +43716,6 @@
         }
       }
     },
-    "Photos, videos and voice notes can only go to the current circle for now. Text, songs and locations can go to any." : {
-      "localizations" : {
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Fotos, Videos und Sprachnotizen können vorerst nur an den aktuellen Kreis gehen. Text, Songs und Orte können an jeden gehen."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Por ahora, las fotos, los vídeos y las notas de voz solo pueden ir al círculo actual. El texto, las canciones y las ubicaciones pueden ir a cualquiera."
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Pour l’instant, les photos, vidéos et notes vocales ne peuvent être publiées que dans le cercle actuel. Les textes, morceaux et positions peuvent l’être dans n’importe lequel."
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Per ora foto, video e note vocali possono andare solo nella cerchia attuale. Testi, brani e posizioni possono andare in qualsiasi cerchia."
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "写真、ビデオ、ボイスメモは、今のところ現在のサークルにのみ投稿できます。テキスト、曲、位置情報はどのサークルにも投稿できます。"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "사진, 비디오, 음성 메모는 현재로서는 현재 서클에만 게시할 수 있습니다. 텍스트, 노래, 위치는 어느 서클에나 게시할 수 있습니다."
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Por enquanto, fotos, vídeos e notas de voz só podem ir para o círculo atual. Textos, músicas e localizações podem ir para qualquer um."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "照片、视频和语音备忘目前只能发到当前圈子。文字、歌曲和位置可发到任意圈子。"
-          }
-        }
-      }
-    },
     "Post to several circles…" : {
       "localizations" : {
         "de" : {

@@ -14,12 +14,4 @@ enum MultiCirclePost {
     static func buttonTitle(count: Int) -> String {
         count == 1 ? String(localized: "Post to 1 circle") : String(localized: "Post to \(count) circles")
     }
-
-    /// Media (photo, video, file, voice) is sealed to ONE circle's key when it is stored, and the sealed
-    /// copy is cached per file — so a second circle would get a blob its members cannot open, and the two
-    /// uploads would clash on the shared content-addressed key. Until media is sealed per circle, a post with
-    /// an attachment can only go to the circle it was composed in; text, songs and locations can go anywhere.
-    static func lockedToActive(attachedMedia: [String], isSynthetic: (String) -> Bool) -> Bool {
-        attachedMedia.contains { !isSynthetic($0) }
-    }
 }

@@ -1331,8 +1331,11 @@ enum SharedStore {
         // crashed the instant a big video was posted. Sealing to disk keeps the big buffers off the
         // managed heap; the uploads below then stream the sealed file in 8 MB windows (never whole).
         // OFF the main thread — the serial backup queue runs these back-to-back.
+        // A file shared to several circles at once is sealed ONCE for all of them (see `MediaCircleSets`);
+        // the set is part of the cached seal's name so a seal made for fewer circles is never reused.
+        let sealSet = MediaCircleSets.shared.sealSet(ref: ref, circleId: circleId)
         let sealedURL = url.deletingLastPathComponent()
-            .appendingPathComponent(".seal-\(ref).tmp")
+            .appendingPathComponent(".seal-\(ref)\(MediaCircleSets.tag(sealSet)).tmp")
         // REUSE an existing seal rather than making a new one per attempt. Two reasons, and the first
         // is a correctness bug, not an optimisation:
         //
@@ -1362,7 +1365,7 @@ enum SharedStore {
             // lock → seal), and un-gated it was a holder the hold log could not name — gated bodies
             // were seen waiting 2.2s for the mutex with no gated holder to blame.
             sealedOK = await engine.run {
-                $0.sealCircleMediaFile(circleId: circleId, inPath: url.path, outPath: sealedURL.path)
+                $0.sealCircleMediaFileMulti(circleIds: sealSet, inPath: url.path, outPath: sealedURL.path)
             }
         }
         guard sealedOK,

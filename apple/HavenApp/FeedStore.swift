@@ -4916,6 +4916,11 @@ final class FeedStore: ObservableObject {
         return out
     }
 
+    /// The refs a post's media enqueues for upload, in order: previews and thumbs first, then the rest.
+    private func authoredMediaRefs(_ media: [String]) -> [String] {
+        MediaVariants.allPreviews(in: media) + MediaVariants.allThumbs(in: media) + MediaVariants.uploadOrder(media)
+    }
+
     /// Queue a just-authored event's media for relay backup: PRIORITY lane (ahead of any backfill
     /// backlog), thumbs first, then posters, then content — so the placeholder-feeding bytes land
     /// before the big blobs start.
@@ -4927,8 +4932,7 @@ final class FeedStore: ObservableObject {
         // satellite link was the one blob that never left. Android enqueues them explicitly for the
         // same reason; iOS did not, which is exactly why android→ delivered a preview and ios→ did
         // not, to the same stub.
-        for ref in MediaVariants.allPreviews(in: media) + MediaVariants.allThumbs(in: media)
-            + MediaVariants.uploadOrder(media) {
+        for ref in authoredMediaRefs(media) {
             MediaBackupQueue.shared.enqueue(ref, circleId: circleId, engine: engine, priority: true)
         }
     }
@@ -4959,7 +4963,14 @@ final class FeedStore: ObservableObject {
         Task { @MainActor in
             // Same post, once per chosen circle (long-press Post). Each is its own event in its own circle —
             // circles have separate keys — in the order picked, the active circle first.
-            for cid in circleIds ?? [self.activeCircleId] {
+            let targets = circleIds ?? [self.activeCircleId]
+            // The attachments are sealed ONCE for every chosen circle, so say so BEFORE the first post enqueues
+            // its upload: the first circle's job must not seal for itself alone (`MediaCircleSets`).
+            if targets.count > 1 {
+                MediaCircleSets.shared.register(
+                    refs: self.authoredMediaRefs(self.withPreviewMarkers(self.withThumbMarkers(rawMedia))), circleIds: targets)
+            }
+            for cid in targets {
                 await self.postNow(body, media: rawMedia, music: music, retentionSecs: retentionSecs, story: story, muteVideo: muteVideo, circleId: cid)
             }
         }

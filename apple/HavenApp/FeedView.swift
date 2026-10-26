@@ -600,8 +600,7 @@ struct FeedView: View {
             .overlay { QATransferScene() }
             #endif
             .sheet(isPresented: $showCirclePicker) {
-            CirclePostPicker(activeId: store.activeCircleId,
-                             lockedToActive: MultiCirclePost.lockedToActive(attachedMedia: attachedMedia, isSynthetic: MediaStore.isSynthetic)) { ids in
+            CirclePostPicker(activeId: store.activeCircleId) { ids in
                 sendTargets = ids
                 send()
             }

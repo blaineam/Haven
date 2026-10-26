@@ -8,6 +8,11 @@
 	<array>
 		<string>applinks:wemiller.com?mode=developer</string>
 	</array>
+	<!-- CarPlay, Communication category (granted 2026-10). Lets the Haven scene appear on the car's
+	     display: a conversation list backed by Siri-managed messaging. iOS ONLY - never add this to
+	     the macOS entitlement files. See docs/CARPLAY.md. -->
+	<key>com.apple.developer.carplay-communication</key>
+	<true/>
 	<!-- Carrier satellite (T-Satellite and the direct-to-cell services behind it). Declares Haven
 	     as optimised for a carrier-constrained network and names its category, which is what makes
 	     the app eligible for the bearer. iOS/iPadOS 26.0+; process-level, so it covers the core's

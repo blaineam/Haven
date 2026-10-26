@@ -100,6 +100,18 @@ targets:
         NSUserActivityTypes:
           - INSendMessageIntent
         UILaunchScreen: {}
+        # CarPlay (Communication category). Declaring a scene manifest at all turns scene
+        # lifecycle on, so it is spelled out: multiple scenes allowed (the phone window + the
+        # car's display), and ONLY the CarPlay role is declared. There is deliberately NO
+        # UIWindowSceneSessionRoleApplication entry: the SwiftUI `WindowGroup` supplies the phone
+        # window itself, and a hand-written window role would replace SwiftUI's scene delegate.
+        # docs/CARPLAY.md.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+          UISceneConfigurations:
+            CPTemplateApplicationSceneSessionRoleApplication:
+              - UISceneConfigurationName: CarPlay
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).CarPlaySceneDelegate
         # Required by the Mac App Store (ignored on iOS). Haven is a social network.
         LSApplicationCategoryType: public.app-category.social-networking
         UISupportedInterfaceOrientations:

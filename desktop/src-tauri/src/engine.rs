@@ -9686,6 +9686,45 @@ impl Engine {
         false
     }
 
+    /// Register `reference` in `circle_id`'s scope on every destination the ledger says already
+    /// holds the blob. The "already uploaded?" ledger is keyed by (destination, ref) — NOT circle —
+    /// so a multi-circle post's second circle would otherwise hit the ledger, skip the scope PUT
+    /// and never be authorised to fetch the blob from a relay the first circle uploaded to. The
+    /// scope marker is a tiny idempotent write; fresh-authored media only (never the backlog).
+    async fn scope_ledgered_media(self: &Arc<Self>, circle_id: &str, reference: &str) {
+        let scope_key = Self::media_scope_key(reference, circle_id);
+        let circle_relays = self.relays_for(circle_id);
+        for node_hex in self.media_dests(circle_id) {
+            if node_hex.starts_with("s3:") || !self.media_backed_up_has(&node_hex, reference) {
+                continue;
+            }
+            let own_relay = circle_relays.contains(&node_hex);
+            if !own_relay && Self::scope_refused(&node_hex, circle_id) {
+                continue;
+            }
+            let mut scoped = false;
+            if let Some((urls, token)) = self.relay_http_reachable(&node_hex) {
+                for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
+                    match self.http_put(base, &token, &scope_key, haven_net::blobstore::MEDIA_SCOPE_BODY.to_vec()).await {
+                        Ok(()) => { scoped = true; break; }
+                        Err(RelayErr::Forbidden) => { self.note_scope_refused(&node_hex, circle_id, own_relay); scoped = true; break; }
+                        Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
+                    }
+                }
+            }
+            if scoped { continue; }
+            if let Some(client) = self.relay_client_for(&node_hex).await {
+                if let Err(e) = client.put(scope_key.clone(), haven_net::blobstore::MEDIA_SCOPE_BODY.to_vec()).await {
+                    if e.to_string().to_lowercase().contains("forbidden") {
+                        self.note_scope_refused(&node_hex, circle_id, own_relay);
+                    } else {
+                        self.mark_relay_fail(&node_hex);
+                    }
+                }
+            }
+        }
+    }
+
     /// PRIORITY LANE for a just-authored event's media: upload thumbs first, then posters, then
     /// content (see `upload_order` — the placeholder-feeding bytes land before the big blob starts),
     /// and ANNOUNCE each fresh blob to the circle the moment it lands (frame 32 + a silent push
@@ -9700,6 +9739,9 @@ impl Engine {
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
             for r in ordered {
+                // A ref another circle's post of the same (multi-circle) attachment already
+                // uploaded sits in the (dest, ref) ledger: scope it into THIS circle too.
+                me.scope_ledgered_media(&circle_id, &r).await;
                 let landed = me.upload_media(&circle_id, &r).await;
                 // Only a FRESH post's landing is worth announcing — a slow backlog drain isn't news.
                 if landed && now_ms().saturating_sub(authored_at) < 600_000 {
@@ -10905,6 +10947,27 @@ impl Engine {
     pub fn add_local_file(&self, circle_id: &str, bytes: &[u8]) -> String {
         self.media
             .store_kind(&self.social, circle_id, bytes, crate::localmedia::MediaKind::File)
+    }
+
+    /// Make every stored blob in `references` openable by every circle in `circle_ids` (see
+    /// [`LocalMedia::reseal_for_circles`]). Synthetic markers (`thumb:`/`geo:`…) are skipped. Errs
+    /// naming the first ref that could not be re-sealed, so the caller never posts an attachment
+    /// that the extra circles' members could not open.
+    pub fn reseal_media_for_circles(
+        &self,
+        origin_circle: &str,
+        references: &[String],
+        circle_ids: &[String],
+    ) -> Result<(), String> {
+        for r in references {
+            if crate::localmedia::LocalMedia::is_synthetic(r) {
+                continue;
+            }
+            if !self.media.reseal_for_circles(&self.social, origin_circle, r, circle_ids) {
+                return Err(format!("cannot re-seal media {} for the selected circles", short(r)));
+            }
+        }
+        Ok(())
     }
 
     /// Decrypt a stored media ref for display, trying the given circle then any circle.

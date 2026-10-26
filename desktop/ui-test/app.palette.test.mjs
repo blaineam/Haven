@@ -6,7 +6,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
-import { boot, post, click, tab, lastCall, DM, withDm } from './uiharness.mjs';
+import { boot, post, click, tab, lastCall, DM, withDm, J } from './uiharness.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ui = (f) => readFileSync(join(root, 'desktop/ui', f), 'utf8');
@@ -65,7 +65,7 @@ test('palettes: no hard-coded violet/pink/amber colour left in the stylesheet or
 test('palettes: every palette has a runtime icon PNG and a translated name in all six languages', () => {
   for (const id of IDS) assert.ok(existsSync(join(root, 'desktop/ui/palette-icons', id + '.png')), id);
   const strings = ui('strings.js');
-  for (const k of ['palette_title', 'palette_foot', 'post_to_n_circles', 'post_to_circles_title', 'multipost_hint', 'multipost_media_note', ...IDS.map((i) => 'palette_' + i)]) {
+  for (const k of ['palette_title', 'palette_foot', 'post_to_n_circles', 'post_to_circles_title', 'multipost_hint', ...IDS.map((i) => 'palette_' + i)]) {
     assert.equal(strings.split(`"${k}":`).length - 1, 7, `${k} present in en + 6 languages`);
   }
 });
@@ -197,21 +197,65 @@ test('the one-time multi-circle hint shows only for 2+ circles, only once', asyn
   assert.equal(seen.length, 1, 'shown exactly once');
 });
 
-test('with an attachment only the current circle is selectable; without one every circle is', async () => {
+test('with attachments every circle is selectable and no media note is shown', async () => {
   const { app } = await boot(twoCircles());
   type(app, 'with photo');
   app.ev('state.attachments.push({ ref: "r1", url: null, isVideo: false })');
   await rightClickPost(app);
-  const [cur, fam] = app.qa('#menu-root .circle-pick input[type="checkbox"]');
-  assert.equal(cur.disabled, false);
-  assert.equal(fam.disabled, true, 'other circles are disabled while media is attached');
-  assert.equal(fam.checked, false);
-  assert.match(app.q('#menu-root .circle-pick').textContent, /current circle for now/);
+  const boxes = app.qa('#menu-root .circle-pick input[type="checkbox"]');
+  assert.equal(boxes.length, 2);
+  assert.ok(boxes.every((b) => !b.disabled), 'no row is locked while media is attached');
+  assert.equal(app.qa('#menu-root .cp-note').length, 0);
+  assert.doesNotMatch(app.q('#menu-root .circle-pick').textContent, /for now/);
+});
+
+test('a multi-circle post with attachments re-seals every blob for ALL targets, then posts per circle', async () => {
+  const { app } = await boot(twoCircles());
+  type(app, 'photo to both');
+  app.ev('state.attachments.push({ ref: "img_a", url: null, isVideo: false, thumbRef: "img_t", previewRef: "img_p" }, { ref: "aud_b", url: null, isVideo: false, isAudio: true })');
+  await rightClickPost(app);
+  const [, fam] = app.qa('#menu-root .circle-pick input[type="checkbox"]');
+  fam.checked = true; fam.dispatchEvent(new app.ctx.Event('change', { bubbles: true }));
   await click(app, '#menu-root .circle-pick .btn');
-  assert.deepEqual(app.calls.filter((c) => c.cmd === 'post').map((c) => c.args.circleId), ['default']);
-  const free = await boot(twoCircles());
-  type(free.app, 'text only');
-  await rightClickPost(free.app);
-  assert.ok(free.app.qa('#menu-root .circle-pick input[type="checkbox"]').every((b) => !b.disabled));
-  assert.equal(free.app.qa('#menu-root .cp-note').length, 0);
+  const order = app.calls.filter((c) => c.cmd === 'media_reseal_for_circles' || c.cmd === 'post');
+  assert.deepEqual(order.map((c) => c.cmd), ['media_reseal_for_circles', 'post', 'post'], 'reseal exactly once, BEFORE any post');
+  assert.deepEqual(J(order[0].args), { originCircleId: 'default', references: ['img_a', 'img_t', 'img_p', 'aud_b'], circleIds: ['default', 'fam'] });
+  assert.deepEqual(order.slice(1).map((c) => c.args.circleId), ['default', 'fam']);
+  assert.ok(order.slice(1).every((c) => c.args.media.includes('img_a') && c.args.media.includes('aud_b')), 'attachments ride on every circle\'s post');
+  assert.equal(app.ev('state.attachments.length'), 0, 'composer cleared once');
+});
+
+test('a post to only the other circle also re-seals (the origin is not among the targets); single-circle posts never do', async () => {
+  const { app } = await boot(twoCircles());
+  type(app, 'just family');
+  app.ev('state.attachments.push({ ref: "img_a", url: null, isVideo: false })');
+  await rightClickPost(app);
+  const [cur, fam] = app.qa('#menu-root .circle-pick input[type="checkbox"]');
+  cur.checked = false; cur.dispatchEvent(new app.ctx.Event('change', { bubbles: true }));
+  fam.checked = true; fam.dispatchEvent(new app.ctx.Event('change', { bubbles: true }));
+  await click(app, '#menu-root .circle-pick .btn');
+  const r = app.calls.find((c) => c.cmd === 'media_reseal_for_circles');
+  assert.deepEqual(J(r.args.circleIds), ['fam']);
+  assert.deepEqual(app.calls.filter((c) => c.cmd === 'post').map((c) => c.args.circleId), ['fam']);
+
+  const one = await boot(twoCircles());
+  type(one.app, 'plain click');
+  one.app.ev('state.attachments.push({ ref: "img_a", url: null, isVideo: false })');
+  await click(one.app, '.composer-send');
+  assert.equal(one.app.calls.filter((c) => c.cmd === 'media_reseal_for_circles').length, 0, 'no re-seal for a normal post');
+  assert.equal(one.app.calls.filter((c) => c.cmd === 'post').length, 1);
+});
+
+test('a failed re-seal aborts the multi-circle post (nothing is posted that other circles cannot open) and keeps the draft', async () => {
+  const { app } = await boot(twoCircles({ be: { media_reseal_for_circles: () => { throw new Error('boom'); } } }));
+  type(app, 'doomed');
+  app.ev('state.attachments.push({ ref: "img_a", url: null, isVideo: false })');
+  await rightClickPost(app);
+  const [, fam] = app.qa('#menu-root .circle-pick input[type="checkbox"]');
+  fam.checked = true; fam.dispatchEvent(new app.ctx.Event('change', { bubbles: true }));
+  await click(app, '#menu-root .circle-pick .btn');
+  assert.equal(app.calls.filter((c) => c.cmd === 'post').length, 0);
+  assert.equal(app.q('textarea.composer-field').value, 'doomed', 'draft kept');
+  assert.equal(app.ev('state.attachments.length'), 1, 'attachment kept');
+  assert.match(app.q('#toast').textContent, /boom/);
 });

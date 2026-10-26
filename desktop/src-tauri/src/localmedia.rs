@@ -447,6 +447,82 @@ impl LocalMedia {
         true
     }
 
+    /// Re-seal an already-stored blob so EVERY circle in `targets` can open it — one blob, one
+    /// content-addressed key, one upload (multi-circle posting with attachments).
+    ///
+    /// Attach time seals to the ORIGIN circle only; a post fanned out to several circles then
+    /// references a blob the other circles' members cannot open. This opens the stored copy (origin
+    /// circle first, then any circle), checks the plaintext still IS the ref (a tampered at-rest file
+    /// is refused, never re-sealed into a fresh valid envelope), seals it once for `targets` via the
+    /// core's `seal_circle_media[_file]_multi` and atomically replaces the file under the SAME hash
+    /// name. The content address is the plaintext hash, so the ref never changes. The first target
+    /// is the primary circle (`origin` when it is among them). Returns false, leaving the stored
+    /// file untouched, when the blob is missing / unopenable / fails verification, or when any
+    /// target is an unknown circle.
+    pub fn reseal_for_circles(
+        &self,
+        social: &Arc<HavenSocial>,
+        origin: &str,
+        reference: &str,
+        targets: &[String],
+    ) -> bool {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        if Self::is_synthetic(reference) || targets.is_empty() {
+            return false;
+        }
+        let mut ids: Vec<String> = Vec::new();
+        if targets.iter().any(|t| t == origin) {
+            ids.push(origin.to_string());
+        }
+        for t in targets {
+            if !ids.contains(t) {
+                ids.push(t.clone());
+            }
+        }
+        let name = bare_id(reference);
+        let dst = self.dir.join(name);
+        let Ok(md) = fs::metadata(&dst) else { return false };
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let tag = format!("{}-{n}", std::process::id());
+        if md.len() > 64 * 1024 * 1024 {
+            // Big video: stay file→file so neither plaintext nor envelope is ever whole in RAM here.
+            let plain = self.dir.join(format!("incoming_{name}.{tag}.plain.part"));
+            let out = self.dir.join(format!("incoming_{name}.{tag}.reseal.part"));
+            let cleanup = || {
+                let _ = fs::remove_file(&plain);
+                let _ = fs::remove_file(&out);
+            };
+            let opened = social.open_circle_media_file(
+                origin.to_string(),
+                dst.to_string_lossy().into_owned(),
+                plain.to_string_lossy().into_owned(),
+            );
+            if !opened || !mediaref::verify_file(reference, &plain) {
+                cleanup();
+                return false;
+            }
+            let sealed = social.seal_circle_media_file_multi(
+                ids,
+                plain.to_string_lossy().into_owned(),
+                out.to_string_lossy().into_owned(),
+            );
+            let ok = sealed && fs::rename(&out, &dst).is_ok();
+            cleanup();
+            return ok;
+        }
+        let Ok(stored) = fs::read(&dst) else { return false };
+        let opened = social
+            .open_circle_media(origin.to_string(), stored.clone())
+            .or_else(|| social.circles().into_iter().find_map(|c| social.open_circle_media(c.id, stored.clone())))
+            .unwrap_or(stored);
+        let Some(plain) = Self::checked(reference, opened) else { return false };
+        match social.seal_circle_media_multi(ids, plain) {
+            Ok(blob) => self.write_raw_sealed(reference, &blob),
+            Err(_) => false,
+        }
+    }
+
     /// Delete every stored media file (part of "start over").
     pub fn clear(&self) {
         if let Ok(entries) = fs::read_dir(&self.dir) {

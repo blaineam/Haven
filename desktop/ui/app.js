@@ -1547,7 +1547,6 @@ async function pickCircles(anchor, currentId) {
   return new Promise((resolve) => {
     const root = $("#menu-root");
     const picked = new Set([currentId]);
-    const mediaLocked = state.attachments.length > 0;
     const go = el("button", { class: "btn primary" });
     const paint = () => {
       const n = picked.size;
@@ -1557,8 +1556,6 @@ async function pickCircles(anchor, currentId) {
     const rows = circles.map((c) => {
       const box = el("input", { type: "checkbox", "data-circle": c.id });
       box.checked = picked.has(c.id);
-      // A media blob is sealed to ONE circle's key, so with an attachment only this circle works.
-      if (mediaLocked && c.id !== currentId) box.disabled = true;
       box.addEventListener("change", () => { if (box.checked) picked.add(c.id); else picked.delete(c.id); paint(); });
       return el("label", {}, box, el("span", {}, circleDisplayName(c.id, c.name)));
     });
@@ -1566,8 +1563,7 @@ async function pickCircles(anchor, currentId) {
     go.addEventListener("click", () => { if (picked.size) done([...circles.map((c) => c.id).filter((id) => picked.has(id))]); });
     paint();
     const menu = el("div", { class: "menu glass circle-pick", role: "dialog", "aria-label": t("post_to_circles_title") },
-      el("div", { class: "cp-title muted" }, t("post_to_circles_title")), ...rows,
-      mediaLocked ? el("div", { class: "cp-note muted small" }, t("multipost_media_note")) : null, go);
+      el("div", { class: "cp-title muted" }, t("post_to_circles_title")), ...rows, go);
     const backdrop = el("div", { class: "menu-backdrop", onclick: () => done(null) });
     root.replaceChildren(backdrop, menu);
     const r = anchor.getBoundingClientRect();
@@ -1660,13 +1656,21 @@ function buildComposer(onPost, placeholder = t("share_something"), opts = {}) {
   const send = async (targets) => {
     const body = ta.value.trim();
     if (!body && !state.attachments.length && !music) return;
-    // Attachments are sealed to this circle's key: never fan them out, whatever the picker returned.
-    if (Array.isArray(targets) && state.attachments.length) targets = targets.filter((c) => c === circleId);
     const multi = opts.onPostTo && Array.isArray(targets) && targets.length
       && !(targets.length === 1 && targets[0] === circleId);
     if (multi) {
-      // Authored once per circle through the same per-circle post path. Media is already stored
-      // locally once (content-addressed); each circle's post references the same refs.
+      // Authored once per circle through the same per-circle post path. Media is stored locally once
+      // (content-addressed) and sealed to the circle it was attached in, so FIRST re-seal each stored
+      // blob for the whole target set: one blob every selected circle can open, same refs, one upload.
+      if (state.attachments.length) {
+        try {
+          await invoke("media_reseal_for_circles", { originCircleId: circleId, references: attachmentRefs(state.attachments), circleIds: targets });
+        } catch (e) {
+          // Never post a blob the extra circles' members could not open; keep the draft for a retry.
+          toast(t("couldnt_attach", String(e)));
+          return;
+        }
+      }
       for (const cid of targets) await opts.onPostTo(cid, body, music, muteVideo, retentionSecs);
     } else {
       await onPost(body, music, muteVideo, retentionSecs);
@@ -2870,6 +2874,11 @@ async function posterFromVideoRef(circleId, ref) {
 
 /** The composed media array for a post/DM: attachment refs in order, then a `thumb:<ref>:<thumbRef>`
  *  pairing marker per photo that minted one (synthetic scheme — old clients simply ignore it). */
+/** Every stored blob an attachment list owns: the content, plus its thumbnail / preview companions. */
+function attachmentRefs(atts) {
+  return [...new Set(atts.flatMap((a) => [a.ref, a.thumbRef, a.previewRef]).filter(Boolean))];
+}
+
 function withThumbMarkers(atts) {
   return [
     ...atts.map((a) => a.ref),

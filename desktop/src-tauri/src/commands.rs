@@ -1412,6 +1412,20 @@ pub fn add_media(engine: Eng, circle_id: String, data_base64: String, is_video: 
     Ok(engine.add_local_media(&cid, &bytes, is_video))
 }
 
+/// Re-seal already-attached media so EVERY circle in `circle_ids` can open it (multi-circle post
+/// with attachments). One blob, same content-addressed ref; call before authoring the per-circle
+/// posts. Errors (and changes nothing for that ref) if a blob can't be re-sealed.
+#[tauri::command]
+pub fn media_reseal_for_circles(
+    engine: Eng,
+    origin_circle_id: String,
+    references: Vec<String>,
+    circle_ids: Vec<String>,
+) -> R<()> {
+    let origin = if origin_circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { origin_circle_id };
+    engine.reseal_media_for_circles(&origin, &references, &circle_ids)
+}
+
 /// Mint the 512px AVIF preview for a photo the composer is attaching, returning its ref (or null).
 ///
 /// Separate from `add_media` because the webview cannot encode AVIF: JS hands the same sanitized

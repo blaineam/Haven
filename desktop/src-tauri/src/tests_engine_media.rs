@@ -1131,3 +1131,90 @@ async fn a_circle_carried_onto_an_owned_successor_leaves_one_row_and_a_synced_to
     }
     e.reconcile_superseded_circles();                                      // nothing superseded: no-op
 }
+
+// ── multi-circle posts with attachments: one blob openable by every selected circle ─────────────
+
+/// The stored (at-rest, sealed) bytes behind a ref.
+fn stored(e: &Engine, r: &str) -> Vec<u8> {
+    e.media.raw_sealed(r).expect("blob is held")
+}
+
+#[tokio::test]
+async fn resealed_media_opens_under_every_selected_circle_and_the_ref_never_changes() {
+    let (e, paths) = new_engine(190);
+    let work = e.create_circle("Work".into());
+    let bytes = b"\xFF\xD8\xFF one photo for two circles".to_vec();
+    let r = e.add_local_media(DEFAULT_CIRCLE, &bytes, false);
+    let before = stored(&e, &r);
+    // (The author's own account is a recipient of every circle's seal, so a single-engine test
+    // cannot show a NON-member circle failing to open it; the per-circle epoch entries are the
+    // core's `seal_circle_media_multi` tests. What this pins is the store-level contract below.)
+    assert!(e.social.open_circle_media(DEFAULT_CIRCLE.into(), before.clone()).is_some());
+
+    e.reseal_media_for_circles(DEFAULT_CIRCLE, std::slice::from_ref(&r), &[DEFAULT_CIRCLE.to_string(), work.clone()])
+        .expect("reseal");
+    let after = stored(&e, &r);
+    assert_ne!(before, after, "a fresh envelope replaced the stored blob");
+    for cid in [DEFAULT_CIRCLE, work.as_str()] {
+        assert_eq!(e.social.open_circle_media(cid.into(), after.clone()).as_deref(), Some(&bytes[..]), "opens under {cid}");
+        assert_eq!(e.media.load(&e.social, cid, &r).as_deref(), Some(&bytes[..]), "load verifies under {cid}");
+    }
+    // Same ref, same file name (the plaintext's sha-256), one file, no scratch left behind.
+    assert_eq!(r, format!("img_{}", crate::localmedia::bare_id(&r)));
+    let names: Vec<String> = std::fs::read_dir(paths.media_dir()).unwrap().flatten()
+        .map(|d| d.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, vec![crate::localmedia::bare_id(&r).to_string()]);
+}
+
+#[tokio::test]
+async fn reseal_with_a_non_origin_primary_and_a_repeat_still_covers_origin() {
+    let (e, _) = new_engine(191);
+    let work = e.create_circle("Work".into());
+    let r = e.add_local_audio(DEFAULT_CIRCLE, b"OggS a voice note");
+    // Targets given in picker order (not origin-first), with a duplicate.
+    e.reseal_media_for_circles(DEFAULT_CIRCLE, std::slice::from_ref(&r), &[work.clone(), DEFAULT_CIRCLE.to_string(), work.clone()])
+        .expect("reseal");
+    let blob = stored(&e, &r);
+    assert!(e.social.open_circle_media(DEFAULT_CIRCLE.into(), blob.clone()).is_some());
+    assert!(e.social.open_circle_media(work, blob).is_some());
+}
+
+#[tokio::test]
+async fn reseal_works_for_file_attachments_stored_from_disk() {
+    let (e, paths) = new_engine(192);
+    let work = e.create_circle("Work".into());
+    let src = paths.root.join("clip.mp4");
+    std::fs::write(&src, b"a clip stored via the file path").unwrap();
+    let r = e.add_local_media_file(DEFAULT_CIRCLE, src.to_str().unwrap(), true).expect("stored");
+    let f = e.add_local_file(DEFAULT_CIRCLE, b"PK a zip");
+    e.reseal_media_for_circles(DEFAULT_CIRCLE, &[r.clone(), f.clone()], &[DEFAULT_CIRCLE.to_string(), work.clone()])
+        .expect("reseal");
+    assert_eq!(e.media.load(&e.social, &work, &r).unwrap(), b"a clip stored via the file path");
+    assert_eq!(e.media.load(&e.social, &work, &f).unwrap(), b"PK a zip");
+    assert_eq!(e.media_bytes(DEFAULT_CIRCLE, &r).unwrap(), b"a clip stored via the file path");
+}
+
+#[tokio::test]
+async fn reseal_refuses_and_leaves_the_stored_blob_untouched_on_bad_input() {
+    let (e, _) = new_engine(193);
+    let work = e.create_circle("Work".into());
+    let r = e.add_local_media(DEFAULT_CIRCLE, b"\xFF\xD8\xFF keep me", false);
+    let before = stored(&e, &r);
+    let both = vec![DEFAULT_CIRCLE.to_string(), work.clone()];
+
+    // Unknown target circle: the core refuses, nothing is replaced.
+    let unknown = vec![DEFAULT_CIRCLE.to_string(), "no-such-circle".to_string()];
+    assert!(e.reseal_media_for_circles(DEFAULT_CIRCLE, std::slice::from_ref(&r), &unknown).is_err());
+    assert_eq!(stored(&e, &r), before);
+    // No targets / missing blob are errors too; synthetic markers are skipped (nothing to seal).
+    assert!(e.reseal_media_for_circles(DEFAULT_CIRCLE, std::slice::from_ref(&r), &[]).is_err());
+    assert!(e.reseal_media_for_circles(DEFAULT_CIRCLE, &["img_missing".to_string()], &both).is_err());
+    assert!(e.reseal_media_for_circles(DEFAULT_CIRCLE, &["thumb:img_a:img_b".to_string(), "geo:1,2,x".to_string()], &both).is_ok());
+
+    // A blob whose plaintext is not what its ref names (tampered / substituted) is never re-sealed
+    // into a fresh, valid-looking envelope.
+    let forged = e.social.seal_circle_media(DEFAULT_CIRCLE.into(), b"substituted bytes".to_vec()).unwrap();
+    assert!(e.media.write_raw_sealed(&r, &forged));
+    assert!(e.reseal_media_for_circles(DEFAULT_CIRCLE, std::slice::from_ref(&r), &both).is_err());
+    assert_eq!(stored(&e, &r), forged, "the refused blob is left exactly as it was");
+}

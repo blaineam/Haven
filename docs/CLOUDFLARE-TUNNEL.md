@@ -572,7 +572,7 @@ before the relay can start a new one. A process counts as Haven's only if it run
 helper **and** passes `--logfile` into Haven's own logs directory (`CloudflaredOrphans`, covered by
 `CloudflaredOrphansTests`).
 
-Pinned version: `2026.7.2` (see `haven_net::cfquicktunnel::CLOUDFLARED_VERSION` and the fetch script).
+Pinned version: `2026.10.4` (see `haven_net::cfquicktunnel::CLOUDFLARED_VERSION` and the fetch script).
 
 ### Updating the pin (and signing — fully automatic)
 

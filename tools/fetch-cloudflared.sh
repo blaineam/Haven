@@ -21,7 +21,7 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 # Single source of truth: the Rust const (override with CLOUDFLARED_VERSION=… or --version).
 read_pinned_version() {
-  # Matches: pub const CLOUDFLARED_VERSION: &str = "2026.7.2";
+  # Matches: pub const CLOUDFLARED_VERSION: &str = "2026.10.4";
   sed -n 's/^pub const CLOUDFLARED_VERSION: &str = "\([^"]*\)";.*/\1/p' \
     "$ROOT/core/haven-net/src/cfquicktunnel.rs" | head -1
 }

@@ -35,7 +35,7 @@ use anyhow::{anyhow, bail, Context, Result};
 
 /// Pinned cloudflared release — **single source of truth** (fetch script greps this line).
 /// Bump this string only; never hand-sign the binary after an update.
-pub const CLOUDFLARED_VERSION: &str = "2026.7.2";
+pub const CLOUDFLARED_VERSION: &str = "2026.10.4";
 
 /// How to run the bundled `cloudflared` connector.
 #[derive(Clone, Debug)]

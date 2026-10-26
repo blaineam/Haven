@@ -9,6 +9,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed — bundled cloudflared 2026.7.2 → 2026.10.4
+
+One pin (`CLOUDFLARED_VERSION` in `core/haven-net/src/cfquicktunnel.rs`) feeds the desktop `externalBin`, the macOS
+`Helpers/` embed, the MSIX and the relay's Docker image (`relay/docker/Dockerfile` keeps its own copy of the number;
+bumped in step, as are the fetch script's comment and `docs/CLOUDFLARE-TUNNEL.md`). All assets the fetch script and
+the Dockerfile download (darwin arm64/amd64, windows amd64, linux amd64/arm64/arm) exist for the new tag.
+
 ### Added — iOS / macOS / watchOS: color palettes, per-palette app icon, and posting to several circles at once
 
 **Palettes** (`docs/PALETTES.md`). Settings → Appearance offers eight palettes including a colorless

@@ -53,15 +53,16 @@ object ContactRemovals {
         load(); return (removedAt[hex] ?: 0L) > (readdedAt[hex] ?: 0L)
     }
 
-    /** The user removed this contact NOW (LWW). */
+    /** The user removed this contact NOW (LWW). Strictly newer than any re-add: the comparison is `>`,
+     *  so a remove landing in the same millisecond as a prior re-add would otherwise lose the tie. */
     @Synchronized fun markRemoved(hex: String) {
         if (hex.isBlank()) return
-        load(); removedAt[hex] = nowMs(); persist()
+        load(); removedAt[hex] = maxOf(nowMs(), (readdedAt[hex] ?: 0L) + 1); persist()
     }
     /** A deliberate (re-)add lifts any removal NOW (LWW). */
     @Synchronized fun markReadded(hex: String) {
         if (hex.isBlank()) return
-        load(); readdedAt[hex] = nowMs(); persist()
+        load(); readdedAt[hex] = maxOf(nowMs(), (removedAt[hex] ?: 0L) + 1); persist()
     }
 
     @Synchronized fun removedAtMap(): Map<String, Long> { load(); return HashMap(removedAt) }

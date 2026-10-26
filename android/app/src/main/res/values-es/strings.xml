@@ -741,4 +741,27 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="relay_history_relay_err">No se pudieron revisar %1$d círculos: un relay no respondió.</string>
     <string name="relay_history_caveat">Es posible que algunas publicaciones antiguas ya no estén en tus relays.</string>
     <string name="relay_history_dismiss">Descartar</string>
+    <!-- Appearance (palettes) + multi-circle post -->
+    <string name="settings_section_appearance">Apariencia</string>
+    <string name="settings_category_appearance_subtitle">Paleta e icono de la app</string>
+    <string name="appearance_palette_title">Paleta</string>
+    <string name="appearance_palette_desc">Colores de botones, enlaces y del degradado de Haven. Solo se aplica en este dispositivo.</string>
+    <string name="appearance_icon_note">El icono de la app cambia para coincidir. Algunos launchers tardan un momento en actualizarlo.</string>
+    <string name="appearance_palette_selected_cd">%1$s, seleccionada</string>
+    <string name="palette_sunset">Atardecer</string>
+    <string name="palette_ocean">Océano</string>
+    <string name="palette_forest">Bosque</string>
+    <string name="palette_rose">Rosa</string>
+    <string name="palette_ember">Brasa</string>
+    <string name="palette_sky">Cielo</string>
+    <string name="palette_grape">Uva</string>
+    <string name="palette_neutral">Neutra</string>
+    <string name="composer_post_long_click_label">Elegir círculos donde publicar</string>
+    <string name="composer_circles_sheet_title">Publicar en círculos</string>
+    <string name="composer_circles_post_button">Publicar en %1$d círculos</string>
+    <string name="composer_circles_post_button_one">Publicar en 1 círculo</string>
+    <string name="composer_circles_media_note">Las fotos y los vídeos solo pueden ir a un círculo, así que los demás no están disponibles mientras haya algo adjunto.</string>
+    <string name="composer_circles_current">Actual</string>
+    <string name="composer_circles_hint">Consejo: mantén pulsado Publicar para compartir la misma publicación con más de un círculo.</string>
+    <string name="composer_circles_hint_dismiss">Entendido</string>
 </resources>

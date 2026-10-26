@@ -280,7 +280,7 @@ private fun AddCard(
             Spacer(Modifier.height(10.dp))
             Text(
                 stringResource(R.string.connect_problem_prefixed, problem),
-                color = HavenTheme.amber, fontSize = 12.sp, textAlign = TextAlign.Center,
+                color = HavenTheme.warn, fontSize = 12.sp, textAlign = TextAlign.Center,
             )
         }
         Spacer(Modifier.height(12.dp))
@@ -339,9 +339,9 @@ private fun AddedCard() {
 private fun SafetyCard(title: String, words: List<String>, note: String) {
     val pill = remember {
         Brush.horizontalGradient(listOf(
-            HavenTheme.violet.copy(alpha = 0.18f),
-            HavenTheme.brandPink.copy(alpha = 0.18f),
-            HavenTheme.amber.copy(alpha = 0.18f),
+            HavenTheme.stop1.copy(alpha = 0.18f),
+            HavenTheme.stop2.copy(alpha = 0.18f),
+            HavenTheme.stop3.copy(alpha = 0.18f),
         ))
     }
     Column(

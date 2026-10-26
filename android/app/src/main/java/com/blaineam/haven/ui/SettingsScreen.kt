@@ -2,6 +2,10 @@ package com.blaineam.haven.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.clickable
 import com.blaineam.haven.core.RelayHistoryProgress
 import androidx.compose.foundation.layout.Arrangement
@@ -94,6 +98,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         "relays" -> stringResource(R.string.settings_section_relays)
         "blocked" -> stringResource(R.string.settings_section_blocked); "diagnostics" -> stringResource(R.string.settings_section_diagnostics)
         "identity" -> stringResource(R.string.settings_section_identity); "managemedia" -> stringResource(R.string.settings_section_managemedia)
+        "appearance" -> stringResource(R.string.settings_section_appearance)
         "support" -> stringResource(R.string.support_header); else -> stringResource(R.string.common_settings)
     }
 
@@ -146,6 +151,7 @@ fun SettingsScreen(onBack: () -> Unit) {
 
             // ── Top-level category list (iOS-style) ──
             if (section == null) {
+                SettingsCategory(stringResource(R.string.settings_section_appearance), stringResource(R.string.settings_category_appearance_subtitle)) { section = "appearance" }
                 SettingsCategory(stringResource(R.string.settings_section_privacy), stringResource(R.string.settings_category_privacy_subtitle)) { section = "privacy" }
                 SettingsCategory(stringResource(R.string.settings_section_relays), stringResource(R.string.settings_category_relays_subtitle)) { section = "relays" }
                 SettingsCategory(stringResource(R.string.settings_section_connection), stringResource(R.string.settings_category_connection_subtitle)) { section = "connection" }
@@ -165,6 +171,10 @@ fun SettingsScreen(onBack: () -> Unit) {
                     else stringResource(R.string.settings_blocked_count, HavenNet.blocked.size)) { section = "blocked" }
                 SettingsCategory(stringResource(R.string.support_header),
                     stringResource(R.string.support_category_subtitle)) { section = "support" }
+            }
+
+            if (section == "appearance") {
+                AppearanceSection()
             }
 
             // ── Feedback & Support (MillerKit parity: guided email templates + rate/other apps) ──
@@ -1443,5 +1453,60 @@ private fun RelayHistoryCard() {
                     modifier = Modifier.clickable { confirmCancel = false }.padding(8.dp))
             },
         )
+    }
+}
+
+@androidx.annotation.StringRes
+private fun paletteNameRes(id: String): Int = when (id) {
+    "ocean" -> R.string.palette_ocean; "forest" -> R.string.palette_forest; "rose" -> R.string.palette_rose
+    "ember" -> R.string.palette_ember; "sky" -> R.string.palette_sky; "grape" -> R.string.palette_grape
+    "neutral" -> R.string.palette_neutral; else -> R.string.palette_sunset
+}
+
+/** Settings → Appearance: the palette swatches (docs/PALETTES.md). Picking one re-skins the app live
+ *  and switches the launcher icon alias. Per-device. */
+@Composable
+private fun AppearanceSection() {
+    val selected = HavenTheme.paletteId
+    Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
+        Text(stringResource(R.string.appearance_palette_title), color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+        Spacer(Modifier.height(4.dp))
+        Text(stringResource(R.string.appearance_palette_desc), color = HavenTheme.textSecondary, fontSize = 12.sp)
+        Spacer(Modifier.height(14.dp))
+        Palettes.all.chunked(4).forEach { rowItems ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                rowItems.forEach { p ->
+                    val name = stringResource(paletteNameRes(p.id))
+                    val isSel = p.id == selected
+                    val cd = if (isSel) stringResource(R.string.appearance_palette_selected_cd, name) else name
+                    Column(
+                        Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
+                            .clickable { com.blaineam.haven.core.AppearancePrefs.setPalette(p.id) }
+                            .padding(vertical = 4.dp)
+                            .semantics { contentDescription = cd }
+                            .testTag("palette:${p.id}"),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        val swatch = androidx.compose.ui.graphics.Brush.linearGradient(listOf(
+                            androidx.compose.ui.graphics.Color(0xFF000000.toInt() or p.stop1),
+                            androidx.compose.ui.graphics.Color(0xFF000000.toInt() or p.stop2),
+                            androidx.compose.ui.graphics.Color(0xFF000000.toInt() or p.stop3)))
+                        Box(Modifier.size(52.dp).clip(CircleShape).background(swatch)
+                            .then(if (isSel) Modifier.border(3.dp, HavenTheme.textPrimary, CircleShape) else Modifier),
+                            contentAlignment = Alignment.Center) {
+                            if (isSel) Icon(Icons.Filled.Check, null, tint = androidx.compose.ui.graphics.Color.White,
+                                modifier = Modifier.size(22.dp))
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(name, color = if (isSel) HavenTheme.textPrimary else HavenTheme.textSecondary,
+                            fontSize = 11.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    }
+                }
+                // Pad a short last row so swatches keep their column width.
+                repeat(4 - rowItems.size) { Spacer(Modifier.weight(1f)) }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(stringResource(R.string.appearance_icon_note), color = HavenTheme.textSecondary, fontSize = 12.sp)
     }
 }

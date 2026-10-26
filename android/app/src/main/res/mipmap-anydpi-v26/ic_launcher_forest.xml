@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Palette launcher icon "forest": the 432px render of packaging/palette-icons/forest.png (docs/PALETTES.md),
+     full-bleed so the mask crops gradient, not mark. Selected at runtime via the matching
+     <activity-alias> (ui/AppIcon.kt). -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_bg_forest" />
+    <foreground android:drawable="@drawable/ic_launcher_forest" />
+</adaptive-icon>

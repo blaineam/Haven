@@ -9,6 +9,22 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added — Android: color palettes, per-palette app icon, and posting to several circles at once
+
+**Palettes** (`docs/PALETTES.md`). Settings → Appearance has eight swatches; `HavenTheme` reads the
+selected palette (`appearance.palette`, per device, live recomposition, unknown id falls back to Sunset).
+The brand gradient now follows the palette (stop 1/2/3 replace the old violet/pink/amber); light/dark text
+accents are derived from the stops to clear WCAG AA, and Neutral deepens its gradient so white-on-pill
+text meets AA. Warning amber stays fixed. **App icon:** one `<activity-alias>` per palette with an adaptive
+icon rendered from `packaging/palette-icons/`; the chosen alias is enabled and the rest disabled with
+`setComponentEnabledSetting(DONT_KILL_APP)`. Deep links, share filters and shortcuts stay on `MainActivity`.
+
+**Multi-circle post.** Long-press the composer's Post button for a checklist of your circles (current one
+pre-checked, DMs excluded) and "Post to N circles". A plain tap is unchanged. The post is authored once per
+circle through the normal path. Media blobs are sealed under a single circle's key on Android, so while a
+photo/video/file is attached only the current circle is selectable (text, songs and locations go anywhere).
+A one-time tip appears after a few posts, only when you are in 2+ circles. Localized in all shipped locales.
+
 ### Added — Desktop: color palettes and posting to several circles at once
 
 **Palettes** (`docs/PALETTES.md`). Settings now has a palette picker with eight swatches (Sunset, Ocean,

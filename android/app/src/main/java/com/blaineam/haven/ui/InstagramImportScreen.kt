@@ -172,7 +172,7 @@ private fun StepOne(onNext: () -> Unit) {
                        stringResource(R.string.ig_setting_include_value))
         }
         Spacer(Modifier.height(10.dp))
-        Text(stringResource(R.string.ig_json_warning), color = HavenTheme.amber, fontSize = 12.sp)
+        Text(stringResource(R.string.ig_json_warning), color = HavenTheme.warn, fontSize = 12.sp)
         Spacer(Modifier.height(14.dp))
         SecondaryButton(stringResource(R.string.ig_step1_next), onNext)
     }
@@ -250,7 +250,7 @@ private fun SettingRow(label: String, value: String, critical: Boolean = false) 
     Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically) {
         Text(label, color = HavenTheme.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
-        Text(value, color = if (critical) HavenTheme.amber else HavenTheme.textSecondary,
+        Text(value, color = if (critical) HavenTheme.warn else HavenTheme.textSecondary,
              fontSize = 14.sp,
              fontWeight = if (critical) FontWeight.Bold else FontWeight.Normal)
     }
@@ -314,7 +314,7 @@ private fun Preview(circleId: String, circleName: String) {
             Spacer(Modifier.height(14.dp))
             Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
                 Text(stringResource(R.string.ig_missing_fmt, s.missing.size),
-                     color = HavenTheme.amber, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                     color = HavenTheme.warn, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
                 Text(stringResource(R.string.ig_missing_footer), color = HavenTheme.textSecondary,
                      fontSize = 12.sp)
@@ -425,7 +425,7 @@ private fun Running(onLeave: () -> Unit) {
         Spacer(Modifier.height(18.dp))
         // Stop is destructive and sits next to a progress bar, so it confirms.
         TextButton(onClick = { confirmStop = true }) {
-            Text(stringResource(R.string.ig_stop), color = HavenTheme.amber)
+            Text(stringResource(R.string.ig_stop), color = HavenTheme.warn)
         }
         Spacer(Modifier.height(24.dp))
     }
@@ -440,7 +440,7 @@ private fun Running(onLeave: () -> Unit) {
             },
             confirmButton = {
                 TextButton(onClick = { confirmStop = false; InstagramImporter.cancel() }) {
-                    Text(stringResource(R.string.ig_stop_confirm), color = HavenTheme.amber)
+                    Text(stringResource(R.string.ig_stop_confirm), color = HavenTheme.warn)
                 }
             },
             dismissButton = {

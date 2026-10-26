@@ -735,4 +735,27 @@
     <string name="relay_history_relay_err">서클 %1$d개를 확인하지 못했습니다. Relay가 응답하지 않았습니다.</string>
     <string name="relay_history_caveat">일부 오래된 게시물은 더 이상 Relay에 없을 수 있습니다.</string>
     <string name="relay_history_dismiss">닫기</string>
+    <!-- Appearance (palettes) + multi-circle post -->
+    <string name="settings_section_appearance">모양</string>
+    <string name="settings_category_appearance_subtitle">팔레트 및 앱 아이콘</string>
+    <string name="appearance_palette_title">팔레트</string>
+    <string name="appearance_palette_desc">버튼, 링크, Haven 그라데이션의 색상입니다. 이 기기에만 적용됩니다.</string>
+    <string name="appearance_icon_note">앱 아이콘도 함께 바뀝니다. 일부 런처는 갱신에 잠시 걸릴 수 있습니다.</string>
+    <string name="appearance_palette_selected_cd">%1$s, 선택됨</string>
+    <string name="palette_sunset">선셋</string>
+    <string name="palette_ocean">오션</string>
+    <string name="palette_forest">포레스트</string>
+    <string name="palette_rose">로즈</string>
+    <string name="palette_ember">엠버</string>
+    <string name="palette_sky">스카이</string>
+    <string name="palette_grape">그레이프</string>
+    <string name="palette_neutral">뉴트럴</string>
+    <string name="composer_post_long_click_label">게시할 서클 선택</string>
+    <string name="composer_circles_sheet_title">서클에 게시</string>
+    <string name="composer_circles_post_button">%1$d개 서클에 게시</string>
+    <string name="composer_circles_post_button_one">1개 서클에 게시</string>
+    <string name="composer_circles_media_note">사진과 동영상은 한 서클에만 보낼 수 있어서, 첨부된 동안에는 다른 서클을 선택할 수 없습니다.</string>
+    <string name="composer_circles_current">현재</string>
+    <string name="composer_circles_hint">팁: 게시를 길게 누르면 같은 게시물을 여러 서클에 공유할 수 있습니다.</string>
+    <string name="composer_circles_hint_dismiss">확인</string>
 </resources>

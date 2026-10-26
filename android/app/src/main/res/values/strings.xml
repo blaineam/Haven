@@ -857,4 +857,27 @@
     <string name="relay_history_relay_err">%1$d circles couldn’t be checked — a relay didn’t answer.</string>
     <string name="relay_history_caveat">Some older posts may no longer be on your relays.</string>
     <string name="relay_history_dismiss">Dismiss</string>
+    <!-- Appearance (palettes) + multi-circle post -->
+    <string name="settings_section_appearance">Appearance</string>
+    <string name="settings_category_appearance_subtitle">Palette and app icon</string>
+    <string name="appearance_palette_title">Palette</string>
+    <string name="appearance_palette_desc">Colors for buttons, links and the Haven gradient. Applies on this device only.</string>
+    <string name="appearance_icon_note">The app icon changes to match. Some launchers take a moment to refresh it.</string>
+    <string name="appearance_palette_selected_cd">%1$s, selected</string>
+    <string name="palette_sunset">Sunset</string>
+    <string name="palette_ocean">Ocean</string>
+    <string name="palette_forest">Forest</string>
+    <string name="palette_rose">Rose</string>
+    <string name="palette_ember">Ember</string>
+    <string name="palette_sky">Sky</string>
+    <string name="palette_grape">Grape</string>
+    <string name="palette_neutral">Neutral</string>
+    <string name="composer_post_long_click_label">Choose circles to post to</string>
+    <string name="composer_circles_sheet_title">Post to circles</string>
+    <string name="composer_circles_post_button">Post to %1$d circles</string>
+    <string name="composer_circles_post_button_one">Post to 1 circle</string>
+    <string name="composer_circles_media_note">Photos and videos can only go to one circle, so the others are unavailable while something is attached.</string>
+    <string name="composer_circles_current">Current</string>
+    <string name="composer_circles_hint">Tip: press and hold Post to share the same post with more than one circle.</string>
+    <string name="composer_circles_hint_dismiss">Got it</string>
 </resources>

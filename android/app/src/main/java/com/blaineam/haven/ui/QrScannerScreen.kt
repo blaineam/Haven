@@ -148,7 +148,7 @@ fun QrScannerScreen(onResult: (String) -> Unit, onCancel: () -> Unit) {
                 blendMode = androidx.compose.ui.graphics.BlendMode.Clear)
             // corner brackets
             val c = 36f; val sw = 6f
-            val pink = Color(0xFFEC4899)
+            val pink = HavenTheme.stop2
             listOf(
                 Offset(left, top) to listOf(Offset(left, top + c), Offset(left, top), Offset(left + c, top)),
                 Offset(left + side, top) to listOf(Offset(left + side - c, top), Offset(left + side, top), Offset(left + side, top + c)),

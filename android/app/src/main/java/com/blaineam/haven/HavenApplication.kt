@@ -16,6 +16,8 @@ class HavenApplication : Application() {
         com.blaineam.haven.core.CircleSettings.init(this)  // per-circle save/optimize/retention overrides
         com.blaineam.haven.core.HiddenStore.init(this)     // posts the user hid from their own feed
         com.blaineam.haven.core.RelayNudge.init(this)      // per-circle "relay nudge dismissed" flags
+        com.blaineam.haven.core.AppearancePrefs.init(this)  // per-device palette (appearance.palette) before first compose
+        com.blaineam.haven.core.MultiCircleHint.init(this)  // one-time "press and hold Post" tip state
         com.blaineam.haven.core.LowDataMonitor.init(this)  // classify the link before anything sends
         com.blaineam.haven.support.RatingManager.recordLaunch(this)  // rating gates: one cold start
         SyncWorker.schedule(this)

@@ -735,4 +735,27 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="relay_history_relay_err">%1$d cercles n’ont pas pu être vérifiés — un relay n’a pas répondu.</string>
     <string name="relay_history_caveat">Certaines publications plus anciennes ne sont peut-être plus sur vos relays.</string>
     <string name="relay_history_dismiss">Ignorer</string>
+    <!-- Appearance (palettes) + multi-circle post -->
+    <string name="settings_section_appearance">Apparence</string>
+    <string name="settings_category_appearance_subtitle">Palette et icône de l’app</string>
+    <string name="appearance_palette_title">Palette</string>
+    <string name="appearance_palette_desc">Couleurs des boutons, des liens et du dégradé Haven. S’applique uniquement sur cet appareil.</string>
+    <string name="appearance_icon_note">L’icône de l’app change en conséquence. Certains lanceurs mettent un instant à l’actualiser.</string>
+    <string name="appearance_palette_selected_cd">%1$s, sélectionnée</string>
+    <string name="palette_sunset">Crépuscule</string>
+    <string name="palette_ocean">Océan</string>
+    <string name="palette_forest">Forêt</string>
+    <string name="palette_rose">Rose</string>
+    <string name="palette_ember">Braise</string>
+    <string name="palette_sky">Ciel</string>
+    <string name="palette_grape">Raisin</string>
+    <string name="palette_neutral">Neutre</string>
+    <string name="composer_post_long_click_label">Choisir les cercles où publier</string>
+    <string name="composer_circles_sheet_title">Publier dans des cercles</string>
+    <string name="composer_circles_post_button">Publier dans %1$d cercles</string>
+    <string name="composer_circles_post_button_one">Publier dans 1 cercle</string>
+    <string name="composer_circles_media_note">Les photos et vidéos ne peuvent aller que dans un seul cercle ; les autres sont donc indisponibles tant qu’un média est joint.</string>
+    <string name="composer_circles_current">Actuel</string>
+    <string name="composer_circles_hint">Astuce : appuyez longuement sur Publier pour partager la même publication dans plusieurs cercles.</string>
+    <string name="composer_circles_hint_dismiss">Compris</string>
 </resources>

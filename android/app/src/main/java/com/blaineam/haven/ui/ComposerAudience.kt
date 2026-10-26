@@ -2,6 +2,7 @@ package com.blaineam.haven.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -64,6 +65,7 @@ fun replyPlaceholder(circle: String): String =
  * the draft and does the actual posting — so it can be driven in a Compose test without a live engine.
  * Post goes straight to [onPost]: the placeholder and the pill are the audience cue, nothing asks.
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun AudienceComposerBar(
     circleName: String,
@@ -71,6 +73,9 @@ fun AudienceComposerBar(
     onDraftChange: (String) -> Unit,
     canPost: Boolean,
     onPost: () -> Unit,
+    /** Long-press on Post (the multi-circle checklist). Null = no long-press behavior. A plain tap is
+     *  always [onPost] — no picker or confirmation on the normal path. */
+    onPostLongClick: (() -> Unit)? = null,
 ) {
     Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically) {
@@ -82,10 +87,15 @@ fun AudienceComposerBar(
         )
         Spacer(Modifier.size(8.dp))
         // Labeled "Post", not a bare paper plane: the plane is what a private message's send
-        // looks like, and this goes to the whole circle. White-on-brand-gradient — never themed.
+        // looks like, and this goes to the whole circle. White-on-brand-gradient (the gradient follows the palette; the white text never flips with light/dark).
         val postCd = stringResource(R.string.composer_post_cd_named, circleName)
         Box(Modifier.height(48.dp).clip(CircleShape).background(HavenTheme.brandHorizontal)
-            .clickable(enabled = canPost) { onPost() }
+            .combinedClickable(
+                enabled = canPost,
+                onLongClickLabel = if (onPostLongClick != null) stringResource(R.string.composer_post_long_click_label) else null,
+                onLongClick = onPostLongClick,
+                onClick = onPost,
+            )
             .padding(horizontal = 18.dp)
             .semantics { contentDescription = postCd }
             .testTag("composeSend"),

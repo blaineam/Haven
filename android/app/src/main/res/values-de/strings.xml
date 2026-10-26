@@ -735,4 +735,27 @@
     <string name="relay_history_relay_err">%1$d Kreise konnten nicht geprüft werden – ein Relay hat nicht geantwortet.</string>
     <string name="relay_history_caveat">Einige ältere Beiträge sind möglicherweise nicht mehr auf deinen Relays.</string>
     <string name="relay_history_dismiss">Schließen</string>
+    <!-- Appearance (palettes) + multi-circle post -->
+    <string name="settings_section_appearance">Darstellung</string>
+    <string name="settings_category_appearance_subtitle">Farbpalette und App-Symbol</string>
+    <string name="appearance_palette_title">Farbpalette</string>
+    <string name="appearance_palette_desc">Farben für Schaltflächen, Links und den Haven-Verlauf. Gilt nur auf diesem Gerät.</string>
+    <string name="appearance_icon_note">Das App-Symbol ändert sich passend. Manche Launcher brauchen einen Moment, bis es aktualisiert ist.</string>
+    <string name="appearance_palette_selected_cd">%1$s, ausgewählt</string>
+    <string name="palette_sunset">Sonnenuntergang</string>
+    <string name="palette_ocean">Ozean</string>
+    <string name="palette_forest">Wald</string>
+    <string name="palette_rose">Rose</string>
+    <string name="palette_ember">Glut</string>
+    <string name="palette_sky">Himmel</string>
+    <string name="palette_grape">Traube</string>
+    <string name="palette_neutral">Neutral</string>
+    <string name="composer_post_long_click_label">Kreise zum Posten auswählen</string>
+    <string name="composer_circles_sheet_title">In Kreisen posten</string>
+    <string name="composer_circles_post_button">In %1$d Kreisen posten</string>
+    <string name="composer_circles_post_button_one">In 1 Kreis posten</string>
+    <string name="composer_circles_media_note">Fotos und Videos können nur an einen Kreis gehen, die anderen sind deshalb nicht verfügbar, solange etwas angehängt ist.</string>
+    <string name="composer_circles_current">Aktuell</string>
+    <string name="composer_circles_hint">Tipp: Halte „Posten“ gedrückt, um denselben Beitrag in mehreren Kreisen zu teilen.</string>
+    <string name="composer_circles_hint_dismiss">Verstanden</string>
 </resources>

@@ -734,4 +734,27 @@
     <string name="relay_history_relay_err">有 %1$d 个圈子无法检查——某个 Relay 没有响应。</string>
     <string name="relay_history_caveat">部分较早的帖子可能已不在你的 Relay 上。</string>
     <string name="relay_history_dismiss">关闭</string>
+    <!-- Appearance (palettes) + multi-circle post -->
+    <string name="settings_section_appearance">外观</string>
+    <string name="settings_category_appearance_subtitle">配色与应用图标</string>
+    <string name="appearance_palette_title">配色</string>
+    <string name="appearance_palette_desc">按钮、链接和 Haven 渐变的颜色。仅在此设备上生效。</string>
+    <string name="appearance_icon_note">应用图标会随之更改。部分启动器需要片刻才会刷新。</string>
+    <string name="appearance_palette_selected_cd">%1$s，已选中</string>
+    <string name="palette_sunset">日落</string>
+    <string name="palette_ocean">海洋</string>
+    <string name="palette_forest">森林</string>
+    <string name="palette_rose">玫瑰</string>
+    <string name="palette_ember">余烬</string>
+    <string name="palette_sky">天空</string>
+    <string name="palette_grape">葡萄</string>
+    <string name="palette_neutral">中性</string>
+    <string name="composer_post_long_click_label">选择要发布到的圈子</string>
+    <string name="composer_circles_sheet_title">发布到圈子</string>
+    <string name="composer_circles_post_button">发布到 %1$d 个圈子</string>
+    <string name="composer_circles_post_button_one">发布到 1 个圈子</string>
+    <string name="composer_circles_media_note">照片和视频只能发到一个圈子，因此添加附件时其他圈子不可选。</string>
+    <string name="composer_circles_current">当前</string>
+    <string name="composer_circles_hint">提示：长按“发布”，可将同一条帖子分享到多个圈子。</string>
+    <string name="composer_circles_hint_dismiss">知道了</string>
 </resources>

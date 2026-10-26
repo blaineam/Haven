@@ -211,6 +211,24 @@ fun CircleScreen(onAddFriend: () -> Unit) {
         // post the engine actually accepted, back on main.
         HavenNet.post(active, draft.trim(), pendingMedia.toList(), pendingMusic, retentionSecs = disappearSecs,
             onPublished = { com.blaineam.haven.support.RatingManager.maybeAskAfterPublish(context) })
+        com.blaineam.haven.core.MultiCircleHint.notePost()
+        draft = ""; pendingMedia.clear(); pendingMusic = null; disappearSecs = null
+    }
+    // Long-press on Post: author the SAME post once per chosen circle through the ordinary per-circle
+    // path (HavenNet.post). The active circle goes first. Blob media is only ever offered for the
+    // circle it was sealed under (see MultiCircle), so each call reads a blob that circle can open.
+    var showCirclesSheet by remember { mutableStateOf(false) }
+    val postTargets = remember(circlesVersion) {
+        MultiCircle.targets(HavenNet.feedCircles().map { PostTarget(it.id, HavenNet.circleName(it.id)) })
+    }
+    val hasBlobMedia = pendingMedia.any { !com.blaineam.haven.core.LocalMedia.isSynthetic(it) }
+    fun postToCircles(ids: List<String>) {
+        val body = draft.trim(); val media = pendingMedia.toList(); val music = pendingMusic; val secs = disappearSecs
+        ids.forEachIndexed { i, id ->
+            HavenNet.post(id, body, media, music, retentionSecs = secs,
+                onPublished = if (i == 0) ({ com.blaineam.haven.support.RatingManager.maybeAskAfterPublish(context) }) else null)
+        }
+        com.blaineam.haven.core.MultiCircleHint.markShown()   // found the gesture — the tip is moot
         draft = ""; pendingMedia.clear(); pendingMusic = null; disappearSecs = null
     }
     var cameraForPost by remember { mutableStateOf(false) }
@@ -446,6 +464,20 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                     }
                 }
             }
+            // One-time tip (only in 2+ circles, after a few posts): the long-press exists.
+            val hintTick by com.blaineam.haven.core.MultiCircleHint.version
+            if (hintTick >= 0 && com.blaineam.haven.core.MultiCircleHint.shouldShow(postTargets.size)) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.composer_circles_hint), color = HavenTheme.textSecondary,
+                        fontSize = 12.sp, modifier = Modifier.weight(1f))
+                    Text(stringResource(R.string.composer_circles_hint_dismiss), color = HavenTheme.pink,
+                        fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                            .clickable { com.blaineam.haven.core.MultiCircleHint.markShown() }
+                            .padding(horizontal = 10.dp, vertical = 6.dp))
+                }
+            }
             // Say out loud who this reaches (placeholder naming the circle, labeled Post) — see
             // AudienceComposerBar. Post goes straight out; nothing asks.
             AudienceComposerBar(
@@ -453,11 +485,22 @@ fun CircleScreen(onAddFriend: () -> Unit) {
                 draft = draft, onDraftChange = { draft = it },
                 canPost = draft.isNotBlank() || pendingMedia.isNotEmpty() || pendingMusic != null,
                 onPost = { postNow() },
+                // Only offered when there is somewhere else to post; a single-circle user gets exactly
+                // the old behaviour.
+                onPostLongClick = if (postTargets.size >= 2) ({ showCirclesSheet = true }) else null,
             )
             }
             }
         }
 
+    }
+
+    if (showCirclesSheet) {
+        PostToCirclesSheet(
+            targets = postTargets, activeId = active, hasBlobMedia = hasBlobMedia,
+            onDismiss = { showCirclesSheet = false },
+            onPost = { ids -> showCirclesSheet = false; postToCircles(ids) },
+        )
     }
 
     // Full-screen overlays (a borderless Dialog draws above the tab bar — true full-screen).
@@ -898,7 +941,7 @@ private fun OfferUpgradeCard(circleId: String) {
 private fun UpgradeAction(text: String, onClick: () -> Unit) {
     Text(
         text,
-        color = HavenTheme.violet, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+        color = HavenTheme.accent1, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
         modifier = Modifier.clip(RoundedCornerShape(50)).background(Color.White)
             .clickable { onClick() }.padding(horizontal = 14.dp, vertical = 8.dp),
     )
@@ -2430,7 +2473,7 @@ fun PostCard(
                         icon, label,
                         tint = when {
                             backed -> HavenTheme.pink
-                            localOnly -> HavenTheme.amber
+                            localOnly -> HavenTheme.warn
                             else -> HavenTheme.textSecondary
                         },
                         // Padded well past the 16dp glyph: this sits inches from the ⋯ menu.

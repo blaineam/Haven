@@ -735,4 +735,27 @@
     <string name="relay_history_relay_err">Impossibile controllare %1$d cerchie: un relay non ha risposto.</string>
     <string name="relay_history_caveat">Alcuni post meno recenti potrebbero non essere più sui tuoi relay.</string>
     <string name="relay_history_dismiss">Ignora</string>
+    <!-- Appearance (palettes) + multi-circle post -->
+    <string name="settings_section_appearance">Aspetto</string>
+    <string name="settings_category_appearance_subtitle">Tavolozza e icona dell’app</string>
+    <string name="appearance_palette_title">Tavolozza</string>
+    <string name="appearance_palette_desc">Colori di pulsanti, link e del gradiente di Haven. Vale solo su questo dispositivo.</string>
+    <string name="appearance_icon_note">L’icona dell’app cambia di conseguenza. Alcuni launcher impiegano un attimo ad aggiornarla.</string>
+    <string name="appearance_palette_selected_cd">%1$s, selezionata</string>
+    <string name="palette_sunset">Tramonto</string>
+    <string name="palette_ocean">Oceano</string>
+    <string name="palette_forest">Foresta</string>
+    <string name="palette_rose">Rosa</string>
+    <string name="palette_ember">Brace</string>
+    <string name="palette_sky">Cielo</string>
+    <string name="palette_grape">Uva</string>
+    <string name="palette_neutral">Neutra</string>
+    <string name="composer_post_long_click_label">Scegli i cerchi in cui pubblicare</string>
+    <string name="composer_circles_sheet_title">Pubblica nei cerchi</string>
+    <string name="composer_circles_post_button">Pubblica in %1$d cerchi</string>
+    <string name="composer_circles_post_button_one">Pubblica in 1 cerchio</string>
+    <string name="composer_circles_media_note">Foto e video possono andare in un solo cerchio, quindi gli altri non sono disponibili finché c’è un allegato.</string>
+    <string name="composer_circles_current">Attuale</string>
+    <string name="composer_circles_hint">Suggerimento: tieni premuto Pubblica per condividere lo stesso post in più di un cerchio.</string>
+    <string name="composer_circles_hint_dismiss">Capito</string>
 </resources>

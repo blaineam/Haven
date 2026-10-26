@@ -735,4 +735,27 @@
     <string name="relay_history_relay_err">%1$d 件のサークルを確認できませんでした。Relay が応答しませんでした。</string>
     <string name="relay_history_caveat">古い投稿の一部は、すでに Relay に残っていない可能性があります。</string>
     <string name="relay_history_dismiss">閉じる</string>
+    <!-- Appearance (palettes) + multi-circle post -->
+    <string name="settings_section_appearance">外観</string>
+    <string name="settings_category_appearance_subtitle">パレットとアプリアイコン</string>
+    <string name="appearance_palette_title">パレット</string>
+    <string name="appearance_palette_desc">ボタン、リンク、Haven のグラデーションの色です。このデバイスにのみ適用されます。</string>
+    <string name="appearance_icon_note">アプリアイコンもそれに合わせて変わります。ランチャーによっては更新に少し時間がかかります。</string>
+    <string name="appearance_palette_selected_cd">%1$s、選択中</string>
+    <string name="palette_sunset">サンセット</string>
+    <string name="palette_ocean">オーシャン</string>
+    <string name="palette_forest">フォレスト</string>
+    <string name="palette_rose">ローズ</string>
+    <string name="palette_ember">エンバー</string>
+    <string name="palette_sky">スカイ</string>
+    <string name="palette_grape">グレープ</string>
+    <string name="palette_neutral">ニュートラル</string>
+    <string name="composer_post_long_click_label">投稿先のサークルを選択</string>
+    <string name="composer_circles_sheet_title">サークルに投稿</string>
+    <string name="composer_circles_post_button">%1$d 個のサークルに投稿</string>
+    <string name="composer_circles_post_button_one">1 個のサークルに投稿</string>
+    <string name="composer_circles_media_note">写真と動画は 1 つのサークルにしか送れないため、添付中は他のサークルを選べません。</string>
+    <string name="composer_circles_current">現在</string>
+    <string name="composer_circles_hint">ヒント：「投稿」を長押しすると、同じ投稿を複数のサークルに共有できます。</string>
+    <string name="composer_circles_hint_dismiss">了解</string>
 </resources>

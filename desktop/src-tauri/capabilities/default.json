@@ -15,6 +15,7 @@
     "core:window:allow-unmaximize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-start-dragging",
+    "core:window:allow-set-icon",
     "dialog:default",
     "opener:default",
     "notification:default",

@@ -7,6 +7,26 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Added — Desktop: color palettes and posting to several circles at once
+
+**Palettes** (`docs/PALETTES.md`). Settings now has a palette picker with eight swatches (Sunset, Ocean,
+Forest, Rose, Ember, Sky, Grape, Neutral). Every pink/violet/amber in the desktop UI — accents, gradients,
+glows, avatar rings, shadows, selection — is now a CSS variable derived from the chosen palette, so a pick
+applies instantly with no restart and is remembered per device (`haven-palette`, never synced; unknown
+values fall back to Sunset). Text ink is nudged per theme only where a stop would fall below WCAG AA, so
+every palette stays readable in light and dark. Neutral renders all decoration in true greys. Semantic
+colors (ok, warning, destructive) are not themed. While Haven runs, the window and taskbar icon follow the
+palette; the installed icon (Start menu, MSIX, Flatpak, launcher) is fixed — the Settings footer says so.
+
+**Post to several circles.** Right-click (or long-press) the Post button for a checklist of your circles
+(the current one is pre-ticked, DMs are excluded) and "Post to N circles". A plain click on Post is
+unchanged — no picker, no confirmation. The post is authored once per ticked circle through the normal
+per-circle path; the media is stored locally once and the same refs go to each circle. A one-time tip
+appears after a few posts, and only if you are in two or more circles. All new strings ship in every
+language.
+
 ## 2.0.3 (2026-10-22)
 
 ### Fixed — iPhone: picking photos shows them being prepared, and a 48 MP pick no longer cooks the phone

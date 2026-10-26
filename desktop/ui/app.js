@@ -1049,7 +1049,7 @@ function relayWalkthrough(circleId) {
         t("wt_routes_b")),
       point("🔒", t("wt_cant_read_t"),
         [t("wt_cant_read_b"),
-         el("a", { href: "https://wemiller.com/apps/haven/docs/#relay-idea", target: "_blank", style: "color:var(--pink);text-decoration:underline" }, t("learn_more"))]),
+         el("a", { href: "https://wemiller.com/apps/haven/docs/#relay-idea", target: "_blank", style: "color:var(--tint);text-decoration:underline" }, t("learn_more"))]),
 
       heading(t("wt_how_heading")),
       point("🖥️", t("wt_easy_t"),
@@ -1064,7 +1064,7 @@ function relayWalkthrough(circleId) {
         t("wt_only_b")),
       point("⚛️", t("wt_pq_t"),
         [t("wt_pq_b"),
-         el("a", { href: "https://wemiller.com/apps/haven/docs/#encryption", target: "_blank", style: "color:var(--pink);text-decoration:underline" }, t("learn_more"))]),
+         el("a", { href: "https://wemiller.com/apps/haven/docs/#encryption", target: "_blank", style: "color:var(--tint);text-decoration:underline" }, t("learn_more"))]),
     ),
     // wrap: three buttons don't fit the sheet on a narrow window, and a clipped "Not now" is a trap.
     el("div", { class: "row wrap", style: "margin-top:14px" },
@@ -1320,6 +1320,9 @@ async function renderFeed() {
       floating: true,
       // Who this reaches — said out loud by the placeholder and the labeled Post (see `Audience`).
       audience: { name: state.activeCircleName },
+      // Right-click / long-press on Post → circle checklist → one post per ticked circle. The
+      // plain click path above is untouched (no picker, no confirm).
+      onPostTo: (cid, body, music, muteVideo, retentionSecs) => invoke("post", { circleId: cid, body, media: withThumbMarkers(state.attachments), music, muteVideo, retentionSecs }),
       onSchedule: (body, music, muteVideo, sendAtMs) => invoke("schedule_message", { kind: "post", circleId: state.activeCircle, body, media: withThumbMarkers(state.attachments), music, muteVideo, sendAtMs }),
     },
   );
@@ -1508,6 +1511,70 @@ const Audience = {
   },
 };
 
+const LONG_PRESS_MS = 500;
+
+/** The circles a post can go to: everything `circles` returns except DMs, current one first. */
+function postableCircles(list, currentId) {
+  const rows = (list || []).filter((c) => c && c.id && !String(c.id).startsWith("dm:"));
+  return rows.sort((a, b) => (b.id === currentId) - (a.id === currentId));
+}
+
+/** One-time nudge toward the multi-circle picker: only for people in 2+ circles, only after a few
+ *  single-circle posts, shown once ever (per device). Never a picker or confirm on the normal path. */
+const MultiPostHint = {
+  KEY: "haven-multipost-hint",   // "done" once shown; otherwise the count of single posts so far
+  AFTER: 3,
+  async afterPost() {
+    let v = null;
+    try { v = localStorage.getItem(this.KEY); } catch (_) {}
+    if (v === "done") return;
+    const n = (Number(v) || 0) + 1;
+    try { localStorage.setItem(this.KEY, String(n)); } catch (_) {}
+    if (n < this.AFTER) return;
+    const circles = postableCircles(await invoke("circles").catch(() => []), state.activeCircle);
+    if (circles.length < 2) return;       // not in 2+ circles — keep counting, say nothing
+    try { localStorage.setItem(this.KEY, "done"); } catch (_) {}
+    toast(t("multipost_hint"));
+  },
+};
+
+/** Popover checklist of the user's circles anchored to the Post button. Resolves with the ticked
+ *  circle ids when "Post to N circles" is pressed, or null if dismissed (or there is only one circle
+ *  to choose from — then there is nothing to pick and the gesture does nothing). */
+async function pickCircles(anchor, currentId) {
+  const circles = postableCircles(await invoke("circles").catch(() => []), currentId);
+  if (circles.length < 2) return null;
+  return new Promise((resolve) => {
+    const root = $("#menu-root");
+    const picked = new Set([currentId]);
+    const go = el("button", { class: "btn primary" });
+    const paint = () => {
+      const n = picked.size;
+      go.textContent = n === 1 ? t("post_btn") : t("post_to_n_circles", n);
+      go.disabled = n === 0;
+    };
+    const rows = circles.map((c) => {
+      const box = el("input", { type: "checkbox", "data-circle": c.id });
+      box.checked = picked.has(c.id);
+      box.addEventListener("change", () => { if (box.checked) picked.add(c.id); else picked.delete(c.id); paint(); });
+      return el("label", {}, box, el("span", {}, circleDisplayName(c.id, c.name)));
+    });
+    const done = (v) => { closeMenu(); resolve(v); };
+    go.addEventListener("click", () => { if (picked.size) done([...circles.map((c) => c.id).filter((id) => picked.has(id))]); });
+    paint();
+    const menu = el("div", { class: "menu glass circle-pick", role: "dialog", "aria-label": t("post_to_circles_title") },
+      el("div", { class: "cp-title muted" }, t("post_to_circles_title")), ...rows, go);
+    const backdrop = el("div", { class: "menu-backdrop", onclick: () => done(null) });
+    root.replaceChildren(backdrop, menu);
+    const r = anchor.getBoundingClientRect();
+    const mw = menu.offsetWidth, mh = menu.offsetHeight;
+    const left = Math.max(8, Math.min(r.right - mw, window.innerWidth - mw - 8));
+    const top = r.top - mh - 8 >= 8 ? r.top - mh - 8 : r.bottom + 6;
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+  });
+}
+
 function buildComposer(onPost, placeholder = t("share_something"), opts = {}) {
   const circleId = opts.circleId || state.activeCircle;
   const aud = opts.audience || null;
@@ -1584,10 +1651,20 @@ function buildComposer(onPost, placeholder = t("share_something"), opts = {}) {
   refreshSync();
   state.syncTimer = setInterval(refreshSync, 2500);
 
-  const send = async () => {
+  // `targets` (circle ids) comes ONLY from the Post button's checklist; a plain click / Enter passes
+  // nothing (a click handler passes its Event — not an array) and posts to this circle as before.
+  const send = async (targets) => {
     const body = ta.value.trim();
     if (!body && !state.attachments.length && !music) return;
-    await onPost(body, music, muteVideo, retentionSecs);
+    const multi = opts.onPostTo && Array.isArray(targets) && targets.length
+      && !(targets.length === 1 && targets[0] === circleId);
+    if (multi) {
+      // Authored once per circle through the same per-circle post path. Media is already stored
+      // locally once (content-addressed); each circle's post references the same refs.
+      for (const cid of targets) await opts.onPostTo(cid, body, music, muteVideo, retentionSecs);
+    } else {
+      await onPost(body, music, muteVideo, retentionSecs);
+    }
     ta.value = ""; autoGrow();
     state.attachments = [];
     music = null;
@@ -1598,6 +1675,7 @@ function buildComposer(onPost, placeholder = t("share_something"), opts = {}) {
     drawMusic();
     drawRetention();
     toast(t("posted_toast"));
+    if (!multi && opts.onPostTo) MultiPostHint.afterPost();
   };
   // Enter sends, Shift+Enter is a newline — the desktop convention, and the field is a pill you
   // can't see a "Post" button next to at rest.
@@ -1636,10 +1714,32 @@ function buildComposer(onPost, placeholder = t("share_something"), opts = {}) {
 
   // A circle post's send is labeled "Post", not a bare paper plane: the plane is what a private
   // message's send looks like, and this goes to the whole circle.
+  // `held`: a long press already opened the circle checklist, so the click that ends it is not a post.
+  let held = false;
   const sendBtn = aud
     ? el("button", { class: "composer-send labeled", title: t("post_to_everyone_in", aud.name),
-        "aria-label": t("post_to_everyone_in", aud.name), onclick: send }, t("post_btn"))
+        "aria-label": t("post_to_everyone_in", aud.name), onclick: () => { if (held) { held = false; return; } send(); } }, t("post_btn"))
     : el("button", { class: "composer-send", title: t("post_btn"), "aria-label": t("post_btn"), onclick: send }, icon("paperplane.fill"));
+
+  // Right-click (or a long press) on the labeled Post pill opens the circle checklist. Only the feed
+  // composer opts in (`onPostTo`); with a single circle there is nothing to choose, so it stays inert.
+  if (aud && opts.onPostTo) {
+    let pressTimer = null;
+    const open = async () => {
+      const picked = await pickCircles(sendBtn, circleId);
+      if (picked) send(picked);
+    };
+    sendBtn.addEventListener("contextmenu", (e) => { e.preventDefault(); open(); });
+    sendBtn.addEventListener("pointerdown", (e) => {
+      if (e.button && e.button !== 0) return;
+      held = false;
+      pressTimer = setTimeout(() => { held = true; open(); }, LONG_PRESS_MS);
+    });
+    const cancelPress = () => { clearTimeout(pressTimer); };
+    sendBtn.addEventListener("pointerup", cancelPress);
+    sendBtn.addEventListener("pointerleave", cancelPress);
+    sendBtn.addEventListener("pointercancel", cancelPress);
+  }
 
   const bar = el("div", { class: "composer" + (opts.floating ? " floating" : "") },
     el("div", { class: "composer-meta" }, syncBadge),
@@ -3343,7 +3443,7 @@ async function backupDetailSheet(circleId, refs) {
       total === 1 ? t("attachment_one") : t("attachments_many", total)),
     ...list,
     stranded
-      ? el("div", { class: "muted small", style: "margin-top:10px;color:var(--amber,#F59E0B)" },
+      ? el("div", { class: "muted small", style: "margin-top:10px;color:var(--warn-amber,#F59E0B)" },
           t("stranded_warning"))
       : null,
   ]);
@@ -5338,7 +5438,7 @@ async function relaySheet() {
     el("button", { class: "btn small primary", style: "align-self:flex-start;margin-top:8px", onclick: savePublic }, t("save_front_door")),
     el("div", { class: "muted small" },
       t("front_door_sealed"),
-      el("a", { href: "https://wemiller.com/apps/haven/docs/#front-door", target: "_blank", style: "color:var(--pink);text-decoration:underline" }, t("learn_more"))),
+      el("a", { href: "https://wemiller.com/apps/haven/docs/#front-door", target: "_blank", style: "color:var(--tint);text-decoration:underline" }, t("learn_more"))),
   );
   const liveTunnelCard = (() => {
     if (!s.hosting) return null;
@@ -5815,6 +5915,36 @@ function translationFeedbackSheet() {
 /** SETTINGS — the gear in the You tab's toolbar. Grouped rows in the macOS order
  *  (Settings.swift): privacy note, Relays, Blocked people, Identities, Devices, Advanced. This is
  *  the ONLY home for Relay now. */
+/** Settings ▸ Appearance ▸ palette swatches (docs/PALETTES.md). Each swatch is a radio showing the
+ *  palette's three stops; picking one re-themes the whole UI live (CSS variables) and retints the
+ *  window/taskbar icon. */
+function paletteGroup() {
+  const cur = currentPalette();
+  const wrap = el("div", { class: "set-row palette-row", role: "radiogroup", "aria-label": t("palette_title") });
+  const label = el("div", { class: "muted small palette-name" }, t(PALETTE_NAME_KEYS[cur]));
+  const swatches = Object.entries(PALETTES).map(([id, stops]) => {
+    const b = el("button", {
+      class: "swatch" + (id === cur ? " on" : ""), role: "radio", "data-palette": id,
+      "aria-checked": id === cur ? "true" : "false", title: t(PALETTE_NAME_KEYS[id]), "aria-label": t(PALETTE_NAME_KEYS[id]),
+      style: `background:linear-gradient(135deg, ${stops[0]}, ${stops[1]} 55%, ${stops[2]})`,
+      onclick: () => {
+        const pid = setPalette(id);
+        for (const s of swatches) {
+          const on = s.dataset.palette === pid;
+          s.classList.toggle("on", on);
+          s.setAttribute("aria-checked", on ? "true" : "false");
+        }
+        label.textContent = t(PALETTE_NAME_KEYS[pid]);
+      },
+    });
+    return b;
+  });
+  wrap.append(el("div", { class: "palette-swatches" }, ...swatches));
+  return el("div", { class: "set-group" },
+    el("div", { class: "set-row" }, el("span", { style: "flex:1" }, t("palette_title")), label),
+    wrap);
+}
+
 async function settingsSheet() {
   const row = (label, iconName, on, opts = {}) => el("button", { class: "set-row", onclick: on },
     el("span", { class: "ri" }, icon(iconName)),
@@ -5875,6 +6005,8 @@ async function settingsSheet() {
       localStorage.setItem("haven-theme", next);
       settingsSheet();
     }, { value: themeNow === "light" ? t("light") : t("dark") })),
+    paletteGroup(),
+    foot(t("palette_foot")),
 
     group(row(t("import_from_instagram"), "square.and.arrow.down", () => instagramImportSheet())),
     foot(t("import_ig_foot")),
@@ -7937,6 +8069,110 @@ function initTheme() {
   if (saved) document.documentElement.dataset.theme = saved;
 }
 
+// ---- palettes (docs/PALETTES.md) --------------------------------------------------------
+// One curated set shared by every client: three gradient stops per palette, stop 2 is the tint.
+// The whole UI reads CSS variables (--p1/2/3, --p*-rgb, --p2-ink-*; see styles.css), so a switch is
+// `applyPalette` writing eight custom properties on <html> — live, no restart, no re-render.
+// Per-device (localStorage, never synced). Unknown / missing ids fall back to `sunset`.
+const PALETTE_KEY = "haven-palette";
+const DEFAULT_PALETTE = "sunset";
+const PALETTES = {
+  sunset: ["#7C3AED", "#EC4899", "#F59E0B"],
+  ocean: ["#2563EB", "#06B6D4", "#14B8A6"],
+  forest: ["#047857", "#10B981", "#84CC16"],
+  rose: ["#BE123C", "#F43F5E", "#FB923C"],
+  ember: ["#B91C1C", "#F97316", "#FACC15"],
+  sky: ["#0EA5E9", "#6366F1", "#A78BFA"],
+  grape: ["#6D28D9", "#A855F7", "#F472B6"],
+  neutral: ["#404040", "#737373", "#A3A3A3"],
+};
+// The surfaces coloured TEXT sits on, worst case: the light page, and the dark card.
+// Name keys spelled out (not built with string concatenation) so the strings lint can see them.
+const PALETTE_NAME_KEYS = {
+  sunset: "palette_sunset", ocean: "palette_ocean", forest: "palette_forest", rose: "palette_rose",
+  ember: "palette_ember", sky: "palette_sky", grape: "palette_grape", neutral: "palette_neutral",
+};
+const PALETTE_BG_LIGHT = "#f6f4fb";
+const PALETTE_BG_DARK = "#1c1828";
+
+function normalizePaletteId(id) {
+  return typeof id === "string" && Object.prototype.hasOwnProperty.call(PALETTES, id) ? id : DEFAULT_PALETTE;
+}
+function hexToRgb(hex) {
+  const n = parseInt(String(hex).replace("#", ""), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function rgbToHex(rgb) {
+  return "#" + rgb.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("");
+}
+function relLuminance(rgb) {
+  const [r, g, b] = rgb.map((v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+/** WCAG contrast ratio of two #rrggbb colours. */
+function contrastRatio(a, b) {
+  const la = relLuminance(hexToRgb(a)), lb = relLuminance(hexToRgb(b));
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+/** `hex` as TEXT on `bg`: unchanged if it already clears AA (4.5:1), else mixed toward black (light
+ *  backgrounds) or white (dark ones) in 2% steps until it does. Derived from the stop — no
+ *  per-palette overrides (docs/PALETTES.md). */
+function inkFor(hex, bg, min = 4.5) {
+  const towards = relLuminance(hexToRgb(bg)) > 0.5 ? [0, 0, 0] : [255, 255, 255];
+  const base = hexToRgb(hex);
+  for (let i = 0; i <= 50; i++) {
+    const cand = rgbToHex(base.map((v, k) => v + (towards[k] - v) * (i * 0.02)));
+    if (contrastRatio(cand, bg) >= min) return cand;
+  }
+  return rgbToHex(towards);
+}
+/** The CSS custom properties a palette sets on <html>. */
+function paletteVars(id) {
+  const [s1, s2, s3] = PALETTES[normalizePaletteId(id)];
+  const rgb = (h) => hexToRgb(h).join(", ");
+  return {
+    "--p1": s1, "--p2": s2, "--p3": s3,
+    "--p1-rgb": rgb(s1), "--p2-rgb": rgb(s2), "--p3-rgb": rgb(s3),
+    "--p2-ink-dark": inkFor(s2, PALETTE_BG_DARK),
+    "--p2-ink-light": inkFor(s2, PALETTE_BG_LIGHT),
+  };
+}
+function currentPalette() {
+  let saved = null;
+  try { saved = localStorage.getItem(PALETTE_KEY); } catch (_) {}
+  return normalizePaletteId(saved);
+}
+/** Runtime window + taskbar icon from the palette PNG. The packaged / Start-menu / MSIX / Flatpak
+ *  icon is fixed at build time and is deliberately NOT touched. Best effort: never throws. */
+async function setPaletteIcon(id) {
+  try {
+    const win = TAURI.window && TAURI.window.getCurrentWindow && TAURI.window.getCurrentWindow();
+    if (!win || !win.setIcon || typeof fetch !== "function") return;
+    const res = await fetch("palette-icons/" + normalizePaletteId(id) + ".png");
+    if (res && res.ok === false) return;
+    await win.setIcon(new Uint8Array(await res.arrayBuffer()));
+  } catch (_) {}
+}
+function applyPalette(id) {
+  const pid = normalizePaletteId(id);
+  const root = document.documentElement;
+  for (const [k, v] of Object.entries(paletteVars(pid))) root.style.setProperty(k, v);
+  root.dataset.palette = pid;
+  return pid;
+}
+/** Persist + apply + retint the window icon. */
+function setPalette(id) {
+  const pid = applyPalette(id);
+  try { localStorage.setItem(PALETTE_KEY, pid); } catch (_) {}
+  setPaletteIcon(pid);
+  return pid;
+}
+function initPalette() {
+  const pid = applyPalette(currentPalette());
+  // The default needs no icon swap: the bundled icon already is `sunset`.
+  if (pid !== DEFAULT_PALETTE) setPaletteIcon(pid);
+}
+
 // First-run welcome (parity with iOS/Android): on a fresh install the backend has NO identity or
 // engine, so we must show this BEFORE calling any engine command. "Create" mints a new identity;
 // "Link" adopts a transfer code from another device. Both relaunch the app into the normal flow.
@@ -7993,7 +8229,7 @@ function termsContent() {
     rule("📒", t("on_record_t"), t("on_record_b")),
     rule("💜", t("own_share_t"), t("own_share_b")),
     el("a", { href: "https://github.com/blaineam/haven/blob/main/docs/TERMS.md", target: "_blank",
-              class: "small", style: "text-align:center;text-decoration:underline;color:var(--pink)" },
+              class: "small", style: "text-align:center;text-decoration:underline;color:var(--tint)" },
        t("read_full_terms")));
 }
 
@@ -8027,7 +8263,7 @@ function renderOnboarding() {
 
   const brandMark = () => {
     const m = el("div", { style: "width:112px;height:112px;border-radius:56px;background:var(--grad);"
-      + "display:flex;align-items:center;justify-content:center;box-shadow:0 10px 20px rgba(236,72,153,0.4)" });
+      + "display:flex;align-items:center;justify-content:center;box-shadow:0 10px 20px rgba(var(--p2-rgb),0.4)" });
     m.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="width:66px;height:66px">
       <circle cx="6" cy="7" r="1.6" fill="white"/><circle cx="18" cy="6" r="1.6" fill="white"/>
       <circle cx="12" cy="13" r="1.8" fill="white"/><circle cx="5" cy="17" r="1.6" fill="white"/>
@@ -8189,6 +8425,7 @@ function renderSeedlessLinking() {
 
 async function boot() {
   initTheme();
+  initPalette();
   // Fresh install → no identity/engine yet. Show the welcome screen and stop before touching any
   // engine command (which would error). onboard_create/onboard_link relaunch into the real app.
   try {

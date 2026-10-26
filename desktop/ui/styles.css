@@ -13,11 +13,21 @@
    opaque-first and only becomes translucent inside an @supports. See .glass below. */
 
 :root {
-  --violet: #7c3aed;
-  --pink: #ec4899;
-  --amber: #f59e0b;
-  --grad: linear-gradient(135deg, var(--violet), var(--pink) 55%, var(--amber));
-  --grad-h: linear-gradient(90deg, var(--violet), var(--pink) 55%, var(--amber));
+  /* PALETTE (docs/PALETTES.md). Everything decorative derives from the three stops; app.js
+     `applyPalette` overwrites these on <html> when the user picks one (per-device, live). The
+     values here ARE the default `sunset`, so first paint is right before any script runs.
+       --p1/2/3        the stops (fills, gradients, rings, glows)
+       --p*-rgb        the same stops as "r, g, b" for rgba(var(--p2-rgb), .3) shadows
+       --p2-ink-dark   stop 2 nudged (only if it must) to >= 4.5:1 as TEXT on the dark cards
+       --p2-ink-light  stop 2 nudged to >= 4.5:1 as TEXT on the light page
+       --tint          the one the theme actually uses for coloured text/icons
+     --warn-amber is the SEMANTIC warning amber and is never themed. */
+  --p1: #7c3aed; --p2: #ec4899; --p3: #f59e0b;
+  --p1-rgb: 124, 58, 237; --p2-rgb: 236, 72, 153; --p3-rgb: 245, 158, 11;
+  --p2-ink-dark: #ec4899; --p2-ink-light: #c23b7d;
+  --warn-amber: #f59e0b;
+  --grad: linear-gradient(135deg, var(--p1), var(--p2) 55%, var(--p3));
+  --grad-h: linear-gradient(90deg, var(--p1), var(--p2) 55%, var(--p3));
 
   /* Spring-ish easing curves (approximating SwiftUI .snappy / .bouncy). */
   --spring: cubic-bezier(0.22, 1, 0.36, 1);
@@ -53,8 +63,8 @@
   --shadow: 0 8px 16px rgba(0, 0, 0, 0.10);   /* HavenCard: .shadow(radius:16, y:8) */
 
   /* HavenBackground: grouped base + pink glow at (0.85, -0.05) r460, violet at (0.05, 0.18) r420. */
-  --glow1: radial-gradient(660px 660px at 85% -5%, rgba(236, 72, 153, 0.22), transparent 62%);
-  --glow2: radial-gradient(600px 600px at 5% 18%, rgba(124, 58, 237, 0.20), transparent 62%);
+  --glow1: radial-gradient(660px 660px at 85% -5%, rgba(var(--p2-rgb), 0.22), transparent 62%);
+  --glow2: radial-gradient(600px 600px at 5% 18%, rgba(var(--p1-rgb), 0.20), transparent 62%);
 
   /* Glass: opaque fallback first; the @supports block below thins these out where blur works.
      NOTE the thin value is a NEUTRAL MID film, not a white one and not a black one. A white film
@@ -71,8 +81,9 @@
   --glass: rgba(58, 50, 78, 0.92);
   --glass-thin: rgba(72, 68, 88, 0.72);
   --glass-ring: rgba(255, 255, 255, 0.12);   /* havenGlass fallback ring */
-  --glass-pink: rgba(236, 72, 153, 0.22);    /* havenGlass(tint: pink) */
-  --glass-pink-ring: rgba(236, 72, 153, 0.45);
+  --tint: var(--p2-ink-dark);
+  --glass-pink: rgba(var(--p2-rgb), 0.22);    /* havenGlass(tint: pink) */
+  --glass-pink-ring: rgba(var(--p2-rgb), 0.45);
 }
 
 /* ---- Light ---- */
@@ -83,7 +94,7 @@
   --card: rgba(255, 255, 255, 0.86);
   --panel: rgba(255, 255, 255, 0.78);
   --panel-solid: #ffffff;
-  --panel2: rgba(124, 58, 237, 0.06);
+  --panel2: rgba(var(--p1-rgb), 0.06);
   --line: rgba(20, 12, 40, 0.10);
   --line-strong: rgba(20, 12, 40, 0.16);
   --text: #1c1430;
@@ -91,27 +102,28 @@
   --ok: #059669;
   --warn: #b45309;
   --shadow: 0 8px 16px rgba(80, 40, 120, 0.10);
-  --glow1: radial-gradient(660px 660px at 85% -5%, rgba(236, 72, 153, 0.16), transparent 62%);
-  --glow2: radial-gradient(600px 600px at 5% 18%, rgba(124, 58, 237, 0.14), transparent 62%);
+  --glow1: radial-gradient(660px 660px at 85% -5%, rgba(var(--p2-rgb), 0.16), transparent 62%);
+  --glow2: radial-gradient(600px 600px at 5% 18%, rgba(var(--p1-rgb), 0.14), transparent 62%);
   --glass: rgba(255, 255, 255, 0.94);
   --glass-thin: rgba(255, 255, 255, 0.62);
   --glass-ring: rgba(20, 12, 40, 0.10);
-  --glass-pink: rgba(236, 72, 153, 0.14);
-  --glass-pink-ring: rgba(236, 72, 153, 0.38);
+  --tint: var(--p2-ink-light);
+  --glass-pink: rgba(var(--p2-rgb), 0.14);
+  --glass-pink-ring: rgba(var(--p2-rgb), 0.38);
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
     color-scheme: light;
     --bg: #f6f4fb; --bg2: #ffffff; --card: rgba(255,255,255,0.86);
     --panel: rgba(255,255,255,0.78); --panel-solid: #fff;
-    --panel2: rgba(124,58,237,0.06); --line: rgba(20,12,40,0.10); --line-strong: rgba(20,12,40,0.16);
+    --panel2: rgba(var(--p1-rgb), 0.06); --line: rgba(20,12,40,0.10); --line-strong: rgba(20,12,40,0.16);
     --text: #1c1430; --muted: #6b6385; --ok: #059669; --warn: #b45309;
     --shadow: 0 8px 16px rgba(80,40,120,0.10);
-    --glow1: radial-gradient(660px 660px at 85% -5%, rgba(236,72,153,0.16), transparent 62%);
-    --glow2: radial-gradient(600px 600px at 5% 18%, rgba(124,58,237,0.14), transparent 62%);
+    --glow1: radial-gradient(660px 660px at 85% -5%, rgba(var(--p2-rgb), 0.16), transparent 62%);
+    --glow2: radial-gradient(600px 600px at 5% 18%, rgba(var(--p1-rgb), 0.14), transparent 62%);
     --glass: rgba(255,255,255,0.94); --glass-thin: rgba(255,255,255,0.62);
     --glass-ring: rgba(20,12,40,0.10);
-    --glass-pink: rgba(236,72,153,0.14); --glass-pink-ring: rgba(236,72,153,0.38);
+    --tint: var(--p2-ink-light); --glass-pink: rgba(var(--p2-rgb), 0.14); --glass-pink-ring: rgba(var(--p2-rgb), 0.38);
   }
 }
 
@@ -160,7 +172,7 @@ button { font-family: inherit; cursor: pointer; }
 .icon-btn:active { transform: scale(0.94); opacity: 0.8; }
 .icon-btn.sm { width: 26px; height: 26px; font-size: 11px; }
 .icon-btn.sm svg { width: 12px; height: 12px; }
-.icon-btn.pink { color: var(--pink); }
+.icon-btn.pink { color: var(--tint); }
 
 /* Glass pill button for text actions — GlassPillButtonStyle. */
 .pill-btn {
@@ -222,7 +234,7 @@ button { font-family: inherit; cursor: pointer; }
 /* The circle switcher: a pink-tinted glass pill, chevron first — macOS `circlePicker`. */
 .circle-pill {
   display: inline-flex; align-items: center; gap: 5px; border-radius: 999px;
-  padding: 7px 14px; font-size: 13px; font-weight: 700; color: var(--pink); white-space: nowrap;
+  padding: 7px 14px; font-size: 13px; font-weight: 700; color: var(--tint); white-space: nowrap;
   transition: transform .14s var(--spring), opacity .14s;
 }
 .circle-pill:active { transform: scale(0.96); opacity: 0.85; }
@@ -331,7 +343,7 @@ input, textarea, select {
 }
 textarea { resize: vertical; min-height: 64px; }
 input:focus, textarea:focus, select:focus {
-  outline: none; border-color: var(--pink); box-shadow: 0 0 0 3px rgba(236, 72, 153, 0.18);
+  outline: none; border-color: var(--tint); box-shadow: 0 0 0 3px rgba(var(--p2-rgb), 0.18);
 }
 
 .btn {
@@ -344,13 +356,13 @@ input:focus, textarea:focus, select:focus {
 /* BrandButtonStyle: gradient pill, white text, pink shadow. No glass underneath. */
 .btn.primary {
   background: var(--grad-h); border: 0; color: white;
-  box-shadow: 0 5px 10px rgba(236, 72, 153, 0.35);
+  box-shadow: 0 5px 10px rgba(var(--p2-rgb), 0.35);
 }
-.btn.primary:hover { box-shadow: 0 7px 14px rgba(236, 72, 153, 0.45); }
+.btn.primary:hover { box-shadow: 0 7px 14px rgba(var(--p2-rgb), 0.45); }
 .btn.ghost { background: transparent; }
 /* SwiftUI `.buttonStyle(.bordered).tint(HavenTheme.pink)` — a tinted fill, NOT the brand gradient:
    it's a secondary action sitting under a prominent one. */
-.btn.tint-pink { background: var(--glass-pink); border-color: var(--glass-pink-ring); color: var(--pink); }
+.btn.tint-pink { background: var(--glass-pink); border-color: var(--glass-pink-ring); color: var(--tint); }
 .btn.danger { color: #fb7185; border-color: rgba(244, 63, 94, 0.4); }
 .btn.small { padding: 7px 13px; font-size: 12px; }
 .btn:disabled { opacity: 0.5; cursor: default; transform: none; }
@@ -359,7 +371,7 @@ input:focus, textarea:focus, select:focus {
 .avatar {
   width: 40px; height: 40px; border-radius: 50%; background: var(--grad);
   display: flex; align-items: center; justify-content: center; font-size: 17px; flex: 0 0 auto;
-  color: white; font-weight: 700; box-shadow: 0 2px 8px rgba(124, 58, 237, 0.3);
+  color: white; font-weight: 700; box-shadow: 0 2px 8px rgba(var(--p1-rgb), 0.3);
   overflow: hidden;
 }
 .avatar img { width: 100%; height: 100%; object-fit: cover; }
@@ -391,11 +403,11 @@ input:focus, textarea:focus, select:focus {
 .feed-banner { display: flex; align-items: center; gap: 8px; padding: 4px 2px 0; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: all .3s; flex: 0 0 auto; }
 .dot.on { background: #34d399; }
-.dot.relay { background: var(--amber); }
+.dot.relay { background: var(--warn-amber); }
 /* "Where this is stored" rows: a full set on a relay others can read, a partial/own-relay-only
    copy, and nothing yet. Same three states Apple's BackupDetailView draws. */
 .dot.ok { background: #34d399; }
-.dot.warn { background: var(--amber); }
+.dot.warn { background: var(--warn-amber); }
 .dot.muted { background: var(--muted); }
 .feed-banner .txt { font-size: 12px; color: var(--muted); }
 
@@ -418,7 +430,7 @@ input:focus, textarea:focus, select:focus {
 }
 .story-ring.add .ring > div {
   width: 100%; height: 100%; border-radius: 50%; background: var(--bg);
-  display: flex; align-items: center; justify-content: center; color: var(--pink);
+  display: flex; align-items: center; justify-content: center; color: var(--tint);
 }
 .story-ring.add .ring svg { width: 21px; height: 21px; }
 .story-ring.cover .ring { background: var(--grad); }
@@ -618,7 +630,7 @@ input:focus, textarea:focus, select:focus {
 .react-pill .n { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--muted); }
 .react-pill:hover { transform: translateY(-1px); }
 .react-pill:active { transform: scale(0.9); }
-.react-pill.mine .n { color: var(--pink); }
+.react-pill.mine .n { color: var(--tint); }
 .react-pill.pop { animation: pop .4s var(--bounce); }
 @keyframes pop { 0% { transform: scale(1); } 40% { transform: scale(1.35); } 100% { transform: scale(1); } }
 /* Quick-react emoji at the trailing edge: bare glyphs, no chrome (macOS `Button(e)`). */
@@ -649,7 +661,7 @@ input:focus, textarea:focus, select:focus {
 .comment { display: flex; gap: 8px; }
 .comment .bubble { min-width: 0; }
 .comment .bubble .who { font-size: 11px; font-weight: 600; }
-.comment .bubble .who.me { color: var(--pink); }
+.comment .bubble .who.me { color: var(--tint); }
 .reply-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
 .reply-row input {
   border-radius: 999px; border: 1px solid var(--glass-ring); background: var(--panel2);
@@ -658,7 +670,7 @@ input:focus, textarea:focus, select:focus {
 .send-sm {
   width: 30px; height: 30px; border-radius: 50%; border: 0; flex: 0 0 auto;
   background: var(--grad); color: #fff; display: inline-flex; align-items: center; justify-content: center;
-  box-shadow: 0 3px 8px rgba(236, 72, 153, 0.35); transition: transform .14s var(--spring);
+  box-shadow: 0 3px 8px rgba(var(--p2-rgb), 0.35); transition: transform .14s var(--spring);
 }
 .send-sm:active { transform: scale(0.92); }
 .send-sm svg { width: 13px; height: 13px; }
@@ -689,7 +701,7 @@ input:focus, textarea:focus, select:focus {
 }
 .song-sound svg, .song-open svg { width: 15px; height: 15px; display: block; }
 .song-sound:hover, .song-open:hover { color: var(--text); }
-.song-open { color: var(--brand-pink, #e0308a); }
+.song-open { color: var(--tint); }
 .kebab {
   margin-left: auto; background: transparent; border: 0; color: var(--muted); font-size: 17px;
   padding: 4px 8px; border-radius: 8px; line-height: 1; transition: color .2s;
@@ -714,8 +726,8 @@ input:focus, textarea:focus, select:focus {
 /* plus.circle.fill — a FILLED pink circle with a knocked-out plus. It is its own surface: no glass. */
 .composer-plus {
   width: 28px; height: 28px; flex: 0 0 auto; border: 0; padding: 0; border-radius: 50%;
-  background: var(--pink); color: #fff; display: inline-flex; align-items: center; justify-content: center;
-  box-shadow: 0 3px 10px rgba(236, 72, 153, 0.4); transition: transform .14s var(--spring);
+  background: var(--p2); color: #fff; display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: 0 3px 10px rgba(var(--p2-rgb), 0.4); transition: transform .14s var(--spring);
   margin-bottom: 7px;
 }
 .composer-plus:active { transform: scale(0.92); }
@@ -734,7 +746,7 @@ input:focus, textarea:focus, select:focus {
 .composer-send {
   width: 42px; height: 42px; flex: 0 0 auto; border: 0; padding: 0; border-radius: 50%;
   background: var(--grad); color: #fff; display: inline-flex; align-items: center; justify-content: center;
-  box-shadow: 0 4px 8px rgba(236, 72, 153, 0.4); transition: transform .14s var(--spring), opacity .2s;
+  box-shadow: 0 4px 8px rgba(var(--p2-rgb), 0.4); transition: transform .14s var(--spring), opacity .2s;
 }
 .composer-send:active { transform: scale(0.94); opacity: 0.9; }
 .composer-send svg { width: 17px; height: 17px; }
@@ -754,7 +766,7 @@ input:focus, textarea:focus, select:focus {
 .profile-avatar {
   position: relative; width: 92px; height: 92px; border-radius: 50%; border: 0; padding: 0;
   background: none; cursor: pointer; transition: transform .14s var(--spring);
-  filter: drop-shadow(0 8px 16px rgba(236, 72, 153, 0.35));
+  filter: drop-shadow(0 8px 16px rgba(var(--p2-rgb), 0.35));
 }
 .profile-avatar:active { transform: scale(0.96); }
 .profile-avatar .disc {
@@ -764,13 +776,13 @@ input:focus, textarea:focus, select:focus {
 .profile-avatar .disc img { width: 100%; height: 100%; object-fit: cover; }
 .profile-avatar .pencil {
   position: absolute; right: -2px; bottom: -2px; width: 26px; height: 26px; border-radius: 50%;
-  background: var(--bg); color: var(--pink); display: flex; align-items: center; justify-content: center;
+  background: var(--bg); color: var(--tint); display: flex; align-items: center; justify-content: center;
 }
 .profile-avatar .pencil svg { width: 15px; height: 15px; }
 .profile-name { font-size: 21px; font-weight: 700; }
 .profile-bio { font-size: 13px; color: var(--muted); max-width: 460px; }
 /* A profile link is user-supplied and can be any length — it wraps rather than widening the head. */
-.profile-link { font-size: 12px; font-weight: 600; color: var(--pink); background: none; border: 0; display: inline-flex; gap: 5px; align-items: center; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+.profile-link { font-size: 12px; font-weight: 600; color: var(--tint); background: none; border: 0; display: inline-flex; gap: 5px; align-items: center; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
 .profile-link svg { width: 12px; height: 12px; }
 .section-label { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
 
@@ -788,7 +800,7 @@ input:focus, textarea:focus, select:focus {
   width: 110px; height: 110px; flex: 0 0 auto; border-radius: 50%; background: var(--grad);
   overflow: hidden; display: flex; align-items: center; justify-content: center;
   font-size: 55px; line-height: 1; color: #fff;
-  filter: drop-shadow(0 8px 14px rgba(236, 72, 153, 0.35));
+  filter: drop-shadow(0 8px 14px rgba(var(--p2-rgb), 0.35));
 }
 .ep-avatar img { width: 100%; height: 100%; object-fit: cover; }
 /* macOS: `.font(.title3)`, centred, `.havenPillField()`, inset 30 — the name is the headline of the
@@ -814,7 +826,7 @@ input:focus, textarea:focus, select:focus {
   transition: transform .14s var(--spring), background .2s, border-color .2s;
 }
 .emoji-cell:hover { transform: scale(1.08); }
-.emoji-cell.on { background: var(--glass-pink); border-color: var(--pink); }
+.emoji-cell.on { background: var(--glass-pink); border-color: var(--tint); }
 
 /* ---- Settings sheet rows (macOS grouped Form) ---- */
 .set-group { border-radius: var(--r-md); overflow: hidden; border: 1px solid var(--line); background: var(--panel2); }
@@ -825,7 +837,7 @@ input:focus, textarea:focus, select:focus {
 }
 .set-row + .set-row { border-top: 1px solid var(--line); }
 button.set-row:hover { background: var(--panel); }
-.set-row .ri { width: 18px; flex: 0 0 auto; text-align: center; color: var(--pink); }
+.set-row .ri { width: 18px; flex: 0 0 auto; text-align: center; color: var(--tint); }
 .set-row .chev { margin-left: auto; color: var(--muted); font-size: 12px; }
 .set-foot { font-size: 11px; color: var(--muted); padding: 6px 4px 0; line-height: 1.45; }
 
@@ -859,13 +871,13 @@ button.set-row:hover { background: var(--panel); }
   padding: 8px 12px; border-radius: 16px; background: var(--panel2); line-height: 1.4;
   font-size: 14px; word-break: break-word; white-space: pre-wrap;
 }
-.chat-bubble.me { background: var(--grad); color: #fff; box-shadow: 0 4px 12px rgba(236, 72, 153, 0.28); }
+.chat-bubble.me { background: var(--grad); color: #fff; box-shadow: 0 4px 12px rgba(var(--p2-rgb), 0.28); }
 .chat-bubble.tombstone { font-style: italic; color: var(--muted); background: var(--panel2); }
 /* Spacer(minLength: 50) either side — a bubble never spans the full column. */
 .bubble-col { display: flex; flex-direction: column; gap: 4px; max-width: calc(100% - 50px); align-items: flex-start; }
 .bubble-row.me .bubble-col { align-items: flex-end; }
 .bubble-media img, .bubble-media video { max-width: 240px; border-radius: 12px; display: block; }
-.chat-sender { font-size: 11px; font-weight: 600; color: var(--pink); padding-left: 4px; }
+.chat-sender { font-size: 11px; font-weight: 600; color: var(--tint); padding-left: 4px; }
 .bubble-reacts { display: flex; gap: 4px; flex-wrap: wrap; }
 .msg-react {
   font-size: 11px; padding: 2px 6px; border-radius: 999px; border: 1px solid transparent;
@@ -875,8 +887,8 @@ button.set-row:hover { background: var(--panel); }
 .msg-react:active { transform: scale(0.9); }
 .chat-meta { display: flex; gap: 5px; align-items: center; font-size: 10px; color: var(--muted); padding: 0 4px; }
 .chat-check { color: var(--muted); }
-.chat-check.on { color: var(--pink); }
-.chat-bubble.secret { cursor: pointer; user-select: none; border: 1px dashed var(--pink); }
+.chat-check.on { color: var(--tint); }
+.chat-bubble.secret { cursor: pointer; user-select: none; border: 1px dashed var(--p2); }
 /* The DM composer DOES carry a glass band (macOS `.havenGlass(in: Rectangle())`) — unlike the
    feed's, which floats bare over the gradient. It's the floor of the thread. */
 .dm-composer { flex: 0 0 auto; padding: 10px 14px; border-radius: var(--r-lg) var(--r-lg) 0 0; border-bottom: 0; }
@@ -885,7 +897,7 @@ button.set-row:hover { background: var(--panel); }
 .composer-field.tint-pink { background: var(--glass-pink); border-color: var(--glass-pink-ring); }
 
 /* New-message picker rows (DMContactPicker): tap to select, pink check when picked. */
-.pick-check { opacity: 0; color: var(--pink); display: flex; }
+.pick-check { opacity: 0; color: var(--tint); display: flex; }
 .pick-check svg { width: 16px; height: 16px; }
 .list-item.picked .pick-check { opacity: 1; }
 .list-item.picked { background: var(--glass-pink); }
@@ -911,12 +923,12 @@ button.set-row:hover { background: var(--panel); }
 .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; word-break: break-all; overflow-wrap: anywhere; }
 .list-item { display: flex; align-items: center; gap: 11px; padding: 11px; border-radius: var(--r-md); transition: background .18s; }
 .list-item:hover { background: var(--panel2); }
-.pending-item { border: 1px solid var(--pink); border-radius: var(--r-md); padding: 12px; margin-bottom: 8px; background: rgba(236, 72, 153, 0.06); }
+.pending-item { border: 1px solid var(--p2); border-radius: var(--r-md); padding: 12px; margin-bottom: 8px; background: rgba(var(--p2-rgb), 0.06); }
 #scan-video { width: 100%; max-width: 340px; border-radius: var(--r-md); background: #000; }
 
 /* ---- misc ---- */
 .empty { text-align: center; color: var(--muted); padding: 48px 10px; }
-.empty .big { font-size: 34px; color: var(--pink); display: block; margin-bottom: 10px; }
+.empty .big { font-size: 34px; color: var(--tint); display: block; margin-bottom: 10px; }
 .empty .h { font-size: 15px; font-weight: 600; color: var(--text); }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
 @media (max-width: 980px) { .grid2 { grid-template-columns: 1fr; } }
@@ -987,7 +999,7 @@ button.set-row:hover { background: var(--panel); }
 .nudge-banner {
   display: flex; align-items: flex-start; gap: 10px; padding: 14px;
   background: var(--grad-h); border-radius: var(--r-md); color: #fff;
-  box-shadow: 0 6px 18px rgba(236, 72, 153, 0.3);
+  box-shadow: 0 6px 18px rgba(var(--p2-rgb), 0.3);
   animation: cardIn .4s var(--spring) both;
 }
 .nudge-body { display: flex; align-items: flex-start; gap: 12px; flex: 1; min-width: 0; cursor: pointer; }
@@ -1007,7 +1019,7 @@ button.set-row:hover { background: var(--panel); }
 /* A banner's prominent action (Follow / Upgrade) — solid white ON the gradient, since a glass pill
    reads as secondary and these are the whole point of the card (.borderedProminent on Apple). */
 .nudge-cta {
-  flex: 0 0 auto; align-self: center; background: #fff; color: var(--violet);
+  flex: 0 0 auto; align-self: center; background: #fff; color: var(--p1);
 }
 .nudge-cta:hover { opacity: 0.92; }
 .nudge-point {
@@ -1021,7 +1033,7 @@ button.set-row:hover { background: var(--panel); }
 .post.focus-flash { animation: focusFlash 1.6s var(--spring); }
 @keyframes focusFlash {
   0%, 100% { outline: 2px solid transparent; outline-offset: 3px; }
-  15%, 60% { outline: 2px solid var(--pink); outline-offset: 3px; }
+  15%, 60% { outline: 2px solid var(--p2); outline-offset: 3px; }
 }
 
 /* ---- Calls (macOS CallOverlay parity: gradient stage, solo/grid, PiP, bottom-centre controls) ---- */
@@ -1047,7 +1059,7 @@ button.set-row:hover { background: var(--panel); }
 .call-solo { position: absolute; inset: 0; display: grid; place-items: center; }
 .call-solo video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .call-solo.speaking::after { content: ""; position: absolute; inset: 10px; border-radius: 18px;
-  border: 4px solid var(--pink); box-shadow: 0 0 18px var(--pink), inset 0 0 18px rgba(236,72,153,.35);
+  border: 4px solid var(--p2); box-shadow: 0 0 18px var(--p2), inset 0 0 18px rgba(var(--p2-rgb), .35);
   pointer-events: none; }
 /* Groups — remote tiles only (we live in the PiP), centred, rounded, badged. */
 .call-grid { position: absolute; inset: 12px; display: grid; gap: 8px; align-content: center;
@@ -1057,16 +1069,16 @@ button.set-row:hover { background: var(--panel); }
 .call-tile video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .call-tile-shade { position: absolute; inset: 0; pointer-events: none;
   background: linear-gradient(180deg, rgba(0,0,0,.45), transparent 40%, rgba(0,0,0,.35)); }
-.call-tile.speaking { box-shadow: 0 0 0 3px var(--pink), 0 0 14px var(--pink); }
+.call-tile.speaking { box-shadow: 0 0 0 3px var(--p2), 0 0 14px var(--p2); }
 .call-name { position: absolute; left: 8px; bottom: 8px; background: rgba(0, 0, 0, 0.55); padding: 3px 9px; border-radius: 999px; font-size: 12px; }
 /* Our own camera: corner PiP, mirrored, hairline border (macOS 96×128). */
 .call-pip { position: absolute; top: 10px; right: 14px; width: 96px; height: 128px; z-index: 3;
   border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,.6);
   background: rgba(0,0,0,.3); display: grid; place-items: center; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
 .call-pip video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
-.call-pip.speaking { box-shadow: 0 0 0 3px var(--pink), 0 0 14px var(--pink); }
+.call-pip.speaking { box-shadow: 0 0 0 3px var(--p2), 0 0 14px var(--p2); }
 .call-avatar { border-radius: 50%; display: grid; place-items: center; overflow: hidden;
-  background: linear-gradient(180deg, var(--amber), var(--pink)); color: #fff; font-weight: 700;
+  background: linear-gradient(180deg, var(--p3), var(--p2)); color: #fff; font-weight: 700;
   border: 2px solid rgba(255,255,255,.25); box-shadow: 0 6px 18px rgba(0,0,0,.3); }
 .call-avatar img { width: 100%; height: 100%; object-fit: cover; }
 /* Controls: ALWAYS bottom-centre — device pickers on a slim row, circular glass buttons below. */
@@ -1120,7 +1132,7 @@ button.set-row:hover { background: var(--panel); }
 ::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
 ::-webkit-scrollbar-corner { background: transparent; }
 .view { scroll-behavior: smooth; overscroll-behavior: contain; }   /* momentum-y, no rubber-band bleed */
-::selection { background: rgba(236, 72, 153, 0.32); color: var(--text); }
+::selection { background: rgba(var(--p2-rgb), 0.32); color: var(--text); }
 html { -webkit-text-size-adjust: 100%; }
 input, textarea, select { box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.06); }
 :focus-visible { outline: none; }
@@ -1130,16 +1142,16 @@ body.drop-target::after {
   content: "Drop photos or videos to attach";
   position: fixed; inset: 8px; z-index: 9999; pointer-events: none;
   display: flex; align-items: center; justify-content: center;
-  font-weight: 600; color: var(--pink);
-  background: rgba(236, 72, 153, 0.10);
-  border: 2px dashed var(--pink); border-radius: 16px;
+  font-weight: 600; color: var(--tint);
+  background: rgba(var(--p2-rgb), 0.10);
+  border: 2px dashed var(--p2); border-radius: 16px;
 }
 
 /* ---- Media storage management (#1 cleanup screen, #3 evicted placeholder) ------------- */
 @keyframes havenSpin { to { transform: rotate(360deg); } }
 .spinner {
   width: 22px; height: 22px; border-radius: 50%;
-  border: 2.5px solid var(--line); border-top-color: var(--pink);
+  border: 2.5px solid var(--line); border-top-color: var(--tint);
   animation: havenSpin 0.8s linear infinite;
 }
 /* Cleanup-row thumbnail: a fixed square that holds either an <img> cover or a kind glyph. */
@@ -1166,32 +1178,32 @@ body.drop-target::after {
   width: 7px; height: 7px; border-radius: 4px; background: var(--line-strong);
   transition: width .25s var(--spring), background .25s;
 }
-.ig-dot.on { width: 22px; background: var(--pink); }
+.ig-dot.on { width: 22px; background: var(--p2); }
 
 .ig-step {
   display: flex; flex-direction: column; align-items: center; gap: 12px;
   text-align: center; padding: 6px 2px 2px;
 }
-.ig-step-icon { color: var(--pink); }
+.ig-step-icon { color: var(--tint); }
 .ig-step-icon svg { width: 40px; height: 40px; }
 .ig-step-title { font-size: 19px; font-weight: 700; }
 .ig-step-blurb { font-size: 13px; color: var(--muted); line-height: 1.5; max-width: 42ch; }
 /* The one value the user genuinely cannot get wrong (JSON, not HTML) is the only one drawn hot. */
-.ig-critical { color: var(--amber); font-weight: 700; }
+.ig-critical { color: var(--warn-amber); font-weight: 700; }
 .ig-warn {
   display: flex; gap: 8px; align-items: flex-start; font-size: 12px; line-height: 1.45;
-  color: var(--amber); text-align: left;
+  color: var(--warn-amber); text-align: left;
 }
 .ig-warn svg { width: 16px; height: 16px; flex: 0 0 auto; margin-top: 1px; }
 .ig-bullet { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; line-height: 1.5; }
-.ig-bullet i { width: 5px; height: 5px; border-radius: 50%; background: var(--pink); margin-top: 7px; flex: 0 0 auto; }
+.ig-bullet i { width: 5px; height: 5px; border-radius: 50%; background: var(--p2); margin-top: 7px; flex: 0 0 auto; }
 
 .ig-big { font-size: 54px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
 .ig-bar { width: 100%; max-width: 340px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .ig-bar i { display: block; height: 100%; background: var(--grad-h); transition: width .3s var(--spring); }
 .ig-done-icon { color: var(--ok); }
 .ig-done-icon svg { width: 46px; height: 46px; }
-.ig-fail-icon { color: var(--amber); }
+.ig-fail-icon { color: var(--warn-amber); }
 .ig-fail-icon svg { width: 42px; height: 42px; }
 
 /* The app-wide "still importing" pill. Bottom-LEFT on purpose: the composer floats bottom-centre
@@ -1201,14 +1213,35 @@ body.drop-target::after {
   position: fixed; left: 16px; bottom: 16px; z-index: 40;
   display: flex; align-items: center; gap: 11px; padding: 9px 14px;
   border-radius: 999px; background: var(--panel-solid); color: var(--text);
-  border: 1px solid rgba(236, 72, 153, 0.35);
+  border: 1px solid rgba(var(--p2-rgb), 0.35);
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
   animation: cardIn .35s var(--spring) both;
 }
-.import-pill:hover { border-color: var(--pink); }
+.import-pill:hover { border-color: var(--tint); }
 .ip-ring { width: 34px; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; flex: 0 0 auto; }
 .ip-ring i { display: block; height: 100%; background: var(--grad-h); transition: width .3s var(--spring); }
 .ip-title { font-size: 12px; font-weight: 600; }
 .ip-count { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .ip-chev { color: var(--muted); display: flex; }
 .ip-chev svg { width: 12px; height: 12px; transform: rotate(-90deg); }
+
+/* ---- Palette swatches (Settings > Appearance). The ring is the selection state; the gradient is
+   the palette's own stops, so it is correct for every palette without a per-palette rule. ---- */
+.palette-swatches { display: flex; flex-wrap: wrap; gap: 10px; }
+.swatch {
+  width: 34px; height: 34px; border-radius: 50%; border: 2px solid var(--line-strong); padding: 0;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18); transition: transform .14s var(--spring);
+}
+.swatch:hover { transform: scale(1.08); }
+.swatch:focus-visible { outline: 2px solid var(--tint); outline-offset: 3px; }
+.swatch.on { border-color: var(--text); box-shadow: 0 0 0 3px var(--p2), 0 2px 6px rgba(0, 0, 0, 0.18); }
+
+/* ---- Multi-circle post popover (right-click / long-press on Post) ---- */
+.circle-pick { min-width: 240px; max-width: 320px; padding: 8px; }
+.circle-pick .cp-title { font-size: 12px; font-weight: 700; padding: 6px 8px 8px; }
+.circle-pick label {
+  display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: var(--r-sm); cursor: pointer; font-size: 14px;
+}
+.circle-pick label:hover { background: var(--glass-pink); }
+.circle-pick input[type="checkbox"] { accent-color: var(--p2); width: 16px; height: 16px; }
+.circle-pick .btn { width: 100%; margin-top: 6px; }

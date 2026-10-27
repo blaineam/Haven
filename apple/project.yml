@@ -655,6 +655,7 @@ targets:
       - path: HavenApp/CarPlayAvatar.swift
       - path: HavenApp/CarPlayAvatarRenderer.swift
       - path: HavenApp/CarPlayDriveMode.swift
+      - path: HavenApp/CarPlayNavigator.swift
       - path: HavenApp/CarPlayVoice.swift
       - path: Shared/Messaging.xcstrings
     settings:

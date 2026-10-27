@@ -267,7 +267,7 @@ final class CarPlayTemplatesTests: XCTestCase {
         XCTAssertNotNil((section.items.first as? CPListItem)?.image)
     }
 
-    func testCallsListRowsOpenAContactAndTheContactButtonCalls() {
+    func testCallsListRowsDialDirectlyWithNoContactCard() {
         let rows = [CarPlayConversations.CallRow(conversationId: "dm:aa", title: "Tracy M")]
         var selected: [String] = []
         let section = CarPlayTemplates.callsSection(for: rows) { selected.append($0.conversationId) }
@@ -276,16 +276,8 @@ final class CarPlayTemplatesTests: XCTestCase {
         let done = expectation(description: "handler")
         item?.handler?(item!, { done.fulfill() })
         wait(for: [done], timeout: 2)
-        XCTAssertEqual(selected, ["dm:aa"], "selecting opens the card; it does not dial")
-
-        var called = 0
-        let img = CarPlayAvatarRenderer.shared.image(for: .initials("TM"), photo: nil, photoStamp: 0, id: "dm:aa",
-                                                     side: CarPlayAvatar.side(max: CPButtonMaximumImageSize), scale: 2,
-                                                     paletteId: "t", stops: [0x7C3AED, 0xEC4899, 0xF59E0B])
-        let template = CarPlayTemplates.contactTemplate(for: rows[0], avatar: img) { called += 1 }
-        XCTAssertTrue(template.contact.actions?.first is CPContactCallButton, "the system Call button")
-        XCTAssertEqual(template.contact.name, "Tracy M")
-        XCTAssertEqual(called, 0, "building the card never dials")
+        XCTAssertEqual(selected, ["dm:aa"], "selecting is the dial action itself - no template is pushed in between")
+        XCTAssertEqual(item?.detailText, MessagingText.audioCall)
     }
 
     func testEmptyCallsListHasAnExplanation() {

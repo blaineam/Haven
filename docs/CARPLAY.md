@@ -92,8 +92,7 @@ the snapshot, a group DM by its title, locked conversations are refused.
   Read aloud uses Haven's own `AVSpeechSynthesizer` (`CarPlaySpeaker`: spoken-audio session that ducks other
   audio and hands it back, never over an active call): "N new messages from Tracy M." then each unread one
   oldest first (attachment-only messages are spoken as "Sent a photo"), or the latest few when nothing is
-  unread. Heard messages are marked read. Call opens the same contact card as the Calls tab (it never dials on
-  one tap).
+  unread. Heard messages are marked read. Call dials the person straight away, like a Calls-tab row.
 
 #### Parked vs. driving - message text is only shown when parked
 
@@ -298,8 +297,8 @@ A locked winner is never swapped for a look-alike for calls (locked "Maya" does 
   interactions for the 8 most recent unlocked conversations (and on every call placed). Locked conversations
   contribute nothing; switching CarPlay and Siri messages off or resetting the account erases both.
 * **Screen:** the CarPlay root is a tab bar (Messages | Calls) when the entitlement allows 2+ tabs
-  (`CPTabBarTemplate.maximumTabCount`). A Calls row opens a `CPContactTemplate` (system `CPContactCallButton`);
-  that button starts the same call. A tap on a row never dials by itself.
+  (`CPTabBarTemplate.maximumTabCount`). Tapping a Calls row dials that person straight away
+  (avatar, name, "Haven audio call" subtitle); there is no intermediate contact card.
 * **Audio only:** `CallManager.startCall` begins with the camera off (`videoOn == false`) and requests the
   CallKit call with `CXStartCallAction.isVideo = false`, so every Haven call from the car starts audio-only,
   including when Siri asked for video (the activity carries `havenAudioOnly`). Video can be switched on from the
@@ -421,6 +420,10 @@ existing. NOT verified without a car: how the icons and the own-photo rows look 
 
 ## Known limits
 
+* **Navigation never runs bare.** `CPInterfaceController` raises an uncaught exception when a navigation call fails
+  and has no completion handler (the limited-UI crash). Every set-root / push / pop goes through `CarPlayNavigator`:
+  serial, always with a completion that logs and swallows errors, skipping a pop at the root and a push of a template
+  already on the stack. Do not call the interface controller directly.
 * CarPlay shows at most `CPListTemplate.maximumItemCount` rows (head-unit dependent); Haven uses min(12, that).
 * Siri send needs the app process alive to seal and send. With CarPlay connected the scene keeps it running; with
   no ack within 4 s (app not running) the extension answers "needs the app" and the request stays queued,

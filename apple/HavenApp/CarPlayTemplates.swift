@@ -259,29 +259,18 @@ enum CarPlayTemplates {
 
     // MARK: Calls
 
-    /// The Calls tab list. A row opens a contact card (never dials on the first tap - an accidental
-    /// touch on a dashboard must not ring someone).
+    /// The Calls tab list. A row dials immediately - there is no intermediate card (`onSelect` places the call).
     static func callsSection(for rows: [CarPlayConversations.CallRow], avatars: [String: UIImage] = [:],
                              onSelect: @escaping (CarPlayConversations.CallRow) -> Void) -> CPListSection {
         guard !rows.isEmpty else {
             return CPListSection(items: [CPListItem(text: MessagingText.noOneToCall, detailText: MessagingText.noOneToCallHint)])
         }
         let items: [CPListItem] = rows.map { row in
-            let item = CPListItem(text: row.title, detailText: nil, image: avatars[row.conversationId])
+            let item = CPListItem(text: row.title, detailText: MessagingText.audioCall, image: avatars[row.conversationId])
             item.handler = { _, completion in onSelect(row); completion() }
             return item
         }
         return CPListSection(items: items)
-    }
-
-    /// Contact card with the system Call button (CPContactCallButton). `onCall` starts an AUDIO call (`CallManager.startCall`).
-    static func contactTemplate(for row: CarPlayConversations.CallRow, avatar: UIImage,
-                                onCall: @escaping () -> Void) -> CPContactTemplate {
-        let call = CPContactCallButton(handler: { _ in onCall() })
-        let contact = CPContact(name: row.title, image: avatar)
-        contact.subtitle = MessagingText.audioCall
-        contact.actions = [call]
-        return CPContactTemplate(contact: contact)
     }
 }
 #endif

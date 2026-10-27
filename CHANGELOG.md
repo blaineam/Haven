@@ -9,6 +9,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - CarPlay crashed when the car switched to limited UI (iOS)
+
+- Crash logs (SIGABRT, an uncaught NSException from `-[CPInterfaceController _handleCompletion:withSuccess:error:]`): CarPlay raises when a navigation call fails and was given no completion handler, and the limited-UI rebuild could pop/push while a transition was still in flight. All CarPlay navigation (set root, push, pop to root) now goes through `CarPlayNavigator`: one operation at a time, a completion handler on every call that logs and swallows errors, a pop with nothing to pop and a push of a template already on the stack are skipped, and no conversation screen opens while driving. Tested against a fake controller (`CarPlayNavigatorTests`).
+
+### Changed - CarPlay Calls tab dials on tap (iOS)
+
+- Tapping a person in the Calls tab places the Haven audio call immediately; the intermediate contact screen (avatar, "Haven audio call", a Call button) is gone, and the conversation screen's Call button dials directly too. Rows show the avatar, name and a "Haven audio call" subtitle.
+
 ### Changed - CarPlay while driving: a tap reads or composes, no menu (iOS)
 
 - In driving mode (the car reports a UI limit) tapping a Messages-tab conversation no longer opens the

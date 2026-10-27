@@ -14,8 +14,8 @@ import UIKit
 ///     row (the one Siri-managed `CPMessageListItem`, keyed by the DM circle id, which takes a spoken
 ///     reply through `HavenIntents`), with "Read to me" and "Call" as nav-bar buttons; DRIVING (the car
 ///     reports a UI limit - `CarPlayDriveMode`) it shows no message text at all, only those actions.
-///   * **Calls** - callable conversations; a row opens a `CPContactTemplate` whose "Call on Haven" button
-///     starts an audio call through `CallManager` (CallKit then shows it natively on the car).
+///   * **Calls** - callable conversations; a row dials that person straight away (no intermediate screen)
+///     as an audio call through `CallManager` (CallKit then shows it natively on the car).
 ///
 /// Rules this file keeps:
 ///   * never block the main thread - rows come from `FeedStore`'s cached read model and refresh on a
@@ -26,6 +26,8 @@ import UIKit
 ///   * no identity yet (fresh install) -> a single "Open Haven on your iPhone" row.
 final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPSessionConfigurationDelegate {
     private var interfaceController: CPInterfaceController?
+    /// All navigation (set root / push / pop) goes through here: one op at a time, always a completion.
+    private var navigator: CarPlayNavigator?
     private var messagesTemplate: CPListTemplate?
     private var callsTemplate: CPListTemplate?
     private var cancellables = Set<AnyCancellable>()
@@ -50,6 +52,8 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
                                   didConnect interfaceController: CPInterfaceController) {
         HavenLog.sync("carplay: connected")
         self.interfaceController = interfaceController
+        navigator = CarPlayNavigator(controller: CarPlayControllerAdapter(interfaceController),
+                                     log: { HavenLog.sync($0) })
         let configuration = CPSessionConfiguration(delegate: self)
         carSession = configuration
         driveMode = CarPlayDriveMode.mode(for: configuration.limitedUserInterfaces)
@@ -66,7 +70,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             callsTemplate = calls
             root = CPTabBarTemplate(templates: [messages, calls])
         }
-        interfaceController.setRootTemplate(root, animated: false, completion: nil)
+        navigator?.setRoot(root, animated: false)
         refresh()
         observe()
     }
@@ -81,6 +85,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         carSession = nil
         CarPlaySpeaker.shared.stop()
         self.interfaceController = nil
+        navigator = nil
     }
 
     // MARK: - Parked / driving
@@ -99,7 +104,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             // back to the list (whose rows now read / compose directly).
             if mode == .driving, self.openConversation != nil {
                 self.openConversation = nil
-                self.interfaceController?.popToRootTemplate(animated: false, completion: nil)
+                self.navigator?.popToRoot(animated: false)
             }
             self.refresh()
         }
@@ -224,24 +229,25 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             for: detail, mode: driveMode, art: art,
             onRead: { [weak self] in self?.read(id, unreadOnly: true) },
             onCall: { [weak self] in
-                if let row = self?.callRows.first(where: { $0.conversationId == id }) { self?.showContact(row) }
+                if let row = self?.callRows.first(where: { $0.conversationId == id }) { self?.dial(row) }
             },
             onSpeak: { [weak self] line in self?.speakLine(id, line) })
     }
 
     @MainActor private func showConversation(_ id: String) {
-        guard let controller = interfaceController, let screen = conversationScreen(id),
+        // Never in limited UI (no conversation screen while driving) and never over a screen already open.
+        guard let navigator, driveMode == .parked, openConversation == nil, let screen = conversationScreen(id),
               let title = threadsByID[id]?.title else { return }
         let template = CPListTemplate(title: title, sections: screen.sections)
         template.trailingNavigationBarButtons = screen.buttons
         openConversation = (id, template)
-        controller.pushTemplate(template, animated: true, completion: nil)
+        navigator.push(template, animated: true)
     }
 
     /// New messages arriving while a conversation is open, or the car starting/stopping, update it in place.
     @MainActor private func refreshOpenConversation() {
         guard let open = openConversation else { return }
-        guard interfaceController?.templates.contains(where: { $0 === open.template }) == true,
+        guard navigator?.contains(open.template) == true,
               let fresh = conversationScreen(open.id) else { openConversation = nil; return }
         open.template.updateSections(fresh.sections)
         open.template.trailingNavigationBarButtons = fresh.buttons
@@ -269,23 +275,37 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 
     @MainActor private func callsSection(avatars: [String: UIImage]) -> CPListSection {
         CarPlayTemplates.callsSection(for: callRows, avatars: avatars) { [weak self] row in
-            self?.showContact(row)
+            self?.dial(row)
         }
     }
 
-    @MainActor private func showContact(_ row: CarPlayConversations.CallRow) {
-        guard let controller = interfaceController else { return }
-        let side = CarPlayAvatar.side(max: CPButtonMaximumImageSize)
-        let image = avatarsByID[row.conversationId]
-            ?? CarPlayAvatarRenderer.shared.image(for: .initials(CarPlayAvatar.initials(row.title)), photo: nil, photoStamp: 0,
-                                                  id: row.conversationId, side: side, scale: controller.carTraitCollection.displayScale,
-                                                  paletteId: PaletteStore.current.id, stops: PaletteStore.current.stops)
-        let template = CarPlayTemplates.contactTemplate(for: row, avatar: image) { [weak self] in
-            // Back to the list first so the call UI CallKit raises isn't under a pushed template.
-            self?.interfaceController?.popToRootTemplate(animated: false, completion: nil)
-            SiriCallRouter.place(conversationId: row.conversationId)
-        }
-        controller.pushTemplate(template, animated: true, completion: nil)
+    /// Tapping a person dials them - no intermediate screen. Back to the root first (a no-op from the
+    /// Calls tab) so the call UI CallKit raises isn't under a pushed conversation screen.
+    @MainActor private func dial(_ row: CarPlayConversations.CallRow) {
+        navigator?.popToRoot(animated: false)
+        SiriCallRouter.place(conversationId: row.conversationId)
+    }
+}
+
+/// `CPInterfaceController` seen through `CarPlayNavigating` (see `CarPlayNavigator` for why every call carries a completion).
+private final class CarPlayControllerAdapter: CarPlayNavigating {
+    private let controller: CPInterfaceController
+    init(_ controller: CPInterfaceController) { self.controller = controller }
+
+    var stack: [AnyObject] { controller.templates }
+
+    func setRoot(_ template: AnyObject, animated: Bool, completion: @escaping (Bool, Error?) -> Void) {
+        guard let template = template as? CPTemplate else { return completion(false, nil) }
+        controller.setRootTemplate(template, animated: animated, completion: completion)
+    }
+
+    func push(_ template: AnyObject, animated: Bool, completion: @escaping (Bool, Error?) -> Void) {
+        guard let template = template as? CPTemplate else { return completion(false, nil) }
+        controller.pushTemplate(template, animated: animated, completion: completion)
+    }
+
+    func popToRoot(animated: Bool, completion: @escaping (Bool, Error?) -> Void) {
+        controller.popToRootTemplate(animated: animated, completion: completion)
     }
 }
 #endif

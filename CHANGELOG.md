@@ -9,6 +9,23 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - Android post media (and tile thumbnails) took minutes to appear on a fresh install (Android)
+- **Root cause (Nokia 6.1, fresh install on a busy circle).** The core's `feed()` is
+  OLDEST-FIRST and `requestMissingMedia` walked it that way into ONE serial FIFO, so the
+  NEWEST post's media was asked for LAST - behind every older ref. On a fresh device nearly
+  every backlog ref is a relay MISS (sealed before the device existed): logcat showed 875 refs
+  at ~0.11 s each (about 100 s) before the queue reached anything recent, and the 4 blobs that
+  were found were unopenable. The small thumbs that make a tile look like the photo queued
+  behind the full-size backlog too, while profile pictures took another path - hence "avatars
+  load, post media takes forever".
+- **Fix.** The sweep now walks each circle newest-first; fresh media and the newest 120 posts'
+  thumbs/posters/previews ride the priority lane (drained ahead of the backlog by the same
+  single serial consumer, so peak memory is unchanged); older history queues behind. A relay
+  MISS no longer pays a second `__interface__` liveness request when the same base proved alive
+  in the last minute (about half the cost of a hopeless ref). Apple parity: iOS already puts
+  thumbs/posters/previews on a priority lane and scans newest-first.
+- New pure `MediaRestorePlan` / `AliveProbeCache` with `MediaRestorePlanTest` (9 tests).
+
 ### Fixed - Android crashed mid-sync on a fresh install and dropped the arriving message (Android)
 - A new install's first backfill kills the process with `ConcurrentModificationException` in
   `HavenNet.saveUnopenable`: the parked-media set is a `Collections.synchronizedSet`, and

@@ -6598,12 +6598,14 @@ object HavenNet : InboundListener {
     }
 
     /** Enqueue a missing media blob to fetch from the circle's relays — serialized (one at a time). */
-    private fun enqueueRestore(circleId: String, ref: String, onMiss: (() -> Unit)? = null) {
+    private fun enqueueRestore(circleId: String, ref: String, priority: Boolean = false, onMiss: (() -> Unit)? = null) {
         if (LocalMedia.isSynthetic(ref)) return   // geo: pins et al. carry no bytes — nothing to fetch
         val job = MediaJob.Restore(ref, circleId, onMiss)
         if (!offerMediaJob(jobKey(job))) return
         ensureMediaQueueDraining()
-        mediaQueue.trySend(job)
+        // PRIORITY = fresh media + the newest posts' thumbs (see [MediaRestorePlan]); drained ahead of
+        // the backlog by the single serial consumer, so peak memory is unchanged.
+        (if (priority) mediaPriorityQueue else mediaQueue).trySend(job)
     }
 
     /**
@@ -7276,9 +7278,15 @@ object HavenNet : InboundListener {
         val now = nowMs()
         val missing = LinkedHashMap<String, Pair<String, Boolean>>()   // ref -> (circleId, fresh)
         val thumbs = LinkedHashMap<String, String>()   // thumb ref -> circleId (prefetched unconditionally)
+        val priorityThumbs = LinkedHashSet<String>()   // recent posts' small companions → the priority lane
         for (c in social.circles()) {
-            val feed = runCatching { social.feed(c.id, now, null) }.getOrDefault(emptyList())
+            // The core's feed is OLDEST-FIRST. Walk it NEWEST-first: `missing` is insertion-ordered
+            // and drained serially, so oldest-first put the newest post's media LAST — behind a
+            // week of refs a fresh device can never open. See [MediaRestorePlan].
+            val feed = runCatching { social.feed(c.id, now, null) }.getOrDefault(emptyList()).asReversed()
+            var rank = -1
             for (item in feed) {
+                rank++
                 // FRESH = the referencing event is < 5 min old — its media rides the fast lane.
                 val fresh = now >= item.createdAt && (now - item.createdAt) < FRESH_EVENT_MS.toULong()
                 // Skip synthetic refs (geo: location pins): they carry no fetchable bytes, so counting
@@ -7331,8 +7339,12 @@ object HavenNet : InboundListener {
                 // `satellite preview blob (stub→) → android`). POSTERS ride here too rather than in
                 // `missing`, where a video tile waited behind full-size clips and generated its own
                 // poster instead. iOS parity.
+                val thumbPriority = MediaRestorePlan.thumbLane(rank, backfill) == MediaRestorePlan.Lane.PRIORITY
                 for (small in MediaVariants.prefetchCompanions(item.media)) {
-                    if (!LocalMedia.has(small) && !unopenableMedia.contains(small)) thumbs[small] = c.id
+                    if (!LocalMedia.has(small) && !unopenableMedia.contains(small)) {
+                        thumbs[small] = c.id
+                        if (thumbPriority) priorityThumbs.add(small)
+                    }
                 }
                 // Same lazy rule as the post — a backfilled thread's attachments load on tap.
                 if (!backfill) item.comments.forEach { cm ->
@@ -7386,17 +7398,7 @@ object HavenNet : InboundListener {
         //
         // Interleaving by circle bounds the damage a stuck circle can do to the others: a backlog
         // still drains slowly, but it can no longer starve a conversation that is working fine.
-        val byCircleQueues = missing.entries.groupBy { it.value.first }.values.map { it.toMutableList() }
-        val ordered = ArrayList<Map.Entry<String, Pair<String, Boolean>>>(missing.size)
-        var idx = 0
-        while (ordered.size < missing.size) {
-            var moved = false
-            for (q in byCircleQueues) {
-                if (idx < q.size) { ordered.add(q[idx]); moved = true }
-            }
-            if (!moved) break
-            idx++
-        }
+        val ordered = MediaRestorePlan.interleave(missing.entries.groupBy { it.value.first }.values.map { it.toList() })
         for ((ref, info) in ordered.map { it.key to it.value }) {
             if (prefetchSuspended) break
             val (circleId, fresh) = info
@@ -7419,7 +7421,7 @@ object HavenNet : InboundListener {
                 if (unopenableMedia.contains(ref)) {
                     if (mayDirectAsk(ref, circleHasRelay = false)) askForMedia(ref, payload, mediaAskTargets(ref))
                 } else {
-                    enqueueRestore(circleId, ref) {
+                    enqueueRestore(circleId, ref, priority = MediaRestorePlan.fullSizeLane(fresh) == MediaRestorePlan.Lane.PRIORITY) {
                         if (mayDirectAsk(ref, circleHasRelay = true)) askForMedia(ref, payload, mediaAskTargets(ref))
                     }
                 }
@@ -7463,7 +7465,10 @@ object HavenNet : InboundListener {
         if (fastActive) armFastMediaSweep()
         // Thumbs: no lanes, no data-saver gate — they are what makes the loading placeholder look
         // like the photo. The restore queue's own dedup bounds the re-asks.
-        for ((t, cid) in thumbs) enqueueRestore(cid, t)
+        // The recent posts' companions ride the PRIORITY lane (newest first — `thumbs` is insertion-
+        // ordered newest-first), the rest of the history queues behind the full-size backlog.
+        for ((t, cid) in thumbs) if (t in priorityThumbs) enqueueRestore(cid, t, priority = true)
+        for ((t, cid) in thumbs) if (t !in priorityThumbs) enqueueRestore(cid, t)
         if (mediaReqAt.size > 4000) mediaReqAt.clear()   // bound the throttle map
     }
 
@@ -7517,6 +7522,7 @@ object HavenNet : InboundListener {
     // seed), or the relay sees a node id in no roster and answers 403.
 
     private val httpUrlBad = SharedCollections.map<Long>()   // url -> retry-after epoch ms (2-min backoff)
+    private val baseAliveProbes = AliveProbeCache()
 
     /**
      * The relay's usable HTTP URLs from where WE are — empty means "iroh-only", which is the honest
@@ -8915,9 +8921,13 @@ object HavenNet : InboundListener {
                     // name that no longer routes anywhere. Distinguish by asking for a key the
                     // relay always serves — if its own interface doc is missing too, we are not
                     // talking to the relay at all.
-                    val iface = relayHttpGet(base, entry.httpToken, "haven/relay/__interface__")
-                    if (iface.isSuccess && iface.getOrNull() != null) noteFabricBaseAlive(base)
-                    else if (iface.exceptionOrNull() !is RelayForbidden) noteFabricBaseDead(base)
+                    // One proof of life covers every miss in the next minute — a fresh device's doomed
+                    // backlog otherwise paid this second round-trip per ref ([AliveProbeCache]).
+                    if (!baseAliveProbes.recentlyAlive(base)) {
+                        val iface = relayHttpGet(base, entry.httpToken, "haven/relay/__interface__")
+                        if (iface.isSuccess && iface.getOrNull() != null) { noteFabricBaseAlive(base); baseAliveProbes.noteAlive(base) }
+                        else if (iface.exceptionOrNull() !is RelayForbidden) { baseAliveProbes.forget(base); noteFabricBaseDead(base) }
+                    }
                     refreshRelayInterfaceIfNeeded(nodeHex, force = true)
                     httpMiss = true; break
                 }

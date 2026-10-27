@@ -157,6 +157,9 @@ private fun MainScaffold() {
     // can't race it away before that screen is composed.
     val stagedDm by com.blaineam.haven.core.DmDrafts.openThread
     LaunchedEffect(stagedDm) { if (stagedDm != null) tab = Tab.Messages }
+    // A voice command (Assistant) that could not pick ONE recipient: open the Messages list to pick.
+    val assistantPick by com.blaineam.haven.core.AssistantLaunch.showMessages
+    LaunchedEffect(assistantPick) { if (assistantPick > 0) tab = Tab.Messages }
 
     // Content shared into Haven from another app (text, a link, photos, a document) → raise the
     // routing sheet, which asks whether it should be a post, a story, or a message and to whom.

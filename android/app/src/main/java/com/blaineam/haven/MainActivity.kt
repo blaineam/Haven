@@ -287,6 +287,20 @@ class MainActivity : FragmentActivity() {
             runCatching { com.blaineam.haven.core.Notifications.clearIncomingCall(this) }
             runCatching { com.blaineam.haven.core.CallManager.accept() }
         }
+        // Google Assistant "send a message to <name> on Haven" (res/xml/shortcuts.xml). Resolved and
+        // staged in the composer — never sent from the intent. See core/AssistantRoute.kt.
+        if (intent?.action == com.blaineam.haven.core.AssistantRoute.ACTION) {
+            val name = intent.getStringExtra(com.blaineam.haven.core.AssistantRoute.EXTRA_NAME)
+            val text = intent.getStringExtra(com.blaineam.haven.core.AssistantRoute.EXTRA_TEXT)
+            intent.removeExtra(com.blaineam.haven.core.AssistantRoute.EXTRA_NAME)
+            intent.removeExtra(com.blaineam.haven.core.AssistantRoute.EXTRA_TEXT)
+            val app = applicationContext
+            lifecycleScope.launch(Dispatchers.IO) {
+                val plan = runCatching { com.blaineam.haven.core.AssistantLaunch.resolve(app, name, text) }.getOrNull()
+                if (plan != null) withContext(Dispatchers.Main) { com.blaineam.haven.core.AssistantLaunch.apply(plan) }
+            }
+            return
+        }
         when (intent?.action) {
             // A haven:// or https link the app was opened with (tap in a browser/DM, or one of our
             // own notifications). Invites and post links share a domain AND both ride the

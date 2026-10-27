@@ -18,4 +18,29 @@
         <data android:mimeType="audio/*" />
         <category android:name="com.blaineam.haven.category.SHARE_TARGET" />
     </share-target>
+
+    <!--
+      Google Assistant App Action: "Hey Google, send a message to Blaine on Haven".
+
+      Assistant launches MainActivity with this explicit intent; AssistantRoute resolves the recipient
+      against the user's contacts and STAGES the text in that conversation's composer. It never sends
+      from the intent — any app can fire an explicit intent at an exported activity, so voice sending
+      stays on the notification REPLY path (CarMessaging). `name` is the spoken recipient, or the
+      matched dynamic shortcut's id (ShareShortcuts binds contact names to this capability).
+      Both parameters are optional, so this single intent is also the no-parameters fallback.
+      The action and keys must match AssistantRoute (a unit test enforces it).
+    -->
+    <capability android:name="actions.intent.CREATE_MESSAGE">
+        <intent
+            android:action="com.blaineam.haven.action.ASSISTANT_MESSAGE"
+            android:targetPackage="com.blaineam.haven"
+            android:targetClass="com.blaineam.haven.MainActivity">
+            <parameter
+                android:name="message.text"
+                android:key="text" />
+            <parameter
+                android:name="message.recipient.name"
+                android:key="name" />
+        </intent>
+    </capability>
 </shortcuts>

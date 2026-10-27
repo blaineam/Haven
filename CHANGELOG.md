@@ -16,6 +16,20 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   mid-copy threw. The copy now runs under the set's own monitor (`snapshotOf`). Found in the
   Nokia's logcat; a deterministic lock-held test (`SetSnapshotTest`) guards it.
 
+### Added - "Hey Google, send a message to <name> on Haven" (Android)
+
+- Haven declares the Assistant `CREATE_MESSAGE` App Action. Assistant opens Haven on the right conversation
+  with the spoken text staged in the composer (never sent from the intent: any app can fire an explicit
+  intent, so the user presses Send; voice replies from a notification stay on the REPLY action). The
+  recipient is matched across all contacts and group threads with tiered matching (exact name, every word,
+  prefix/initial like "Tracy M", one-letter slip), so "Tracy" never offers "Troy"; a tie or no match opens the
+  Messages list. Locked conversations are never candidates.
+- Direct-share shortcuts now carry a `LocusId`, the conversation category and a capability binding of each
+  contact's full and first name, so Assistant can resolve "Blaine" to the thread.
+- Assistant only registers App Actions for a build uploaded through Google Play: a sideloaded debug build
+  cannot be driven by voice (the Android Studio App Actions Test Tool and `adb` prove the rest). See
+  `docs/ASSISTANT.md`. Tests: `AssistantRouteTest`, `AssistantShortcutsDeclarationTest`.
+
 ### Fixed - CarPlay crashed when the car switched to limited UI (iOS)
 
 - Crash logs (SIGABRT, an uncaught NSException from `-[CPInterfaceController _handleCompletion:withSuccess:error:]`): CarPlay raises when a navigation call fails and was given no completion handler, and the limited-UI rebuild could pop/push while a transition was still in flight. All CarPlay navigation (set root, push, pop to root) now goes through `CarPlayNavigator`: one operation at a time, a completion handler on every call that logs and swallows errors, a pop with nothing to pop and a push of a template already on the stack are skipped, and no conversation screen opens while driving. Tested against a fake controller (`CarPlayNavigatorTests`).

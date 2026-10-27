@@ -20,6 +20,7 @@ object ComposeStateHolders {
         "SyncMetrics", "HavenNet", "MediaProcessing", "MediaWantedStore", "MediaReoptimizer",
         "MediaLimits", "QaDriver", "RelayNudge", "PinnedMediaStore", "ScheduledStore", "ShareInbox",
         "InviteInbox", "PostLinkInbox", "StoryLinkInbox", "CircleLinkInbox", "RelayHistoryResync", "MultiCircleHint",
+        "AssistantLaunch",
     )
 
     /** Run each holder's initializer on the calling (main) thread; already-initialized ones are free. */

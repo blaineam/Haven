@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.core.app.Person
+import androidx.core.content.LocusIdCompat
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
@@ -29,6 +30,9 @@ import androidx.core.graphics.drawable.IconCompat
 object ShareShortcuts {
     /** Must match the `<category>` in `res/xml/shortcuts.xml`. */
     const val CATEGORY = "com.blaineam.haven.category.SHARE_TARGET"
+
+    /** The platform's person-to-person thread category (Assistant reads it to rank conversations). */
+    const val CONVERSATION_CATEGORY = "android.shortcut.conversation"
 
     /** How many conversations we keep published. The row only ever draws a handful, and the system
      *  caps dynamic shortcuts anyway — publishing the whole thread list would just spray names into
@@ -121,14 +125,27 @@ object ShareShortcuts {
         // same `haven://m/<circleId>` route a notification tap uses.
         val open = Intent(Intent.ACTION_VIEW, Uri.parse("haven://m/$circleId"))
             .setPackage(context.packageName)
+        // What Assistant may call this conversation: "Blaine" and "Blaine Miller" both reach it, so
+        // "send a message to Blaine on Haven" resolves to this shortcut and hands us its id.
+        val spoken = (people.mapNotNull { it.name?.toString() } + title)
+            .flatMap { AssistantRoute.recipientNames(it) }.distinct()
         return ShortcutInfoCompat.Builder(context, circleId)
             .setShortLabel(title)
             .setLongLabel(title)
             .setLongLived(true)                 // required: the system keeps it past a cache refresh
-            .setCategories(setOf(CATEGORY))     // matches <share-target> in res/xml/shortcuts.xml
+            // CATEGORY matches <share-target> in res/xml/shortcuts.xml; the conversation category and
+            // setIsConversation mark it as a person-to-person thread for Assistant and the share sheet.
+            .setCategories(setOf(CATEGORY, CONVERSATION_CATEGORY))
+            .setIsConversation()
+            .setLocusId(LocusIdCompat(circleId))
             .setPersons(people.toTypedArray())
             .setIcon(icon(others.firstOrNull().orEmpty()) ?: fallbackIcon(context))
             .setIntent(open)
+            .apply {
+                if (spoken.isNotEmpty()) {
+                    addCapabilityBinding(AssistantRoute.CAPABILITY_CREATE_MESSAGE, AssistantRoute.PARAM_RECIPIENT_NAME, spoken)
+                }
+            }
             .build()
     }
 

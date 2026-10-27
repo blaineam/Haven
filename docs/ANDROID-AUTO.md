@@ -70,6 +70,12 @@ the first thing to run in a cold process.
   iOS Show Previews has no Android equivalent beyond that system setting). Users who do not want text on a locked
   phone should pick Name and type only / Minimal, which also removes it from the car.
 
+## Starting a message by voice ("send a message to Blaine on Haven")
+
+That is the Assistant App Action, separate from the reply path above: it opens Haven on the
+conversation with the text staged and never sends by itself. See [ASSISTANT.md](ASSISTANT.md) for what
+it does, what a sideloaded build can and cannot test, and the `adb` commands.
+
 ## Calls
 
 Haven's calls are **in-app only** (`CallManager`: "no Telecom yet"). The incoming-call notification is a custom

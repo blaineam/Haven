@@ -108,6 +108,7 @@
 -keepnames class com.blaineam.haven.core.CircleLinkInbox
 -keepnames class com.blaineam.haven.core.RelayHistoryResync
 -keepnames class com.blaineam.haven.core.MultiCircleHint
+-keepnames class com.blaineam.haven.core.AssistantLaunch
 
 # WorkManager stores the worker's CLASS NAME in its database. SyncWorker is enqueued as unique
 # periodic work with ExistingPeriodicWorkPolicy.KEEP, so the row written by an unobfuscated

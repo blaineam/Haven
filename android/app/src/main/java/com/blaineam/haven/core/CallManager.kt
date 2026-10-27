@@ -49,6 +49,10 @@ object CallManager {
     /** Speakerphone (loudspeaker) vs earpiece. Defaults ON for a video call, OFF for voice-only —
      *  set when audio starts; the user can flip it any time (iOS parity). */
     val speakerOn = mutableStateOf(true)
+    /** The user's explicit speaker/earpiece tap this call (null = untouched: speaker unless a car /
+     *  headset / Bluetooth output is attached — [CallRoutePolicy]). */
+    private var speakerChoice: Boolean? = null
+    private var routeCallback: android.media.AudioDeviceCallback? = null
     /** In-app minimized call (small floating tile + tap to restore), iOS parity. */
     val minimized = mutableStateOf(false)
     /** Sharing this device's screen into the call instead of the camera. */
@@ -781,6 +785,10 @@ object CallManager {
             // Mode FIRST: on API 31+ a communication-device selection only sticks once the audio
             // system is in communication mode, so routing before this line is silently dropped.
             audioManager().mode = android.media.AudioManager.MODE_IN_COMMUNICATION
+            // An attached car / headset / Bluetooth output is the user's choice — don't pin the
+            // loudspeaker over it (and follow it if it connects or leaves mid-call).
+            decideDefaultSpeaker()
+            watchOutputDevices()
             // One routing path for start, toggle and re-assert. This used to be its own copy of the
             // speakerphone write, which is exactly how a start and a toggle come to disagree about
             // what "speaker on" means on a device where only one of the two paths was updated.
@@ -1171,7 +1179,33 @@ object CallManager {
     private var nativeAudioSuspended = false
 
     private fun applyNativeMic() { audioTrack?.setEnabled(micOn.value && !nativeAudioSuspended) }
-    fun toggleSpeaker() = onCall { speakerOn.value = !speakerOn.value; applySpeaker() }
+    fun toggleSpeaker() = onCall {
+        speakerOn.value = !speakerOn.value
+        speakerChoice = speakerOn.value
+        applySpeaker()
+    }
+
+    /** Speaker is the call default only while nothing external is attached; a tap always wins. */
+    private fun decideDefaultSpeaker() {
+        val am = runCatching { audioManager() }.getOrNull() ?: return
+        val types = am.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS).map { it.type }
+        val want = CallRoutePolicy.wantsSpeaker(speakerChoice, CallRoutePolicy.hasExternalOutput(types))
+        if (speakerOn.value != want) speakerOn.value = want
+    }
+
+    private fun watchOutputDevices() {
+        if (routeCallback != null) return
+        val cb = object : android.media.AudioDeviceCallback() {
+            private fun reroute() = callHandler.post {
+                if (!mediaStarted || speakerChoice != null) return@post
+                decideDefaultSpeaker(); applySpeaker()
+            }
+            override fun onAudioDevicesAdded(added: Array<out android.media.AudioDeviceInfo>) { reroute() }
+            override fun onAudioDevicesRemoved(removed: Array<out android.media.AudioDeviceInfo>) { reroute() }
+        }
+        routeCallback = cb
+        runCatching { audioManager().registerAudioDeviceCallback(cb, callHandler) }
+    }
 
     private fun audioManager(): android.media.AudioManager =
         appContext.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -1516,6 +1550,9 @@ object CallManager {
             else legacySpeakerphone(am, false)
             am.mode = android.media.AudioManager.MODE_NORMAL
         }
+        routeCallback?.let { cb -> runCatching { audioManager().unregisterAudioDeviceCallback(cb) } }
+        routeCallback = null
+        speakerChoice = null
         speakerOn.value = true   // default for the next call
         sessionId = ""; mediaStarted = false; isCaller = false; nativeAudioSuspended = false
         ringing.value = false; connecting.value = false; inCall.value = false; minimized.value = false

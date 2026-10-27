@@ -546,6 +546,8 @@ targets:
       # Whether call audio may start (RemoteIO aborts on a hung audio server) — the probe/decide/
       # retry state machine. AVFoundation only; the probe is injected in tests.
       - path: HavenApp/CallAudioGate.swift
+      # Where call audio plays (speaker vs an attached car/headset) and the category options — pure.
+      - path: HavenApp/CallAudioRoute.swift
       # Which self-sync merges owe an engine export (a circle record's relays do not).
       - path: HavenApp/SelfSyncEngineDiff.swift
       # Whether the bell's list/watermark persist (a demo launch pulls its fresh engine from 0).

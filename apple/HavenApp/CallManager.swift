@@ -50,6 +50,12 @@ final class CallManager: NSObject, ObservableObject {
     @Published private(set) var videoOn = false
     @Published private(set) var ringing = false
     @Published private(set) var speakerOn = false
+    /// The user's explicit speaker/earpiece tap this call (nil = never touched: speaker unless a car,
+    /// Bluetooth or headset output is attached). See `CallAudioRoute`.
+    private var speakerChoice: Bool?
+    /// The attached-output probe runs once per call (and on a device attach/detach) — not on every
+    /// ICE "connected" tick, which would flap the route.
+    private var routeProbed = false
     @Published private(set) var muted = false
     /// WebRTC would not give us a peer connection for someone in this call, so there is no media path
     /// to them and there never will be on this attempt. Surfaced so the call screen can say "Couldn't
@@ -1515,18 +1521,9 @@ final class CallManager: NSObject, ObservableObject {
         #if os(iOS)
         let rtc = RTCAudioSession.sharedInstance()
         rtc.lockForConfiguration()
-        // Mirror the user's speaker choice — recovery used to reassert .defaultToSpeaker
-        // unconditionally, which put an earpiece call back on the speaker behind their back.
-        try? rtc.setCategory(.playAndRecord,
-                             with: speakerOn ? [.allowBluetoothHFP, .defaultToSpeaker] : [.allowBluetoothHFP])
         try? rtc.setMode(.voiceChat)
-        try? rtc.setActive(true)
-        // Default to speaker for in-app video-style calls so "connected but silent" isn't just
-        // earpiece at zero volume against the cheek — user can still toggle.
-        if !speakerOn {
-            speakerOn = true
-        }
-        try? rtc.overrideOutputAudioPort(.speaker)
+        applyOutputRoute(rtc, reprobe: !routeProbed)
+        routeProbed = true
         rtc.unlockForConfiguration()
         guard forceEnable else { return }
         // Bounce only on recovery paths — not every ICE "connected" tick.
@@ -1587,8 +1584,22 @@ final class CallManager: NSObject, ObservableObject {
         }
         // Keep the speaker button honest: a route change (headset unplug, session reset) can move
         // output off the speaker — reflect reality instead of showing a stale toggle.
-        nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { _ in
-            Task { @MainActor in CallManager.shared.syncSpeakerState() }
+        nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { note in
+            let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
+            let reason = AVAudioSession.RouteChangeReason(rawValue: raw) ?? .unknown
+            Task { @MainActor in
+                let call = CallManager.shared
+                // A car/headset connecting or leaving mid-call, with no explicit speaker tap: follow it
+                // (join it, or fall back to the speaker) instead of staying pinned where we were.
+                if call.active, call.speakerChoice == nil, call.routeProbed,
+                   CallAudioRoute.reroutesAutomatically(reason: reason) {
+                    let rtc = RTCAudioSession.sharedInstance()
+                    rtc.lockForConfiguration()
+                    call.applyOutputRoute(rtc, reprobe: true)
+                    rtc.unlockForConfiguration()
+                }
+                call.syncSpeakerState()
+            }
         }
     }
 
@@ -1597,14 +1608,37 @@ final class CallManager: NSObject, ObservableObject {
         HavenLog.net("call audio recovery (\(reason))")
         let rtc = RTCAudioSession.sharedInstance()
         rtc.lockForConfiguration()
-        try? rtc.setCategory(.playAndRecord, with: [.allowBluetoothHFP, .defaultToSpeaker])
         try? rtc.setMode(.voiceChat)
-        try? rtc.setActive(true)
-        try? rtc.overrideOutputAudioPort(speakerOn ? .speaker : .none)
+        applyOutputRoute(rtc, reprobe: speakerChoice == nil)
         rtc.unlockForConfiguration()
         // Bounce the audio unit so WebRTC tears down + rebuilds capture/playout on the new session —
         // through the gate, so a session that came back broken can't take the app down with it.
         enableWebRTCAudio(reason: "recover: \(reason)", bounce: true)
+    }
+
+    /// Choose and apply where the call plays out. Caller holds the RTCAudioSession configuration lock.
+    /// The user's tap wins; otherwise the speaker is only the default when nothing external is
+    /// attached — a car (CarPlay/Bluetooth), headset or AirPlay output is kept, not overridden.
+    /// `reprobe` clears any earlier speaker override first so the route we read is the real default.
+    private func applyOutputRoute(_ rtc: RTCAudioSession, reprobe: Bool) {
+        let wantSpeaker: Bool
+        if let choice = speakerChoice {
+            wantSpeaker = choice
+        } else if reprobe {
+            try? rtc.setCategory(.playAndRecord, with: CallAudioRoute.categoryOptions(speaker: false))
+            try? rtc.setActive(true)
+            try? rtc.overrideOutputAudioPort(.none)
+            let external = CallAudioRoute.hasExternalOutput(
+                AVAudioSession.sharedInstance().currentRoute.outputs.map(\.portType))
+            wantSpeaker = CallAudioRoute.wantsSpeaker(userChoice: nil, externalActive: external)
+            HavenLog.call("call audio route: external=\(external) → \(wantSpeaker ? "speaker" : "attached output")")
+        } else {
+            wantSpeaker = speakerOn
+        }
+        try? rtc.setCategory(.playAndRecord, with: CallAudioRoute.categoryOptions(speaker: wantSpeaker))
+        try? rtc.setActive(true)
+        try? rtc.overrideOutputAudioPort(wantSpeaker ? .speaker : .none)
+        if speakerOn != wantSpeaker { speakerOn = wantSpeaker }
     }
 
     private func syncSpeakerState() {
@@ -1619,6 +1653,7 @@ final class CallManager: NSObject, ObservableObject {
 
     func toggleSpeaker() {
         speakerOn.toggle()
+        speakerChoice = speakerOn
         #if os(iOS)
         let s = RTCAudioSession.sharedInstance()
         s.lockForConfiguration()
@@ -1632,8 +1667,7 @@ final class CallManager: NSObject, ObservableObject {
         //
         // Drop `.defaultToSpeaker` when going to the earpiece, restore it for speakerphone. The
         // override still does the actual switching; the category just stops contradicting it.
-        try? s.setCategory(.playAndRecord,
-                           with: speakerOn ? [.allowBluetoothHFP, .defaultToSpeaker] : [.allowBluetoothHFP])
+        try? s.setCategory(.playAndRecord, with: CallAudioRoute.categoryOptions(speaker: speakerOn))
         try? s.overrideOutputAudioPort(speakerOn ? .speaker : .none)
         s.unlockForConfiguration()
         #endif
@@ -2083,7 +2117,7 @@ final class CallManager: NSObject, ObservableObject {
         CallMediaBridge.shared.qaResetCallStats()
         #endif
         localVideoTrack = nil; videoOn = false; screenShareOn = false
-        ringing = false; speakerOn = false; muted = false; minimized = false
+        ringing = false; speakerOn = false; speakerChoice = nil; routeProbed = false; muted = false; minimized = false
         isCaller = false; mediaStarted = false
         active = false; inCall = false; connecting = false; peerName = ""
         sessionId = ""; roster.removeAll()

@@ -199,8 +199,13 @@ final class CallMediaBridge {
         // format we already know is invalid.
         #if !os(macOS)
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playAndRecord, mode: .voiceChat,
-                                 options: [.allowBluetoothHFP, .defaultToSpeaker])
+        // CallManager owns the category and the output route (speaker vs car/headset). Only set one
+        // when it has not — re-asserting `.defaultToSpeaker` here pinned a CarPlay/Bluetooth call back
+        // onto the loudspeaker.
+        if session.category != .playAndRecord || session.mode != .voiceChat {
+            try? session.setCategory(.playAndRecord, mode: .voiceChat,
+                                     options: CallAudioRoute.categoryOptions(speaker: false))
+        }
         try? session.setActive(true, options: [])
         #endif
         // Hardware echo cancellation / noise suppression / AGC — the same processing WebRTC uses.

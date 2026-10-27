@@ -9,6 +9,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed — call audio no longer pinned to the phone's loudspeaker (iOS + Android)
+
+CarPlay test: a Haven audio call was "super quiet" on both sides and the route picker only ever offered speaker.
+Cause: every audio start and recovery forced `overrideOutputAudioPort(.speaker)` + `.defaultToSpeaker` (and the
+hairpin bridge re-asserted the category), which overrides whatever the user connected — the car, AirPods, a headset,
+AirPlay — so the call played from the phone's small speaker while the echo canceller, which assumes that speaker, ducked
+the voice. Now `CallAudioRoute` decides: an explicit speaker tap wins; otherwise the speaker is the default only when
+nothing external is attached, and a car/headset connecting or leaving mid-call is followed (no override left behind).
+`.defaultToSpeaker` is only in the category while speaker mode is on; A2DP is allowed beside HFP. Android had the same
+shape (it always selected the built-in speaker as the communication device); `CallRoutePolicy` + an
+`AudioDeviceCallback` apply the same rule. macOS/desktop route output through the system device and are unaffected.
+Needs a real-car check: the simulator models CarPlay audio loosely.
+
 ### Fixed — a circle with no relays of its own is no longer guessed onto every relay (Android / desktop)
 
 Follow-up to the friend-relay fix. The e2e then failed on `A private photo on R_C`: R_C is a standalone relay B

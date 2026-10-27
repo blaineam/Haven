@@ -30,6 +30,23 @@ Now a fetch that asked no relay claims nothing; a hint it cannot act on is re-as
 sweep); the author is nudged to re-announce the circle relay; and the peer-ask patience no longer
 assumes a relay exists (`NoRelayMediaPolicy`).
 
+### Added - Android Auto car app: a Calls screen with Recents and Contacts (Android)
+- Haven is now a **Car App Library app (category CALLING)**, so Android Auto lists it with a real screen
+  instead of only Google's stock "No new messages during this drive" messaging screen. **Recents** (people
+  with the most recent conversation first) and **Contacts** (A-Z) tabs; **tapping a person dials them** with no
+  contact card in between - the counterpart of CarPlay's Calls tab - through the same Telecom path as the in-app
+  Call button and "call X on Haven", then an in-call screen with **Hang up** that closes itself when the call
+  ends. Rows are a name and a round avatar (photo, else initials in the palette tint); never message text.
+  When the host's item limit cuts the list, the first row is **Search all contacts** (typed or spoken, same
+  tiered matcher as voice calling: "Tracy" never offers "Troy"). A cold start shows a spinner while the engine
+  boots; before onboarding it says to finish setup on the phone; a missing microphone grant is requested on
+  the phone and the call dials once it is allowed.
+- Release builds validate the Android Auto host against Google's published allowlist; a debug build accepts any
+  host so the Desktop Head Unit connects (pinned by test). `automotive_app_desc.xml` now declares `template`
+  next to `notification`. 12 new strings in all 9 locales. New dependency `androidx.car.app:app:1.7.0`.
+- Not verified: how the host draws it, and Play's current rules for the Calling category - docs/ANDROID-CALLS.md
+  lists the Desktop Head Unit steps and the Play Console path.
+
 ### Added - Haven calls are system calls on Android (Telecom), and "call <name> on Haven" by voice (Android)
 - **Telecom integration** (the counterpart of iOS CallKit). A self-managed phone account and
   `HavenTelecomService` register every Haven call - started from the UI, by voice or from a

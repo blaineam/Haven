@@ -197,6 +197,11 @@ dependencies {
     // ("Can only use lower 16 bits for requestCode") on every fresh Android 13+ launch.
     implementation("androidx.fragment:fragment-ktx:1.8.5")
 
+    // Android Auto CAR APP (docs/ANDROID-CALLS.md): Haven draws a Calls screen on the head unit with the
+    // Car App Library's templates (Recents / Contacts, tap a person to call). Messaging stays
+    // notification-based. 1.7.0 is the latest STABLE release.
+    implementation("androidx.car.app:app:1.7.0")
+
     // EXIF orientation for picked photos (so they aren't sideways/blank).
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 

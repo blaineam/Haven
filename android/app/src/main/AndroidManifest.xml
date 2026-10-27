@@ -294,6 +294,20 @@
                 <action android:name="android.telecom.ConnectionService" />
             </intent-filter>
         </service>
+        <!-- Haven's Android Auto CAR APP (category CALLING): the Recents / Contacts screen on the head
+             unit, tap a person to call (car/). Exported because the Android Auto host binds it; the host
+             is checked against an allowlist in code (car/CarHosts.kt), so no other app can drive it.
+             See docs/ANDROID-CALLS.md. -->
+        <service
+            android:name=".car.HavenCarAppService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="androidx.car.app.CarAppService" />
+                <category android:name="androidx.car.app.category.CALLING" />
+            </intent-filter>
+        </service>
+        <!-- Oldest Car App API level this app can run on; the screen adapts above it (tabs need level 6). -->
+        <meta-data android:name="androidx.car.app.minCarApiLevel" android:value="1" />
         <service
             android:name=".core.ConnectionService"
             android:exported="false"

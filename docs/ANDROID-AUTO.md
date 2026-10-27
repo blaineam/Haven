@@ -84,6 +84,13 @@ CallKit and what still needs a real head unit are in [ANDROID-CALLS.md](ANDROID-
 Bluetooth headsets and the system call controls know a Haven call exists, can answer / reject / hang it up,
 and drive its audio route; Haven keeps drawing its own call screen and the incoming-call notification.
 
+**The Calls screen on the head unit.** Haven is also a Car App Library app (category CALLING): Android Auto
+lists it as a templated app with **Recents** and **Contacts** tabs where tapping a person dials them — the
+counterpart of CarPlay's Calls tab. Messaging itself stays notification-based (read aloud + voice reply), so
+the stock "No new messages during this drive" screen is Android Auto's messaging surface and not Haven's own.
+See [ANDROID-CALLS.md](ANDROID-CALLS.md#the-android-auto-car-app-recents--contacts) for the design, the Desktop
+Head Unit steps and the Play requirements.
+
 **What Android Auto actually shows for a self-managed call is not verified.** Self-managed calls are the
 app's own UI by design; whether a given Android Auto version / head unit adds its own in-call card for them
 varies. Do not promise a native car call screen until it has been seen on a head unit (steps below). What is
@@ -92,6 +99,10 @@ over it, headset / car answer and hang-up buttons).
 
 ## What the owner must do in Play Console
 
+0. **Calls screen (Car App Library)**: a templated Android for Cars app is reviewed separately from the
+   notification path. Open Play Console -> Release -> Advanced settings -> Android form factors -> **Android
+   for Cars**, confirm the **Calling** category, ship to a testing track first and run the Car App Quality
+   checklist. Details and the unverified points are in [ANDROID-CALLS.md](ANDROID-CALLS.md#play).
 1. **App content / Declarations**: nothing new is a *policy* requirement for a notification-based messaging
    app. There is no form to apply for, unlike CarPlay's entitlement. If the Play Console shows an "Android for
    Cars" section, open it and confirm the app type is **Messaging**; Play reads this from the

@@ -25,10 +25,12 @@ class AndroidAutoDeclarationTest {
         assertTrue(Regex("""com\.google\.android\.gms\.car\.application"\s+android:resource="@xml/automotive_app_desc"""").containsMatchIn(m))
     }
 
-    @Test fun `descriptor uses only the notification capability`() {
+    @Test fun `descriptor uses the notification capability for messages and the template one for the calls screen`() {
+        // `notification` = Haven's MessagingStyle notifications; `template` = the Car App Library calls screen
+        // (CarAppDeclarationTest checks the service). Never sms / media.
         val x = File(main, "res/xml/automotive_app_desc.xml").readText()
         val uses = Regex("""<uses\s+name="([^"]+)"""").findAll(x).map { it.groupValues[1] }.toList()
-        assertEquals(listOf("notification"), uses)
+        assertEquals(listOf("notification", "template"), uses)
     }
 
     @Test fun `the car action receiver is registered and not exported`() {

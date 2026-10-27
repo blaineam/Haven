@@ -9,6 +9,17 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - Android: "Waiting for sender…" no longer lies on a relay-less device
+
+A freshly installed Android that had not yet learned a circle's relay asked ZERO relays for every
+photo, then fell into the "relays answered and none holds it" branch and painted *Waiting for
+sender…* over all of them (3,270 fetches in one log, every one `relays=[]`). The sender was fine:
+the iPhone had answered 52 media asks with 51 relay hints, which a device with no relay cannot use.
+Now a fetch that asked no relay claims nothing; a hint it cannot act on is re-asked at once
+(bounded by the author's own 3-hint budget, so they stream the bytes instead of one hint per
+sweep); the author is nudged to re-announce the circle relay; and the peer-ask patience no longer
+assumes a relay exists (`NoRelayMediaPolicy`).
+
 ### Added - Haven calls are system calls on Android (Telecom), and "call <name> on Haven" by voice (Android)
 - **Telecom integration** (the counterpart of iOS CallKit). A self-managed phone account and
   `HavenTelecomService` register every Haven call - started from the UI, by voice or from a

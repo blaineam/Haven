@@ -1885,6 +1885,7 @@ object HavenNet : InboundListener {
                     .any { it.id == f.circleId }) f.circleId else activeCircle.value
             enqueueRestore(cid, f.ref)
             Log.i(TAG, "media-available ${f.ref.take(10)}: announced by ${f.from.take(8)} — prefetching")
+            onUnusableRelayHint(cid, f.ref, f.from)
             return
         }
         MediaWantedStore.clear(f.ref)
@@ -7124,7 +7125,7 @@ object HavenNet : InboundListener {
         // RELAY FIRST; the direct ask only if the relay misses (it used to go out alongside the
         // restore, so every holder streamed bytes the relay was about to deliver).
         enqueueRestore(circleId, ref) {
-            if (!mayDirectAsk(ref, circleHasRelay = true)) return@enqueueRestore
+            if (!mayDirectAsk(ref, circleHasRelay = relaysFor(circleId).isNotEmpty())) return@enqueueRestore
             // The direct ask reaches friends' phones, so a fast scroll through an old feed must not
             // become a burst: at most 8 per 20s. The next on-screen appearance (≥1 min later) covers
             // anything the budget skipped.
@@ -7156,6 +7157,42 @@ object HavenNet : InboundListener {
             if (mediaRefAuthor.size > 5000) { mediaRefAuthor.clear(); mediaRefBornAt.clear() }
             mediaRefAuthor[ref] = if (isMe) SELF_AUTHOR else authorShort
             mediaRefBornAt[ref] = createdAt.toLong()
+        }
+    }
+
+    private val hintReasks = HashMap<String, Pair<Int, Long>>()      // ref -> (re-asks so far, last at ms)
+    private val introNudgedAt = HashMap<String, Long>()               // "author|circle" -> last nudge ms
+
+    /**
+     * A friend hinted "it's on a relay" but this device knows no relay for the circle, so the hint
+     * cannot be acted on. Re-ask at once (the author streams after [HeavyWorkPolicy.MAX_RELAY_HINTS]
+     * hints rather than one per sweep) and nudge them to re-announce the circle relay (a Hello makes
+     * them re-send it). See [NoRelayMediaPolicy].
+     */
+    private fun onUnusableRelayHint(circleId: String, ref: String, author: String) {
+        if (relaysFor(circleId).isNotEmpty() || LocalMedia.has(ref)) return
+        val now = System.currentTimeMillis()
+        val reask = synchronized(hintReasks) {
+            val (n, last) = hintReasks[ref] ?: (0 to 0L)
+            if (!NoRelayMediaPolicy.reAskAfterUnusableHint(false, n, if (n == 0) null else last, now)) false
+            else {
+                hintReasks[ref] = (n + 1) to now
+                if (hintReasks.size > 5000) hintReasks.clear()
+                true
+            }
+        }
+        if (reask) {
+            Log.i("MediaSync", "hint for ${ref.take(10)} but no relay known for $circleId — re-asking ${author.take(8)} so they stream it")
+            askForMedia(ref, nodeIdHex.toByteArray(Charsets.UTF_8) + ref.toByteArray(Charsets.UTF_8), listOf(author))
+        }
+        val nudge = synchronized(introNudgedAt) {
+            val k = "$author|$circleId"
+            if (!NoRelayMediaPolicy.introNudgeDue(false, introNudgedAt[k], now)) false
+            else { introNudgedAt[k] = now; if (introNudgedAt.size > 500) introNudgedAt.clear(); true }
+        }
+        if (nudge) {
+            Log.i("MediaSync", "no relay known for $circleId — asking ${author.take(8)} to re-announce theirs")
+            sendHello(circleId, author, resendHistory = false)
         }
     }
 
@@ -8959,11 +8996,14 @@ object HavenNet : InboundListener {
         // loss for days — the blob was on the relay the whole time and the device simply wasn't
         // allowed to ask for it.
         if (synchronized(rosterNeeded) { rosterNeeded.isEmpty() }) {
-            android.util.Log.i("MediaSync", "fetch ref=$ref NOT FOUND — no relay served it")
+            android.util.Log.i("MediaSync", "fetch ref=$ref NOT FOUND — no relay served it" +
+                if (NoRelayMediaPolicy.relaysAnsweredEmpty(relays.size)) "" else " (no relay known for this circle — none asked)")
             // Honest placeholder state: the relays answered and none holds it — we are waiting on
             // the SENDER to put it (back) up, which is a different thing from "downloading" or
-            // "gone forever" (Apple noteMediaMissingOnRelays parity).
-            noteMediaMissingOnRelays(ref)
+            // "gone forever" (Apple noteMediaMissingOnRelays parity). With NO relay known nothing
+            // answered, so say nothing: the placeholder keeps its spinner and the peer ask / relay
+            // learning ([NoRelayMediaPolicy]) get the chance to resolve it.
+            if (NoRelayMediaPolicy.relaysAnsweredEmpty(relays.size)) noteMediaMissingOnRelays(ref)
             // A full miss is ALSO the signature of a relay whose HTTP front door we can't use
             // (rotated tunnel / never learned): the blob may sit on a relay we only failed to
             // ASK properly. Try to fetch each dest relay's self-published interface over iroh —

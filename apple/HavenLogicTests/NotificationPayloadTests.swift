@@ -227,7 +227,7 @@ final class NotificationPayloadTests: XCTestCase {
     func testCommunicationPlanOnlyForPlainDMAtFullDetail() throws {
         let dm = try XCTUnwrap(decode(["t": "Maya", "b": "dinner at 6?", "c": "dm:aa-bb", "k": "dm"]))
         XCTAssertEqual(C.communicationPlan(dm, detail: .full),
-                       .init(conversationId: "dm:aa-bb", senderName: "Maya", text: "dinner at 6?"))
+                       .init(conversationId: "dm:aa-bb", senderName: "Maya", text: "dinner at 6?", groupName: nil))
         XCTAssertNil(C.communicationPlan(dm, detail: .privateDetail), "private detail must not put text in the intent")
         XCTAssertNil(C.communicationPlan(dm, detail: .minimal))
     }
@@ -243,5 +243,30 @@ final class NotificationPayloadTests: XCTestCase {
         XCTAssertNil(C.communicationPlan(anon, detail: .full), "no sender name -> nothing to announce")
         let call = try XCTUnwrap(decode(["t": "Maya", "h": "abc"]))
         XCTAssertNil(C.communicationPlan(call, detail: .full))
+    }
+
+    func testGroupDMsAnnounceByGroupName() throws {
+        let dm = try XCTUnwrap(decode(["t": "Maya", "b": "who is driving?", "c": "dm:grp", "k": "dm"]))
+        XCTAssertEqual(C.communicationPlan(dm, detail: .full, groupName: "  Book Club ")?.groupName, "Book Club")
+        XCTAssertNil(C.communicationPlan(dm, detail: .full, groupName: "   ")?.groupName)
+        XCTAssertNil(C.communicationPlan(dm, detail: .privateDetail, groupName: "Book Club"), "privacy still wins for groups")
+    }
+
+    func testCirclePostsAndCommentsNeverAnnounce() throws {
+        for kind in ["post", "comment", "story", "react"] {
+            let p = try XCTUnwrap(decode(["t": "Maya", "b": "hello", "c": "circle-1", "k": kind]))
+            XCTAssertNil(C.communicationPlan(p, detail: .full), kind)
+            let dmKind = try XCTUnwrap(decode(["t": "Maya", "b": "hello", "c": "dm:aa", "k": kind]))
+            XCTAssertNil(C.communicationPlan(dmKind, detail: .full), "only kind=dm is a message (\(kind))")
+        }
+    }
+
+    func testStockBannerLinesAreLocalizedButRealTextIsNeverTouched() {
+        // No string table in the host-less bundle: the English key comes back, proving the mapping runs
+        // and that arbitrary text passes through verbatim.
+        XCTAssertEqual(C.localizedPlaceholder("Sent a photo"), "Sent a photo")
+        XCTAssertEqual(C.localizedPlaceholder("Sent the group a voice note"), "Sent the group a voice note")
+        XCTAssertEqual(C.localizedPlaceholder("Sent a photo of my dog"), "Sent a photo of my dog")
+        XCTAssertEqual(C.localizedPlaceholder("lunch?"), "lunch?")
     }
 }

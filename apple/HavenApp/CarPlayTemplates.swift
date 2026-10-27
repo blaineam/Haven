@@ -9,13 +9,13 @@ enum CarPlayTemplates {
     static func section(for rows: [CarPlayConversations.Row], configured: Bool, enabled: Bool,
                                 avatars: [String: UIImage] = [:]) -> CPListSection {
         if !enabled {
-            return CPListSection(items: [CPListItem(text: "Turned off", detailText: "Turn on CarPlay and Siri messages in Haven Settings on your iPhone.")])
+            return CPListSection(items: [CPListItem(text: MessagingText.turnedOff, detailText: MessagingText.turnedOffHint)])
         }
         if !configured {
-            return CPListSection(items: [CPListItem(text: "Open Haven on your iPhone", detailText: "Finish setting up to see your conversations.")])
+            return CPListSection(items: [CPListItem(text: MessagingText.openOnPhone, detailText: MessagingText.openOnPhoneHint)])
         }
         if rows.isEmpty {
-            return CPListSection(items: [CPListItem(text: "No conversations yet", detailText: "Say \u{201C}Hey Siri, send a message with Haven\u{201D} once you have someone to talk to.")])
+            return CPListSection(items: [CPListItem(text: MessagingText.noConversations, detailText: MessagingText.noConversationsHint)])
         }
         let items: [CPListTemplateItem] = rows.map { row in
             let leading = CPMessageListItemLeadingConfiguration(
@@ -39,7 +39,7 @@ enum CarPlayTemplates {
     static func callsSection(for rows: [CarPlayConversations.CallRow], avatars: [String: UIImage] = [:],
                              onSelect: @escaping (CarPlayConversations.CallRow) -> Void) -> CPListSection {
         guard !rows.isEmpty else {
-            return CPListSection(items: [CPListItem(text: "No one to call yet", detailText: "Conversations you can call appear here.")])
+            return CPListSection(items: [CPListItem(text: MessagingText.noOneToCall, detailText: MessagingText.noOneToCallHint)])
         }
         let items: [CPListItem] = rows.map { row in
             let item = CPListItem(text: row.title, detailText: nil, image: avatars[row.conversationId])
@@ -54,7 +54,7 @@ enum CarPlayTemplates {
                                 onCall: @escaping () -> Void) -> CPContactTemplate {
         let call = CPContactCallButton(handler: { _ in onCall() })
         let contact = CPContact(name: row.title, image: avatar)
-        contact.subtitle = "Haven audio call"
+        contact.subtitle = MessagingText.audioCall
         contact.actions = [call]
         return CPContactTemplate(contact: contact)
     }

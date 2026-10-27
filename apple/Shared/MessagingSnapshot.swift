@@ -16,7 +16,44 @@ import Foundation
 ///   * the user's notification-privacy setting (`SharedNotificationPrivacy.Detail`) caps the text:
 ///     `.full` shows the message, `.privateDetail` shows only "Sent you a message", `.minimal` shows
 ///     "New activity" and nothing about who or what.
+/// Every user-visible phrase the car and Siri may speak or show, localized from the `Messaging` string
+/// table (shipped in the app, the Intents extension and the notification extension). Without a table
+/// (host-less tests) the English key comes back.
+enum MessagingText {
+    private static func t(_ key: String.LocalizationValue) -> String { String(localized: key, table: "Messaging") }
+    static var locked: String { t("Locked") }
+    static var newActivity: String { t("New activity") }
+    static var unsent: String { t("Message unsent") }
+    static var sentAMessage: String { t("Sent you a message") }
+    static var youSentAMessage: String { t("You sent a message") }
+    static var photo: String { t("Sent a photo") }
+    static var video: String { t("Sent a video") }
+    static var voice: String { t("Sent a voice note") }
+    static var file: String { t("Sent a file") }
+    static var song: String { t("Shared a song") }
+    static var attachment: String { t("Sent an attachment") }
+    static var groupPhoto: String { t("Sent the group a photo") }
+    static var groupVoice: String { t("Sent the group a voice note") }
+    static var groupMessage: String { t("Messaged the group") }
+
+    // CarPlay screens
+    static var tabMessages: String { t("Messages") }
+    static var tabCalls: String { t("Calls") }
+    static var noConversations: String { t("No conversations yet") }
+    static var noConversationsHint: String { t("Say \u{201C}Hey Siri, send a message with Haven\u{201D} once you have someone to talk to.") }
+    static var openOnPhone: String { t("Open Haven on your iPhone") }
+    static var openOnPhoneHint: String { t("Finish setting up to see your conversations.") }
+    static var turnedOff: String { t("Turned off") }
+    static var turnedOffHint: String { t("Turn on CarPlay and Siri messages in Haven Settings on your iPhone.") }
+    static var noOneToCall: String { t("No one to call yet") }
+    static var noOneToCallHint: String { t("Conversations you can call appear here.") }
+    static var audioCall: String { t("Haven audio call") }
+}
+
 struct MessagingMessage: Equatable {
+    /// What a message carries besides (or instead of) text. Drives the spoken fallback, e.g. "Sent a photo".
+    enum Attachment: Equatable { case none, photo, video, voice, file, song, other }
+
     var id: String
     var isMe: Bool
     var unsent: Bool
@@ -26,6 +63,39 @@ struct MessagingMessage: Equatable {
     var hasAttachment: Bool
     /// Display name of the author ("" for my own messages).
     var author: String = ""
+    /// Kind of attachment when `hasAttachment` (nil/`.none` with `hasAttachment` reads as "an attachment").
+    var attachment: Attachment = .none
+
+}
+
+extension MessagingMessage.Attachment {
+    /// Kind from the media refs' prefixes (the same `img_`/`vid_`/`aud_`/`file_` encoding the media layer
+    /// uses - no IO). The first ref decides a mixed message.
+    static func kind(mediaRefs: [String], hasMusic: Bool) -> MessagingMessage.Attachment {
+        if let first = mediaRefs.first {
+            if first.hasPrefix("img_") { return .photo }
+            if first.hasPrefix("vid_") { return .video }
+            if first.hasPrefix("aud_") { return .voice }
+            if first.hasPrefix("file_") { return .file }
+            return .other
+        }
+        return hasMusic ? .song : .none
+    }
+}
+
+extension MessagingMessage {
+    /// "Sent a photo" etc. for an attachment-only message; "" when there is no attachment.
+    var attachmentPhrase: String {
+        guard hasAttachment || attachment != .none else { return "" }
+        switch attachment {
+        case .photo: return MessagingText.photo
+        case .video: return MessagingText.video
+        case .voice: return MessagingText.voice
+        case .file: return MessagingText.file
+        case .song: return MessagingText.song
+        case .none, .other: return MessagingText.attachment
+        }
+    }
 }
 
 struct MessagingThread: Equatable {
@@ -44,7 +114,7 @@ struct MessagingThread: Equatable {
 }
 
 enum MessagingPrivacy {
-    static let lockedText = "Locked"
+    static var lockedText: String { MessagingText.locked }
     static let previewLimit = 80
 
     /// Newest message (by `createdAt`, ties keep the later element).
@@ -75,16 +145,15 @@ enum MessagingPrivacy {
         guard let message else { return "" }
         switch detail {
         case .minimal:
-            return unread ? "New activity" : ""
+            return unread ? MessagingText.newActivity : ""
         case .privateDetail:
-            if message.unsent { return "Message unsent" }
-            return message.isMe ? "You sent a message"
-                                : SharedNotificationPrivacy.fallbackPrivateBody(kind: "dm")
+            if message.unsent { return MessagingText.unsent }
+            return message.isMe ? MessagingText.youSentAMessage : MessagingText.sentAMessage
         case .full:
-            if message.unsent { return "Message unsent" }
+            if message.unsent { return MessagingText.unsent }
             let text = truncate(message.body)
             if !text.isEmpty { return text }
-            return message.hasAttachment ? "Attachment" : ""
+            return message.attachmentPhrase
         }
     }
 
@@ -94,7 +163,7 @@ enum MessagingPrivacy {
         guard !locked, detail == .full, !message.unsent else { return "" }
         let text = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty { return text }
-        return message.hasAttachment ? "Attachment" : ""
+        return message.attachmentPhrase
     }
 }
 
@@ -128,15 +197,24 @@ struct MessagingSnapshot: Codable, Equatable {
 
     static let maxConversations = 12
     static let maxMessages = 6
+    /// The most recently active conversations keep a deeper history so Siri can answer "read earlier
+    /// messages from Tracy" (the only sanctioned way to scroll back from a car - see docs/CARPLAY.md).
+    static let deepConversations = 3
+    static let maxDeepMessages = 20
 
     static func build(threads: [MessagingThread], detail: SharedNotificationPrivacy.Detail,
                       now: UInt64) -> MessagingSnapshot {
+        let activity: [String: UInt64] = Dictionary(uniqueKeysWithValues: threads.map {
+            ($0.id, MessagingPrivacy.latest($0.messages)?.createdAt ?? 0)
+        })
+        let deep = Set(threads.filter { !$0.locked }.sorted { activity[$0.id]! > activity[$1.id]! }
+            .prefix(deepConversations).map(\.id))
         let convs = threads.map { t -> Conversation in
             let newest = latest(t.messages)
             let unreadN = t.locked ? 0 : MessagingPrivacy.unreadCount(t.messages, watermark: t.watermark)
             var msgs: [Message] = []
             if !t.locked {
-                let recent = t.messages.sorted { $0.createdAt < $1.createdAt }.suffix(maxMessages)
+                let recent = t.messages.sorted { $0.createdAt < $1.createdAt }.suffix(deep.contains(t.id) ? maxDeepMessages : maxMessages)
                 msgs = recent.map { m in
                     Message(id: m.id, author: m.isMe ? "" : m.author, isMe: m.isMe, at: m.createdAt,
                             text: MessagingPrivacy.spokenText(m, locked: false, detail: detail),
@@ -276,4 +354,38 @@ enum SiriRequestQueue {
     static func complete(_ file: URL) { try? FileManager.default.removeItem(at: file) }
 
     static func clear() { if let dir { try? FileManager.default.removeItem(at: dir) } }
+}
+
+/// Filtering for "read my messages" requests, kept pure so the rules are tested without SiriKit.
+enum MessagingSearch {
+    struct Query {
+        var onlyUnread = false
+        var onlyRead = false
+        /// Every term must appear (case/diacritic-insensitive) in the message text.
+        var terms: [String] = []
+        var from: Date?
+        var to: Date?
+        /// How many messages one answer reads aloud.
+        var limit = 10
+    }
+
+    /// Matching messages, OLDEST first, at most `limit`, taking the NEWEST ones that match - so a request
+    /// bounded by `to` ("earlier than that") yields the page just before it.
+    static func select(_ messages: [MessagingSnapshot.Message], _ q: Query) -> [MessagingSnapshot.Message] {
+        let terms = q.terms.map(ContactMatching.normalize).filter { !$0.isEmpty }
+        let hits = messages.filter { m in
+            if m.isMe || m.text.isEmpty { return false }
+            if q.onlyUnread && !m.unread { return false }
+            if q.onlyRead && m.unread { return false }
+            let at = Date(timeIntervalSince1970: Double(m.at) / 1000)
+            if let from = q.from, at < from { return false }
+            if let to = q.to, at > to { return false }
+            if !terms.isEmpty {
+                let text = ContactMatching.normalize(m.text)
+                if !terms.allSatisfy({ text.contains($0) }) { return false }
+            }
+            return true
+        }.sorted { $0.at < $1.at }
+        return Array(hits.suffix(max(0, q.limit)))
+    }
 }

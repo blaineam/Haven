@@ -432,6 +432,8 @@ targets:
       - path: HavenIntents
       - path: Shared/MessagingSnapshot.swift
       - path: Shared/ContactMatching.swift
+      # The spoken/shown phrases ("Sent a photo", ...) in the six shipped languages.
+      - path: Shared/Messaging.xcstrings
       - path: Shared/SiriRequestSignal.swift
       - path: Shared/SharedNotificationPrivacy.swift
       # Live read of the biometric-locked circle set (shared keychain group), like the NSE.
@@ -650,6 +652,7 @@ targets:
       - path: HavenApp/CarPlayConversations.swift
       - path: HavenApp/CarPlayAvatar.swift
       - path: HavenApp/CarPlayAvatarRenderer.swift
+      - path: Shared/Messaging.xcstrings
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.intentstests

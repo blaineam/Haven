@@ -153,9 +153,11 @@ final class IntentHandlerTests: XCTestCase {
 
     // MARK: read
 
-    private func search(conversation: String? = nil, attributes: INMessageAttributeOptions = []) -> INSearchForMessagesIntentResponse {
-        let intent = INSearchForMessagesIntent(recipients: nil, senders: nil, searchTerms: nil, attributes: attributes,
-                                               dateTime: nil, identifiers: nil, notificationIdentifiers: nil,
+    private func search(conversation: String? = nil, attributes: INMessageAttributeOptions = [], terms: [String]? = nil,
+                        before: Date? = nil) -> INSearchForMessagesIntentResponse {
+        let range = before.map { INDateComponentsRange(start: nil, end: Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: $0)) }
+        let intent = INSearchForMessagesIntent(recipients: nil, senders: nil, searchTerms: terms, attributes: attributes,
+                                               dateTime: range, identifiers: nil, notificationIdentifiers: nil,
                                                speakableGroupNames: nil, conversationIdentifiers: conversation.map { [$0] })
         var out: INSearchForMessagesIntentResponse!
         let e = expectation(description: "search")
@@ -171,6 +173,15 @@ final class IntentHandlerTests: XCTestCase {
         XCTAssertEqual(r.messages?.map(\.content), ["bring wine"], "only the message newer than the watermark")
         XCTAssertEqual(r.messages?.first?.conversationIdentifier, "dm:maya")
         XCTAssertEqual(search(conversation: "dm:maya").messages?.map(\.content), ["dinner at 7?", "bring wine"])
+    }
+
+    func testReadHonoursSearchTermsAndEarlierThanBounds() {
+        install()
+        XCTAssertEqual(search(conversation: "dm:maya", terms: ["WINE"]).messages?.map(\.content), ["bring wine"])
+        XCTAssertEqual(search(conversation: "dm:maya", terms: ["zebra"]).code, .failure)
+        // "Earlier messages": bounded before the second message -> only the first.
+        let secondAt = Date(timeIntervalSince1970: Double(1_800_000_000_000 - 5 * 60_000) / 1000)
+        XCTAssertEqual(search(conversation: "dm:maya", before: secondAt.addingTimeInterval(-1)).messages?.map(\.content), ["dinner at 7?"])
     }
 
     func testReadNeverRevealsLockedOrPrivacyHiddenContent() {

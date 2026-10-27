@@ -28,6 +28,9 @@ enum SharedDestinations {
         /// The emoji they chose, shown when there's no photo — that's how plenty of people are
         /// identified everywhere else in Haven, so a monogram here would be a downgrade.
         var emoji: String = ""
+        /// People in the thread besides me (nil = unknown/legacy). > 1 marks a group DM, which Siri
+        /// announces by group name ("Tracy in Book Club says ...").
+        var memberCount: Int? = nil
     }
 
     /// Test seam: stands in for the App Group container. Always nil in the app and the extension.

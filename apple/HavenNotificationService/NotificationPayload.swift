@@ -172,6 +172,8 @@ enum NotificationPayloadCodec {
         let conversationId: String
         let senderName: String
         let text: String
+        /// Set for a group DM: Siri announces "<sender> in <group> says ...".
+        let groupName: String?
     }
 
     /// Only a plain inbound DM, on a device whose effective privacy level is `.full`, becomes a
@@ -180,13 +182,33 @@ enum NotificationPayloadCodec {
     /// (Private/Minimal, iOS Show Previews, a biometric-locked circle, a sealed call/story/reaction)
     /// must also keep it out of the intent. The decision therefore takes the already-resolved
     /// `detail` (Haven's preference tightened by the system's), never the raw preference.
+    ///
+    /// `groupName` is the thread title when the thread has several other members (from the App Group
+    /// destination mirror); circle POSTS and comments are not messages and never get a plan.
     static func communicationPlan(_ p: NotificationPayload,
-                                  detail: SharedNotificationPrivacy.Detail) -> CommunicationPlan? {
+                                  detail: SharedNotificationPrivacy.Detail,
+                                  groupName: String? = nil) -> CommunicationPlan? {
         guard detail == .full, !p.redactedForLock, p.kind == "dm",
               let cid = p.circleId, cid.hasPrefix("dm:") else { return nil }
         let name = p.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let text = p.fullBody.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name != "Haven", !text.isEmpty else { return nil }
-        return CommunicationPlan(conversationId: cid, senderName: name, text: text)
+        let group = groupName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return CommunicationPlan(conversationId: cid, senderName: name, text: localizedPlaceholder(text),
+                                 groupName: (group?.isEmpty ?? true) ? nil : group)
+    }
+
+    /// The sender builds the banner in ITS language ("Sent a photo"); when the whole body is one of those
+    /// stock lines, say it in THIS device's language instead. Real message text is never touched.
+    static func localizedPlaceholder(_ body: String) -> String {
+        switch body {
+        case "Sent a photo": return MessagingText.photo
+        case "Sent the group a photo": return MessagingText.groupPhoto
+        case "Sent a voice note": return MessagingText.voice
+        case "Sent the group a voice note": return MessagingText.groupVoice
+        case "Sent you a message": return MessagingText.sentAMessage
+        case "Messaged the group": return MessagingText.groupMessage
+        default: return body
+        }
     }
 }

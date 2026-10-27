@@ -37,14 +37,14 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         HavenLog.sync("carplay: connected")
         self.interfaceController = interfaceController
         let messages = CPListTemplate(title: "Haven", sections: [CarPlayTemplates.section(for: [], configured: false, enabled: true)])
-        messages.emptyViewSubtitleVariants = ["No conversations yet"]
+        messages.emptyViewSubtitleVariants = [MessagingText.noConversations]
         messagesTemplate = messages
         var root: CPTemplate = messages
         if CPTabBarTemplate.maximumTabCount >= 2 {
-            messages.tabTitle = "Messages"
+            messages.tabTitle = MessagingText.tabMessages
             messages.tabImage = UIImage(systemName: "message.fill")
-            let calls = CPListTemplate(title: "Calls", sections: [CarPlayTemplates.callsSection(for: []) { _ in }])
-            calls.tabTitle = "Calls"
+            let calls = CPListTemplate(title: MessagingText.tabCalls, sections: [CarPlayTemplates.callsSection(for: []) { _ in }])
+            calls.tabTitle = MessagingText.tabCalls
             calls.tabImage = UIImage(systemName: "phone.fill")
             callsTemplate = calls
             root = CPTabBarTemplate(templates: [messages, calls])

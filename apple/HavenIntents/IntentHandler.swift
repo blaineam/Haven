@@ -224,14 +224,18 @@ extension IntentHandler: INSearchForMessagesIntentHandling {
         }
         // Attributes: none = everything; .unread / .read narrow it. Haven has no flagged/played state.
         let attrs = intent.attributes
-        let onlyUnread = attrs.contains(.unread) && !attrs.contains(.read)
-        let onlyRead = attrs.contains(.read) && !attrs.contains(.unread)
         let unsupportedOnly = !attrs.isEmpty && !attrs.contains(.unread) && !attrs.contains(.read)
+        var query = MessagingSearch.Query()
+        query.onlyUnread = attrs.contains(.unread) && !attrs.contains(.read)
+        query.onlyRead = attrs.contains(.read) && !attrs.contains(.unread)
+        query.terms = intent.searchTerms ?? []
+        // "Earlier messages": Siri bounds the request with a date range; the page just before `to`.
+        let cal = Calendar.current
+        query.from = intent.dateTimeRange?.startDateComponents.flatMap { cal.date(from: $0) }
+        query.to = intent.dateTimeRange?.endDateComponents.flatMap { cal.date(from: $0) }
         var out: [INMessage] = []
-        for c in pool where !IntentMessaging.isLocked(c) {
-            for m in c.messages where !m.text.isEmpty && detail == .full && !m.isMe && !unsupportedOnly {
-                if onlyUnread && !m.unread { continue }
-                if onlyRead && m.unread { continue }
+        for c in pool where !IntentMessaging.isLocked(c) && detail == .full && !unsupportedOnly {
+            for m in MessagingSearch.select(c.messages, query) {
                 let sender = IntentMessaging.person(handle: c.memberHandles.count == 1 ? c.memberHandles[0] : nil,
                                               name: m.author.isEmpty ? c.title : m.author)
                 out.append(INMessage(identifier: m.id, conversationIdentifier: c.id, content: m.text,

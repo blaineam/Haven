@@ -9,7 +9,7 @@ enum MessagingThreads {
     /// The user's notification-privacy level. Car/Siri surfaces are never looser than a banner.
     static var privacyDetail: SharedNotificationPrivacy.Detail { SharedNotificationPrivacy.detail }
 
-    static let maxPerThread = 8
+    static let maxPerThread = MessagingSnapshot.maxDeepMessages
 
     static func current() -> [MessagingThread] {
         let store = FeedStore.shared
@@ -27,7 +27,8 @@ enum MessagingThreads {
             let messages: [MessagingMessage] = locked ? [] : items.map { item in
                 MessagingMessage(id: item.id, isMe: item.isMe, unsent: item.unsent, createdAt: item.createdAt,
                                  body: item.body, hasAttachment: !item.media.isEmpty || item.music != nil,
-                                 author: item.isMe ? "" : (ContactsStore.shared.name(forNodePrefix: item.authorShort) ?? "Someone"))
+                                 author: item.isMe ? "" : (ContactsStore.shared.name(forNodePrefix: item.authorShort) ?? "Someone"),
+                                 attachment: .kind(mediaRefs: item.media, hasMusic: item.music != nil))
             }
             // Names this person is known by besides the thread title (your nickname vs their signed
             // name), so a spoken "Tracy Miller" finds the thread you titled "Tracy M".

@@ -70,7 +70,8 @@ final class NotificationService: UNNotificationServiceExtension {
         Self.resolveDetail { detail in
             let shown = NotificationPayloadCodec.applyPrivacy(decoded, detail: detail)
             best.title = shown.title
-            best.body = shown.body
+            // Stock lines ("Sent a photo") arrive in the sender's language; say them in ours.
+            best.body = detail == .full ? NotificationPayloadCodec.localizedPlaceholder(shown.body) : shown.body
             // Group notifications by conversation so a burst of DMs or reactions stacks sensibly
             // instead of flooding the lock screen as unrelated cards.
             if let thread = decoded.threadId, !thread.isEmpty {
@@ -94,12 +95,21 @@ final class NotificationService: UNNotificationServiceExtension {
                 // Communication notification: lets Siri announce the message and reply by voice
                 // (AirPods, CarPlay). Only for plain DMs at full detail - see `communicationPlan`.
                 var outgoing: UNNotificationContent = best
-                if let plan = NotificationPayloadCodec.communicationPlan(decoded, detail: detail) {
+                if let plan = NotificationPayloadCodec.communicationPlan(decoded, detail: detail,
+                                                                         groupName: Self.groupName(for: decoded)) {
                     outgoing = Self.communicationContent(best, plan: plan)
                 }
                 contentHandler(outgoing)
             }
         }
+    }
+
+    /// The thread's name when it is a group DM (more than one other member), from the destination mirror.
+    private static func groupName(for p: NotificationPayload) -> String? {
+        guard let cid = p.circleId, cid.hasPrefix("dm:"),
+              let item = SharedDestinations.read().first(where: { $0.id == cid }),
+              (item.memberCount ?? 1) > 1 else { return nil }
+        return item.name
     }
 
     /// Donate the incoming message as an `INSendMessageIntent` interaction and fold the intent into the
@@ -117,7 +127,8 @@ final class NotificationService: UNNotificationServiceExtension {
                               nameComponents: nil, displayName: plan.senderName, image: avatar,
                               contactIdentifier: nil, customIdentifier: plan.conversationId)
         let intent = INSendMessageIntent(recipients: nil, outgoingMessageType: .outgoingMessageText,
-                                         content: plan.text, speakableGroupName: nil,
+                                         content: plan.text,
+                                         speakableGroupName: plan.groupName.map { INSpeakableString(spokenPhrase: $0) },
                                          conversationIdentifier: plan.conversationId, serviceName: "Haven",
                                          sender: sender, attachments: nil)
         if let avatar { intent.setImage(avatar, forParameterNamed: \.sender) }

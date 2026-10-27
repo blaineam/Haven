@@ -110,6 +110,7 @@ enum ShareSuggestions {
             let name = store.dmPartnerName(circle.id)
             var item = SharedDestinations.Item(id: circle.id, name: name, isDM: true,
                                                lastActivity: lastActivity(circle.id))
+            item.memberCount = store.dmMemberHexes(circle.id).count
             if let hex = store.dmPartnerHex(circle.id) {
                 if let image = ContactsStore.shared.avatarImage(forNodePrefix: hex),
                    let data = image.jpegData(compressionQuality: 0.7) {

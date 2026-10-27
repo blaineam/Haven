@@ -71,9 +71,40 @@ final class CarPlayConversationsTests: XCTestCase {
     }
 
     func testAttachmentAndUnsentWording() {
-        XCTAssertEqual(rows([thread("dm:a", "A", [msg("1", mins: 1, body: "", att: true)])])[0].detail, "Attachment")
+        XCTAssertEqual(rows([thread("dm:a", "A", [msg("1", mins: 1, body: "", att: true)])])[0].detail, "Sent an attachment")
         XCTAssertEqual(rows([thread("dm:a", "A", [msg("1", mins: 1, unsent: true)])])[0].detail, "Message unsent")
         XCTAssertEqual(rows([thread("dm:a", "A", [])])[0].detail, "")
+    }
+
+    func testAttachmentOnlyMessagesSayWhatTheyAre() {
+        func phrase(_ kind: MessagingMessage.Attachment) -> String {
+            var m = msg("1", mins: 1, body: "", att: true); m.attachment = kind
+            return rows([thread("dm:a", "A", [m])])[0].detail
+        }
+        XCTAssertEqual(phrase(.photo), "Sent a photo")
+        XCTAssertEqual(phrase(.video), "Sent a video")
+        XCTAssertEqual(phrase(.voice), "Sent a voice note")
+        XCTAssertEqual(phrase(.file), "Sent a file")
+        XCTAssertEqual(phrase(.song), "Shared a song")
+        // Caption text wins over the attachment phrase.
+        var m = msg("1", mins: 1, body: "look!", att: true); m.attachment = .photo
+        XCTAssertEqual(rows([thread("dm:a", "A", [m])])[0].detail, "look!")
+        // ... and the spoken line for Siri is the same phrase, but only at Full privacy.
+        var p = msg("2", mins: 1, body: "", att: true); p.attachment = .photo
+        XCTAssertEqual(MessagingPrivacy.spokenText(p, locked: false, detail: .full), "Sent a photo")
+        XCTAssertEqual(MessagingPrivacy.spokenText(p, locked: false, detail: .privateDetail), "")
+        XCTAssertEqual(MessagingPrivacy.spokenText(p, locked: true, detail: .full), "")
+    }
+
+    func testAttachmentKindFromMediaRefs() {
+        typealias A = MessagingMessage.Attachment
+        XCTAssertEqual(A.kind(mediaRefs: ["img_ab"], hasMusic: false), .photo)
+        XCTAssertEqual(A.kind(mediaRefs: ["vid_ab", "img_cd"], hasMusic: false), .video, "first ref decides")
+        XCTAssertEqual(A.kind(mediaRefs: ["aud_ab"], hasMusic: false), .voice)
+        XCTAssertEqual(A.kind(mediaRefs: ["file_ab"], hasMusic: false), .file)
+        XCTAssertEqual(A.kind(mediaRefs: ["zzz"], hasMusic: false), .other)
+        XCTAssertEqual(A.kind(mediaRefs: [], hasMusic: true), .song)
+        XCTAssertEqual(A.kind(mediaRefs: [], hasMusic: false), .none)
     }
 
     func testLockedNeverShowsTextOrTimeOrUnread() {
@@ -149,14 +180,59 @@ final class CarPlayConversationsTests: XCTestCase {
         XCTAssertFalse(data.contains("secret"), "locked text must never reach the App Group file")
     }
 
-    func testSnapshotCapsAndOrdersMessages() {
-        let many = (0..<20).map { msg("m\($0)", mins: Double(20 - $0)) }
-        let s = MessagingSnapshot.build(threads: [thread("dm:a", "A", many)], detail: .full, now: 1)
-        let ids = s.conversations[0].messages.map(\.id)
-        XCTAssertEqual(ids.count, MessagingSnapshot.maxMessages)
-        XCTAssertEqual(ids.last, "m19")
-        let threads = (0..<30).map { thread("dm:\($0)", "P\($0)", [msg("x", mins: Double($0))]) }
-        XCTAssertEqual(MessagingSnapshot.build(threads: threads, detail: .full, now: 1).conversations.count, MessagingSnapshot.maxConversations)
+    func testSnapshotCapsMessagesAndKeepsDeeperHistoryForTheMostRecentThree() {
+        let many = { (id: String, base: Double) in (0..<30).map { self.msg("\(id)\($0)", mins: base + Double(30 - $0)) } }
+        let threads = (0..<5).map { thread("dm:\($0)", "P\($0)", many("m\($0)-", Double($0) * 100)) }
+        let s = MessagingSnapshot.build(threads: threads, detail: .full, now: 1)
+        let depth = Dictionary(uniqueKeysWithValues: s.conversations.map { ($0.id, $0.messages.count) })
+        XCTAssertEqual(depth["dm:0"], MessagingSnapshot.maxDeepMessages)
+        XCTAssertEqual(depth["dm:2"], MessagingSnapshot.maxDeepMessages)
+        XCTAssertEqual(depth["dm:3"], MessagingSnapshot.maxMessages, "older conversations stay shallow")
+        XCTAssertEqual(s.conversation(id: "dm:0")?.messages.last?.id, "m0-29", "oldest -> newest")
+        let lock = MessagingThread(id: "dm:L", title: "L", memberHandles: ["h"], messages: many("l", 0), watermark: 0, locked: true)
+        XCTAssertEqual(MessagingSnapshot.build(threads: [lock], detail: .full, now: 1).conversations[0].messages.count, 0)
+        let more = (0..<30).map { thread("dm:\($0)", "P\($0)", [msg("x\($0)", mins: Double($0))]) }
+        XCTAssertEqual(MessagingSnapshot.build(threads: more, detail: .full, now: 1).conversations.count, MessagingSnapshot.maxConversations)
+    }
+
+    // MARK: Search ("read earlier messages from Tracy")
+
+    private func snap(_ n: Int) -> [MessagingSnapshot.Message] {
+        (0..<n).map { i in
+            .init(id: "m\(i)", author: "Tracy", isMe: i % 7 == 6, at: UInt64(1_800_000_000_000 + i * 60_000),
+                  text: i % 5 == 0 ? "lunch at noon? #\(i)" : "note \(i)", unread: i >= n - 3)
+        }
+    }
+
+    func testSearchPagesBackwardsFromAnUpperBound() {
+        let all = snap(20)
+        var q = MessagingSearch.Query(); q.limit = 5
+        let newest = MessagingSearch.select(all, q)
+        XCTAssertEqual(newest.count, 5)
+        XCTAssertEqual(newest.map(\.at), newest.map(\.at).sorted(), "oldest first")
+        // Earlier than the oldest message just read.
+        q.to = Date(timeIntervalSince1970: Double(newest[0].at) / 1000 - 1)
+        let earlier = MessagingSearch.select(all, q)
+        XCTAssertEqual(earlier.count, 5)
+        XCTAssertLessThan(earlier.last!.at, newest[0].at, "the page before, no overlap")
+    }
+
+    func testSearchTermsDatesAndUnread() {
+        let all = snap(20)
+        var q = MessagingSearch.Query(); q.terms = ["LUNCH"]
+        XCTAssertEqual(MessagingSearch.select(all, q).map(\.id), ["m0", "m5", "m10", "m15"])
+        q.terms = ["lunch", "noon", "zebra"]
+        XCTAssertTrue(MessagingSearch.select(all, q).isEmpty, "every term must match")
+        q = MessagingSearch.Query(); q.onlyUnread = true
+        XCTAssertEqual(MessagingSearch.select(all, q).map(\.id), ["m17", "m18", "m19"])
+        q = MessagingSearch.Query(); q.onlyRead = true; q.limit = 100
+        XCTAssertFalse(MessagingSearch.select(all, q).contains { $0.unread })
+        q = MessagingSearch.Query(); q.limit = 100
+        q.from = Date(timeIntervalSince1970: Double(all[10].at) / 1000)
+        q.to = Date(timeIntervalSince1970: Double(all[12].at) / 1000)
+        XCTAssertEqual(MessagingSearch.select(all, q).map(\.id), ["m10", "m11", "m12"])
+        XCTAssertFalse(MessagingSearch.select(all, MessagingSearch.Query(limit: 100)).contains { $0.isMe }, "never reads my own messages back")
+        XCTAssertTrue(MessagingSearch.select(all, MessagingSearch.Query(limit: 0)).isEmpty)
     }
 
     func testResolveByName() {

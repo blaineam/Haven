@@ -9,6 +9,12 @@ import Intents
 @MainActor
 enum SiriCallRouter {
     static let activityType = "INStartCallIntent"
+    /// A queued "call X" older than this is dropped (see `CarPlayBridge.drain`).
+    static let maxRequestAgeMs: UInt64 = 90_000
+    /// The continuation activity and the queued request both describe one spoken command; only the
+    /// first rings.
+    private static var lastStart: (id: String, at: Date)?
+    private static let dedupeWindow: TimeInterval = 20
 
     static func handle(_ activity: NSUserActivity, retried: Bool = false) {
         let store = FeedStore.shared
@@ -51,6 +57,16 @@ enum SiriCallRouter {
     /// `CallManager.startCall` begins audio-only (CXStartCallAction.isVideo == false, camera off); video is
     /// something the user turns on from the phone. That is what makes it safe to start from a car.
     private static func start(_ cid: String) {
+        if let last = lastStart, last.id == cid, Date().timeIntervalSince(last.at) < dedupeWindow {
+            HavenLog.call("siri call: duplicate request for \(cid) ignored")
+            return
+        }
+        guard !CallManager.shared.callInProgress else {
+            HavenLog.call("siri call: a call is already in progress")
+            return
+        }
+        lastStart = (cid, Date())
+        SiriContactVocabulary.donateCall(conversationId: cid)
         let store = FeedStore.shared
         CallManager.shared.startCall(participants: store.dmMemberHexes(cid), name: store.dmPartnerName(cid))
     }

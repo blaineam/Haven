@@ -48,6 +48,25 @@ enum MessagingText {
     static var noOneToCall: String { t("No one to call yet") }
     static var noOneToCallHint: String { t("Conversations you can call appear here.") }
     static var audioCall: String { t("Haven audio call") }
+
+    // CarPlay conversation screen + spoken summaries
+    static var readNew: String { t("Read new messages") }
+    static var readToMe: String { t("Read to me") }
+    static var readHint: String { t("Haven reads them aloud") }
+    static var reply: String { t("Reply") }
+    static var replyHint: String { t("Say your message to Siri") }
+    static var callOnHaven: String { t("Call on Haven") }
+    static var recentMessages: String { t("Recent messages") }
+    static var noMessagesYet: String { t("No messages yet") }
+    static var you: String { t("You") }
+    static var lockedHint: String { t("Unlock this conversation in Haven on your iPhone.") }
+    static var hiddenHint: String { t("Message text is hidden by your notification privacy setting.") }
+    static var nothingToSpeak: String { t("Nothing to read right now.") }
+    static func oneNewMessage(from name: String) -> String { String(format: String(localized: "One new message from %@.", table: "Messaging"), name) }
+    static func newMessages(_ n: Int, from name: String) -> String { String(format: String(localized: "%lld new messages from %@.", table: "Messaging"), n, name) }
+    static func recentFrom(_ name: String) -> String { String(format: String(localized: "Recent messages from %@.", table: "Messaging"), name) }
+    static func noneYet(from name: String) -> String { String(format: String(localized: "No messages from %@ yet.", table: "Messaging"), name) }
+    static func says(_ author: String, _ text: String) -> String { String(format: String(localized: "%1$@ says: %2$@", table: "Messaging"), author, text) }
 }
 
 struct MessagingMessage: Equatable {
@@ -302,7 +321,7 @@ enum MessagingSnapshotStore {
 /// One file per request, so two requests can never overwrite each other; the app drains in order.
 /// The extension has no engine - it only enqueues; the app does the sealing and sending.
 struct SiriRequest: Codable, Equatable {
-    enum Kind: String, Codable { case send, markRead }
+    enum Kind: String, Codable { case send, markRead, call }
     var id: String
     var kind: Kind
     var conversationId: String
@@ -387,5 +406,37 @@ enum MessagingSearch {
             return true
         }.sorted { $0.at < $1.at }
         return Array(hits.suffix(max(0, q.limit)))
+    }
+}
+
+/// The names Siri should be able to hear for "call/message <name> on Haven": registered with
+/// `INVocabulary` (user-specific `contactName`s) so Siri maps a spoken "Tracy M" - a title that exists
+/// nowhere in the user's Contacts - to Haven instead of failing or guessing a Contacts neighbour
+/// ("Tracy", "Troy", ...). Pure so the rules are tested on the host.
+enum MessagingVocabulary {
+    /// Siri accepts at most 100 strings per type.
+    static let maxNames = 100
+
+    /// Most-recent conversation first: every title and alias, then (after all full names, so a full name
+    /// always outranks a bare first name) each distinct first name. Locked conversations contribute
+    /// nothing - their names are part of what the lock hides. Duplicates (after folding) are dropped.
+    static func names(threads: [MessagingThread]) -> [String] {
+        let open = threads.filter { !$0.locked }.sorted {
+            (MessagingPrivacy.latest($0.messages)?.createdAt ?? 0) > (MessagingPrivacy.latest($1.messages)?.createdAt ?? 0)
+        }
+        var seen = Set<String>(), out: [String] = []
+        func add(_ raw: String) {
+            let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = ContactMatching.normalize(name)
+            guard !key.isEmpty, name.count <= 60, seen.insert(key).inserted else { return }
+            out.append(name)
+        }
+        for t in open { ([t.title] + t.aliases).forEach(add) }
+        for t in open {
+            for full in [t.title] + t.aliases where ContactMatching.tokens(full).count > 1 {
+                if let first = full.split(whereSeparator: { $0.isWhitespace }).first { add(String(first)) }
+            }
+        }
+        return Array(out.prefix(maxNames))
     }
 }

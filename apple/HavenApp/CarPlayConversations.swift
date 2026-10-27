@@ -54,6 +54,96 @@ enum CarPlayConversations {
         return sorted.prefix(max(0, limit)).map { CallRow(conversationId: $0.id, title: MessagingPrivacy.truncate($0.title, limit: 60)) }
     }
 
+    // MARK: Conversation screen (tap a row)
+
+    /// One message line on the conversation screen.
+    struct Line: Equatable {
+        var id: String
+        var text: String
+        /// "Maya - 3:41 PM" / "You - Yesterday".
+        var byline: String
+        var unread: Bool
+    }
+
+    /// What tapping a conversation shows: the recent messages (newest first) plus what may be done with
+    /// them. Built from the SAME privacy filter as the list rows, so nothing appears here that the row
+    /// or a banner would hide.
+    struct Detail: Equatable {
+        var conversationId: String
+        var title: String
+        var locked: Bool
+        var lines: [Line]
+        var unreadCount: Int
+        /// Haven may read this conversation aloud (unlocked and the privacy setting allows content).
+        var canSpeak: Bool
+        /// The privacy setting hides message text: say so instead of showing a blank list.
+        var textHidden: Bool
+        /// Someone to ring (not locked, has a member).
+        var callable: Bool
+    }
+
+    static let maxDetailLines = 8
+    static let detailTextLimit = 200
+
+    static func detail(thread t: MessagingThread, detail: SharedNotificationPrivacy.Detail, now: Date,
+                       calendar: Calendar = .current, locale: Locale = .current,
+                       limit: Int = maxDetailLines) -> Detail {
+        let multi = t.memberHandles.count > 1
+        guard !t.locked else {
+            return Detail(conversationId: t.id, title: t.title, locked: true, lines: [], unreadCount: 0,
+                          canSpeak: false, textHidden: false, callable: false)
+        }
+        let newestFirst = t.messages.sorted { $0.createdAt > $1.createdAt }
+        var lines: [Line] = []
+        for m in newestFirst {
+            let unread = !m.isMe && !m.unsent && m.createdAt > t.watermark
+            let text = lineText(m, unread: unread, detail: detail)
+            guard !text.isEmpty else { continue }
+            let who = m.isMe ? MessagingText.you : (multi && !m.author.isEmpty ? m.author : "")
+            let when = timeLabel(ms: m.createdAt, now: now, calendar: calendar, locale: locale)
+            lines.append(Line(id: m.id, text: text, byline: [who, when].filter { !$0.isEmpty }.joined(separator: " \u{00B7} "), unread: unread))
+            if lines.count >= limit { break }
+        }
+        return Detail(conversationId: t.id, title: t.title, locked: false, lines: lines,
+                      unreadCount: MessagingPrivacy.unreadCount(t.messages, watermark: t.watermark),
+                      canSpeak: detail == .full, textHidden: detail != .full,
+                      callable: !t.memberHandles.isEmpty)
+    }
+
+    /// Longer than the row preview (the screen exists to be read), same privacy tiers.
+    private static func lineText(_ m: MessagingMessage, unread: Bool, detail: SharedNotificationPrivacy.Detail) -> String {
+        guard detail == .full else { return MessagingPrivacy.preview(of: m, locked: false, unread: unread, detail: detail) }
+        if m.unsent { return MessagingText.unsent }
+        let text = MessagingPrivacy.truncate(m.body, limit: detailTextLimit)
+        return text.isEmpty ? m.attachmentPhrase : text
+    }
+
+    /// What Haven reads aloud for "Read new messages" / "Read to me": an intro, then the unread inbound
+    /// messages oldest first (or, with nothing unread, the latest few). Empty when nothing may be spoken
+    /// (locked, or the privacy setting forbids content). Attachments are spoken as their phrase
+    /// ("Sent a photo") - there is no content description of an image in the car.
+    static let maxSpoken = 5
+
+    static func spokenScript(thread t: MessagingThread, detail: SharedNotificationPrivacy.Detail) -> [String] {
+        guard !t.locked, detail == .full else { return [] }
+        let multi = t.memberHandles.count > 1
+        let inbound = t.messages.filter { !$0.isMe && !$0.unsent }.sorted { $0.createdAt < $1.createdAt }
+        let unread = inbound.filter { $0.createdAt > t.watermark }
+        let pool = Array((unread.isEmpty ? inbound : unread).suffix(maxSpoken))
+        let name = t.title
+        guard !pool.isEmpty else { return [MessagingText.noneYet(from: name)] }
+        var out: [String] = []
+        if unread.isEmpty { out.append(MessagingText.recentFrom(name)) }
+        else if unread.count == 1 { out.append(MessagingText.oneNewMessage(from: name)) }
+        else { out.append(MessagingText.newMessages(unread.count, from: name)) }
+        for m in pool {
+            let text = MessagingPrivacy.spokenText(m, locked: false, detail: detail)
+            guard !text.isEmpty else { continue }
+            out.append(multi && !m.author.isEmpty ? MessagingText.says(m.author, text) : text)
+        }
+        return out
+    }
+
     /// Today -> "3:41 PM"; yesterday -> "Yesterday"; this week -> weekday; older -> short date.
     static func timeLabel(ms: UInt64, now: Date, calendar: Calendar, locale: Locale) -> String {
         let date = Date(timeIntervalSince1970: Double(ms) / 1000)

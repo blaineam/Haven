@@ -365,4 +365,56 @@ final class IntentHandlerTests: XCTestCase {
         XCTAssertEqual(resolved.map(kind), ["unsupported"], "locked Tracy M must not become Tracy Zhang")
         XCTAssertEqual(response.code, .failure)
     }
+
+    // MARK: the car report - calls by any spelling of the name, never a Troy
+
+    func testEveryWayOfSayingTheNameResolvesTheCallWithoutDisambiguation() {
+        installTracy(extra: [("dm:troy", "Troy", ["tr1"]), ("dm:trey", "Trey Boyd", ["tr2"])])
+        for spoken in ["Tracy", "Tracy M", "Tracy Miller", "tracy m"] {
+            let (resolved, response) = startCall(spoken)
+            XCTAssertEqual(resolved.map(kind), ["success"], spoken)
+            XCTAssertEqual(response.userActivity?.userInfo?[SiriCallTarget.conversationKey] as? String, "dm:tracy", spoken)
+        }
+    }
+
+    func testCallingTwoTracysAsksWhichOneButOffersOnlyTheTracys() {
+        installTracy(extra: [("dm:tracyk", "Tracy K", ["t3"]), ("dm:troy", "Troy", ["tr1"])])
+        let (resolved, _) = startCall("Tracy")
+        XCTAssertEqual(resolved.map(kind), ["disambiguation"])
+        guard let snap = IntentMessaging.snapshot,
+              case .many(let offered) = IntentMessaging.resolve(id: nil, people: [person("Tracy")], in: snap) else { return XCTFail() }
+        XCTAssertEqual(Set(offered.map(\.title)), ["Tracy M", "Tracy K"])
+        XCTAssertEqual(startCall("Tracy M").resolve.map(kind), ["success"])
+    }
+
+    func testAContactsStylePersonWithAPhoneHandleStillResolvesByName() {
+        installTracy(extra: [("dm:troy", "Troy", ["tr1"])])
+        let p = INPerson(personHandle: INPersonHandle(value: "+15551234567", type: .phoneNumber), nameComponents: nil,
+                         displayName: "Tracy Miller", image: nil, contactIdentifier: "ABC-123", customIdentifier: nil)
+        let intent = INStartCallIntent(callRecordFilter: nil, callRecordToCallBack: nil, audioRoute: .unknown,
+                                       destinationType: .normal, contacts: [p], callCapability: .audioCall)
+        var resolved: [INStartCallContactResolutionResult] = []
+        let e = expectation(description: "resolve")
+        handler.resolveContacts(for: intent) { resolved = $0; e.fulfill() }
+        wait(for: [e], timeout: 5)
+        XCTAssertEqual(resolved.map(kind), ["success"])
+    }
+
+    func testStartCallAlsoQueuesTheCallForTheAppToPlace() {
+        installTracy()
+        SiriRequestQueue.clear()
+        let (_, response) = startCall("Tracy M")
+        XCTAssertEqual(response.code, .continueInApp)
+        let queued = SiriRequestQueue.pending().map(\.request).filter { $0.kind == .call }
+        XCTAssertFalse(queued.isEmpty, "a backgrounded app has no window to deliver the activity to; the queue reaches it")
+        XCTAssertEqual(queued.last?.conversationId, "dm:tracy")
+        XCTAssertEqual(queued.last?.text, "")
+    }
+
+    func testRefusedCallsQueueNothing() {
+        installTracy(lockTracy: true)
+        SiriRequestQueue.clear()
+        _ = startCall("Tracy M")
+        XCTAssertTrue(SiriRequestQueue.pending().isEmpty)
+    }
 }

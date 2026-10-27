@@ -59,12 +59,33 @@ configuration (`CarPlaySceneDelegate`). There is **no** `UIWindowSceneSessionRol
 `UIWindowScene` configuration; `FeedUITests` and `AudienceUITests` (13 tests) pass unchanged with the manifest.
 Do not add a window-role entry - it would replace SwiftUI's scene delegate.
 
-### How a row behaves (Apple's Siri-managed model)
+### How a row behaves
 
-`CPMessageListItem` selection does not call the app. The row's `conversationIdentifier` is the DM circle id.
-An **unread** row makes Siri read the conversation (`INSearchForMessagesIntent`); a **read** row starts a
-reply (`INSendMessageIntent`). The extension resolves the id against the snapshot. A group DM resolves by its
-title. Locked conversations are refused.
+Messages-tab rows are plain `CPListItem`s: a tap opens the **conversation screen** (below). They were
+Siri-managed `CPMessageListItem`s before; those never call the app, so every tap on a read conversation ended
+at Siri's "what would you like to send?". The conversation screen keeps exactly ONE Siri-managed row - **Reply**
+- whose `conversationIdentifier` is the DM circle id: Siri reads any unread messages
+(`INSearchForMessagesIntent`) and takes the reply (`INSendMessageIntent`); the extension resolves the id against
+the snapshot, a group DM by its title, locked conversations are refused.
+
+### The conversation screen (tap a row)
+
+`CarPlayConversations.detail` (pure, unit-tested) -> `CarPlayTemplates.conversationTemplate`:
+
+* **Read new messages** / **Read to me** - Haven reads aloud with its own `AVSpeechSynthesizer`
+  (`CarPlaySpeaker`: spoken-audio session that ducks other audio and hands it back, never over an active call).
+  The script is "N new messages from Tracy M." then each unread one oldest first (attachment-only messages are
+  spoken as "Sent a photo"), or the latest few when nothing is unread. Heard messages are marked read.
+* **Reply** - the Siri-managed row described above.
+* **Call on Haven** - opens the same contact card as the Calls tab (never dials on one tap).
+* **Recent messages** - the newest 8 (200 characters each), newest first, "You . 3:41 PM" bylines (group:
+  the author); a tap reads that message aloud. New messages refresh an open screen in place.
+
+Privacy is identical to the list: a locked conversation shows only "Locked" (no read, reply or call rows'
+content); with the notification-privacy setting below Full there is no read-aloud and the lines show the
+capped phrases ("Sent you a message"), with a line saying why.
+There is still no "parked" signal in the SDK, so the screen is the same parked or driving - CarPlay itself
+limits list interaction while the car is moving.
 
 ## Privacy rules (enforced in one place: `MessagingPrivacy`)
 
@@ -172,6 +193,12 @@ first member with a photo, else the title's initials. (Circle posts are not part
 the name they signed): case, diacritics, fullwidth/halfwidth and hiragana/katakana are folded; emoji and
 punctuation ignored; tokens match as equal, prefix, one-letter initial ("Miller" = "M"), or near-miss spelling
 ("Tracey"); CJK names match by containment. "Tracy" and "Tracy Miller" both find "Tracy M".
+
+Matches are TIERED and only the best tier present is considered, so a sloppier match can never join a list with
+or outvote a better one: exact name > every spoken word is a word of the name ("Tracy" -> "Tracy M") > prefix /
+initial ("Tracy Miller" -> "Tracy M") > near-miss spelling. "Tracy" with contacts Tracy M, Troy, Trey resolves
+straight to Tracy M; the spelling guess "Tracey" is only offered when nothing better exists. Only genuine ties
+(two Tracys) disambiguate, and only between the tied people. One resolver serves messages and calls.
 Outcome per request (send recipients, read-from sender, call contact):
 
 | Situation | Siri result |
@@ -187,7 +214,17 @@ A locked winner is never swapped for a look-alike for calls (locked "Maya" does 
 
 * **Siri:** "call Tracy on Haven" -> `INStartCallIntent` -> `HavenIntents` resolves (fuzzy, locked refused) and
   answers `.continueInApp` with the conversation id and `havenAudioOnly = true` -> `SiriCallRouter` ->
-  `CallManager.startCall`.
+  `CallManager.startCall`. The extension ALSO queues a `.call` request in the App Group and rings the app: when
+  Siri launches Haven in the background (phone locked in a pocket) there is no phone window for the continuation
+  activity, so the queue (drained wherever the app runs - `CarPlayBridge.drain`) is what places the call. The two
+  paths de-duplicate (same conversation within 20 s) and a request older than 90 s is dropped.
+* **Why "call Tracy M" failed while messaging it worked:** Siri resolves the spoken name BEFORE the extension,
+  against the user's Contacts plus whatever the app taught it. Messages worked because share-suggestion
+  donations had taught Siri the thread titles; calls had nothing, so Siri fell back to phonetic Contacts
+  neighbours ("Tracy / Troy / ..."). `SiriContactVocabulary` now registers the titles, aliases and first names as
+  user-specific `contactName` vocabulary (`INVocabulary`, `MessagingVocabulary`) and donates `INStartCallIntent`
+  interactions for the 8 most recent unlocked conversations (and on every call placed). Locked conversations
+  contribute nothing; switching CarPlay and Siri messages off or resetting the account erases both.
 * **Screen:** the CarPlay root is a tab bar (Messages | Calls) when the entitlement allows 2+ tabs
   (`CPTabBarTemplate.maximumTabCount`). A Calls row opens a `CPContactTemplate` (system `CPContactCallButton`);
   that button starts the same call. A tap on a row never dials by itself.
@@ -261,7 +298,7 @@ What Apple's CarPlay SDK offers a Communication app (from the SDK headers; the w
 this environment):
 
 * `CPMessageListItem` selection is Siri-managed: the app gets no callback. Unread rows -> Siri reads; read rows
-  -> Siri composes a reply.
+  -> Siri composes a reply. (Haven now uses it for the single Reply row only; see "The conversation screen".)
 * There is **no "parked" signal** for non-navigation apps. `CPSessionConfiguration` exposes only
   `limitedUserInterfaces` (keyboard/lists limited by the car) and `contentStyle`; nothing reports vehicle motion.
 * Haven can show lists, a tab bar and a contact card (what it uses). Scrolling message history in an app-drawn
@@ -275,6 +312,11 @@ time. To make that possible without exposing more than needed, the three most re
 20 messages in the Siri snapshot (the rest 6). Locked conversations and privacy levels below Full return nothing.
 Browsing a long history by eye is a phone feature.
 
+Update (field test): Messages-tab rows now open an app-drawn conversation screen (recent messages as list
+items plus read-aloud, reply and call). Apple's Communication guidance leans on Siri for message content, so this
+is the item most worth a second look at App Review; it uses only `CPListTemplate`/`CPListItem`, and the content
+obeys the same privacy tiers as the rows.
+
 ## Verification status of the follow-ups
 
 Proven by automated tests (this branch): name scoring and resolution (including the "Tracy M" report), intent
@@ -282,6 +324,14 @@ resolution kinds and refusals, audio-only call activity, avatar geometry and rea
 aspect fill), tab/list/contact template construction, localized phrase tables, search paging, communication
 plans. Not verified by any test or run: real CarPlay rendering of the new avatars and tabs, Siri speech, Announce
 Notifications, CallKit on the head unit.
+
+Field-test round 2 (conversation screen, call resolution, matcher tiers): proven by automated tests -
+tiered resolution ("Tracy" never offers Troy; "Tracy M"/"Tracy Miller"/"Tracy" all resolve a call), conversation
+detail + spoken script (privacy tiers, caps, ordering), template construction including the mixed
+`CPListItem` + `CPMessageListItem` conversation screen, the queued call request, vocabulary rules, localized
+strings. NOT verified without a car/CarPlay simulator: how the screen renders, `AVSpeechSynthesizer` over the
+car audio route, that Siri now maps "Tracy M" to Haven after the vocabulary/donations settle (Siri can take a
+few minutes after the first launch to learn them), and the background-launch call path.
 
 ## Known limits
 

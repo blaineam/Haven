@@ -136,31 +136,76 @@ enum ContactMatching {
 
     // MARK: Ranking + resolution
 
-    /// Best score of any query against any of the candidate's names; candidates scoring 0 are dropped.
-    static func rank(queries: [String], candidates: [Candidate]) -> [Match] {
-        var out: [Match] = []
-        for c in candidates {
-            var best = 0.0
-            for q in queries { for n in c.names { best = max(best, score(query: q, name: n)) } }
-            if best >= weakThreshold { out.append(Match(id: c.id, score: best)) }
+    /// How a candidate matched, strongest first. Resolution only ever looks at the best tier present, so a
+    /// sloppier match (a prefix, an initial, a near-miss spelling) can never share a disambiguation list
+    /// with, or outvote, a better one - "Tracy" is the contact called "Tracy", not also "Troy".
+    enum Tier: Int, Comparable {
+        case weak = 0       // near-miss spelling only
+        case strong = 1     // prefix / initial / CJK containment
+        case tokens = 2     // every spoken word is exactly one of the name's words ("Tracy" -> "Tracy M")
+        case exact = 3      // the whole folded name
+        static func < (a: Tier, b: Tier) -> Bool { a.rawValue < b.rawValue }
+    }
+
+    static func tier(query: String, name: String) -> Tier {
+        let q = normalize(query), n = normalize(name)
+        guard !q.isEmpty, !n.isEmpty else { return .weak }
+        if q == n { return .exact }
+        let s = score(query: q, name: n)
+        if s < strongThreshold { return .weak }
+        var pool = n.split(separator: " ").map(String.init)
+        for qtok in q.split(separator: " ").map(String.init) {
+            guard let i = pool.firstIndex(of: qtok) else { return .strong }
+            pool.remove(at: i)
         }
-        return out.sorted { $0.score != $1.score ? $0.score > $1.score : $0.id < $1.id }
+        return .tokens
+    }
+
+    /// Best score (and tier) of any query against any of the candidate's names; candidates scoring below
+    /// the weak threshold are dropped.
+    private static func rankTiered(queries: [String], candidates: [Candidate]) -> [(match: Match, tier: Tier)] {
+        var out: [(Match, Tier)] = []
+        for c in candidates {
+            var best = 0.0, bestTier = Tier.weak
+            for q in queries { for n in c.names {
+                let s = score(query: q, name: n)
+                guard s >= weakThreshold else { continue }
+                let t = tier(query: q, name: n)
+                if t > bestTier || (t == bestTier && s > best) || best == 0 { bestTier = t; best = s }
+            } }
+            if best >= weakThreshold { out.append((Match(id: c.id, score: best), bestTier)) }
+        }
+        return out.sorted { a, b in
+            a.1 != b.1 ? a.1 > b.1 : (a.0.score != b.0.score ? a.0.score > b.0.score : a.0.id < b.0.id)
+        }
+    }
+
+    static func rank(queries: [String], candidates: [Candidate]) -> [Match] {
+        rankTiered(queries: queries, candidates: candidates).map(\.match)
+            .sorted { $0.score != $1.score ? $0.score > $1.score : $0.id < $1.id }
     }
 
     static func resolve(queries: [String], candidates: [Candidate]) -> Resolution {
-        let ranked = rank(queries: queries, candidates: candidates)
-        guard let top = ranked.first else { return .none }
+        let ranked = rankTiered(queries: queries, candidates: candidates)
+        guard let best = ranked.first else { return .none }
 
-        let exact = ranked.filter { $0.score >= 1 }
-        if exact.count == 1 { return .confident(exact[0]) }
-        if exact.count > 1 { return .ambiguous(Array(exact.prefix(maxChoices))) }
-
-        let strong = ranked.filter { $0.score >= strongThreshold }
-        if !strong.isEmpty {
-            let close = strong.filter { top.score - $0.score <= closeMargin }
+        // Only the best tier is in play: an exact name beats "Tracy M", which beats "Tracy Miller" by
+        // initial, which beats a spelling guess.
+        let top = ranked.filter { $0.tier == best.tier }.map(\.match)
+        switch best.tier {
+        case .exact, .tokens:
+            // Several different people can genuinely share the spoken words ("Tracy" -> two Tracys).
+            // Close scores are a tie; a clearly better-covered one (fewer extra words) wins.
+            let close = top.filter { top[0].score - $0.score <= closeMargin }
             return close.count == 1 ? .confident(close[0]) : .ambiguous(Array(close.prefix(maxChoices)))
+        case .strong:
+            let close = top.filter { top[0].score - $0.score <= closeMargin }
+            return close.count == 1 ? .confident(close[0]) : .ambiguous(Array(close.prefix(maxChoices)))
+        case .weak:
+            // Only guesses: never "no matches" while something plausible exists, but never a crowd -
+            // one guess is confirmed, a couple of close guesses are offered.
+            let close = top.filter { top[0].score - $0.score <= closeMargin }
+            return close.count == 1 ? .tentative(close[0]) : .ambiguous(Array(close.prefix(maxChoices)))
         }
-        // Only weak candidates: never "no matches" while something plausible exists.
-        return ranked.count == 1 ? .tentative(top) : .ambiguous(Array(ranked.prefix(maxChoices)))
     }
 }

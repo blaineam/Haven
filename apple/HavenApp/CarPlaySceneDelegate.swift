@@ -7,9 +7,10 @@ import UIKit
 ///
 /// CarPlay connects this scene to the SAME process as the phone UI, so it reads the same `FeedStore`.
 /// Root: a tab bar (when the entitlement allows 2+ tabs) with
-///   * **Messages** - a `CPListTemplate` of direct-message conversations as `CPMessageListItem`s. Those are
-///     Siri-managed: selecting one does not call back into us; Siri reads the conversation (unread) or
-///     starts a reply (read) through `HavenIntents`, keyed by the `conversationIdentifier` (the DM circle id).
+///   * **Messages** - a `CPListTemplate` of direct-message conversations. A tap opens the conversation
+///     screen: "Read new messages" (Haven reads them aloud), a "Reply" row (the one Siri-managed
+///     `CPMessageListItem`, keyed by the DM circle id, which takes a spoken reply through `HavenIntents`),
+///     "Call on Haven", and the recent messages (newest first; a tap reads one aloud).
 ///   * **Calls** - callable conversations; a row opens a `CPContactTemplate` whose "Call on Haven" button
 ///     starts an audio call through `CallManager` (CallKit then shows it natively on the car).
 ///
@@ -28,6 +29,10 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     /// Bumps on every refresh request so a stale async build never overwrites a newer one.
     private var generation = 0
     private var callRows: [CarPlayConversations.CallRow] = []
+    private var threadsByID: [String: MessagingThread] = [:]
+    private var detailLevel: SharedNotificationPrivacy.Detail = .minimal
+    /// The conversation screen currently on top, refreshed in place when new messages arrive.
+    private var openConversation: (id: String, template: CPListTemplate)?
     private var avatarsByID: [String: UIImage] = [:]
 
     // MARK: - Scene lifecycle
@@ -60,6 +65,8 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         cancellables.removeAll()
         messagesTemplate = nil
         callsTemplate = nil
+        openConversation = nil
+        CarPlaySpeaker.shared.stop()
         self.interfaceController = nil
     }
 
@@ -90,8 +97,11 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         let detail = MessagingThreads.privacyDetail
         let rows = CarPlayConversations.rows(threads: threads, detail: detail, now: Date(), limit: limit)
         callRows = enabled && configured ? CarPlayConversations.callRows(threads: threads, limit: limit) : []
+        threadsByID = Dictionary(threads.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        detailLevel = detail
         // Rows first, from text alone, so the list is never held up by image work...
-        template.updateSections([CarPlayTemplates.section(for: rows, configured: configured, enabled: enabled, avatars: avatarsByID)])
+        template.updateSections([messagesSection(rows: rows, configured: configured, enabled: enabled, avatars: avatarsByID)])
+        refreshOpenConversation()
         callsTemplate?.updateSections([callsSection(avatars: avatarsByID)])
         guard enabled, configured, !rows.isEmpty || !callRows.isEmpty else { return }
         // ...then avatars: inputs are read here (stores are main-actor), drawn off the main thread
@@ -128,9 +138,62 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
                                          rows: [CarPlayConversations.Row], configured: Bool, enabled: Bool) {
         guard mine == generation else { return }
         avatarsByID = images
-        messagesTemplate?.updateSections([CarPlayTemplates.section(for: rows, configured: configured,
-                                                                   enabled: enabled, avatars: images)])
+        messagesTemplate?.updateSections([messagesSection(rows: rows, configured: configured, enabled: enabled, avatars: images)])
         callsTemplate?.updateSections([callsSection(avatars: images)])
+    }
+
+    // MARK: - Messages
+
+    @MainActor private func messagesSection(rows: [CarPlayConversations.Row], configured: Bool, enabled: Bool,
+                                            avatars: [String: UIImage]) -> CPListSection {
+        CarPlayTemplates.section(for: rows, configured: configured, enabled: enabled, avatars: avatars,
+                                 unreadMark: CarPlayTemplates.unreadDot(color: UIColor(PaletteStore.current.tint))) { [weak self] row in
+            self?.showConversation(row.conversationId)
+        }
+    }
+
+    @MainActor private func conversationTemplate(_ id: String) -> CPListTemplate? {
+        guard let thread = threadsByID[id] else { return nil }
+        let detail = CarPlayConversations.detail(thread: thread, detail: detailLevel, now: Date())
+        return CarPlayTemplates.conversationTemplate(
+            for: detail,
+            onRead: { [weak self] in self?.read(id, unreadOnly: true) },
+            onCall: { [weak self] in
+                if let row = self?.callRows.first(where: { $0.conversationId == id }) { self?.showContact(row) }
+            },
+            onSpeak: { [weak self] line in self?.speakLine(id, line) })
+    }
+
+    @MainActor private func showConversation(_ id: String) {
+        guard let controller = interfaceController, let template = conversationTemplate(id) else { return }
+        openConversation = (id, template)
+        controller.pushTemplate(template, animated: true, completion: nil)
+    }
+
+    /// New messages arriving while a conversation is open update it in place.
+    @MainActor private func refreshOpenConversation() {
+        guard let open = openConversation else { return }
+        guard interfaceController?.templates.contains(where: { $0 === open.template }) == true,
+              let fresh = conversationTemplate(open.id) else { openConversation = nil; return }
+        open.template.updateSections(fresh.sections)
+    }
+
+    /// "Read new messages": the unread ones (or the latest few), then mark the thread read - it has
+    /// been heard, so the unread dot goes away like it would after opening it on the phone.
+    @MainActor private func read(_ id: String, unreadOnly: Bool) {
+        guard let thread = threadsByID[id] else { return }
+        let script = CarPlayConversations.spokenScript(thread: thread, detail: detailLevel)
+        guard !script.isEmpty else { return }
+        let newest = thread.messages.map(\.createdAt).max() ?? 0
+        CarPlaySpeaker.shared.speak(script) {
+            DMReadStore.shared.markRead(id, newestMessageAt: newest)
+        }
+    }
+
+    @MainActor private func speakLine(_ id: String, _ line: CarPlayConversations.Line) {
+        guard let thread = threadsByID[id], !thread.locked, detailLevel == .full else { return }
+        let author = thread.memberHandles.count > 1 ? thread.messages.first { $0.id == line.id }?.author : nil
+        CarPlaySpeaker.shared.speak([author.flatMap { $0.isEmpty ? nil : MessagingText.says($0, line.text) } ?? line.text])
     }
 
     // MARK: - Calls

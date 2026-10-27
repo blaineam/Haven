@@ -308,6 +308,13 @@ extension IntentHandler: INStartCallIntentHandling {
               let c = found.single else {
             completion(INStartCallIntentResponse(code: .failure, userActivity: nil)); return
         }
+        // Belt and braces: when Siri launches the app in the BACKGROUND (phone locked in a pocket, the car
+        // case) there may be no phone window to deliver the continuation activity to, and then nothing
+        // would ring. The app drains this queue wherever it is running, so queue the call too; the app
+        // de-duplicates the two paths.
+        if SiriRequestQueue.enqueue(kind: .call, conversationId: c.id) {
+            SiriRequestSignal.post(SiriRequestSignal.request)
+        }
         let activity = NSUserActivity(activityType: Self.callActivityType)
         // Haven calls always START audio-only (also when Siri asked for video: a head unit cannot show
         // it); video can be switched on from the phone once the call is up.

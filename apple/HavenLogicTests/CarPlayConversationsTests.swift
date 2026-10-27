@@ -278,6 +278,83 @@ final class CarPlayConversationsTests: XCTestCase {
         SiriRequestQueue.clear()
         XCTAssertEqual(SiriRequestQueue.pending().count, 0)
     }
+    // MARK: conversation screen + spoken script
+
+    private func detail(_ t: MessagingThread, _ d: SharedNotificationPrivacy.Detail = .full) -> CarPlayConversations.Detail {
+        CarPlayConversations.detail(thread: t, detail: d, now: now, calendar: cal, locale: locale)
+    }
+
+    func testDetailListsRecentMessagesNewestFirstWithAuthorAndTime() {
+        var t = thread("dm:a", "Tracy M", [msg("1", mins: 90, mine: true, body: "where are you"), msg("2", mins: 5, body: "On my way"),
+                                          msg("3", mins: 2, body: "", att: true)], watermark: ms(10))
+        t.memberHandles = ["h1"]
+        let d = detail(t)
+        XCTAssertEqual(d.lines.map(\.id), ["3", "2", "1"])
+        XCTAssertEqual(d.lines[0].text, MessagingText.attachment, "attachment-only message is described, not blank")
+        XCTAssertEqual(d.lines[1].text, "On my way")
+        XCTAssertEqual(d.lines[2].byline.hasPrefix("You"), true)
+        XCTAssertEqual(d.unreadCount, 2)
+        XCTAssertTrue(d.lines[0].unread && d.lines[1].unread && !d.lines[2].unread)
+        XCTAssertTrue(d.canSpeak && d.callable && !d.locked && !d.textHidden)
+    }
+
+    func testDetailTextIsLongerThanTheRowPreviewButBounded() {
+        let long = String(repeating: "word ", count: 80)
+        let d = detail(thread("dm:a", "A", [msg("1", mins: 1, body: long)]))
+        XCTAssertGreaterThan(d.lines[0].text.count, MessagingPrivacy.previewLimit)
+        XCTAssertLessThanOrEqual(d.lines[0].text.count, CarPlayConversations.detailTextLimit)
+    }
+
+    func testDetailRespectsLockAndPrivacyLevels() {
+        let t = thread("dm:a", "A", [msg("1", mins: 1, body: "secret plans"), msg("2", mins: 50, mine: true, body: "mine")])
+        let locked = detail(thread("dm:a", "A", [msg("1", mins: 1, body: "secret")], locked: true))
+        XCTAssertTrue(locked.locked)
+        XCTAssertTrue(locked.lines.isEmpty && !locked.canSpeak && !locked.callable)
+        for level in [SharedNotificationPrivacy.Detail.privateDetail, .minimal] {
+            let d = detail(t, level)
+            XCTAssertTrue(d.textHidden && !d.canSpeak, "\(level)")
+            XCTAssertFalse(d.lines.contains { $0.text.contains("secret") || $0.text.contains("mine") }, "\(level) leaks text")
+        }
+        XCTAssertEqual(detail(t, .privateDetail).lines.first?.text, MessagingText.sentAMessage)
+    }
+
+    func testDetailCapsLines() {
+        let t = thread("dm:a", "A", (0..<30).map { msg("m\($0)", mins: Double($0)) })
+        XCTAssertEqual(detail(t).lines.count, CarPlayConversations.maxDetailLines)
+        XCTAssertEqual(detail(t).lines.first?.id, "m0")
+    }
+
+    func testSpokenScriptIntroThenUnreadOldestFirst() {
+        let t = thread("dm:a", "Tracy M", [msg("1", mins: 30, body: "old, read"), msg("2", mins: 9, body: "first new"),
+                                          msg("3", mins: 4, body: "", att: true), msg("4", mins: 3, mine: true, body: "my reply")],
+                       watermark: ms(20))
+        XCTAssertEqual(CarPlayConversations.spokenScript(thread: t, detail: .full),
+                       [MessagingText.newMessages(2, from: "Tracy M"), "first new", MessagingText.attachment])
+        let one = thread("dm:a", "Tracy M", [msg("2", mins: 9, body: "only")], watermark: ms(20))
+        XCTAssertEqual(CarPlayConversations.spokenScript(thread: one, detail: .full), [MessagingText.oneNewMessage(from: "Tracy M"), "only"])
+    }
+
+    func testSpokenScriptWithNothingUnreadReadsTheLatestAndWithNothingAtAllSaysSo() {
+        let t = thread("dm:a", "Tracy M", [msg("1", mins: 30, body: "one"), msg("2", mins: 20, body: "two")], watermark: ms(1))
+        XCTAssertEqual(CarPlayConversations.spokenScript(thread: t, detail: .full), [MessagingText.recentFrom("Tracy M"), "one", "two"])
+        XCTAssertEqual(CarPlayConversations.spokenScript(thread: thread("dm:a", "Tracy M", []), detail: .full), [MessagingText.noneYet(from: "Tracy M")])
+    }
+
+    func testSpokenScriptIsCappedAndNamesGroupAuthors() {
+        var t = thread("dm:g", "Crew", (0..<12).map { msg("m\($0)", mins: Double(20 - $0), body: "m\($0)", author: "Maya") })
+        t.memberHandles = ["h1", "h2"]
+        let s = CarPlayConversations.spokenScript(thread: t, detail: .full)
+        XCTAssertEqual(s.count, 1 + CarPlayConversations.maxSpoken)
+        XCTAssertEqual(s[1], MessagingText.says("Maya", "m7"), "the newest five, oldest first, with the speaker named in a group")
+    }
+
+    func testNothingIsSpokenWhenLockedOrPrivate() {
+        let t = thread("dm:a", "A", [msg("1", mins: 1, body: "secret")])
+        XCTAssertTrue(CarPlayConversations.spokenScript(thread: t, detail: .privateDetail).isEmpty)
+        XCTAssertTrue(CarPlayConversations.spokenScript(thread: t, detail: .minimal).isEmpty)
+        XCTAssertTrue(CarPlayConversations.spokenScript(thread: thread("dm:a", "A", [msg("1", mins: 1)], locked: true), detail: .full).isEmpty)
+    }
+
 }
 
 /// Which conversation a Siri/CarPlay "call X" means - and, as importantly, which it must refuse.

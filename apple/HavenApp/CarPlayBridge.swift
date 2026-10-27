@@ -50,15 +50,18 @@ final class CarPlayBridge {
     func wipe() {
         MessagingSnapshotStore.clear()
         SiriRequestQueue.clear()
+        SiriContactVocabulary.forget()
     }
 
     func publish() {
         guard SettingsStore.shared.carPlayAndSiri else { wipe(); return }
         guard FeedStore.shared.isConfigured else { return }
-        let snapshot = MessagingSnapshot.build(threads: MessagingThreads.current(),
+        let threads = MessagingThreads.current()
+        let snapshot = MessagingSnapshot.build(threads: threads,
                                                detail: MessagingThreads.privacyDetail,
                                                now: UInt64(Date().timeIntervalSince1970 * 1000))
         MessagingSnapshotStore.write(snapshot)
+        SiriContactVocabulary.sync(threads: threads)
     }
 
     /// Apply whatever Siri queued. Safe to call any time and from several places (launch, foreground,
@@ -75,6 +78,15 @@ final class CarPlayBridge {
                 if !locked {
                     let newest = FeedStore.shared.messages(in: request.conversationId).map(\.createdAt).max() ?? 0
                     DMReadStore.shared.markRead(request.conversationId, newestMessageAt: newest)
+                }
+                SiriRequestQueue.complete(file)
+                handled = true
+            case .call:
+                // A call is only worth placing right now: a request that sat in the queue (app was dead,
+                // engine never came up) must not ring someone minutes later.
+                let age = UInt64(Date().timeIntervalSince1970 * 1000) &- request.createdAt
+                if !locked, age < SiriCallRouter.maxRequestAgeMs {
+                    SiriCallRouter.place(conversationId: request.conversationId)
                 }
                 SiriRequestQueue.complete(file)
                 handled = true

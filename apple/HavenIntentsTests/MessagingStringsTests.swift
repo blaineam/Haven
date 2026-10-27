@@ -7,7 +7,13 @@ final class MessagingStringsTests: XCTestCase {
     private let keys = ["Locked", "New activity", "Message unsent", "Sent you a message", "You sent a message", "Sent a photo",
                         "Sent a video", "Sent a voice note", "Sent a file", "Shared a song", "Sent an attachment",
                         "Sent the group a photo", "Sent the group a voice note", "Messaged the group", "Messages", "Calls",
-                        "No conversations yet", "Open Haven on your iPhone", "Turned off", "No one to call yet", "Haven audio call"]
+                        "No conversations yet", "Open Haven on your iPhone", "Turned off", "No one to call yet", "Haven audio call",
+                        "Read new messages", "Read to me", "Haven reads them aloud", "Reply", "Say your message to Siri",
+                        "Call on Haven", "Recent messages", "No messages yet", "You",
+                        "Unlock this conversation in Haven on your iPhone.", "Nothing to read right now.",
+                        "Message text is hidden by your notification privacy setting.",
+                        "One new message from %@.", "%lld new messages from %@.", "Recent messages from %@.",
+                        "No messages from %@ yet.", "%1$@ says: %2$@"]
 
     private func table(_ lang: String) -> [String: String]? {
         let bundle = Bundle(for: Self.self)

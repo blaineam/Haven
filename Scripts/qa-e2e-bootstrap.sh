@@ -20,6 +20,25 @@ AND_PKG="${HAVEN_AND_PKG:-com.blaineam.haven}"
 
 log() { echo "[e2e-boot] $*"; }
 
+# ── Host load preflight. The budgets assume a quiet machine: with Spotlight / mediaanalysisd /
+#    another session's build saturating the host the 2.5 GB emulator swaps and the whole fleet runs
+#    3-4x slow, so checks score RED (or "never") for reasons that say nothing about the code. Wait
+#    for the 1-min load average to drop, then fail LOUDLY as "host starved" rather than score it.
+#    E2E_MAX_LOAD (default 8), E2E_LOAD_WAIT_S (default 1200); E2E_SKIP_LOAD_PREFLIGHT=1 to bypass.
+if [[ "${E2E_SKIP_LOAD_PREFLIGHT:-0}" != "1" ]]; then
+  _max="${E2E_MAX_LOAD:-8}"; _deadline=$(( $(date +%s) + ${E2E_LOAD_WAIT_S:-1200} ))
+  while :; do
+    _load=$(sysctl -n vm.loadavg | awk '{print int($2)}')
+    [[ "$_load" -lt "$_max" ]] && break
+    if [[ $(date +%s) -ge $_deadline ]]; then
+      log "FATAL: host starved — load average $_load >= $_max for ${E2E_LOAD_WAIT_S:-1200}s; results would not be trustworthy (E2E_SKIP_LOAD_PREFLIGHT=1 to override)"
+      exit 75
+    fi
+    sleep 15
+  done
+  log "host load $_load < $_max — proceeding"
+fi
+
 # ── Host audio preflight. The iOS simulator and the macOS stub use the HOST's default output
 #    device. When that device is stuck (seen with a virtual remote-desktop output while its client
 #    is disconnected), every audio start blocks ~15s and WebRTC's AURemoteIO::Initialize aborts on

@@ -111,7 +111,24 @@ not shown on the car.
 Automated (JVM, no device): `./gradlew --offline :app:testDebugUnitTest --tests '*CarMessagingTest' --tests '*AndroidAutoDeclarationTest'`
 (plus the full unit suite, including `TestFlakeGuardTest`).
 
-See "Verification status" below for what has and has not been exercised.
+On a device/emulator (hermetic, offline runner):
+`ANDROID_SERIAL=<serial> ./gradlew --offline :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.blaineam.haven.CarNotificationsInstrumentedTest`
+posts the real notification and asserts, from `NotificationManager.getActiveNotifications()`, that it is
+MessagingStyle with `CATEGORY_MESSAGE`, a REPLY (RemoteInput) and a MARK_AS_READ semantic action neither
+showing UI, then fires the posted reply PendingIntent with a RemoteInput result and checks the text lands in the
+thread via `HavenNet.sendDm`, and that mark-as-read withdraws the notification.
+
+### Verification status (2026-10-26)
+
+Verified: JVM rules (`CarMessagingTest`, `AndroidAutoDeclarationTest`, full unit suite), debug build and manifest
+merge, and the instrumented test above on an API 35 emulator (arm64, google_apis).
+
+NOT verified, because it cannot be on this setup: any real Android Auto or Desktop Head Unit session. The
+emulator images here have no Play Store and carry only the stub `com.google.android.projection.gearhead`
+(1.2.542030-stub), not the real Android Auto app the DHU needs. So what Android Auto *does* with the notification
+(card rendering, Assistant read-out, voice reply UX, the notification-listener allow-list for third-party
+messaging apps) is taken from the platform documentation, not observed. `lintDebug` could not run offline
+(an uncached lint-checks dependency).
 
 ### Manual, on a real head unit or the Desktop Head Unit (NOT exercised by automation)
 

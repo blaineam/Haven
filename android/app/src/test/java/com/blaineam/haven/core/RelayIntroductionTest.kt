@@ -44,4 +44,40 @@ class RelayIntroductionTest {
         assertTrue(RelayIntroduction.enrollDue(1, null, emptySet(), listOf(rb), force = false))
         assertTrue(RelayIntroduction.enrollDue(1, 0, enrolled, listOf(rb), force = true))
     }
+
+    // --- Track R: a member that joined without an approval, and a LOST enroll, must not wait 10 minutes ---
+
+    @Test fun aNewMemberSetReopensTheGateWithoutWaitingTenMinutes() {
+        val enrolled = setOf(ra)
+        // Steady state: nothing changed, 1 minute later → not due.
+        assertFalse(RelayIntroduction.enrollDue(60_000, 0, enrolled, listOf(ra), force = false))
+        // The same minute, but the relay has not heard the current member set (a linked device or a
+        // contact added from another device joined) → due now.
+        assertTrue(RelayIntroduction.enrollDue(60_000, 0, enrolled, listOf(ra), force = false, membersChanged = true))
+    }
+
+    @Test fun aFailedEnrollRetriesInAMinuteNotTen() {
+        val enrolled = setOf(ra)
+        val last = 1_000L
+        // The attempt did not land (relay down / dial failed / refused): too soon to hammer it…
+        assertFalse(RelayIntroduction.enrollDue(last + 30_000, last, enrolled, listOf(ra), force = false, lastLanded = false))
+        // …but a minute later it is due, far inside the 10-minute steady-state gate.
+        assertTrue(RelayIntroduction.enrollDue(last + RelayIntroduction.ENROLL_RETRY_GAP_MS, last, enrolled, listOf(ra), force = false, lastLanded = false))
+        assertTrue(RelayIntroduction.ENROLL_RETRY_GAP_MS < RelayIntroduction.ENROLL_GAP_MS)
+    }
+
+    @Test fun aRelayThatNeverAnswersTheVerbIsNotRedialedEveryTick() {
+        // After a failed attempt even a CHANGED member set waits the retry gap (an older relay answers
+        // `ERR verb` forever; the sync tick is 20 s).
+        val enrolled = setOf(ra)
+        assertFalse(RelayIntroduction.enrollDue(21_000, 1_000, enrolled, listOf(ra), force = false,
+            membersChanged = true, lastLanded = false))
+    }
+
+    @Test fun forceAndNewRelayStillWinOverEverything() {
+        val enrolled = setOf(ra)
+        assertTrue(RelayIntroduction.enrollDue(2_000, 1_000, enrolled, listOf(ra), force = true, lastLanded = false))
+        assertTrue(RelayIntroduction.enrollDue(2_000, 1_000, enrolled, listOf(ra, rb), force = false, lastLanded = false))
+        assertTrue(RelayIntroduction.enrollDue(0, null, emptySet(), listOf(ra), force = false))
+    }
 }

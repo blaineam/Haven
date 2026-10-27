@@ -24,6 +24,26 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   answer a ringing call). If ACCEPT travels over a relay that refuses the callee's device, the screen waits
   for it — that is the relay-authorization problem tracked separately, not the label.
 
+### Fixed - Android: a new member of a circle is enrolled on the relay promptly, and a call no longer waits out a dial backoff
+
+Two delivery bugs, both found on the Nokia 6.1 (a second device on an isolated guest subnet that can
+reach only the relay's HTTP twin):
+
+- **The relay never learned the new member.** The relay (`haven-relay` 2.0.0 on the NAS) authorizes a
+  device only once an existing member has told it the circle's member list (`ENROLL`). The
+  Nokia's account and device were in the relay's `devroster-devices.json` (its signed roster PUT was
+  accepted) but in none of its `enrolled-circles.json` grants, so every mailbox list, media fetch and DM
+  put came back "not authorized there yet" (2,885 refusals in 20 minutes) — "media never loads and my
+  DMs don't reach the other phone". The enroll gate only reopened on approval, on a new relay, or every
+  10 minutes, recorded an attempt as done BEFORE it landed, and ignored a changed member set. It now
+  also reopens when the member set differs from the one a relay last accepted, and a failed attempt
+  retries after a minute (`RelayIntroduction.enrollDue`, `ENROLL_RETRY_GAP_MS`). Android inviter side;
+  iOS has the same gate and needs the same change.
+- **A call waited out the dial backoff.** Mobile dial backoff runs 2 → 30 min after failed connects and
+  placing a call did not forgive it, so an invite to a peer with an old strike count rang minutes late
+  ("the call finally came through, it had to catch up"). Call setup frames (invite, accept, group
+  invite/join) now forgive that peer's dial backoff first (`CallDialPolicy`); ICE/SDP/hangup never do.
+
 ### Fixed - Android: the call camera button (and the mic) on a device that only ever receives calls
 
 On the Nokia the in-call camera button never started the camera — the tile stayed black — and the mic

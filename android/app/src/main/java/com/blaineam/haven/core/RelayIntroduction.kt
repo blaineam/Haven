@@ -19,17 +19,32 @@ class RelayIntroduction {
         const val REINTRODUCE_GAP_MS = 30_000L
         /** The member enroll's steady-state gate: the set changes rarely, so once per 10 min is plenty. */
         const val ENROLL_GAP_MS = 600_000L
+        /** A FAILED enroll (relay unreachable, dial failed, refused) is retried this soon, not after the
+         *  10-minute steady-state gate: a brand-new member stays refused ("media never loads, my DMs
+         *  don't send") until the relay hears the list, so one lost attempt must not cost ten minutes. */
+        const val ENROLL_RETRY_GAP_MS = 60_000L
         /** Circle id meaning "every circle" — a relay made the all-circles default joined all of them. */
         const val ALL_CIRCLES = "*"
 
         /**
          * The member-enroll gate. Due when forced, never enrolled, the circle's relay set gained a relay
-         * since the last enroll (that relay has never heard the list), or [ENROLL_GAP_MS] has passed.
+         * since the last enroll (that relay has never heard the list), the MEMBER SET differs from the one
+         * the relay last accepted ([membersChanged] — a contact or device that joined without going through
+         * an approval, e.g. a linked device or a friend added from another device, is refused by the relay
+         * until it is enrolled, so waiting out the steady-state gate leaves them locked out), the last
+         * attempt did not land and [ENROLL_RETRY_GAP_MS] has passed, or [ENROLL_GAP_MS] has passed.
          */
-        fun enrollDue(nowMs: Long, lastMs: Long?, lastRelays: Set<String>, relays: List<String>, force: Boolean): Boolean {
+        fun enrollDue(
+            nowMs: Long, lastMs: Long?, lastRelays: Set<String>, relays: List<String>, force: Boolean,
+            membersChanged: Boolean = false, lastLanded: Boolean = true,
+        ): Boolean {
             if (force) return true
             if (lastMs == null) return true
             if (relays.any { it.lowercase() !in lastRelays }) return true
+            // A relay that never answers the verb (older build, unreachable) must not be re-dialed every
+            // sync tick: after a failed attempt the retry gap applies even to a changed member set.
+            if (!lastLanded) return nowMs - lastMs >= ENROLL_RETRY_GAP_MS
+            if (membersChanged) return true
             return nowMs - lastMs >= ENROLL_GAP_MS
         }
     }

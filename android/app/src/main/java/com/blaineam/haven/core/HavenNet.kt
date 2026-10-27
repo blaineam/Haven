@@ -1577,6 +1577,9 @@ object HavenNet : InboundListener {
      *  lands the ACCEPT within the ring window (the push rings, but the answer path was direct-only). */
     fun sendCallFrame(type: Int, payload: ByteArray, toNodeHex: String) {
         val frame = Wire.frame(type, payload)
+        // A call is the user saying "this person, now": a peer sitting in a 2–30 min dial backoff from
+        // earlier failures must be tried immediately, not when the cooldown happens to expire.
+        if (CallDialPolicy.forgivesBackoff(type)) forgiveDials(toNodeHex)
         sendFrame(type, payload, toNodeHex)
         val dests = LinkedHashSet<String>()
         // Prefer roster device ids for this account; fall back to account hex + invite hints.
@@ -3468,6 +3471,11 @@ object HavenNet : InboundListener {
      *  and the relays that enroll reached: a relay added since then opens the gate ([RelayIntroduction]). */
     private val lastEnrollMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val lastEnrollRelays = java.util.concurrent.ConcurrentHashMap<String, Set<String>>()
+    /** The member list a relay last ACCEPTED per circle (set only when an enroll landed) and whether
+     *  the latest attempt landed — so a member who joined without an approval re-opens the gate, and a
+     *  lost attempt retries in a minute instead of ten. */
+    private val lastEnrollMembers = java.util.concurrent.ConcurrentHashMap<String, Set<String>>()
+    private val lastEnrollLanded = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
 
     /** Which relays each circle had at the last [noteRelayJoins] — the diff is what JOINED. Seeded by
      *  [loadRelayNodes] so a relaunch introduces nothing. Guarded by [relayIntro]. */
@@ -3569,24 +3577,33 @@ object HavenNet : InboundListener {
             if (only != null && c.id !in only) continue
             val relays = relaysFor(c.id).filter { !it.startsWith("s3:") && it.length == 64 }
             if (relays.isEmpty()) continue
-            // A relay added since the last enroll has never heard the list: the gate opens for it.
-            if (!RelayIntroduction.enrollDue(nowMs, lastEnrollMs[c.id], lastEnrollRelays[c.id] ?: emptySet(),
-                    relays, force)) continue
             // Rule (2) of `learn`: name OURSELVES or the relay declines the whole request.
             val members = LinkedHashSet<String>()
             members.add(myAcct)
             myNode?.let { members.add(it) }
             for (t in dialTargets(c.id)) members.add(t.lowercase())
             if (members.size <= 1) continue
+            val memberSet = members.toSet()
+            // A relay added since the last enroll has never heard the list: the gate opens for it. So does
+            // a member set the relay has not accepted yet, and a failed attempt after a short retry gap.
+            if (!RelayIntroduction.enrollDue(nowMs, lastEnrollMs[c.id], lastEnrollRelays[c.id] ?: emptySet(),
+                    relays, force, membersChanged = memberSet != lastEnrollMembers[c.id],
+                    lastLanded = lastEnrollLanded[c.id] ?: true)) continue
             lastEnrollMs[c.id] = nowMs
             lastEnrollRelays[c.id] = relays.map { it.lowercase() }.toSet()
             val list = members.toList()
             scope.launch {
+                var landed = false
                 for (hex in relays) {
                     val client = relayClientFor(hex) ?: continue
                     val ok = runCatching { client.enrollMembers(c.id, list) }.getOrDefault(false)
-                    if (ok) Log.i(TAG, "enrolled ${list.size} members of ${c.id} at ${hex.take(8)}")
+                    if (ok) {
+                        landed = true
+                        Log.i(TAG, "enrolled ${list.size} members of ${c.id} at ${hex.take(8)}")
+                    }
                 }
+                lastEnrollLanded[c.id] = landed
+                if (landed) lastEnrollMembers[c.id] = memberSet
             }
         }
     }

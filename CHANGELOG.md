@@ -9,6 +9,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed - CarPlay while driving: a tap reads or composes, no menu (iOS)
+
+- In driving mode (the car reports a UI limit) tapping a Messages-tab conversation no longer opens the
+  conversation menu. A conversation with unread messages reads them aloud straight away (and marks them read);
+  one with nothing unread is the Siri-managed row, so Siri asks "what would you like to say?"; a locked one does
+  nothing. Parked behaviour is unchanged, and a conversation screen open when the car starts moving closes.
+  Tests: the tap decision and the row builder in each mode.
+
 ### Changed - CarPlay conversation screen: icon buttons, your own picture, palette colours (iOS)
 
 - Read to me / Read new and Call are SF Symbol icon buttons in the nav bar (a speaker, a badged speaker with unread

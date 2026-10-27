@@ -7,8 +7,10 @@ import UIKit
 ///
 /// CarPlay connects this scene to the SAME process as the phone UI, so it reads the same `FeedStore`.
 /// Root: a tab bar (when the entitlement allows 2+ tabs) with
-///   * **Messages** - a `CPListTemplate` of direct-message conversations. A tap opens the conversation
-///     screen: PARKED it shows the recent messages in chat order (a tap reads one aloud) above a "Reply"
+///   * **Messages** - a `CPListTemplate` of direct-message conversations. DRIVING (the car reports a UI
+///     limit) a tap opens NO screen: an unread conversation reads its unread messages aloud, any other is
+///     the Siri-managed compose row ("what would you like to say?"), a locked one does nothing. PARKED a
+///     tap opens the conversation screen: it shows the recent messages in chat order (a tap reads one aloud) above a "Reply"
 ///     row (the one Siri-managed `CPMessageListItem`, keyed by the DM circle id, which takes a spoken
 ///     reply through `HavenIntents`), with "Read to me" and "Call" as nav-bar buttons; DRIVING (the car
 ///     reports a UI limit - `CarPlayDriveMode`) it shows no message text at all, only those actions.
@@ -93,6 +95,12 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             guard let self, self.driveMode != mode else { return }
             HavenLog.sync("carplay: \(mode == .driving ? "driving" : "parked")")
             self.driveMode = mode
+            // Driving has no conversation menu: a screen left open from when the car was parked closes,
+            // back to the list (whose rows now read / compose directly).
+            if mode == .driving, self.openConversation != nil {
+                self.openConversation = nil
+                self.interfaceController?.popToRootTemplate(animated: false, completion: nil)
+            }
             self.refresh()
         }
     }
@@ -193,10 +201,12 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 
     @MainActor private func messagesSection(rows: [CarPlayConversations.Row], configured: Bool, enabled: Bool,
                                             avatars: [String: UIImage]) -> CPListSection {
-        CarPlayTemplates.section(for: rows, configured: configured, enabled: enabled, mode: driveMode, avatars: avatars,
-                                 unreadMark: CarPlayTemplates.unreadDot(color: CarPlayTemplates.tintColor(stops: PaletteStore.current.stops))) { [weak self] row in
-            self?.showConversation(row.conversationId)
-        }
+        CarPlayTemplates.section(for: rows, configured: configured, enabled: enabled, mode: driveMode,
+                                 canSpeak: detailLevel == .full, avatars: avatars,
+                                 unreadMark: CarPlayTemplates.unreadDot(color: CarPlayTemplates.tintColor(stops: PaletteStore.current.stops)),
+                                 onSelect: { [weak self] row in self?.showConversation(row.conversationId) },
+                                 // Driving: no menu - an unread row just reads aloud.
+                                 onRead: { [weak self] row in self?.read(row.conversationId, unreadOnly: true) })
     }
 
     @MainActor private func conversationScreen(_ id: String) -> CarPlayTemplates.ConversationScreen? {

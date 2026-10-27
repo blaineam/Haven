@@ -13,7 +13,7 @@ final class CarPlayTemplatesTests: XCTestCase {
         var selected: [String] = []
         let mark = CarPlayTemplates.unreadDot(color: .systemPurple)
         let section = CarPlayTemplates.section(for: [row("dm:aa", unread: true), row("dm:bb", detail: "", trailing: "")],
-                                               configured: true, enabled: true, unreadMark: mark) { selected.append($0.conversationId) }
+                                               configured: true, enabled: true, unreadMark: mark, onSelect: { selected.append($0.conversationId) })
         let items = section.items.compactMap { $0 as? CPListItem }
         XCTAssertEqual(items.count, 2)
         XCTAssertTrue(section.items.allSatisfy { !($0 is CPMessageListItem) }, "no Siri-managed rows: a tap must open the conversation, not jump to 'what would you like to send?'")
@@ -166,10 +166,68 @@ final class CarPlayTemplatesTests: XCTestCase {
         XCTAssertEqual(CarPlayTemplates.rowDetail(readRow, mode: .driving), "")
         XCTAssertEqual(CarPlayTemplates.rowDetail(locked, mode: .driving), "Locked")
         let section = CarPlayTemplates.section(for: [unreadRow, readRow], configured: true, enabled: true, mode: .driving)
-        let items = section.items.compactMap { $0 as? CPListItem }
-        XCTAssertEqual(items.map(\.text), ["Maya", "Sam"], "names stay")
-        XCTAssertEqual(items.map(\.detailText), ["3 unread", nil])
-        XCTAssertFalse(items.contains { ($0.detailText ?? "").contains("On my way") })
+        let texts = section.items.map { ($0 as? CPListItem)?.text ?? ($0 as? CPMessageListItem)?.text }
+        XCTAssertEqual(texts, ["Maya", "Sam"], "names stay")
+        let details = section.items.map { ($0 as? CPListItem)?.detailText ?? ($0 as? CPMessageListItem)?.detailText }
+        XCTAssertEqual(details.first ?? nil, "3 unread")
+        XCTAssertFalse(details.contains { ($0 ?? "").contains("On my way") || ($0 ?? "").contains("see you") })
+    }
+
+    // MARK: driving-mode tap (no menu)
+
+    private func drivingRow(_ id: String, unreadCount: Int = 0, locked: Bool = false) -> CarPlayConversations.Row {
+        .init(conversationId: id, title: "Maya", detail: locked ? "Locked" : "secret text", trailing: "3:41 PM",
+              unread: unreadCount > 0, locked: locked, unreadCount: unreadCount)
+    }
+
+    func testDrivingTapDecision() {
+        typealias T = CarPlayTemplates
+        XCTAssertEqual(T.drivingTap(for: drivingRow("a", unreadCount: 2), canSpeak: true), .read, "unread + speakable -> read aloud")
+        XCTAssertEqual(T.drivingTap(for: drivingRow("a", unreadCount: 2), canSpeak: false), .compose, "privacy forbids speaking -> Siri compose")
+        XCTAssertEqual(T.drivingTap(for: drivingRow("a"), canSpeak: true), .compose, "nothing unread -> Siri compose")
+        XCTAssertEqual(T.drivingTap(for: drivingRow("a"), canSpeak: false), .compose)
+        XCTAssertEqual(T.drivingTap(for: drivingRow("a", locked: true), canSpeak: true), .none, "locked never reads or opens")
+        XCTAssertEqual(T.drivingTap(for: drivingRow("a", unreadCount: 0, locked: true), canSpeak: false), .none)
+    }
+
+    func testDrivingRowsReadComposeOrDoNothingAndNeverOpenTheMenu() {
+        var opened: [String] = [], read: [String] = []
+        let section = CarPlayTemplates.section(
+            for: [drivingRow("dm:unread", unreadCount: 2), drivingRow("dm:read"), drivingRow("dm:lock", locked: true)],
+            configured: true, enabled: true, mode: .driving, canSpeak: true,
+            onSelect: { opened.append($0.conversationId) }, onRead: { read.append($0.conversationId) })
+        XCTAssertEqual(section.items.count, 3)
+        let unread = section.items[0] as? CPListItem
+        XCTAssertEqual(unread?.detailText, "2 unread")
+        XCTAssertNil(unread.flatMap { $0.detailText?.range(of: "secret") }, "no message text while driving")
+        fire(unread!)
+        XCTAssertEqual(read, ["dm:unread"], "an unread row reads aloud")
+        let compose = section.items[1] as? CPMessageListItem
+        XCTAssertNotNil(compose, "a read conversation is the Siri-managed row: tap = 'what would you like to say?'")
+        XCTAssertEqual(compose?.conversationIdentifier, "dm:read")
+        XCTAssertNil(compose?.detailText)
+        let locked = section.items[2] as? CPListItem
+        XCTAssertNil(locked?.accessoryImage)
+        XCTAssertEqual(locked?.detailText, "Locked")
+        fire(locked!)
+        XCTAssertEqual(read, ["dm:unread"], "a locked row never reads")
+        XCTAssertTrue(opened.isEmpty, "no row opens the conversation menu while driving")
+        _ = CPListTemplate(title: "Haven", sections: [section])
+    }
+
+    func testDrivingUnreadRowWithPrivacyHidingTextFallsBackToSiriCompose() {
+        let section = CarPlayTemplates.section(for: [drivingRow("dm:aa", unreadCount: 1)], configured: true, enabled: true,
+                                               mode: .driving, canSpeak: false)
+        XCTAssertTrue(section.items.first is CPMessageListItem)
+    }
+
+    func testParkedRowsStillOpenTheConversationScreen() {
+        var opened: [String] = [], read: [String] = []
+        let section = CarPlayTemplates.section(for: [drivingRow("dm:aa", unreadCount: 2)], configured: true, enabled: true,
+                                               mode: .parked, onSelect: { opened.append($0.conversationId) }, onRead: { read.append($0.conversationId) })
+        fire(section.items[0] as! CPListItem)
+        XCTAssertEqual(opened, ["dm:aa"])
+        XCTAssertTrue(read.isEmpty)
     }
 
     func testConversationScreenReadsToMeWhenNothingIsUnreadAndHidesReadingWhenPrivate() {

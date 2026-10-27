@@ -108,6 +108,20 @@ unit-tested decision). While driving:
 * the Messages-tab rows show **names and unread counts only** ("3 unread"), never a preview;
 * when the car starts or stops moving the Messages list and any open conversation are **rebuilt immediately**.
 
+**Tapping a conversation while driving opens no menu.** The conversation screen is a parked-only
+feature. In driving mode a Messages-tab tap does exactly one thing (`CarPlayTemplates.drivingTap`, a pure,
+unit-tested decision):
+
+* **unread messages Haven may speak** -> they are read aloud right away (read-aloud voice, ducks other audio,
+  never over a call) and the thread is marked read when it finishes;
+* **nothing unread** (or the notification-privacy setting forbids speaking text) -> the Siri-managed
+  `CPMessageListItem` row: Siri asks "what would you like to say?";
+* **locked conversation** -> nothing is read and nothing opens (the row just says "Locked").
+
+The rows rebuild live when the car flips parked <-> driving and when unread state changes (reading marks the
+thread read, so its row becomes the compose row). A conversation screen left open when the car starts moving
+is closed back to the list.
+
 Honest limit: a car (or the CarPlay simulator) that **never reports limits looks parked**, so it will show
 message text even while moving. There is nothing more to go on; the app cannot read speed or the handbrake.
 

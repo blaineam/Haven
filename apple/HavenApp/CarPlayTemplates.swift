@@ -6,14 +6,31 @@ import UIKit
 /// (which needs the live app stores) so the template construction - where CarPlay raises on a bad
 /// argument - is exercised by a host-less test (`CarPlayTemplatesTests`).
 enum CarPlayTemplates {
-    /// The Messages tab. Rows are plain `CPListItem`s (not Siri-managed `CPMessageListItem`s): a tap opens
-    /// the conversation screen (`conversationTemplate`) where the messages can be read aloud or seen, a
-    /// reply started and the person called. A Siri-managed row can only ever read-then-reply, which is
-    /// what made every tap end at "what would you like to send?".
+    /// What tapping a Messages-tab row does while the car is limiting its UI (driving). There is no menu in
+    /// this mode - the parked conversation screen is never pushed:
+    ///   * `.read`    - unread messages Haven may speak: the tap reads them aloud (and marks them read);
+    ///   * `.compose` - nothing to read (or the privacy setting forbids speaking): the tap hands the
+    ///     conversation to Siri ("what would you like to say?"), via the Siri-managed `CPMessageListItem`;
+    ///   * `.none`    - a locked conversation: nothing is read and nothing opens (no Face ID in a car).
+    enum DrivingTap: Equatable { case read, compose, none }
+
+    static func drivingTap(for row: CarPlayConversations.Row, canSpeak: Bool) -> DrivingTap {
+        if row.locked { return .none }
+        return row.unreadCount > 0 && canSpeak ? .read : .compose
+    }
+
+    /// The Messages tab.
+    ///   * PARKED: rows are plain `CPListItem`s (not Siri-managed): a tap opens the conversation screen
+    ///     (`conversationTemplate`) where the messages can be read aloud or seen, a reply started and the
+    ///     person called. A Siri-managed row can only ever read-then-reply, which is what made every tap end
+    ///     at "what would you like to send?".
+    ///   * DRIVING: no menu at all (`DrivingTap`) - an unread row reads aloud (`onRead`), a read row is the
+    ///     Siri-managed compose row, a locked row does nothing.
     static func section(for rows: [CarPlayConversations.Row], configured: Bool, enabled: Bool,
-                        mode: CarPlayDriveMode = .parked,
+                        mode: CarPlayDriveMode = .parked, canSpeak: Bool = true,
                         avatars: [String: UIImage] = [:], unreadMark: UIImage? = nil,
-                        onSelect: @escaping (CarPlayConversations.Row) -> Void = { _ in }) -> CPListSection {
+                        onSelect: @escaping (CarPlayConversations.Row) -> Void = { _ in },
+                        onRead: @escaping (CarPlayConversations.Row) -> Void = { _ in }) -> CPListSection {
         if !enabled {
             return CPListSection(items: [CPListItem(text: MessagingText.turnedOff, detailText: MessagingText.turnedOffHint)])
         }
@@ -23,8 +40,27 @@ enum CarPlayTemplates {
         if rows.isEmpty {
             return CPListSection(items: [CPListItem(text: MessagingText.noConversations, detailText: MessagingText.noConversationsHint)])
         }
-        let items: [CPListItem] = rows.map { row in
+        let items: [CPListTemplateItem] = rows.map { row in
             let detail = rowDetail(row, mode: mode)
+            if mode == .driving {
+                switch drivingTap(for: row, canSpeak: canSpeak) {
+                case .compose:
+                    return CPMessageListItem(conversationIdentifier: row.conversationId, text: row.title,
+                                             leadingConfiguration: CPMessageListItemLeadingConfiguration(
+                                                leadingItem: .none, leadingImage: avatars[row.conversationId], unread: false),
+                                             trailingConfiguration: nil, detailText: nil, trailingText: nil)
+                case .read:
+                    let item = CPListItem(text: row.title, detailText: detail.isEmpty ? nil : detail,
+                                          image: avatars[row.conversationId], accessoryImage: unreadMark, accessoryType: .none)
+                    item.handler = { _, completion in onRead(row); completion() }
+                    return item
+                case .none:
+                    let item = CPListItem(text: row.title, detailText: detail.isEmpty ? nil : detail,
+                                          image: avatars[row.conversationId], accessoryImage: nil, accessoryType: .none)
+                    item.handler = { _, completion in completion() }
+                    return item
+                }
+            }
             let item = CPListItem(text: row.title, detailText: detail.isEmpty ? nil : detail,
                                   image: avatars[row.conversationId],
                                   accessoryImage: row.unread ? unreadMark : nil,

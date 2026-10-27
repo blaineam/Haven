@@ -84,16 +84,8 @@ class CarMessagingTest {
         assertEquals(listOf("m5", "m6", "m7", "m8", "m9", "m10"), p.messages.map { it.text })
     }
 
-    @Test fun `a locked circle's phone banner is demoted to minimal`() {
-        assertEquals("minimal", CarMessaging.effectiveDetail("full", locked = true))
-        assertEquals("minimal", CarMessaging.effectiveDetail("private", locked = true))
-        assertEquals("full", CarMessaging.effectiveDetail("full", locked = false))
-        assertEquals("private", CarMessaging.effectiveDetail("private", locked = false))
-        // …and minimal carries neither the sender nor the text.
-        val (useName, body) = PushBanner.displayBody("secret text", "Sent you a message", "dm",
-            CarMessaging.effectiveDetail("full", locked = true))
-        assertFalse(useName)
-        assertEquals("New activity", body)
+    @Test fun `a locked circle's phone banner copy carries no sender or text`() {
+        assertEquals("New activity in a locked circle", CarMessaging.LOCKED_BODY)
     }
 
     @Test fun `notification id is stable per conversation and distinct between them`() {

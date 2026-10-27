@@ -2479,10 +2479,10 @@ object HavenNet : InboundListener {
             CarNotifications.post(appContext, plan, link)
             return
         }
-        // A locked circle's banner never carries its sender or text, whatever the preview setting.
-        val (useName, body) = PushBanner.displayBody(
-            copy.body, copy.privateBody, copy.kind, CarMessaging.effectiveDetail(detail, locked),
-        )
+        // A locked circle's banner never carries its sender or text, whatever the preview setting
+        // (iOS NotificationPayload.redactIfLocked parity: "Haven" / "New activity in a locked circle").
+        val (useName, body) = if (locked) false to CarMessaging.LOCKED_BODY
+        else PushBanner.displayBody(copy.body, copy.privateBody, copy.kind, detail)
         Notifications.notify(
             appContext,
             title = if (useName) authorName else "Haven",

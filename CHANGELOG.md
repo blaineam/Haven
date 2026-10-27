@@ -32,6 +32,22 @@ etc. in the device language; group DMs are announced by group name. The three ne
 Siri history, and "read earlier messages from ..." honours Siri's date bounds and search terms. Details, owner
 test steps for Announce Notifications, and what Apple does not allow while parked: `docs/CARPLAY.md`.
 
+### Added — Android: Android Auto messaging
+
+Haven now declares itself to Android Auto as a messaging app (`automotive_app_desc.xml`, `notification`). A new
+direct message is posted as a `MessagingStyle` conversation notification (a `Person` per sender, group title for
+group DMs, sharing-shortcut id, `CATEGORY_MESSAGE`) with **Reply** (voice / `RemoteInput`) and **Mark as read**
+semantic actions, both routed through a non-exported receiver into the existing `HavenNet.sendDm` / `DmRead`.
+Privacy matches iOS CarPlay: only plain inbound DMs at Full previews, never locked circles, calls, reactions or
+stories, and a new Settings -> Privacy -> Car -> "Android Auto messages" switch (default on; nine locales).
+Reply and mark-read re-check the lock and the switch when they run.
+
+### Fixed — Android: locked circle's DM banner leaked sender and text
+
+The phone banner for a message in a biometric-locked circle used the normal preview level. It now reads the
+"Haven - New activity in a locked circle", exactly as iOS does. Calls still have no Telecom integration, so nothing call-related
+reaches the car (see `docs/ANDROID-AUTO.md`).
+
 ### Fixed — Siri example phrases (App Store Connect ITMS-90626)
 
 The 2.0.4 delivery warned "No example phrase was provided for INSendMessageIntent / INSearchForMessagesIntent /

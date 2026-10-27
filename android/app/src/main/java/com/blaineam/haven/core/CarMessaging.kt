@@ -16,7 +16,7 @@ package com.blaineam.haven.core
  *  * only at the **Full** notification-preview level (private / minimal show no text on the car, as
  *    `Name and type only` and `Minimal` show none on CarPlay);
  *  * never for a biometric-locked circle, whatever the preview level — and a locked circle's phone
- *    banner drops to the generic "New activity" too, so nothing about it leaks to a lock screen;
+ *    banner drops to the generic "New activity in a locked circle" too, so nothing about it leaks to a lock screen;
  *  * and only while the "Android Auto messages" switch is on.
  *
  * A notification that is not built as MessagingStyle is simply invisible to Android Auto.
@@ -71,8 +71,8 @@ object CarMessaging {
 
     fun isDm(circleId: String) = circleId.startsWith("dm:")
 
-    /** The preview level actually applied to a banner: a locked circle is treated as `minimal`. */
-    fun effectiveDetail(detail: String, locked: Boolean): String = if (locked) "minimal" else detail
+    /** Phone banner body for a biometric-locked circle (iOS `redactIfLocked` copy), under title "Haven". */
+    const val LOCKED_BODY = "New activity in a locked circle"
 
     fun plan(input: Input): Plan {
         if (!input.carEnabled) return Plan.Plain

@@ -778,4 +778,11 @@
     <string name="composer_circles_current">Attuale</string>
     <string name="composer_circles_hint">Suggerimento: tieni premuto Pubblica per condividere lo stesso post in più di un cerchio.</string>
     <string name="composer_circles_hint_dismiss">Capito</string>
+    <string name="car_tab_messages">Messaggi</string>
+    <string name="car_empty_messages">Nessuna conversazione per ora.</string>
+    <string name="car_generic_message">Nuovo messaggio</string>
+    <string name="car_calls_label">Haven Chiamate</string>
+    <string name="car_messages_label">Haven Messaggi</string>
+    <string name="car_messages_title">Messaggi</string>
+    <string name="car_messages_off">I messaggi di Android Auto sono disattivati nelle impostazioni di Haven.</string>
 </resources>

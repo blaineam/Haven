@@ -51,6 +51,22 @@ reach only the relay's HTTP twin):
   ("the call finally came through, it had to catch up"). Call setup frames (invite, accept, group
   invite/join) now forgive that peer's dial backoff first (`CallDialPolicy` on Android and iOS,
   `call_setup_forgives_dial` on desktop); ICE/SDP/hangup never do.
+### Added - Android Auto: "Haven Messages" next to "Haven Calls", and an honest CarPlay parity audit
+
+Android Auto now lists **two Haven entries**: **Haven Calls** (Recents / Contacts, tap to dial) and **Haven
+Messages** (a `ConversationItem` list: unread state, the head unit reads the unread aloud and takes a spoken
+reply, mark-as-read through the same engine path as the notification actions). Names-only privacy is the same as
+the notification path: real texts reach the host only at the Full preview level, a biometric-locked
+conversation is omitted entirely, and the "Android Auto messages" switch gates it. `docs/CAR-PARITY.md` answers
+"why not tabs for both" with the library evidence (one service may declare both categories, but a
+`ConversationItem` list is documented only as a top-level `ListTemplate`; the in-Calls Messages tab is built and
+kept as a one-line fallback) and lists every CarPlay capability against Android Auto as parity / platform /
+gap. **Important:** Google ships templated calling and messaging for Android Auto as a beta (internal and closed
+testing only; open testing / production builds with the categories are rejected), so the car categories are now
+Gradle manifest placeholders (`HAVEN_CAR_APP` / `-PhavenCarApp`, default on) and the Play workflow turns them
+off for the production and open-testing bundles; release candidates (internal + closed) keep them. The minimum
+Car App API level is now 7 (needed by `ConversationItem`). Tests: `CarConversationsTest`, the extended
+`CarAppDeclarationTest` (two services, categories, labels + icons, gating in Gradle and the workflow).
 
 ### Fixed - Android: the call camera button (and the mic) on a device that only ever receives calls
 

@@ -777,4 +777,11 @@
     <string name="composer_circles_current">当前</string>
     <string name="composer_circles_hint">提示：长按“发布”，可将同一条帖子分享到多个圈子。</string>
     <string name="composer_circles_hint_dismiss">知道了</string>
+    <string name="car_tab_messages">消息</string>
+    <string name="car_empty_messages">还没有对话。</string>
+    <string name="car_generic_message">新消息</string>
+    <string name="car_calls_label">Haven 通话</string>
+    <string name="car_messages_label">Haven 消息</string>
+    <string name="car_messages_title">消息</string>
+    <string name="car_messages_off">Android Auto 消息已在 Haven 设置中关闭。</string>
 </resources>

@@ -17,6 +17,17 @@ android {
         //   ./gradlew bundleRelease -PhavenVersionCode=<n> -PhavenVersionName=<x.y.z>
         versionCode = (project.findProperty("havenVersionCode") as String?)?.toInt() ?: 1
         versionName = (project.findProperty("havenVersionName") as String?) ?: "0.1.0"
+        // The Android Auto CAR APP (templated Calls / Messages screens, Car App Library) is a Google BETA:
+        // Play accepts it on internal + closed testing and REJECTS builds that declare it on open testing /
+        // production (developer.android.google.cn "Build calling/templated messaging experiences for Android
+        // Auto"). So the car categories are manifest placeholders: on by default (local, debug, rc → internal /
+        // closed testing) and OFF when CI builds the production / open-testing bundle (HAVEN_CAR_APP=false in
+        // android.yml). Off = the service keeps no CALLING / MESSAGING category, so it is not a car app at all;
+        // Haven's notification-based Android Auto messaging and Telecom calls are unaffected.
+        val carApp = ((project.findProperty("havenCarApp") as String?) ?: System.getenv("HAVEN_CAR_APP") ?: "true") != "false"
+        manifestPlaceholders["carCallingCategory"] = if (carApp) "androidx.car.app.category.CALLING" else "com.blaineam.haven.category.CAR_APP_OFF_CALLING"
+        manifestPlaceholders["carMessagingCategory"] = if (carApp) "androidx.car.app.category.MESSAGING" else "com.blaineam.haven.category.CAR_APP_OFF_MESSAGING"
+        manifestPlaceholders["carAppEnabled"] = carApp.toString()
         // Our own runner, so the whole instrumented-test process is hermetic before
         // `HavenApplication.onCreate` can schedule a mailbox poll. See HavenTestRunner.
         testInstrumentationRunner = "com.blaineam.haven.HavenTestRunner"

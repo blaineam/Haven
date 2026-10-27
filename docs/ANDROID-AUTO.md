@@ -70,6 +70,18 @@ the first thing to run in a cold process.
   iOS Show Previews has no Android equivalent beyond that system setting). Users who do not want text on a locked
   phone should pick Name and type only / Minimal, which also removes it from the car.
 
+## The "Haven Messages" entry (conversation list)
+
+Besides the notifications below, Haven declares a second Car App Library service, **Haven Messages**
+(`car/HavenMessagesCarAppService`, category `androidx.car.app.category.MESSAGING`): a list of DM conversations
+with unread state, built from `ConversationItem` / `CarMessage`. The head unit reads the unread aloud on a tap
+and takes a spoken reply (`ConversationCallback.onTextReply` -> the same `CarMessaging.execute` path as the
+notification reply). The privacy rules are the notification rules ([CAR-PARITY.md](CAR-PARITY.md)): only at the
+**Full** preview level do real texts reach the host, a biometric-locked conversation is omitted, and the
+"Android Auto messages" switch gates everything. It is a Google beta: present in the internal / closed
+(alpha) Play tracks and in debug builds, stripped from production bundles. The notification path in this
+document is unaffected and ships everywhere.
+
 ## Starting a message by voice ("send a message to Blaine on Haven")
 
 That is the Assistant App Action, separate from the reply path above: it opens Haven on the

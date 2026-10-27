@@ -778,4 +778,11 @@
     <string name="composer_circles_current">現在</string>
     <string name="composer_circles_hint">ヒント：「投稿」を長押しすると、同じ投稿を複数のサークルに共有できます。</string>
     <string name="composer_circles_hint_dismiss">了解</string>
+    <string name="car_tab_messages">メッセージ</string>
+    <string name="car_empty_messages">まだ会話はありません。</string>
+    <string name="car_generic_message">新着メッセージ</string>
+    <string name="car_calls_label">Haven 通話</string>
+    <string name="car_messages_label">Haven メッセージ</string>
+    <string name="car_messages_title">メッセージ</string>
+    <string name="car_messages_off">Android Auto のメッセージは Haven の設定でオフになっています。</string>
 </resources>

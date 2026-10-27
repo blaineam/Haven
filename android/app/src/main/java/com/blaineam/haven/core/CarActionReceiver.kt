@@ -3,7 +3,6 @@ package com.blaineam.haven.core
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.util.Log
 import androidx.core.app.RemoteInput
 
 /**
@@ -29,25 +28,10 @@ class CarActionReceiver : BroadcastReceiver() {
         val pending = goAsync()
         EngineBoot.background {
             try {
-                CarMessaging.execute(action, circleId, text, real(app))
+                CarMessaging.execute(action, circleId, text, CarHandlers.real(app))
             } finally {
                 pending.finish()
             }
         }
-    }
-
-    private fun real(app: Context) = object : CarMessaging.Handlers {
-        override fun enabled() = runCatching { ProfileStore.get(app).androidAutoMessages }.getOrDefault(false)
-        override fun locked(circleId: String) = CircleLock.isLocked(circleId)
-        override fun send(circleId: String, text: String) {
-            HavenNet.init(app)
-            HavenNet.sendDm(circleId, text)
-        }
-        override fun markRead(circleId: String) {
-            HavenNet.init(app)
-            DmRead.markRead(circleId, HavenNet.lastActivity(circleId))
-        }
-        override fun cancel(circleId: String) = CarNotifications.cancel(app, circleId)
-        override fun log(message: String) { Log.i("CarAction", message) }
     }
 }

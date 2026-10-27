@@ -302,14 +302,35 @@
              See docs/ANDROID-CALLS.md. -->
         <service
             android:name=".car.HavenCarAppService"
+            android:label="@string/car_calls_label"
+            android:icon="@drawable/ic_car_entry_calls"
+            android:enabled="${carAppEnabled}"
             android:exported="true">
             <intent-filter>
                 <action android:name="androidx.car.app.CarAppService" />
-                <category android:name="androidx.car.app.category.CALLING" />
+                <!-- Placeholders (app/build.gradle.kts): the real Car App Library CALLING category, or an inert
+                     name when CI builds the Play production / open-testing bundle — templated Android Auto
+                     apps are a Google beta that Play rejects outside internal / closed testing. -->
+                <category android:name="${carCallingCategory}" />
             </intent-filter>
         </service>
-        <!-- Oldest Car App API level this app can run on; the screen adapts above it (tabs need level 6). -->
-        <meta-data android:name="androidx.car.app.minCarApiLevel" android:value="1" />
+        <!-- "Haven Messages": a second Android Auto entry (category MESSAGING, the conversation list built from
+             ConversationItem). Own label + icon so the two show as separate Haven entries. Same placeholder
+             gating as the calls service. See docs/CAR-PARITY.md. -->
+        <service
+            android:name=".car.HavenMessagesCarAppService"
+            android:label="@string/car_messages_label"
+            android:icon="@drawable/ic_car_entry_messages"
+            android:enabled="${carAppEnabled}"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="androidx.car.app.CarAppService" />
+                <category android:name="${carMessagingCategory}" />
+            </intent-filter>
+        </service>
+        <!-- Oldest Car App API level this app can run on. ConversationItem (the Messages entry) needs level 7, and the
+             setting is app-wide; every Android Auto host of the last two years is above it. -->
+        <meta-data android:name="androidx.car.app.minCarApiLevel" android:value="7" />
         <service
             android:name=".core.ConnectionService"
             android:exported="false"

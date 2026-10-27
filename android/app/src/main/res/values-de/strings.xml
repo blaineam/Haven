@@ -778,4 +778,11 @@
     <string name="composer_circles_current">Aktuell</string>
     <string name="composer_circles_hint">Tipp: Halte „Posten“ gedrückt, um denselben Beitrag in mehreren Kreisen zu teilen.</string>
     <string name="composer_circles_hint_dismiss">Verstanden</string>
+    <string name="car_tab_messages">Nachrichten</string>
+    <string name="car_empty_messages">Noch keine Unterhaltungen.</string>
+    <string name="car_generic_message">Neue Nachricht</string>
+    <string name="car_calls_label">Haven Anrufe</string>
+    <string name="car_messages_label">Haven Nachrichten</string>
+    <string name="car_messages_title">Nachrichten</string>
+    <string name="car_messages_off">Android-Auto-Nachrichten sind in den Haven-Einstellungen ausgeschaltet.</string>
 </resources>

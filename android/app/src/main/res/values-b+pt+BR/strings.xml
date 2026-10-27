@@ -813,4 +813,11 @@ O que já tentei:
     <string name="composer_circles_current">Atual</string>
     <string name="composer_circles_hint">Dica: mantenha Publicar pressionado para compartilhar a mesma publicação com mais de um círculo.</string>
     <string name="composer_circles_hint_dismiss">Entendi</string>
+    <string name="car_tab_messages">Mensagens</string>
+    <string name="car_empty_messages">Ainda não há conversas.</string>
+    <string name="car_generic_message">Nova mensagem</string>
+    <string name="car_calls_label">Haven Chamadas</string>
+    <string name="car_messages_label">Haven Mensagens</string>
+    <string name="car_messages_title">Mensagens</string>
+    <string name="car_messages_off">As mensagens do Android Auto estão desativadas nos ajustes do Haven.</string>
 </resources>

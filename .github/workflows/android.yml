@@ -358,6 +358,10 @@ jobs:
           HAVEN_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           HAVEN_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           VN: ${{ steps.cfg.outputs.version_name }}
+          # The templated Android Auto car app (Calls / Messages screens) is a Google BETA: Play accepts it on
+          # internal + closed testing and REJECTS bundles that declare it on open testing / production. Only
+          # those two testing tracks get the car categories in the manifest (app/build.gradle.kts).
+          HAVEN_CAR_APP: ${{ (steps.cfg.outputs.track == 'internal' || steps.cfg.outputs.track == 'alpha') && 'true' || 'false' }}
         run: |
           ./gradlew bundleRelease -PhavenVersionCode=${{ github.run_number }} -PhavenVersionName="$VN"
           mkdir -p ../out

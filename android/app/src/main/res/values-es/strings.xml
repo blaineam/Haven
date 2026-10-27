@@ -784,4 +784,11 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="composer_circles_current">Actual</string>
     <string name="composer_circles_hint">Consejo: mantén pulsado Publicar para compartir la misma publicación con más de un círculo.</string>
     <string name="composer_circles_hint_dismiss">Entendido</string>
+    <string name="car_tab_messages">Mensajes</string>
+    <string name="car_empty_messages">Aún no hay conversaciones.</string>
+    <string name="car_generic_message">Mensaje nuevo</string>
+    <string name="car_calls_label">Haven Llamadas</string>
+    <string name="car_messages_label">Haven Mensajes</string>
+    <string name="car_messages_title">Mensajes</string>
+    <string name="car_messages_off">Los mensajes de Android Auto están desactivados en los ajustes de Haven.</string>
 </resources>

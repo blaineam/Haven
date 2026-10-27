@@ -17,6 +17,7 @@ import androidx.car.app.model.Template
 import androidx.core.graphics.drawable.IconCompat
 import com.blaineam.haven.R
 import com.blaineam.haven.core.CarCalls
+import com.blaineam.haven.core.CarConversations
 
 /**
  * The Haven screen on the head unit: Recents / Contacts tabs (a single two-section list on a host too
@@ -27,10 +28,19 @@ import com.blaineam.haven.core.CarCalls
 class CarCallsScreen(carContext: CarContext) : Screen(carContext) {
     private var snapshot: CarCalls.Snapshot = CarCalls.Snapshot.Loading
     private var activeTab = CarCalls.TAB_RECENTS
+    private var messages: CarConversations.Snapshot = CarConversations.Snapshot.Hidden
 
     fun show(next: CarCalls.Snapshot) {
         if (next == snapshot) return
         snapshot = next
+        invalidate()
+    }
+
+    /** The Messages tab's content (or [CarConversations.Snapshot.Hidden] to drop the tab). */
+    fun showMessages(next: CarConversations.Snapshot) {
+        if (next == messages) return
+        messages = next
+        if (next is CarConversations.Snapshot.Hidden && activeTab == CarConversations.TAB_MESSAGES) activeTab = CarCalls.TAB_RECENTS
         invalidate()
     }
 
@@ -67,11 +77,27 @@ class CarCallsScreen(carContext: CarContext) : Screen(carContext) {
             .setHeaderAction(Action.APP_ICON)
             .addTab(Tab.Builder().setTitle(str(R.string.car_tab_recents)).setIcon(icon(R.drawable.ic_car_recents)).setContentId(CarCalls.TAB_RECENTS).build())
             .addTab(Tab.Builder().setTitle(str(R.string.car_tab_contacts)).setIcon(icon(R.drawable.ic_car_contacts)).setContentId(CarCalls.TAB_CONTACTS).build())
-        val content = if (activeTab == CarCalls.TAB_CONTACTS) contactsList(people, max) else recentsList(people, max)
+        // Messages: only on a host that has conversation items (API 7) and while the switch is on.
+        val withMessages = messages !is CarConversations.Snapshot.Hidden
+        if (withMessages) {
+            tabs.addTab(Tab.Builder().setTitle(str(R.string.car_tab_messages)).setIcon(icon(R.drawable.ic_car_messages)).setContentId(CarConversations.TAB_MESSAGES).build())
+        }
+        val shown = if (activeTab == CarConversations.TAB_MESSAGES && !withMessages) CarCalls.TAB_RECENTS else activeTab
+        val content = when (shown) {
+            CarConversations.TAB_MESSAGES -> messagesList()
+            CarCalls.TAB_CONTACTS -> contactsList(people, max)
+            else -> recentsList(people, max)
+        }
         return tabs
             .setTabContents(TabContents.Builder(ListTemplate.Builder().setSingleList(content).build()).build())
-            .setActiveTabContentId(if (activeTab == CarCalls.TAB_CONTACTS) CarCalls.TAB_CONTACTS else CarCalls.TAB_RECENTS)
+            .setActiveTabContentId(shown)
             .build()
+    }
+
+    /** The conversation list (the host reads unread messages aloud on a tap and takes a spoken reply). */
+    private fun messagesList(): ItemList = when (val m = messages) {
+        is CarConversations.Snapshot.Ready -> CarMessagesList.list(carContext, m.rows, str(R.string.car_empty_messages))
+        else -> ItemList.Builder().setNoItemsMessage(str(R.string.car_empty_messages)).build()
     }
 
     // ---------------------------------------------------------------------------- one list (older hosts)

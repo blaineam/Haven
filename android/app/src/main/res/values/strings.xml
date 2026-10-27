@@ -900,4 +900,11 @@
     <string name="composer_circles_current">Current</string>
     <string name="composer_circles_hint">Tip: press and hold Post to share the same post with more than one circle.</string>
     <string name="composer_circles_hint_dismiss">Got it</string>
+    <string name="car_tab_messages">Messages</string>
+    <string name="car_empty_messages">No conversations yet.</string>
+    <string name="car_generic_message">New message</string>
+    <string name="car_calls_label">Haven Calls</string>
+    <string name="car_messages_label">Haven Messages</string>
+    <string name="car_messages_title">Messages</string>
+    <string name="car_messages_off">Android Auto messages are turned off in Haven’s settings.</string>
 </resources>

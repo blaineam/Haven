@@ -108,7 +108,7 @@ messaging app that draws nothing).
 | Recents | most recent conversations | most recent conversations (`HavenNet.lastActivity`) — no separate call log exists, so "recent" is conversation activity, as on iOS |
 | Row content | name + avatar | name + round avatar (photo, else initials in the palette tint) — **never message text** |
 | Long lists | list item limits | the host's item limit (`ConstraintManager`); when it cuts the A→Z list the first row is **Search all contacts** (typed or spoken, tiered matcher shared with voice calling) |
-| Messages | Messages tab (Siri-managed rows) | **not on the screen**: messaging stays notification-based (read aloud + voice reply). The library has a Messaging category (`androidx.car.app.category.MESSAGING`, `ConversationItem`, Car API 7) but a service is declared in one category here; moving messages onto a templated screen is a separate decision, noted in "Not done" |
+| Messages | Messages tab (Siri-managed rows) | **a second Android Auto entry, "Haven Messages"** (category MESSAGING, `ConversationItem` list: host read-out + voice reply) — see [CAR-PARITY.md](CAR-PARITY.md). The Calls screen itself stays calls only; messaging also stays notification-based (read aloud + voice reply) on every build |
 | Message text while driving | hidden in driving mode | never drawn at all (names only) |
 | Locked / not set up | "Locked" | "Open Haven on your phone to finish setting up." until onboarding is done |
 
@@ -167,6 +167,12 @@ adds on its own for a self-managed Telecom call.
 
 ### Play
 
+**Beta gate (read this first).** Google ships templated calling and messaging for Android Auto as a beta:
+internal and closed testing only; builds with the car categories on open testing or production are
+**rejected**. The bundle build therefore sets the categories off for production and open testing
+(`HAVEN_CAR_APP`, `android/app/build.gradle.kts`, `.github/workflows/android.yml`; details and the unit tests that
+pin it are in [CAR-PARITY.md](CAR-PARITY.md)). The rest of this section is for the testing tracks.
+
 Car App Library apps run only from a **Play** install (or a sideload with "Unknown sources" for testing), and
 Play reviews them as an **Android for Cars** app. In Play Console open **Release -> Advanced settings ->
 Android form factors -> Android for Cars** (the section appears once the bundle declares a car app) and
@@ -179,7 +185,7 @@ set, a demo video). The messaging notification path needs none of this.
 
 ### Not done
 
-- A Messages tab on the car screen (see the table above).
+- A Messages *tab* on the Calls screen: Messages are their own entry ("Haven Messages"); the tab is built but switched off (`CarConversations.TAB_IN_CALLS_SERVICE`, the fallback in CAR-PARITY.md).
 - Video calls and group calls from the car (Haven's voice calls are 1:1 audio).
 - Voice-started calls ("call Tracy on Haven") already work through Assistant — see
   [ASSISTANT.md](ASSISTANT.md); the car screen is the touch path.

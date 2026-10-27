@@ -778,4 +778,11 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="composer_circles_current">Actuel</string>
     <string name="composer_circles_hint">Astuce : appuyez longuement sur Publier pour partager la même publication dans plusieurs cercles.</string>
     <string name="composer_circles_hint_dismiss">Compris</string>
+    <string name="car_tab_messages">Messages</string>
+    <string name="car_empty_messages">Aucune conversation pour le moment.</string>
+    <string name="car_generic_message">Nouveau message</string>
+    <string name="car_calls_label">Haven Appels</string>
+    <string name="car_messages_label">Haven Messages</string>
+    <string name="car_messages_title">Messages</string>
+    <string name="car_messages_off">Les messages Android Auto sont désactivés dans les réglages de Haven.</string>
 </resources>

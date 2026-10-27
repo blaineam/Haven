@@ -293,6 +293,13 @@
             </intent-filter>
         </receiver>
 
+        <!-- Android Auto messaging (docs/ANDROID-AUTO.md): declares the app as a car-capable
+             messaging app. Without this meta-data Android Auto ignores Haven's notifications
+             entirely, however well-formed. The XML lists the single capability used: `notification`. -->
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
+
         <!-- Declares Haven as optimised for carrier satellite data (docs/SATELLITE-DESIGN.md §2.2).
              This is what gets the app access to a satellite network when it is the ONLY network
              available, and what lists it under the system's satellite-app settings. The value is the

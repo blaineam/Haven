@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Declares Haven to Android Auto as a MESSAGING app (docs/ANDROID-AUTO.md).
+
+  `notification` is the only capability Haven uses: Android Auto reads Haven's own MessagingStyle
+  notifications (core/CarNotifications.kt) aloud and lets the driver reply by voice. There is
+  deliberately no `sms` entry (that is for the default-SMS handler), no `media` entry, and no
+  templated/navigation entry: Haven draws nothing on the head unit itself.
+-->
+<automotiveApp>
+    <uses name="notification" />
+</automotiveApp>

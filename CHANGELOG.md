@@ -28,6 +28,15 @@ xor could collide and retarget another thread's reply). Tests: `CarMessagingTest
   cannot come up (no account yet) the car shows "Open Haven on your phone to place calls." (9 locales). Normal
   app startup is unchanged. Tests: `CallRuntimeTest` (boot order, idempotence, graceful failure, source guards).
 
+### Changed - Haven-branded Android notification, car and Telecom icons
+Production notifications used stock framework glyphs (`sym_call_incoming`, `ic_dialog_email`,
+`stat_sys_data_bluetooth`, `ic_menu_send`/`ic_menu_view`). They now use the Haven constellation mark as monochrome
+(white-on-transparent) vectors - `ic_stat_haven` (messages, posts, the connection service) and `ic_stat_haven_call`
+(a handset with the Haven cluster) - tinted by the user's palette (`NotificationBrand.accent()` = the tint stop;
+Neutral stays grey). Reply / mark-read actions got brand-style glyphs, the Telecom PhoneAccount carries the mark
+and the accent, and the testing-track-only car-app icons (entry + tab icons) follow the same style. New
+`NotificationBrand` + `NotificationBrandTest` (source scans: no `android.R.drawable.*` left, white-only vectors).
+
 ### Fixed - Android Auto never read DMs that arrived late
 `notifyInbound` skipped any message sent more than 10 minutes before it was processed, so a DM that landed late (fresh
 install, offline stretch) never got a notification and Android Auto - which only reads notifications - never saw it.

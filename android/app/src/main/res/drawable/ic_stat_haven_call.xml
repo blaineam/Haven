@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Haven's call notification small icon: a handset with the Haven constellation cluster (three connected
+     nodes) beside it. White on transparent; tinted by NotificationBrand.accent. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="#FFFFFFFF" android:pathData="M6.62,10.79c1.44,2.83 3.76,5.14 6.59,6.59l2.2,-2.2c0.27,-0.27 0.67,-0.36 1.02,-0.24 1.12,0.37 2.33,0.57 3.57,0.57 0.55,0 1,0.45 1,1V20c0,0.55 -0.45,1 -1,1 -9.39,0 -17,-7.61 -17,-17 0,-0.55 0.45,-1 1,-1h3.5c0.55,0 1,0.45 1,1 0,1.25 0.2,2.45 0.57,3.57 0.11,0.35 0.03,0.74 -0.25,1.02l-2.2,2.2z" />
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="1.2" android:strokeLineCap="round" android:pathData="M14.2,8.2 L19.6,4.4 M14.2,8.2 L20.4,10.6 M19.6,4.4 L20.4,10.6" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M12.65,8.2 a1.55,1.55 0,1,0 3.1,0 a1.55,1.55 0,1,0 -3.1,0 M18.05,4.4 a1.55,1.55 0,1,0 3.1,0 a1.55,1.55 0,1,0 -3.1,0 M18.85,10.6 a1.55,1.55 0,1,0 3.1,0 a1.55,1.55 0,1,0 -3.1,0" />
+</vector>

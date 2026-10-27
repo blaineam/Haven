@@ -118,7 +118,8 @@ class ConnectionService : Service() {
         val pi = PendingIntent.getActivity(this, 0, open ?: Intent(),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setSmallIcon(NotificationBrand.SMALL_ICON)
+            .setColor(NotificationBrand.accent())
             .setContentTitle("Haven is connected")
             .setContentText("Receiving posts, messages and calls in real time")
             .setOngoing(true)

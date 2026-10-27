@@ -60,6 +60,10 @@ object TelecomCalls {
                 .setCapabilities(PhoneAccount.CAPABILITY_SELF_MANAGED)
                 .addSupportedUriScheme(TelecomPolicy.SCHEME)
                 .setShortDescription("Haven calls")
+                // The Haven mark on the system's call/account surfaces (car, Bluetooth, dialer pickers),
+                // tinted with the palette accent like the notifications.
+                .setIcon(android.graphics.drawable.Icon.createWithResource(ctx, NotificationBrand.SMALL_ICON_CALL))
+                .setHighlightColor(NotificationBrand.accent())
                 .build()
             tm.registerPhoneAccount(account)
             appContext = ctx

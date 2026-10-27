@@ -58,7 +58,7 @@ object CarNotifications {
             .setLabel(context.getString(R.string.car_reply_label))
             .build()
         val reply = NotificationCompat.Action.Builder(
-            android.R.drawable.ic_menu_send, context.getString(R.string.car_reply_label),
+            R.drawable.ic_action_reply, context.getString(R.string.car_reply_label),
             actionIntent(context, CarMessaging.ACTION_REPLY, plan.circleId, id, mutable = true),
         )
             .addRemoteInput(replyInput)
@@ -67,7 +67,7 @@ object CarNotifications {
             .setAllowGeneratedReplies(false)   // no canned smart-replies spoken on a driver's behalf
             .build()
         val markRead = NotificationCompat.Action.Builder(
-            android.R.drawable.ic_menu_view, context.getString(R.string.car_mark_read_label),
+            R.drawable.ic_action_mark_read, context.getString(R.string.car_mark_read_label),
             actionIntent(context, CarMessaging.ACTION_MARK_READ, plan.circleId, id, mutable = false),
         )
             .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
@@ -79,7 +79,8 @@ object CarNotifications {
         val conversationImage = if (plan.isGroup) null
             else plan.messages.lastOrNull()?.let { runCatching { AvatarStore.bitmap(it.senderKey) }.getOrNull() }
         val n = NotificationCompat.Builder(context, CHANNEL)
-            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setSmallIcon(NotificationBrand.SMALL_ICON)
+            .setColor(NotificationBrand.accent())
             .apply { conversationImage?.let { setLargeIcon(it) } }
             .setStyle(style)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)

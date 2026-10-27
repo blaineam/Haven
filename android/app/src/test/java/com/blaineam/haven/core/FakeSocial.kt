@@ -44,6 +44,10 @@ class FakeSocial : HavenSocial(NoHandle) {
     val calls = java.util.concurrent.CopyOnWriteArrayList<String>()
 
     override fun `contactNodeIds`(`circleId`: String): List<String> { check(); return members[circleId] ?: emptyList() }
+
+    /** The events "I authored" per circle, as `exportMyEnvelopes` returns them for a backfill. */
+    val envelopes = HashMap<String, List<ByteArray>>()
+    override fun `exportMyEnvelopes`(`circleId`: String): List<ByteArray> { check(); return envelopes[circleId] ?: emptyList() }
     override fun `supersededCircleIds`(): List<String> { check(); return superseded }
     override fun `circleSuccessor`(`circleId`: String): String? { check(); return successors[circleId] }
     override fun `reports`(`circleId`: String): List<ReportFfi> { check(); return reportList[circleId] ?: emptyList() }

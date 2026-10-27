@@ -31,4 +31,20 @@ final class RelayDefaultScopeTests: XCTestCase {
         scope.reset()
         XCTAssertTrue(scope.inherits(circleId: "cA", relay: friend))
     }
+
+    /// iOS never GUESSES a relay for a circle with no list of its own (Android/desktop's `fallback`): such a
+    /// circle uses only the default, and that verdict is recomputed on every call — so a relay that becomes
+    /// the default, or membership that arrives late, re-scopes the circle with nothing to retry. Events
+    /// authored before that are re-sent by `backfillMailbox` when the relay joins. A friend's relay is still
+    /// never taken by a circle the friend is not in, however late things arrive.
+    func testKeylessCircleIsReJudgedEachCallSoLateArrivalsNeverStrandIt() {
+        let scope = RelayDefaultScope()
+        scope.update(members: ["cS": [friend, friendAccount], "cA": []])
+        XCTAssertFalse(scope.inherits(circleId: "cA", relay: friend), "A's private circle never takes B's relay")
+        XCTAssertTrue(scope.inherits(circleId: "cA", relay: own), "my own relay, adopted later, is usable at once")
+        scope.learn(circleId: "cA", members: [])
+        scope.update(members: ["cS": [friend, friendAccount], "cA": [], "dm:b": [friend]])   // a late roster/record
+        XCTAssertFalse(scope.inherits(circleId: "cA", relay: friend), "late data does not widen the private circle")
+        XCTAssertTrue(scope.inherits(circleId: "dm:b", relay: friend))
+    }
 }

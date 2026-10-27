@@ -99,3 +99,80 @@ impl RelayScope {
         out
     }
 }
+
+/// One circle as last observed: whether it had NO relay list of its own, and every relay it could use.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScopeSeen {
+    pub keyless: bool,
+    pub relays: HashSet<String>,
+}
+
+/// Event-driven re-scope of circles whose relay set can change under them.
+///
+/// A circle with NO relay list of its own (a self-sync-learned circle whose record carried an empty list)
+/// is guessed onto [`RelayScope::fallback`] relays — deliberately narrow, for privacy. That set is computed
+/// per call, so a relay learned LATER is picked up by the next poll, but an event authored before it was
+/// known had already uploaded to nowhere and nothing re-sent it: e2e `multirelay: A's private post on A's
+/// other devices` read "never" until the daily refresh. This remembers each circle's effective set;
+/// [`KeylessScopeWatch::gained`] returns the circles that were key-less at the last look and have since
+/// gained a relay (one learned, the circle's record landing with its list, a default adopted) so the
+/// caller can backfill exactly those. It never widens who may hold a circle. The first call only seeds.
+#[derive(Default)]
+pub struct KeylessScopeWatch {
+    seeded: bool,
+    seen: HashMap<String, ScopeSeen>,
+}
+
+impl KeylessScopeWatch {
+    pub fn gained(&mut self, current: HashMap<String, ScopeSeen>) -> Vec<String> {
+        let before = std::mem::replace(&mut self.seen, current.clone());
+        if !self.seeded {
+            self.seeded = true;
+            return Vec::new();
+        }
+        let mut out: Vec<String> = current
+            .iter()
+            .filter(|(cid, now)| {
+                // A circle first seen after the seed counts as key-less with nothing yet.
+                let was = before.get(*cid).cloned().unwrap_or(ScopeSeen { keyless: true, relays: HashSet::new() });
+                was.keyless && now.relays.iter().any(|r| !was.relays.contains(r))
+            })
+            .map(|(cid, _)| cid.clone())
+            .collect();
+        out.sort();
+        out
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+
+    fn s(keyless: bool, r: &[&str]) -> ScopeSeen {
+        ScopeSeen { keyless, relays: r.iter().map(|x| x.to_string()).collect() }
+    }
+    fn one(c: &str, v: ScopeSeen) -> HashMap<String, ScopeSeen> {
+        HashMap::from([(c.to_string(), v)])
+    }
+
+    #[test]
+    fn flags_only_keyless_circles_that_gain_a_relay() {
+        let mut w = KeylessScopeWatch::default();
+        assert!(w.gained(one("c", s(true, &[]))).is_empty(), "the first look only seeds");
+        assert!(w.gained(one("c", s(true, &[]))).is_empty());
+        assert_eq!(w.gained(one("c", s(true, &["r1"]))), vec!["c"]);
+        assert!(w.gained(one("c", s(true, &["r1"]))).is_empty(), "unchanged afterwards");
+
+        let mut w = KeylessScopeWatch::default();
+        w.gained(one("c2", s(true, &[])));
+        assert_eq!(w.gained(one("c2", s(false, &["r1"]))), vec!["c2"], "a record landing with its list is a gain");
+
+        let mut w = KeylessScopeWatch::default();
+        w.gained(one("c3", s(false, &["r1"])));
+        assert!(w.gained(one("c3", s(false, &["r1", "r2"]))).is_empty(), "a keyed circle's setter backfills it");
+
+        let mut w = KeylessScopeWatch::default();
+        w.gained(HashMap::new());
+        assert_eq!(w.gained(one("new", s(true, &["r1"]))), vec!["new"], "a circle first seen after the seed");
+    }
+}

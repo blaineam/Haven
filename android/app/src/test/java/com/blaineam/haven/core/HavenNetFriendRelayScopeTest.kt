@@ -81,6 +81,51 @@ class HavenNetFriendRelayScopeTest {
         assertTrue("nothing left for either relay", env.relay.hits.isEmpty())
     }
 
+    /** The e2e `multirelay: A's private post on A's other devices` hole: the circle's record carried no list
+     *  and the only relay this device could use was learned AFTER the post. The post had uploaded nowhere and
+     *  nothing re-sent it. Learning the relay must backfill the circle — without widening who may hold it. */
+    @Test fun a_keyless_circle_is_backfilled_when_a_relay_it_may_use_is_learned_after_the_post() {
+        env.social.circleList = env.social.circleList + CircleInfoFfi("cK", "Synced", 1u)
+        env.social.members["cK"] = emptyList()
+        env.social.envelopes["cK"] = listOf("evt".toByteArray())
+        NetEnv.call("rescopeKeylessCircles")   // seeds the watch: nothing known yet
+        assertFalse("posted before any relay was usable", runBlocking { HavenNet.uploadEvent("cK", "evt".toByteArray()) })
+        assertTrue(env.relay.hits.isEmpty())
+        env.addRelay("c4".repeat(32), env.relay.base)   // a relay nobody here knows as a contact's becomes known
+        NetEnv.call("rescopeKeylessCircles")
+        assertTrue("the stranded event was re-sent to the relay learned later", env.relay.hits.isNotEmpty())
+    }
+
+    @Test fun a_keyless_circle_is_not_backfilled_onto_a_relay_only_a_wider_circle_may_use() {
+        val rc = "c5".repeat(32)
+        val rcRelay = FakeRelayServer().start()
+        env.entries()[rc] = HavenNet.RelayEntry(rc, "R_C", true, 0, false, httpUrls = listOf(rcRelay.base), httpToken = env.token)
+        env.social.circleList = env.social.circleList.filter { it.id != "dm:b" }   // dm:b legitimately may use rc
+        env.social.envelopes["cA"] = listOf("evt".toByteArray())
+        NetEnv.call("rescopeKeylessCircles")   // seed
+        env.bindCircleRelay("cS", rc)           // announced for the circle shared with B
+        HavenNet.relaysForCircle("cS")
+        NetEnv.call("rescopeKeylessCircles")
+        val onRc = rcRelay.hits.map { it.path }
+        rcRelay.stop()
+        assertTrue("A's private circle never lands on the relay serving B's circle: $onRc", onRc.none { "cA" in it })
+    }
+
+    @Test fun the_watch_flags_only_keyless_circles_that_gain_a_relay() {
+        val w = KeylessScopeWatch()
+        fun s(k: Boolean, vararg r: String) = KeylessScopeWatch.Scope(k, r.toSet())
+        assertEquals("the first look only seeds", emptyList<String>(), w.gained(mapOf("c" to s(true))))
+        assertEquals(emptyList<String>(), w.gained(mapOf("c" to s(true))))
+        assertEquals(listOf("c"), w.gained(mapOf("c" to s(true, "r1"))))
+        assertEquals("unchanged afterwards", emptyList<String>(), w.gained(mapOf("c" to s(true, "r1"))))
+        assertEquals("a record landing with its list is a gain too", listOf("c2"),
+            KeylessScopeWatch().also { it.gained(mapOf("c2" to s(true))) }.gained(mapOf("c2" to s(false, "r1"))))
+        assertEquals("a keyed circle gaining a relay was handled by its setter", emptyList<String>(),
+            KeylessScopeWatch().also { it.gained(mapOf("c3" to s(false, "r1"))) }.gained(mapOf("c3" to s(false, "r1", "r2"))))
+        assertEquals("a circle first seen after the seed", listOf("new"),
+            KeylessScopeWatch().also { it.gained(emptyMap()) }.gained(mapOf("new" to s(true, "r1"))))
+    }
+
     @Test fun the_rule_is_pure() {
         val friends = setOf(b, bDevice)
         assertFalse(RelayScope.verdict(bDevice, emptySet(), friends))

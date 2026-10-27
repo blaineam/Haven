@@ -74,6 +74,10 @@ pub struct PendingRequest {
 
 #[derive(Default)]
 struct DynState {
+    /// Which circles had no relay list of their own and what they could use, as last looked at — see
+    /// [`crate::relayscope::KeylessScopeWatch`] and [`Engine::rescope_keyless_circles`].
+    keyless_watch: crate::relayscope::KeylessScopeWatch,
+    keyless_rescope_pending: bool,
     pending: Vec<PendingRequest>,
     /// node ids we initiated a connect to (scanned their QR) → expected verify hash.
     initiated: HashMap<String, String>,
@@ -5286,6 +5290,7 @@ impl Engine {
         let Some(hello) = wire::parse_hello(payload) else { return };
         let id_hex = wire::node_hex(&hello.bundle);
         self.prefs.lock().relay_scope.invalidate(); // a contact may be new: who is a friend's relay changes with it
+        self.note_keyless_scope(); // …and what a key-less circle may be guessed onto changes with it too
         if self.prefs.lock().blocked.contains(&id_hex) {
             return;
         }
@@ -5478,6 +5483,9 @@ impl Engine {
 
     async fn handle_relay_node(self: &Arc<Self>, body: &[u8]) {
         let Some((circle_id, news)) = self.ingest_relay_announce(body) else { return };
+        if news {
+            self.note_keyless_scope(); // a relay a key-less circle may use may have just been learned
+        }
         if !news {
             // A RE-announce of a relay we already hold for this circle, unchanged. Members send
             // these every sync tick for every relay of every circle; each one used to re-export this
@@ -7405,6 +7413,7 @@ impl Engine {
         }
         let _ = p.save(&self.paths);
         drop(p);
+        self.note_keyless_scope(); // the default is inherited by key-less circles too
         self.nudge_self_sync(); // the default reaches my other devices promptly
         self.emit_changed();
     }
@@ -7626,6 +7635,58 @@ impl Engine {
     fn relays_for(&self, circle_id: &str) -> Vec<String> {
         self.ensure_relay_scope(circle_id);
         self.prefs.lock().active_relays_for(circle_id)
+    }
+
+    /// Coalescing window for [`Engine::note_keyless_scope`]; tests park it so a re-scope runs only when called.
+    const KEYLESS_RESCOPE_DELAY_MS: u64 = if cfg!(test) { 3_600_000 } else { 500 };
+
+    /// A relay was learned / a circle record landed / the default or a contact changed: re-scope the circles
+    /// that had no relay list of their own, off the caller's lock and coalesced. See
+    /// [`crate::relayscope::KeylessScopeWatch`].
+    fn note_keyless_scope(self: &Arc<Self>) {
+        {
+            let mut st = self.dyn_state.lock();
+            if st.keyless_rescope_pending {
+                return;
+            }
+            st.keyless_rescope_pending = true;
+        }
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(Self::KEYLESS_RESCOPE_DELAY_MS)).await;
+            me.dyn_state.lock().keyless_rescope_pending = false;
+            me.rescope_keyless_circles().await;
+        });
+    }
+
+    /// Backfill each circle that was key-less at the last look and can now use a relay it could not before:
+    /// an event authored before the relay was known had uploaded to nowhere. Returns the circles re-sent.
+    pub(crate) async fn rescope_keyless_circles(self: &Arc<Self>) -> Vec<String> {
+        let circles: Vec<String> = self.social.circles().into_iter().map(|c| c.id).collect();
+        for c in &circles {
+            self.ensure_relay_scope(c);
+        }
+        let cur: std::collections::HashMap<String, crate::relayscope::ScopeSeen> = {
+            let p = self.prefs.lock();
+            circles
+                .iter()
+                .map(|cid| {
+                    let keyless = !p.relays.contains_key(cid);
+                    let relays = if keyless { p.fallback_relays_for(cid) } else { p.active_relays_for(cid) };
+                    (cid.clone(), crate::relayscope::ScopeSeen { keyless, relays: relays.into_iter().collect() })
+                })
+                .collect()
+        };
+        let gained = self.dyn_state.lock().keyless_watch.gained(cur);
+        if gained.is_empty() {
+            return gained;
+        }
+        log::info!("relay scope: {} key-less circle(s) gained a relay — backfilling", gained.len());
+        for cid in &gained {
+            self.backfill_mailbox(cid).await;
+        }
+        self.poll_mailbox().await;
+        gained
     }
 
     /// Keep [`Prefs::relay_scope`] fresh enough to judge `circle_id`: rebuilt when it expires, a
@@ -12175,6 +12236,7 @@ impl Engine {
             applied
         };
         if applied {
+            self.note_keyless_scope(); // a circle record may have landed with its relay list
             self.persist_coalesced(); // network-driven: coalesce (see persist_coalesced)
             self.emit_changed();
         }

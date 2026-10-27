@@ -9,23 +9,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
-### Changed — iOS: CarPlay conversation screen, Siri calls by any spelling of a name, stricter name matching
+### Fixed — a private post stranded on a circle with no relay list yet is re-sent when a relay is learned (Android / desktop)
 
-Second real-car round. **Tapping a conversation** no longer lands on "what would you like to send?": rows in the
-CarPlay Messages tab are plain list items that open a conversation screen — *Read new messages* / *Read to me*
-(Haven reads them aloud over the car audio, marks them read), *Reply* (the one Siri-managed row), *Call on Haven*,
-and the recent messages newest first (a tap reads one). Locked conversations and the notification-privacy levels
-apply exactly as in the list. **"Call <name> on Haven"** now works: Siri resolves names before the app sees them
-and had only been taught the thread titles for messaging, so calls fell back to phonetic Contacts neighbours
-("Tracy / Troy / …"). Haven now registers conversation titles, aliases and first names as Siri vocabulary and
-donates call interactions for recent conversations (nothing for locked ones; erased with the switch or an account
-reset), and the extension also queues the call for the app so it rings when Siri launches Haven in the background.
-**Name matching** is tiered: an exact name beats "every spoken word is a word of the name" beats prefix/initial
-beats a spelling guess, and only the best tier is considered — "Tracy" resolves straight to "Tracy M" instead of
-offering Troy and a third, and only genuine ties (two Tracys) disambiguate. One resolver for messages and calls.
-Tests: tiers, "Tracy M"/"Tracy Miller"/"Tracy" for calls, conversation detail + spoken script privacy, template
-construction, queued call, vocabulary rules. Needs a real car check (rendering, speech over the car route, Siri
-learning the new vocabulary) — `docs/CARPLAY.md`.
+The e2e `multirelay: A's private post on A's other devices` read "never" on a loaded host. A device that learned the
+private circle from self-sync with an EMPTY relay list authored the post before it knew any relay the circle may
+use (the guess is deliberately narrow so a private circle never reaches a friend's relay), so the upload went to
+nowhere — and nothing re-sent it when the relay arrived, until the daily refresh. Android and desktop now remember
+each circle's usable relay set (`KeylessScopeWatch`) and backfill the circles that were key-less and gained a relay,
+on the events that change it: a relay announced or adopted, the default set, a synced circle record landing with its
+list, a contact joining. Debounced, event-driven, idempotent; the privacy rule is unchanged (tests assert a private
+circle is never moved onto the relay of a wider circle). iOS never guesses a relay, so it has no such window (tests
+pin that a late roster or default never widens a private circle). Residual: a key-less private circle whose only
+usable relay is also listed for a wider circle waits for its own record to name it — documented in
+`docs/RELAY-AND-DEPLOY.md`. Test harness: Android NetEnv parks the re-scope debounce so a test controls when it runs.
 
 ### Fixed — call audio no longer pinned to the phone's loudspeaker (iOS + Android)
 

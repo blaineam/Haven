@@ -63,6 +63,8 @@ class NetEnv(
         ContactRemovals.init(ctx)
         ctx.filesDir.resolve("media").mkdirs()
         field("ready").setBoolean(HavenNet, true)
+        field("keylessRescopeDelayMs").setLong(HavenNet, 3_600_000L)   // re-scope only when a test asks for it
+        set("keylessWatch", KeylessScopeWatch())                        // and each test seeds its own
         HavenNet.isForeground = true   // notifications need a real Context; the foreground app posts none
         resetPollFlags()
         field("circlesCache").set(HavenNet, null)

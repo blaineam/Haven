@@ -1995,6 +1995,7 @@ object HavenNet : InboundListener {
 
     private fun handleHello(payload: ByteArray, viaNearby: Boolean = false, senderDevice: String? = null): HelloOutcome {
         relayScope.invalidate()   // a contact may be new: who counts as a friend's relay changes with it
+        noteKeylessScope()        // …and what a key-less circle may be guessed onto changes with it too
         val hello = Wire.parseHello(payload) ?: return HelloOutcome(true, "malformed")
         val idHex = nodeHex(hello.bundle)
         if (blocked.contains(idHex)) return HelloOutcome(true, "blocked")   // a blocked node can't handshake back in
@@ -3505,6 +3506,40 @@ object HavenNet : InboundListener {
             delay(RelayIntroduction.DEBOUNCE_MS)
             introduceToJoinedRelays()
         }
+    }
+
+    private var keylessWatch = KeylessScopeWatch()
+    private val keylessRescopePending = java.util.concurrent.atomic.AtomicBoolean(false)
+    /** Coalescing window for [noteKeylessScope]; unit tests park it so a re-scope runs only when they call it. */
+    @Volatile private var keylessRescopeDelayMs = 500L
+
+    /**
+     * Every relay mutation ends in [saveRelayNodes]; a contact change calls [relayScope] invalidate: re-scope
+     * the circles that had no relay list of their own ([KeylessScopeWatch]) and backfill whichever gained
+     * one, so an event authored before the relay was known is not stranded. Coalesced, off the save lock.
+     */
+    private fun noteKeylessScope() {
+        if (!keylessRescopePending.compareAndSet(false, true)) return
+        scope.launch {
+            delay(keylessRescopeDelayMs)
+            keylessRescopePending.set(false)
+            rescopeKeylessCircles()
+        }
+    }
+
+    private suspend fun rescopeKeylessCircles() {
+        val cur = runCatching {
+            social.circles().map { it.id }.associateWith { cid ->
+                val keyless = !relayNodes.containsKey(cid)
+                val relays = (relaysFor(cid) + if (keyless) circleFallbackRelays(cid) else emptyList()).toSet()
+                KeylessScopeWatch.Scope(keyless, relays)
+            }
+        }.getOrNull() ?: return
+        val gained = keylessWatch.gained(cur)
+        if (gained.isEmpty()) return
+        Log.i(TAG, "relay scope: ${gained.size} key-less circle(s) gained a relay — backfilling")
+        for (cid in gained) backfillMailbox(cid)
+        pollMailbox()
     }
 
     private suspend fun introduceToJoinedRelays() {
@@ -9922,6 +9957,7 @@ object HavenNet : InboundListener {
      */
     private fun saveRelayNodes(stampFlush: Boolean = false): Unit = synchronized(relaySaveLock) {
         noteRelayJoins()
+        noteKeylessScope()
         val now = relayNow()
         val o = JSONObject()
         relayNodes.forEach { (k, v) -> o.put(k, JSONArray().apply { v.forEach { put(it) } }) }

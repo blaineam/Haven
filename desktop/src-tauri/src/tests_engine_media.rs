@@ -1280,3 +1280,58 @@ async fn reseal_refuses_and_leaves_the_stored_blob_untouched_on_bad_input() {
     assert!(e.reseal_media_for_circles(DEFAULT_CIRCLE, std::slice::from_ref(&r), &both).is_err());
     assert_eq!(stored(&e, &r), forged, "the refused blob is left exactly as it was");
 }
+
+/// e2e `multirelay: A's private post on A's other devices`: a circle learned with an EMPTY relay list uploads
+/// to nothing until a relay it may use is known; a relay learned after the post must re-send what it missed.
+#[tokio::test]
+async fn a_keyless_circle_is_rescoped_when_a_relay_it_may_use_is_learned_after_the_post() {
+    let (a, _) = new_engine(97);
+    let private = a.create_circle("Private".into());
+    a.prefs.lock().relays.clear();
+    assert!(a.rescope_keyless_circles().await.is_empty(), "the first look only seeds");
+    assert!(a.prefs.lock().fallback_relays_for(&private).is_empty(), "nothing to land on yet");
+    a.prefs.lock().ensure_relay_entry(R2, None, false, true); // learned later; no circle lists it
+    assert!(a.rescope_keyless_circles().await.contains(&private), "the stranded events are re-sent");
+    assert!(a.rescope_keyless_circles().await.is_empty(), "once");
+}
+
+/// The circle's own record arriving with its relay list is the same event from the other side.
+#[tokio::test]
+async fn a_keyless_circle_is_rescoped_when_its_record_lands_with_a_relay_list() {
+    let (a, _) = new_engine(98);
+    let (b, _) = new_engine(101);
+    befriend(&a, &b);
+    let shared = a.create_circle("Shared".into());
+    a.social.add_existing_to_circle(shared.clone(), b.node_id_hex()).unwrap();
+    let private = a.create_circle("Private".into());
+    a.prefs.lock().relays.clear();
+    a.prefs.lock().ensure_relay_entry(R1, None, false, true);
+    a.prefs.lock().relays.insert(shared.clone(), vec![R1.to_string()]); // R1 serves cS, so the private circle may not guess it
+    for c in [&shared, &private] {
+        a.ensure_relay_scope(c);
+    }
+    assert!(a.prefs.lock().fallback_relays_for(&private).is_empty());
+    a.rescope_keyless_circles().await; // seed
+    a.prefs.lock().relays.insert(private.clone(), vec![R1.to_string()]); // the self-sync record lands with its list
+    assert!(a.rescope_keyless_circles().await.contains(&private), "an explicit list is the user's own choice");
+}
+
+/// Privacy is untouched: a relay learned for a circle B is in is never a reason to re-send A's private circle.
+#[tokio::test]
+async fn rescoping_never_moves_a_private_circle_onto_the_relay_of_a_wider_circle() {
+    let (a, _) = new_engine(99);
+    let (b, _) = new_engine(100);
+    befriend(&a, &b);
+    let shared = a.create_circle("Shared".into());
+    a.social.add_existing_to_circle(shared.clone(), b.node_id_hex()).unwrap();
+    let private = a.create_circle("Private".into());
+    a.prefs.lock().relays.clear();
+    a.prefs.lock().ensure_relay_entry(R1, None, false, true);
+    a.prefs.lock().relays.insert(shared.clone(), vec![R1.to_string()]);
+    a.rescope_keyless_circles().await; // seed
+    a.prefs.lock().ensure_relay_entry(R2, None, false, true);
+    a.prefs.lock().relays.get_mut(&shared).unwrap().push(R2.to_string()); // another relay learned for cS
+    let gained = a.rescope_keyless_circles().await;
+    assert!(!gained.contains(&private), "A's private circle must not follow cS onto its relays: {gained:?}");
+    assert!(a.prefs.lock().fallback_relays_for(&private).is_empty());
+}

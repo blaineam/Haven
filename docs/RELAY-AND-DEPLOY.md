@@ -103,6 +103,20 @@ circle's mailbox), but a media ref names no circle, so media used to replicate t
    Explicit per-circle assignments are never filtered; a friend-invite grant adopts the inviter's relays into the
    default circle only. Android `RelayScope`, iOS `RelayDefaultScope`, desktop `relayscope.rs`.
 
+   **A circle with no relay list yet is re-scoped on events, not guessed wider.** A circle learned from self-sync
+   whose record carried an empty list (Android/desktop only — iOS never guesses; it uses an explicit list plus the
+   inheriting default) may use only a relay no other circle lists, or one whose every member is also in this
+   circle (`RelayScope.fallback`). That set is computed per call, so it follows what the device learns; what
+   it could not do was re-send an event authored *before* the relay was known (the e2e `A's private post on A's
+   other devices` read "never"). Android `KeylessScopeWatch` / desktop `relayscope::KeylessScopeWatch` remember each
+   circle's effective set and, whenever a relay is learned or announced, the default changes, a circle record lands
+   or a contact joins (all debounced, none polled), backfill exactly the circles that were key-less and gained a
+   relay. Backfill is idempotent (per-(relay, key) skip). **Remaining condition:** the fallback is not widened
+   to "relays of circles I am in" — an unlisted standalone relay (a friend's `R_C`) cannot be told apart from my own
+   by node id, and widening would put a private circle's mailbox there; so a key-less private circle whose only
+   usable relay is also listed for a wider circle stays unwired until its own record (or the user's tick) names
+   that relay. The record is retransmitted by self-sync on every pass, so that is a delay, not a loss.
+
 ### Learning circles after the link — the ENROLL op (implemented)
 
 A relay used to read its circle list **once**, from the link the operator pasted, and never change

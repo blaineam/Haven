@@ -83,3 +83,37 @@ class RelayScope(private val now: () -> Long = System::currentTimeMillis, privat
             !(def in friends && def !in circleMembers)
     }
 }
+
+/**
+ * Event-driven re-scope of circles whose relay set can change under them.
+ *
+ * A circle with NO relay list of its own (a self-sync-learned circle whose record carried an empty list)
+ * is guessed onto [RelayScope.fallback] relays, which is deliberately narrow (privacy). That set is
+ * computed per call, so a relay learned LATER is picked up by the next poll — but an event authored
+ * before it was learned had already uploaded to nowhere, and nothing re-uploaded it, so a private post
+ * to my other devices read "never" until the 24h refresh. This remembers each circle's effective relay
+ * set; [gained] returns the circles that were key-less at the last look and have since gained a relay
+ * (a relay learned, the circle's record landing with its list, a default adopted) so the caller can
+ * backfill exactly those — no polling, no widening of who is allowed to hold the circle.
+ * The first call only seeds: a cold start's periodic backfill covers what was already there.
+ */
+class KeylessScopeWatch {
+    /** One circle's effective relays and whether it had NO list of its own when observed. */
+    data class Scope(val keyless: Boolean, val relays: Set<String>)
+
+    private var seeded = false
+    private var seen: Map<String, Scope> = emptyMap()
+
+    @Synchronized
+    fun gained(current: Map<String, Scope>): List<String> {
+        val before = seen
+        seen = current
+        if (!seeded) { seeded = true; return emptyList() }
+        val out = ArrayList<String>()
+        for ((cid, now) in current) {
+            val was = before[cid] ?: Scope(true, emptySet())   // a circle first seen after the seed
+            if (was.keyless && now.relays.any { it !in was.relays }) out.add(cid)
+        }
+        return out
+    }
+}

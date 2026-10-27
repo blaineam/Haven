@@ -106,18 +106,26 @@ function sh(cmd, args, opts = {}) { return execFileSync(cmd, args, { encoding: '
 // "that leg is unhealthy", exactly like any other adb failure. `E2E_ADB_TIMEOUT_MS` overrides.
 // Pin every adb child to the harness's own emulator (AVD haven_phone): a physical phone or another
 // session's emulator on the same adb server makes bare `adb` fail with "more than one device".
-function pinAndroidSerial() {
-  if (process.env.ANDROID_SERIAL) return;
-  const list = spawnSync('adb', ['devices'], { encoding: 'utf8', timeout: 15_000 }).stdout || '';
+let pinnedAt = 0;
+function pinAndroidSerial(force = false) {
+  // Re-resolved (at most every 5 s) because the bootstrap cold-reboots the emulator AFTER this module loads,
+  // and it can come back under a different serial — a pin taken once at load then points at nothing and the
+  // whole android leg is silently skipped (e2e 2026-10-27: "no android device", 286 checks instead of 458).
+  const now = Date.now();
+  const cur = process.env.ANDROID_SERIAL;
+  if (!force && cur && cur !== 'emulator-none' && now - pinnedAt < 5_000) return;
+  pinnedAt = now;
+  const list = spawnSync('adb', ['devices'], { encoding: 'utf8', timeout: 15_000, env: { ...process.env, ANDROID_SERIAL: '' } }).stdout || '';
   for (const m of list.matchAll(/^(emulator-\d+)\s+device/gm)) {
     const name = (spawnSync('adb', ['-s', m[1], 'emu', 'avd', 'name'], { encoding: 'utf8', timeout: 15_000 }).stdout || '').split('\n')[0].trim();
     if (name === (process.env.HAVEN_AVD || 'haven_phone')) { process.env.ANDROID_SERIAL = m[1]; return; }
   }
   process.env.ANDROID_SERIAL = 'emulator-none';
 }
-pinAndroidSerial();
+pinAndroidSerial(true);
 const ADB_TIMEOUT_MS = +(process.env.E2E_ADB_TIMEOUT_MS || 60_000);
 function shOk(cmd, args, opts = {}) {
+  if (cmd === 'adb') pinAndroidSerial();
   const r = spawnSync(cmd, args, { encoding: 'utf8', ...(cmd === 'adb' ? { timeout: ADB_TIMEOUT_MS } : {}), ...opts });
   if (r.error?.code === 'ETIMEDOUT') log(`WARN adb ${args.slice(0, 3).join(' ')} … hung ${ADB_TIMEOUT_MS / 1000}s — killed`);
   return r.status === 0 ? (r.stdout || '') : null;
@@ -137,6 +145,7 @@ function saveAndroidLogcat(label) {
   try {
     fd = openSync(join(OUT, `android-logcat-${label}.txt`), 'w');
     for (const buf of [['-b', 'main,system'], ['-b', 'crash']]) {
+      pinAndroidSerial();
       spawnSync('adb', ['logcat', '-d', '-v', 'threadtime', ...buf], { stdio: ['ignore', fd, 'ignore'], timeout: 120_000 });
     }
   } catch (_) { /* best effort — diagnostics must never fail the run */ } finally { if (fd !== undefined) try { closeSync(fd); } catch (_) {} }
@@ -290,6 +299,7 @@ function androidQaRead(name) {
 // hiccup must not RED a leg, and a persistent one must name itself.
 const AND_QA_WRITE_ATTEMPTS = +(process.env.E2E_AND_QA_WRITE_ATTEMPTS || 3);
 function adbAttempt(args) {
+  pinAndroidSerial();
   const r = spawnSync('adb', args, { encoding: 'utf8', timeout: ADB_TIMEOUT_MS });
   if (r.status === 0 && !r.error) return null;
   const why = r.error?.code === 'ETIMEDOUT' ? `hung ${ADB_TIMEOUT_MS / 1000}s — killed`

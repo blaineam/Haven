@@ -89,6 +89,19 @@ class ProfileStore private constructor(context: Context) {
         }
 
     /**
+     * Android Auto messages (iOS "CarPlay and Siri messages", default ON). Off = DM notifications are
+     * built as plain banners with no reply / mark-read semantic actions, which Android Auto ignores.
+     * See [CarMessaging].
+     */
+    private val _androidAutoMessages = mutableStateOf(prefs.getBoolean(KEY_ANDROID_AUTO, true))
+    var androidAutoMessages: Boolean
+        get() = _androidAutoMessages.value
+        set(v) {
+            _androidAutoMessages.value = v
+            prefs.edit().putBoolean(KEY_ANDROID_AUTO, v).apply()
+        }
+
+    /**
      * Notification preview detail: "full" | "private" | "minimal" (iOS SharedNotificationPrivacy).
      * Device-local; applied when posting local banners.
      */
@@ -271,6 +284,7 @@ class ProfileStore private constructor(context: Context) {
         private const val KEY_DATA_SAVER = "superDataSaver"
         private const val KEY_SEND_ORIGINAL = "sendOriginal"
         private const val KEY_SHARE_SUGGEST = "shareSuggestions"
+        private const val KEY_ANDROID_AUTO = "androidAutoMessages"
         private const val KEY_NOTIF_DETAIL = "notificationDetail"
         private const val KEY_FIELD_TS = "profileFieldTs"
         private const val KEY_SETTING_TS = "settingTs"

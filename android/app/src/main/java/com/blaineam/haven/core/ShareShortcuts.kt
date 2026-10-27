@@ -78,6 +78,19 @@ object ShareShortcuts {
         }
     }
 
+    /**
+     * Make sure [circleId] has a published sharing shortcut and say whether it does. A MessagingStyle
+     * notification points at it (`setShortcutId`) so Assistant / Android Auto can resolve "reply to
+     * Maya". Honors the same rules as [refresh]: nothing for a locked circle, a non-DM, or while
+     * [ProfileStore.shareSuggestions] is off (turning that off erases published names, and a car
+     * notification must not re-publish them) — in those cases the notification simply has no shortcut.
+     */
+    fun ensure(context: Context, circleId: String): Boolean {
+        val ctx = context.applicationContext
+        if (!eligible(circleId) || !ProfileStore.get(ctx).shareSuggestions) return false
+        return runCatching { ShortcutManagerCompat.pushDynamicShortcut(ctx, shortcut(ctx, circleId)) }.isSuccess
+    }
+
     /** Drop one conversation's tile — deleting the thread, or locking its circle, must take it out
      *  of the share sheet too, or the name outlives the thread it belonged to. */
     fun remove(context: Context, circleId: String) {

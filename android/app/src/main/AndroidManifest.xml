@@ -293,6 +293,13 @@
             </intent-filter>
         </receiver>
 
+        <!-- Reply / Mark-as-read from the car (Android Auto) and the notification shade. Not exported:
+             only the PendingIntents Haven attached to its own MessagingStyle notifications reach it.
+             No intent-filter, so nothing implicit can address it either. -->
+        <receiver
+            android:name=".core.CarActionReceiver"
+            android:exported="false" />
+
         <!-- Android Auto messaging (docs/ANDROID-AUTO.md): declares the app as a car-capable
              messaging app. Without this meta-data Android Auto ignores Haven's notifications
              entirely, however well-formed. The XML lists the single capability used: `notification`. -->

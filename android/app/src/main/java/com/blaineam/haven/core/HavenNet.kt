@@ -2456,16 +2456,65 @@ object HavenNet : InboundListener {
             else -> PushBanner.forPost(circleId, circleName, newest.body, media, story = false)
         }
         val detail = runCatching { ProfileStore.get(appContext).notificationDetail }.getOrDefault("full")
-        val (useName, body) = PushBanner.displayBody(copy.body, copy.privateBody, copy.kind, detail)
+        val locked = CircleLock.isLocked(circleId)
+        // Tap-target: a DM opens its Messages THREAD; a circle post/story opens the exact post
+        // (Apple DeepLink.interactionLink parity). Routed through MainActivity.handleShare, so
+        // one route table — and the circle-lock rules — govern links from every source.
+        val link = DeepLink.interactionLink(circleId, newest.id)
+        // Android Auto: a plain inbound DM at Full previews, in an unlocked circle, becomes a
+        // MessagingStyle conversation notification (the only thing the car reads). Everything else —
+        // and every private/minimal/locked case — stays an ordinary banner the car never shows.
+        val plan = CarMessaging.plan(
+            CarMessaging.Input(
+                circleId = circleId,
+                kind = copy.kind,
+                locked = locked,
+                detail = detail,
+                carEnabled = runCatching { ProfileStore.get(appContext).androidAutoMessages }.getOrDefault(false),
+                title = dmPartnerName(circleId),
+                messages = if (circleId.startsWith("dm:")) unreadInboundMessages(circleId, feed) else emptyList(),
+            ),
+        )
+        if (plan is CarMessaging.Plan.Messaging) {
+            CarNotifications.post(appContext, plan, link)
+            return
+        }
+        // A locked circle's banner never carries its sender or text, whatever the preview setting.
+        val (useName, body) = PushBanner.displayBody(
+            copy.body, copy.privateBody, copy.kind, CarMessaging.effectiveDetail(detail, locked),
+        )
         Notifications.notify(
             appContext,
             title = if (useName) authorName else "Haven",
             body = body,
-            // Tap-target: a DM opens its Messages THREAD; a circle post/story opens the exact post
-            // (Apple DeepLink.interactionLink parity). Routed through MainActivity.handleShare, so
-            // one route table — and the circle-lock rules — govern links from every source.
-            deepLink = DeepLink.interactionLink(circleId, newest.id),
+            deepLink = link,
         )
+    }
+
+    /** The unread inbound DM messages of [circleId] (oldest first, newest included) as car-ready
+     *  messages. Unread = newer than the thread's read watermark; text via [PushBanner] so a photo
+     *  or voice note reads as "Sent a photo" instead of nothing. Stories and pure reactions are
+     *  not messages and never appear. */
+    private fun unreadInboundMessages(
+        circleId: String, feed: List<uniffi.haven_ffi.FeedItemFfi>,
+    ): List<CarMessaging.Msg> {
+        val mark = runCatching { DmRead.watermark(circleId) }.getOrDefault(0UL)
+        val name = circleName(circleId)
+        return feed.asSequence()
+            .filter { !it.isMe && !it.story && it.createdAt > mark }
+            .filter { it.body.isNotBlank() || it.media.isNotEmpty() }
+            .sortedBy { it.createdAt }
+            .toList()
+            .takeLast(CarMessaging.MAX_MESSAGES)
+            .map { item ->
+                val hex = contacts.firstOrNull { it.idHex.startsWith(item.authorShort) }?.idHex ?: item.authorShort
+                CarMessaging.Msg(
+                    senderKey = hex,
+                    senderName = displayName(item.authorShort).ifEmpty { "Someone" },
+                    text = PushBanner.forPost(circleId, name, item.body, item.media, story = false).body,
+                    timestampMs = item.createdAt.toLong(),
+                )
+            }
     }
 
     /** Record a notification dedupe key; false if already notified. Persisted (capped — the

@@ -104,6 +104,18 @@ function sh(cmd, args, opts = {}) { return execFileSync(cmd, args, { encoding: '
 // emulator — seen on the multirelay run: 6+ minutes, with two relays and a proxy idling behind it)
 // froze the whole harness. A timed-out call returns null, which every adb caller already treats as
 // "that leg is unhealthy", exactly like any other adb failure. `E2E_ADB_TIMEOUT_MS` overrides.
+// Pin every adb child to the harness's own emulator (AVD haven_phone): a physical phone or another
+// session's emulator on the same adb server makes bare `adb` fail with "more than one device".
+function pinAndroidSerial() {
+  if (process.env.ANDROID_SERIAL) return;
+  const list = spawnSync('adb', ['devices'], { encoding: 'utf8', timeout: 15_000 }).stdout || '';
+  for (const m of list.matchAll(/^(emulator-\d+)\s+device/gm)) {
+    const name = (spawnSync('adb', ['-s', m[1], 'emu', 'avd', 'name'], { encoding: 'utf8', timeout: 15_000 }).stdout || '').split('\n')[0].trim();
+    if (name === (process.env.HAVEN_AVD || 'haven_phone')) { process.env.ANDROID_SERIAL = m[1]; return; }
+  }
+  process.env.ANDROID_SERIAL = 'emulator-none';
+}
+pinAndroidSerial();
 const ADB_TIMEOUT_MS = +(process.env.E2E_ADB_TIMEOUT_MS || 60_000);
 function shOk(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, { encoding: 'utf8', ...(cmd === 'adb' ? { timeout: ADB_TIMEOUT_MS } : {}), ...opts });

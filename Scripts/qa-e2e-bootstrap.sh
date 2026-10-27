@@ -20,6 +20,24 @@ AND_PKG="${HAVEN_AND_PKG:-com.blaineam.haven}"
 
 log() { echo "[e2e-boot] $*"; }
 
+# ── adb is pinned to the harness's OWN emulator (AVD haven_phone). Bare `adb` errors with "more than
+#    one device" as soon as a physical phone (or another session's emulator) is attached, which
+#    silently SKIPPED the android leg — and with a lone physical phone attached it would have
+#    `pm clear`ed Haven on THAT phone. Every adb call below resolves the emulator by AVD name.
+haven_emu_serial() {
+  local s
+  for s in $(command adb devices 2>/dev/null | awk '/^emulator-[0-9]+[ \t]+device/ {print $1}'); do
+    if [[ "$(command adb -s "$s" emu avd name 2>/dev/null | head -1 | tr -d '\r')" == "${HAVEN_AVD:-haven_phone}" ]]; then echo "$s"; return; fi
+  done
+  echo "emulator-none"
+}
+adb() {
+  case "${1:-}" in
+    devices|start-server|kill-server|version) command adb "$@" ;;
+    *) command adb -s "$(haven_emu_serial)" "$@" ;;
+  esac
+}
+
 # ── Host load preflight. The budgets assume a quiet machine: with Spotlight / mediaanalysisd /
 #    another session's build saturating the host the 2.5 GB emulator swaps and the whole fleet runs
 #    3-4x slow, so checks score RED (or "never") for reasons that say nothing about the code. Wait

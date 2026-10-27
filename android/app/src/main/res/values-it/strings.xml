@@ -323,6 +323,11 @@
     <string name="settings_share_sheet_header">Menu di condivisione</string>
     <string name="settings_share_sheet_desc">Mette le tue conversazioni Haven recenti nella riga in cima al menu di condivisione di qualsiasi app, così per inviare una foto o un link bastano due tocchi. Android conserva il nome e la foto su questo dispositivo per disegnare quella riga; se disattivi l\'opzione, li cancella. Le cerchie bloccate non vengono mai suggerite.</string>
     <string name="settings_suggest_conversations">Suggerisci conversazioni</string>
+    <string name="settings_car_header">Auto</string>
+    <string name="settings_android_auto">Messaggi Android Auto</string>
+    <string name="settings_android_auto_desc">Mostra i tuoi messaggi diretti su Android Auto così puoi ascoltarli e rispondere a voce. Le conversazioni bloccate non compaiono mai e il testo dei messaggi segue l’impostazione di anteprima delle notifiche qui sopra: vengono lette solo le anteprime complete. Disattivandolo, i messaggi non compaiono in auto.</string>
+    <string name="car_reply_label">Rispondi</string>
+    <string name="car_mark_read_label">Segna come letto</string>
     <string name="settings_stay_connected_header">Resta connesso</string>
     <string name="settings_stay_connected_desc">Resta connesso per ricevere post, messaggi e chiamate all\'istante. Consuma poca batteria.</string>
     <string name="settings_realtime_connection">Connessione in tempo reale</string>

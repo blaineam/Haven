@@ -329,6 +329,11 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="settings_share_sheet_header">Menú de compartir</string>
     <string name="settings_share_sheet_desc">Pone tus conversaciones recientes de Haven en la fila de arriba del menú de compartir de cualquier app, para que enviar una foto o un enlace sea cosa de dos toques. Android guarda el nombre y la foto en este dispositivo para dibujar esa fila; si desactivas esto, los borra. Los círculos bloqueados nunca se sugieren.</string>
     <string name="settings_suggest_conversations">Sugerir conversaciones</string>
+    <string name="settings_car_header">Coche</string>
+    <string name="settings_android_auto">Mensajes de Android Auto</string>
+    <string name="settings_android_auto_desc">Muestra tus mensajes directos en Android Auto para que puedas escucharlos y responder por voz. Las conversaciones bloqueadas nunca aparecen y el texto de los mensajes sigue tu ajuste de vista previa de notificaciones de arriba: solo se leen las vistas previas completas. Al desactivarlo, los mensajes no aparecen en el coche.</string>
+    <string name="car_reply_label">Responder</string>
+    <string name="car_mark_read_label">Marcar como leído</string>
     <string name="settings_stay_connected_header">Mantente conectado</string>
     <string name="settings_stay_connected_desc">Mantente conectado para recibir publicaciones, mensajes y llamadas al instante. Gasta un poco de batería.</string>
     <string name="settings_realtime_connection">Conexión en tiempo real</string>

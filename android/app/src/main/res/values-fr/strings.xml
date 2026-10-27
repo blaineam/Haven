@@ -324,6 +324,11 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="settings_share_sheet_header">Menu de partage</string>
     <string name="settings_share_sheet_desc">Place vos conversations Haven récentes dans la rangée en haut du menu de partage de n\'importe quelle app : une photo ou un lien s\'envoie en deux appuis. Android conserve le nom et la photo sur cet appareil pour afficher cette rangée ; désactiver cette option les efface. Les cercles verrouillés ne sont jamais suggérés.</string>
     <string name="settings_suggest_conversations">Suggérer des conversations</string>
+    <string name="settings_car_header">Voiture</string>
+    <string name="settings_android_auto">Messages Android Auto</string>
+    <string name="settings_android_auto_desc">Affiche vos messages directs sur Android Auto pour que vous puissiez les écouter et répondre à la voix. Les conversations verrouillées n’apparaissent jamais, et le texte des messages suit votre réglage d’aperçu des notifications ci-dessus : seuls les aperçus complets sont lus. Si vous désactivez cette option, les messages n’apparaissent plus dans la voiture.</string>
+    <string name="car_reply_label">Répondre</string>
+    <string name="car_mark_read_label">Marquer comme lu</string>
     <string name="settings_stay_connected_header">Rester connecté</string>
     <string name="settings_stay_connected_desc">Restez connecté pour recevoir publications, messages et appels instantanément. Consomme un peu de batterie.</string>
     <string name="settings_realtime_connection">Connexion en temps réel</string>

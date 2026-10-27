@@ -323,6 +323,11 @@
     <string name="settings_share_sheet_header">공유 시트</string>
     <string name="settings_share_sheet_desc">최근 Haven 대화를 다른 앱 공유 시트 맨 윗줄에 띄워 줘요. 사진이나 링크를 두 번만 눌러 보낼 수 있어요. Android가 그 줄을 그리려고 이름과 사진을 이 기기에 저장하는데, 이 설정을 끄면 지워져요. 잠긴 서클은 추천에 절대 나오지 않아요.</string>
     <string name="settings_suggest_conversations">대화 추천</string>
+    <string name="settings_car_header">자동차</string>
+    <string name="settings_android_auto">Android Auto 메시지</string>
+    <string name="settings_android_auto_desc">다이렉트 메시지를 Android Auto에 표시하여 음성으로 듣고 답장할 수 있게 합니다. 잠긴 대화는 표시되지 않으며 메시지 내용은 위의 알림 미리보기 설정을 따릅니다. 전체 미리보기만 읽어 줍니다. 끄면 메시지가 차량에 표시되지 않습니다.</string>
+    <string name="car_reply_label">답장</string>
+    <string name="car_mark_read_label">읽음으로 표시</string>
     <string name="settings_stay_connected_header">연결 유지</string>
     <string name="settings_stay_connected_desc">게시물, 메시지, 통화를 바로 받아볼 수 있게 연결을 유지해요. 배터리를 조금 써요.</string>
     <string name="settings_realtime_connection">실시간 연결</string>

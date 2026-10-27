@@ -283,6 +283,14 @@ fun SettingsScreen(onBack: () -> Unit) {
                     color = HavenTheme.textSecondary, fontSize = 12.sp,
                 )
                 SettingSwitch(stringResource(R.string.settings_suggest_conversations), profile.shareSuggestions) { profile.shareSuggestions = it }
+                Spacer(Modifier.height(8.dp))
+                Text(stringResource(R.string.settings_car_header), color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    stringResource(R.string.settings_android_auto_desc),
+                    color = HavenTheme.textSecondary, fontSize = 12.sp,
+                )
+                SettingSwitch(stringResource(R.string.settings_android_auto), profile.androidAutoMessages) { profile.androidAutoMessages = it }
             }
             }  // end Privacy
 

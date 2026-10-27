@@ -323,6 +323,11 @@
     <string name="settings_share_sheet_header">共有シート</string>
     <string name="settings_share_sheet_desc">Haven で最近やりとりした相手を、どのアプリの共有シートでも上部の行に表示します。写真やリンクを2タップで送れます。この行を表示するために、Android は名前と写真をこのデバイスの中に保存します。オフにすると消去されます。ロックされたサークルが候補に出ることはありません。</string>
     <string name="settings_suggest_conversations">会話を提案</string>
+    <string name="settings_car_header">車</string>
+    <string name="settings_android_auto">Android Auto のメッセージ</string>
+    <string name="settings_android_auto_desc">ダイレクトメッセージを Android Auto に表示し、音声で聞いたり返信したりできるようにします。ロックされた会話は表示されず、メッセージの本文は上の通知プレビュー設定に従います。読み上げられるのは完全なプレビューのみです。オフにすると、メッセージは車に表示されません。</string>
+    <string name="car_reply_label">返信</string>
+    <string name="car_mark_read_label">既読にする</string>
     <string name="settings_stay_connected_header">接続を維持</string>
     <string name="settings_stay_connected_desc">投稿・メッセージ・通話をすぐに受け取れるよう、接続を維持します。バッテリーを少し使います。</string>
     <string name="settings_realtime_connection">リアルタイム接続</string>

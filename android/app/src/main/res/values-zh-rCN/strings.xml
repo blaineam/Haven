@@ -323,6 +323,11 @@
     <string name="settings_share_sheet_header">分享面板</string>
     <string name="settings_share_sheet_desc">把你最近的 Haven 对话放进任意应用分享面板顶部的那一行，发照片或链接只需点两下。Android 会把名称和照片保存在本设备上来显示这一行；关闭后这些信息会被清除。已锁定的圈子不会出现在推荐中。</string>
     <string name="settings_suggest_conversations">推荐对话</string>
+    <string name="settings_car_header">车载</string>
+    <string name="settings_android_auto">Android Auto 消息</string>
+    <string name="settings_android_auto_desc">在 Android Auto 上显示你的私信，让你可以收听并用语音回复。已锁定的对话绝不会出现，消息内容遵循上方的通知预览设置：只有完整预览才会被朗读。关闭后，消息不会显示在车内。</string>
+    <string name="car_reply_label">回复</string>
+    <string name="car_mark_read_label">标记为已读</string>
     <string name="settings_stay_connected_header">保持连接</string>
     <string name="settings_stay_connected_desc">保持连接，即时收到动态、消息和通话。会消耗少量电量。</string>
     <string name="settings_realtime_connection">实时连接</string>

@@ -323,6 +323,11 @@
     <string name="settings_share_sheet_header">Teilen-Menü</string>
     <string name="settings_share_sheet_desc">Zeigt deine letzten Haven-Unterhaltungen in der obersten Zeile im Teilen-Menü jeder App — so ist ein Foto oder Link nur zwei Tipps vom Versenden entfernt. Android speichert Name und Foto auf diesem Gerät, um diese Zeile anzuzeigen; wenn du das ausschaltest, werden sie gelöscht. Gesperrte Kreise werden nie vorgeschlagen.</string>
     <string name="settings_suggest_conversations">Unterhaltungen vorschlagen</string>
+    <string name="settings_car_header">Auto</string>
+    <string name="settings_android_auto">Android-Auto-Nachrichten</string>
+    <string name="settings_android_auto_desc">Zeigt deine Direktnachrichten in Android Auto an, damit du sie hören und per Sprache antworten kannst. Gesperrte Unterhaltungen erscheinen nie, und der Nachrichtentext folgt deiner Einstellung für Benachrichtigungsvorschauen oben: nur vollständige Vorschauen werden vorgelesen. Wenn du dies ausschaltest, erscheinen keine Nachrichten im Auto.</string>
+    <string name="car_reply_label">Antworten</string>
+    <string name="car_mark_read_label">Als gelesen markieren</string>
     <string name="settings_stay_connected_header">Verbunden bleiben</string>
     <string name="settings_stay_connected_desc">Bleib verbunden für Beiträge, Nachrichten und Anrufe in Echtzeit. Braucht etwas Akku.</string>
     <string name="settings_realtime_connection">Echtzeitverbindung</string>

@@ -361,6 +361,11 @@
     <string name="settings_share_sheet_header">Share sheet</string>
     <string name="settings_share_sheet_desc">Puts your recent Haven conversations in the row at the top of any app\'s share sheet, so a photo or link is two taps from being sent. Android keeps the name and photo on this device to draw that row; turning this off erases them. Locked circles are never suggested.</string>
     <string name="settings_suggest_conversations">Suggest conversations</string>
+    <string name="settings_car_header">Car</string>
+    <string name="settings_android_auto">Android Auto messages</string>
+    <string name="settings_android_auto_desc">Shows your direct messages on Android Auto so you can hear them and reply by voice. Locked conversations never appear, and message text follows your notification-preview setting above: only Full previews are read out. Turning this off keeps messages off the car display.</string>
+    <string name="car_reply_label">Reply</string>
+    <string name="car_mark_read_label">Mark as read</string>
     <string name="settings_stay_connected_header">Stay connected</string>
     <string name="settings_stay_connected_desc">Stay connected for instant posts, messages, and calls. Uses a little battery.</string>
     <string name="settings_realtime_connection">Real-time connection</string>

@@ -50,7 +50,34 @@ class RelayScope(private val now: () -> Long = System::currentTimeMillis, privat
         return verdict(def, mine, s.friends)
     }
 
+    /** Every circle's members (never me) from the snapshot, guaranteed to include [circleId]. */
+    fun members(circleId: String, circleIds: () -> List<String>, membersOf: (String) -> Set<String>): Map<String, Set<String>> {
+        inherits("", circleId, circleIds, membersOf)   // refreshes / learns the circle; the verdict is unused
+        return HashMap(snap?.members ?: emptyMap())
+    }
+
     companion object {
+        /**
+         * The relays a circle with NO relays of its own may be guessed onto (a self-sync-learned circle
+         * whose record carried an empty list): a relay listed for another circle Y is usable only when
+         * EVERYONE in Y is also in [circleId] — it exposes the circle to nobody it was not already shared
+         * with. The old guess was "every active relay", which sent a private circle's mailbox reads to a
+         * friend-operated standalone relay (R_C, whose node id is no contact's, so [verdict] cannot see
+         * it); the transport then self-enrolled the circle there ("recover_forbidden") and the next media
+         * upload was accepted. e2e `multirelay: … A private photo on R_C`.
+         */
+        fun fallback(circleId: String, members: Map<String, Set<String>>, lists: Map<String, List<String>>,
+                     unwired: List<String> = emptyList()): List<String> {
+            val mine = members[circleId] ?: emptySet()
+            val out = LinkedHashSet<String>()
+            out.addAll(unwired)   // a relay no circle lists was shared with nobody
+            for ((y, relays) in lists) {
+                if (y == circleId) continue
+                if ((members[y] ?: emptySet()).all { it in mine }) out.addAll(relays)
+            }
+            return out.toList()
+        }
+
         /** The pure rule: withheld iff [def] is a friend's node id and that friend is not in this circle. */
         fun verdict(def: String, circleMembers: Set<String>, friends: Set<String>): Boolean =
             !(def in friends && def !in circleMembers)

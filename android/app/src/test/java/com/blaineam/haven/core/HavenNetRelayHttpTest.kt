@@ -406,7 +406,7 @@ class HavenNetRelayHttpTest {
         assertTrue(bad.containsKey(base)); liftCooldown()
     }
 
-    @Test fun a_circle_with_no_relay_of_its_own_falls_back_to_every_active_relay() {
+    @Test fun a_circle_with_no_relay_of_its_own_falls_back_to_an_active_relay_no_circle_lists() {
         prepareMailbox()
         HavenNet.setDefaultRelay(null)             // no default, no per-circle association...
         val env = "orphan circle".toByteArray()

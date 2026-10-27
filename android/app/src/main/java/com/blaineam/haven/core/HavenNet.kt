@@ -5320,6 +5320,16 @@ object HavenNet : InboundListener {
         }.getOrDefault(true)
     }
 
+    /** The relays a circle with no relays of its own may be guessed onto: see [RelayScope.fallback].
+     *  Never "every active relay" — that put a private circle's mailbox on a friend-operated relay. */
+    private fun circleFallbackRelays(circleId: String): List<String> = runCatching {
+        val members = relayScope.members(circleId, { listOf(DEFAULT_CIRCLE) + social.circles().map { it.id } }, { cid -> scopeMembers(cid) })
+        val lists = relayNodes.toMap().mapValues { (_, v) -> RelayNodeMap.copy(v).filter { isRelayActive(it) && !relayStoodDown(it) } }
+        val wired = lists.values.flatten().toSet()
+        val unwired = allActiveRelayHexes().filter { it !in wired && !relayStoodDown(it) && it != defaultRelayHex }
+        RelayScope.fallback(circleId, members, lists, unwired).filter { !it.startsWith("s3:") && circleInheritsRelay(circleId, it) }
+    }.getOrDefault(emptyList())
+
     /** A circle's contacts as relay operators: their account ids and device ids (never mine). */
     private fun scopeMembers(circleId: String): Set<String> {
         val mineAcct = runCatching { social.myNodeHex() }.getOrNull()?.lowercase()
@@ -5706,7 +5716,7 @@ object HavenNet : InboundListener {
         // above). Ephemeral by design: never writes relayNodes.
         val relayHexes = relaysFor(circleId).ifEmpty {
             if (relayNodes.containsKey(circleId)) emptyList()
-            else allActiveRelayHexes().filter { !it.startsWith("s3:") && circleInheritsRelay(circleId, it) }
+            else circleFallbackRelays(circleId)
         }
         // One info line per authored upload so a future empty-relay-set drop (relays=0 → nothing
         // reaches relay-only members) is visible in logcat instead of silently vanishing.
@@ -5790,7 +5800,7 @@ object HavenNet : InboundListener {
         // still has somewhere to land if this device knows any active relay, so the catch-up sweep
         // must not short-circuit it the way a truly relay-less, S3-less circle is skipped.
         val hasRelay = relaysFor(circleId).isNotEmpty() ||
-            (!relayNodes.containsKey(circleId) && allActiveRelayHexes().any { !it.startsWith("s3:") && circleInheritsRelay(circleId, it) })
+            (!relayNodes.containsKey(circleId) && circleFallbackRelays(circleId).isNotEmpty())
         if (!hasRelay && !Presign.hasBootstrap(circleId)) return
         if (eventsToo) {
             val envs = runCatching { social.exportMyEnvelopes(circleId) }.getOrDefault(emptyList())
@@ -6047,15 +6057,12 @@ object HavenNet : InboundListener {
                 // knows. Ephemeral by design: relayNodes only ever learns real associations from
                 // announces/sync, never these fallback guesses. Symmetric with uploadEvent + desktop
                 // engine.rs poll_mailbox.
-                val actives = allActiveRelayHexes().filter { !it.startsWith("s3:") }
-                if (actives.isEmpty()) base
-                else {
-                    val engineCircles = runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
-                    val extra = engineCircles
-                        .filter { cid -> !relayNodes.containsKey(cid) }
-                        .flatMap { cid -> actives.filter { circleInheritsRelay(cid, it) }.map { cid to it } }
-                    base + extra
-                }
+                val engineCircles = runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
+                val extra = engineCircles
+                    .filter { cid -> !relayNodes.containsKey(cid) }
+                    .flatMap { cid -> (relaysFor(cid) + circleFallbackRelays(cid)).distinct().map { cid to it } }
+                    .filter { (cid, hex) -> base.none { it.first == cid && it.second == hex } }
+                base + extra
             }
         for ((circleId, nodeHex) in relayTargets) {
             // S3-bucket relay: LIST + GET via the direct S3 FFI (store-and-forward poll).

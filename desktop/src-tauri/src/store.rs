@@ -943,11 +943,27 @@ impl Prefs {
         out
     }
 
-    /// Every active non-s3 relay a circle with NO relays of its own may be guessed onto — minus a
-    /// friend's relay the friend's absence from the circle rules out ([`crate::relayscope`]).
+    /// Every active non-s3 relay a circle with NO relays of its own may be guessed onto — see
+    /// [`crate::relayscope::RelayScope::fallback`]. Not "every active relay".
     pub fn fallback_relays_for(&self, circle_id: &str) -> Vec<String> {
-        self.all_active_relay_hexes()
+        let lists: std::collections::HashMap<String, Vec<String>> = self
+            .relays
+            .iter()
+            .map(|(c, v)| (c.clone(), v.iter().filter(|h| self.relay_is_active(h)).cloned().collect()))
+            .collect();
+        let wired: std::collections::HashSet<&String> = self.relays.values().flatten().collect();
+        let unwired: Vec<String> = self
+            .all_active_relay_hexes()
             .into_iter()
+            .filter(|h| !wired.contains(h) && *h != self.default_relay)
+            .collect();
+        let mut out = self.active_relays_for(circle_id);
+        for h in self.relay_scope.fallback(circle_id, &lists, &unwired) {
+            if !out.contains(&h) {
+                out.push(h);
+            }
+        }
+        out.into_iter()
             .filter(|h| !h.starts_with("s3:") && self.relay_scope.inherits(circle_id, h))
             .collect()
     }

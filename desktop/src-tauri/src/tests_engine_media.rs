@@ -134,6 +134,35 @@ async fn a_friends_default_relay_is_not_inherited_by_a_circle_the_friend_is_not_
     assert_eq!(a.relays_for(&private), vec![R1.to_string()]);
 }
 
+/// e2e `… A private photo on R_C`: R_C is a standalone relay B operates (its node id is no contact's),
+/// learned for the shared circle. A private circle with an EMPTY relay list used to be guessed onto "every
+/// active relay": its mailbox was read at R_C and the transport self-enrolled the circle there.
+#[tokio::test]
+async fn a_circle_with_no_relays_is_not_guessed_onto_a_relay_learned_for_a_wider_circle() {
+    let (a, _) = new_engine(95);
+    let (b, _) = new_engine(96);
+    befriend(&a, &b);
+    let b_acct = b.node_id_hex();
+    let shared = a.create_circle("Shared".into());
+    a.social.add_existing_to_circle(shared.clone(), b_acct.clone()).unwrap();
+    let private = a.create_circle("Private".into());
+    let dm = a.create_circle("Pair".into());
+    a.social.add_existing_to_circle(dm.clone(), b_acct).unwrap();
+    a.adopt_relay(R1.into()).await;
+    a.prefs.lock().relays.clear();
+    a.prefs.lock().relays.insert(shared.clone(), vec![R1.to_string()]); // learned for the shared circle only
+    for c in [&private, &dm, &shared] {
+        a.ensure_relay_scope(c);
+    }
+    let p = a.prefs.lock();
+    assert!(p.fallback_relays_for(&private).is_empty(), "a private circle must not be guessed onto R_C");
+    assert_eq!(p.fallback_relays_for(&dm), vec![R1.to_string()], "a circle everyone of cS is in may use it");
+    // A relay no circle lists was shared with nobody.
+    drop(p);
+    a.prefs.lock().ensure_relay_entry(R2, None, false, true);
+    assert_eq!(a.prefs.lock().fallback_relays_for(&private), vec![R2.to_string()]);
+}
+
 #[tokio::test]
 async fn erasing_archives_the_relay_so_it_can_be_restored_exactly() {
     let (e, _) = new_engine(92);

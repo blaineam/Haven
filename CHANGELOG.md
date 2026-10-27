@@ -9,6 +9,18 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed — a circle with no relays of its own is no longer guessed onto every relay (Android / desktop)
+
+Follow-up to the friend-relay fix. The e2e then failed on `A private photo on R_C`: R_C is a standalone relay B
+operates (its node id is no contact's, so the node-id match missed it). A device that learned the private circle with
+an EMPTY relay list guessed "every active relay", read the circle's mailbox at R_C (desktop `mailbox list c1TTZ…` at
+`36ce1168`), and the transport's `recover_forbidden` self-enrolled the circle there naming only that device
+(`enrolled-circles.json` grant `[1b219f…]`, the desktop's device id) — after which the media scope marker and blob were
+accepted. The guess is now: relays no circle lists, plus relays listed for a circle every member of which is also in this
+one (`RelayScope.fallback` / `relayscope.rs`); a private circle gets none. iOS never had the guess. Residual: the transport
+still self-enrolls on a refused mailbox LIST (needed for DM recovery), so any client path that reads a circle's mailbox at
+a relay not configured for it re-opens this; the clients no longer issue one.
+
 ### Fixed — Siri example phrases (App Store Connect ITMS-90626)
 
 The 2.0.4 delivery warned "No example phrase was provided for INSendMessageIntent / INSearchForMessagesIntent /

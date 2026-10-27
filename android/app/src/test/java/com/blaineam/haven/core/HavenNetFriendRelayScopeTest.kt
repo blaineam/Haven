@@ -66,11 +66,31 @@ class HavenNetFriendRelayScopeTest {
         assertEquals(listOf(bDevice), HavenNet.relaysForCircle("cNew2"))
     }
 
+    /** e2e `… A private photo on R_C`: R_C is a standalone relay B operates — its node id is no contact's —
+     *  learned for the shared circle. A device that learned the private circle with an EMPTY relay list used
+     *  to guess "every active relay", read the circle's mailbox at R_C, and the transport self-enrolled it. */
+    @Test fun a_circle_with_no_relays_is_not_guessed_onto_a_relay_learned_for_a_wider_circle() {
+        val rc = "c5".repeat(32)
+        env.entries()[rc] = HavenNet.RelayEntry(rc, "R_C", true, 0, false, httpUrls = listOf(env.relay.base), httpToken = env.token)
+        env.bindCircleRelay("cS", rc)          // announced for the circle we share with B
+        @Suppress("UNCHECKED_CAST")
+        fun fb(c: String) = NetEnv.call("circleFallbackRelays", c) as List<String>
+        assertEquals("private circle, no relays of its own: nothing to guess", emptyList<String>(), fb("cA"))
+        assertEquals("a circle whose members all share cS may use cS's relays", listOf(rc), fb("dm:b"))
+        assertFalse(runBlocking { HavenNet.uploadEvent("cA", "g".toByteArray()) })
+        assertTrue("nothing left for either relay", env.relay.hits.isEmpty())
+    }
+
     @Test fun the_rule_is_pure() {
         val friends = setOf(b, bDevice)
         assertFalse(RelayScope.verdict(bDevice, emptySet(), friends))
         assertTrue(RelayScope.verdict(bDevice, setOf(b, bDevice), friends))
         assertTrue(RelayScope.verdict("c4".repeat(32), emptySet(), friends))
+        val m = mapOf("cS" to setOf("b"), "cA" to emptySet<String>(), "dm" to setOf("b"))
+        val lists = mapOf("cS" to listOf("rc"), "cA" to listOf("ra"))
+        assertEquals(emptyList<String>(), RelayScope.fallback("cA", m, lists - "cA"))
+        assertEquals(listOf("rc", "ra"), RelayScope.fallback("dm", m, lists))
+        assertEquals("a relay of a me-only circle exposes nothing to a wider one", listOf("ra"), RelayScope.fallback("cS", m, lists))
         assertTrue(mine.isNotEmpty())
     }
 }

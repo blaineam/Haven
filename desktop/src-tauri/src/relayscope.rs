@@ -68,4 +68,34 @@ impl RelayScope {
         }
         self.members.get(circle_id).is_some_and(|m| m.contains(&hex))
     }
+
+    /// The relays a circle with NO relays of its own may be guessed onto (a self-sync-learned circle whose
+    /// record carried an empty list): a relay listed for another circle Y is usable only when EVERYONE in
+    /// Y is also in `circle_id`, plus relays no circle lists at all. The old guess was "every active relay",
+    /// which read a private circle's mailbox at a friend-operated standalone relay (R_C — its node id is no
+    /// contact's, so `inherits` cannot see it); the transport then self-enrolled the circle there
+    /// (`recover_forbidden`) and the next media upload was accepted. e2e `multirelay: … A private photo on R_C`.
+    pub fn fallback(
+        &self,
+        circle_id: &str,
+        lists: &HashMap<String, Vec<String>>,
+        unwired: &[String],
+    ) -> Vec<String> {
+        let empty = HashSet::new();
+        let mine = self.members.get(circle_id).unwrap_or(&empty);
+        let mut out: Vec<String> = unwired.to_vec();
+        for (y, relays) in lists {
+            if y == circle_id {
+                continue;
+            }
+            if self.members.get(y).unwrap_or(&empty).iter().all(|m| mine.contains(m)) {
+                for r in relays {
+                    if !out.contains(r) {
+                        out.push(r.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
 }

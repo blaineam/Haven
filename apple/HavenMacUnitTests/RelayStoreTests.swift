@@ -287,6 +287,16 @@ final class RelayStoreTests: XCTestCase {
         XCTAssertEqual(Set(store.relays(forCircle: shared)), [friendRelay, own])
     }
 
+    /// A relay learned for the shared circle serves THAT circle only — never a private one (no "every
+    /// active relay" guess; Android and desktop had one, e2e `… A private photo on R_C`).
+    func testARelayLearnedForOneCircleNeverServesAnother() {
+        let r = relay(), shared = circle(), priv = circle()
+        store.add(circleId: shared, nodeHex: r)
+        XCTAssertEqual(store.relays(forCircle: shared), [r])
+        XCTAssertEqual(store.relays(forCircle: priv), [], "no default, no explicit assignment: no relay")
+        XCTAssertTrue(store.allRelays().contains(r), "it is still a known relay (mesh, device roster)")
+    }
+
     func testBackoffStepGrowsOnlyAfterTheWindowExpires() {
         let first = RelayBackoffStep.next(fails: 0, nextRetryMs: 0, now: 1_000)
         XCTAssertEqual(first?.backoffMs, RelayBackoffStep.baseMs)

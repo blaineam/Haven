@@ -21,7 +21,8 @@ class RelayAnnounceParking(
     class Parked(val circleId: String, val sealed: ByteArray, val parkedAtMs: Long)
 
     private val items = LinkedHashMap<String, Parked>()
-    private var lastDrainMs = Long.MIN_VALUE
+    private var drained = false
+    private var lastDrainMs = 0L
 
     /** Park an announce; the same sealed bytes are kept once. Oldest are evicted past [capacity]. */
     @Synchronized fun park(circleId: String, sealed: ByteArray, nowMs: Long) {
@@ -38,7 +39,8 @@ class RelayAnnounceParking(
      * simply parked again by the caller, keeping its place in the bounded queue).
      */
     @Synchronized fun drain(nowMs: Long): List<Parked> {
-        if (items.isEmpty() || nowMs - lastDrainMs < minRetryGapMs) return emptyList()
+        if (items.isEmpty() || (drained && nowMs - lastDrainMs < minRetryGapMs)) return emptyList()
+        drained = true
         lastDrainMs = nowMs
         val it = items.entries.iterator()
         val out = ArrayList<Parked>()

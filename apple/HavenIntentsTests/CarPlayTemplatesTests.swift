@@ -80,18 +80,47 @@ final class CarPlayTemplatesTests: XCTestCase {
         XCTAssertNotNil(items[1].image, "their message carries their avatar")
     }
 
+    func testNavBarIconsAndTintAndOwnAvatar() {
+        XCTAssertNotNil(CarPlayTemplates.barIcon("phone.fill"))
+        XCTAssertNotNil(CarPlayTemplates.barIcon(CarPlayTemplates.readSymbol))
+        XCTAssertNotNil(CarPlayTemplates.barIcon(CarPlayTemplates.readUnreadSymbol), "the badge variant exists on this OS")
+        func rgb(_ c: UIColor) -> [Int] {
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            c.getRed(&r, green: &g, blue: &b, alpha: &a)
+            return [r, g, b].map { Int(($0 * 255).rounded()) }
+        }
+        XCTAssertEqual(rgb(CarPlayTemplates.tintColor(stops: [0x404040, 0x737373, 0xA3A3A3])), [0x73, 0x73, 0x73], "Neutral: grey")
+        XCTAssertEqual(rgb(CarPlayTemplates.tintColor(stops: [0x7C3AED, 0xEC4899, 0xF59E0B])), [0xEC, 0x48, 0x99], "Sunset: its pink")
+        XCTAssertEqual(rgb(CarPlayTemplates.tintColor(stops: [0x2563EB, 0x06B6D4, 0x14B8A6])), [0x06, 0xB6, 0xD4], "Ocean follows the choice")
+        // My rows prefer my own picture; the tinted bubble is only the fallback.
+        let me = CarPlayTemplates.bubbleIcon(mine: true, tint: .systemTeal, side: 30)
+        let photo = CarPlayTemplates.glyph("person.fill", tint: .systemOrange, side: 30)
+        let withPhoto = CarPlayTemplates.conversationScreen(
+            for: detail(), art: .init(myBubble: me, myAvatar: photo), onRead: {}, onCall: {}, onSpeak: { _ in })
+        let withoutPhoto = CarPlayTemplates.conversationScreen(
+            for: detail(), art: .init(myBubble: me), onRead: {}, onCall: {}, onSpeak: { _ in })
+        func myRowImage(_ s: CarPlayTemplates.ConversationScreen) -> Data? {
+            (s.sections[0].items.compactMap { $0 as? CPListItem }.first)?.image?.pngData()
+        }
+        XCTAssertEqual(myRowImage(withPhoto), photo.pngData(), "my own picture on my message")
+        XCTAssertEqual(myRowImage(withoutPhoto), me.pngData(), "no profile data -> the bubble")
+    }
+
     func testReadAndCallAreNavBarButtons() {
         var read = 0, called = 0
         let screen = CarPlayTemplates.conversationScreen(for: detail(), onRead: { read += 1 }, onCall: { called += 1 }, onSpeak: { _ in })
-        XCTAssertEqual(screen.buttons.map(\.title), ["Read new", "Call"])
-        XCTAssertEqual(screen.actions.map(\.title), ["Read new", "Call"])
+        XCTAssertEqual(screen.actions.map(\.title), ["Read new", "Call"], "what each button is called")
+        XCTAssertEqual(screen.symbols, [CarPlayTemplates.readUnreadSymbol, CarPlayTemplates.callSymbol])
+        XCTAssertTrue(screen.buttons.allSatisfy { $0.image != nil }, "icon buttons: a speaker and a handset")
         XCTAssertLessThanOrEqual(screen.buttons.count, 2, "the nav bar shows at most two")
         screen.actions.forEach { $0.run() }
         XCTAssertEqual([read, called], [1, 1])
         let t = CarPlayTemplates.conversationTemplate(for: detail(), onRead: {}, onCall: {}, onSpeak: { _ in })
-        XCTAssertEqual(t.trailingNavigationBarButtons.map(\.title), ["Read new", "Call"])
-        let none = CarPlayTemplates.conversationTemplate(for: detail(unread: 0), onRead: {}, onCall: {}, onSpeak: { _ in })
-        XCTAssertEqual(none.trailingNavigationBarButtons.first?.title, "Read to me")
+        XCTAssertEqual(t.trailingNavigationBarButtons.count, 2)
+        let none = CarPlayTemplates.conversationScreen(for: detail(unread: 0), onRead: {}, onCall: {}, onSpeak: { _ in })
+        XCTAssertEqual(none.actions.first?.title, "Read to me")
+        XCTAssertEqual(none.symbols.first, CarPlayTemplates.readSymbol, "no unread -> the plain speaker")
+        XCTAssertNotNil(none.buttons.first?.image)
     }
 
     func testDrivingConversationShowsNoMessageTextOnlyTheActions() {
@@ -104,7 +133,8 @@ final class CarPlayTemplatesTests: XCTestCase {
         XCTAssertEqual((t.sections[0].items[0] as? CPListItem)?.text, "Messages are hidden while driving")
         XCTAssertEqual((t.sections[0].items[0] as? CPListItem)?.detailText, "Park to read them, or tap Read to me.")
         XCTAssertTrue(t.sections.last?.items.first is CPMessageListItem, "Reply stays available")
-        XCTAssertEqual(t.trailingNavigationBarButtons.map(\.title), ["Read new", "Call"])
+        XCTAssertEqual(screen.actions.map(\.title), ["Read new", "Call"])
+        XCTAssertEqual(t.trailingNavigationBarButtons.count, 2, "the read and call icon buttons stay while driving")
         screen.actions.first?.run()
         XCTAssertEqual(read, 1, "Read to me still works while driving")
         let hiddenText = CarPlayTemplates.conversationTemplate(for: detail(canSpeak: false, hidden: true, lines: [], callable: false), mode: .driving,

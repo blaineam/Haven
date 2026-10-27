@@ -34,6 +34,20 @@ enum CarPlayAvatar {
         return i.isEmpty ? .generic : .initials(i)
     }
 
+    /// The leading image for MY OWN messages on the conversation screen: my profile photo, else my
+    /// emoji, else my initials. `nil` (no profile data at all) means "draw the tinted bubble glyph".
+    static func chooseOwn(hasPhoto: Bool, emoji: String?, name: String) -> Spec? {
+        if hasPhoto { return .photo }
+        if let e = emoji.flatMap(firstEmoji) { return .emoji(e) }
+        let i = initials(name)
+        return i.isEmpty ? nil : .initials(i)
+    }
+
+    /// The accent every CarPlay glyph (reply mic, unread dot, own bubble) is drawn in: the palette's
+    /// tint stop (stop 2, index 1 - the same one the phone's controls use). Neutral therefore renders
+    /// grey. A malformed stop list falls back to neutral grey rather than a brand colour.
+    static func tintRGB(stops: [UInt32]) -> UInt32 { stops.indices.contains(1) ? stops[1] : 0x737373 }
+
     // MARK: Text
 
     /// First emoji grapheme in `s`, if any. Digits and '#'/'*' are "emoji" to Unicode but not to people.

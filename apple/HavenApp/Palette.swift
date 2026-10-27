@@ -44,11 +44,19 @@ struct HavenPalette: Identifiable, Equatable {
 @MainActor
 final class PaletteStore: ObservableObject {
     static let shared = PaletteStore()
-    static let key = "appearance.palette"
+    nonisolated static let key = "appearance.palette"
 
     /// Read by `HavenTheme` from any thread (image renders, background tasks) — written only on main,
-    /// a single pointer-sized value, so an unsynchronised read is safe.
-    nonisolated(unsafe) static var current = HavenPalette.default
+    /// a single pointer-sized value, so an unsynchronised read is safe. Seeded from the stored choice
+    /// (not the default) because `PaletteStore.shared` is only created when the phone's root view is:
+    /// a CarPlay launch with no phone UI never touches it, and the car then drew the default (pink)
+    /// whatever palette was selected.
+    nonisolated(unsafe) static var current = PaletteStore.stored(in: .standard)
+
+    /// The palette saved in `defaults` (the default when none / unknown).
+    nonisolated static func stored(in defaults: UserDefaults) -> HavenPalette {
+        HavenPalette.resolve(defaults.string(forKey: key))
+    }
 
     @Published private(set) var epoch = 0
     @Published private(set) var palette: HavenPalette { didSet { Self.current = palette } }
@@ -59,7 +67,7 @@ final class PaletteStore: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        let p = HavenPalette.resolve(defaults.string(forKey: Self.key))
+        let p = Self.stored(in: defaults)
         self.palette = p
         Self.current = p
     }

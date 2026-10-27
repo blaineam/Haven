@@ -95,4 +95,26 @@ final class CarPlayAvatarTests: XCTestCase {
         XCTAssertNotEqual(base, A.cacheKey(id: "dm:a", spec: .initials("A"), side: 60, scale: 2, paletteId: "sunset", photoStamp: 1))
         XCTAssertEqual(base, A.cacheKey(id: "dm:a", spec: .photo, side: 60, scale: 2, paletteId: "sunset", photoStamp: 1))
     }
+
+    // MARK: Own avatar + palette tint (round 2)
+
+    func testOwnMessagesUseMyPhotoThenEmojiThenInitialsThenTheBubble() {
+        XCTAssertEqual(A.chooseOwn(hasPhoto: true, emoji: "🌿", name: "Blaine Miller"), .photo)
+        XCTAssertEqual(A.chooseOwn(hasPhoto: false, emoji: "🌿", name: "Blaine Miller"), .emoji("🌿"))
+        XCTAssertEqual(A.chooseOwn(hasPhoto: false, emoji: "7", name: "Blaine Miller"), .initials("BM"), "a digit is not an emoji")
+        XCTAssertEqual(A.chooseOwn(hasPhoto: false, emoji: nil, name: "Blaine"), .initials("B"))
+        XCTAssertNil(A.chooseOwn(hasPhoto: false, emoji: nil, name: ""), "no profile data -> the tinted bubble glyph")
+        XCTAssertNil(A.chooseOwn(hasPhoto: false, emoji: "", name: "🌿"))
+    }
+
+    func testCarGlyphTintIsThePalettesTintStopAndNeutralIsGrey() {
+        XCTAssertEqual(A.tintRGB(stops: HavenPalette.resolve("sunset").stops), 0xEC4899)
+        XCTAssertEqual(A.tintRGB(stops: HavenPalette.resolve("ocean").stops), 0x06B6D4)
+        let neutral = A.tintRGB(stops: HavenPalette.resolve("neutral").stops)
+        XCTAssertEqual(neutral, 0x737373)
+        let (r, g, b) = ((neutral >> 16) & 0xFF, (neutral >> 8) & 0xFF, neutral & 0xFF)
+        XCTAssertTrue(r == g && g == b, "Neutral renders neutral grey, never a brand colour")
+        for p in HavenPalette.all { XCTAssertEqual(A.tintRGB(stops: p.stops), p.stops[1]) }
+        XCTAssertEqual(A.tintRGB(stops: []), 0x737373, "a malformed stop list is grey, not pink")
+    }
 }

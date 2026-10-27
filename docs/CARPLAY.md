@@ -73,12 +73,22 @@ the snapshot, a group DM by its title, locked conversations are refused.
 `CarPlayConversations.detail` (pure, unit-tested) -> `CarPlayTemplates.conversationScreen`. A `CPListTemplate`:
 
 * **Messages (parked)** - the newest 8 (200 characters each) in **chat order, oldest first**, so the newest sits
-  right above the reply row. Each row has a small bubble glyph: **their** messages show the contact's avatar
-  (or a left, grey bubble), **yours** a right-hand bubble in your palette tint; the subtitle is "You . 3:41 PM"
+  right above the reply row. Each row has a small round picture: **their** messages show the contact's avatar
+  (or a left, grey bubble), **yours** show YOUR profile picture (photo, else your emoji, else your initials -
+  the tinted right-hand bubble glyph only when you have no profile data at all); the subtitle is "You . 3:41 PM"
   (group: the author). A tap reads that message aloud. A new message refreshes an open screen in place.
 * **Reply** - the one Siri-managed `CPMessageListItem`, below the messages like a composer; the Siri flow
   described above (reads unread, takes the reply).
-* **Read to me** / **Read new** and **Call** - real buttons in the navigation bar (rounded text buttons).
+* **Read to me** / **Read new** and **Call** - real buttons in the navigation bar, drawn as SF Symbol icons:
+  a speaker with sound waves (`speaker.wave.2.fill`; with unread messages the badged
+  `speaker.badge.exclamationmark.fill`) for reading aloud and the handset (`phone.fill`) for calling. A
+  `CPBarButton` built from an image has no title, so the names above are what the actions are called in the code
+  and tests; CarPlay offers no accessibility-label property for it.
+* **Colours** follow Settings > Appearance: the reply mic, unread dots, the own-message bubble and the avatar
+  fallback circles all use the selected palette (tint stop; Neutral = grey). The car's scene reads the SAVED
+  choice at connect (`PaletteStore.current` is seeded from the stored value - it used to start at the Sunset
+  default until the phone UI had created the store, so a CarPlay-only launch drew pink whatever was selected) and
+  redraws when the palette or your profile changes.
   Read aloud uses Haven's own `AVSpeechSynthesizer` (`CarPlaySpeaker`: spoken-audio session that ducks other
   audio and hands it back, never over an active call): "N new messages from Tracy M." then each unread one
   oldest first (attachment-only messages are spoken as "Sent a photo"), or the latest few when nothing is
@@ -389,6 +399,11 @@ while driving), chat ordering and bubble art, nav-bar button wiring, voice order
 no novelty/Personal by default, explicit choice wins, message language first), plus an iOS build with the Settings
 picker. NOT verified without a car: how the nav-bar buttons and bubble glyphs look on a real head unit, whether a
 given car reports `limitedUserInterfaces` at all, and the speech voice over the car audio route.
+
+Round 4 (icons, own picture, palette): proven by automated tests - nav-bar buttons are icon buttons with the right
+symbols (plain vs. unread-badged speaker, handset), my rows prefer my own picture over the bubble, the glyph tint
+is the palette's tint stop (Neutral = grey, malformed stops = grey), and a saved palette is read without the store
+existing. NOT verified without a car: how the icons and the own-photo rows look on a real head unit.
 
 ## Known limits
 

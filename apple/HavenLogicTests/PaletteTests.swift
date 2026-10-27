@@ -30,6 +30,17 @@ final class PaletteTests: XCTestCase {
         XCTAssertEqual(HavenPalette.resolve("ocean").iconName, "AppIcon-ocean")
     }
 
+    /// A CarPlay launch never creates `PaletteStore.shared`, so `current` must already hold the SAVED
+    /// choice (it used to be the Sunset default, which the car drew as pink whatever was selected).
+    func testStoredPaletteIsReadWithoutCreatingTheStore() {
+        let d = UserDefaults(suiteName: "palette-stored-\(UUID().uuidString)")!
+        XCTAssertEqual(PaletteStore.stored(in: d).id, "sunset")
+        d.set("neutral", forKey: PaletteStore.key)
+        XCTAssertEqual(PaletteStore.stored(in: d).id, "neutral")
+        d.set("gone", forKey: PaletteStore.key)
+        XCTAssertEqual(PaletteStore.stored(in: d).id, "sunset", "an unknown id falls back")
+    }
+
     @MainActor func testStorePersistsAndCommitsOnce() {
         let d = UserDefaults(suiteName: "palette-test-\(UUID().uuidString)")!
         let store = PaletteStore(defaults: d)

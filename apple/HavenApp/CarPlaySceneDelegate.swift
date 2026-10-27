@@ -35,6 +35,9 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     /// The conversation screen currently on top, refreshed in place when new messages arrive.
     private var openConversation: (id: String, template: CPListTemplate)?
     private var avatarsByID: [String: UIImage] = [:]
+    /// My own profile picture for my message rows (photo / emoji / initials), nil until drawn or when I have none.
+    private var myAvatar: UIImage?
+    private static let myAvatarKey = "__me__"
     /// Retained for the session: the car's UI-limit reports (`limitedUserInterfaces`) arrive through it.
     private var carSession: CPSessionConfiguration?
     private var driveMode: CarPlayDriveMode = .parked
@@ -101,9 +104,16 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         Task { @MainActor [weak self] in
             guard let self else { return }
             // Feed changes (new message), read watermarks (cleared a badge), per-circle lock toggles.
-            Publishers.Merge3(FeedStore.shared.objectWillChange.map { _ in () },
-                              DMReadStore.shared.objectWillChange.map { _ in () },
-                              CircleSettingsStore.shared.objectWillChange.map { _ in () })
+            // Also the palette (Settings > Appearance) and my profile (photo / emoji), so the car follows
+            // both without a reconnect. `PaletteStore.shared` is touched here on purpose: it loads the
+            // stored choice even when the app was launched by CarPlay with no phone UI.
+            Publishers.MergeMany([
+                FeedStore.shared.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
+                DMReadStore.shared.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
+                CircleSettingsStore.shared.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
+                PaletteStore.shared.$palette.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+                ProfileStore.shared.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
+            ])
                 .debounce(for: .seconds(0.8), scheduler: RunLoop.main)
                 .sink { [weak self] in self?.refresh() }
                 .store(in: &self.cancellables)
@@ -128,6 +138,10 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         refreshOpenConversation()
         callsTemplate?.updateSections([callsSection(avatars: avatarsByID)])
         guard enabled, configured, !rows.isEmpty || !callRows.isEmpty else { return }
+        // My own picture for my message rows (nil spec = no profile data = tinted bubble glyph).
+        let profile = ProfileStore.shared
+        let mySpec = CarPlayAvatar.chooseOwn(hasPhoto: profile.avatar != nil, emoji: profile.emoji, name: profile.displayName)
+        let myPhoto = profile.avatar
         // ...then avatars: inputs are read here (stores are main-actor), drawn off the main thread
         // (CarPlayAvatarRenderer is cached and thread-safe), and applied if nothing newer superseded us.
         let store = FeedStore.shared, contacts = ContactsStore.shared
@@ -148,12 +162,18 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         let side = CarPlayAvatar.side(max: CPMaximumMessageItemImageSize)
         let scale = interfaceController?.carTraitCollection.displayScale ?? 2
         let palette = PaletteStore.current
+        let mine2 = mySpec.map { Input(id: Self.myAvatarKey, spec: $0, photo: myPhoto, stamp: myPhoto.map { ObjectIdentifier($0).hashValue } ?? 0) }
         Task.detached(priority: .userInitiated) { [weak self] in
-            let images: [String: UIImage] = Dictionary(uniqueKeysWithValues: inputs.map { i in
+            var images: [String: UIImage] = Dictionary(uniqueKeysWithValues: inputs.map { i in
                 (i.id, CarPlayAvatarRenderer.shared.image(
                     for: i.spec, photo: i.photo, photoStamp: i.stamp, id: i.id, side: side, scale: scale,
                     paletteId: palette.id, stops: palette.stops))
             })
+            if let m = mine2 {
+                images[m.id] = CarPlayAvatarRenderer.shared.image(
+                    for: m.spec, photo: m.photo, photoStamp: m.stamp, id: m.id, side: side, scale: scale,
+                    paletteId: palette.id, stops: palette.stops)
+            }
             await self?.applyAvatars(images, generation: mine, rows: rows, configured: configured, enabled: enabled)
         }
     }
@@ -161,7 +181,10 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     @MainActor private func applyAvatars(_ images: [String: UIImage], generation mine: Int,
                                          rows: [CarPlayConversations.Row], configured: Bool, enabled: Bool) {
         guard mine == generation else { return }
+        var images = images
+        myAvatar = images.removeValue(forKey: Self.myAvatarKey)
         avatarsByID = images
+        refreshOpenConversation()
         messagesTemplate?.updateSections([messagesSection(rows: rows, configured: configured, enabled: enabled, avatars: images)])
         callsTemplate?.updateSections([callsSection(avatars: images)])
     }
@@ -171,7 +194,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     @MainActor private func messagesSection(rows: [CarPlayConversations.Row], configured: Bool, enabled: Bool,
                                             avatars: [String: UIImage]) -> CPListSection {
         CarPlayTemplates.section(for: rows, configured: configured, enabled: enabled, mode: driveMode, avatars: avatars,
-                                 unreadMark: CarPlayTemplates.unreadDot(color: UIColor(PaletteStore.current.tint))) { [weak self] row in
+                                 unreadMark: CarPlayTemplates.unreadDot(color: CarPlayTemplates.tintColor(stops: PaletteStore.current.stops))) { [weak self] row in
             self?.showConversation(row.conversationId)
         }
     }
@@ -179,11 +202,12 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     @MainActor private func conversationScreen(_ id: String) -> CarPlayTemplates.ConversationScreen? {
         guard let thread = threadsByID[id] else { return nil }
         let detail = CarPlayConversations.detail(thread: thread, detail: detailLevel, now: Date())
-        let tint = UIColor(PaletteStore.current.tint)
+        let tint = CarPlayTemplates.tintColor(stops: PaletteStore.current.stops)
         let art = CarPlayTemplates.ConversationArt(
             theirAvatar: avatarsByID[id],
             theirBubble: CarPlayTemplates.bubbleIcon(mine: false, tint: tint),
             myBubble: CarPlayTemplates.bubbleIcon(mine: true, tint: tint),
+            myAvatar: myAvatar,
             unreadMark: CarPlayTemplates.unreadDot(color: tint),
             replyIcon: CarPlayTemplates.glyph("mic.fill", tint: tint))
         return CarPlayTemplates.conversationScreen(

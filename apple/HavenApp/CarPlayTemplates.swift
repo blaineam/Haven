@@ -66,6 +66,36 @@ enum CarPlayTemplates {
         /// What each button does, by title, so the wiring can be exercised without a car (a
         /// `CPBarButton` does not expose its handler).
         var actions: [(title: String, run: () -> Void)] = []
+        /// The SF Symbol each nav-bar button shows, parallel to `actions` (a `CPBarButton` built from an
+        /// image has no title for VoiceOver / Voice Control, so the symbol is the only thing to assert).
+        var symbols: [String] = []
+    }
+
+    /// The nav-bar button symbols. Read is a speaker with sound waves ("it speaks"); with unread messages
+    /// it gains an exclamation badge. Call is the handset.
+    static let readSymbol = "speaker.wave.2.fill"
+    static let readUnreadSymbol = "speaker.badge.exclamationmark.fill"
+    static let callSymbol = "phone.fill"
+
+    /// A nav-bar icon: the symbol as a template image (CarPlay tints it for the bar), sized to fit the
+    /// button image limit.
+    static func barIcon(_ systemName: String, side: CGFloat? = nil) -> UIImage? {
+        let edge = side ?? max(24, min(CPButtonMaximumImageSize.width, CPButtonMaximumImageSize.height))
+        let config = UIImage.SymbolConfiguration(pointSize: edge * 0.7, weight: .semibold)
+        guard let symbol = UIImage(systemName: systemName, withConfiguration: config)?.withRenderingMode(.alwaysTemplate) else { return nil }
+        return UIGraphicsImageRenderer(size: CGSize(width: edge, height: edge)).image { _ in
+            UIColor.black.set()
+            symbol.withTintColor(.black, renderingMode: .alwaysOriginal).draw(in: CGRect(
+                x: (edge - symbol.size.width) / 2, y: (edge - symbol.size.height) / 2,
+                width: symbol.size.width, height: symbol.size.height))
+        }.withRenderingMode(.alwaysTemplate)
+    }
+
+    /// The accent colour for CarPlay glyphs, from the active palette's stops.
+    static func tintColor(stops: [UInt32]) -> UIColor {
+        let rgb = CarPlayAvatar.tintRGB(stops: stops)
+        return UIColor(red: CGFloat((rgb >> 16) & 0xFF) / 255, green: CGFloat((rgb >> 8) & 0xFF) / 255,
+                       blue: CGFloat(rgb & 0xFF) / 255, alpha: 1)
     }
 
     /// Icons the screen may draw. All optional: a missing one just leaves the row without an image.
@@ -73,6 +103,8 @@ enum CarPlayTemplates {
         var theirAvatar: UIImage? = nil
         var theirBubble: UIImage? = nil
         var myBubble: UIImage? = nil
+        /// My own profile picture (photo / emoji / initials) for my messages; `myBubble` is the fallback.
+        var myAvatar: UIImage? = nil
         var unreadMark: UIImage? = nil
         var replyIcon: UIImage? = nil
     }
@@ -131,10 +163,20 @@ enum CarPlayTemplates {
             return ConversationScreen(sections: [CPListSection(items: [item])], buttons: [], actions: [])
         }
         var actions: [(title: String, run: () -> Void)] = []
-        if detail.canSpeak { actions.append((detail.unreadCount > 0 ? MessagingText.readNewShort : MessagingText.readToMe, onRead)) }
-        if detail.callable { actions.append((MessagingText.callShort, onCall)) }
-        let buttons: [CPBarButton] = actions.map { action in
-            let button = CPBarButton(title: action.title) { _ in action.run() }
+        var symbols: [String] = []
+        if detail.canSpeak {
+            actions.append((detail.unreadCount > 0 ? MessagingText.readNewShort : MessagingText.readToMe, onRead))
+            symbols.append(detail.unreadCount > 0 ? readUnreadSymbol : readSymbol)
+        }
+        if detail.callable {
+            actions.append((MessagingText.callShort, onCall))
+            symbols.append(callSymbol)
+        }
+        // Icon buttons (a handset, a speaker); the title is the fallback if a symbol can't be drawn.
+        let buttons: [CPBarButton] = zip(actions, symbols).map { action, symbol in
+            let button: CPBarButton
+            if let icon = barIcon(symbol) { button = CPBarButton(image: icon) { _ in action.run() } }
+            else { button = CPBarButton(title: action.title) { _ in action.run() } }
             button.buttonStyle = .rounded
             return button
         }
@@ -152,7 +194,7 @@ enum CarPlayTemplates {
             sections.append(CPListSection(items: [CPListItem(text: MessagingText.hiddenWhileDriving, detailText: hint)]))
         case .parked:
             var lines: [CPListItem] = detail.lines.reversed().map { line in
-                let image = line.mine ? art.myBubble : (art.theirAvatar ?? art.theirBubble)
+                let image = line.mine ? (art.myAvatar ?? art.myBubble) : (art.theirAvatar ?? art.theirBubble)
                 let item = CPListItem(text: line.text, detailText: line.byline, image: image,
                                       accessoryImage: line.unread ? art.unreadMark : nil, accessoryType: .none)
                 if detail.canSpeak { item.handler = { _, completion in onSpeak(line); completion() } }
@@ -164,7 +206,7 @@ enum CarPlayTemplates {
             sections.append(CPListSection(items: lines))
         }
         sections.append(CPListSection(items: [reply]))
-        return ConversationScreen(sections: sections, buttons: buttons, actions: actions)
+        return ConversationScreen(sections: sections, buttons: buttons, actions: actions, symbols: symbols)
     }
 
     static func conversationTemplate(for detail: CarPlayConversations.Detail,

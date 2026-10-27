@@ -9,6 +9,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed - CarPlay conversation screen: icon buttons, your own picture, palette colours (iOS)
+
+- Read to me / Read new and Call are SF Symbol icon buttons in the nav bar (a speaker, a badged speaker with unread
+  messages, a handset) instead of text buttons.
+- Your own messages carry YOUR profile picture (photo, else emoji, else initials) instead of the pink bubble glyph;
+  the bubble remains only for an account with no profile data.
+- The car follows your chosen palette (Neutral = grey): the CarPlay-only launch used to draw the default pink
+  because the saved palette was only read once the phone UI had created the palette store. The saved choice is now
+  loaded at startup, and the car redraws when the palette or profile changes.
+
 ### Changed - CarPlay conversation screen: chat layout, text only when parked, read-aloud voice (iOS)
 
 - The conversation screen reads like a thread: messages in chat order (oldest first, newest right above Reply)

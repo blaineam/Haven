@@ -431,6 +431,7 @@ targets:
     sources:
       - path: HavenIntents
       - path: Shared/MessagingSnapshot.swift
+      - path: Shared/ContactMatching.swift
       - path: Shared/SiriRequestSignal.swift
       - path: Shared/SharedNotificationPrivacy.swift
       # Live read of the biometric-locked circle set (shared keychain group), like the NSE.
@@ -566,6 +567,8 @@ targets:
       # request queue, and the CarPlay list-row builder. Foundation only.
       - path: Shared/MessagingSnapshot.swift
       - path: HavenApp/CarPlayConversations.swift
+      - path: HavenApp/CarPlayAvatar.swift
+      - path: Shared/ContactMatching.swift
       - path: HavenApp/SiriCallTarget.swift
       # Link-preview SSRF guard + safety words (cross-platform golden vectors) + composer audience
       # labels — pure Foundation.
@@ -637,6 +640,7 @@ targets:
       - path: HavenIntentsTests
       - path: HavenIntents/IntentHandler.swift
       - path: Shared/MessagingSnapshot.swift
+      - path: Shared/ContactMatching.swift
       - path: Shared/SiriRequestSignal.swift
       - path: Shared/SharedNotificationPrivacy.swift
       - path: Shared/SharedLockedCircles.swift
@@ -644,6 +648,8 @@ targets:
       # CarPlay list construction (CarPlay + UIKit only) and the row model it renders.
       - path: HavenApp/CarPlayTemplates.swift
       - path: HavenApp/CarPlayConversations.swift
+      - path: HavenApp/CarPlayAvatar.swift
+      - path: HavenApp/CarPlayAvatarRenderer.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith.intentstests

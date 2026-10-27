@@ -15,6 +15,12 @@ enum CarPlayConversations {
         var locked: Bool
     }
 
+    /// One callable person/group in the Calls tab.
+    struct CallRow: Equatable {
+        var conversationId: String
+        var title: String
+    }
+
     /// CarPlay's list cap varies by head unit (`CPListTemplate.maximumItemCount`); the delegate passes
     /// the live value, this is the fallback/upper bound.
     static let defaultLimit = 12
@@ -35,6 +41,17 @@ enum CarPlayConversations {
             a.at != b.at ? a.at > b.at : a.row.title.localizedCaseInsensitiveCompare(b.row.title) == .orderedAscending
         }
         return sorted.prefix(max(0, limit)).map(\.row)
+    }
+
+    /// Who can be called from the car: recent conversations, locked ones left out entirely (no Face ID on
+    /// a head unit, and a locked name is not shown), empty groups left out (nobody to ring).
+    static func callRows(threads: [MessagingThread], limit: Int = defaultLimit) -> [CallRow] {
+        let callable = threads.filter { !$0.locked && !$0.memberHandles.isEmpty }
+        let sorted = callable.sorted { a, b in
+            let x = MessagingPrivacy.latest(a.messages)?.createdAt ?? 0, y = MessagingPrivacy.latest(b.messages)?.createdAt ?? 0
+            return x != y ? x > y : a.title.localizedCaseInsensitiveCompare(b.title) == .orderedAscending
+        }
+        return sorted.prefix(max(0, limit)).map { CallRow(conversationId: $0.id, title: MessagingPrivacy.truncate($0.title, limit: 60)) }
     }
 
     /// Today -> "3:41 PM"; yesterday -> "Yesterday"; this week -> weekday; older -> short date.

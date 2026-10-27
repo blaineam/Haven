@@ -20,7 +20,7 @@ enum CarPlayTemplates {
         let items: [CPListTemplateItem] = rows.map { row in
             let leading = CPMessageListItemLeadingConfiguration(
                 leadingItem: .none,
-                leadingImage: avatars[row.conversationId].map(scaledForCar),
+                leadingImage: avatars[row.conversationId],
                 unread: row.unread)
             return CPMessageListItem(conversationIdentifier: row.conversationId,
                                      text: row.title,
@@ -32,12 +32,31 @@ enum CarPlayTemplates {
         return CPListSection(items: items)
     }
 
-    static func scaledForCar(_ image: UIImage) -> UIImage {
-        let max = CPMaximumMessageItemImageSize
-        let scale = min(max.width / image.size.width, max.height / image.size.height, 1)
-        guard scale < 1 else { return image }
-        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
-        return UIGraphicsImageRenderer(size: size).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+    // MARK: Calls
+
+    /// The Calls tab list. A row opens a contact card (never dials on the first tap - an accidental
+    /// touch on a dashboard must not ring someone).
+    static func callsSection(for rows: [CarPlayConversations.CallRow], avatars: [String: UIImage] = [:],
+                             onSelect: @escaping (CarPlayConversations.CallRow) -> Void) -> CPListSection {
+        guard !rows.isEmpty else {
+            return CPListSection(items: [CPListItem(text: "No one to call yet", detailText: "Conversations you can call appear here.")])
+        }
+        let items: [CPListItem] = rows.map { row in
+            let item = CPListItem(text: row.title, detailText: nil, image: avatars[row.conversationId])
+            item.handler = { _, completion in onSelect(row); completion() }
+            return item
+        }
+        return CPListSection(items: items)
+    }
+
+    /// Contact card with the system Call button (CPContactCallButton). `onCall` starts an AUDIO call (`CallManager.startCall`).
+    static func contactTemplate(for row: CarPlayConversations.CallRow, avatar: UIImage,
+                                onCall: @escaping () -> Void) -> CPContactTemplate {
+        let call = CPContactCallButton(handler: { _ in onCall() })
+        let contact = CPContact(name: row.title, image: avatar)
+        contact.subtitle = "Haven audio call"
+        contact.actions = [call]
+        return CPContactTemplate(contact: contact)
     }
 }
 #endif

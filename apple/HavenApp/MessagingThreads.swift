@@ -29,8 +29,14 @@ enum MessagingThreads {
                                  body: item.body, hasAttachment: !item.media.isEmpty || item.music != nil,
                                  author: item.isMe ? "" : (ContactsStore.shared.name(forNodePrefix: item.authorShort) ?? "Someone"))
             }
+            // Names this person is known by besides the thread title (your nickname vs their signed
+            // name), so a spoken "Tracy Miller" finds the thread you titled "Tracy M".
+            var aliases: [String] = []
+            if members.count == 1, let contact = ContactsStore.shared.contact(forNodePrefix: members[0]) {
+                aliases = [contact.name, contact.authoritativeName, contact.nickname].compactMap { $0 }.filter { !$0.isEmpty }
+            }
             var thread = MessagingThread(id: circle.id, title: store.dmPartnerName(circle.id), memberHandles: members,
-                                         messages: messages, watermark: reads.watermark(circle.id), locked: locked)
+                                         aliases: aliases, messages: messages, watermark: reads.watermark(circle.id), locked: locked)
             // A locked thread keeps its newest TIME (so it sorts sensibly) but no text: a content-free
             // placeholder carries the stamp.
             if locked, let newest = items.map(\.createdAt).max() {

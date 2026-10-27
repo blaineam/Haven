@@ -33,6 +33,9 @@ struct MessagingThread: Equatable {
     var title: String
     /// Node ids of everyone but me. Siri resolves recipients against these.
     var memberHandles: [String]
+    /// Other names this person is known by (their signed name vs your nickname for them), so a spoken
+    /// "Tracy Miller" finds the thread you titled "Tracy M". Empty for groups.
+    var aliases: [String] = []
     /// Any order; the builders sort.
     var messages: [MessagingMessage]
     /// Read watermark, unix ms. Inbound messages newer than this are unread.
@@ -110,6 +113,8 @@ struct MessagingSnapshot: Codable, Equatable {
         var id: String
         var title: String
         var memberHandles: [String]
+        /// Other names for matching (optional so snapshots written before this field still decode).
+        var aliases: [String]? = nil
         var locked: Bool
         var lastActivity: UInt64
         var unreadCount: Int
@@ -138,7 +143,8 @@ struct MessagingSnapshot: Codable, Equatable {
                             unread: !m.isMe && !m.unsent && m.createdAt > t.watermark)
                 }
             }
-            return Conversation(id: t.id, title: t.title, memberHandles: t.memberHandles, locked: t.locked,
+            return Conversation(id: t.id, title: t.title, memberHandles: t.memberHandles,
+                                aliases: t.aliases.isEmpty ? nil : t.aliases, locked: t.locked,
                                 lastActivity: newest?.createdAt ?? 0, unreadCount: unreadN, messages: msgs)
         }
         let top = convs.sorted { ($0.lastActivity, $1.title) > ($1.lastActivity, $0.title) }.prefix(maxConversations)
@@ -147,19 +153,26 @@ struct MessagingSnapshot: Codable, Equatable {
 
     private static func latest(_ m: [MessagingMessage]) -> MessagingMessage? { MessagingPrivacy.latest(m) }
 
-    /// Resolve a spoken recipient / group name to conversations: exact (case/diacritic-insensitive)
-    /// title match first, else titles containing every spoken word. Never returns locked
-    /// conversations' contents, but a locked conversation can still be resolved for SENDING.
+    /// Candidates for `ContactMatching`: the title first, then the aliases.
+    var matchCandidates: [ContactMatching.Candidate] {
+        conversations.map { .init(id: $0.id, names: [$0.title] + ($0.aliases ?? [])) }
+    }
+
+    /// Fuzzy resolution of what Siri heard (several spellings of one person are fine) to conversations.
+    func resolution(queries: [String]) -> ContactMatching.Resolution {
+        ContactMatching.resolve(queries: queries, candidates: matchCandidates)
+    }
+
+    /// Every plausible conversation for a spoken name, best first (see `resolution` for the verdict).
+    /// A locked conversation can still be resolved for SENDING; callers refuse to read it.
     func resolve(name: String) -> [Conversation] {
-        let key = Self.fold(name)
-        guard !key.isEmpty else { return [] }
-        let exact = conversations.filter { Self.fold($0.title) == key }
-        if !exact.isEmpty { return exact }
-        let words = key.split(separator: " ").map(String.init)
-        return conversations.filter { c in
-            let t = Self.fold(c.title)
-            return words.allSatisfy { t.contains($0) }
+        let ids: [String]
+        switch resolution(queries: [name]) {
+        case .none: ids = []
+        case .confident(let m), .tentative(let m): ids = [m.id]
+        case .ambiguous(let ms): ids = ms.map(\.id)
         }
+        return ids.compactMap { conversation(id: $0) }
     }
 
     func conversation(id: String) -> Conversation? { conversations.first { $0.id == id } }

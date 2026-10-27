@@ -108,6 +108,30 @@ final class CarPlayConversationsTests: XCTestCase {
         XCTAssertEqual(CarPlayConversations.timeLabel(ms: ms(30 * 24 * 60), now: now, calendar: cal, locale: locale), "9/26/26")
     }
 
+    func testCallRowsExcludeLockedAndEmptyGroupsAndOrderByRecency() {
+        let t = [thread("dm:old", "Old", [msg("1", mins: 90)]),
+                 thread("dm:new", "New", [msg("2", mins: 2)]),
+                 thread("dm:lock", "Vault", [msg("3", mins: 1)], locked: true),
+                 MessagingThread(id: "dm:solo", title: "Solo", memberHandles: [], messages: [msg("4", mins: 1)], watermark: 0, locked: false)]
+        let r = CarPlayConversations.callRows(threads: t)
+        XCTAssertEqual(r.map(\.conversationId), ["dm:new", "dm:old"])
+        XCTAssertEqual(CarPlayConversations.callRows(threads: t, limit: 1).count, 1)
+        XCTAssertEqual(CarPlayConversations.callRows(threads: t, limit: 0).count, 0)
+    }
+
+    func testSnapshotCarriesAliasesForMatching() {
+        var t = thread("dm:t", "Tracy M", [msg("1", mins: 1)])
+        t.aliases = ["Tracy Miller"]
+        let s = MessagingSnapshot.build(threads: [t], detail: .full, now: 1)
+        XCTAssertEqual(s.conversations[0].aliases, ["Tracy Miller"])
+        XCTAssertEqual(s.resolve(name: "Tracy Miller").map(\.id), ["dm:t"])
+        let round = try! JSONDecoder().decode(MessagingSnapshot.self, from: JSONEncoder().encode(s))
+        XCTAssertEqual(round, s)
+        // A snapshot written before aliases existed still decodes.
+        let legacy = #"{"version":1,"generatedAt":1,"detail":"full","conversations":[{"id":"dm:a","title":"A","memberHandles":["h"],"locked":false,"lastActivity":0,"unreadCount":0,"messages":[]}]}"#
+        XCTAssertNil(try! JSONDecoder().decode(MessagingSnapshot.self, from: Data(legacy.utf8)).conversations[0].aliases)
+    }
+
     // MARK: Snapshot (Siri)
 
     func testSnapshotFiltersTextByPrivacyAndLock() {

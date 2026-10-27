@@ -39,14 +39,38 @@ final class CarPlayTemplatesTests: XCTestCase {
         }
     }
 
-    func testLargeAvatarIsScaledToCarLimit() {
-        let big = UIGraphicsImageRenderer(size: CGSize(width: 800, height: 800)).image { c in
-            UIColor.red.setFill(); c.fill(CGRect(x: 0, y: 0, width: 800, height: 800))
-        }
-        let scaled = CarPlayTemplates.scaledForCar(big)
-        XCTAssertLessThanOrEqual(scaled.size.width, CPMaximumMessageItemImageSize.width)
-        XCTAssertLessThanOrEqual(scaled.size.height, CPMaximumMessageItemImageSize.height)
-        let section = CarPlayTemplates.section(for: [row("dm:aa")], configured: true, enabled: true, avatars: ["dm:aa": big])
+    func testAvatarImageIsPassedThroughUnscaled() {
+        let side = CarPlayAvatar.side(max: CPMaximumMessageItemImageSize)
+        let img = CarPlayAvatarRenderer.shared.image(for: .initials("TM"), photo: nil, photoStamp: 0, id: "dm:aa",
+                                                     side: side, scale: 2, paletteId: "sunset",
+                                                     stops: [0x7C3AED, 0xEC4899, 0xF59E0B])
+        let section = CarPlayTemplates.section(for: [row("dm:aa")], configured: true, enabled: true, avatars: ["dm:aa": img])
         XCTAssertNotNil((section.items.first as? CPMessageListItem)?.leadingConfiguration.leadingImage)
+    }
+
+    func testCallsListRowsOpenAContactAndTheContactButtonCalls() {
+        let rows = [CarPlayConversations.CallRow(conversationId: "dm:aa", title: "Tracy M")]
+        var selected: [String] = []
+        let section = CarPlayTemplates.callsSection(for: rows) { selected.append($0.conversationId) }
+        let item = section.items.first as? CPListItem
+        XCTAssertEqual(item?.text, "Tracy M")
+        let done = expectation(description: "handler")
+        item?.handler?(item!, { done.fulfill() })
+        wait(for: [done], timeout: 2)
+        XCTAssertEqual(selected, ["dm:aa"], "selecting opens the card; it does not dial")
+
+        var called = 0
+        let img = CarPlayAvatarRenderer.shared.image(for: .initials("TM"), photo: nil, photoStamp: 0, id: "dm:aa",
+                                                     side: CarPlayAvatar.side(max: CPButtonMaximumImageSize), scale: 2,
+                                                     paletteId: "t", stops: [0x7C3AED, 0xEC4899, 0xF59E0B])
+        let template = CarPlayTemplates.contactTemplate(for: rows[0], avatar: img) { called += 1 }
+        XCTAssertTrue(template.contact.actions?.first is CPContactCallButton, "the system Call button")
+        XCTAssertEqual(template.contact.name, "Tracy M")
+        XCTAssertEqual(called, 0, "building the card never dials")
+    }
+
+    func testEmptyCallsListHasAnExplanation() {
+        let section = CarPlayTemplates.callsSection(for: []) { _ in }
+        XCTAssertEqual((section.items.first as? CPListItem)?.text, "No one to call yet")
     }
 }

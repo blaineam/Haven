@@ -71,6 +71,7 @@ final class IntentHandlerTests: XCTestCase {
             ("needsValue", INPersonResolutionResult.needsValue()),
             ("unsupported", INPersonResolutionResult.unsupported()),
             ("disambiguation", INPersonResolutionResult.disambiguation(with: [p, p])),
+            ("confirmationRequired", INPersonResolutionResult.confirmationRequired(with: p)),
         ]
         return refs.first { code($0.1) == code(r) }?.0 ?? "unknown(\(code(r)))"
     }
@@ -227,5 +228,130 @@ final class IntentHandlerTests: XCTestCase {
             wait(for: [e], timeout: 5)
             XCTAssertEqual(response.code, .failure, name)
         }
+    }
+
+    // MARK: fuzzy names (the field report: "Tracy" / "Tracy Miller" answered "no matches" for "Tracy M")
+
+    private func installTracy(extra: [(String, String, [String])] = [], lockTracy: Bool = false) {
+        var threads = [MessagingThread(id: "dm:tracy", title: "Tracy M", memberHandles: ["t1"], aliases: ["Tracy Miller"],
+                                       messages: [msg("x1", 2, body: "hey")], watermark: 0, locked: lockTracy)]
+        for (id, title, handles) in extra {
+            threads.append(MessagingThread(id: id, title: title, memberHandles: handles, messages: [], watermark: 0, locked: false))
+        }
+        MessagingSnapshotStore.write(MessagingSnapshot.build(threads: threads, detail: .full, now: 1))
+    }
+
+    private func resolveSend(_ name: String) -> [INSendMessageRecipientResolutionResult] {
+        var out: [INSendMessageRecipientResolutionResult] = []
+        let e = expectation(description: name)
+        handler.resolveRecipients(for: INSendMessageIntent(recipients: [person(name)], outgoingMessageType: .outgoingMessageText,
+                                                            content: "x", speakableGroupName: nil, conversationIdentifier: nil,
+                                                            serviceName: nil, sender: nil, attachments: nil)) { out = $0; e.fulfill() }
+        wait(for: [e], timeout: 5)
+        return out
+    }
+
+    func testTracyFindsTracyMForSending() {
+        installTracy()
+        for spoken in ["Tracy", "Tracy Miller", "tracy m", "TRACY"] {
+            let r = resolveSend(spoken)
+            XCTAssertEqual(r.map(kind), ["success"], spoken)
+        }
+    }
+
+    func testStructuredNameComponentsAreUsed() {
+        installTracy()
+        var nc = PersonNameComponents(); nc.givenName = "Tracy"; nc.familyName = "Miller"
+        let p = INPerson(personHandle: INPersonHandle(value: "+15551234567", type: .phoneNumber), nameComponents: nc,
+                         displayName: "", image: nil, contactIdentifier: nil, customIdentifier: nil)
+        var out: [INSendMessageRecipientResolutionResult] = []
+        let e = expectation(description: "nc")
+        handler.resolveRecipients(for: INSendMessageIntent(recipients: [p], outgoingMessageType: .outgoingMessageText, content: "x",
+                                                            speakableGroupName: nil, conversationIdentifier: nil, serviceName: nil,
+                                                            sender: nil, attachments: nil)) { out = $0; e.fulfill() }
+        wait(for: [e], timeout: 5)
+        XCTAssertEqual(out.map(kind), ["success"])
+    }
+
+    func testAmbiguousNamesDisambiguateAndNeverPickSilently() {
+        installTracy(extra: [("dm:tracyz", "Tracy Zhang", ["t2"]), ("dm:tracyk", "Tracy Kim", ["t3"])])
+        // "Tracy" is an equally good first-name match for three people.
+        XCTAssertEqual(resolveSend("Tracy").map(kind), ["disambiguation"])
+        // "Tracy Z" singles out one.
+        XCTAssertEqual(resolveSend("Tracy Zhang").map(kind), ["success"])
+    }
+
+    func testNearMissAsksForConfirmationInsteadOfNoMatches() {
+        installTracy()
+        XCTAssertEqual(resolveSend("Tracey").map(kind), ["confirmationRequired"])
+        XCTAssertEqual(resolveSend("Zebediah").map(kind), ["unsupported"])
+    }
+
+    func testSendHandlesAConfirmedPerson() {
+        installTracy()
+        let done = expectation(description: "handled")
+        let drained = expectation(description: "drained")
+        var seen: [SiriRequest] = []
+        let app = actAsApp(drainTo: drained) { seen = $0 }
+        // What Siri passes back after we returned our own INPerson (customIdentifier = node id).
+        let confirmed = INPerson(personHandle: INPersonHandle(value: "t1", type: .unknown), nameComponents: nil,
+                                 displayName: "Tracy M", image: nil, contactIdentifier: nil, customIdentifier: "t1")
+        handler.handle(intent: INSendMessageIntent(recipients: [confirmed], outgoingMessageType: .outgoingMessageText, content: "hi",
+                                                    speakableGroupName: nil, conversationIdentifier: nil, serviceName: nil,
+                                                    sender: nil, attachments: nil)) { _ in done.fulfill() }
+        wait(for: [drained, done], timeout: 5)
+        app.cancel()
+        XCTAssertEqual(seen.map(\.conversationId), ["dm:tracy"])
+    }
+
+    func testReadFromANameUsesTheSameFuzzyRules() {
+        installTracy()
+        var out: [INPersonResolutionResult] = []
+        let e = expectation(description: "senders")
+        handler.resolveSenders(for: INSearchForMessagesIntent(recipients: nil, senders: [person("Tracy Miller")], searchTerms: nil,
+                                                              attributes: [], dateTime: nil, identifiers: nil,
+                                                              notificationIdentifiers: nil, speakableGroupNames: nil,
+                                                              conversationIdentifiers: nil)) { out = $0; e.fulfill() }
+        wait(for: [e], timeout: 5)
+        XCTAssertEqual(out.map(kind), ["success"])
+        let r = search(conversation: nil, attributes: [])
+        XCTAssertEqual(r.code, .success)
+    }
+
+    // MARK: calls
+
+    private func startCall(_ name: String, capability: INCallCapability = .audioCall) -> (resolve: [INStartCallContactResolutionResult], response: INStartCallIntentResponse) {
+        let intent = INStartCallIntent(callRecordFilter: nil, callRecordToCallBack: nil, audioRoute: .unknown,
+                                       destinationType: .normal, contacts: [person(name)], callCapability: capability)
+        var resolved: [INStartCallContactResolutionResult] = []
+        var response: INStartCallIntentResponse!
+        let e1 = expectation(description: "resolve"), e2 = expectation(description: "handle")
+        handler.resolveContacts(for: intent) { resolved = $0; e1.fulfill() }
+        handler.handle(intent: intent) { response = $0; e2.fulfill() }
+        wait(for: [e1, e2], timeout: 5)
+        return (resolved, response)
+    }
+
+    func testCallByFirstNameFindsTracyMAndStartsAudioOnly() {
+        installTracy()
+        let (resolved, response) = startCall("Tracy Miller")
+        XCTAssertEqual(resolved.map(kind), ["success"])
+        XCTAssertEqual(response.code, .continueInApp)
+        XCTAssertEqual(response.userActivity?.userInfo?[SiriCallTarget.conversationKey] as? String, "dm:tracy")
+        XCTAssertEqual(response.userActivity?.userInfo?[IntentHandler.callAudioOnlyKey] as? Bool, true)
+    }
+
+    func testVideoCallRequestStillStartsAudioOnly() {
+        installTracy()
+        let (_, response) = startCall("Tracy", capability: .videoCall)
+        XCTAssertEqual(response.code, .continueInApp)
+        XCTAssertEqual(response.userActivity?.userInfo?[IntentHandler.callAudioOnlyKey] as? Bool, true)
+    }
+
+    func testLockedWinnerIsNeverSubstitutedByALookAlikeForCalls() {
+        installTracy(extra: [("dm:tracyz", "Tracy Zhang", ["t2"])], lockTracy: true)
+        let (resolved, response) = startCall("Tracy M")
+        XCTAssertEqual(resolved.map(kind), ["unsupported"], "locked Tracy M must not become Tracy Zhang")
+        XCTAssertEqual(response.code, .failure)
     }
 }

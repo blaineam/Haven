@@ -1,4 +1,6 @@
 import XCTest
+import Combine
+import WebRTC
 @testable import HavenUITestHost
 
 /// The call signalling state machine, driven by the frames FeedStore dispatches to it. No media,
@@ -17,6 +19,32 @@ final class CallManagerTests: XCTestCase {
     }
     override func tearDown() async throws {
         if cm.inCall || cm.ringing || cm.connecting { cm.endCall() }
+    }
+
+    /// "The iPhone took a long time to show connected after it connected": `mediaConnected` reads
+    /// `lastPeerState` / `hairpinPeers`, which are not @Published, so the label only caught up when
+    /// something else republished. A change to either must announce itself to the call screen.
+    func testPeerMediaStateChangesRepublishTheCallScreen() {
+        var fired = 0
+        let sub = cm.objectWillChange.sink { fired += 1 }
+        defer { sub.cancel(); cm.lastPeerState = [:]; cm.hairpinPeers = [] }
+        cm.lastPeerState = [:]; cm.hairpinPeers = []
+        fired = 0
+        XCTAssertFalse(cm.mediaConnected)
+        cm.lastPeerState["peer"] = .connected
+        XCTAssertTrue(cm.mediaConnected)
+        XCTAssertEqual(fired, 1, "the ICE-connected write must re-render the screen")
+        cm.lastPeerState["peer"] = .connected                       // no change → no churn
+        XCTAssertEqual(fired, 1)
+        cm.lastPeerState["peer"] = nil
+        XCTAssertFalse(cm.mediaConnected)
+        XCTAssertEqual(fired, 2)
+        cm.hairpinPeers.insert("peer")                               // relayed media counts as connected
+        XCTAssertTrue(cm.mediaConnected)
+        XCTAssertEqual(fired, 3)
+        cm.hairpinPeers.remove("peer")
+        XCTAssertFalse(cm.mediaConnected)
+        XCTAssertEqual(fired, 4)
     }
 
     func testStrangersAndMalformedInvitesNeverRing() async {

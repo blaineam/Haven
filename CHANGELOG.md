@@ -9,6 +9,21 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - Calls: "Connected" lagged on iPhone; Android left a frozen frame when a camera went off
+- **iOS call screen sat on "Connecting media…" after media was up.** `mediaConnected` reads
+  `lastPeerState` / `hairpinPeers`, which are not `@Published`, so the label only caught up when some
+  other published value happened to change. Both now announce their changes to the call screen
+  (`didSet` → `objectWillChange`), so the status flips the moment ICE (or the relay hairpin) connects.
+  Test: `CallManagerTests.testPeerMediaStateChangesRepublishTheCallScreen`.
+- **Android kept the last video frame on screen when a camera was turned off.** A WebRTC sink holds the
+  last frame it was given; a disabled track delivers nothing more. The self-preview (and the minimised
+  tile when the other side's camera went off) now clear the surface and hide it (`CallVideoPolicy`,
+  `CallVideoTile(active = …)`). iOS and desktop already swap to the avatar state (`remoteCameraOff`,
+  `localVideoTrack = nil`, `call.camOn`), so no change there. Tests: `CallVideoPolicyTest`.
+- Not changed: the caller still only becomes "in call" on the callee's ACCEPT frame (early media must not
+  answer a ringing call). If ACCEPT travels over a relay that refuses the callee's device, the screen waits
+  for it — that is the relay-authorization problem tracked separately, not the label.
+
 ### Fixed - Android: the call camera button (and the mic) on a device that only ever receives calls
 
 On the Nokia the in-call camera button never started the camera — the tile stayed black — and the mic

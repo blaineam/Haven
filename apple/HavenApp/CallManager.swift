@@ -174,7 +174,14 @@ final class CallManager: NSObject, ObservableObject {
     private var sessionId = ""
     /// All participant hexes INCLUDING me (canonical roster).
     private var roster: Set<String> = []
-    private var lastPeerState: [String: RTCIceConnectionState] = [:]   // for the grace-then-drop on .disconnected
+    /// For the grace-then-drop on .disconnected AND the "Connecting media…" → "Connected" label
+    /// (`mediaConnected` reads it). It is NOT `@Published`, so without the `didSet` a write here
+    /// never re-rendered the call screen: the label stayed on "Connecting media…" until some other
+    /// published value happened to change (field: "the iPhone took a long time to show connected
+    /// after it connected").
+    var lastPeerState: [String: RTCIceConnectionState] = [:] {
+        didSet { if oldValue != lastPeerState { objectWillChange.send() } }
+    }
     /// TRUE only when at least one peer's ICE path is actually up. The call UI used to say
     /// "Connected" the moment the ACCEPT frame arrived — app-level signaling — while ICE was
     /// still dead (field: both sides "Connected", zero audio). The label now tells the truth.
@@ -186,7 +193,10 @@ final class CallManager: NSObject, ObservableObject {
             || (DemoEnv.isDemo && inCall && !connecting)
     }
     /// Peers whose media is currently relayed over the /webrtc/hairpin WebSocket (ICE failed).
-    private var hairpinPeers: Set<String> = []
+    /// Read by `mediaConnected` too, so a change must re-render the call screen (see `lastPeerState`).
+    var hairpinPeers: Set<String> = [] {
+        didSet { if oldValue != hairpinPeers { objectWillChange.send() } }
+    }
 
     /// The relay produced a decoded remote video track for a hairpin peer — publish it into the
     /// same map the call UI renders, so relayed video appears with no view changes.

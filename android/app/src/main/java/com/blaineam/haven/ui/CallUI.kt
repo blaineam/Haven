@@ -69,7 +69,7 @@ import org.webrtc.VideoTrack
  * across recomposition so tracks bind reliably.
  */
 @Composable
-fun CallVideoTile(track: VideoTrack?, modifier: Modifier = Modifier, mirror: Boolean = false, fit: Boolean = false, overlay: Boolean = false) {
+fun CallVideoTile(track: VideoTrack?, modifier: Modifier = Modifier, mirror: Boolean = false, fit: Boolean = false, overlay: Boolean = false, active: Boolean = true) {
     val context = LocalContext.current
     val view = remember {
         SurfaceViewRenderer(context).apply {
@@ -84,9 +84,14 @@ fun CallVideoTile(track: VideoTrack?, modifier: Modifier = Modifier, mirror: Boo
             setScalingType(if (fit) RendererCommon.ScalingType.SCALE_ASPECT_FIT else RendererCommon.ScalingType.SCALE_ASPECT_FILL)
         }
     }
-    AndroidView(factory = { view }, modifier = modifier)
-    DisposableEffect(track) {
-        track?.addSink(view)
+    // `active = false` (camera off / remote camera off): drop the stale frame and hide the surface —
+    // CallVideoPolicy explains why the sink alone cannot be trusted to blank itself.
+    AndroidView(factory = { view }, modifier = modifier, update = {
+        it.visibility = if (active) android.view.View.VISIBLE else android.view.View.INVISIBLE
+        if (!active) runCatching { it.clearImage() }
+    })
+    DisposableEffect(track, active) {
+        if (active) track?.addSink(view)
         onDispose { runCatching { track?.removeSink(view) } }
     }
     DisposableEffect(Unit) { onDispose { runCatching { view.release() } } }
@@ -209,7 +214,10 @@ private fun MinimizedCall() {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.size(50.dp, 66.dp).clip(RoundedCornerShape(10.dp)).background(CallChip)) {
-                CallVideoTile(firstRemote, Modifier.fillMaxSize())
+                CallVideoTile(firstRemote, Modifier.fillMaxSize(),
+                    active = CallVideoPolicy.remoteTileActive(
+                        CallManager.participants.firstOrNull()?.let { CallManager.remoteCameraOff.contains(it) } == true,
+                        firstRemote != null))
             }
             Spacer(Modifier.size(10.dp))
             Column {
@@ -327,7 +335,8 @@ private fun InCall() {
             Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(12.dp).size(96.dp, 132.dp)
                 .clip(RoundedCornerShape(12.dp)).background(CallChip),
         ) {
-            CallVideoTile(CallManager.localVideo, Modifier.fillMaxSize(), mirror = true, overlay = true)
+            CallVideoTile(CallManager.localVideo, Modifier.fillMaxSize(), mirror = true, overlay = true,
+                active = CallVideoPolicy.localPreviewActive(cameraOn, CallManager.localVideo != null))
             // Camera off: the track sends black, so say why instead of showing an empty chip.
             if (!cameraOn) Icon(Icons.Filled.VideocamOff, null, tint = CallSecondary,
                 modifier = Modifier.align(Alignment.Center).size(28.dp))

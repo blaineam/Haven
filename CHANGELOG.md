@@ -29,6 +29,23 @@ follows the lock-screen detail setting. New switch: Settings -> Car and Siri. Sc
 CarPlay role, so the SwiftUI phone window is unchanged. Architecture, portal steps and manual checks:
 `docs/CARPLAY.md`. Tests: `CarPlayConversationsTests` (HavenLogicTests), `HavenIntentsTests` (iOS simulator).
 
+### Fixed — a friend's relay no longer carries a private circle (Android / iOS / macOS / desktop)
+
+The all-circles **default relay** was inherited by every circle, so when the default was a FRIEND's relay (a
+friend-invite ticket's, a wired one, one announced for the circle we share) a new PRIVATE circle was enrolled on it,
+mirrored its mailbox and media to it, and self-sync (additive, never subtractive) exported the inherited relay as the
+circle's own on every sibling — flipping the default to your own relay afterwards changed nothing. Caught by the e2e
+gate (`multirelay: no private circle's media on a friend's relay that doesn't serve it`, A's private photo on B's
+relay; intermittent, only after earlier steps wired the fleet to the friend's relay: Android learned the new circle
+from iOS with `[R_B]` and enrolled it at 17:36:37, before iOS flipped the default to R_A). Now a default / guessed
+relay that is a contact's node id (account id or one of their devices) is withheld from any circle that contact is not
+a member of (`RelayScope` / `RelayDefaultScope` / `relayscope.rs`); a relay nobody here knows as a contact's, a friend's
+relay for the circles the friend is IN (shared circle, DMs), and an explicit per-circle tick are unchanged. Also: a
+friend-invite grant adopted the inviter's relays into EVERY circle and backfilled them on Android and desktop (iOS
+already used the default circle only) — all three now use the default circle; desktop DM creation no longer seeds a
+DM with every known relay. Tests: `HavenNetFriendRelayScopeTest`, `tests_engine_media::a_friends_default_relay_…`,
+`RelayStoreTests.testAFriendsDefaultRelay…`, `RelayDefaultScopeTests`.
+
 ### Changed — bundled cloudflared 2026.7.2 → 2026.10.4
 
 One pin (`CLOUDFLARED_VERSION` in `core/haven-net/src/cfquicktunnel.rs`) feeds the desktop `externalBin`, the macOS

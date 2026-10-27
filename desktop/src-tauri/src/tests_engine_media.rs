@@ -101,6 +101,39 @@ async fn forgetting_reactivating_renaming_and_defaulting_a_relay() {
     assert_eq!(e.relays_for(DEFAULT_CIRCLE), vec![R1.to_string()]);
 }
 
+/// e2e `multirelay: no private circle's media on a friend's relay that doesn't serve it`: the default
+/// relay was the FRIEND's, so A's new PRIVATE circle inherited it — mailbox, enrollment and media landed
+/// on a relay whose operator is not in that circle, and self-sync exported it as the circle's own relay.
+#[tokio::test]
+async fn a_friends_default_relay_is_not_inherited_by_a_circle_the_friend_is_not_in() {
+    let (a, _) = new_engine(93);
+    let (b, _) = new_engine(94);
+    befriend(&a, &b);
+    let b_relay = b.node_id_hex(); // B's relay, as A learned it
+    a.set_default_relay(b_relay.clone());
+
+    let private = a.create_circle("Private".into());
+    let shared = a.create_circle("Shared".into());
+    a.social.add_existing_to_circle(shared.clone(), b_relay.clone()).unwrap();
+
+    assert!(a.relays_for(&private).is_empty(), "the private circle must not land on B's relay");
+    assert_eq!(a.relays_for(&shared), vec![b_relay.clone()], "the shared circle keeps it");
+    assert_eq!(a.relays_for(DEFAULT_CIRCLE), vec![b_relay.clone()], "so does the circle the friendship lives in");
+    assert!(
+        a.prefs.lock().fallback_relays_for(&private).is_empty(),
+        "a relay-less circle is not guessed onto the friend's relay either"
+    );
+
+    // Ticking it for the private circle is the user's explicit choice and is honoured.
+    a.prefs.lock().relays.entry(private.clone()).or_default().push(b_relay.clone());
+    assert_eq!(a.relays_for(&private), vec![b_relay.clone()]);
+
+    // A relay nobody here knows as a contact's is inherited by every circle, as before.
+    a.prefs.lock().relays.remove(&private);
+    a.set_default_relay(R1.into());
+    assert_eq!(a.relays_for(&private), vec![R1.to_string()]);
+}
+
 #[tokio::test]
 async fn erasing_archives_the_relay_so_it_can_be_restored_exactly() {
     let (e, _) = new_engine(92);

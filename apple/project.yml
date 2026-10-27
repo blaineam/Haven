@@ -484,6 +484,8 @@ targets:
       # Which circles a multi-circle post's media is sealed for (one blob, every selected circle).
       - path: HavenApp/MediaCircleSets.swift
       - path: HavenApp/RelayAddress.swift
+      # Which circles inherit the all-circles default relay (a friend's relay is withheld from a private circle).
+      - path: HavenApp/RelayDefaultScope.swift
       - path: HavenApp/MediaVariants.swift
       - path: HavenApp/FileArchive.swift
       - path: HavenApp/PushBanner.swift

@@ -96,6 +96,13 @@ circle's mailbox), but a media ref names no circle, so media used to replicate t
    strand old clients' media; it stops as those clients update. Retention keeps a marker as long as
    its blob and prunes orphans (idle > 1h).
 
+5. **Which circles inherit the default relay.** The marker only protects a relay that does not serve the circle;
+   a relay that has been *enrolled* for it serves it, so the client must never enroll, mirror or export a circle to a
+   relay that is merely a friend's. The all-circles default (and the "no relays yet" guess) is therefore withheld from
+   a circle when it is a contact's node id (account or device) and that contact is not a member of the circle.
+   Explicit per-circle assignments are never filtered; a friend-invite grant adopts the inviter's relays into the
+   default circle only. Android `RelayScope`, iOS `RelayDefaultScope`, desktop `relayscope.rs`.
+
 ### Learning circles after the link — the ENROLL op (implemented)
 
 A relay used to read its circle list **once**, from the link the operator pasted, and never change

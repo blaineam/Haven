@@ -2693,6 +2693,38 @@ impl Engine {
         }
     }
 
+    /// The inviter's relays from a friend-invite ticket: they belong to the circle the friendship lives
+    /// in (the default circle), NOT to every circle I have. `adopt_relay` associates a relay with ALL
+    /// circles, enrolls them on it and backfills their history — a friend invite put every PRIVATE circle
+    /// on the inviter's relay. Same scope as iOS `adoptFriendInviteRelays` / Android's grant path.
+    async fn adopt_friend_invite_relays(self: &Arc<Self>, relays: &[String]) {
+        let mut added = false;
+        {
+            let mut p = self.prefs.lock();
+            for hex in relays {
+                let hex = hex.trim().to_lowercase();
+                if hex.len() != 64 || hex.starts_with("s3:") || p.relay_forgotten_at_ms(&hex) > 0 {
+                    continue;
+                }
+                p.ensure_relay_entry(&hex, None, false, true);
+                let list = p.relays.entry(DEFAULT_CIRCLE.to_string()).or_default();
+                if !list.contains(&hex) {
+                    list.push(hex);
+                    added = true;
+                }
+            }
+            if added {
+                let _ = p.save(&self.paths);
+            }
+        }
+        if added {
+            self.refresh_haven_fabric();
+            self.nudge_self_sync();
+            self.backfill_mailbox(DEFAULT_CIRCLE).await;
+            self.poll_mailbox().await;
+        }
+    }
+
     /// Pull the account's self-sync slots (opened with `self_key`), merge them, apply locally, and
     /// WRITE the converged state as the self-sync base — all BEFORE any local diff. This is the ordered
     /// grant-acceptance step that stops a just-enrolled empty device from tombstoning the account.
@@ -4356,9 +4388,16 @@ impl Engine {
             let _ = self.social.add_existing_to_circle(circle_id.to_string(), hex.clone());
         }
         self.pin_dm_authority(circle_id);
+        self.ensure_relay_scope(circle_id);
         {
             let mut p = self.prefs.lock();
-            let actives = p.all_active_relay_hexes();
+            // A DM's relays: every known relay EXCEPT a friend's who is not a party to this thread — the
+            // DM's mailbox must not land on a third friend's relay.
+            let actives: Vec<String> = p
+                .all_active_relay_hexes()
+                .into_iter()
+                .filter(|h| p.relay_scope.inherits(circle_id, h))
+                .collect();
             let list = p.relays.entry(circle_id.to_string()).or_default();
             for hex in actives {
                 if !list.contains(&hex) {
@@ -5246,6 +5285,7 @@ impl Engine {
     fn handle_hello_from(self: &Arc<Self>, sender_device: Option<&str>, payload: &[u8]) {
         let Some(hello) = wire::parse_hello(payload) else { return };
         let id_hex = wire::node_hex(&hello.bundle);
+        self.prefs.lock().relay_scope.invalidate(); // a contact may be new: who is a friend's relay changes with it
         if self.prefs.lock().blocked.contains(&id_hex) {
             return;
         }
@@ -7584,7 +7624,53 @@ impl Engine {
     /// are filtered out so they aren't dialed/served, but their config survives. Includes the all-circles
     /// default. Mirrors iOS `relays(forCircle:)`.
     fn relays_for(&self, circle_id: &str) -> Vec<String> {
+        self.ensure_relay_scope(circle_id);
         self.prefs.lock().active_relays_for(circle_id)
+    }
+
+    /// Keep [`Prefs::relay_scope`] fresh enough to judge `circle_id`: rebuilt when it expires, a
+    /// contact joins, or the circle is new to it. A circle created a moment ago is looked up fresh, so
+    /// a brand-new private circle is never judged on stale membership. See [`crate::relayscope`].
+    fn ensure_relay_scope(&self, circle_id: &str) {
+        let now = now_ms();
+        let (stale, expired) = {
+            let p = self.prefs.lock();
+            (p.relay_scope.stale(circle_id, now), p.relay_scope.expired(now))
+        };
+        if !stale {
+            return;
+        }
+        let me = self.social.my_node_hex().to_lowercase();
+        let my_dev = self.social.my_device_node_hex().to_lowercase();
+        let members_of = |cid: &str| -> std::collections::HashSet<String> {
+            let mut out = std::collections::HashSet::new();
+            for a in self.social.contact_node_ids(cid.to_string()) {
+                for d in self.social.device_node_ids_for(a.clone()) {
+                    out.insert(d.to_lowercase());
+                }
+                out.insert(a.to_lowercase());
+            }
+            out.remove(&me);
+            out.remove(&my_dev);
+            out
+        };
+        if expired {
+            let mut m: std::collections::HashMap<String, std::collections::HashSet<String>> =
+                std::collections::HashMap::new();
+            for c in self.social.circles() {
+                let ms = members_of(&c.id);
+                m.insert(c.id, ms);
+            }
+            for cid in [DEFAULT_CIRCLE, circle_id] {
+                if !m.contains_key(cid) {
+                    m.insert(cid.to_string(), members_of(cid));
+                }
+            }
+            self.prefs.lock().relay_scope = crate::relayscope::RelayScope::build(now, m);
+        } else {
+            let ms = members_of(circle_id);
+            self.prefs.lock().relay_scope.learn_circle(circle_id, ms);
+        }
     }
 
     /// Relay hexes to MIRROR media to / FETCH media from — the circle's own active relays PLUS every
@@ -7596,6 +7682,7 @@ impl Engine {
     /// addressing keeps the extra puts idempotent and mesh anti-entropy replicates it back later. Mirrors
     /// iOS `mediaDests(_:)`. Leave MAILBOX (message) paths on `relays_for` — those are membership-gated.
     fn media_dests(&self, circle_id: &str) -> Vec<String> {
+        self.ensure_relay_scope(circle_id);
         let p = self.prefs.lock();
         let mut out: Vec<String> = p
             .active_relays_for(circle_id)
@@ -7974,16 +8061,14 @@ impl Engine {
         //    the matrix stub) would never receive it. So for such a circle, upload to every ACTIVE
         //    relay this device knows — exactly what the poll side reads from. Ephemeral by design:
         //    this never writes prefs.relays.
+        self.ensure_relay_scope(circle_id);
         let relay_hexes: Vec<String> = {
             let p = self.prefs.lock();
             let explicit = p.active_relays_for(circle_id);
             if !explicit.is_empty() || p.relays.contains_key(circle_id) {
                 explicit
             } else {
-                p.all_active_relay_hexes()
-                    .into_iter()
-                    .filter(|h| !h.starts_with("s3:"))
-                    .collect()
+                p.fallback_relays_for(circle_id)
             }
         };
         // One info line per authored upload so a future empty-relay-set drop (relays=0 → nothing
@@ -8096,11 +8181,11 @@ impl Engine {
         // Mirror upload_event's fallback: a selfsync-learned circle with no explicit relay set
         // (no prefs.relays key) still has somewhere to land if this device knows any active relay,
         // so the catch-up sweep must not short-circuit it the way an S3-less, relay-less circle is.
+        self.ensure_relay_scope(circle_id);
         let has_relay = {
             let p = self.prefs.lock();
             !p.active_relays_for(circle_id).is_empty()
-                || (!p.relays.contains_key(circle_id)
-                    && p.all_active_relay_hexes().iter().any(|h| !h.starts_with("s3:")))
+                || (!p.relays.contains_key(circle_id) && !p.fallback_relays_for(circle_id).is_empty())
         };
         let has_s3 = self.prefs.lock().s3.is_some();
         if !has_relay && !has_s3 {
@@ -8284,6 +8369,9 @@ impl Engine {
         let relay_targets: Vec<(String, String)> = {
             let engine_circles: Vec<String> =
                 self.social.circles().into_iter().map(|c| c.id).collect();
+            for cid in &engine_circles {
+                self.ensure_relay_scope(cid);
+            }
             let prefs = self.prefs.lock();
             let mut out: Vec<(String, String)> = prefs
                 .relays
@@ -8296,15 +8384,10 @@ impl Engine {
             // lands on the linked desktop" E2E RED), so read them from every ACTIVE relay. Ephemeral
             // by design: prefs.relays (what circle-sync records export) only ever learns real
             // associations from announces/sync, never these fallback guesses.
-            let actives: Vec<String> = prefs
-                .all_active_relay_hexes()
-                .into_iter()
-                .filter(|h| !h.starts_with("s3:"))
-                .collect();
             for cid in engine_circles {
                 if !prefs.relays.contains_key(&cid) {
-                    for hex in &actives {
-                        out.push((cid.clone(), hex.clone()));
+                    for hex in prefs.fallback_relays_for(&cid) {
+                        out.push((cid.clone(), hex));
                     }
                 }
             }
@@ -12754,7 +12837,7 @@ impl Engine {
                 };
                 log::info!("friend-invite: grant received — completing friendship");
                 self.handle_hello_from(None, &hello);
-                self.adopt_bootstrap_relays(&t.relays).await;
+                self.adopt_friend_invite_relays(&t.relays).await;
                 {
                     let mut p = self.prefs.lock();
                     if let Some(e) = p.friend_invites_accepted.iter_mut().find(|x| x.ticket == a.ticket) {

@@ -1485,7 +1485,8 @@ final class RelayMailboxStore: ObservableObject {
     /// Deactivated relays are filtered out so they aren't dialed/served, but their config survives.
     func relays(forCircle circleId: String) -> [String] {
         var out = (relaysByCircle[circleId] ?? []).filter { isActive($0) }
-        if let def = defaultNodeHex, !def.isEmpty, isActive(def), !out.contains(def) { out.append(def) }
+        if let def = defaultNodeHex, !def.isEmpty, isActive(def), !out.contains(def),
+           RelayDefaultScope.shared.inherits(circleId: circleId, relay: def) { out.append(def) }
         return out
     }
     /// The relays explicitly associated with this circle (no default fallback, INCLUDING inactive) —

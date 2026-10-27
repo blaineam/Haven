@@ -1176,7 +1176,12 @@ object HavenNet : InboundListener {
                 }.getOrNull() ?: continue
                 Log.i(TAG, "friend-invite: grant received — completing friendship")
                 handleHello(hello, viaNearby = false, senderDevice = null)
-                for (r in t.relays) runCatching { adoptRelay(r, setDefault = false) }
+                // The inviter's relays belong to the circle the friendship lives in (the default circle) —
+                // NOT to every circle I have. adoptRelay() adds a relay to ALL circles, enrolls them on it
+                // and backfills their history: a friend invite put every PRIVATE circle on the inviter's
+                // relay. Same scope as iOS `adoptFriendInviteRelays`.
+                adoptInviteRelaysLight(t.relays)
+                scope.launch { backfillMailbox(DEFAULT_CIRCLE) }
                 a.granted = true
                 saveInvites()
                 val inviter = bytesToHex(t.accountId)
@@ -1652,7 +1657,7 @@ object HavenNet : InboundListener {
         )
         for (circleId in circles) {
             val relays = relaysFor(circleId).toMutableList()
-            if (defaultRelayHex.isNotEmpty()) relays.add(defaultRelayHex)
+            if (defaultRelayHex.isNotEmpty() && circleInheritsRelay(circleId, defaultRelayHex)) relays.add(defaultRelayHex)
             for (nodeHex in relays.distinct()) {
                 if (nodeHex.startsWith("s3:")) continue
                 val entry = relayEntries[nodeHex] ?: continue
@@ -1989,6 +1994,7 @@ object HavenNet : InboundListener {
     private data class HelloOutcome(val consumed: Boolean, val why: String)
 
     private fun handleHello(payload: ByteArray, viaNearby: Boolean = false, senderDevice: String? = null): HelloOutcome {
+        relayScope.invalidate()   // a contact may be new: who counts as a friend's relay changes with it
         val hello = Wire.parseHello(payload) ?: return HelloOutcome(true, "malformed")
         val idHex = nodeHex(hello.bundle)
         if (blocked.contains(idHex)) return HelloOutcome(true, "blocked")   // a blocked node can't handshake back in
@@ -5294,8 +5300,36 @@ object HavenNet : InboundListener {
         val out = (relayNodes[circleId] ?: emptyList())
             .filter { isRelayActive(it) && !relayStoodDown(it) }.toMutableList()
         if (defaultRelayHex.isNotEmpty() && isRelayActive(defaultRelayHex) &&
-            !relayStoodDown(defaultRelayHex) && !out.contains(defaultRelayHex))
+            !relayStoodDown(defaultRelayHex) && !out.contains(defaultRelayHex) &&
+            circleInheritsRelay(circleId, defaultRelayHex))
             out.add(defaultRelayHex)
+        return out
+    }
+
+    private val relayScope = RelayScope()
+
+    /** May [circleId] take [relayHex] WITHOUT the user having ticked it for that circle — i.e. as the
+     *  all-circles default or as a guess for a circle with no relays yet? Not when it is a friend's relay
+     *  and that friend is not in the circle ([RelayScope]). Explicit per-circle assignments never ask. */
+    internal fun circleInheritsRelay(circleId: String, relayHex: String): Boolean {
+        if (relayHex.startsWith("s3:") || relayHex.length != 64) return true
+        return runCatching {
+            relayScope.inherits(relayHex, circleId,
+                { listOf(DEFAULT_CIRCLE) + social.circles().map { it.id } },
+                { cid -> scopeMembers(cid) })
+        }.getOrDefault(true)
+    }
+
+    /** A circle's contacts as relay operators: their account ids and device ids (never mine). */
+    private fun scopeMembers(circleId: String): Set<String> {
+        val mineAcct = runCatching { social.myNodeHex() }.getOrNull()?.lowercase()
+        val mineDev = runCatching { social.myDeviceNodeHex() }.getOrNull()?.lowercase()
+        val out = HashSet<String>()
+        for (a in runCatching { social.contactNodeIds(circleId) }.getOrDefault(emptyList())) {
+            out.add(a.lowercase())
+            for (d in runCatching { social.deviceNodeIdsFor(a) }.getOrDefault(emptyList())) out.add(d.lowercase())
+        }
+        out.remove(mineAcct); out.remove(mineDev)
         return out
     }
 
@@ -5672,7 +5706,7 @@ object HavenNet : InboundListener {
         // above). Ephemeral by design: never writes relayNodes.
         val relayHexes = relaysFor(circleId).ifEmpty {
             if (relayNodes.containsKey(circleId)) emptyList()
-            else allActiveRelayHexes().filter { !it.startsWith("s3:") }
+            else allActiveRelayHexes().filter { !it.startsWith("s3:") && circleInheritsRelay(circleId, it) }
         }
         // One info line per authored upload so a future empty-relay-set drop (relays=0 → nothing
         // reaches relay-only members) is visible in logcat instead of silently vanishing.
@@ -5756,7 +5790,7 @@ object HavenNet : InboundListener {
         // still has somewhere to land if this device knows any active relay, so the catch-up sweep
         // must not short-circuit it the way a truly relay-less, S3-less circle is skipped.
         val hasRelay = relaysFor(circleId).isNotEmpty() ||
-            (!relayNodes.containsKey(circleId) && allActiveRelayHexes().any { !it.startsWith("s3:") })
+            (!relayNodes.containsKey(circleId) && allActiveRelayHexes().any { !it.startsWith("s3:") && circleInheritsRelay(circleId, it) })
         if (!hasRelay && !Presign.hasBootstrap(circleId)) return
         if (eventsToo) {
             val envs = runCatching { social.exportMyEnvelopes(circleId) }.getOrDefault(emptyList())
@@ -6000,6 +6034,7 @@ object HavenNet : InboundListener {
                 val def = defaultRelayHex
                 if (def.isNotEmpty() && isRelayActive(def)) {
                     val extra = relayNodes.keys.filter { cid -> base.none { it.first == cid && it.second == def } }
+                        .filter { cid -> circleInheritsRelay(cid, def) }
                         .map { it to def }
                     base + extra
                 } else base
@@ -6018,7 +6053,7 @@ object HavenNet : InboundListener {
                     val engineCircles = runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
                     val extra = engineCircles
                         .filter { cid -> !relayNodes.containsKey(cid) }
-                        .flatMap { cid -> actives.map { cid to it } }
+                        .flatMap { cid -> actives.filter { circleInheritsRelay(cid, it) }.map { cid to it } }
                     base + extra
                 }
             }

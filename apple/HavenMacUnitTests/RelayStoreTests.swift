@@ -264,6 +264,29 @@ final class RelayStoreTests: XCTestCase {
         h.forget(r)
     }
 
+    /// e2e `multirelay: no private circle's media on a friend's relay that doesn't serve it`: the default
+    /// relay was the FRIEND's, so a new PRIVATE circle inherited it — mailbox, enrollment and media landed
+    /// on a relay whose operator is not in that circle, and self-sync exported it as the circle's own.
+    func testAFriendsDefaultRelayIsNotInheritedByACircleTheFriendIsNotIn() {
+        defer { RelayDefaultScope.shared.reset() }
+        let friendRelay = relay(), own = relay()
+        let priv = circle(), shared = circle()
+        store.add(circleId: shared, nodeHex: friendRelay)   // announced for the circle we share
+        store.setDefault(friendRelay)
+        RelayDefaultScope.shared.update(members: [shared: [friendRelay], priv: []])
+
+        XCTAssertEqual(store.relays(forCircle: priv), [], "the private circle must not land on the friend's relay")
+        XCTAssertEqual(store.relays(forCircle: shared), [friendRelay], "the shared circle keeps it")
+
+        store.add(circleId: priv, nodeHex: friendRelay)     // ticking it for the circle is the user's choice
+        XCTAssertEqual(store.relays(forCircle: priv), [friendRelay])
+        store.remove(circleId: priv, nodeHex: friendRelay)
+
+        store.setDefault(own)                                // a relay no contact owns is inherited by every circle
+        XCTAssertEqual(store.relays(forCircle: priv), [own])
+        XCTAssertEqual(Set(store.relays(forCircle: shared)), [friendRelay, own])
+    }
+
     func testBackoffStepGrowsOnlyAfterTheWindowExpires() {
         let first = RelayBackoffStep.next(fails: 0, nextRetryMs: 0, now: 1_000)
         XCTAssertEqual(first?.backoffMs, RelayBackoffStep.baseMs)

@@ -1,0 +1,58 @@
+package com.blaineam.haven.core
+
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Which circles inherit the account-wide DEFAULT relay.
+ *
+ * The default relay is "applied to every circle, present and future". That is right for a relay the
+ * user runs or chose, and wrong for a relay that is simply a FRIEND's (a friend-invite ticket's relay, a
+ * wired/QA relay, one a friend announced for the circle we share): inheriting it puts a PRIVATE circle's
+ * mailbox, enrollment and media on a relay whose operator is not in that circle. e2e `multirelay: no
+ * private circle's media on a friend's relay that doesn't serve it` (A's private photo on B's relay):
+ * the fleet's default was B's relay, A's new private circle inherited it, a sibling enrolled the circle
+ * there, and self-sync (additive, never subtractive) wrote the inherited relay into the circle's
+ * explicit list on every device — so flipping the default to A's own relay afterwards changed nothing.
+ *
+ * A relay is a friend's when its node id is a contact's account id or one of that contact's devices.
+ * The default is withheld from circle X when it is a friend's relay AND that friend is not a member of
+ * X. A relay nobody here knows as a contact's (own, hosted, cloud) is inherited by every circle as
+ * before, and a friend's relay still serves every circle that friend is IN (the shared circle, DMs with
+ * them) and any circle the user ticks it for explicitly — explicit assignment is never filtered.
+ *
+ * Mirrored by iOS `RelayDefaultScope` and desktop `relay_scope`.
+ */
+class RelayScope(private val now: () -> Long = System::currentTimeMillis, private val ttlMs: Long = 10_000L) {
+    private class Snap(val at: Long, val friends: Set<String>, val members: ConcurrentHashMap<String, Set<String>>)
+    @Volatile private var snap: Snap? = null
+
+    /** Forget the cached membership (a contact was added/removed, a circle changed). */
+    fun invalidate() { snap = null }
+
+    /**
+     * May [circleId] inherit the default relay [defaultHex]? [circleIds] lists every circle,
+     * [membersOf] one circle's member node ids (contacts' account ids + their device ids, never mine).
+     * Fail-open only for a relay no contact owns; a circle created after the snapshot is looked up
+     * fresh, so a brand-new private circle is never judged against stale membership.
+     */
+    fun inherits(defaultHex: String, circleId: String, circleIds: () -> List<String>, membersOf: (String) -> Set<String>): Boolean {
+        val def = defaultHex.lowercase()
+        val t = now()
+        var s = snap
+        if (s == null || t - s.at > ttlMs || (!s.members.containsKey(circleId) && circleId !in circleIds())) {
+            val m = ConcurrentHashMap<String, Set<String>>()
+            val friends = HashSet<String>()
+            for (c in circleIds()) { val ms = membersOf(c); m[c] = ms; friends.addAll(ms) }
+            s = Snap(t, friends, m)
+            snap = s
+        }
+        val mine = s.members.getOrPut(circleId) { membersOf(circleId) }
+        return verdict(def, mine, s.friends)
+    }
+
+    companion object {
+        /** The pure rule: withheld iff [def] is a friend's node id and that friend is not in this circle. */
+        fun verdict(def: String, circleMembers: Set<String>, friends: Set<String>): Boolean =
+            !(def in friends && def !in circleMembers)
+    }
+}

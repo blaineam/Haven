@@ -25,6 +25,7 @@ mod netgate;
 mod qa;
 mod relayhealth;
 mod relayintro;
+mod relayscope;
 mod reoptimize;
 mod roster;
 mod scheduled;

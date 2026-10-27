@@ -388,6 +388,10 @@ pub struct Prefs {
     /// Mirrors iOS `haven.relay.default`.
     #[serde(default)]
     pub default_relay: String,
+    /// Which circles may inherit the default relay (engine-maintained snapshot, never persisted):
+    /// a friend's relay is not inherited by a circle that friend is not in. See [`crate::relayscope`].
+    #[serde(skip)]
+    pub relay_scope: crate::relayscope::RelayScope,
     /// Device ids learned from a contact's INVITE LINK (`?d=` dial hints), keyed by lowercased
     /// account hex. The only dialable ids for a device-seed friend until their signed roster
     /// (frame 27) arrives — which the hint itself makes possible. Mirrors iOS/Android.
@@ -939,6 +943,15 @@ impl Prefs {
         out
     }
 
+    /// Every active non-s3 relay a circle with NO relays of its own may be guessed onto — minus a
+    /// friend's relay the friend's absence from the circle rules out ([`crate::relayscope`]).
+    pub fn fallback_relays_for(&self, circle_id: &str) -> Vec<String> {
+        self.all_active_relay_hexes()
+            .into_iter()
+            .filter(|h| !h.starts_with("s3:") && self.relay_scope.inherits(circle_id, h))
+            .collect()
+    }
+
     /// Clear a relay's FORGOTTEN state on an explicit/legit RE-ADD, recording a re-add timestamp (now)
     /// in `cleared_relay_forgets` so self-sync supersedes a sibling's stale deletion tombstone (LWW).
     /// Returns whether the relay had actually been forgotten. Mirrors iOS `unforget`.
@@ -1201,7 +1214,11 @@ impl Prefs {
             .get(circle_id)
             .map(|v| v.iter().filter(|h| self.relay_is_active(h)).cloned().collect())
             .unwrap_or_default();
-        if !self.default_relay.is_empty() && self.relay_is_active(&self.default_relay) && !out.contains(&self.default_relay) {
+        if !self.default_relay.is_empty()
+            && self.relay_is_active(&self.default_relay)
+            && !out.contains(&self.default_relay)
+            && self.relay_scope.inherits(circle_id, &self.default_relay)
+        {
             out.push(self.default_relay.clone());
         }
         out

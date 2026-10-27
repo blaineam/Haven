@@ -191,6 +191,7 @@ final class FeedStore: ObservableObject {
     private func dropEngineCaches() {
         cachedAccountHex = ""; cachedDeviceHex = ""; cachedBundle = Data(); cachedProfileCard = Data()
         circleMembersCache.removeAll(); deviceIdsCache.removeAll(); dialTargetsCache.removeAll()
+        RelayDefaultScope.shared.reset()   // a new engine has learned no membership yet
         messagesCache.removeAll(); messagesStale.removeAll()
         sensitiveCache.removeAll(); reportsCache.removeAll()
         RosterEcho.shared.withLock { $0 = RosterEcho() }   // a new engine has seen no roster yet
@@ -222,9 +223,27 @@ final class FeedStore: ObservableObject {
             changed = true
         }
         if changed {
+            republishRelayScope()
             if publish { objectWillChange.send() }
             scheduleDeviceIdsFill()
         }
+    }
+    /// Hand the membership picture to `RelayDefaultScope`, which `RelayMailboxStore.relays(forCircle:)`
+    /// consults (off the main actor) to decide whether a circle inherits the all-circles default relay:
+    /// a friend's relay is withheld from a circle that friend is not in.
+    private func republishRelayScope() {
+        let mine: Set<String> = [myNodeHex.lowercased(), myDeviceNodeHex.lowercased()]
+        var out: [String: Set<String>] = [:]
+        for (cid, accounts) in circleMembersCache {
+            var ids = Set<String>()
+            for a in accounts {
+                let k = a.lowercased()
+                ids.insert(k)
+                for d in deviceIdsCache[k] ?? [] { ids.insert(d.lowercased()) }
+            }
+            out[cid] = ids.subtracting(mine)
+        }
+        RelayDefaultScope.shared.update(members: out)
     }
     /// Dial ids for an account from the read model. A miss answers the engine's own fallback (the
     /// account id) and schedules a refill.
@@ -259,7 +278,7 @@ final class FeedStore: ObservableObject {
     private func adoptDeviceIds(_ ids: [String: [String]]) {
         var changed = false
         for (a, d) in ids where deviceIdsCache[a.lowercased()] != d { deviceIdsCache[a.lowercased()] = d; changed = true }
-        if changed { dialTargetsCache.removeAll(); ownDeviceHexCache = (0, []) }
+        if changed { dialTargetsCache.removeAll(); ownDeviceHexCache = (0, []); republishRelayScope() }
     }
     /// Engine mutations that must land BEFORE a later pass may use their result — `startDM` creates
     /// the circle a `sendMessage` a moment later posts into. Actor jobs from two unstructured Tasks
@@ -1460,6 +1479,9 @@ final class FeedStore: ObservableObject {
             return id
         }
         guard self.engine === engine else { return nil }
+        // Judge the new circle on its own members from the first instant — never on a snapshot that predates
+        // it — so it cannot inherit a friend's default relay in the window before the circles read lands.
+        RelayDefaultScope.shared.learn(circleId: id, members: Set(memberIds.map { $0.lowercased() }))
         CircleDeletionStore.markRecreated(id)   // a freshly-created circle is not deleted (LWW)
         // Switch-Flip §2: record it so the pin is re-applied on every launch.
         CircleCreatorStore.markCreated(id)
@@ -1850,6 +1872,7 @@ final class FeedStore: ObservableObject {
             guard let self else { return }
             self.pendingCircleOps[id] = nil
             guard self.engine === engine else { return }
+            RelayDefaultScope.shared.learn(circleId: id, members: [idHex.lowercased()])   // a DM's relays: its parties'
             self.persistUserAction(); await self.reloadCircles(); self.syncWithContacts()
             self.nudgeSelfSyncSoon()   // the (re-)opened DM reaches my other devices in seconds
         }
@@ -1880,6 +1903,7 @@ final class FeedStore: ObservableObject {
             guard let self else { return }
             self.pendingCircleOps[id] = nil
             guard self.engine === engine else { return }
+            RelayDefaultScope.shared.learn(circleId: id, members: Set(others.map { $0.lowercased() }))
             self.persistUserAction(); await self.reloadCircles(); self.syncWithContacts()
             self.nudgeSelfSyncSoon()   // the (re-)opened group DM reaches my other devices in seconds
         }

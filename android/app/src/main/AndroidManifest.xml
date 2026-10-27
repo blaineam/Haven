@@ -25,6 +25,11 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Foreground "stay connected" service (keeps the iroh node alive for real-time delivery). -->
+    <!-- Haven's calls as first-class SYSTEM calls (self-managed Telecom account): the car, Bluetooth
+         headsets and the system call controls see them. Normal permission, no runtime prompt; no
+         READ_PHONE_STATE / READ_PHONE_NUMBERS is needed for a self-managed account. See
+         core/TelecomCalls.kt and docs/ANDROID-CALLS.md. -->
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Screen sharing in a call (MediaProjection) — Android 14+ requires this FGS type. -->
@@ -278,6 +283,17 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- Telecom binds this to get a Connection for a Haven call (self-managed phone account).
+             Exported so the system can bind it, but protected by BIND_TELECOM_CONNECTION_SERVICE,
+             which only the system holds — no other app can call into it. -->
+        <service
+            android:name=".core.HavenTelecomService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
         <service
             android:name=".core.ConnectionService"
             android:exported="false"

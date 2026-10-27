@@ -78,19 +78,17 @@ it does, what a sideloaded build can and cannot test, and the `adb` commands.
 
 ## Calls
 
-Haven's calls are **in-app only** (`CallManager`: "no Telecom yet"). The incoming-call notification is a custom
-`CATEGORY_CALL` notification with Answer/Decline actions. Android Auto does not present these as calls and
-Haven does not register a `PhoneAccount`/`ConnectionService`, so **there is no call support in the car**, and
-this work deliberately adds none. To get the car's native in-call UI Haven would need, in a separate project:
+Haven's calls are **system calls** on Android: a self-managed Telecom phone account and `HavenTelecomService`
+register every Haven call with the platform, the counterpart of iOS's CallKit. Architecture, parity with
+CallKit and what still needs a real head unit are in [ANDROID-CALLS.md](ANDROID-CALLS.md). In short: the car,
+Bluetooth headsets and the system call controls know a Haven call exists, can answer / reject / hang it up,
+and drive its audio route; Haven keeps drawing its own call screen and the incoming-call notification.
 
-* a self-managed `ConnectionService` (`PhoneAccount.CAPABILITY_SELF_MANAGED`) declared with
-  `android.permission.BIND_TELECOM_CONNECTION_SERVICE`, and `MANAGE_OWN_CALLS`;
-* `TelecomManager.addNewIncomingCall` / `placeCall`, wired to `CallManager.accept()/hangup()`, audio routing and
-  mute through `CallAudioState`; incoming calls moved to `NotificationCompat.CallStyle`;
-* for the Assistant "call X on Haven": a `tel:`/`haven:` call-capable shortcut or `CAPABILITY` actions.
-
-Android Auto lists such calls on the head unit and routes the car microphone/speakers automatically. Video is
-not shown on the car.
+**What Android Auto actually shows for a self-managed call is not verified.** Self-managed calls are the
+app's own UI by design; whether a given Android Auto version / head unit adds its own in-call card for them
+varies. Do not promise a native car call screen until it has been seen on a head unit (steps below). What is
+certain: the call is registered with Telecom, so the OS treats it as a call (audio focus, no second call
+over it, headset / car answer and hang-up buttons).
 
 ## What the owner must do in Play Console
 
@@ -149,7 +147,11 @@ messaging apps) is taken from the platform documentation, not observed. `lintDeb
 6. Lock the conversation (circle lock), send a DM: no car card, the phone banner reads "New activity in a locked circle".
 7. Turn the switch off: no car card for new DMs.
 8. Group DM: the card carries the group title and the sender's name per message.
-9. Calls: expect NO car integration (see above).
+9. Calls: place a Haven call from the phone while connected to the head unit (or the DHU): the call
+   should appear on the car (answer / hang-up controls, call audio on the car speakers). Receive one from
+   another device: it rings the phone and the car; answering from the car connects it. Report what the
+   car screen shows (a native in-call card, only the notification, or nothing) - this is the unverified
+   part. See [ANDROID-CALLS.md](ANDROID-CALLS.md).
 
 Desktop Head Unit: `sdkmanager "extras;google;auto"`, then on the phone enable Android Auto developer mode
 (tap the version 10 times) -> "Start head unit server"; `adb forward tcp:5277 tcp:5277`; run

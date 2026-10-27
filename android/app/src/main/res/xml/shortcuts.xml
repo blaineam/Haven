@@ -43,4 +43,26 @@
                 android:key="name" />
         </intent>
     </capability>
+
+    <!--
+      Google Assistant App Action: "Hey Google, call Tracy on Haven" (also delivered by Assistant in
+      the car). Same shape as CREATE_MESSAGE above. AssistantCallRoute resolves the participant with
+      the same tiered matcher and dials through Telecom — but only when the launch came from the Google
+      app / Assistant (the referrer); any other caller just opens the conversation. Audio only: a
+      call.callFormat of Video is never auto-dialed. Both parameters are optional. The action and
+      keys must match AssistantCallRoute (a unit test enforces it).
+    -->
+    <capability android:name="actions.intent.CREATE_CALL">
+        <intent
+            android:action="com.blaineam.haven.action.ASSISTANT_CALL"
+            android:targetPackage="com.blaineam.haven"
+            android:targetClass="com.blaineam.haven.MainActivity">
+            <parameter
+                android:name="call.participant.name"
+                android:key="callName" />
+            <parameter
+                android:name="call.callFormat"
+                android:key="callFormat" />
+        </intent>
+    </capability>
 </shortcuts>

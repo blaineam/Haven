@@ -278,6 +278,7 @@ object CallManager {
                 .createInitializationOptions()
         )
         HavenNet.callRouter = { type, body -> receive(type, body) }
+        TelecomCalls.register(appContext)   // self-managed phone account; harmless if the platform refuses
     }
 
     /**
@@ -354,7 +355,17 @@ object CallManager {
     private fun rosterCsv(): String = roster.sorted().joinToString(",")
 
     /** Start (or join) a call with the given OTHER participant hexes. 1:1 = [partnerHex]. */
-    fun startCall(others: List<String>, name: String, session: String? = null) = onCall { startCallOnCall(others, name, session) }
+    /**
+     * Start a call. Goes out through Telecom when it is available ([TelecomCalls.place]) so the system
+     * and the car know about it; the engine then dials from the connection callback. Anything Telecom
+     * can't or won't do (unregistered, refused, a live call to add people to) dials directly.
+     */
+    fun startCall(others: List<String>, name: String, session: String? = null) = onCall {
+        if (!TelecomCalls.place(others, name, session)) startCallOnCall(others, name, session)
+    }
+
+    /** The engine's own dial path — what Telecom's connection callback (and the fallback) invoke. */
+    fun startCallDirect(others: List<String>, name: String, session: String? = null) = onCall { startCallOnCall(others, name, session) }
 
     private fun startCallOnCall(others: List<String>, name: String, session: String?) {
         if (inCall.value || ringing.value || connecting.value) {
@@ -427,6 +438,7 @@ object CallManager {
         callHandler.removeCallbacks(ringTimeoutRunnable)
         ringing.value = false
         inCall.value = true
+        TelecomCalls.onEngineActive()
         ConnectionService.startForCall(appContext)   // same mic claim as the outbound path
         notifyOwnDevicesHandled()   // stop my OTHER devices ringing before they can join and take the audio
         invitees().forEach { send(CallWire.ACCEPT, CallWire.accept(myHex, sessionId), it) }
@@ -509,6 +521,7 @@ object CallManager {
     fun hangup() = onCall { hangupOnCall() }
 
     private fun hangupOnCall() {
+        endReason = if (ringing.value && !isCaller) TelecomPolicy.End.REJECTED else TelecomPolicy.End.LOCAL
         // Declining counts as handling it: silence my other devices too, or they keep ringing after I
         // have dismissed the call here.
         // Stand down my OTHER devices on any end, not just a decline. The hangup below goes to
@@ -588,6 +601,7 @@ object CallManager {
                     ringing.value = false
                     connecting.value = false
                     inCall.value = true
+                    TelecomCalls.onEngineActive()
                     Log.i(TAG, "glare with ${from.take(8)} — both dialing, adopting shared session ${sessionId.take(20)}")
                     send(CallWire.ACCEPT, CallWire.accept(myHex, sessionId), from)
                     startMesh()
@@ -664,6 +678,7 @@ object CallManager {
         // Ring the PHONE, not just the app. Without this the call existed only inside a screen the
         // callee had to already be looking at — the process knew, and said nothing.
         runCatching { Notifications.showIncomingCall(appContext, name) }
+        TelecomCalls.reportIncoming()   // let the system / car know too; the notification above stays the UI
         uiHandler.post { com.blaineam.haven.ui.MusicPlayer.stop() }   // stop the song preview before the ring
         refreshParticipants()
     }
@@ -679,6 +694,7 @@ object CallManager {
         if (!ringing.value || inCall.value) return
         Log.i(TAG, "ring timeout after ${RING_TIMEOUT_MS / 1000}s — ending as missed (session=${sessionId.take(12)})")
         val who = peerName.value
+        endReason = TelecomPolicy.End.MISSED
         teardown()
         runCatching {
             Notifications.notify(appContext, "Missed call", if (who.isEmpty()) "You missed a call" else "You missed a call from $who")
@@ -701,6 +717,7 @@ object CallManager {
         val a = CallWire.parseAccept(body) ?: return
         if (!validSession(a.sessionId) || !knownContact(a.from)) return   // only a contact accepts (F3)
         connecting.value = false; inCall.value = true
+        TelecomCalls.onEngineActive()
         if (roster.add(a.from)) refreshParticipants()
         startMesh()
         connectPeerIfNeeded(a.from)
@@ -729,7 +746,11 @@ object CallManager {
             return
         }
         dropPeer(from)
-        if ((roster - myHex).isEmpty()) teardown()
+        if ((roster - myHex).isEmpty()) {
+            // Hung up before we answered = a missed call; after = the far end ending it.
+            endReason = if (ringing.value && !isCaller) TelecomPolicy.End.MISSED else TelecomPolicy.End.REMOTE
+            teardown()
+        }
     }
 
     private fun handleOffer(body: ByteArray) {
@@ -793,6 +814,7 @@ object CallManager {
             // speakerphone write, which is exactly how a start and a toggle come to disagree about
             // what "speaker on" means on a device where only one of the two paths was updated.
             applySpeaker()
+            TelecomCalls.mirrorSpeaker(speakerOn.value)
             // Re-assert after a beat — some devices ignore the first speakerphone flip at start.
             callHandler.postDelayed({
                 if (mediaStarted) applySpeaker()
@@ -1089,6 +1111,7 @@ object CallManager {
         // "connecting" while audio is already flowing, and the dialing tone keeps looping.
         connecting.value = false
         inCall.value = true
+        TelecomCalls.onEngineActive()
         CallMediaBridge.activate(
             remote = peer,
             sessionId = sessionId,
@@ -1183,6 +1206,18 @@ object CallManager {
         speakerOn.value = !speakerOn.value
         speakerChoice = speakerOn.value
         applySpeaker()
+        TelecomCalls.mirrorSpeaker(speakerOn.value)
+    }
+
+    /**
+     * The system reported a route change we did not ask for (the driver picked Bluetooth on the car's
+     * screen, the system call controls): follow it as an explicit choice — [TelecomPolicy.RouteArbiter]
+     * guarantees it is a real change, never Telecom's initial default.
+     */
+    fun adoptSystemRoute(speaker: Boolean) = onCall {
+        speakerChoice = speaker
+        speakerOn.value = speaker
+        applySpeaker()
     }
 
     /** Speaker is the call default only while nothing external is attached; a tap always wins. */
@@ -1199,6 +1234,7 @@ object CallManager {
             private fun reroute() = callHandler.post {
                 if (!mediaStarted || speakerChoice != null) return@post
                 decideDefaultSpeaker(); applySpeaker()
+                TelecomCalls.mirrorSpeaker(speakerOn.value)
             }
             override fun onAudioDevicesAdded(added: Array<out android.media.AudioDeviceInfo>) { reroute() }
             override fun onAudioDevicesRemoved(removed: Array<out android.media.AudioDeviceInfo>) { reroute() }
@@ -1507,7 +1543,13 @@ object CallManager {
         if (screenShare.value) stopScreenShareOnCall() else startScreenShareOnCall(resultCode, data)
     }
 
+    /** Why the call is ending, set by whoever decides to end it; read once by [teardown] for Telecom. */
+    private var endReason: TelecomPolicy.End? = null
+
     private fun teardown() {
+        val end = endReason ?: TelecomPolicy.End.LOCAL
+        endReason = null
+        runCatching { TelecomCalls.onEngineEnded(end) }
         // Answered, declined, missed, or the caller gave up — in every case stop ringing the phone.
         runCatching { Notifications.clearIncomingCall(appContext) }
         releaseCallWakeLock()

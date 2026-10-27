@@ -144,6 +144,10 @@ object ShareShortcuts {
             .apply {
                 if (spoken.isNotEmpty()) {
                     addCapabilityBinding(AssistantRoute.CAPABILITY_CREATE_MESSAGE, AssistantRoute.PARAM_RECIPIENT_NAME, spoken)
+                    // Only a 1:1 thread can be called by voice — never a group conversation.
+                    if (others.size == 1) {
+                        addCapabilityBinding(AssistantCallRoute.CAPABILITY_CREATE_CALL, AssistantCallRoute.PARAM_PARTICIPANT_NAME, spoken)
+                    }
                 }
             }
             .build()

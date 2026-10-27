@@ -88,4 +88,52 @@ class AssistantShortcutsDeclarationTest {
         assertTrue(src.contains("setIsConversation()"))
         assertEquals("android.shortcut.conversation", ShareShortcuts.CONVERSATION_CATEGORY)
     }
+
+    // ---- actions.intent.CREATE_CALL ("call Tracy on Haven") ----
+    private fun callCapability(): Element =
+        children(shortcuts(), "capability").singleOrNull { attr(it, "name") == AssistantCallRoute.CAPABILITY_CREATE_CALL }
+            ?: error("shortcuts.xml must declare exactly one ${AssistantCallRoute.CAPABILITY_CREATE_CALL} capability")
+
+    @Test fun `both capabilities are declared side by side`() {
+        val names = children(shortcuts(), "capability").map { attr(it, "name") }
+        assertTrue(names.containsAll(listOf(AssistantRoute.CAPABILITY_CREATE_MESSAGE, AssistantCallRoute.CAPABILITY_CREATE_CALL)))
+    }
+
+    @Test fun `the create call capability launches MainActivity with the call action`() {
+        val intent = children(callCapability(), "intent").single()
+        assertEquals(AssistantCallRoute.ACTION, attr(intent, "action"))
+        assertEquals("com.blaineam.haven", attr(intent, "targetPackage"))
+        assertEquals("com.blaineam.haven.MainActivity", attr(intent, "targetClass"))
+        assertTrue("the call and message actions must differ", AssistantCallRoute.ACTION != AssistantRoute.ACTION)
+    }
+
+    @Test fun `the call capability binds the participant name and format to the extras MainActivity reads`() {
+        val params = children(children(callCapability(), "intent").single(), "parameter")
+            .associate { attr(it, "name") to attr(it, "key") }
+        assertEquals(AssistantCallRoute.EXTRA_NAME, params[AssistantCallRoute.PARAM_PARTICIPANT_NAME])
+        assertEquals(AssistantCallRoute.EXTRA_FORMAT, params[AssistantCallRoute.PARAM_CALL_FORMAT])
+        assertEquals("a phone number is never bound — calls go to Haven contacts only", 2, params.size)
+    }
+
+    @Test fun `no call parameter is required so the one intent is also the fallback`() {
+        for (p in children(children(callCapability(), "intent").single(), "parameter")) {
+            assertFalse("${attr(p, "name")} must stay optional", attr(p, "required") == "true")
+        }
+    }
+
+    @Test fun `MainActivity reads the call action keys and checks the referrer before dialing`() {
+        val src = File(main, "java/com/blaineam/haven/MainActivity.kt").readText()
+        assertTrue(src.contains("AssistantCallRoute.ACTION"))
+        assertTrue(src.contains("AssistantCallRoute.EXTRA_NAME"))
+        assertTrue(src.contains("AssistantCallRoute.EXTRA_FORMAT"))
+        assertTrue("the trust decision must come from the launch referrer", src.contains("AssistantCallRoute.isTrustedReferrer(referrer"))
+    }
+
+    @Test fun `only one to one shortcuts are bound for calling`() {
+        val src = File(main, "java/com/blaineam/haven/core/ShareShortcuts.kt").readText()
+        val at = src.indexOf("AssistantCallRoute.CAPABILITY_CREATE_CALL")
+        assertTrue(at > 0)
+        assertTrue("the call binding must sit under an others.size == 1 guard",
+            src.substring(maxOf(0, at - 160), at).contains("others.size == 1"))
+    }
 }

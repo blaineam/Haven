@@ -9,6 +9,29 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added - Haven calls are system calls on Android (Telecom), and "call <name> on Haven" by voice (Android)
+- **Telecom integration** (the counterpart of iOS CallKit). A self-managed phone account and
+  `HavenTelecomService` register every Haven call - started from the UI, by voice or from a
+  notification - with the platform, so the car, Bluetooth headsets and the system call controls know a call
+  exists, can answer / reject / hang it up, and drive its audio route. Haven keeps its own call screen and
+  incoming-call notification; the engine stays the single source of truth (`TelecomPolicy` / `TelecomCalls`,
+  docs/ANDROID-CALLS.md). Telecom is an addition, never a dependency: if it is unavailable, refuses or never
+  answers within 3 s the call dials the old direct way exactly once.
+- **Audio route**: Haven's route choice (a connected car / headset beats the speaker, an explicit speaker tap
+  wins) is mirrored to Telecom, and a route the system reports on its own (the driver picks Bluetooth on the
+  car) is adopted - never Telecom's initial earpiece default.
+- **Google Assistant `CREATE_CALL`**: "Hey Google, call Tracy on Haven" resolves the contact with the same tiered
+  matcher as messages ("Tracy" never offers "Troy") and dials immediately **only when the launch came from the
+  Google app / Assistant** (the system referrer). Any other caller only opens the conversation. Only 1:1 contacts
+  (never a group, a locked or a blocked conversation), only when no call is active, audio only (a video request
+  opens the thread), and the ring is cancellable. docs/ASSISTANT.md has what works on a Play build vs a sideloaded
+  debug build and the adb commands.
+- **Unverified on a head unit / real device**: what Android Auto draws for a self-managed call, the lock-screen
+  ring while the app is closed, and the Assistant voice path (Play build only). Steps in the docs.
+- Tests: `TelecomPolicyTest`, `AssistantCallRouteTest`, `TelecomDeclarationTest`, and the extended
+  `AssistantShortcutsDeclarationTest`.
+
+
 ### Fixed - Android post media (and tile thumbnails) took minutes to appear on a fresh install (Android)
 - **Root cause (Nokia 6.1, fresh install on a busy circle).** The core's `feed()` is
   OLDEST-FIRST and `requestMissingMedia` walked it that way into ONE serial FIFO, so the

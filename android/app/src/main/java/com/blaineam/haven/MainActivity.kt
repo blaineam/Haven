@@ -301,6 +301,23 @@ class MainActivity : FragmentActivity() {
             }
             return
         }
+        // Google Assistant "call <name> on Haven" (res/xml/shortcuts.xml). Dialed immediately only when
+        // the launch came from the Google app / Assistant (the system-provided referrer — never an
+        // extra the sender wrote); any other launcher gets the conversation opened, not a call.
+        // See core/AssistantCallRoute.kt.
+        if (intent?.action == com.blaineam.haven.core.AssistantCallRoute.ACTION) {
+            val name = intent.getStringExtra(com.blaineam.haven.core.AssistantCallRoute.EXTRA_NAME)
+            val format = intent.getStringExtra(com.blaineam.haven.core.AssistantCallRoute.EXTRA_FORMAT)
+            intent.removeExtra(com.blaineam.haven.core.AssistantCallRoute.EXTRA_NAME)
+            intent.removeExtra(com.blaineam.haven.core.AssistantCallRoute.EXTRA_FORMAT)
+            val trusted = com.blaineam.haven.core.AssistantCallRoute.isTrustedReferrer(referrer?.toString())
+            val app = applicationContext
+            lifecycleScope.launch(Dispatchers.IO) {
+                val plan = runCatching { com.blaineam.haven.core.AssistantLaunch.resolveCall(app, name, format, trusted) }.getOrNull()
+                if (plan != null) withContext(Dispatchers.Main) { com.blaineam.haven.core.AssistantLaunch.applyCall(app, plan) }
+            }
+            return
+        }
         when (intent?.action) {
             // A haven:// or https link the app was opened with (tap in a browser/DM, or one of our
             // own notifications). Invites and post links share a domain AND both ride the

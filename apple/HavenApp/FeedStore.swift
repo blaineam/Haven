@@ -2632,6 +2632,15 @@ final class FeedStore: ObservableObject {
     func noteMediaMissingOnRelays(_ ref: String) {
         guard !MediaStore.shared.has(ref) else { return }
         waitingForSenderMedia.insert(ref)
+        var f = MediaTransferState.shared.findingRelay
+        if f.remove(ref) != nil { MediaTransferState.shared.setFindingRelay(f) }
+    }
+    /// This device knows NO relay for the ref's circle, so nothing was (or could be) asked: say what is
+    /// really happening — "Finding a relay…" — instead of blaming the sender (`NoRelayMediaPolicy`).
+    func noteMediaFindingRelay(_ ref: String) {
+        guard !MediaStore.shared.has(ref) else { return }
+        var f = MediaTransferState.shared.findingRelay
+        if f.insert(ref).inserted { MediaTransferState.shared.setFindingRelay(f) }
     }
     func noteUnopenableMedia(_ ref: String) { unopenableMedia.insert(ref) }
     func noteRestoreProgress(_ ref: String, done: Int, total: Int) {
@@ -2650,6 +2659,8 @@ final class FeedStore: ObservableObject {
         waitingForSenderMedia.remove(ref)
         unavailableMedia.remove(ref)
         unopenableMedia.remove(ref)
+        var finding = MediaTransferState.shared.findingRelay
+        if finding.remove(ref) != nil { MediaTransferState.shared.setFindingRelay(finding) }
         MediaTransferState.shared.clearRestoreProgress(ref)   // drops pending chunk progress too
         transferWatch[ref] = nil
         // "Received" counts EVERY lane — relay restore, peer stream, handoff — not just peer
@@ -6723,6 +6734,7 @@ final class FeedStore: ObservableObject {
             SharedStore.markSeenPublic(key)
             relayIngested = true
         }
+        retryParkedRelayAnnounces()   // a key may have landed in this pass (hello / event above)
         // `/__live__/` keys are call frames claimed by the in-call 2s poll — never content. An
         // unclaimed one (another device's lane, or a call long over) fed to receive() fails every
         // single poll forever; keep them out of the batch entirely.
@@ -7333,8 +7345,8 @@ final class FeedStore: ObservableObject {
     /// plaintext); everything else arrives as it came off the wire.
     private func dispatchInboundFrame(_ type: UInt8, _ payload: Data, viaNearby: Bool, senderDevice: String?) {
         switch type {
-        case 0: Task { @MainActor in _ = await self.handleHello(payload, viaNearby: viaNearby, senderDevice: senderDevice) }
-        case 1: handleEvent(payload, senderDevice: senderDevice, viaNearby: viaNearby)
+        case 0: Task { @MainActor in _ = await self.handleHello(payload, viaNearby: viaNearby, senderDevice: senderDevice); self.retryParkedRelayAnnounces() }
+        case 1: handleEvent(payload, senderDevice: senderDevice, viaNearby: viaNearby); retryParkedRelayAnnounces()
         case 3: handleMediaRequest(payload)
         case 5: handleMediaChunk(payload)
         case 9: handleRelay(payload)
@@ -8384,6 +8396,39 @@ final class FeedStore: ObservableObject {
     /// account ids (see `RelayAddress.supersededAccountRelays`).
     private var announcedRelayNodes: Set<String> = []
 
+    /// Relay announces (frame 19) that beat this device's copy of the circle's key — see
+    /// `RelayAnnounceParking`. Bounded (64), expiring (1 h), de-duplicated.
+    private let parkedRelayAnnounces = RelayAnnounceParking()
+
+    private var introNudgedAt: [String: UInt64] = [:]   // "author|circle" -> last nudge (ms)
+
+    /// A friend authored media for a circle this device knows no relay for: ask them to re-announce
+    /// theirs (a Hello makes them re-send frame 19), at most once per `NoRelayMediaPolicy.introNudgeEveryMs`
+    /// per (author, circle).
+    private func nudgeAuthorToAnnounceRelay(circleId: String, author: String) {
+        guard !SharedStore.hasMailbox(circleId), author.count == 64 else { return }
+        let key = "\(author)|\(circleId)"
+        let nowMs = now()
+        guard NoRelayMediaPolicy.introNudgeDue(hasRelay: false, lastNudgeMs: introNudgedAt[key], nowMs: nowMs) else { return }
+        introNudgedAt[key] = nowMs
+        if introNudgedAt.count > 500 { introNudgedAt.removeAll() }
+        guard let name = circles.first(where: { $0.id == circleId })?.name,
+              let hello = helloPayload(circleId: circleId, circleName: name) else { return }
+        HavenLog.sync("no relay known for \(circleId.prefix(12)) — asking \(author.prefix(8)) to re-announce theirs")
+        sendIroh(0, hello, to: author)
+    }
+
+    /// Re-process parked relay announces (a key may have landed). Cheap when nothing is parked; the
+    /// ones still unopenable are parked again by `handleRelayNode`.
+    private func retryParkedRelayAnnounces() {
+        for p in parkedRelayAnnounces.drain(nowMs: now()) {
+            var payload = Data()
+            lpAppend(&payload, Data(p.circleId.utf8))
+            payload.append(p.sealed)                    // [LP cid][sealed] — frame 19's layout
+            Task { await self.handleRelayNode(payload) }
+        }
+    }
+
     private func handleRelayNode(_ payload: Data) async {
         guard let engine else { return }
         var off = 0
@@ -8399,7 +8444,18 @@ final class FeedStore: ObservableObject {
             guard let opened = s.openCircleMediaSender(circleId: circleId, sealed: sealed) else { return nil }
             return (opened.data, s.contactNodeIds(circleId: circleId))
         }
-        guard self.engine === engine, let read, var nodeHex = String(data: read.data, encoding: .utf8) else { return }
+        guard self.engine === engine else { return }
+        guard let read else {
+            // Not openable YET: this device does not hold the circle's key. Dropping the announce meant
+            // a freshly (re)installed device never learned its first relay (an invite carries device
+            // ids, not a relay) and ran relay-less. Park it and retry when keys may have landed
+            // (next hello / event / mailbox pass) — `RelayAnnounceParking`, Android/desktop parity.
+            parkedRelayAnnounces.park(circleId: circleId, sealed: sealed, nowMs: now())
+            return
+        }
+        // A relay announce opened: the "Finding a relay…" placeholders retry on the next sweep.
+        MediaTransferState.shared.setFindingRelay([])
+        guard var nodeHex = String(data: read.data, encoding: .utf8) else { return }
         let data = read.data
         // Extended announce: JSON {node, urls, token} also carries the relay's plain-HTTP media
         // interface (the reliable cross-NAT path). Legacy announces are the bare 64-hex id.
@@ -9020,6 +9076,9 @@ final class FeedStore: ObservableObject {
         let ref = String(data: refD, encoding: .utf8) ?? ""
         let circleId = String(data: cidD, encoding: .utf8) ?? ""
         let postId = String(data: pidD, encoding: .utf8) ?? ""
+        // "It's on a relay, fetch it there" is no use to a device that knows no relay for this circle.
+        // The requestMedia below asks the author directly; also nudge them to re-announce their relay.
+        if !SharedStore.hasMailbox(circleId) { nudgeAuthorToAnnounceRelay(circleId: circleId, author: from) }
         guard MediaWantedStore.shared.isWanted(ref) else {
             // Not something we asked for → an author's push-ahead announce (their fresh post's
             // media just landed on a relay). Prefetch it anyway — bounded, deduped, and
@@ -9312,6 +9371,14 @@ final class FeedStore: ObservableObject {
         // them all) — the same test the missing-media sweep uses.
         let circleHasRelay = circleIds.contains { SharedStore.hasMailbox($0) }
         guard circleHasRelay, incoming[ref] == nil else {
+            if !circleHasRelay {
+                // No relay known for any circle: nothing can be fetched from a relay, so the placeholder
+                // must not imply the SENDER is at fault. The author is asked directly (below) — a
+                // relay-less device is re-asked straight away, so they reach "hints exhausted" and
+                // stream — and nudged to re-announce their relay when their hint arrives
+                // (`handleMediaAvailable`, `NoRelayMediaPolicy`).
+                noteMediaFindingRelay(ref)
+            }
             if mayDirectAsk(ref, circleHasRelay: circleHasRelay) { askForMedia(ref: ref, myHex: myHex, plain: payload) }
             return
         }

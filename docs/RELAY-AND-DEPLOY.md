@@ -36,6 +36,17 @@ and degrades gracefully:
 - **Auto-pooling:** when a circle member advertises their relay (frame 19 / `RELAY_NODE`),
   peers **add** it to their set rather than replacing — so adopting one relay each gives the
   whole circle several, with no manual fan-out.
+- **A new device's FIRST relay:** an invite carries device ids, not a relay, and self-sync needs a
+  transport, so a freshly (re)installed device learns its first relay ONLY from a sealed frame-19
+  announce — and that announce is sealed to the circle, so it cannot be opened until the device holds
+  the circle's key. An announce that arrives first is **parked** (bounded to 64, expiring after 1 h,
+  de-duplicated, drained at most every 5 s) and re-processed on the next hello / event / sync tick
+  instead of being dropped (`RelayAnnounceParking` on iOS and Android, `relayparking.rs` on desktop —
+  same constants). Until a relay is known the media placeholder says **Finding a relay…** (nothing was
+  asked, so nothing is "missing"), a relay hint the device cannot use makes it re-ask the author at once
+  (within the author's 3-hint budget, so they stream the bytes), and the author is nudged — at most once
+  per 10 min per (author, circle) — to re-announce the circle's relay. None of this widens a circle's
+  relay scope: a parked announce is applied exactly as a live one is.
 - **Layered delivery:** relays are one tier of the chain above — if every relay is down, direct
   P2P (online peers) and the BYO S3 bucket still carry traffic.
 

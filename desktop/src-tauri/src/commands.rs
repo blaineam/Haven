@@ -1076,6 +1076,14 @@ pub fn media_is_wanted(engine: Eng, reference: String) -> bool {
     engine.media_is_wanted(&reference)
 }
 
+/// True while this device knows NO relay (or S3 bucket) to fetch `circle_id`'s media from — the
+/// placeholder then says "Finding a relay…" instead of implying the sender is at fault (nothing was
+/// asked, so nothing is missing). Android/iOS parity; see `relayparking`.
+#[tauri::command]
+pub fn media_finding_relay(engine: Eng, circle_id: String) -> bool {
+    engine.media_finding_relay(&circle_id)
+}
+
 /// "Message <author>" from a post's ⋯ menu: open (or reuse) the DM with them and carry the post's
 /// media. Returns the DM circle id, or `None` when the author isn't a contact.
 #[tauri::command]

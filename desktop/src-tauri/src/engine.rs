@@ -78,6 +78,13 @@ struct DynState {
     /// [`crate::relayscope::KeylessScopeWatch`] and [`Engine::rescope_keyless_circles`].
     keyless_watch: crate::relayscope::KeylessScopeWatch,
     keyless_rescope_pending: bool,
+    /// Relay announces (frame 19) that beat this device's copy of the circle's key — see
+    /// [`crate::relayparking`]. Re-processed on the next hello / event / heartbeat.
+    parked_relay_announces: crate::relayparking::RelayAnnounceParking,
+    /// "author|circle" -> last time we nudged them to re-announce their circle relay (we know none).
+    intro_nudged_at: HashMap<String, u64>,
+    /// ref -> (re-asks so far, last at ms) after a relay hint this relay-less device could not use.
+    hint_reasks: HashMap<String, (usize, u64)>,
     pending: Vec<PendingRequest>,
     /// node ids we initiated a connect to (scanned their QR) → expected verify hash.
     initiated: HashMap<String, String>,
@@ -1844,6 +1851,9 @@ impl Engine {
                 // A relay that joined a circle since the last heartbeat serves nobody until we
                 // introduce ourselves — now, not on the ~2-min backfill tick (`relayintro`).
                 me.introduce_to_joined_relays().await;
+                // Relay announces that beat the circle's key: a key may have landed since (cheap no-op
+                // when nothing is parked; drains are rate-limited — `relayparking`).
+                me.retry_parked_relay_announces();
 
                 // Poll bucket (base 30s): pull the circle mailbox so posts arrive even when peers
                 // aren't both online, then converge this user's OWN devices over the same relays.
@@ -5195,8 +5205,14 @@ impl Engine {
         tauri::async_runtime::spawn(async move {
             me.dyn_state.lock().internet_active = true;
             match t {
-                wire::HELLO => me.handle_hello_from(sender_device.as_deref(), &body),
-                wire::EVENT => me.handle_event(&body, sender_device.as_deref()),
+                wire::HELLO => {
+                    me.handle_hello_from(sender_device.as_deref(), &body);
+                    me.retry_parked_relay_announces();
+                }
+                wire::EVENT => {
+                    me.handle_event(&body, sender_device.as_deref());
+                    me.retry_parked_relay_announces();
+                }
                 wire::RELAY_NODE => me.handle_relay_node(&body).await,
                 wire::MEDIA_REQ => me.handle_media_request(&body).await,
                 wire::MEDIA_RESUME_REQ => me.handle_media_resume_request(&body).await,
@@ -5481,6 +5497,18 @@ impl Engine {
 
     // ---- relay / mailbox ----------------------------------------------------------------
 
+    /// Re-process parked relay announces (a key may have landed). Cheap when nothing is parked; the
+    /// ones still unopenable are parked again by [`Self::ingest_relay_announce`].
+    fn retry_parked_relay_announces(self: &Arc<Self>) {
+        let drained = self.dyn_state.lock().parked_relay_announces.drain(now_ms());
+        for p in drained {
+            let me = self.clone();
+            tauri::async_runtime::spawn(async move {
+                me.handle_relay_node(&wire::event_payload(&p.circle_id, &p.sealed)).await; // [LP cid][sealed]
+            });
+        }
+    }
+
     async fn handle_relay_node(self: &Arc<Self>, body: &[u8]) {
         let Some((circle_id, news)) = self.ingest_relay_announce(body) else { return };
         if news {
@@ -5515,7 +5543,14 @@ impl Engine {
         if circle_id.is_empty() || sealed.is_empty() {
             return None;
         }
-        let opened = self.social.open_circle_media_sender(circle_id.clone(), sealed)?;
+        let Some(opened) = self.social.open_circle_media_sender(circle_id.clone(), sealed.clone()) else {
+            // Not openable YET: this device does not hold the circle's key. Dropping the announce meant
+            // a freshly (re)installed device never learned its first relay (an invite carries device
+            // ids, not a relay) and ran relay-less. Park it and retry when keys may have landed
+            // (next hello / event / heartbeat) — Android/iOS parity.
+            self.dyn_state.lock().parked_relay_announces.park(&circle_id, &sealed, now_ms());
+            return None;
+        };
         let announcer_hex = opened.sender_hex.to_lowercase(); // authenticated envelope sender (account id)
         let text = String::from_utf8_lossy(&opened.data).trim().to_string();
         // Extended announce: JSON {node, urls, token, derp, turn, turnUser, turnPass}.
@@ -11410,6 +11445,10 @@ impl Engine {
         if !self.is_contact(&from) {
             return;
         }
+        // "It's on a relay, fetch it there" is no use to a device that knows no relay for this circle:
+        // re-ask the author right away (so they reach "hints exhausted" and stream it) and nudge them
+        // to re-announce their relay. Android `onUnusableRelayHint` parity.
+        self.on_unusable_relay_hint(&circle_id, &reference, &from);
         // Something we asked for → the full "it's back" flow below. Anything else is the author's
         // push-ahead announce (their fresh post's media just landed on a relay): prefetch it
         // quietly — bounded, deduped, data-saver aware — with NO notification; the post's own
@@ -11460,6 +11499,76 @@ impl Engine {
         );
         log::info!("media-wanted {}: author says it's back — fetching", short(&reference));
         self.emit_changed();
+    }
+
+    /// Does this device know ANY relay (or an S3 bucket) it could fetch `circle_id`'s media from?
+    /// False for a freshly (re)installed device that has not yet learned one (frame 19).
+    fn media_circle_has_relay(&self, circle_id: &str) -> bool {
+        !self.media_dests(circle_id).is_empty() || self.prefs.lock().s3.is_some()
+    }
+
+    /// Whether a media ref's circle is relay-less here — drives the "Finding a relay…" placeholder
+    /// (nothing was asked, so nothing is "missing"). See `relayparking`.
+    pub fn media_finding_relay(&self, circle_id: &str) -> bool {
+        let asked = self.media_dests(circle_id).len() + usize::from(self.prefs.lock().s3.is_some());
+        !crate::relayparking::relays_answered_empty(asked)
+    }
+
+    /// Ask `author` to re-announce their circle relay (a Hello makes them re-send frame 19) — at most
+    /// once per [`crate::relayparking::INTRO_NUDGE_EVERY_MS`] per (author, circle), and only while this
+    /// device knows no relay for the circle.
+    fn nudge_author_to_announce_relay(self: &Arc<Self>, circle_id: &str, author: &str) {
+        if author.len() != 64 || self.media_circle_has_relay(circle_id) {
+            return;
+        }
+        let now = now_ms();
+        let key = format!("{author}|{circle_id}");
+        {
+            let mut st = self.dyn_state.lock();
+            let last = st.intro_nudged_at.get(&key).copied();
+            if !crate::relayparking::intro_nudge_due(false, last, now) {
+                return;
+            }
+            st.intro_nudged_at.insert(key, now);
+            if st.intro_nudged_at.len() > 500 {
+                st.intro_nudged_at.clear();
+            }
+        }
+        log::info!("no relay known for {} — asking {} to re-announce theirs", short(circle_id), short(author));
+        self.send_hello(circle_id, author);
+    }
+
+    /// A friend hinted "it's on a relay" for a ref of a circle we know NO relay for: the hint cannot be
+    /// acted on. Re-ask the author at once (spaced and capped at the author's hint budget) so they
+    /// stream the bytes instead of waiting out the 5-minute direct-ask cooldown per hint, and nudge them
+    /// to re-announce the circle relay. Android `onUnusableRelayHint` parity.
+    fn on_unusable_relay_hint(self: &Arc<Self>, circle_id: &str, reference: &str, author: &str) {
+        if self.media_circle_has_relay(circle_id) || self.media.has(reference) {
+            return;
+        }
+        let now = now_ms();
+        let reask = {
+            let mut st = self.dyn_state.lock();
+            let (n, last) = st.hint_reasks.get(reference).copied().unwrap_or((0, 0));
+            if crate::relayparking::re_ask_after_unusable_hint(false, n, (n > 0).then_some(last), now) {
+                st.hint_reasks.insert(reference.to_string(), (n + 1, now));
+                if st.hint_reasks.len() > 5000 {
+                    st.hint_reasks.clear();
+                }
+                true
+            } else {
+                false
+            }
+        };
+        if reask {
+            log::info!("hint for {} but no relay known for {} — re-asking {} so they stream it",
+                       short(reference), short(circle_id), short(author));
+            let my_hex = self.node_id_hex();
+            let mut payload = my_hex.clone().into_bytes();
+            payload.extend_from_slice(reference.as_bytes());
+            self.ask_for_media(reference, &my_hex, payload, vec![author.to_string()]);
+        }
+        self.nudge_author_to_announce_relay(circle_id, author);
     }
 
     /// Act on an UNSOLICITED frame-32 announce (author push-ahead): fetch the just-landed blob so

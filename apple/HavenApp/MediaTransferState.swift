@@ -25,6 +25,10 @@ final class MediaTransferState: ObservableObject {
     @Published private(set) var downloading: Set<String> = []
     @Published private(set) var unavailable: Set<String> = []
     @Published private(set) var waitingForSender: Set<String> = []
+    /// Refs we could not even look for because this device knows no relay for their circle yet —
+    /// "Finding a relay…", NOT "Waiting for sender…" (`NoRelayMediaPolicy`). Cleared when a relay
+    /// announce opens or the bytes land.
+    @Published private(set) var findingRelay: Set<String> = []
     @Published private(set) var restoreProgress: [String: MediaRestoreProgress] = [:]
 
     // Change-guarded setters: a `Set.insert` of a member already present, or a `remove` of one that
@@ -32,6 +36,7 @@ final class MediaTransferState: ObservableObject {
     func setDownloading(_ v: Set<String>) { if v != downloading { downloading = v } }
     func setUnavailable(_ v: Set<String>) { if v != unavailable { unavailable = v } }
     func setWaitingForSender(_ v: Set<String>) { if v != waitingForSender { waitingForSender = v } }
+    func setFindingRelay(_ v: Set<String>) { if v != findingRelay { findingRelay = v } }
     func setRestoreProgress(_ v: [String: MediaRestoreProgress]) { if v != restoreProgress { restoreProgress = v } }
 
     /// Per-chunk progress lands here and is published at most every ~100 ms — a 32 KB-chunk restore

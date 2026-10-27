@@ -25,6 +25,7 @@ mod netgate;
 mod qa;
 mod relayhealth;
 mod relayintro;
+mod relayparking;
 mod relayscope;
 mod reoptimize;
 mod roster;
@@ -626,6 +627,7 @@ pub fn run() {
             commands::media_download,
             commands::media_request_when_available,
             commands::media_is_wanted,
+            commands::media_finding_relay,
             commands::message_author,
             commands::kept_stories,
             commands::toggle_kept_story,

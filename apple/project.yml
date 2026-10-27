@@ -489,6 +489,8 @@ targets:
       - path: HavenApp/RelayAddress.swift
       # Which circles inherit the all-circles default relay (a friend's relay is withheld from a private circle).
       - path: HavenApp/RelayDefaultScope.swift
+      # Parked relay announces + the no-relay media rules (Android/desktop parity). Foundation/CryptoKit only.
+      - path: HavenApp/RelayAnnounceParking.swift
       - path: HavenApp/MediaVariants.swift
       - path: HavenApp/FileArchive.swift
       - path: HavenApp/PushBanner.swift

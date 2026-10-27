@@ -28,6 +28,25 @@ to "on" while a failed capture published a permanent black tile, with no message
   CAMERA granted throws on Android 14+). Matches iOS, which already requests camera access at the toggle.
 - Not covered: a call answered from a head unit / Telecom `onAnswer` with no Haven window still cannot show
   a permission prompt; grant once in-app and it never recurs.
+### Fixed - iOS + desktop: a new device parks relay announces it cannot open yet (Android parity)
+
+The Android fix above, on the other two platforms. An iOS or desktop device that received a circle's
+relay announce (frame 19) before it held the circle's key dropped it for good — and that announce is the
+only way a freshly (re)installed device learns its FIRST relay (an invite carries device ids, not a
+relay) — so it ran relay-less. Now an announce that cannot be opened yet is **parked** (bounded to 64,
+expiring after 1 h, de-duplicated, drained at most every 5 s) and re-processed on the next hello / event /
+mailbox pass / heartbeat: `RelayAnnounceParking` (iOS `RelayAnnounceParking.swift`, desktop
+`relayparking.rs`), same constants and cases as Android's.
+
+While no relay is known, a photo's placeholder says **Finding a relay…** (translated; iOS in all its
+languages, desktop in its six) instead of implying the sender is slow: nothing was asked, so nothing is
+missing — iOS no longer paints *Waiting for sender…* from a restore that asked no relay, and desktop's
+"Not available yet" no longer fires while there is nothing to ask. A relay hint the device cannot use
+makes desktop re-ask the author at once (spaced, capped at the author's 3-hint budget — iOS already asks
+directly whenever it has no relay), and both nudge the author with a Hello, at most once per 10 min per
+(author, circle), so they re-announce the circle relay. No relay scope is widened: a parked announce is
+applied exactly like a live one (`docs/RELAY-AND-DEPLOY.md`). Tests: iOS `RelayAnnounceParkingTests` (13),
+desktop `relayparking` unit tests + engine tests for parking/retry and the relay-less state.
 
 ### Fixed - Android: "Waiting for sender…" no longer lies on a relay-less device
 
@@ -38,8 +57,8 @@ dropped it when the key had not landed yet (`peers_keyed` 0 at startup) — neve
 device ran relay-less indefinitely. Unopenable announces are now parked (bounded, expiring,
 de-duplicated) and re-processed on the next hello / event / sync tick (`RelayAnnounceParking`), and
 a relay-less photo shows **Finding a relay…** instead of blaming the sender. iOS
-(`FeedStore.handleRelayNode`) and desktop (`handle_relay_node`) drop an unopenable announce the same
-way — parity port pending.
+(`FeedStore.handleRelayNode`) and desktop (`handle_relay_node`) dropped an unopenable announce the same
+way — ported below (iOS + desktop).
 
 A freshly installed Android that had not yet learned a circle's relay asked ZERO relays for every
 photo, then fell into the "relays answered and none holds it" branch and painted *Waiting for

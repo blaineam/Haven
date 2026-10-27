@@ -2550,6 +2550,7 @@ final class EvictedMediaStore: ObservableObject {
 /// A graceful placeholder for a referenced blob whose bytes aren't on disk. Honest states:
 ///  • deliberately evicted (cleanup / limit sweep) → a "Download N MB" affordance (re-fetches on tap);
 ///  • actively downloading → a spinner, with chunk progress (i/n) for large chunked blobs;
+///  • no relay known for the circle yet → "Finding a relay…" (nothing was asked, so nothing is missing);
 ///  • relays reachable but empty → "Waiting for sender…" (their device hasn't uploaded it yet);
 ///  • retries exhausted / relay swept it → "No longer available" (Retry + Ask-for-it-back).
 /// Media that's simply still syncing keeps the plain "still loading" spinner — but ONLY when there is
@@ -2649,7 +2650,7 @@ struct MissingMediaPlaceholder: View {
             // the real view swaps in on the next refresh. No spinner over finished media.
             EmptyView()
         } else if thumbImage != nil,
-                  transfer.downloading.contains(ref) || transfer.waitingForSender.contains(ref),
+                  transfer.downloading.contains(ref) || transfer.waitingForSender.contains(ref) || transfer.findingRelay.contains(ref),
                   !transfer.unavailable.contains(ref) {
             // We are holding a picture of it and it is on its way. Show the picture. A spinner and a
             // "Waiting for sender…" caption over a photo that is visibly there reads as an error, and
@@ -2663,6 +2664,14 @@ struct MissingMediaPlaceholder: View {
                 if let p = transfer.restoreProgress[ref], p.total > 1 {
                     Text("Downloading… \(p.done)/\(p.total)").font(.caption).foregroundStyle(overlayStyle)
                 }
+            }
+        } else if transfer.findingRelay.contains(ref), !transfer.unavailable.contains(ref) {
+            // This device knows no relay for the circle yet (a freshly installed device that has not
+            // learned one), so nothing was asked and nothing is "missing" — say what is really
+            // happening instead of blaming the sender. Android/desktop parity.
+            VStack(spacing: 8) {
+                ProgressView()
+                Text("Finding a relay…").font(.caption).foregroundStyle(overlayStyle)
             }
         } else if transfer.waitingForSender.contains(ref), !transfer.unavailable.contains(ref) {
             // The relays answered and none holds it — the SENDER hasn't uploaded it yet. A different

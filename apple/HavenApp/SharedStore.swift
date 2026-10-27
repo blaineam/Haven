@@ -2544,11 +2544,21 @@ enum SharedStore {
             // membership problem look like data loss for days — the blob was on the relay the
             // whole time, and the device simply wasn't allowed to ask for it.
             if rosterNeeded.isEmpty {
-                HavenLog.relay("media restore \(ref.prefix(12)): NOT FOUND on any relay/S3")
+                // How many sources were actually ASKED: our own relay, each circle's media relays, S3.
+                // A fetch that asked none proved nothing — it must not claim "the relays answered and
+                // none holds it" (`NoRelayMediaPolicy`).
+                let ownAsked = RelayHost.shared.serving && circleIds.contains(where: { relayNodes($0).contains(RelayHost.shared.nodeId) })
+                let relaysAsked = (ownAsked ? 1 : 0) + circleIds.reduce(0) { $0 + mediaDests($1).count } + (circleIds.contains(where: { mediaS3(for: $0) != nil }) ? 1 : 0)
+                HavenLog.relay("media restore \(ref.prefix(12)): NOT FOUND on any relay/S3" + (NoRelayMediaPolicy.relaysAnsweredEmpty(relaysAsked: relaysAsked) ? "" : " (no relay known for this circle — none asked)"))
                 // Honest placeholder state: the relays answered and none holds it — we are now
                 // waiting on the SENDER to put it (back) up, which is a different thing from
-                // "downloading" or "gone forever".
-                FeedStore.shared.noteMediaMissingOnRelays(ref)
+                // "downloading" or "gone forever". With NO relay asked there is nothing to wait on the
+                // sender for: say "Finding a relay…" instead.
+                if NoRelayMediaPolicy.relaysAnsweredEmpty(relaysAsked: relaysAsked) {
+                    FeedStore.shared.noteMediaMissingOnRelays(ref)
+                } else {
+                    FeedStore.shared.noteMediaFindingRelay(ref)
+                }
                 // A full miss is ALSO the signature of a relay whose HTTP front door we can't use
                 // (rotated tunnel / never learned): the blob may sit on a relay we only failed to
                 // ASK properly. Try to fetch each dest relay's self-published interface over iroh —

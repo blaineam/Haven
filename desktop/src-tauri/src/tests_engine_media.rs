@@ -406,6 +406,67 @@ async fn handle_relay_node_applies_a_live_announce_and_ignores_junk() {
     assert_eq!(b.relays_detail().len(), 1);
 }
 
+#[tokio::test]
+async fn a_relay_announce_that_beats_the_circle_key_is_parked_not_dropped() {
+    // The fresh-install failure: the ONLY way a new device learns its first relay is a sealed announce
+    // from a circle member, and one that arrives before the circle's key was dropped for good.
+    let (a, _) = new_engine(130);
+    let (b, _) = new_engine(131); // holds no key for A's circle
+    a.prefs.lock().ensure_relay_entry(R1, None, false, true);
+    let frame = announce_frame(&a, R1);
+
+    b.handle_relay_node(&frame).await;
+    assert!(b.relays_detail().is_empty(), "nothing learned: it cannot be opened yet");
+    assert_eq!(b.dyn_state.lock().parked_relay_announces.len(), 1, "parked, not dropped");
+    b.handle_relay_node(&frame).await;
+    assert_eq!(b.dyn_state.lock().parked_relay_announces.len(), 1, "the same bytes are kept once");
+
+    // Still no key: a retry parks it again (it keeps its place) and learns nothing.
+    b.retry_parked_relay_announces();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(b.relays_detail().is_empty());
+    assert_eq!(b.dyn_state.lock().parked_relay_announces.len(), 1, "still unopenable → re-parked");
+
+    // Junk never parks (it is not a sealed announce for any circle).
+    let before = b.dyn_state.lock().parked_relay_announces.len();
+    b.handle_relay_node(b"junk").await;
+    assert_eq!(b.dyn_state.lock().parked_relay_announces.len(), before);
+}
+
+#[tokio::test]
+async fn retrying_a_parked_announce_applies_it_once_it_opens() {
+    // A member that holds the key opens what was parked: drain → handle_relay_node → the relay is learned.
+    let (a, b) = pair(134, 135);
+    a.prefs.lock().ensure_relay_entry(R1, None, false, true);
+    let frame = announce_frame(&a, R1);
+    let sealed = {
+        let mut r = wire::Reader::new(&frame);
+        let _cid = r.lp();
+        r.rest()
+    };
+    b.dyn_state.lock().parked_relay_announces.park(DEFAULT_CIRCLE, &sealed, now_ms());
+    assert!(b.relays_detail().is_empty());
+    b.retry_parked_relay_announces();
+    for _ in 0..50 {
+        if !b.relays_detail().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(b.relays_detail().len(), 1, "the parked announce was applied");
+    assert_eq!(b.dyn_state.lock().parked_relay_announces.len(), 0, "handed over and not re-parked");
+}
+
+#[tokio::test]
+async fn a_relay_less_device_asks_nothing_of_relays_and_says_so() {
+    // Nothing was asked → "Finding a relay…" (not "waiting for sender"); a relay appears → it clears.
+    let (a, b) = pair(132, 133);
+    assert!(b.media_finding_relay(DEFAULT_CIRCLE), "a fresh device knows no relay for the circle");
+    a.prefs.lock().ensure_relay_entry(R1, None, false, true);
+    b.handle_relay_node(&announce_frame(&a, R1)).await;
+    assert!(!b.media_finding_relay(DEFAULT_CIRCLE), "a relay is known now");
+}
+
 // ── pins, kept stories, evicted set ─────────────────────────────────────────────────────────────
 
 #[tokio::test]

@@ -344,9 +344,12 @@ function syncingPlaceholder(circleId, ref, isVideo) {
   }
   const front = el("div", { class: "col", style: "position:relative;z-index:1;align-items:center;gap:6px" });
   box.append(front);
-  const waiting = () => front.replaceChildren(
+  // `finding` = this device knows NO relay for the circle yet (a freshly installed device that has not
+  // learned one): nothing was asked, so nothing is missing — say so instead of implying a slow sender
+  // (Android/iOS parity; `media_finding_relay`).
+  const waiting = (finding) => front.replaceChildren(
     el("div", { class: "spinner" }),
-    el("div", { class: "muted small" }, isVideo ? t("video_still_loading") : t("still_loading")));
+    el("div", { class: "muted small" }, finding ? t("finding_relay") : (isVideo ? t("video_still_loading") : t("still_loading"))));
   // `gone` is terminal and ACTIONABLE, so it always shows — even over a thumb. Re-show the front
   // layer the thumb hid: the difference between "on its way" (say nothing) and "you need to do
   // something" is the only thing chrome should be marking here.
@@ -359,15 +362,20 @@ function syncingPlaceholder(circleId, ref, isVideo) {
     } }, t("retry"))));
   let timer = null;
   const start = () => {
-    waiting();
+    waiting(false);
     let waited = 0;
+    let finding = false;
     clearTimeout(timer);
     const tick = async () => {
       if (!box.isConnected) return;   // card re-rendered underneath us — stop polling
       const url = await invoke("media_data_url", { circleId, reference: ref }).catch(() => null);
       if (url) { const n = mediaNode(ref); box.replaceWith(n); loadMedia(n, circleId, ref); return; }
+      const nowFinding = await invoke("media_finding_relay", { circleId }).catch(() => false);
+      if (nowFinding !== finding) { finding = nowFinding; waiting(finding); }
       waited += 2000;
-      if (waited >= 45000) { gone(); return; }
+      // Never give up ("Not available yet") while there is no relay to ask: that is not the sender's
+      // fault and a relay announce may land at any moment.
+      if (waited >= 45000 && !finding) { gone(); return; }
       timer = setTimeout(tick, 2000);
     };
     timer = setTimeout(tick, 2000);

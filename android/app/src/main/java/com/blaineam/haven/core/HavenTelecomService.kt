@@ -15,6 +15,13 @@ import android.telecom.PhoneAccountHandle
  * Telecom hook.
  */
 class HavenTelecomService : android.telecom.ConnectionService() {
+    override fun onCreate() {
+        super.onCreate()
+        // Telecom can bind this in a process nothing else started (no RootScreen to initialise the call
+        // stack): bring it up, off this thread, so the connection callbacks below find a live CallManager.
+        CallRuntime.whenReady(applicationContext) { }
+    }
+
     override fun onCreateOutgoingConnection(
         connectionManagerPhoneAccount: PhoneAccountHandle?,
         request: ConnectionRequest?,

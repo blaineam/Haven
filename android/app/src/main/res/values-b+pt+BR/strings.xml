@@ -376,6 +376,7 @@ O que já tentei:
     <string name="car_hang_up">Desligar</string>
     <string name="car_search_all">Pesquisar todos os contatos</string>
     <string name="car_search_hint">Pesquisar contatos</string>
+    <string name="car_open_haven">Abra o Haven no seu telefone para fazer chamadas.</string>
     <string name="settings_stay_connected_header">Fique conectado</string>
     <string name="settings_stay_connected_desc">Fique conectado para receber publicações, mensagens e chamadas na hora. Usa um pouco de bateria.</string>
     <string name="settings_realtime_connection">Conexão em tempo real</string>

@@ -88,6 +88,9 @@ object CallManager {
     lateinit var eglBase: EglBase; private set
 
     private lateinit var appContext: Context
+
+    /** [init] has run. Entry points are ignored before it (see [onCall]); a process with no UI boots it via [CallRuntime]. */
+    val isReady: Boolean get() = this::appContext.isInitialized
     private var myHex: String = ""
     private var factory: PeerConnectionFactory? = null
     private var audioTrack: AudioTrack? = null
@@ -200,6 +203,10 @@ object CallManager {
     /** Run [block] on the call thread: inline when already there (nested entry points stay in
      *  order), otherwise queued in arrival order. Never blocks the caller. */
     private fun onCall(block: () -> Unit) {
+        // Before [init] there is no appContext (and no engine to dial through): a call entry that arrives
+        // first in a cold, UI-less process (the car, a voice launch) would crash the process on the first
+        // lateinit read. Drop it loudly; callers that can start calls go through [CallRuntime.whenReady].
+        if (!isReady) { Log.w(TAG, "call entry before init — ignored"); return }
         if (isOnCallThread()) block() else callHandler.post(block)
     }
 
@@ -277,6 +284,7 @@ object CallManager {
         return servers
     }
 
+    @Synchronized   // RootScreen (main) and CallRuntime (a UI-less process) may both bring this up
     fun init(context: Context, myNodeHex: String) {
         if (this::appContext.isInitialized) { myHex = myNodeHex; return }
         appContext = context.applicationContext

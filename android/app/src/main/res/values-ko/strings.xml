@@ -341,6 +341,7 @@
     <string name="car_hang_up">통화 종료</string>
     <string name="car_search_all">모든 연락처 검색</string>
     <string name="car_search_hint">연락처 검색</string>
+    <string name="car_open_haven">통화하려면 휴대전화에서 Haven을 여세요.</string>
     <string name="settings_stay_connected_header">연결 유지</string>
     <string name="settings_stay_connected_desc">게시물, 메시지, 통화를 바로 받아볼 수 있게 연결을 유지해요. 배터리를 조금 써요.</string>
     <string name="settings_realtime_connection">실시간 연결</string>

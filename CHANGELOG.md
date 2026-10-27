@@ -18,6 +18,15 @@ launcher for "call X on Haven" and each assistant call launch logs its referrer 
 Android Auto message notifications: the contact's picture is the conversation image, the group flag is set after the
 title, and every reply / mark-read PendingIntent is distinct per conversation through its Intent data (a request-code
 xor could collide and retarget another thread's reply). Tests: `CarMessagingTest`, `AssistantCallRouteTest`.
+### Fixed - Android: a call placed from a cold, UI-less process no longer crashes (car, voice, Telecom)
+- Found on the Desktop Head Unit: the car app can start Haven in a process nothing else started, where
+  `RootScreen` never ran `CallManager.init`, so the first call from the car crashed the process
+  (`UninitializedPropertyAccessException: appContext`). A shared idempotent `CallRuntime` now brings the engine,
+  the network node and the call stack up (off the main thread, never throwing) and every entry that can place a
+  call without the UI uses it: the car app's call tap, the Assistant "call X on Haven" route and the Telecom
+  service. `CallManager` also ignores (and logs) an entry that arrives before `init` instead of crashing. If it
+  cannot come up (no account yet) the car shows "Open Haven on your phone to place calls." (9 locales). Normal
+  app startup is unchanged. Tests: `CallRuntimeTest` (boot order, idempotence, graceful failure, source guards).
 
 ### Fixed - Android Auto never read DMs that arrived late
 `notifyInbound` skipped any message sent more than 10 minutes before it was processed, so a DM that landed late (fresh

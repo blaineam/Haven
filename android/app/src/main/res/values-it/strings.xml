@@ -341,6 +341,7 @@
     <string name="car_hang_up">Termina</string>
     <string name="car_search_all">Cerca tra tutti i contatti</string>
     <string name="car_search_hint">Cerca contatti</string>
+    <string name="car_open_haven">Apri Haven sul telefono per fare chiamate.</string>
     <string name="settings_stay_connected_header">Resta connesso</string>
     <string name="settings_stay_connected_desc">Resta connesso per ricevere post, messaggi e chiamate all\'istante. Consuma poca batteria.</string>
     <string name="settings_realtime_connection">Connessione in tempo reale</string>

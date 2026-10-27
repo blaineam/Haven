@@ -347,6 +347,7 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="car_hang_up">Colgar</string>
     <string name="car_search_all">Buscar en todos los contactos</string>
     <string name="car_search_hint">Buscar contactos</string>
+    <string name="car_open_haven">Abre Haven en tu teléfono para hacer llamadas.</string>
     <string name="settings_stay_connected_header">Mantente conectado</string>
     <string name="settings_stay_connected_desc">Mantente conectado para recibir publicaciones, mensajes y llamadas al instante. Gasta un poco de batería.</string>
     <string name="settings_realtime_connection">Conexión en tiempo real</string>

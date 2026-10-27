@@ -379,6 +379,7 @@
     <string name="car_hang_up">Hang up</string>
     <string name="car_search_all">Search all contacts</string>
     <string name="car_search_hint">Search contacts</string>
+    <string name="car_open_haven">Open Haven on your phone to place calls.</string>
     <string name="settings_stay_connected_header">Stay connected</string>
     <string name="settings_stay_connected_desc">Stay connected for instant posts, messages, and calls. Uses a little battery.</string>
     <string name="settings_realtime_connection">Real-time connection</string>

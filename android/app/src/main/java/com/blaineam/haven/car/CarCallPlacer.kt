@@ -2,9 +2,12 @@ package com.blaineam.haven.car
 
 import android.Manifest
 import android.content.pm.PackageManager
+import androidx.car.app.CarToast
 import androidx.car.app.Screen
 import androidx.core.content.ContextCompat
+import com.blaineam.haven.R
 import com.blaineam.haven.core.CallManager
+import com.blaineam.haven.core.CallRuntime
 import com.blaineam.haven.core.CarCalls
 
 /**
@@ -30,7 +33,17 @@ object CarCallPlacer {
     }
 
     private fun dial(screen: Screen, entry: CarCalls.Entry) {
-        CallManager.startCall(listOf(entry.hex), entry.name)
-        screen.screenManager.push(CarInCallScreen(screen.carContext, entry.name))
+        val ctx = screen.carContext
+        // The car can start Haven in a cold process with no UI, where nothing has brought the call stack up
+        // (a call straight into CallManager crashed the car process): make it ready first — never on the
+        // car's main thread — and only then dial.
+        CallRuntime.whenReady(ctx) { ready ->
+            if (!ready) {
+                CarToast.makeText(ctx, ctx.getString(R.string.car_open_haven), CarToast.LENGTH_LONG).show()
+                return@whenReady
+            }
+            CallManager.startCall(listOf(entry.hex), entry.name)
+            screen.screenManager.push(CarInCallScreen(ctx, entry.name))
+        }
     }
 }

@@ -78,7 +78,10 @@ object AssistantLaunch {
                 ) == android.content.pm.PackageManager.PERMISSION_GRANTED
                 if (!granted) { DmDrafts.openThread.value = plan.circleId; return }
                 val name = HavenNet.contacts.firstOrNull { it.idHex.equals(plan.hex, true) }?.name.orEmpty().ifBlank { "Friend" }
-                CallManager.startCall(listOf(plan.hex), name)
+                // A voice launch from the background can run before RootScreen brought the call stack up.
+                CallRuntime.whenReady(context) { ready ->
+                    if (ready) CallManager.startCall(listOf(plan.hex), name) else DmDrafts.openThread.value = plan.circleId
+                }
             }
             is AssistantCallRoute.Plan.Open -> DmDrafts.openThread.value = plan.circleId
             is AssistantCallRoute.Plan.Pick -> showMessages.intValue++

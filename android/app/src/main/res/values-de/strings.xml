@@ -341,6 +341,7 @@
     <string name="car_hang_up">Auflegen</string>
     <string name="car_search_all">Alle Kontakte durchsuchen</string>
     <string name="car_search_hint">Kontakte suchen</string>
+    <string name="car_open_haven">Öffne Haven auf deinem Telefon, um Anrufe zu tätigen.</string>
     <string name="settings_stay_connected_header">Verbunden bleiben</string>
     <string name="settings_stay_connected_desc">Bleib verbunden für Beiträge, Nachrichten und Anrufe in Echtzeit. Braucht etwas Akku.</string>
     <string name="settings_realtime_connection">Echtzeitverbindung</string>

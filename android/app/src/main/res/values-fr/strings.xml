@@ -342,6 +342,7 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="car_hang_up">Raccrocher</string>
     <string name="car_search_all">Rechercher dans tous les contacts</string>
     <string name="car_search_hint">Rechercher des contacts</string>
+    <string name="car_open_haven">Ouvrez Haven sur votre téléphone pour passer des appels.</string>
     <string name="settings_stay_connected_header">Rester connecté</string>
     <string name="settings_stay_connected_desc">Restez connecté pour recevoir publications, messages et appels instantanément. Consomme un peu de batterie.</string>
     <string name="settings_realtime_connection">Connexion en temps réel</string>

@@ -573,6 +573,9 @@
     <string name="call_speaker_on">Lautsprecher an</string>
     <string name="call_speaker_off">Lautsprecher aus</string>
     <string name="call_camera">Kamera</string>
+    <string name="call_perm_mic_denied">Mikrofon-Berechtigung ist aus – die andere Person kann dich nicht hören. Aktiviere sie in den Einstellungen.</string>
+    <string name="call_perm_camera_denied">Kamera-Berechtigung ist aus – dein Video kann nicht starten.</string>
+    <string name="call_perm_camera_settings">Kamera-Berechtigung ist aus. Aktiviere sie in den Einstellungen, um Video zu teilen.</string>
     <string name="call_flip">Wechseln</string>
     <string name="call_share_screen">Bildschirm teilen</string>
     <string name="call_add_people">Leute hinzufügen</string>

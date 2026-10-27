@@ -573,6 +573,9 @@
     <string name="call_speaker_on">스피커 켜기</string>
     <string name="call_speaker_off">스피커 끄기</string>
     <string name="call_camera">카메라</string>
+    <string name="call_perm_mic_denied">마이크 권한이 꺼져 있어 상대방이 내 목소리를 들을 수 없습니다. 설정에서 켜 주세요.</string>
+    <string name="call_perm_camera_denied">카메라 권한이 꺼져 있어 비디오를 시작할 수 없습니다.</string>
+    <string name="call_perm_camera_settings">카메라 권한이 꺼져 있습니다. 비디오를 공유하려면 설정에서 켜 주세요.</string>
     <string name="call_flip">전환</string>
     <string name="call_share_screen">화면 공유</string>
     <string name="call_add_people">참여자 추가</string>

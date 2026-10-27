@@ -9,6 +9,26 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - Android: the call camera button (and the mic) on a device that only ever receives calls
+
+On the Nokia the in-call camera button never started the camera — the tile stayed black — and the mic
+captured nothing. Cause: only the OUTGOING "start a call" path ever asked for CAMERA + RECORD_AUDIO.
+Answering a call (in-app Accept, the notification's Answer, a car's answer key) and the in-call camera
+button never asked at all, so a receive-only device kept both permissions denied; the button then flipped
+to "on" while a failed capture published a permanent black tile, with no message.
+
+- **Answer asks first** (`MainActivity.answerCallWithPermissions`): the mic + camera that are missing are
+  requested, then the call is accepted either way (a denied mic is toasted).
+- **Camera button asks** (`toggleCameraWithPermission`): requests CAMERA, or — once the system will no
+  longer show the prompt ("don't ask again") — opens Haven's app settings with an explanatory toast.
+- **The button tells the truth**: if capture does not start (permission, camera held by another app) the
+  camera flips back OFF instead of staying lit over a black tile.
+- Decisions live in the pure `CallPermissionPolicy` with `CallPermissionPolicyTest`, including a manifest
+  guard that the call service must not claim the `camera` foreground-service type (starting one without
+  CAMERA granted throws on Android 14+). Matches iOS, which already requests camera access at the toggle.
+- Not covered: a call answered from a head unit / Telecom `onAnswer` with no Haven window still cannot show
+  a permission prompt; grant once in-app and it never recurs.
+
 ### Fixed - Android: "Waiting for sender…" no longer lies on a relay-less device
 
 **Why a new device never found its first relay.** An invite carries device ids, not a relay, and

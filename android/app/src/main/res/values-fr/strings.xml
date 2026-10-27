@@ -573,6 +573,9 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="call_speaker_on">Haut-parleur activé</string>
     <string name="call_speaker_off">Haut-parleur désactivé</string>
     <string name="call_camera">Caméra</string>
+    <string name="call_perm_mic_denied">L\'autorisation du micro est désactivée : votre interlocuteur ne vous entend pas. Activez-la dans les Réglages.</string>
+    <string name="call_perm_camera_denied">L\'autorisation de la caméra est désactivée : votre vidéo ne peut pas démarrer.</string>
+    <string name="call_perm_camera_settings">L\'autorisation de la caméra est désactivée. Activez-la dans les Réglages pour partager la vidéo.</string>
     <string name="call_flip">Changer de caméra</string>
     <string name="call_share_screen">Partager l\'écran</string>
     <string name="call_add_people">Ajouter des personnes</string>

@@ -572,6 +572,9 @@
     <string name="call_speaker_on">扬声器开</string>
     <string name="call_speaker_off">扬声器关</string>
     <string name="call_camera">摄像头</string>
+    <string name="call_perm_mic_denied">麦克风权限已关闭，对方听不到你的声音。请在设置中开启。</string>
+    <string name="call_perm_camera_denied">相机权限已关闭，无法开启视频。</string>
+    <string name="call_perm_camera_settings">相机权限已关闭。请在设置中开启以分享视频。</string>
     <string name="call_flip">翻转</string>
     <string name="call_share_screen">共享屏幕</string>
     <string name="call_add_people">添加成员</string>

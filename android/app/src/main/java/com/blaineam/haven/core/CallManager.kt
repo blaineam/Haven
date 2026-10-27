@@ -1324,8 +1324,8 @@ object CallManager {
         else -> "type:$type"
     }
     /** Open the camera at the best resolution it will accept. */
-    private fun startCapture(cap: org.webrtc.VideoCapturer) {
-        if (capturing) return
+    private fun startCapture(cap: org.webrtc.VideoCapturer): Boolean {
+        if (capturing) return true
         // Fall back down the ladder: a 1280x720@30 request is fine on modern hardware and simply
         // FAILS on older sensors — and a failed startCapture leaves an enabled track publishing
         // nothing, which the far end renders as a permanently black tile rather than an error.
@@ -1333,9 +1333,10 @@ object CallManager {
             val ok = runCatching { cap.startCapture(w, h, fps); true }.getOrElse {
                 Log.w(TAG, "camera: startCapture ${w}x$h@$fps failed (${it.message})"); false
             }
-            if (ok) { capturing = true; Log.i(TAG, "camera: capturing at ${w}x$h@$fps"); return }
+            if (ok) { capturing = true; Log.i(TAG, "camera: capturing at ${w}x$h@$fps"); return true }
         }
         Log.w(TAG, "camera: every capture format was refused — this device cannot publish video")
+        return false
     }
 
     private fun stopCapture() {
@@ -1367,7 +1368,11 @@ object CallManager {
         // delivered a frame publishes black forever — the far end sees a dead tile and there is
         // nothing on screen to say why. Turning the camera on now always opens a fresh session.
         val cap = capturer
-        if (cameraOn.value) { if (cap != null) startCapture(cap) } else stopCapture()
+        if (cameraOn.value) {
+            // A camera that would not open (permission denied, held by another app) must not leave
+            // the button lit while a black tile publishes — flip back OFF so the UI tells the truth.
+            if (cap == null || !startCapture(cap)) { Log.w(TAG, "camera: capture did not start — leaving the camera off"); cameraOn.value = false }
+        } else stopCapture()
         localVideo?.setEnabled(cameraOn.value)
             ?: Log.w(TAG, "camera: still no track after retry — this device cannot publish video")
         // Tell every peer so they swap to my avatar instead of freezing on my last camera frame.

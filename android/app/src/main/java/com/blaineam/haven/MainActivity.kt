@@ -39,6 +39,57 @@ class MainActivity : FragmentActivity() {
         if (grants.values.all { it }) HavenNet.restoreNearbyIfWanted()
     }
 
+    // Call permissions (see core/CallPermissionPolicy): asked when a call is ANSWERED and when the
+    // in-call camera button is tapped — previously only an outgoing call asked, so a receive-only
+    // device never got the mic or camera and showed a black tile with no explanation.
+    private var pendingCallPerm: (() -> Unit)? = null
+    private val callPermLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+        val action = pendingCallPerm; pendingCallPerm = null
+        com.blaineam.haven.core.CallPermissionPolicy.deniedMessages(grants).forEach {
+            val msg = if (it == com.blaineam.haven.core.CallPermissionPolicy.RECORD_AUDIO) R.string.call_perm_mic_denied else R.string.call_perm_camera_denied
+            android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_LONG).show()
+        }
+        action?.invoke()
+    }
+
+    private fun hasPermission(p: String) = androidx.core.content.ContextCompat.checkSelfPermission(this, p) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    /** Accept the ringing call, asking for the mic + camera first when they are missing. */
+    fun answerCallWithPermissions() {
+        val need = com.blaineam.haven.core.CallPermissionPolicy.answerRequest(
+            hasPermission(com.blaineam.haven.core.CallPermissionPolicy.RECORD_AUDIO),
+            hasPermission(com.blaineam.haven.core.CallPermissionPolicy.CAMERA))
+        if (need.isEmpty()) { com.blaineam.haven.core.CallManager.accept(); return }
+        pendingCallPerm = { com.blaineam.haven.core.CallManager.accept() }   // answer either way; mic-off is toasted
+        runCatching { callPermLauncher.launch(need.toTypedArray()) }.onFailure { pendingCallPerm = null; com.blaineam.haven.core.CallManager.accept() }
+    }
+
+    /** The in-call camera button: ask for CAMERA first (or send the user to Settings), then toggle. */
+    fun toggleCameraWithPermission() {
+        val cam = com.blaineam.haven.core.CallPermissionPolicy.CAMERA
+        val prefs = getSharedPreferences("call_perms", MODE_PRIVATE)
+        when (com.blaineam.haven.core.CallPermissionPolicy.cameraToggleStep(
+            granted = hasPermission(cam),
+            askedBefore = prefs.getBoolean("camera_asked", false),
+            rationale = shouldShowRequestPermissionRationale(cam))) {
+            com.blaineam.haven.core.CallPermissionPolicy.Step.PROCEED -> com.blaineam.haven.core.CallManager.toggleCamera()
+            com.blaineam.haven.core.CallPermissionPolicy.Step.REQUEST -> {
+                prefs.edit().putBoolean("camera_asked", true).apply()
+                pendingCallPerm = { if (hasPermission(cam)) com.blaineam.haven.core.CallManager.toggleCamera() }
+                runCatching { callPermLauncher.launch(arrayOf(cam)) }.onFailure { pendingCallPerm = null }
+            }
+            com.blaineam.haven.core.CallPermissionPolicy.Step.OPEN_SETTINGS -> {
+                android.widget.Toast.makeText(this, R.string.call_perm_camera_settings, android.widget.Toast.LENGTH_LONG).show()
+                runCatching {
+                    startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", packageName, null)))
+                }
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         com.blaineam.haven.core.QaStats.mark("activity_create")   // DEBUG launch timeline
         enableEdgeToEdge()
@@ -285,7 +336,7 @@ class MainActivity : FragmentActivity() {
         if (intent?.getBooleanExtra(com.blaineam.haven.core.Notifications.EXTRA_ANSWER_CALL, false) == true) {
             intent.removeExtra(com.blaineam.haven.core.Notifications.EXTRA_ANSWER_CALL)
             runCatching { com.blaineam.haven.core.Notifications.clearIncomingCall(this) }
-            runCatching { com.blaineam.haven.core.CallManager.accept() }
+            runCatching { answerCallWithPermissions() }
         }
         // Google Assistant "send a message to <name> on Haven" (res/xml/shortcuts.xml). Resolved and
         // staged in the composer — never sent from the intent. See core/AssistantRoute.kt.

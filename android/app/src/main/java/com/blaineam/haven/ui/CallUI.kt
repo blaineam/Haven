@@ -225,8 +225,22 @@ private fun MinimizedCall() {
     }
 }
 
+/** The hosting [MainActivity] (it owns the permission launcher), unwrapping any ContextWrapper. */
+private fun callHost(ctx: android.content.Context): com.blaineam.haven.MainActivity? {
+    var c: android.content.Context? = ctx
+    while (c is android.content.ContextWrapper) { if (c is com.blaineam.haven.MainActivity) return c; c = c.baseContext }
+    return null
+}
+
+/** Accept: ask for the mic (+ camera) first, falling back to a plain accept if there is no activity. */
+private fun answerCall(ctx: android.content.Context) { callHost(ctx)?.answerCallWithPermissions() ?: CallManager.accept() }
+
+/** Camera button: ask for CAMERA first (or open Settings if it can no longer be asked), then toggle. */
+private fun toggleCamera(ctx: android.content.Context) { callHost(ctx)?.toggleCameraWithPermission() ?: CallManager.toggleCamera() }
+
 @Composable
 private fun IncomingCall() {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
     val name by CallManager.peerName
     // Opaque: this overlays the live feed, and the 5% that used to show through leaked post
     // content behind the ring screen (iOS had the same bug, far worse over its light gradient).
@@ -240,7 +254,7 @@ private fun IncomingCall() {
             Spacer(Modifier.height(48.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(48.dp)) {
                 RoundButton(Icons.Filled.CallEnd, Color(0xFFEF4444), stringResource(R.string.call_decline)) { CallManager.decline() }
-                RoundButton(Icons.Filled.Videocam, Color(0xFF22C55E), stringResource(R.string.call_accept)) { CallManager.accept() }
+                RoundButton(Icons.Filled.Videocam, Color(0xFF22C55E), stringResource(R.string.call_accept)) { answerCall(ctx) }
             }
         }
     }
@@ -248,6 +262,7 @@ private fun IncomingCall() {
 
 @Composable
 private fun InCall() {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
     val name by CallManager.peerName
     val micOn by CallManager.micOn
     val cameraOn by CallManager.cameraOn
@@ -344,7 +359,7 @@ private fun InCall() {
                     CallManager.toggleSpeaker()
                 }
                 RoundButton(if (cameraOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
-                    if (cameraOn) CallChip else Color.White, stringResource(R.string.call_camera)) { CallManager.toggleCamera() }
+                    if (cameraOn) CallChip else Color.White, stringResource(R.string.call_camera)) { toggleCamera(ctx) }
                 if (cameraOn) {
                     RoundButton(Icons.Filled.Cameraswitch, CallChip, stringResource(R.string.call_flip)) { CallManager.switchCamera() }
                 }

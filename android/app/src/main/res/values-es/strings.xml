@@ -579,6 +579,9 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="call_speaker_on">Altavoz activado</string>
     <string name="call_speaker_off">Altavoz desactivado</string>
     <string name="call_camera">Cámara</string>
+    <string name="call_perm_mic_denied">El permiso del micrófono está desactivado: la otra persona no puede oírte. Actívalo en Ajustes.</string>
+    <string name="call_perm_camera_denied">El permiso de la cámara está desactivado: tu vídeo no puede iniciarse.</string>
+    <string name="call_perm_camera_settings">El permiso de la cámara está desactivado. Actívalo en Ajustes para compartir vídeo.</string>
     <string name="call_flip">Girar</string>
     <string name="call_share_screen">Compartir pantalla</string>
     <string name="call_add_people">Añadir personas</string>

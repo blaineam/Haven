@@ -274,11 +274,13 @@ class CallManagerMeshTest {
         assertSame(null, CallManager.localVideo)
     }
 
-    @Test fun the_camera_toggle_announces_my_state_to_everyone_even_when_no_camera_exists() {
+    @Test fun the_camera_toggle_announces_my_state_to_everyone_and_flips_back_off_when_no_camera_exists() {
         ringAndAnswer()
         env.social.sealedCalls.clear()
         CallManager.toggleCamera(); drain(); lane()
-        assertTrue(CallManager.cameraOn.value)
+        // No camera can open here (none exists in the test env), so the button must NOT stay lit over a
+        // black tile: it flips back OFF — and the far end is still told, so it shows my avatar.
+        assertFalse("a camera that cannot start leaves the button off", CallManager.cameraOn.value)
         assertTrue("the far end swaps to my avatar instead of freezing", sent().contains(CallWire.CAMERA to high))
         CallManager.toggleCamera(); drain(); lane()
         assertFalse(CallManager.cameraOn.value)

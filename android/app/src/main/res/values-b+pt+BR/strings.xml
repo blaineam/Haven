@@ -608,6 +608,9 @@ O que já tentei:
     <string name="call_speaker_on">Viva-voz ligado</string>
     <string name="call_speaker_off">Viva-voz desligado</string>
     <string name="call_camera">Câmera</string>
+    <string name="call_perm_mic_denied">A permissão do microfone está desativada — a outra pessoa não consegue ouvir você. Ative em Ajustes.</string>
+    <string name="call_perm_camera_denied">A permissão da câmera está desativada — seu vídeo não pode iniciar.</string>
+    <string name="call_perm_camera_settings">A permissão da câmera está desativada. Ative em Ajustes para compartilhar vídeo.</string>
     <string name="call_flip">Virar</string>
     <string name="call_share_screen">Compartilhar tela</string>
     <string name="call_add_people">Adicionar pessoas</string>

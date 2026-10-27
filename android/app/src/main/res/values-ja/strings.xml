@@ -573,6 +573,9 @@
     <string name="call_speaker_on">スピーカーオン</string>
     <string name="call_speaker_off">スピーカーオフ</string>
     <string name="call_camera">カメラ</string>
+    <string name="call_perm_mic_denied">マイクの許可がオフです。相手にあなたの声が聞こえません。設定でオンにしてください。</string>
+    <string name="call_perm_camera_denied">カメラの許可がオフです。ビデオを開始できません。</string>
+    <string name="call_perm_camera_settings">カメラの許可がオフです。ビデオを共有するには設定でオンにしてください。</string>
     <string name="call_flip">切り替え</string>
     <string name="call_share_screen">画面を共有</string>
     <string name="call_add_people">メンバーを追加</string>

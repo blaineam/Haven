@@ -573,6 +573,9 @@
     <string name="call_speaker_on">Vivavoce attivo</string>
     <string name="call_speaker_off">Vivavoce disattivato</string>
     <string name="call_camera">Fotocamera</string>
+    <string name="call_perm_mic_denied">L\'autorizzazione del microfono è disattivata: l\'altra persona non può sentirti. Attivala in Impostazioni.</string>
+    <string name="call_perm_camera_denied">L\'autorizzazione della fotocamera è disattivata: il tuo video non può partire.</string>
+    <string name="call_perm_camera_settings">L\'autorizzazione della fotocamera è disattivata. Attivala in Impostazioni per condividere il video.</string>
     <string name="call_flip">Cambia</string>
     <string name="call_share_screen">Condividi schermo</string>
     <string name="call_add_people">Aggiungi persone</string>

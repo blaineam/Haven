@@ -615,6 +615,9 @@
     <string name="call_speaker_on">Speaker on</string>
     <string name="call_speaker_off">Speaker off</string>
     <string name="call_camera">Camera</string>
+    <string name="call_perm_mic_denied">Microphone permission is off — the other person can\'t hear you. Turn it on in Settings.</string>
+    <string name="call_perm_camera_denied">Camera permission is off — your video can\'t start.</string>
+    <string name="call_perm_camera_settings">Camera permission is off. Turn it on in Settings to share video.</string>
     <string name="call_flip">Flip</string>
     <string name="call_share_screen">Share screen</string>
     <string name="call_add_people">Add people</string>

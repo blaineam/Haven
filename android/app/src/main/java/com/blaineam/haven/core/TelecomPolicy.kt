@@ -88,6 +88,49 @@ object TelecomPolicy {
         fun reset() { requested = null; settled = false }
     }
 
+    /** A Telecom incoming-connection request for a call that ended less than this ago is the caller giving up. */
+    const val GONE_WINDOW_MS = 5_000L
+
+    /** How long a connection created while the engine's state is still catching up is trusted before it is verified. */
+    const val GRACE_MS = 1_500L
+
+    enum class IncomingVerdict {
+        /** The engine has a live call and Telecom has no connection for it yet: create the connection. */
+        ACCEPT,
+        /** The engine does not look live, but nothing says the call ended: create it and verify after [GRACE_MS]. */
+        ACCEPT_WITH_GRACE,
+        /** Telecom re-offered the call it already holds a connection for: keep the existing one. */
+        REFUSE_DUPLICATE,
+        /** The call ended moments ago (caller hung up / answered elsewhere): refuse, there is nothing to ring. */
+        REFUSE_GONE,
+    }
+
+    /**
+     * Whether to create a connection when Telecom asks for an incoming one (`onCreateIncomingConnection`).
+     *
+     * The old rule was "refuse unless the engine says ringing right now", which is wrong in two directions:
+     * it refused a call the user had already ANSWERED in-app before the system got here (and so left a live
+     * call with no Telecom connection), and it refused whenever the engine's state had not yet caught up.
+     * It is right only for a call that really ended. So:
+     *
+     *  * a live engine call is accepted — unless Telecom already holds a connection for that SAME call
+     *    ([hasLiveSession] && [sameCall]), which is a duplicate offer and keeps the existing connection;
+     *  * a live session for a DIFFERENT call is stale (its end event never arrived) — the caller ends it
+     *    first, then this decides as if there were none;
+     *  * an engine that is not live but ended a call ≤ [GONE_WINDOW_MS] ago is the caller giving up: refuse;
+     *  * anything else is engine-state lag or an unknown: accept and verify after [GRACE_MS] rather than
+     *    drop a call that may be ringing.
+     *
+     * Refusing NEVER removes the ring: the notification and ring come from the engine path
+     * ([CallManager.incoming] -> [IncomingCallUi]), not from Telecom.
+     */
+    fun decideIncoming(engineLive: Boolean, hasLiveSession: Boolean, sameCall: Boolean, msSinceEnd: Long?): IncomingVerdict {
+        if (hasLiveSession && sameCall) return IncomingVerdict.REFUSE_DUPLICATE
+        if (engineLive) return IncomingVerdict.ACCEPT
+        if (msSinceEnd != null && msSinceEnd <= GONE_WINDOW_MS) return IncomingVerdict.REFUSE_GONE
+        return IncomingVerdict.ACCEPT_WITH_GRACE
+    }
+
     /** What the engine side of a call offers the connection (answer / hang up), as plain callbacks. */
     interface Engine {
         fun accept()

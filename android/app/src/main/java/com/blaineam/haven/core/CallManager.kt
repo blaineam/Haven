@@ -52,6 +52,16 @@ object CallManager {
     /** The user's explicit speaker/earpiece tap this call (null = untouched: speaker unless a car /
      *  headset / Bluetooth output is attached — [CallRoutePolicy]). */
     private var speakerChoice: Boolean? = null
+
+    /** The live call's session id ("" when idle) — Telecom pairs its connection to a call by it. */
+    val liveSessionId: String get() = sessionId
+
+    /**
+     * True from the moment a call starts ringing / dialing until teardown. A plain volatile mirror of the
+     * Compose call state: Telecom reads it from the main thread, and a callback racing the call thread must
+     * not see a stale "idle" (that refused a ringing call as "no longer ringing").
+     */
+    @Volatile var telecomLive = false; private set
     private var routeCallback: android.media.AudioDeviceCallback? = null
     /** In-app minimized call (small floating tile + tap to restore), iOS parity. */
     val minimized = mutableStateOf(false)
@@ -381,6 +391,7 @@ object CallManager {
         roster.clear(); roster.addAll(others); roster.add(myHex)
         peerName.value = name
         isCaller = true
+        telecomLive = true
         connecting.value = true
         uiHandler.post { com.blaineam.haven.ui.MusicPlayer.stop() }   // call audio owns the stage from the first dial
         refreshParticipants()
@@ -672,6 +683,7 @@ object CallManager {
         roster.clear(); roster.addAll(members)
         peerName.value = name
         isCaller = false
+        telecomLive = true
         ringing.value = true
         acquireCallWakeLock()
         startRingTimeout()
@@ -1554,6 +1566,7 @@ object CallManager {
     private fun teardown() {
         val end = endReason ?: TelecomPolicy.End.LOCAL
         endReason = null
+        telecomLive = false
         runCatching { TelecomCalls.onEngineEnded(end) }
         // Answered, declined, missed, or the caller gave up — in every case stop ringing the phone.
         runCatching { Notifications.clearIncomingCall(appContext) }

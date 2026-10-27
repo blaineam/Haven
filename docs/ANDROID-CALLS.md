@@ -29,6 +29,16 @@ adapter around it, never a second state machine.
 * **Ending**: every way a call ends (local hang-up, remote hang-up, decline, ring timeout) passes through
   `CallManager.teardown`, which reports an end cause (`LOCAL`, `REMOTE`, `REJECTED`, `MISSED`) to Telecom and
   destroys the connection. The echo of our own disconnect is guarded so it never loops into a second hang-up.
+* **Incoming connection requests are tolerant** (`TelecomPolicy.decideIncoming`). Telecom may ask for the
+  connection a moment after the engine started ringing, and that callback races the call thread. The old rule
+  ("refuse unless ringing right now") refused a call the user had already answered in-app and any call whose
+  engine state had not yet caught up. Now: a live engine call (the volatile `CallManager.telecomLive` mirror
+  counts) is accepted; a duplicate offer for the call Telecom already holds keeps the existing connection; a
+  request moments after a call ended is the caller giving up and is refused (that is what the first of two
+  attempts on 2026-10-27 13:25 was); anything else is accepted with a 1.5 s grace window and verified. A live
+  session left over from an earlier call (its end event never arrived) is ended instead of blocking the next
+  one. A refusal never removes the ring: the notification and ring come from the engine path, before Telecom
+  is told.
 * **Busy**: a second incoming call while one is live is ignored by the engine (as on iOS: "startCall
   IGNORED") and a second `Connection` is refused with `BUSY`.
 * **Telecom is an addition, never a dependency.** If the account can't be registered, `placeCall` throws,

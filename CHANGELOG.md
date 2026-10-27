@@ -27,6 +27,17 @@ the next sweep, so history trickles in at a rate the author's phone can afford. 
 missing: the Nokia holds Blaine's current epoch keys (`peers_keyed=1`, `missing_keys=[]`); older media
 open only after the author re-seals them for the new device (GROUP-KEYING.md "Add" semantics).
 
+### Fixed - Telecom no longer refuses a ringing or answered call as "no longer ringing" on a callback race (Android)
+- `onCreateIncomingConnection` refused any call whose engine ringing flag was not set at that instant: a call
+  answered in-app before the system got there ended up live with no Telecom connection, and a callback racing
+  the call thread dropped the call. The decision is now `TelecomPolicy.decideIncoming`: a live call (including a
+  volatile mirror the main thread can trust) is accepted, a duplicate offer keeps the existing connection, a
+  request just after the call ended (the caller gave up) is refused, and an unknown state is accepted and verified
+  after 1.5 s. A stale session from an earlier call is ended rather than blocking the next. A refused connection
+  never removes the ring - the notification and ring come from the engine path first. Tests: the decision table
+  in `TelecomPolicyTest` and ordering / wiring guards in `TelecomDeclarationTest`.
+
+
 ### Fixed - Calls: "Connected" lagged on iPhone; Android left a frozen frame when a camera went off
 - **iOS call screen sat on "Connecting media…" after media was up.** `mediaConnected` reads
   `lastPeerState` / `hairpinPeers`, which are not `@Published`, so the label only caught up when some

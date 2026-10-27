@@ -100,4 +100,39 @@ class TelecomDeclarationTest {
         assertTrue(Regex("TelecomCalls\\.onEngineActive\\(\\)").findAll(cm).count() >= 4)
         assertTrue(cm.contains("TelecomCalls.mirrorSpeaker("))
     }
+
+    // ---- a refused Telecom connection must never take the ring with it ----
+    @Test fun `the engine posts the notification and ring BEFORE it tells Telecom`() {
+        val cm = File(main, "java/com/blaineam/haven/core/CallManager.kt").readText()
+        val show = cm.indexOf("Notifications.showIncomingCall(appContext, name)")
+        val report = cm.indexOf("TelecomCalls.reportIncoming()")
+        assertTrue(show > 0 && report > 0)
+        assertTrue("the ring comes from the engine path, so a Telecom refusal can never remove it", show < report)
+    }
+
+    @Test fun `the engine keeps a volatile live flag for Telecom to read from the main thread`() {
+        val cm = File(main, "java/com/blaineam/haven/core/CallManager.kt").readText()
+        assertTrue(cm.contains("@Volatile var telecomLive = false; private set"))
+        assertEquals("set when a call starts ringing and when one starts dialing", 2,
+            Regex("""telecomLive = true""").findAll(cm).count())
+        assertEquals("cleared by teardown", 1, Regex("""telecomLive = false\n""").findAll(cm).count())
+    }
+
+    @Test fun `an incoming connection request goes through the tolerant decision and only refuses a duplicate or a finished call`() {
+        val t = File(main, "java/com/blaineam/haven/core/TelecomCalls.kt").readText()
+        val create = t.substring(t.indexOf("internal fun createIncoming()"), t.indexOf("internal fun incomingRefused()"))
+        assertTrue(create.contains("TelecomPolicy.decideIncoming("))
+        assertTrue("the engine's volatile flag counts as live", create.contains("CallManager.telecomLive"))
+        assertEquals("only the duplicate and the gone verdicts return a failed connection", 2,
+            Regex("""createFailedConnection""").findAll(create).count())
+        assertTrue("an unverified connection is checked after the grace window", create.contains("TelecomPolicy.GRACE_MS"))
+        assertFalse("the old blunt 'not ringing' refusal is gone", create.contains("if (!CallManager.ringing.value) {"))
+    }
+
+    @Test fun `a stale Telecom session from an earlier call is ended instead of blocking the next one`() {
+        val t = File(main, "java/com/blaineam/haven/core/TelecomCalls.kt").readText()
+        assertTrue(t.contains("boundSessionId != CallManager.liveSessionId"))
+        assertTrue(t.contains("stale Telecom session"))
+        assertTrue(t.contains("lastEndedAt = SystemClock.elapsedRealtime()"))
+    }
 }

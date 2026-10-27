@@ -223,4 +223,40 @@ class TelecomPolicyTest {
         assertEquals(0, g.direct)
         assertTrue(p.onConnectionRequested())
     }
+
+    // ---- the incoming-connection decision (a call must not be refused as "no longer ringing" by a race) ----
+    private fun verdict(engineLive: Boolean = false, hasLiveSession: Boolean = false, sameCall: Boolean = false, sinceEnd: Long? = null) =
+        TelecomPolicy.decideIncoming(engineLive, hasLiveSession, sameCall, sinceEnd)
+
+    @Test fun aLiveEngineCallIsAcceptedEvenWhenTheRingingFlagIsNotTheStateYouExpect() {
+        // answered in-app before the system got here: ringing is already false but the call is live
+        assertEquals(TelecomPolicy.IncomingVerdict.ACCEPT, verdict(engineLive = true))
+    }
+
+    @Test fun aCallThatEndedMomentsAgoIsTheCallerGivingUpSoItIsRefused() {
+        assertEquals(TelecomPolicy.IncomingVerdict.REFUSE_GONE, verdict(sinceEnd = 10))
+        assertEquals(TelecomPolicy.IncomingVerdict.REFUSE_GONE, verdict(sinceEnd = TelecomPolicy.GONE_WINDOW_MS))
+    }
+
+    @Test fun anIdleEngineWithNoRecentEndIsAcceptedWithAGraceWindowNotRefused() {
+        assertEquals(TelecomPolicy.IncomingVerdict.ACCEPT_WITH_GRACE, verdict())
+        assertEquals(TelecomPolicy.IncomingVerdict.ACCEPT_WITH_GRACE, verdict(sinceEnd = TelecomPolicy.GONE_WINDOW_MS + 1))
+        assertEquals(TelecomPolicy.IncomingVerdict.ACCEPT_WITH_GRACE, verdict(sinceEnd = null))
+    }
+
+    @Test fun aSecondOfferForTheSameCallKeepsTheExistingConnection() {
+        assertEquals(TelecomPolicy.IncomingVerdict.REFUSE_DUPLICATE, verdict(engineLive = true, hasLiveSession = true, sameCall = true))
+        assertEquals("even if the engine looks idle", TelecomPolicy.IncomingVerdict.REFUSE_DUPLICATE,
+            verdict(engineLive = false, hasLiveSession = true, sameCall = true, sinceEnd = 5))
+    }
+
+    @Test fun aNewCallAfterAnEarlierOneEndedIsNotRefusedAsGone() {
+        // the previous call ended 300 ms ago but THIS call is live: live wins over the recent-end rule
+        assertEquals(TelecomPolicy.IncomingVerdict.ACCEPT, verdict(engineLive = true, sinceEnd = 300))
+    }
+
+    @Test fun theGraceWindowIsShorterThanTheRingTimeoutAndLongerThanARaceItCovers() {
+        assertTrue(TelecomPolicy.GRACE_MS in 500..5_000)
+        assertTrue(TelecomPolicy.GONE_WINDOW_MS >= TelecomPolicy.GRACE_MS)
+    }
 }

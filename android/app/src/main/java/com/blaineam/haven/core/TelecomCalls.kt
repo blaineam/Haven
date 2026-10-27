@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.telecom.CallAudioState
 import android.telecom.Connection
 import android.telecom.DisconnectCause
@@ -40,6 +41,12 @@ object TelecomCalls {
 
     @Volatile private var session: TelecomPolicy.Session? = null
     @Volatile private var connection: HavenConnection? = null
+
+    /** The engine session id the live connection was created for ("" while it was still unknown). */
+    @Volatile private var boundSessionId = ""
+
+    /** `elapsedRealtime` of the last engine end (0 = never): a connection request moments after it is the caller giving up. */
+    @Volatile private var lastEndedAt = 0L
 
     private class Pending(val others: List<String>, val name: String, val session: String?, val placer: TelecomPolicy.Placer)
     @Volatile private var pending: Pending? = null
@@ -125,7 +132,14 @@ object TelecomCalls {
     /** The engine just started ringing — tell Telecom. The notification already rings the phone. */
     fun reportIncoming() {
         val ctx = appContext ?: return
-        if (!registered || session?.ended == false) return
+        if (!registered) return
+        session?.takeIf { !it.ended }?.let { live ->
+            // The same call is already in Telecom's hands (a duplicate report): nothing to do. A live
+            // connection for a DIFFERENT call is stale — its end event never arrived — so end it and offer this one.
+            if (boundSessionId == CallManager.liveSessionId) return
+            Log.w(TAG, "stale Telecom session from an earlier call — ending it before reporting the new one")
+            live.onEngineEnded(TelecomPolicy.End.CANCELED)
+        }
         runCatching {
             val tm = ctx.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
             tm.addNewIncomingCall(handle(ctx), Bundle())
@@ -133,17 +147,46 @@ object TelecomCalls {
     }
 
     internal fun createIncoming(): Connection {
-        // Busy (another Haven call is live) or it ended before the system got here: refuse cleanly.
-        if (session?.ended == false) return Connection.createFailedConnection(DisconnectCause(DisconnectCause.BUSY))
-        if (!CallManager.ringing.value) {
-            Log.i(TAG, "incoming connection refused — the call is no longer ringing (caller gave up or answered in-app)")
-            return Connection.createFailedConnection(DisconnectCause(DisconnectCause.CANCELED))
+        var existing = session?.takeIf { !it.ended }
+        if (existing != null && boundSessionId != CallManager.liveSessionId) {
+            Log.w(TAG, "stale Telecom session from an earlier call — ending it")
+            existing.onEngineEnded(TelecomPolicy.End.CANCELED)
+            existing = null
+        }
+        val sinceEnd = lastEndedAt.takeIf { it > 0 }?.let { SystemClock.elapsedRealtime() - it }
+        val verdict = TelecomPolicy.decideIncoming(
+            engineLive = CallManager.telecomLive || CallManager.callInProgress,
+            hasLiveSession = existing != null,
+            sameCall = existing != null,
+            msSinceEnd = sinceEnd,
+        )
+        Log.i(TAG, "incoming connection requested: $verdict (engineLive=${CallManager.telecomLive} ringing=${CallManager.ringing.value} sinceEnd=${sinceEnd}ms)")
+        when (verdict) {
+            TelecomPolicy.IncomingVerdict.REFUSE_DUPLICATE ->
+                return Connection.createFailedConnection(DisconnectCause(DisconnectCause.BUSY))
+            TelecomPolicy.IncomingVerdict.REFUSE_GONE ->
+                // The caller gave up (or it was answered elsewhere) before the system got here. Nothing to
+                // ring; the engine already cleared its own notification and ring when the call ended.
+                return Connection.createFailedConnection(DisconnectCause(DisconnectCause.CANCELED))
+            TelecomPolicy.IncomingVerdict.ACCEPT, TelecomPolicy.IncomingVerdict.ACCEPT_WITH_GRACE -> Unit
         }
         // The ring must NOT wait for Telecom's onShowIncomingCallUi (a self-managed call draws and rings
         // nothing, and the system did not call it on a real phone): make sure the notification + ring are
-        // up now. Idempotent — the engine already started them when the invite arrived.
-        appContext?.let { IncomingCallUi.ring(it, CallManager.peerName.value) }
-        return attach(outgoing = false, name = CallManager.peerName.value)
+        // up now. Idempotent — the engine already started them when the invite arrived. A refusal above
+        // never removes it: the ring comes from the engine path, not from Telecom.
+        if (CallManager.ringing.value) appContext?.let { IncomingCallUi.ring(it, CallManager.peerName.value) }
+        val conn = attach(outgoing = false, name = CallManager.peerName.value)
+        if (verdict == TelecomPolicy.IncomingVerdict.ACCEPT_WITH_GRACE) {
+            // The engine's state had not caught up (or we simply don't know): trust the connection briefly,
+            // then drop it if nothing is live — better a ring that clears itself than a lost call.
+            main.postDelayed({
+                if (!CallManager.telecomLive && !CallManager.callInProgress) {
+                    Log.i(TAG, "grace expired with no live call — ending the unverified connection")
+                    conn.session.onEngineEnded(TelecomPolicy.End.CANCELED)
+                }
+            }, TelecomPolicy.GRACE_MS)
+        }
+        return conn
     }
 
     internal fun incomingRefused() { Log.i(TAG, "Telecom refused the incoming call — the notification is still the UI") }
@@ -162,6 +205,7 @@ object TelecomCalls {
 
     /** The call ended for [end]; also drops a placement that never produced a connection. */
     fun onEngineEnded(end: TelecomPolicy.End) {
+        lastEndedAt = SystemClock.elapsedRealtime()
         session?.onEngineEnded(end)
         pending = null
         arbiter.reset()
@@ -204,6 +248,7 @@ object TelecomCalls {
         conn.session = s
         connection = conn
         session = s
+        boundSessionId = CallManager.liveSessionId
         // The engine may already be connected if the user answered in-app before the system got here.
         if (CallManager.inCall.value) s.onEngineActive()
         return conn
@@ -220,5 +265,6 @@ object TelecomCalls {
     /** JVM-test seam: forget everything (state is process-wide). */
     internal fun resetForTest() {
         registered = false; appContext = null; session = null; connection = null; pending = null; arbiter.reset()
+        boundSessionId = ""; lastEndedAt = 0L
     }
 }

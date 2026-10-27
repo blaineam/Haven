@@ -68,6 +68,8 @@ final class CarPlayConversationsTests: XCTestCase {
         let unsent = thread("dm:d", "D", [msg("4", mins: 5, unsent: true)], watermark: wm)
         let r = Dictionary(uniqueKeysWithValues: rows([unread, read, mine, unsent]).map { ($0.conversationId, $0.unread) })
         XCTAssertEqual(r, ["dm:a": true, "dm:b": false, "dm:c": false, "dm:d": false])
+        let counts = Dictionary(uniqueKeysWithValues: rows([unread, read, mine, unsent]).map { ($0.conversationId, $0.unreadCount) })
+        XCTAssertEqual(counts, ["dm:a": 1, "dm:b": 0, "dm:c": 0, "dm:d": 0], "driving mode shows this count instead of any text")
     }
 
     func testAttachmentAndUnsentWording() {
@@ -115,6 +117,7 @@ final class CarPlayConversationsTests: XCTestCase {
             XCTAssertFalse(r.detail.contains("secret"))
             XCTAssertEqual(r.trailing, "")
             XCTAssertFalse(r.unread)
+            XCTAssertEqual(r.unreadCount, 0)
             XCTAssertTrue(r.locked)
         }
     }
@@ -293,6 +296,7 @@ final class CarPlayConversationsTests: XCTestCase {
         XCTAssertEqual(d.lines[0].text, MessagingText.attachment, "attachment-only message is described, not blank")
         XCTAssertEqual(d.lines[1].text, "On my way")
         XCTAssertEqual(d.lines[2].byline.hasPrefix("You"), true)
+        XCTAssertEqual(d.lines.map(\.mine), [false, false, true], "drives the right-hand bubble glyph")
         XCTAssertEqual(d.unreadCount, 2)
         XCTAssertTrue(d.lines[0].unread && d.lines[1].unread && !d.lines[2].unread)
         XCTAssertTrue(d.canSpeak && d.callable && !d.locked && !d.textHidden)

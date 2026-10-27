@@ -11,6 +11,8 @@ import Foundation
 ///     afterwards (`notifyOthersOnDeactivation`);
 ///   * never while a Haven call is up (it would talk over the person on the line);
 ///   * a new request, or the scene disconnecting, stops what is being read.
+/// The voice comes from `CarPlayVoice` (best installed voice for the message language, or the one chosen in
+/// Haven Settings > Car and Siri) - never the bare default-quality voice for the language.
 /// The script itself (what may be spoken at all) comes from `CarPlayConversations.spokenScript`, so the
 /// locked / notification-privacy rules are applied before anything reaches the synthesizer.
 @MainActor
@@ -39,7 +41,7 @@ final class CarPlaySpeaker: NSObject, AVSpeechSynthesizerDelegate {
         pending = lines.count
         for line in lines {
             let u = AVSpeechUtterance(string: line)
-            u.voice = AVSpeechSynthesisVoice(language: Locale.preferredLanguages.first)
+            CarPlayVoice.apply(to: u, preferredId: SettingsStore.shared.carPlayVoiceId)
             u.postUtteranceDelay = 0.35
             synth.speak(u)
         }

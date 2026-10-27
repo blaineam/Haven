@@ -70,22 +70,70 @@ the snapshot, a group DM by its title, locked conversations are refused.
 
 ### The conversation screen (tap a row)
 
-`CarPlayConversations.detail` (pure, unit-tested) -> `CarPlayTemplates.conversationTemplate`:
+`CarPlayConversations.detail` (pure, unit-tested) -> `CarPlayTemplates.conversationScreen`. A `CPListTemplate`:
 
-* **Read new messages** / **Read to me** - Haven reads aloud with its own `AVSpeechSynthesizer`
-  (`CarPlaySpeaker`: spoken-audio session that ducks other audio and hands it back, never over an active call).
-  The script is "N new messages from Tracy M." then each unread one oldest first (attachment-only messages are
-  spoken as "Sent a photo"), or the latest few when nothing is unread. Heard messages are marked read.
-* **Reply** - the Siri-managed row described above.
-* **Call on Haven** - opens the same contact card as the Calls tab (never dials on one tap).
-* **Recent messages** - the newest 8 (200 characters each), newest first, "You . 3:41 PM" bylines (group:
-  the author); a tap reads that message aloud. New messages refresh an open screen in place.
+* **Messages (parked)** - the newest 8 (200 characters each) in **chat order, oldest first**, so the newest sits
+  right above the reply row. Each row has a small bubble glyph: **their** messages show the contact's avatar
+  (or a left, grey bubble), **yours** a right-hand bubble in your palette tint; the subtitle is "You . 3:41 PM"
+  (group: the author). A tap reads that message aloud. A new message refreshes an open screen in place.
+* **Reply** - the one Siri-managed `CPMessageListItem`, below the messages like a composer; the Siri flow
+  described above (reads unread, takes the reply).
+* **Read to me** / **Read new** and **Call** - real buttons in the navigation bar (rounded text buttons).
+  Read aloud uses Haven's own `AVSpeechSynthesizer` (`CarPlaySpeaker`: spoken-audio session that ducks other
+  audio and hands it back, never over an active call): "N new messages from Tracy M." then each unread one
+  oldest first (attachment-only messages are spoken as "Sent a photo"), or the latest few when nothing is
+  unread. Heard messages are marked read. Call opens the same contact card as the Calls tab (it never dials on
+  one tap).
 
-Privacy is identical to the list: a locked conversation shows only "Locked" (no read, reply or call rows'
-content); with the notification-privacy setting below Full there is no read-aloud and the lines show the
-capped phrases ("Sent you a message"), with a line saying why.
-There is still no "parked" signal in the SDK, so the screen is the same parked or driving - CarPlay itself
-limits list interaction while the car is moving.
+#### Parked vs. driving - message text is only shown when parked
+
+CarPlay has **no public parked/driving API**. The one signal an app gets is
+`CPSessionConfiguration.limitedUserInterfaces`: a vehicle that restricts long lists and/or the keyboard while it
+moves reports `.lists` / `.keyboard` through `CPSessionConfigurationDelegate`, and clears them when parked.
+Haven treats **any reported limit as DRIVING** and **no limit as PARKED** (`CarPlayDriveMode`, a pure,
+unit-tested decision). While driving:
+
+* the conversation screen shows **no message text** - a "Messages are hidden while driving" line ("Park to read
+  them, or tap Read to me.") plus the Reply row and the Read/Call buttons (reading ALOUD stays available);
+* the Messages-tab rows show **names and unread counts only** ("3 unread"), never a preview;
+* when the car starts or stops moving the Messages list and any open conversation are **rebuilt immediately**.
+
+Honest limit: a car (or the CarPlay simulator) that **never reports limits looks parked**, so it will show
+message text even while moving. There is nothing more to go on; the app cannot read speed or the handbrake.
+
+#### What CarPlay does and does not allow here
+
+CarPlay draws every screen itself. A third-party Communication app gets a fixed set of templates (list, tab bar,
+contact, alert / action sheet); there are **no custom views, so no free-form chat bubbles, no sticky footer and
+no in-list buttons**. What Haven built is the closest the platform permits: chat ordering, per-message bubble
+glyphs, a composer-style Reply row at the bottom, and real buttons in the navigation bar (a list template shows
+at most two). `CPInformationTemplate` has three real bottom buttons, but it is not documented as available to
+Communication apps and CarPlay raises on an unsupported template, so it is deliberately **not used** (it could not
+be verified without a car). The iOS 26.4 `CPListTemplateDetailsHeader` (header with action buttons) is likewise
+documented around media content and was not adopted for the same reason.
+
+#### Read-aloud voice
+
+The voice was previously `AVSpeechSynthesisVoice(language:)`, which returns the **default-quality** voice for the
+language - not the one chosen in Settings. iOS exposes **no API to read the voice picked in Settings >
+Accessibility > Spoken Content**. So `CarPlayVoice`:
+
+1. **Match system** (default): when VoiceOver / Speak Screen / Speak Selection is on, the utterance sets
+   `prefersAssistiveTechnologySettings` and the system applies the user's assistive speech settings; otherwise Haven
+   picks the **best installed voice** (premium > enhanced > standard) for the message's own language (detected on
+   device, only when confident) and falls back to the system language. Novelty voices (Bubbles, Zarvox...) and
+   Personal Voices are never picked automatically.
+2. **A specific voice** can be chosen in Haven Settings > Car and Siri > Read-aloud voice (it plays a sample on
+   tap). A chosen voice always wins; Personal Voice appears there only once the user has authorized Haven for it in
+   iOS Settings (Haven does not prompt for it).
+
+Not verified on a device: what `prefersAssistiveTechnologySettings` resolves to for a given Spoken Content
+configuration (Apple does not document it beyond "assistive technology settings"), and how a given premium voice
+sounds over the car's audio route.
+
+Privacy is identical to the list: a locked conversation shows only "Locked" (no buttons, no reply row content);
+with the notification-privacy setting below Full there is no read-aloud and the lines show the capped phrases
+("Sent you a message"), with a line saying why.
 
 ## Privacy rules (enforced in one place: `MessagingPrivacy`)
 
@@ -313,7 +361,8 @@ time. To make that possible without exposing more than needed, the three most re
 Browsing a long history by eye is a phone feature.
 
 Update (field test): Messages-tab rows now open an app-drawn conversation screen (recent messages as list
-items plus read-aloud, reply and call). Apple's Communication guidance leans on Siri for message content, so this
+items plus read-aloud, reply and call; reshaped into a chat-order list with nav-bar buttons, parked-only text and
+a voice setting in the round-3 pass below). Apple's Communication guidance leans on Siri for message content, so this
 is the item most worth a second look at App Review; it uses only `CPListTemplate`/`CPListItem`, and the content
 obeys the same privacy tiers as the rows.
 
@@ -332,6 +381,14 @@ detail + spoken script (privacy tiers, caps, ordering), template construction in
 strings. NOT verified without a car/CarPlay simulator: how the screen renders, `AVSpeechSynthesizer` over the
 car audio route, that Siri now maps "Tracy M" to Haven after the vocabulary/donations settle (Siri can take a
 few minutes after the first launch to learn them), and the background-launch call path.
+
+Field-test round 3 (chat layout, drive mode, voice): proven by automated tests - parked vs. driving decision
+(`CarPlayDriveMode`, any reported limit = driving), conversation screen in each mode (no message text while
+driving, Reply and buttons kept, locked/hidden-text variants), Messages-row subtitles (names + unread counts only
+while driving), chat ordering and bubble art, nav-bar button wiring, voice ordering (premium > enhanced > standard,
+no novelty/Personal by default, explicit choice wins, message language first), plus an iOS build with the Settings
+picker. NOT verified without a car: how the nav-bar buttons and bubble glyphs look on a real head unit, whether a
+given car reports `limitedUserInterfaces` at all, and the speech voice over the car audio route.
 
 ## Known limits
 

@@ -9,6 +9,21 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed - CarPlay conversation screen: chat layout, text only when parked, read-aloud voice (iOS)
+
+- The conversation screen reads like a thread: messages in chat order (oldest first, newest right above Reply)
+  with a bubble glyph per message (their avatar / grey left bubble, your tinted right bubble), the Siri-managed
+  Reply row below them like a composer, and **Read to me / Call as real buttons** in the nav bar. CarPlay allows no
+  custom views or bottom button bar; `docs/CARPLAY.md` says exactly what is and isn't possible.
+- **Message text is only shown when parked.** The car's UI-limit report (`limitedUserInterfaces`) means driving:
+  the conversation screen shows only "Messages are hidden while driving" plus Reply / Read / Call, and the Messages
+  tab shows names and unread counts, never a preview; both rebuild the moment the car starts or stops. A car that
+  never reports limits looks parked.
+- **Read-aloud voice:** Haven no longer uses the default-quality voice. "Match system" follows the user's
+  accessibility speech settings when they are on, otherwise the best installed voice for the message's language;
+  Settings > Car and Siri > Read-aloud voice picks an exact voice (with a sample). Localized (de, es, it, ja, ko,
+  pt-BR). Tests: drive mode, both screen modes, chat ordering, voice ordering.
+
 ### Fixed — a private post stranded on a circle with no relay list yet is re-sent when a relay is learned (Android / desktop)
 
 The e2e `multirelay: A's private post on A's other devices` read "never" on a loaded host. A device that learned the

@@ -8,9 +8,10 @@ import UIKit
 /// CarPlay connects this scene to the SAME process as the phone UI, so it reads the same `FeedStore`.
 /// Root: a tab bar (when the entitlement allows 2+ tabs) with
 ///   * **Messages** - a `CPListTemplate` of direct-message conversations. A tap opens the conversation
-///     screen: "Read new messages" (Haven reads them aloud), a "Reply" row (the one Siri-managed
-///     `CPMessageListItem`, keyed by the DM circle id, which takes a spoken reply through `HavenIntents`),
-///     "Call on Haven", and the recent messages (newest first; a tap reads one aloud).
+///     screen: PARKED it shows the recent messages in chat order (a tap reads one aloud) above a "Reply"
+///     row (the one Siri-managed `CPMessageListItem`, keyed by the DM circle id, which takes a spoken
+///     reply through `HavenIntents`), with "Read to me" and "Call" as nav-bar buttons; DRIVING (the car
+///     reports a UI limit - `CarPlayDriveMode`) it shows no message text at all, only those actions.
 ///   * **Calls** - callable conversations; a row opens a `CPContactTemplate` whose "Call on Haven" button
 ///     starts an audio call through `CallManager` (CallKit then shows it natively on the car).
 ///
@@ -21,7 +22,7 @@ import UIKit
 ///     Calls), and the notification-privacy setting caps the preview (`CarPlayConversations` /
 ///     `MessagingPrivacy`);
 ///   * no identity yet (fresh install) -> a single "Open Haven on your iPhone" row.
-final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
+final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPSessionConfigurationDelegate {
     private var interfaceController: CPInterfaceController?
     private var messagesTemplate: CPListTemplate?
     private var callsTemplate: CPListTemplate?
@@ -34,6 +35,9 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     /// The conversation screen currently on top, refreshed in place when new messages arrive.
     private var openConversation: (id: String, template: CPListTemplate)?
     private var avatarsByID: [String: UIImage] = [:]
+    /// Retained for the session: the car's UI-limit reports (`limitedUserInterfaces`) arrive through it.
+    private var carSession: CPSessionConfiguration?
+    private var driveMode: CarPlayDriveMode = .parked
 
     // MARK: - Scene lifecycle
 
@@ -41,6 +45,9 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
                                   didConnect interfaceController: CPInterfaceController) {
         HavenLog.sync("carplay: connected")
         self.interfaceController = interfaceController
+        let configuration = CPSessionConfiguration(delegate: self)
+        carSession = configuration
+        driveMode = CarPlayDriveMode.mode(for: configuration.limitedUserInterfaces)
         let messages = CPListTemplate(title: "Haven", sections: [CarPlayTemplates.section(for: [], configured: false, enabled: true)])
         messages.emptyViewSubtitleVariants = [MessagingText.noConversations]
         messagesTemplate = messages
@@ -66,8 +73,25 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         messagesTemplate = nil
         callsTemplate = nil
         openConversation = nil
+        carSession = nil
         CarPlaySpeaker.shared.stop()
         self.interfaceController = nil
+    }
+
+    // MARK: - Parked / driving
+
+    /// The vehicle started or stopped limiting its UI (it is moving / it is parked). Rebuild the Messages
+    /// list and any open conversation right now, so message text never lingers on screen after the car
+    /// starts moving.
+    func sessionConfiguration(_ sessionConfiguration: CPSessionConfiguration,
+                              limitedUserInterfacesChanged limitedUserInterfaces: CPLimitableUserInterface) {
+        let mode = CarPlayDriveMode.mode(for: limitedUserInterfaces)
+        Task { @MainActor [weak self] in
+            guard let self, self.driveMode != mode else { return }
+            HavenLog.sync("carplay: \(mode == .driving ? "driving" : "parked")")
+            self.driveMode = mode
+            self.refresh()
+        }
     }
 
     // MARK: - Refresh
@@ -146,17 +170,24 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 
     @MainActor private func messagesSection(rows: [CarPlayConversations.Row], configured: Bool, enabled: Bool,
                                             avatars: [String: UIImage]) -> CPListSection {
-        CarPlayTemplates.section(for: rows, configured: configured, enabled: enabled, avatars: avatars,
+        CarPlayTemplates.section(for: rows, configured: configured, enabled: enabled, mode: driveMode, avatars: avatars,
                                  unreadMark: CarPlayTemplates.unreadDot(color: UIColor(PaletteStore.current.tint))) { [weak self] row in
             self?.showConversation(row.conversationId)
         }
     }
 
-    @MainActor private func conversationTemplate(_ id: String) -> CPListTemplate? {
+    @MainActor private func conversationScreen(_ id: String) -> CarPlayTemplates.ConversationScreen? {
         guard let thread = threadsByID[id] else { return nil }
         let detail = CarPlayConversations.detail(thread: thread, detail: detailLevel, now: Date())
-        return CarPlayTemplates.conversationTemplate(
-            for: detail,
+        let tint = UIColor(PaletteStore.current.tint)
+        let art = CarPlayTemplates.ConversationArt(
+            theirAvatar: avatarsByID[id],
+            theirBubble: CarPlayTemplates.bubbleIcon(mine: false, tint: tint),
+            myBubble: CarPlayTemplates.bubbleIcon(mine: true, tint: tint),
+            unreadMark: CarPlayTemplates.unreadDot(color: tint),
+            replyIcon: CarPlayTemplates.glyph("mic.fill", tint: tint))
+        return CarPlayTemplates.conversationScreen(
+            for: detail, mode: driveMode, art: art,
             onRead: { [weak self] in self?.read(id, unreadOnly: true) },
             onCall: { [weak self] in
                 if let row = self?.callRows.first(where: { $0.conversationId == id }) { self?.showContact(row) }
@@ -165,17 +196,21 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     }
 
     @MainActor private func showConversation(_ id: String) {
-        guard let controller = interfaceController, let template = conversationTemplate(id) else { return }
+        guard let controller = interfaceController, let screen = conversationScreen(id),
+              let title = threadsByID[id]?.title else { return }
+        let template = CPListTemplate(title: title, sections: screen.sections)
+        template.trailingNavigationBarButtons = screen.buttons
         openConversation = (id, template)
         controller.pushTemplate(template, animated: true, completion: nil)
     }
 
-    /// New messages arriving while a conversation is open update it in place.
+    /// New messages arriving while a conversation is open, or the car starting/stopping, update it in place.
     @MainActor private func refreshOpenConversation() {
         guard let open = openConversation else { return }
         guard interfaceController?.templates.contains(where: { $0 === open.template }) == true,
-              let fresh = conversationTemplate(open.id) else { openConversation = nil; return }
+              let fresh = conversationScreen(open.id) else { openConversation = nil; return }
         open.template.updateSections(fresh.sections)
+        open.template.trailingNavigationBarButtons = fresh.buttons
     }
 
     /// "Read new messages": the unread ones (or the latest few), then mark the thread read - it has

@@ -40,41 +40,114 @@ final class CarPlayTemplatesTests: XCTestCase {
                         lines: [CarPlayConversations.Line]? = nil, callable: Bool = true) -> CarPlayConversations.Detail {
         .init(conversationId: "dm:aa", title: "Tracy M", locked: locked,
               lines: lines ?? [.init(id: "m2", text: "On my way", byline: "Tracy \u{00B7} 3:41 PM", unread: true),
-                               .init(id: "m1", text: "hey", byline: "You \u{00B7} 3:00 PM", unread: false)],
+                               .init(id: "m1", text: "hey", byline: "You \u{00B7} 3:00 PM", unread: false, mine: true)],
               unreadCount: unread, canSpeak: canSpeak, textHidden: hidden, callable: callable)
     }
 
-    func testConversationScreenOffersReadReplyCallAndTheMessages() {
-        var read = 0, called = 0
+    private func fire(_ item: CPListItem) {
+        let done = expectation(description: item.text ?? "")
+        item.handler?(item, { done.fulfill() })
+        wait(for: [done], timeout: 2)
+    }
+
+    func testParkedConversationShowsChatOrderMessagesThenTheSiriReplyRow() {
         var spoken: [String] = []
-        let t = CarPlayTemplates.conversationTemplate(for: detail(), onRead: { read += 1 }, onCall: { called += 1 },
+        let t = CarPlayTemplates.conversationTemplate(for: detail(), mode: .parked, onRead: {}, onCall: {},
                                                       onSpeak: { spoken.append($0.id) })
-        XCTAssertEqual(t.sections.count, 2)
-        let actions = t.sections[0].items
-        XCTAssertEqual((actions[0] as? CPListItem)?.text, "Read new messages")
-        let reply = actions[1] as? CPMessageListItem
+        XCTAssertEqual(t.sections.count, 2, "messages, then the composer row")
+        let messages = t.sections[0].items.compactMap { $0 as? CPListItem }
+        XCTAssertEqual(messages.map(\.text), ["hey", "On my way"], "oldest first: the newest sits right above Reply")
+        XCTAssertEqual(messages.map(\.detailText), ["You \u{00B7} 3:00 PM", "Tracy \u{00B7} 3:41 PM"])
+        let reply = t.sections[1].items.first as? CPMessageListItem
+        XCTAssertEqual(t.sections[1].items.count, 1)
         XCTAssertEqual(reply?.conversationIdentifier, "dm:aa", "the reply row is the one Siri-managed item")
-        XCTAssertEqual((actions[2] as? CPListItem)?.text, "Call on Haven")
-        let messages = t.sections[1].items.compactMap { $0 as? CPListItem }
-        XCTAssertEqual(messages.map(\.text), ["On my way", "hey"], "newest first")
-        XCTAssertEqual(t.sections[1].header, "Recent messages")
-        for item in [actions[0], actions[2], messages[0]].compactMap({ $0 as? CPListItem }) {
-            let done = expectation(description: item.text ?? "")
-            item.handler?(item, { done.fulfill() })
-            wait(for: [done], timeout: 2)
-        }
-        XCTAssertEqual([read, called, spoken.count], [1, 1, 1])
-        XCTAssertEqual(spoken, ["m2"])
+        XCTAssertEqual(reply?.text, "Reply")
+        fire(messages[1])
+        XCTAssertEqual(spoken, ["m2"], "a message row reads that message")
+    }
+
+    func testBubbleArtDistinguishesMineFromTheirs() {
+        let tint = UIColor.systemPurple
+        let mine = CarPlayTemplates.bubbleIcon(mine: true, tint: tint)
+        let theirs = CarPlayTemplates.bubbleIcon(mine: false, tint: tint)
+        XCTAssertGreaterThan(mine.size.width, 0)
+        XCTAssertNotEqual(mine.pngData(), theirs.pngData(), "right/tinted vs left/grey bubble")
+        let avatar = CarPlayTemplates.bubbleIcon(mine: false, tint: tint, side: 30)
+        let art = CarPlayTemplates.ConversationArt(theirAvatar: avatar, theirBubble: theirs, myBubble: mine)
+        let t = CarPlayTemplates.conversationTemplate(for: detail(), art: art, onRead: {}, onCall: {}, onSpeak: { _ in })
+        let items = t.sections[0].items.compactMap { $0 as? CPListItem }
+        XCTAssertNotNil(items[0].image, "my message carries the right bubble")
+        XCTAssertNotNil(items[1].image, "their message carries their avatar")
+    }
+
+    func testReadAndCallAreNavBarButtons() {
+        var read = 0, called = 0
+        let screen = CarPlayTemplates.conversationScreen(for: detail(), onRead: { read += 1 }, onCall: { called += 1 }, onSpeak: { _ in })
+        XCTAssertEqual(screen.buttons.map(\.title), ["Read new", "Call"])
+        XCTAssertEqual(screen.actions.map(\.title), ["Read new", "Call"])
+        XCTAssertLessThanOrEqual(screen.buttons.count, 2, "the nav bar shows at most two")
+        screen.actions.forEach { $0.run() }
+        XCTAssertEqual([read, called], [1, 1])
+        let t = CarPlayTemplates.conversationTemplate(for: detail(), onRead: {}, onCall: {}, onSpeak: { _ in })
+        XCTAssertEqual(t.trailingNavigationBarButtons.map(\.title), ["Read new", "Call"])
+        let none = CarPlayTemplates.conversationTemplate(for: detail(unread: 0), onRead: {}, onCall: {}, onSpeak: { _ in })
+        XCTAssertEqual(none.trailingNavigationBarButtons.first?.title, "Read to me")
+    }
+
+    func testDrivingConversationShowsNoMessageTextOnlyTheActions() {
+        var read = 0
+        let screen = CarPlayTemplates.conversationScreen(for: detail(), mode: .driving, onRead: { read += 1 }, onCall: {}, onSpeak: { _ in })
+        let t = CarPlayTemplates.conversationTemplate(for: detail(), mode: .driving, onRead: {}, onCall: {}, onSpeak: { _ in })
+        let texts = t.sections.flatMap(\.items).compactMap { ($0 as? CPListItem).map { [$0.text, $0.detailText].compactMap { $0 } } }.flatMap { $0 }
+        XCTAssertFalse(texts.contains { $0.contains("On my way") || $0.contains("hey") }, "no message text while driving")
+        XCTAssertEqual(t.sections[0].items.count, 1)
+        XCTAssertEqual((t.sections[0].items[0] as? CPListItem)?.text, "Messages are hidden while driving")
+        XCTAssertEqual((t.sections[0].items[0] as? CPListItem)?.detailText, "Park to read them, or tap Read to me.")
+        XCTAssertTrue(t.sections.last?.items.first is CPMessageListItem, "Reply stays available")
+        XCTAssertEqual(t.trailingNavigationBarButtons.map(\.title), ["Read new", "Call"])
+        screen.actions.first?.run()
+        XCTAssertEqual(read, 1, "Read to me still works while driving")
+        let hiddenText = CarPlayTemplates.conversationTemplate(for: detail(canSpeak: false, hidden: true, lines: [], callable: false), mode: .driving,
+                                                               onRead: {}, onCall: {}, onSpeak: { _ in })
+        XCTAssertEqual((hiddenText.sections[0].items[0] as? CPListItem)?.detailText, "Park to see them.")
+        XCTAssertTrue(hiddenText.trailingNavigationBarButtons.isEmpty)
+    }
+
+    func testDriveModeFromLimits() {
+        XCTAssertEqual(CarPlayDriveMode.mode(limitsActive: false), .parked)
+        XCTAssertEqual(CarPlayDriveMode.mode(limitsActive: true), .driving)
+        XCTAssertEqual(CarPlayDriveMode.mode(for: []), .parked, "a car that never reports a limit looks parked")
+        XCTAssertEqual(CarPlayDriveMode.mode(for: .lists), .driving)
+        XCTAssertEqual(CarPlayDriveMode.mode(for: .keyboard), .driving)
+        XCTAssertEqual(CarPlayDriveMode.mode(for: [.lists, .keyboard]), .driving)
+        XCTAssertTrue(CarPlayDriveMode.parked.showsMessageText)
+        XCTAssertFalse(CarPlayDriveMode.driving.showsMessageText)
+    }
+
+    func testMessagesTabRowsShowNamesAndUnreadCountsOnlyWhileDriving() {
+        let unreadRow = CarPlayConversations.Row(conversationId: "dm:aa", title: "Maya", detail: "On my way", trailing: "3:41 PM",
+                                                 unread: true, locked: false, unreadCount: 3)
+        let readRow = CarPlayConversations.Row(conversationId: "dm:bb", title: "Sam", detail: "see you", trailing: "2:00 PM",
+                                               unread: false, locked: false, unreadCount: 0)
+        let locked = CarPlayConversations.Row(conversationId: "dm:cc", title: "Locked chat", detail: "Locked", trailing: "",
+                                              unread: false, locked: true)
+        XCTAssertEqual(CarPlayTemplates.rowDetail(unreadRow, mode: .parked), "3:41 PM \u{00B7} On my way")
+        XCTAssertEqual(CarPlayTemplates.rowDetail(unreadRow, mode: .driving), "3 unread")
+        XCTAssertEqual(CarPlayTemplates.rowDetail(readRow, mode: .driving), "")
+        XCTAssertEqual(CarPlayTemplates.rowDetail(locked, mode: .driving), "Locked")
+        let section = CarPlayTemplates.section(for: [unreadRow, readRow], configured: true, enabled: true, mode: .driving)
+        let items = section.items.compactMap { $0 as? CPListItem }
+        XCTAssertEqual(items.map(\.text), ["Maya", "Sam"], "names stay")
+        XCTAssertEqual(items.map(\.detailText), ["3 unread", nil])
+        XCTAssertFalse(items.contains { ($0.detailText ?? "").contains("On my way") })
     }
 
     func testConversationScreenReadsToMeWhenNothingIsUnreadAndHidesReadingWhenPrivate() {
-        let none = CarPlayTemplates.conversationTemplate(for: detail(unread: 0), onRead: {}, onCall: {}, onSpeak: { _ in })
-        XCTAssertEqual((none.sections[0].items[0] as? CPListItem)?.text, "Read to me")
         let hidden = CarPlayTemplates.conversationTemplate(for: detail(canSpeak: false, hidden: true, lines: [], callable: false),
                                                            onRead: {}, onCall: {}, onSpeak: { _ in })
-        XCTAssertEqual(hidden.sections[0].items.count, 1, "only the Siri reply row: no read, no call")
-        XCTAssertTrue(hidden.sections[0].items[0] is CPMessageListItem)
-        XCTAssertEqual((hidden.sections[1].items.first as? CPListItem)?.text, "Message text is hidden by your notification privacy setting.")
+        XCTAssertTrue(hidden.trailingNavigationBarButtons.isEmpty, "no read, no call")
+        XCTAssertEqual((hidden.sections[0].items.first as? CPListItem)?.text, "Message text is hidden by your notification privacy setting.")
+        XCTAssertTrue(hidden.sections[1].items[0] is CPMessageListItem, "only the Siri reply row remains")
     }
 
     func testLockedConversationScreenShowsOnlyThatItIsLocked() {
@@ -82,6 +155,9 @@ final class CarPlayTemplatesTests: XCTestCase {
         XCTAssertEqual(t.sections.count, 1)
         XCTAssertEqual(t.sections[0].items.count, 1)
         XCTAssertEqual((t.sections[0].items[0] as? CPListItem)?.text, "Locked")
+        XCTAssertTrue(t.trailingNavigationBarButtons.isEmpty)
+        let driving = CarPlayTemplates.conversationTemplate(for: detail(locked: true), mode: .driving, onRead: {}, onCall: {}, onSpeak: { _ in })
+        XCTAssertEqual((driving.sections[0].items[0] as? CPListItem)?.text, "Locked")
     }
 
     func testEmptyUnconfiguredAndDisabledStates() {

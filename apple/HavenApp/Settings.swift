@@ -79,6 +79,11 @@ final class SettingsStore: ObservableObject {
             #endif
         }
     }
+    /// The voice Haven reads messages in on CarPlay: "" = match the system (best installed voice, or the
+    /// user's assistive speech settings), else an `AVSpeechSynthesisVoice` identifier. DEVICE-LOCAL.
+    @Published var carPlayVoiceId: String {
+        didSet { d.set(carPlayVoiceId, forKey: kCarPlayVoice) }
+    }
     /// Auto-delete posts older than this many days (0 = keep forever).
     @Published var retentionDays: Int { didSet { d.set(retentionDays, forKey: kRet); stamp(kRet) } }
 
@@ -158,6 +163,7 @@ final class SettingsStore: ObservableObject {
     private let kKeepAwake = "haven.relay.keepAwake"
     private let kShareSuggest = "haven.shareSuggestions"
     private let kCarPlay = "haven.carPlayAndSiri"
+    private let kCarPlayVoice = "haven.carPlayVoiceId"
 
     private init() {
         saveToPhotos = d.object(forKey: kSave) as? Bool ?? true   // default ON
@@ -171,6 +177,7 @@ final class SettingsStore: ObservableObject {
         notificationDetail = SharedNotificationPrivacy.detail
         shareSuggestions = d.object(forKey: kShareSuggest) as? Bool ?? true   // default ON
         carPlayAndSiri = d.object(forKey: kCarPlay) as? Bool ?? true          // default ON
+        carPlayVoiceId = d.string(forKey: kCarPlayVoice) ?? ""                // default: match the system
         retentionDays = d.object(forKey: kRet) as? Int ?? 0       // default forever
         keepMyPosts = d.object(forKey: kKeepMine) as? Bool ?? true   // default: always keep my own archive
         identifySongsInVideos = d.object(forKey: kIdentifySongs) as? Bool ?? true   // default ON; the switch is the opt-out
@@ -361,6 +368,17 @@ struct SettingsView: View {
                 Section {
                     Toggle("CarPlay and Siri messages", isOn: $settings.carPlayAndSiri)
                         .tint(HavenTheme.pink)
+                    if settings.carPlayAndSiri {
+                        NavigationLink {
+                            CarPlayVoicePickerView()
+                        } label: {
+                            HStack {
+                                Text("Read-aloud voice", tableName: "Messaging")
+                                Spacer()
+                                Text(CarPlayVoicePickerView.summary(settings.carPlayVoiceId)).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
                 } header: { Text("Car and Siri") }
                 footer: {
                     Text("Lists your conversations on CarPlay and lets Siri read and send Haven messages by voice. Siri runs in a separate part of the app, so a few recent messages are kept in a protected file on this device while this is on; turning it off deletes it. Locked conversations show only \u{201C}Locked\u{201D}, and message text follows your lock-screen detail setting above.")

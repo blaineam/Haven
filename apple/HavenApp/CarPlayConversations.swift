@@ -13,6 +13,9 @@ enum CarPlayConversations {
         var trailing: String
         var unread: Bool
         var locked: Bool
+        /// How many inbound messages are unread (0 for a locked thread). Driving mode shows this instead
+        /// of any message text.
+        var unreadCount: Int = 0
     }
 
     /// One callable person/group in the Calls tab.
@@ -30,12 +33,13 @@ enum CarPlayConversations {
                      limit: Int = defaultLimit) -> [Row] {
         let built = threads.map { t -> (row: Row, at: UInt64) in
             let newest = MessagingPrivacy.latest(t.messages)
-            let unread = !t.locked && MessagingPrivacy.unreadCount(t.messages, watermark: t.watermark) > 0
+            let unreadCount = t.locked ? 0 : MessagingPrivacy.unreadCount(t.messages, watermark: t.watermark)
+            let unread = unreadCount > 0
             let text = MessagingPrivacy.preview(of: newest, locked: t.locked, unread: unread, detail: detail)
             let at = newest?.createdAt ?? 0
             let trailing = (at == 0 || t.locked) ? "" : timeLabel(ms: at, now: now, calendar: calendar, locale: locale)
             return (Row(conversationId: t.id, title: MessagingPrivacy.truncate(t.title, limit: 60), detail: text,
-                        trailing: trailing, unread: unread, locked: t.locked), at)
+                        trailing: trailing, unread: unread, locked: t.locked, unreadCount: unreadCount), at)
         }
         let sorted = built.sorted { a, b in
             a.at != b.at ? a.at > b.at : a.row.title.localizedCaseInsensitiveCompare(b.row.title) == .orderedAscending
@@ -63,6 +67,8 @@ enum CarPlayConversations {
         /// "Maya - 3:41 PM" / "You - Yesterday".
         var byline: String
         var unread: Bool
+        /// I wrote it (drives the right-hand bubble glyph).
+        var mine: Bool = false
     }
 
     /// What tapping a conversation shows: the recent messages (newest first) plus what may be done with
@@ -101,7 +107,7 @@ enum CarPlayConversations {
             guard !text.isEmpty else { continue }
             let who = m.isMe ? MessagingText.you : (multi && !m.author.isEmpty ? m.author : "")
             let when = timeLabel(ms: m.createdAt, now: now, calendar: calendar, locale: locale)
-            lines.append(Line(id: m.id, text: text, byline: [who, when].filter { !$0.isEmpty }.joined(separator: " \u{00B7} "), unread: unread))
+            lines.append(Line(id: m.id, text: text, byline: [who, when].filter { !$0.isEmpty }.joined(separator: " \u{00B7} "), unread: unread, mine: m.isMe))
             if lines.count >= limit { break }
         }
         return Detail(conversationId: t.id, title: t.title, locked: false, lines: lines,

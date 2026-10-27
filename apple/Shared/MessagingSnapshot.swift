@@ -57,6 +57,14 @@ enum MessagingText {
     static var replyHint: String { t("Say your message to Siri") }
     static var callOnHaven: String { t("Call on Haven") }
     static var recentMessages: String { t("Recent messages") }
+    /// Short labels for the navigation-bar buttons (the long forms above are row titles).
+    static var readNewShort: String { t("Read new") }
+    static var callShort: String { t("Call") }
+    /// Driving mode (the car reports a UI limit): names and counts only, never message text.
+    static var hiddenWhileDriving: String { t("Messages are hidden while driving") }
+    static var hiddenWhileDrivingHint: String { t("Park to read them, or tap Read to me.") }
+    static var hiddenWhileDrivingHintNoRead: String { t("Park to see them.") }
+    static func unreadCount(_ n: Int) -> String { String(format: String(localized: "%lld unread", table: "Messaging"), n) }
     static var noMessagesYet: String { t("No messages yet") }
     static var you: String { t("You") }
     static var lockedHint: String { t("Unlock this conversation in Haven on your iPhone.") }

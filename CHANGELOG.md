@@ -15,6 +15,18 @@ install, offline stretch) never got a notification and Android Auto - which only
 DM threads now use a 24 h window (one notification per thread); circle posts keep 10 minutes. New
 `InboundNotifyPolicy` + `InboundNotifyPolicyTest`.
 
+### Fixed - Android: a new member no longer asks the author to re-seal their whole history at once
+
+A device that joins a circle after its history was sealed (the Nokia: `me_listed=false`, sealed to
+20-29 recipients that predate it, under epoch keys it was never handed) holds hundreds of blobs it can
+never open. Each blob's re-seal ask was bounded (15-minute cooldown, 3 tries) but nothing bounded them
+together: one fresh install made ~180 asks in two minutes (734 live-lane puts), and every ask makes the
+author's phone re-read, re-seal and re-upload the whole file. Re-seal asks from the quarantine path now
+share a global pace (6 per minute, `ResealPacing`); a denied ask costs nothing and is offered again on
+the next sweep, so history trickles in at a rate the author's phone can afford. The key itself was not
+missing: the Nokia holds Blaine's current epoch keys (`peers_keyed=1`, `missing_keys=[]`); older media
+open only after the author re-seals them for the new device (GROUP-KEYING.md "Add" semantics).
+
 ### Fixed - Calls: "Connected" lagged on iPhone; Android left a frozen frame when a camera went off
 - **iOS call screen sat on "Connecting media…" after media was up.** `mediaConnected` reads
   `lastPeerState` / `hairpinPeers`, which are not `@Published`, so the label only caught up when some

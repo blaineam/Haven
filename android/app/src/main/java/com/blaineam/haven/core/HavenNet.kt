@@ -8737,6 +8737,7 @@ object HavenNet : InboundListener {
     private val resealAskedAt = HashMap<String, Long>()
     private val resealTries = HashMap<String, Int>()
     private val RESEAL_MAX_TRIES = 3
+    private val resealPacing = ResealPacing()
 
     /**
      * The point of USE reporting a failure, which no sweep can match for accuracy: the tile tried to
@@ -8755,6 +8756,9 @@ object HavenNet : InboundListener {
         synchronized(resealAskedAt) {
             val last = resealAskedAt[ref]
             if (last != null && now - last < RESEAL_ASK_COOLDOWN_MS) return
+            // Global pace: a new member's whole unreadable history must not become one stampede of asks
+            // at the author. A denied ask costs nothing (no try, no cooldown) — the next sweep retries.
+            if (!resealPacing.tryAcquire(now)) return
             // BOUNDED. Every ask makes the AUTHOR re-read, re-seal and re-upload the whole file —
             // hundreds of MB for a video. A blob that will never converge (its author no longer
             // holds the plaintext, say) would otherwise bill them that cost every cooldown, forever,

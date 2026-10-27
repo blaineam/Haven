@@ -123,10 +123,11 @@ class NetEnv(
 
     private fun clearAll() {
         (field("relayScope").get(HavenNet) as RelayScope).invalidate()   // membership snapshot is per-test state
+        (field("resealPacing").get(HavenNet) as ResealPacing).clear()    // the global ask budget is per-test state
         for (name in listOf("relayEntries", "relayNodes", "seenMailbox", "refusedUntilMs", "refusedStreak", "httpUrlBad",
             "mailboxListDigests", "relayHealth", "pendingSeenMarks", "deviceHints", "initiated", "helloOffered",
             "backedUp", "uploadProgress", "scopeRefusedUntil", "rosterNeeded", "rosterPublished", "rosterPullAt",
-            "lastEnrollMs", "lastEnrollRelays", "erasedRelays", "relayInterfaceRefreshMs", "replacedInterfaces",
+            "lastEnrollMs", "lastEnrollRelays", "lastEnrollMembers", "lastEnrollLanded", "erasedRelays", "relayInterfaceRefreshMs", "replacedInterfaces",
             "mediaQueueKeys", "restoreInFlight", "fastReq", "mediaReqAt", "resealAskedAt", "resealTries", "unopenableMedia",
             "mediaServedAt", "mediaServing", "announcedMediaAt", "countedArrivals", "requestedRefs", "pendingBackups",
             "probedThisSession", "verifiedOpen", "fetchedFrom", "transferWatch", "waitingForSenderMedia", "unavailableMedia",

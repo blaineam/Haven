@@ -231,6 +231,7 @@
     <string name="circle_photo_label">Photo</string>
     <string name="circle_downloading_progress">Downloading… %1$d/%2$d</string>
     <string name="circle_downloading">Downloading…</string>
+    <string name="circle_finding_relay">Finding a relay…</string>
     <string name="circle_waiting_for_sender">Waiting for sender…</string>
     <string name="circle_no_longer_available">No longer available</string>
     <string name="circle_will_tell_you">We\'ll tell you when it\'s back</string>

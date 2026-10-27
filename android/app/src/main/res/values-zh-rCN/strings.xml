@@ -202,6 +202,7 @@
     <string name="circle_photo_label">照片</string>
     <string name="circle_downloading_progress">正在下载… %1$d/%2$d</string>
     <string name="circle_downloading">正在下载…</string>
+    <string name="circle_finding_relay">正在查找中继…</string>
     <string name="circle_waiting_for_sender">等待发送方…</string>
     <string name="circle_no_longer_available">已不可用</string>
     <string name="circle_will_tell_you">恢复后我们会通知你</string>

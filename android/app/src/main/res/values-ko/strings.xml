@@ -202,6 +202,7 @@
     <string name="circle_photo_label">사진</string>
     <string name="circle_downloading_progress">다운로드 중… %1$d/%2$d</string>
     <string name="circle_downloading">다운로드 중…</string>
+    <string name="circle_finding_relay">릴레이를 찾는 중…</string>
     <string name="circle_waiting_for_sender">보낸 사람을 기다리는 중…</string>
     <string name="circle_no_longer_available">더 이상 볼 수 없어요</string>
     <string name="circle_will_tell_you">다시 연결되면 알려 드릴게요</string>

@@ -202,6 +202,7 @@
     <string name="circle_photo_label">Foto</string>
     <string name="circle_downloading_progress">Wird heruntergeladen… %1$d/%2$d</string>
     <string name="circle_downloading">Wird heruntergeladen…</string>
+    <string name="circle_finding_relay">Relay wird gesucht…</string>
     <string name="circle_waiting_for_sender">Warten auf Absender…</string>
     <string name="circle_no_longer_available">Nicht mehr verfügbar</string>
     <string name="circle_will_tell_you">Wir sagen dir Bescheid, wenn es wieder da ist</string>

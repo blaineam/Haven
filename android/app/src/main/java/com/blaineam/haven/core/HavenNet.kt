@@ -1527,12 +1527,12 @@ object HavenNet : InboundListener {
         scope.launch {
             withContext(Dispatchers.Main) { internetActive.value = true }
             when (type) {
-                Wire.HELLO -> handleHello(body, viaNearby, senderDevice)
+                Wire.HELLO -> { handleHello(body, viaNearby, senderDevice); retryParkedRelayAnnounces() }
                 Wire.DEVICE_ENROLL -> handleEnrollmentRequest(body)
                 Wire.DEVICE_GRANT -> handleDeviceGrant(body)
                 Wire.SEEDLESS_ENROLL_REQ -> handleSeedlessEnrollRequest(body)
                 Wire.SEEDLESS_ENROLL_GRANT -> handleSeedlessEnrollGrant(body)
-                Wire.EVENT -> handleEvent(body, senderDevice, viaNearby)
+                Wire.EVENT -> { handleEvent(body, senderDevice, viaNearby); retryParkedRelayAnnounces() }
                 Wire.RELAY_NODE -> handleRelayNode(body)
                 Wire.RELAY -> handleRelay(body, viaNearby)
                 Wire.PRESIGN -> handlePresignBootstrap(body)
@@ -3173,6 +3173,7 @@ object HavenNet : InboundListener {
         // A hybrid-PQ seal per member per circle: never on main. RootScreen calls this on every
         // ON_RESUME, and the e2e launch sampled main parked in sendHello → sealCircleMedia.
         if (onMainThread()) { scope.launch { syncWithContacts() }; return }
+        retryParkedRelayAnnounces()
         val nowMs = System.currentTimeMillis()
         val resendHistory = nowMs - lastHistoryResendMs > 180_000   // ~3 min, not every tick
         val snapshot = dialTargets(DEFAULT_CIRCLE)   // account id (handle) + device ids (actual reach)
@@ -4760,13 +4761,28 @@ object HavenNet : InboundListener {
 
     /** Frame 19: [LP circleId][sealCircleMedia(relay node hex | {"node","urls","token"} JSON)].
      *  Store the relay (+ its HTTP interface when announced) + backfill/poll. */
+    /** Relay announces that beat the circle's key here — see [RelayAnnounceParking]. */
+    private val parkedRelayAnnounces = RelayAnnounceParking()
+
+    /** Re-process parked relay announces (a key may have landed). Cheap when nothing is parked. */
+    private fun retryParkedRelayAnnounces() {
+        for (p in parkedRelayAnnounces.drain(System.currentTimeMillis())) {
+            handleRelayNode(Wire.eventPayload(p.circleId, p.sealed))   // [LP cid][sealed] — frame 19's layout
+        }
+    }
+
     private fun handleRelayNode(body: ByteArray) {
         val r = Wire.Reader(body)
         val cidBytes = r.lp() ?: return
         val circleId = String(cidBytes, Charsets.UTF_8)
         val sealed = r.rest()
         if (circleId.isEmpty() || sealed.isEmpty()) return
-        val opened = runCatching { social.openCircleMediaSender(circleId, sealed) }.getOrNull() ?: return
+        val opened = runCatching { social.openCircleMediaSender(circleId, sealed) }.getOrNull() ?: run {
+            // Not openable YET (we do not hold this circle's key). Dropping it meant a new device never
+            // learned its first relay: park it and retry when keys arrive (hello / event / sync tick).
+            parkedRelayAnnounces.park(circleId, sealed, System.currentTimeMillis())
+            return
+        }
         val announcerHex = opened.senderHex.lowercase()   // authenticated envelope sender (account id)
         val text = String(opened.data, Charsets.UTF_8).trim()
         // Extended announce: JSON {node, urls, token, derp, turn, turnUser, turnPass} — see [RelayAnnounce].
@@ -4854,6 +4870,8 @@ object HavenNet : InboundListener {
                 Log.i(TAG, "learned relay TURN for ${nodeHex.take(8)}: ${announcedTurn.size} url(s)")
             }
         }
+        // A relay is known now: the "Finding a relay…" placeholders retry on the next sweep.
+        scope.launch(Dispatchers.Main) { findingRelayMedia.clear() }
         scope.launch(Dispatchers.Main) { bumpRelays() }   // recompose the Relays hub off the inbound thread
         // SUPERSEDE stale account-id relays: under the per-device transport a relay is ALWAYS a device id,
         // never an account id. A relay-list entry equal to a member's (or our own) ACCOUNT id is a dead
@@ -6967,6 +6985,9 @@ object HavenNet : InboundListener {
     /** Relays were reachable and NONE holds the blob — we're waiting on the SENDER's device to
      *  upload it. Drives the placeholder's honest "Waiting for sender…" state (Apple parity). */
     val waitingForSenderMedia = mutableStateListOf<String>()
+    /** Refs we could not even look for because this device knows no relay for their circle yet —
+     *  "Finding a relay…", not "Waiting for sender…" ([NoRelayMediaPolicy]). */
+    val findingRelayMedia = mutableStateListOf<String>()
 
     /** Chunk progress for large chunked relay restores (ref → done/total) — the placeholder's i/n. */
     val mediaRestoreProgress = androidx.compose.runtime.mutableStateMapOf<String, Pair<Int, Int>>()
@@ -6981,6 +7002,7 @@ object HavenNet : InboundListener {
         scope.launch(Dispatchers.Main) {
             downloadingMedia.remove(ref)
             waitingForSenderMedia.remove(ref)
+            findingRelayMedia.remove(ref)
             unavailableMedia.remove(ref)
             mediaRestoreProgress.remove(ref)
         }
@@ -7077,6 +7099,13 @@ object HavenNet : InboundListener {
         if (LocalMedia.has(ref)) return
         scope.launch(Dispatchers.Main) {
             if (!waitingForSenderMedia.contains(ref)) waitingForSenderMedia.add(ref)
+        }
+    }
+
+    private fun noteMediaFindingRelay(ref: String) {
+        if (LocalMedia.has(ref)) return
+        scope.launch(Dispatchers.Main) {
+            if (!findingRelayMedia.contains(ref)) findingRelayMedia.add(ref)
         }
     }
 
@@ -9004,6 +9033,7 @@ object HavenNet : InboundListener {
             // answered, so say nothing: the placeholder keeps its spinner and the peer ask / relay
             // learning ([NoRelayMediaPolicy]) get the chance to resolve it.
             if (NoRelayMediaPolicy.relaysAnsweredEmpty(relays.size)) noteMediaMissingOnRelays(ref)
+            else noteMediaFindingRelay(ref)
             // A full miss is ALSO the signature of a relay whose HTTP front door we can't use
             // (rotated tunnel / never learned): the blob may sit on a relay we only failed to
             // ASK properly. Try to fetch each dest relay's self-published interface over iroh —

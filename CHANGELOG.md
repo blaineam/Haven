@@ -11,6 +11,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed - Android: "Waiting for sender…" no longer lies on a relay-less device
 
+**Why a new device never found its first relay.** An invite carries device ids, not a relay, and
+self-sync needs a transport, so the ONLY way a fresh device learns its first relay is a sealed relay
+announce (frame 19) from a circle member. Android opened it with the circle's key and simply
+dropped it when the key had not landed yet (`peers_keyed` 0 at startup) — never retried, so the
+device ran relay-less indefinitely. Unopenable announces are now parked (bounded, expiring,
+de-duplicated) and re-processed on the next hello / event / sync tick (`RelayAnnounceParking`), and
+a relay-less photo shows **Finding a relay…** instead of blaming the sender. iOS
+(`FeedStore.handleRelayNode`) and desktop (`handle_relay_node`) drop an unopenable announce the same
+way — parity port pending.
+
 A freshly installed Android that had not yet learned a circle's relay asked ZERO relays for every
 photo, then fell into the "relays answered and none holds it" branch and painted *Waiting for
 sender…* over all of them (3,270 fetches in one log, every one `relays=[]`). The sender was fine:

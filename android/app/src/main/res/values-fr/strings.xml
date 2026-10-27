@@ -203,6 +203,7 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="circle_photo_label">Photo</string>
     <string name="circle_downloading_progress">Téléchargement… %1$d/%2$d</string>
     <string name="circle_downloading">Téléchargement…</string>
+    <string name="circle_finding_relay">Recherche d’un relais…</string>
     <string name="circle_waiting_for_sender">En attente de l\'expéditeur…</string>
     <string name="circle_no_longer_available">Plus disponible</string>
     <string name="circle_will_tell_you">Nous vous préviendrons dès son retour</string>

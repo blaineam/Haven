@@ -1200,6 +1200,7 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
     }
     val unavailable = com.blaineam.haven.core.HavenNet.unavailableMedia.contains(ref)
     val waiting = com.blaineam.haven.core.HavenNet.waitingForSenderMedia.contains(ref)
+    val findingRelay = com.blaineam.haven.core.HavenNet.findingRelayMedia.contains(ref)
     val progress = com.blaineam.haven.core.HavenNet.mediaRestoreProgress[ref]
     val evictedBytes = com.blaineam.haven.core.EvictedMediaStore.size(ref)
     // The post's blurred tiny thumb companion, when declared AND its ≤32KB bytes have arrived —
@@ -1237,6 +1238,15 @@ private fun MissingMediaPlaceholder(circleId: String, ref: String, isVideo: Bool
                     else stringResource(R.string.circle_downloading),
                     color = if (thumbBmp != null) Color.White else HavenTheme.textSecondary, fontSize = 12.sp,
                 )
+            }
+            // This device knows no relay for the circle yet, so nothing was asked and nothing is "missing":
+            // say what is really happening instead of blaming the sender.
+            findingRelay && !waiting && !unavailable -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    color = HavenTheme.pink, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.height(8.dp))
+                Text(stringResource(R.string.circle_finding_relay),
+                    color = HavenTheme.textSecondary, fontSize = 12.sp)
             }
             waiting && !unavailable -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 // The relays answered and none holds it — the SENDER hasn't uploaded it yet. A

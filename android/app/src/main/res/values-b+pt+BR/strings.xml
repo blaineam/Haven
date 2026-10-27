@@ -237,6 +237,7 @@ O que já tentei:
     <string name="circle_photo_label">Foto</string>
     <string name="circle_downloading_progress">Baixando… %1$d/%2$d</string>
     <string name="circle_downloading">Baixando…</string>
+    <string name="circle_finding_relay">Procurando um relay…</string>
     <string name="circle_waiting_for_sender">Aguardando quem enviou…</string>
     <string name="circle_no_longer_available">Não está mais disponível</string>
     <string name="circle_will_tell_you">A gente avisa quando voltar</string>

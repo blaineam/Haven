@@ -114,6 +114,10 @@ struct DynState {
     last_media_backfill_ms: u64,
     /// Which relays joined which circle since the last heartbeat (see `relayintro`).
     relay_intro: crate::relayintro::RelayIntroduction,
+    /// Per circle: when/where/with whom the last member enroll ran and whether it LANDED (see
+    /// `relayintro::enroll_due`) — a member who joined without an approval re-opens the gate, and a lost
+    /// attempt retries in a minute, never marked done before a relay answered.
+    enroll: HashMap<String, crate::relayintro::EnrollState>,
     /// last own-device catch-up sweep, and whether one is still running. Throttled HARD (5 min) and
     /// single-flight: the sweep RE-SEALS every envelope it hands over, so it is real CPU per item
     /// and must never ride the sync tick or be allowed to overlap itself. See `sync_with_contacts`.
@@ -1851,6 +1855,8 @@ impl Engine {
                 // A relay that joined a circle since the last heartbeat serves nobody until we
                 // introduce ourselves — now, not on the ~2-min backfill tick (`relayintro`).
                 me.introduce_to_joined_relays().await;
+                // Unforced: only a changed member set / a joined relay / a lost attempt's retry acts.
+                me.enroll_circle_members_gated(None, false).await;
                 // Relay announces that beat the circle's key: a key may have landed since (cheap no-op
                 // when nothing is parked; drains are rate-limited — `relayparking`).
                 me.retry_parked_relay_announces();
@@ -6961,8 +6967,15 @@ impl Engine {
         self.enroll_circle_members_in(Some(&cids)).await;
     }
 
-    /// [`Self::enroll_circle_members`] for `only` these circles (all when `None`).
+    /// [`Self::enroll_circle_members`] for `only` these circles (all when `None`). `force` is the
+    /// periodic re-assert (every ~2 min on the backfill tick — faster than iOS/Android's 10-minute
+    /// steady gate); the unforced heartbeat call only acts when the member set differs from the one a
+    /// relay last accepted, a relay joined, or a failed attempt is due its one-minute retry.
     async fn enroll_circle_members_in(self: &Arc<Self>, only: Option<&[String]>) {
+        self.enroll_circle_members_gated(only, true).await
+    }
+
+    async fn enroll_circle_members_gated(self: &Arc<Self>, only: Option<&[String]>, force: bool) {
         let me = self.social.my_node_hex();
         let my_dev = self.node_id_hex();
         for c in self.social.circles() {
@@ -6984,12 +6997,39 @@ impl Engine {
             if members.len() <= 1 {
                 continue;
             }
-            let list: Vec<String> = members.into_iter().collect();
+            let now = now_ms();
+            {
+                let mut d = self.dyn_state.lock();
+                let st = d.enroll.entry(c.id.clone()).or_default();
+                let due = crate::relayintro::enroll_due(
+                    now,
+                    st.last_ms,
+                    &st.relays,
+                    &relays,
+                    force,
+                    members != st.members,
+                    st.landed || st.last_ms.is_none(),
+                );
+                if !due {
+                    continue;
+                }
+                st.last_ms = Some(now);
+                st.relays = relays.iter().map(|r| r.to_lowercase()).collect();
+            }
+            let list: Vec<String> = members.iter().cloned().collect();
+            let mut landed = false;
             for hex in relays {
                 let Some(client) = self.relay_client_for(&hex).await else { continue };
                 if client.enroll_members(c.id.clone(), list.clone()).await {
+                    landed = true;
                     log::info!("enrolled {} members of {} at {}", list.len(), c.id, &hex[..8.min(hex.len())]);
                 }
+            }
+            let mut d = self.dyn_state.lock();
+            let st = d.enroll.entry(c.id.clone()).or_default();
+            st.landed = landed;
+            if landed {
+                st.members = members;
             }
         }
     }
@@ -11707,6 +11747,11 @@ impl Engine {
                 return;
             }
         };
+        // A call is the user saying "this person, now": a peer sitting in a dial backoff from earlier
+        // failures must be tried immediately (iOS/Android `CallDialPolicy` parity).
+        if crate::relayintro::call_setup_forgives_dial(t) {
+            self.forgive_dials(to_hex, None);
+        }
         self.send_frame(t, &sealed, to_hex);
         let mut dests = self.social.device_node_ids_for(to_hex.to_string());
         if dests.is_empty() {

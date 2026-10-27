@@ -12,6 +12,66 @@ use std::collections::{BTreeSet, HashMap};
 pub const REINTRODUCE_GAP_MS: u64 = 30_000;
 /// Circle id meaning "every circle" — a relay made the all-circles default joined all of them.
 pub const ALL_CIRCLES: &str = "*";
+/// The member enroll's steady-state gate (iOS/Android parity): the set changes rarely.
+pub const ENROLL_GAP_MS: u64 = 600_000;
+/// A FAILED enroll (relay unreachable, dial failed, refused) is retried this soon, not after the
+/// steady-state gate: a brand-new member stays refused ("media never loads, my DMs don't send") until
+/// the relay hears the list, so one lost attempt must not cost ten minutes.
+pub const ENROLL_RETRY_GAP_MS: u64 = 60_000;
+
+/// What the engine remembers per circle about the last member enroll.
+#[derive(Default, Clone)]
+pub struct EnrollState {
+    /// When the last attempt started (`None` = never).
+    pub last_ms: Option<u64>,
+    /// The relays that attempt addressed.
+    pub relays: BTreeSet<String>,
+    /// The member list a relay last ACCEPTED (set only when an enroll landed).
+    pub members: BTreeSet<String>,
+    /// Whether the latest attempt landed on at least one relay.
+    pub landed: bool,
+}
+
+/// The member-enroll gate. Due when forced, never enrolled, the circle's relay set gained a relay since
+/// the last enroll (that relay has never heard the list), the MEMBER SET differs from the one a relay
+/// last accepted (`members_changed` — a contact or device that joined without an approval), the last
+/// attempt did not land and [`ENROLL_RETRY_GAP_MS`] has passed, or [`ENROLL_GAP_MS`] has passed.
+/// iOS `RelayIntroduction.enrollDue` / Android `RelayIntroduction.enrollDue` parity.
+pub fn enroll_due(
+    now_ms: u64,
+    last_ms: Option<u64>,
+    last_relays: &BTreeSet<String>,
+    relays: &[String],
+    force: bool,
+    members_changed: bool,
+    last_landed: bool,
+) -> bool {
+    if force {
+        return true;
+    }
+    let Some(last) = last_ms else { return true };
+    if relays.iter().any(|r| !last_relays.contains(&r.to_lowercase())) {
+        return true;
+    }
+    // A relay that never answers the verb (older build, unreachable) must not be re-dialed every
+    // heartbeat: after a failed attempt the retry gap applies even to a changed member set.
+    if !last_landed {
+        return now_ms.saturating_sub(last) >= ENROLL_RETRY_GAP_MS;
+    }
+    if members_changed {
+        return true;
+    }
+    now_ms.saturating_sub(last) >= ENROLL_GAP_MS
+}
+
+/// Which outbound call frames re-open a peer's iroh dial backoff first. Mobile/desktop dial backoff runs
+/// minutes after failed connects; a call is the moment the user said "this person, now", so an INVITE (or
+/// the callee's ACCEPT) must not wait out a strike count built while the peer was offline. Call SETUP
+/// frames only — ICE/SDP/hangup and the sealed media frames that share the path never re-arm a dial.
+/// iOS/Android `CallDialPolicy` parity.
+pub fn call_setup_forgives_dial(frame_type: u8) -> bool {
+    matches!(frame_type, 10 | 11 | 21 | 22)
+}
 
 #[derive(Default)]
 pub struct RelayIntroduction {
@@ -69,6 +129,54 @@ impl RelayIntroduction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn set(rs: &[&str]) -> BTreeSet<String> {
+        rs.iter().map(|r| r.to_string()).collect()
+    }
+
+    #[test]
+    fn a_new_member_set_reopens_the_gate_without_waiting_ten_minutes() {
+        let ra = "a".repeat(64);
+        let enrolled = set(&[&ra]);
+        assert!(!enroll_due(60_000, Some(0), &enrolled, &[ra.clone()], false, false, true));
+        assert!(enroll_due(60_000, Some(0), &enrolled, &[ra.clone()], false, true, true));
+    }
+
+    #[test]
+    fn a_failed_enroll_retries_in_a_minute_not_ten() {
+        let ra = "a".repeat(64);
+        let enrolled = set(&[&ra]);
+        assert!(!enroll_due(31_000, Some(1_000), &enrolled, &[ra.clone()], false, false, false));
+        assert!(enroll_due(1_000 + ENROLL_RETRY_GAP_MS, Some(1_000), &enrolled, &[ra.clone()], false, false, false));
+        assert!(ENROLL_RETRY_GAP_MS < ENROLL_GAP_MS);
+    }
+
+    #[test]
+    fn a_relay_that_never_answers_the_verb_is_not_redialed_every_heartbeat() {
+        let ra = "a".repeat(64);
+        let enrolled = set(&[&ra]);
+        assert!(!enroll_due(21_000, Some(1_000), &enrolled, &[ra.clone()], false, true, false));
+    }
+
+    #[test]
+    fn force_and_a_new_relay_still_win_over_everything() {
+        let ra = "a".repeat(64);
+        let rb = "b".repeat(64);
+        let enrolled = set(&[&ra]);
+        assert!(enroll_due(2_000, Some(1_000), &enrolled, &[ra.clone()], true, false, false));
+        assert!(enroll_due(2_000, Some(1_000), &enrolled, &[ra.clone(), rb], false, false, false));
+        assert!(enroll_due(0, None, &BTreeSet::new(), &[ra], false, false, true));
+    }
+
+    #[test]
+    fn call_setup_frames_forgive_the_dial_backoff_and_signaling_never_does() {
+        for t in [10u8, 11, 21, 22] {
+            assert!(call_setup_forgives_dial(t), "type {t}");
+        }
+        for t in [12u8, 13, 15, 16, 17, 18, 31, 32, 33] {
+            assert!(!call_setup_forgives_dial(t), "type {t}");
+        }
+    }
 
     fn map(pairs: &[(&str, &[&str])]) -> HashMap<String, BTreeSet<String>> {
         pairs.iter().map(|(c, rs)| (c.to_string(), rs.iter().map(|r| r.to_string()).collect())).collect()

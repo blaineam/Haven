@@ -8242,6 +8242,11 @@ final class FeedStore: ObservableObject {
     /// the relays that enroll reached: a relay added since then opens the gate (`RelayIntroduction`).
     private var lastEnrollMs: [String: UInt64] = [:]
     private var lastEnrollRelays: [String: Set<String>] = [:]
+    /// The member list a relay last ACCEPTED per circle (set only when an enroll landed) and whether the
+    /// latest attempt landed — so a member who joined without an approval re-opens the gate, and a lost
+    /// attempt retries in a minute instead of ten. Android `lastEnrollMembers`/`lastEnrollLanded` parity.
+    private var lastEnrollMembers: [String: Set<String>] = [:]
+    private var lastEnrollLanded: [String: Bool] = [:]
     private var relayIntro = RelayIntroduction()
 
     /// A relay just joined `circleId` (adopted, announced, synced, or made the default). Introduce
@@ -8279,12 +8284,6 @@ final class FeedStore: ObservableObject {
         let relays = RelayMailboxStore.shared.relays(forCircle: circleId)
             .filter { !$0.hasPrefix("s3:") && $0.count == 64 }
         guard !relays.isEmpty else { return }
-        // `force`: a member was just added (approval) — the set DID change, so the gate that assumes
-        // it rarely does must not hold the new friend out for up to ten minutes. Same for a relay
-        // added since the last enroll: it has never heard the list at all.
-        guard RelayIntroduction.enrollDue(nowMs: nowMs, lastMs: lastEnrollMs[circleId],
-                                          lastRelays: lastEnrollRelays[circleId] ?? [],
-                                          relays: relays, force: force) else { return }
         // Rule (2) of `learn`: we must name OURSELVES or the relay declines outright.
         var members = Set(dialTargets(circleId).map { $0.lowercased() })
         // A replace names every remaining member's ACCOUNT too — the relay re-expands each account's
@@ -8293,16 +8292,35 @@ final class FeedStore: ObservableObject {
         members.insert(myNodeHex.lowercased())
         members.insert(myDeviceNodeHex.lowercased())
         guard members.count > 1 || replace else { return }
+        // `force`: a member was just added (approval) — the set DID change, so the gate that assumes
+        // it rarely does must not hold the new friend out for up to ten minutes. Same for a relay
+        // added since the last enroll: it has never heard the list at all. A member set the relay has
+        // not accepted yet re-opens it too (a linked device / a contact added elsewhere), and a FAILED
+        // attempt retries after a minute — never marked done before the relay answered.
+        guard RelayIntroduction.enrollDue(nowMs: nowMs, lastMs: lastEnrollMs[circleId],
+                                          lastRelays: lastEnrollRelays[circleId] ?? [],
+                                          relays: relays, force: force,
+                                          membersChanged: members != lastEnrollMembers[circleId],
+                                          lastLanded: lastEnrollLanded[circleId] ?? true) else { return }
         lastEnrollMs[circleId] = nowMs
         lastEnrollRelays[circleId] = Set(relays.map { $0.lowercased() })
         let list = Array(members)
+        let memberSet = members
         Task.detached {
+            var landed = false
             for hex in relays {
                 guard let c = await RelayClients.client(hex) else { continue }
                 let ok = replace
                     ? await c.enrollMembersReplace(circleId: circleId, members: list)
                     : await c.enrollMembers(circleId: circleId, members: list)
-                if ok { HavenLog.relay("\(replace ? "replaced" : "enrolled") \(list.count) members of \(circleId) at \(hex.prefix(8))") }
+                if ok {
+                    landed = true
+                    HavenLog.relay("\(replace ? "replaced" : "enrolled") \(list.count) members of \(circleId) at \(hex.prefix(8))")
+                }
+            }
+            await MainActor.run { [weak self] in
+                self?.lastEnrollLanded[circleId] = landed
+                if landed { self?.lastEnrollMembers[circleId] = memberSet }
             }
         }
     }
@@ -9148,6 +9166,9 @@ final class FeedStore: ObservableObject {
         // work (now also off-main, see WebRTCCall.captureQueue) that is what made in-call controls
         // feel dead. The hop back for delivery keeps send ordering on one actor as before.
         guard let engine else { return }
+        // A call is the user saying "this person, now": a peer sitting in a 2–30 min dial backoff from
+        // earlier failures must be tried immediately, not when the cooldown happens to expire.
+        if CallDialPolicy.forgivesBackoff(type) { forgiveDials(accountHex: nodeHex) }
         Task.detached(priority: .userInitiated) {
             let sealedOpt = await engine.run {
                 try? $0.sealCallFrame(recipientNodeHex: nodeHex, frameType: type, data: payload)

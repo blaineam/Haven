@@ -130,13 +130,26 @@ struct RelayIntroduction {
         return circleIds.filter { pendingCircles.contains($0) }
     }
 
+    /// A FAILED enroll (relay unreachable, dial failed, refused) is retried this soon, not after the
+    /// 10-minute steady-state gate: a brand-new member stays refused ("media never loads, my DMs don't
+    /// send") until the relay hears the list, so one lost attempt must not cost ten minutes.
+    static let enrollRetryGapMs: UInt64 = 60_000
+
     /// The member-enroll gate. Due when forced, never enrolled, the circle's relay set gained a relay
-    /// since the last enroll (that relay has never heard the list), or `enrollGapMs` has passed.
+    /// since the last enroll (that relay has never heard the list), the MEMBER SET differs from the one
+    /// a relay last accepted (`membersChanged` — a contact or device that joined without an approval,
+    /// e.g. a linked device or a friend added from another device, is refused by the relay until it is
+    /// enrolled), the last attempt did not land and `enrollRetryGapMs` has passed, or `enrollGapMs` has
+    /// passed. Android `RelayIntroduction.enrollDue` parity.
     static func enrollDue(nowMs: UInt64, lastMs: UInt64?, lastRelays: Set<String>, relays: [String],
-                          force: Bool) -> Bool {
+                          force: Bool, membersChanged: Bool = false, lastLanded: Bool = true) -> Bool {
         if force { return true }
         guard let lastMs else { return true }
         if relays.contains(where: { !lastRelays.contains($0.lowercased()) }) { return true }
+        // A relay that never answers the verb (older build, unreachable) must not be re-dialed every
+        // sync tick: after a failed attempt the retry gap applies even to a changed member set.
+        if !lastLanded { return nowMs &- lastMs >= enrollRetryGapMs }
+        if membersChanged { return true }
         return nowMs &- lastMs >= enrollGapMs
     }
 }
@@ -449,5 +462,22 @@ enum LaunchOrder {
     static func mailboxPhases(_ ids: [String], active: String) -> [[String]] {
         guard ids.contains(active) else { return [ids] }
         return [[active], ids.filter { $0 != active }].filter { !$0.isEmpty }
+    }
+}
+
+/// Which outbound call frames re-open a peer's iroh dial backoff first. Mobile backoff runs 2 → 30 min
+/// after failed connects; a call is the moment the user said "this person, now", so an INVITE (or the
+/// callee's ACCEPT) must not wait out a strike count built while the peer was offline or on an
+/// unreachable network ("the call finally came through, it had to catch up"). Call SETUP frames only —
+/// ICE/SDP/hangup and the sealed media frames that share the path never re-arm a dial. Android
+/// `CallDialPolicy` parity.
+enum CallDialPolicy {
+    static let invite: UInt8 = 10
+    static let accept: UInt8 = 11
+    static let groupInvite: UInt8 = 21
+    static let groupJoin: UInt8 = 22
+
+    static func forgivesBackoff(_ type: UInt8) -> Bool {
+        type == invite || type == accept || type == groupInvite || type == groupJoin
     }
 }

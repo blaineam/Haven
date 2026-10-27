@@ -452,4 +452,46 @@ final class RelayIntroductionTests: XCTestCase {
         XCTAssertTrue(RelayIntroduction.enrollDue(nowMs: 1, lastMs: nil, lastRelays: [], relays: [rb], force: false))
         XCTAssertTrue(RelayIntroduction.enrollDue(nowMs: 1, lastMs: 0, lastRelays: enrolled, relays: [rb], force: true))
     }
+
+    // --- a member that joined without an approval, and a LOST enroll, must not wait 10 minutes ---
+
+    func testANewMemberSetReopensTheGateWithoutWaitingTenMinutes() {
+        let enrolled: Set<String> = [ra]
+        XCTAssertFalse(RelayIntroduction.enrollDue(nowMs: 60_000, lastMs: 0, lastRelays: enrolled, relays: [ra], force: false))
+        // The same minute, but the relay has not heard the current member set → due now.
+        XCTAssertTrue(RelayIntroduction.enrollDue(nowMs: 60_000, lastMs: 0, lastRelays: enrolled, relays: [ra],
+                                                  force: false, membersChanged: true))
+    }
+
+    func testAFailedEnrollRetriesInAMinuteNotTen() {
+        let enrolled: Set<String> = [ra]
+        XCTAssertFalse(RelayIntroduction.enrollDue(nowMs: 31_000, lastMs: 1_000, lastRelays: enrolled, relays: [ra],
+                                                   force: false, lastLanded: false))
+        XCTAssertTrue(RelayIntroduction.enrollDue(nowMs: 1_000 + RelayIntroduction.enrollRetryGapMs, lastMs: 1_000,
+                                                  lastRelays: enrolled, relays: [ra], force: false, lastLanded: false))
+        XCTAssertLessThan(RelayIntroduction.enrollRetryGapMs, RelayIntroduction.enrollGapMs)
+    }
+
+    func testARelayThatNeverAnswersTheVerbIsNotRedialedEveryTick() {
+        // After a failed attempt even a CHANGED member set waits the retry gap (the sync tick is 20 s).
+        XCTAssertFalse(RelayIntroduction.enrollDue(nowMs: 21_000, lastMs: 1_000, lastRelays: [ra], relays: [ra],
+                                                   force: false, membersChanged: true, lastLanded: false))
+    }
+
+    func testForceAndANewRelayStillWinOverEverything() {
+        XCTAssertTrue(RelayIntroduction.enrollDue(nowMs: 2_000, lastMs: 1_000, lastRelays: [ra], relays: [ra], force: true, lastLanded: false))
+        XCTAssertTrue(RelayIntroduction.enrollDue(nowMs: 2_000, lastMs: 1_000, lastRelays: [ra], relays: [ra, rb], force: false, lastLanded: false))
+        XCTAssertTrue(RelayIntroduction.enrollDue(nowMs: 0, lastMs: nil, lastRelays: [], relays: [ra], force: false))
+    }
+
+    // --- call setup forgives the peer's dial backoff (Android CallDialPolicyTest parity) ---
+
+    func testCallSetupFramesForgiveTheDialBackoff() {
+        for t: UInt8 in [10, 11, 21, 22] { XCTAssertTrue(CallDialPolicy.forgivesBackoff(t), "type \(t)") }
+    }
+
+    func testSignalingAfterSetupNeverReArmsADial() {
+        // hangup, audio, video, SDP offer/answer, ICE, and the sealed media frames 31/32/33
+        for t: UInt8 in [12, 13, 15, 16, 17, 18, 31, 32, 33] { XCTAssertFalse(CallDialPolicy.forgivesBackoff(t), "type \(t)") }
+    }
 }

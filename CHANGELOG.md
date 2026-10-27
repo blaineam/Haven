@@ -37,12 +37,14 @@ reach only the relay's HTTP twin):
   DMs don't reach the other phone". The enroll gate only reopened on approval, on a new relay, or every
   10 minutes, recorded an attempt as done BEFORE it landed, and ignored a changed member set. It now
   also reopens when the member set differs from the one a relay last accepted, and a failed attempt
-  retries after a minute (`RelayIntroduction.enrollDue`, `ENROLL_RETRY_GAP_MS`). Android inviter side;
-  iOS has the same gate and needs the same change.
+  retries after a minute (`RelayIntroduction.enrollDue`, `ENROLL_RETRY_GAP_MS`). Android, iOS
+  (`RelayIntroduction.enrollDue` / `FeedStore.enrollMembers`) and desktop (`relayintro::enroll_due`, an
+  unforced heartbeat pass next to the ~2-minute re-assert) share the same constants and tests.
 - **A call waited out the dial backoff.** Mobile dial backoff runs 2 → 30 min after failed connects and
   placing a call did not forgive it, so an invite to a peer with an old strike count rang minutes late
   ("the call finally came through, it had to catch up"). Call setup frames (invite, accept, group
-  invite/join) now forgive that peer's dial backoff first (`CallDialPolicy`); ICE/SDP/hangup never do.
+  invite/join) now forgive that peer's dial backoff first (`CallDialPolicy` on Android and iOS,
+  `call_setup_forgives_dial` on desktop); ICE/SDP/hangup never do.
 
 ### Fixed - Android: the call camera button (and the mic) on a device that only ever receives calls
 

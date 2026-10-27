@@ -8741,7 +8741,7 @@ object HavenNet : InboundListener {
         }
     }
     private fun saveUnopenable() {
-        prefs.edit().putStringSet("unopenableMedia", HashSet(unopenableMedia)).apply()
+        prefs.edit().putStringSet("unopenableMedia", snapshotOf(unopenableMedia)).apply()
     }
 
     /**

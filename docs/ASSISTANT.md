@@ -7,6 +7,46 @@ Haven declares two Assistant **App Actions**: `actions.intent.CREATE_MESSAGE` so
 message ("reply to Blaine, …") is a separate, older path that does not use App Actions: see
 [ANDROID-AUTO.md](ANDROID-AUTO.md).
 
+## Status of Google's voice stack (read this first) — checked against Google's pages, October 2026
+
+Production Haven on Android relies on two things Google supports today:
+
+1. **Notification-based messaging in Android Auto** (read aloud, voice reply, mark as read): not in beta.
+   Requirements are listed in [Android Auto messaging notifications](#android-auto-messaging-notifications-checklist).
+2. **Voice commands to the phone's assistant** through **App Actions** (`CREATE_CALL`, `CREATE_MESSAGE`).
+
+What Google says, and what it does not say (each line cites the page it came from; none of this could be
+exercised from a debug build, because App Actions are registered by Google Play):
+
+| Question | Answer | Source (retrieved 2026-10-27) |
+|---|---|---|
+| Are App Actions still supported? | **Yes.** "Assistant's App Actions let users launch and control Android apps with their voice"; Android 5+, phones only, not Android Go. Page last updated 2026-07-16. | [App Actions overview](https://developer.android.com/develop/devices/assistant/overview) |
+| Does that include Gemini? | **Partly documented.** The overview page and the build guide only say "Assistant". The *cars* page says drivers "can use Gemini or Google Assistant to control Android apps" and that "Gemini or Google Assistant matches the query to a built-in intent (BII) declared in your app's `shortcuts.xml`". Press reports say Assistant is being removed from Android from **2026-09-04** and replaced by Gemini; Google's developer pages do not describe what changes for communication BIIs. **Unverified for CREATE_CALL / CREATE_MESSAGE under Gemini.** | [App Actions for cars](https://developer.android.com/develop/devices/assistant/cars) (updated 2026-10-23); press: [implicator.ai](https://www.implicator.ai/google-sets-september-4-date-to-replace-assistant-with-gemini-on-android/) |
+| Do `CREATE_CALL` / `CREATE_MESSAGE` still exist, with what parameters? | **Yes.** `call.participant.name` / `.telephone` / `.identifier`, `call.callFormat` (Audio, Video); `message.text`, `message.recipient.name` / `.telephone` / `.email`, `message.disambiguatingDescription`. None is required. User invocation and the Test Tool preview are **en-US only**. Reference pages last updated 2024-09-04. | [CREATE_CALL](https://developer.android.com/reference/app-actions/built-in-intents/communications/create-call), [CREATE_MESSAGE](https://developer.android.com/reference/app-actions/built-in-intents/communications/create-message) |
+| Is a Play upload enough? | **No. Google must review and approve.** "App Actions aren't available to users of your published apps or open test releases until they're reviewed and approved." Steps: accept the App Actions terms in Play Console (**Advanced settings > App Actions**), upload a build whose `shortcuts.xml` declares the capabilities, Google emails you; internal/closed testers see unapproved actions only after joining the *App Actions Development Program* Google Group (up to ~3 h). Redeployed versions are reviewed again. (Earlier versions of this file said there is no separate step; that was wrong.) | [Build App Actions](https://developer.android.com/develop/devices/assistant/get-started) (updated 2026-02-26) |
+| Do App Actions work for phone apps projected to Android Auto? | **Not documented.** Google's "App Actions for cars" page documents only the parking and charging BIIs, for Car App Library apps in the POI category. Communication BIIs are not mentioned for cars. Whether Assistant/Gemini in the car hands `CREATE_CALL` to the *phone's* app is **unverified**; Haven's calls themselves are visible to the car through Telecom (docs/ANDROID-CALLS.md). | [App Actions for cars](https://developer.android.com/develop/devices/assistant/cars) |
+| AppFunctions (the Gemini-native route)? | **Experimental, Android 16+, Gemini integration in private preview.** "As of May 2026, AppFunctions integration with Gemini is in a private preview with trusted testers"; callers need `EXECUTE_APP_FUNCTIONS`; an Early Access Program exists and registering "does NOT automatically" grant access. Jetpack `androidx.appfunctions:*:1.0.0-alpha10`, KSP, `compileSdk 36`. **Haven does not ship it** (see below). | [AppFunctions overview](https://developer.android.com/ai/appfunctions) (updated 2026-10-22), [Add AppFunctions](https://developer.android.com/ai/appfunctions/add-appfunctions) |
+| Android Auto messaging notifications | Documented, **not** beta; `MessagingStyle` + `SEMANTIC_ACTION_REPLY` + `SEMANTIC_ACTION_MARK_AS_READ`. The page does not mention "send a message to X" by voice. | [Messaging notifications](https://developer.android.com/training/cars/communication/notification-messaging) (updated 2026-10-23) |
+
+### Why AppFunctions is not in this release
+
+* Gemini's use of third-party AppFunctions is invitation-only today, so shipping it would not change what a user
+  can say to Gemini.
+* The Jetpack library is an **alpha** (`1.0.0-alpha10`) and needs the KSP compiler plugin, which this project does
+  not use; neither is in the offline Gradle cache, and an alpha compiler plugin in the production build is a risk
+  with no user benefit yet.
+* When it opens up, the work is small and the routing already exists: `callContact(name)` would call
+  `AssistantCallRoute` and `sendMessage(name, text)` would call `AssistantRoute` (staging, never sending), gated by
+  `SDK_INT >= 36`. Apply to the Early Access Program from the AppFunctions page when ready.
+
+### What this means for the owner
+
+* "Hey Google, call Blaine on Haven" and "…send a message to Blaine on Haven" can only work on a **Play-installed**
+  build whose `shortcuts.xml` Google has **approved**, in **en-US**, and only if Gemini honours App Actions for these
+  intents (documented for Assistant and, for cars, for Gemini; not documented for communication BIIs).
+* The part that does not depend on any of that: a **message notification** is read aloud in the car and answered by
+  voice, and a Haven **call** placed or answered from the car is a real Telecom call (the car shows and controls it).
+
 ## What it does
 
 1. Assistant launches `MainActivity` with an explicit intent: action
@@ -97,9 +137,16 @@ integration. So:
 | The call receiving side (resolution, trust check, dial) | Testable with `adb`: **an adb launch is untrusted by design and only opens the thread** - the dial path itself is covered by unit tests and by the App Actions Test Tool (whose launch comes from the Google app). | Same. |
 | "Reply to Blaine" from a message notification | Works on any build (it is a notification action). | Same. |
 
-Needs the owner: confirm in Play Console that the app is linked to Assistant (App Actions are enabled
-by uploading a build whose `shortcuts.xml` declares capabilities; there is no separate toggle for
-BII-based actions) and run the App Actions Test Tool once with the account that owns the phone.
+Needs the owner (Google's process, from [Build App Actions](https://developer.android.com/develop/devices/assistant/get-started)):
+
+1. Play Console > **Advanced settings > App Actions**: accept the terms.
+2. Upload a build that contains `shortcuts.xml` (internal or closed testing first).
+3. Google reviews `shortcuts.xml` separately from app review and emails the result. Until it is approved, internal
+   and closed testers must join the *App Actions Development Program* Google Group to see the actions (allow up
+   to three hours), and open testing / production users do not get them at all.
+4. Run the Android Studio **Google Assistant plugin > App Actions Test Tool** once with the Google account that
+   owns the phone (en-US).
+5. Voice-trigger only to demonstrate: Google recommends the Test Tool for routine testing.
 
 ### Proving the receiving side with adb (works on a debug build)
 
@@ -146,3 +193,54 @@ a `locusId`, and `capabilityBindings` entries for `actions.intent.CREATE_MESSAGE
 * `AssistantShortcutsDeclarationTest` also parses the `CREATE_CALL` capability (action, package/class, keys vs
   what `MainActivity` reads, no phone number bound, optional parameters), that `MainActivity` checks the
   referrer before dialing, and that only 1:1 shortcuts are bound for calling.
+
+## Trusted launchers and how to see which one Gemini uses
+
+A call is dialed only when the launcher package is in `AssistantCallRoute.TRUSTED_PACKAGES`: the Google app
+(`com.google.android.googlequicksearchbox`, which hosts Assistant and Gemini's voice entry on most phones), the
+standalone Assistant app (`com.google.android.apps.googleassistant`) and the Gemini app
+(`com.google.android.apps.bard`, added defensively: Google does not document which package launches App Action
+fulfilment under Gemini). Every assistant call launch logs the referrer package, nothing else:
+
+```bash
+adb logcat -s HavenAssistant
+```
+
+Expected: `call launch referrer=com.google.android.googlequicksearchbox trusted=true`. If a voice command opens the
+conversation instead of dialing, this line shows the package that launched it; add it to `TRUSTED_PACKAGES` only
+if it is a Google-signed package.
+
+## Android Auto messaging notifications checklist
+
+Verified against [Messaging notifications](https://developer.android.com/training/cars/communication/notification-messaging)
+(updated 2026-10-23) and implemented in `CarNotifications.kt`; the pure rules (what may reach the car, privacy,
+locked threads) are in `CarMessaging.kt` and covered by `CarMessagingTest`.
+
+| Requirement (Google) | Haven |
+|---|---|
+| `<uses name="notification" />` in `automotive_app_desc.xml` | yes (the car-app `template` entry is added only in builds with the car categories, see CAR-PARITY.md) |
+| `MessagingStyle` with a `Person` per sender (unique `key`), `setGroupConversation` set **after** the title | yes; group flag now set after the title |
+| `setLargeIcon` = the conversation image in Android Auto | **added**: the contact's picture for a 1:1 thread; none for a group |
+| Reply: `SEMANTIC_ACTION_REPLY`, `setShowsUserInterface(false)`, exactly one `RemoteInput`, mutable `PendingIntent` | yes (`FLAG_MUTABLE` on API 31+) |
+| Mark as read: `SEMANTIC_ACTION_MARK_AS_READ`, no UI, no `RemoteInput` | yes |
+| Unique PendingIntent / notification ids per conversation; repeated calls for one conversation return the same id | notification id is a stable hash of the conversation; PendingIntents are now made distinct by the Intent **data** (`CarMessaging.actionData`), because PendingIntents ignore extras and a request-code xor could collide |
+| Actions handled by a background component, never an Activity | yes (`CarActionReceiver`, a broadcast receiver) |
+| Message history only from notifications during the car session | inherent to notification messaging |
+
+Haven-specific privacy (not required by Google): only a plain inbound DM at the **Full** preview level, never a locked
+thread, only while "Android Auto messages" is on; private/minimal levels and circle posts stay ordinary banners that
+the car does not read.
+
+## Owner test script (Play internal testing build)
+
+1. Play Console: accept the App Actions terms, upload this build to the **internal testing** track, join the
+   *App Actions Development Program* Google Group with the phone's Google account, wait up to three hours.
+2. Install from Play (not a sideload). Open Haven once so the conversation shortcuts are published.
+3. Set the phone's assistant language to English (US). Say "Hey Google, send a message to <contact> on Haven": Haven
+   should open that conversation with the text ready. Say "Hey Google, call <contact> on Haven": the call should ring
+   out. Watch `adb logcat -s HavenAssistant` to see the launcher package.
+4. In the car (or the Desktop Head Unit with "Unknown sources" on): have the iPhone send a DM. The notification should
+   be read aloud, and "reply" by voice should send. Mark as read should clear it.
+5. Result matrix to report back: (a) phone voice works / does not, (b) car voice works / does not, (c) the launcher
+   package from the log. If (a) fails on a Play build under Gemini, App Actions are not honoured for these intents
+   there and the next step is the AppFunctions Early Access Program.

@@ -34,12 +34,10 @@ object CarNotifications {
         val shortcutOk = ShareShortcuts.ensure(context, plan.circleId)
         val me = Person.Builder().setName(context.getString(R.string.you_default_name)).build()
         val style = NotificationCompat.MessagingStyle(me)
-        if (plan.isGroup) {
-            style.isGroupConversation = true
-            plan.title?.let { style.conversationTitle = it }
-        } else {
-            style.isGroupConversation = false
-        }
+        // Android's guidance: set the group flag AFTER the title (setting a title can flip the flag for
+        // apps targeting below P). A 1:1 thread has no title and is never a group.
+        if (plan.isGroup) plan.title?.let { style.conversationTitle = it }
+        style.isGroupConversation = plan.isGroup
         for (m in plan.messages) {
             val person = Person.Builder()
                 .setName(m.senderName.ifBlank { "Someone" })
@@ -76,8 +74,13 @@ object CarNotifications {
             .setShowsUserInterface(false)
             .build()
 
+        // "Shows in Android Auto as the conversation image": a 1:1 thread uses the contact's picture (only ever
+        // built at the Full preview level, where the sender's name is already shown); a group has none.
+        val conversationImage = if (plan.isGroup) null
+            else plan.messages.lastOrNull()?.let { runCatching { AvatarStore.bitmap(it.senderKey) }.getOrNull() }
         val n = NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .apply { conversationImage?.let { setLargeIcon(it) } }
             .setStyle(style)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -107,10 +110,12 @@ object CarNotifications {
     /** An EXPLICIT broadcast to our own receiver. Reply must be mutable (the system adds the
      *  RemoteInput result to it); mark-read stays immutable. */
     private fun actionIntent(context: Context, action: String, circleId: String, id: Int, mutable: Boolean): PendingIntent {
+        // The Intent DATA (CarMessaging.actionData) is what makes each (action, conversation) PendingIntent
+        // distinct — PendingIntents ignore extras — so FLAG_UPDATE_CURRENT can never retarget one
+        // conversation's still-posted reply at another. The request code stays distinct too.
         val i = Intent(action).setClass(context, CarActionReceiver::class.java)
+            .setData(Uri.parse(CarMessaging.actionData(action, circleId)))
             .putExtra(CarMessaging.EXTRA_CIRCLE_ID, circleId)
-        // Distinct request code per (action, conversation): a shared one would let FLAG_UPDATE_CURRENT
-        // retarget another conversation's still-posted reply.
         val code = id xor (if (mutable) 0x1 else 0x2)
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or
             if (mutable) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0 }

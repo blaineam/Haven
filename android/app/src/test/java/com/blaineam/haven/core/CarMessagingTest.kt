@@ -177,4 +177,22 @@ class CarMessagingTest {
         CarMessaging.execute("com.example.OTHER", dm, "hi", f)
         assertTrue(f.events.isEmpty())
     }
+
+    // ---- notification PendingIntent identity ---------------------------------------------------
+
+    @Test fun `every action and conversation gets its own PendingIntent identity`() {
+        val a = CarMessaging.actionData(CarMessaging.ACTION_REPLY, dm)
+        val b = CarMessaging.actionData(CarMessaging.ACTION_REPLY, groupDm)
+        val c = CarMessaging.actionData(CarMessaging.ACTION_MARK_READ, dm)
+        assertEquals("stable for the same input", a, CarMessaging.actionData(CarMessaging.ACTION_REPLY, dm))
+        assertEquals(3, setOf(a, b, c).size)
+        assertTrue(a.startsWith("haven-car://reply/"))
+        assertTrue(c.startsWith("haven-car://markread/"))
+    }
+
+    @Test fun `the conversation id is URL-encoded so a colon or separator cannot forge another route`() {
+        val d = CarMessaging.actionData(CarMessaging.ACTION_REPLY, "dm:x/../markread/y")
+        assertFalse(d.removePrefix("haven-car://reply/").contains('/'))
+        assertTrue(d.startsWith("haven-car://reply/"))
+    }
 }

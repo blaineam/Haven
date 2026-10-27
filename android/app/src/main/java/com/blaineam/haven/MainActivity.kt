@@ -362,6 +362,9 @@ class MainActivity : FragmentActivity() {
             intent.removeExtra(com.blaineam.haven.core.AssistantCallRoute.EXTRA_NAME)
             intent.removeExtra(com.blaineam.haven.core.AssistantCallRoute.EXTRA_FORMAT)
             val trusted = com.blaineam.haven.core.AssistantCallRoute.isTrustedReferrer(referrer?.toString())
+            // The launcher package only (no name, no text): lets the owner see which package Gemini / Assistant
+            // launches from, and add it to AssistantCallRoute.TRUSTED_PACKAGES if it is not already there.
+            android.util.Log.i("HavenAssistant", "call launch referrer=${referrer?.host ?: "none"} trusted=$trusted")
             val app = applicationContext
             lifecycleScope.launch(Dispatchers.IO) {
                 val plan = runCatching { com.blaineam.haven.core.AssistantLaunch.resolveCall(app, name, format, trusted) }.getOrNull()

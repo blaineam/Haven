@@ -9,6 +9,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed - Android voice: verified against Google's 2026 docs; Gemini app trusted for voice calls; car notification polish
+Researched what Google documents for Gemini / Assistant (docs/ASSISTANT.md, with sources): App Actions are still
+supported but need **Google review and approval** in Play Console (the old note saying there was no separate step was
+wrong), user invocation is en-US only, Gemini is named only on the cars page, and AppFunctions (the Gemini-native
+route) is Android 16+, alpha and in private preview, so it is not shipped. The Gemini app package is now an accepted
+launcher for "call X on Haven" and each assistant call launch logs its referrer package (`adb logcat -s HavenAssistant`).
+Android Auto message notifications: the contact's picture is the conversation image, the group flag is set after the
+title, and every reply / mark-read PendingIntent is distinct per conversation through its Intent data (a request-code
+xor could collide and retarget another thread's reply). Tests: `CarMessagingTest`, `AssistantCallRouteTest`.
+
 ### Fixed - Android Auto never read DMs that arrived late
 `notifyInbound` skipped any message sent more than 10 minutes before it was processed, so a DM that landed late (fresh
 install, offline stretch) never got a notification and Android Auto - which only reads notifications - never saw it.

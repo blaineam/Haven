@@ -97,6 +97,9 @@ class AssistantCallRouteTest {
     @Test fun theGoogleAppAndAssistantAreTrusted() {
         assertTrue(AssistantCallRoute.isTrustedReferrer("android-app://com.google.android.googlequicksearchbox"))
         assertTrue(AssistantCallRoute.isTrustedReferrer("android-app://com.google.android.apps.googleassistant"))
+        assertTrue("the Gemini app", AssistantCallRoute.isTrustedReferrer("android-app://com.google.android.apps.bard"))
+        assertFalse("a look-alike of the Gemini package", AssistantCallRoute.isTrustedReferrer("android-app://com.google.android.apps.bard.evil"))
+        assertFalse("a prefix of the Gemini package", AssistantCallRoute.isTrustedReferrer("android-app://com.google.android.apps"))
         assertTrue(AssistantCallRoute.isTrustedReferrer("android-app://com.google.android.googlequicksearchbox/https/www.google.com"))
     }
 

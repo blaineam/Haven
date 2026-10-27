@@ -35,10 +35,19 @@ object AssistantCallRoute {
     const val PARAM_PARTICIPANT_NAME = "call.participant.name"
     const val PARAM_CALL_FORMAT = "call.callFormat"
 
-    /** Launching packages whose intent we accept as a real voice command (the Google app hosts Assistant). */
+    /**
+     * Launching packages whose intent we accept as a real voice command: the Google app (hosts Assistant and,
+     * on most phones, Gemini's voice entry), the standalone Assistant app, and the Gemini app. Google is
+     * replacing Assistant with Gemini on Android (shutdown from 2026-09-04, per Google's announcement as
+     * reported in the press); which package Gemini's App Action fulfilment is launched from is NOT documented
+     * by Google, so the Gemini app's package is included defensively and MainActivity logs every assistant
+     * launch's referrer (tag `HavenAssistant`) so an unexpected package is visible in `adb logcat`. A package
+     * name can only be held by one installed app, so a look-alike cannot claim a trusted entry.
+     */
     val TRUSTED_PACKAGES: Set<String> = setOf(
         "com.google.android.googlequicksearchbox",
         "com.google.android.apps.googleassistant",
+        "com.google.android.apps.bard",
     )
 
     /** One person Haven may call: a 1:1 contact only. [names] is the display name plus aliases. */

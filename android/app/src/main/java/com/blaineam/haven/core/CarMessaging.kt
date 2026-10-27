@@ -96,6 +96,19 @@ object CarMessaging {
         )
     }
 
+    /**
+     * A URI that makes every (action, conversation) PendingIntent distinct. PendingIntents are matched on the
+     * Intent (action, data, component, categories) — NOT on extras — so two conversations' reply intents that
+     * differ only by an extra, and share a request code, are the SAME PendingIntent and FLAG_UPDATE_CURRENT
+     * would retarget one conversation's reply at another. Android's messaging-notification guidance requires a
+     * unique id per conversation; putting the conversation in the Intent data guarantees it whatever the
+     * request code (a xor of two hashes could collide).
+     */
+    fun actionData(action: String, circleId: String): String {
+        val kind = when (action) { ACTION_REPLY -> "reply"; ACTION_MARK_READ -> "markread"; else -> "other" }
+        return "haven-car://$kind/" + java.net.URLEncoder.encode(circleId, "UTF-8")
+    }
+
     /** One stable notification per conversation, so a new message updates it instead of stacking. */
     fun notificationId(circleId: String): Int = 0x4A000000 or (circleId.hashCode() and 0x00FFFFFF)
 

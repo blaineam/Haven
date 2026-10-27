@@ -86,6 +86,25 @@ assumes a relay exists (`NoRelayMediaPolicy`).
 - Not verified: how the host draws it, and Play's current rules for the Calling category - docs/ANDROID-CALLS.md
   lists the Desktop Head Unit steps and the Play Console path.
 
+### Fixed - an incoming Haven call did not ring on a phone left in vibrate mode (Android)
+- **Root cause (Nokia 6.1, 2026-10-27).** The ring was the notification channel's sound: a one-shot the
+  OS drops entirely when the ring stream is muted (`shouldNotificationSoundPlay false: muted stream:2`), with a
+  single one-second buzz in vibrate mode. The call notification *was* posted (heads-up with Answer) and answered
+  by tap five seconds later - it was not auto-answered - but nothing audible or repeating told the owner.
+  Telecom's `onShowIncomingCallUi` never fired: a self-managed call draws and rings nothing, so Haven must not
+  depend on it.
+- **Fix.** Haven now presents the call itself the moment the engine knows about it (and again, idempotently, from
+  `onCreateIncomingConnection`): a **CallStyle** incoming-call notification (Answer / Decline, full-screen intent,
+  `setOnlyAlertOnce`) plus its own **looping ringtone and/or repeating vibration** that follows the ringer
+  (normal = ringtone, vibrate mode = repeating vibration, silent / Do Not Disturb = notification only), capped
+  at 70 s and stopped by every way a call ends. The call channel is now silent (`haven.call.v2`; the old noisy
+  one is deleted). `onShowIncomingCallUi` is logged and only re-asserts the notification.
+- Tests: `IncomingCallPolicyTest` (ring decisions, exactly one notification and one ring, idempotent re-assert,
+  cancel on answer / decline / hang-up / timeout, no ring after the call ended, nothing but the Telecom port ever
+  calls `setActive`, wiring guards). Retest on the owner's phone: iPhone -> Android call with the phone on
+  vibrate, on normal, locked and unlocked, with and without the head unit connected.
+
+
 ### Added - Haven calls are system calls on Android (Telecom), and "call <name> on Haven" by voice (Android)
 - **Telecom integration** (the counterpart of iOS CallKit). A self-managed phone account and
   `HavenTelecomService` register every Haven call - started from the UI, by voice or from a

@@ -30,6 +30,8 @@
          READ_PHONE_STATE / READ_PHONE_NUMBERS is needed for a self-managed account. See
          core/TelecomCalls.kt and docs/ANDROID-CALLS.md. -->
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <!-- Repeating vibration while an incoming call rings (IncomingCallUi). Normal permission. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Screen sharing in a call (MediaProjection) — Android 14+ requires this FGS type. -->

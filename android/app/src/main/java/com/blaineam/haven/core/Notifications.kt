@@ -17,7 +17,8 @@ object Notifications {
     private const val CHANNEL = "haven.activity"
     /** Calls get their OWN channel: ringtone + vibrate + a full-screen intent, none of which belong
      *  on ordinary activity. A user who mutes post notifications must still be reachable by phone. */
-    private const val CALL_CHANNEL = "haven.call"
+    private const val CALL_CHANNEL = "haven.call.v2"
+    private const val LEGACY_CALL_CHANNEL = "haven.call"
     private const val CALL_NOTIF_ID = 424242
     private var nextId = 1000
 
@@ -35,21 +36,22 @@ object Notifications {
         }
     }
 
+    /**
+     * The incoming-call channel. SILENT on purpose: Haven rings the call itself ([IncomingCallUi]) — a
+     * channel's sound is a one-shot that the OS drops entirely when the ring stream is muted, and its
+     * vibration is a single buzz. The channel only has to be high importance so the heads-up and the
+     * full-screen intent show. (`haven.call` was the old, noisy channel; its settings cannot be changed
+     * once created, so a new id replaces it and the old one is deleted.)
+     */
     fun ensureCallChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val mgr = context.getSystemService(NotificationManager::class.java) ?: return
+        runCatching { mgr.deleteNotificationChannel(LEGACY_CALL_CHANNEL) }
         if (mgr.getNotificationChannel(CALL_CHANNEL) != null) return
         val ch = NotificationChannel(CALL_CHANNEL, "Calls", NotificationManager.IMPORTANCE_HIGH).apply {
             description = "Incoming Haven calls"
-            setSound(
-                android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_RINGTONE),
-                android.media.AudioAttributes.Builder()
-                    .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build(),
-            )
-            enableVibration(true)
-            vibrationPattern = longArrayOf(0, 1000, 1000)
+            setSound(null, null)
+            enableVibration(false)
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
         }
         mgr.createNotificationChannel(ch)
@@ -67,7 +69,10 @@ object Notifications {
      * phone call does; where it is not permitted the notification degrades to a heads-up banner with
      * the same two actions, which is still reachable.
      */
-    fun showIncomingCall(context: Context, callerName: String) {
+    fun showIncomingCall(context: Context, callerName: String) = IncomingCallUi.ring(context, callerName)
+
+    /** The CallStyle notification itself — posted (and re-posted, same id) by [IncomingCallUi]'s presenter. */
+    fun postIncomingCall(context: Context, callerName: String) {
         ensureCallChannel(context)
         val open = context.packageManager.getLaunchIntentForPackage(context.packageName)
             ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP) }
@@ -97,6 +102,8 @@ object Notifications {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val who = callerName.ifBlank { "Someone" }
+        val declinePi = action(ACTION_DECLINE, 3)
+        val caller = androidx.core.app.Person.Builder().setName(who).setImportant(true).build()
         val n = NotificationCompat.Builder(context, CALL_CHANNEL)
             .setSmallIcon(android.R.drawable.sym_call_incoming)
             .setContentTitle("Incoming Haven call")
@@ -106,16 +113,21 @@ object Notifications {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setOngoing(true)          // not swipe-dismissable: decline it, don't lose it
             .setAutoCancel(false)
+            .setOnlyAlertOnce(true)    // a re-post (Telecom's onShowIncomingCallUi) must never alert again
             .setFullScreenIntent(full, true)
             .setContentIntent(full)
-            .addAction(android.R.drawable.sym_call_incoming, "Answer", answerPi)
-            .addAction(android.R.drawable.sym_call_missed, "Decline", action(ACTION_DECLINE, 3))
+            // CallStyle: the system (and Android Auto) present this as an incoming CALL with Answer and
+            // Decline, not as a generic notification.
+            .setStyle(NotificationCompat.CallStyle.forIncomingCall(caller, declinePi, answerPi))
             .build()
         runCatching { NotificationManagerCompat.from(context).notify(CALL_NOTIF_ID, n) }
     }
 
-    /** Clear the ringing notification — answered, declined, or the caller gave up. */
-    fun clearIncomingCall(context: Context) {
+    /** Stop ringing — answered, declined, or the caller gave up: the notification goes and so does the ring. */
+    fun clearIncomingCall(context: Context) = IncomingCallUi.stop(context)
+
+    /** Remove just the notification ([IncomingCallUi]'s presenter pairs it with stopping the ring). */
+    fun cancelIncomingCall(context: Context) {
         runCatching { NotificationManagerCompat.from(context).cancel(CALL_NOTIF_ID) }
     }
 

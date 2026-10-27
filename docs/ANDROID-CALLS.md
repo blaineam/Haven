@@ -36,6 +36,34 @@ adapter around it, never a second state machine.
   the old direct way exactly once (`Placer`). A connection that arrives after the fallback fired is refused, so
   one tap can never become two calls. A refused incoming report leaves the notification as the UI.
 
+## Incoming call UI and ring
+
+A self-managed Telecom call **draws and rings nothing** - Telecom only tracks its state, and `onShowIncomingCallUi`
+is a courtesy that did not even arrive on a real phone. So Haven presents every incoming call itself, from the
+moment it knows about it, independent of Telecom (`IncomingCallPolicy` / `IncomingCallUi`, JVM-tested):
+
+* **Notification**: a `NotificationCompat.CallStyle.forIncomingCall` notification (Answer / Decline), category
+  CALL, max priority, **full-screen intent**, `setOnlyAlertOnce` so a re-post never alerts again. CallStyle is also
+  what lets Android and Android Auto present it as a call. It is posted when the engine receives the invite *and*
+  again (idempotently, same id) from `onCreateIncomingConnection`; `onShowIncomingCallUi` only re-asserts it.
+* **Ring**: Haven plays its own **looping** ringtone and/or **repeating** vibration with
+  `USAGE_NOTIFICATION_RINGTONE`, following the user's ringer: normal = ringtone (+ vibration if "vibrate for calls"
+  is on), **vibrate mode = repeating vibration**, silent or Do Not Disturb filtering = just the notification.
+  Capped at 70 s (the engine's callee ring timeout is 60 s).
+* **Why**: the ring used to be the notification channel's sound, a one-shot the OS drops entirely when the ring
+  stream is muted and a single one-second buzz in vibrate mode. On 2026-10-27 a phone in vibrate mode
+  (`STREAM_RING` muted, `shouldNotificationSoundPlay false`) showed the heads-up but did not ring, and the call
+  was answered five seconds later by tapping Answer. The call channel is now `haven.call.v2`, silent and high
+  importance (the old `haven.call` channel is deleted - a channel's sound cannot be changed once created).
+* **Cleared** by every way a call stops ringing: answer (in-app, notification or car), decline, remote hang-up,
+  ring timeout and teardown all go through `Notifications.clearIncomingCall`, which removes the notification and
+  stops the ring.
+* **Nothing auto-answers.** `Connection.setActive()` is only reached through `TelecomPolicy.Session.onEngineActive`,
+  driven by the engine's own connected events; a test fails if any other file calls it. A log of a real call showed
+  the connection going active exactly when SystemUI fired the Answer action `PendingIntent`.
+* **Permissions**: `USE_FULL_SCREEN_INTENT` (granted on the test phone; on Android 14+ it is a user-revocable app
+  op, so a fresh Play install may need it allowed under Special app access) and `VIBRATE` (normal).
+
 ## Audio route
 
 The engine's existing routing (`setCommunicationDevice` / speakerphone, with `CallRoutePolicy`: a connected car,

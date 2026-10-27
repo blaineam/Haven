@@ -135,7 +135,14 @@ object TelecomCalls {
     internal fun createIncoming(): Connection {
         // Busy (another Haven call is live) or it ended before the system got here: refuse cleanly.
         if (session?.ended == false) return Connection.createFailedConnection(DisconnectCause(DisconnectCause.BUSY))
-        if (!CallManager.ringing.value) return Connection.createFailedConnection(DisconnectCause(DisconnectCause.CANCELED))
+        if (!CallManager.ringing.value) {
+            Log.i(TAG, "incoming connection refused — the call is no longer ringing (caller gave up or answered in-app)")
+            return Connection.createFailedConnection(DisconnectCause(DisconnectCause.CANCELED))
+        }
+        // The ring must NOT wait for Telecom's onShowIncomingCallUi (a self-managed call draws and rings
+        // nothing, and the system did not call it on a real phone): make sure the notification + ring are
+        // up now. Idempotent — the engine already started them when the invite arrived.
+        appContext?.let { IncomingCallUi.ring(it, CallManager.peerName.value) }
         return attach(outgoing = false, name = CallManager.peerName.value)
     }
 
@@ -144,7 +151,8 @@ object TelecomCalls {
     /** The system asks Haven to show its incoming-call UI — the full-screen notification, re-posted. */
     internal fun showIncomingUi() {
         val ctx = appContext ?: return
-        if (CallManager.ringing.value) runCatching { Notifications.showIncomingCall(ctx, CallManager.peerName.value) }
+        Log.i(TAG, "onShowIncomingCallUi — re-asserting the incoming-call notification")
+        if (CallManager.ringing.value) IncomingCallUi.reassert(ctx, CallManager.peerName.value)
     }
 
     // ---------------------------------------------------------------- engine → system

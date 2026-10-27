@@ -21,6 +21,17 @@ one (`RelayScope.fallback` / `relayscope.rs`); a private circle gets none. iOS n
 still self-enrolls on a refused mailbox LIST (needed for DM recovery), so any client path that reads a circle's mailbox at
 a relay not configured for it re-opens this; the clients no longer issue one.
 
+### Changed — iOS: CarPlay follow-ups from the first real-car test
+
+Conversation photos on CarPlay are now circular, aspect-filled avatars (profile emoji or initials on a palette
+disc when there is no photo; a neutral disc for locked / Minimal-privacy rows). Siri now finds people by fuzzy
+name - "Tracy" and "Tracy Miller" both match "Tracy M" - and asks "which one?" or "did you mean ...?" instead of
+answering "no matches" (send, read-from and call). CarPlay gains a Calls tab (contact card with the system Call
+button; calls start audio-only). Photo, video, voice-note, file and song messages are read as "Sent a photo"
+etc. in the device language; group DMs are announced by group name. The three newest conversations keep a deeper
+Siri history, and "read earlier messages from ..." honours Siri's date bounds and search terms. Details, owner
+test steps for Announce Notifications, and what Apple does not allow while parked: `docs/CARPLAY.md`.
+
 ### Fixed — Siri example phrases (App Store Connect ITMS-90626)
 
 The 2.0.4 delivery warned "No example phrase was provided for INSendMessageIntent / INSearchForMessagesIntent /

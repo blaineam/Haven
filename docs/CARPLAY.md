@@ -152,6 +152,137 @@ Real-car checks that the Simulator cannot do: Siri announcing a communication no
 speakers, CallKit in-call UI on the head unit, locked-phone behaviour (file protection), wireless CarPlay
 reconnects.
 
+## Field-test follow-ups (carplay2)
+
+### Avatars
+
+CarPlay draws a `CPMessageListItem` leading image exactly as supplied (it only scales down when larger than
+`CPMaximumMessageItemImageSize`); it applies no circle mask and no aspect fill, so a raw contact photo showed as
+an uncropped rectangle. `CarPlayAvatarRenderer` now bakes a square canvas (side = the smaller dimension of
+`CPMaximumMessageItemImageSize`, drawn at the car display's `displayScale`), a circle mask, and an aspect-FILL
+photo. Without a photo: the contact's profile emoji on a gradient from the active palette, else up to two
+initials, else a neutral disc. Locked conversations and the Minimal privacy level always get the neutral disc
+(the banner for Minimal says only "Haven"). Decisions are pure (`CarPlayAvatar`, unit-tested); drawing is
+cached and runs off the main thread; the list shows its text first and swaps the images in. Group DMs use the
+first member with a photo, else the title's initials. (Circle posts are not part of the car UI.)
+
+### Name matching (Siri)
+
+`Shared/ContactMatching` scores a spoken name against each conversation's title and aliases (your nickname vs
+the name they signed): case, diacritics, fullwidth/halfwidth and hiragana/katakana are folded; emoji and
+punctuation ignored; tokens match as equal, prefix, one-letter initial ("Miller" = "M"), or near-miss spelling
+("Tracey"); CJK names match by containment. "Tracy" and "Tracy Miller" both find "Tracy M".
+Outcome per request (send recipients, read-from sender, call contact):
+
+| Situation | Siri result |
+|---|---|
+| exact name, or the only strong candidate | success |
+| several equally good ("Tracy" with Tracy M / Tracy Zhang) | disambiguation (Siri asks which) |
+| one weak candidate ("Tracey") | confirmationRequired ("Tracy M?") |
+| nothing plausible | unsupported |
+
+A locked winner is never swapped for a look-alike for calls (locked "Maya" does not become "Maya Chen").
+
+### Calls from the car
+
+* **Siri:** "call Tracy on Haven" -> `INStartCallIntent` -> `HavenIntents` resolves (fuzzy, locked refused) and
+  answers `.continueInApp` with the conversation id and `havenAudioOnly = true` -> `SiriCallRouter` ->
+  `CallManager.startCall`.
+* **Screen:** the CarPlay root is a tab bar (Messages | Calls) when the entitlement allows 2+ tabs
+  (`CPTabBarTemplate.maximumTabCount`). A Calls row opens a `CPContactTemplate` (system `CPContactCallButton`);
+  that button starts the same call. A tap on a row never dials by itself.
+* **Audio only:** `CallManager.startCall` begins with the camera off (`videoOn == false`) and requests the
+  CallKit call with `CXStartCallAction.isVideo = false`, so every Haven call from the car starts audio-only,
+  including when Siri asked for video (the activity carries `havenAudioOnly`). Video can be switched on from the
+  phone later.
+* **Incoming calls:** `CallManager` reports them through CallKit (`CXProvider`), which CarPlay presents
+  natively with its own answer/decline UI. Haven draws nothing extra.
+* **Verification level:** the intent resolution, the audio-only flag, the call-list/contact template
+  construction and the locked/unknown refusals are unit-tested (`IntentHandlerTests`, `CarPlayTemplatesTests`,
+  `SiriCallTargetTests`). The path from `SiriCallRouter` into `CallManager`/CallKit, the head-unit answer UI,
+  and real-car behaviour are NOT covered by any automated test and are unverified here. (The simulator uses
+  Haven's in-app call UI instead of CallKit by design.)
+
+### Announcing incoming messages while driving (how to enable)
+
+Haven posts incoming DMs as **communication notifications**: the notification service extension donates an
+`INSendMessageIntent` (sender `INPerson` with photo, `content`, `conversationIdentifier` = the DM id, and a
+`speakableGroupName` for group DMs) and calls `content.updating(from:)`. That is what lets Siri announce the
+message and take a spoken reply (the reply comes back to `HavenIntents` as an `INSendMessageIntent`; the sender
+person we donate carries the conversation id so it resolves exactly). Requirements, all in place:
+
+* Communication Notifications entitlement on the app (portal capability + profile; see above);
+* the NSE runs on the push (`mutable-content`), which is the existing path;
+* effective privacy level **Full** (Haven's lock-screen detail setting, tightened by iOS Show Previews);
+  otherwise the notification stays an ordinary banner and nothing is donated, so Siri cannot read it;
+* never for a biometric-locked circle, calls, reactions, stories, or circle posts/comments.
+
+Group DMs announce ("Tracy in Book Club says ..."); circle posts and comments do NOT - they are not messages
+and Siri has no conversation to reply into. Haven does not mark messages time-sensitive (that needs a separate
+entitlement and bypasses Focus); communication notifications are announced on their own merits.
+
+Owner test steps (iPhone, iOS 26+ wording may vary slightly):
+
+1. Settings -> Notifications -> **Announce Notifications**: turn **Announce Notifications** on.
+2. Same screen -> choose where: **Headphones**, **CarPlay** (turn on), and optionally "Speaker". Under
+   "Announce Notifications From" Haven appears after its first communication notification is delivered and
+   must be on (Messaging apps are listed there by name).
+3. Settings -> Notifications -> **Haven**: Allow Notifications on, Banners/Sounds on, and *Announce* shown
+   (it only appears once the first communication notification has arrived).
+4. Settings -> Siri: Siri on; "Allow Siri When Locked" on if the phone is locked in the car.
+5. Haven Settings -> Notifications: lock-screen detail = **Full previews** (anything else is deliberately silent).
+6. From another device send a DM. In the car / with headphones Siri says the sender and message, then
+   offers "reply?"; speak the reply, Siri confirms, and it appears in the thread.
+
+What the Simulator and this repo's tests can show: that a plain DM at Full yields a plan with sender, text and
+group name, and that locked/non-DM/Private/Minimal yield none (`NotificationPayloadTests`). Whether iOS actually
+speaks it depends on system settings and the car, and has not been observed here.
+
+### Photos in incoming messages
+
+* A photo-only DM is spoken/shown as **"Sent a photo"** (also video, voice note, file, song) in the device's
+  language: the NSE rewrites the sender's stock banner line into the recipient's language and the CarPlay list
+  and Siri reading use the same phrases (`Shared/Messaging.xcstrings`; six languages). Real caption text is read
+  as written.
+* **Describing the image is not done.** Findings: (a) Apple documents no image description for third-party
+  communication notifications. Attachments on an `INSendMessageIntent` only support audio message files;
+  a `UNNotificationAttachment` image is shown, not described, and I found no documented Announce behaviour that
+  reads it - unverified on a device. (b) An on-device description in the NSE is not feasible: Haven's media
+  reaches the NSE as ciphertext sealed to the circle (`SharedPushPrefetch` stores the sealed bytes; opening
+  them needs the engine and circle key, which the NSE deliberately never holds), the NSE memory ceiling is small
+  for a classification model, there is no sensitive-content (SCA) gate in the NSE path, and the photo is often
+  not on the device yet. So the honest fallback above is where it stops. A future option, not built: have the
+  app (which does hold the decrypted photo, with more memory) describe it after ingest and put that text in the
+  Siri snapshot, behind the sensitive-content check - only when the app runs while the phone is in the car.
+
+### Parked conversation browsing
+
+What Apple's CarPlay SDK offers a Communication app (from the SDK headers; the web docs could not be fetched in
+this environment):
+
+* `CPMessageListItem` selection is Siri-managed: the app gets no callback. Unread rows -> Siri reads; read rows
+  -> Siri composes a reply.
+* There is **no "parked" signal** for non-navigation apps. `CPSessionConfiguration` exposes only
+  `limitedUserInterfaces` (keyboard/lists limited by the car) and `contentStyle`; nothing reports vehicle motion.
+* Haven can show lists, a tab bar and a contact card (what it uses). Scrolling message history in an app-drawn
+  screen is not something the Communication category provides, and the SDK offers no way to detect that the car
+  is parked to unlock one.
+
+What Haven does instead, using only sanctioned surfaces: Siri **"read my messages from Tracy"** (reads unread),
+and **"read earlier messages from Tracy"** / "...containing lunch": `INSearchForMessagesIntent` honours the
+date bounds and search terms Siri sends and returns the newest page that matches before the bound, 10 at a
+time. To make that possible without exposing more than needed, the three most recently active conversations keep
+20 messages in the Siri snapshot (the rest 6). Locked conversations and privacy levels below Full return nothing.
+Browsing a long history by eye is a phone feature.
+
+## Verification status of the follow-ups
+
+Proven by automated tests (this branch): name scoring and resolution (including the "Tracy M" report), intent
+resolution kinds and refusals, audio-only call activity, avatar geometry and real rendered pixels (circle mask,
+aspect fill), tab/list/contact template construction, localized phrase tables, search paging, communication
+plans. Not verified by any test or run: real CarPlay rendering of the new avatars and tabs, Siri speech, Announce
+Notifications, CallKit on the head unit.
+
 ## Known limits
 
 * CarPlay shows at most `CPListTemplate.maximumItemCount` rows (head-unit dependent); Haven uses min(12, that).

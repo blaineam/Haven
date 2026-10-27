@@ -2423,7 +2423,8 @@ object HavenNet : InboundListener {
         if (isForeground) return
         val feed = runCatching { social.feed(circleId, nowMs(), null) }.getOrDefault(emptyList())
         val newest = feed.filter { !it.isMe }.maxByOrNull { it.createdAt } ?: return
-        if (nowMs() - newest.createdAt > 600_000uL) return   // 10 min (ULong math; skew-safe enough)
+        // A DM may land long after it was sent (fresh install, offline stretch): see InboundNotifyPolicy.
+        if (InboundNotifyPolicy.isStale(circleId, newest.createdAt.toLong(), nowMs().toLong())) return
         if (!markNotified("$circleId:${newest.id}")) return
         // PREFETCH-BEFORE-NOTIFY: kick the message's media fetches (poster/thumb first, data-saver
         // rules) so the bytes are downloading — often landed — by the time the user taps the

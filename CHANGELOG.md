@@ -9,6 +9,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - Android Auto never read DMs that arrived late
+`notifyInbound` skipped any message sent more than 10 minutes before it was processed, so a DM that landed late (fresh
+install, offline stretch) never got a notification and Android Auto - which only reads notifications - never saw it.
+DM threads now use a 24 h window (one notification per thread); circle posts keep 10 minutes. New
+`InboundNotifyPolicy` + `InboundNotifyPolicyTest`.
+
 ### Fixed - Calls: "Connected" lagged on iPhone; Android left a frozen frame when a camera went off
 - **iOS call screen sat on "Connecting media…" after media was up.** `mediaConnected` reads
   `lastPeerState` / `hairpinPeers`, which are not `@Published`, so the label only caught up when some

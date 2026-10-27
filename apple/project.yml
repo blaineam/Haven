@@ -200,6 +200,8 @@ targets:
       - path: HavenApp
         excludes:
           - "Info*.plist"
+          # Siri example phrases (App Store Connect ITMS-90626) are an iOS requirement only.
+          - "*.lproj/AppIntentVocabulary.plist"
           - HavenAVComposition.swift
           - "* 2.swift"
           - "* 2.entitlements"

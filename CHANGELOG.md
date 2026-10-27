@@ -9,6 +9,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed — Siri example phrases (App Store Connect ITMS-90626)
+
+The 2.0.4 delivery warned "No example phrase was provided for INSendMessageIntent / INSearchForMessagesIntent /
+INSetMessageAttributeIntent / INStartCallIntent" in all nine languages. The app now ships a localized
+`AppIntentVocabulary.plist` (en, de, es, fr, it, ja, ko, pt-BR, zh-Hans) with one example per intent. iOS only: the
+macOS target excludes it.
+
 ### Added — iOS: CarPlay (Communication) and Siri messaging
 
 Haven now appears on CarPlay (`com.apple.developer.carplay-communication`): a list of direct-message

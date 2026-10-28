@@ -9,6 +9,27 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - Android: an idle poll no longer re-downloads a 57,000-key mailbox listing
+A relay keeps every envelope for 30 days, so one circle can list ~57,000 keys, and Android downloaded, parsed, sorted and
+set-tested that whole list on EVERY poll (and a pass that stalled marked nothing, so the next poll started over — the "stuck at
+9,325"). The main poll now asks the relay's HTTP interface first and echoes the last list digest, so an unchanged mailbox is a
+bodiless 204 (iOS and desktop already did this); the digest is committed only after a pass fully drained the listing and its
+seen-marks were flushed, so it can never hide a key still owed a GET. Unseen keys are picked before sorting, one pass fetches
+at most 200 (control-plane first) and a capped pass that moved something is followed by another at once. Wire-compatible: a relay
+that does not speak the digest header behaves as before.
+
+### Fixed - push worker no longer flooded with events it cannot inline (all platforms)
+Re-sealed and hybrid-signed envelopes are 9-88 KB; the worker inlines an event only under ~3,900 characters and logged every other
+one as "ev dropped" — yet Android (and desktop, and some Apple paths) still uploaded each one, one `/notify` per envelope, several
+a second during a catch-up. A shared size guard now sends the event only when it can be inlined (`PushPolicy`, `PushManager`,
+desktop `push_wake`), own-device self-sync pushes are rate-bounded on Android, and the per-pass self-sync fan-out is capped at 3
+everywhere. A woken device still pulls the rest from its mailbox. `PushPolicyTest`.
+
+### Fixed - Android: an incoming 1:1 call shows the CALLER's name (lock screen, notification, Android Auto)
+The invite carries the thread title as the sender sees it — for a 1:1 that is the callee's own name — and Android used it as the
+caller's name, so the car and the ring showed your own name. A call with two people now rings with the caller's contact name
+(Apple parity); only a real group keeps its title. Verified on the Desktop Head Unit.
+
 ### Fixed - Android outgoing call screen: stays up, status visible, tone stops, phone icon
 When the iPhone's VoIP ring negotiated media early, the caller code cleared its dialing state before the callee answered, so the call screen
 vanished ~1 s after dialing and the ringback kept playing with nothing to stop it. Dialing now holds until the ACCEPT (the ICE state seen
@@ -38,8 +59,8 @@ Android has no push, so inbound DMs/calls only arrive while the process is alive
 `dataSync`, which has a ~6 h/day budget; once spent the service stopped and a low-RAM phone (Nokia 6.1, ~80 MB free) killed
 the cached process, so iPhone→Android DMs waited on the relay until the app was reopened. From Android 14 the idle service
 is now typed `remoteMessaging` (no time budget). Calls/screen-share keep mic/projection-only types as before; Android 13 and
-below keep `dataSync`. New manifest permission `FOREGROUND_SERVICE_REMOTE_MESSAGING`; Play Console needs the foreground-service
-declaration for this type. `ForegroundTypesTest` covers the new matrix.
+below keep `dataSync`. New manifest permission `FOREGROUND_SERVICE_REMOTE_MESSAGING`; Play Console's foreground-service
+declaration for this type is already approved. `ForegroundTypesTest` covers the new matrix.
 
 ### Changed - Android voice: verified against Google's 2026 docs; Gemini app trusted for voice calls; car notification polish
 Researched what Google documents for Gemini / Assistant (docs/ASSISTANT.md, with sources): App Actions are still

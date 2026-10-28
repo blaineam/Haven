@@ -137,16 +137,24 @@ final class PushManager: NSObject, ObservableObject {
     func wake(_ nodeId: String, ciphertext: String? = nil, event: String? = nil, silent: Bool = false) {
         guard !nodeId.isEmpty else { return }
         var body: [String: Any] = ["nodeId": nodeId, "ciphertext": ciphertext ?? "_"]
-        if let event { body["event"] = event }
+        // The Worker inlines an event only while payload + event stays under ~3900 chars; bigger ones (a re-sealed or
+        // hybrid-signed envelope is 9-88 KB) are dropped there. Do not upload what it will throw away.
+        if let event, event.utf8.count <= Self.inlineMaxB64 { body["event"] = event }
         if silent { body["silent"] = true }
         post("/notify", body)
     }
+
+    /// Largest base64 event the push Worker will inline (push/worker.js budgets 3900 for payload + event).
+    static let inlineMaxB64 = 3_000
 
     /// Multi-device: sync an event we authored to our OWN other devices (linked to this
     /// identity). A `silent` push (no banner) so we don't self-notify; the other devices stash
     /// the inline event and ingest it — no mailbox needed.
     func syncSelf(event: String) {
         guard let nodeId = myNodeId() else { return }
+        // Too big to inline → the Worker would drop the event and send a bare wake; my other devices pull it from the
+        // mailbox on their next poll anyway, so a catch-up stream must not become a /notify per envelope.
+        guard event.utf8.count <= Self.inlineMaxB64 else { return }
         post("/notify", ["nodeId": nodeId, "event": event, "silent": true])
     }
 

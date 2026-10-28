@@ -50,6 +50,8 @@ pub const DEFAULT_CIRCLE: &str = "default";
 
 /// The push Worker — also hosts the content-free moderation ledger (`/flag`).
 pub const PUSH_RELAY: &str = "https://haven-push.wemiller.workers.dev";
+/// Largest base64 event the push Worker will inline (it budgets 3900 chars for payload + event).
+const PUSH_INLINE_MAX_B64: usize = 3_000;
 
 /// One configured relay's full state for the Relays hub UI (active + inactive).
 #[derive(Clone)]
@@ -1197,8 +1199,13 @@ impl Engine {
             "nodeId": node_hex,
             "ciphertext": ciphertext.unwrap_or_else(|| "_".into()),
         });
+        // The Worker inlines an event only while payload + event stays under ~3900 chars and drops anything
+        // bigger ("ev dropped"); a re-sealed / hybrid-signed envelope is 9-88 KB, so uploading it was pure waste
+        // (and a catch-up fired one such request per envelope). The woken device pulls the rest from its mailbox.
         if let Some(e) = event {
-            body["event"] = e.into();
+            if e.len() <= PUSH_INLINE_MAX_B64 {
+                body["event"] = e.into();
+            }
         }
         if silent {
             body["silent"] = true.into();
@@ -8922,7 +8929,7 @@ impl Engine {
                 // Push leg of the same fan-out: a silent syncSelf wake with the inline event so my
                 // SLEEPING devices ingest without their own mailbox round-trip (iOS parity; capped
                 // — a cold-drain backlog still converges via their poll).
-                for (_cid, env) in newly_ingested.iter().take(10) {
+                for (_cid, env) in newly_ingested.iter().take(3) {
                     self.push_wake(
                         &self.node_id_hex(),
                         None,

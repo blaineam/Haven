@@ -38,6 +38,7 @@ class NetEnv(
     private val savedPush = HavenNet.pushRelayBase
 
     fun up(withRelay: Boolean = true): NetEnv {
+        PushPolicy.reset()   // the self-sync burst limiter is process-wide; every test starts with a full window
         Dispatchers.setMain(UnconfinedTestDispatcher())
         relay.start()
         HavenNet.pushRelayBase = relay.base   // never the real push worker

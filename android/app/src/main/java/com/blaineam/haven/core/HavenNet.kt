@@ -4514,7 +4514,7 @@ object HavenNet : InboundListener {
         // design) — this leg is for the members who DO hold push tokens.
         scope.launch {
             pushSyncSelf(env)
-            val eventB64 = Base64.encodeToString(env, Base64.NO_WRAP)
+            val eventB64 = PushPolicy.inline(env)
             val notifJson = banner?.let { bannerJson(it, circleId) }
             for (member in runCatching { social.contactNodeIds(circleId) }.getOrDefault(emptyList())) {
                 val sealed = notifJson?.let {
@@ -4547,7 +4547,8 @@ object HavenNet : InboundListener {
     private fun pushWake(nodeId: String, ciphertextB64: String?, eventB64: String?, silent: Boolean) {
         if (nodeId.isEmpty()) return
         val body = JSONObject().put("nodeId", nodeId).put("ciphertext", ciphertextB64 ?: "_")
-        if (eventB64 != null) body.put("event", eventB64)
+        // The worker drops an event it cannot inline; do not upload what it will throw away.
+        if (eventB64 != null && eventB64.length <= PushPolicy.INLINE_MAX_B64) body.put("event", eventB64)
         if (silent) body.put("silent", true)
         pushPost("/notify", body)
     }
@@ -4570,9 +4571,14 @@ object HavenNet : InboundListener {
     /** Multi-device: deliver an envelope to my OWN other devices' push tokens — a silent
      *  content-available push (no self-notify), inline event, no mailbox round-trip. */
     private fun pushSyncSelf(env: ByteArray) {
+        // Only an envelope the worker can inline is worth a push: a bigger one would be dropped there anyway
+        // ("ev dropped"), and the sibling pulls it from the mailbox on its next poll. A burst is bounded too —
+        // a catch-up / re-seal stream used to fire a /notify per envelope, several a second.
+        val event = PushPolicy.inline(env) ?: return
+        if (!PushPolicy.allowSelfSync()) return
         pushPost("/notify", JSONObject()
             .put("nodeId", accountNodeHex)
-            .put("event", Base64.encodeToString(env, Base64.NO_WRAP))
+            .put("event", event)
             .put("silent", true))
     }
 
@@ -6242,9 +6248,36 @@ object HavenNet : InboundListener {
             }
             val prefix = "haven/mailbox/$circleId/"
             val client = relayClientFor(nodeHex)
+            val entry = relayEntries[nodeHex]
+            val digestKey = "$nodeHex|$prefix"
             var keys: List<String>? = null
             var httpBase: String? = null
-            if (client != null) {
+            var freshDigest: String? = null
+            // DELTA-LIST FIRST over the relay's HTTP interface (iOS/desktop parity): echo the last digest and an
+            // unchanged mailbox comes back as a bodiless 204, instead of the whole key set again. A relay holds
+            // every envelope for 30 days, so one circle can list ~57,000 keys — downloading, parsing, sorting and
+            // set-testing that on every poll was the whole cost of an idle device. A relay that doesn't speak the
+            // header never answers 204 and never hands back a digest: today's behaviour.
+            if (entry != null && entry.httpToken.isNotEmpty()) {
+                val cached = synchronized(mailboxListDigests) { mailboxListDigests[digestKey] }
+                for (base in httpUrlsFor(entry)) {
+                    val r = relayHttpListDelta(base, entry.httpToken, prefix, cached)
+                    if (r.isSuccess) {
+                        val (listed, digest) = r.getOrThrow()
+                        markRelaySeen(nodeHex)
+                        httpBase = base
+                        if (listed == null) { keys = emptyList(); break }   // 204: nothing changed since a COMPLETE pass
+                        keys = listed
+                        freshDigest = digest
+                        Log.d(TAG, "mailbox http-list ${listed.size} keys circle=${circleId.take(12)} via $base")
+                        break
+                    }
+                    if (r.exceptionOrNull() is RelayForbidden) { noteRefused(nodeHex, "mailbox list"); break }
+                    Log.d(TAG, "mailbox http-list failed via $base: ${r.exceptionOrNull()?.message}")
+                    markHttpUrlBad(base)
+                }
+            }
+            if (keys == null && client != null) {
                 keys = runCatching { client.list(prefix) }.getOrNull()
                 if (keys == null) relayFailed(nodeHex)
                 else {
@@ -6257,39 +6290,31 @@ object HavenNet : InboundListener {
                     refreshRelayInterfaceIfNeeded(nodeHex)
                 }
             }
-            // iroh unreachable (dial backoff / no addressing — emulator NAT, CGNAT both ends) →
-            // the relay's signed-HTTP interface, the reliable cross-NAT path. Without this rung
-            // store-and-forward CONTENT only ever rode the dial, so an HTTP-only device polled
-            // "successfully" forever while its mailbox sat full on the relay (iOS pullMailbox
-            // parity — same ladder as devroster/media/`__live__`).
-            val entry = relayEntries[nodeHex]
-            if (keys == null && entry != null && entry.httpToken.isNotEmpty()) {
-                for (base in httpUrlsFor(entry)) {
-                    val r = relayHttpListDelta(base, entry.httpToken, prefix, digest = null)
-                    if (r.isSuccess) {
-                        keys = r.getOrNull()?.first ?: emptyList()
-                        httpBase = base
-                        markRelaySeen(nodeHex)
-                        Log.d(TAG, "mailbox http-list ${keys.size} keys circle=${circleId.take(12)} via $base")
-                        break
-                    }
-                    if (r.exceptionOrNull() is RelayForbidden) { noteRefused(nodeHex, "mailbox list"); break }
-                    Log.d(TAG, "mailbox http-list failed via $base: ${r.exceptionOrNull()?.message}")
-                    markHttpUrlBad(base)
-                }
-            }
             if (keys == null) continue
             if (keys.isNotEmpty()) withContext(Dispatchers.Main) { relayActive.value = true }
             // Same shape as the S3 branch: skip unclaimed live-call frames, control-plane first,
-            // and mark a content key seen ONLY once its envelope actually ingested.
-            for (key in keys.sortedBy { mailboxKeyRank(it) }) {
-                if (key.contains("/__live__/")) continue
-                if (!helloSlotIsMine(key)) continue   // another id's hello slot — skip before the GET
-                if (seenMailbox.contains(key)) continue
+            // and mark a content key seen ONLY once its envelope actually ingested. The unseen keys are picked
+            // BEFORE the sort (the sort of a 57k list was most of the CPU), and one pass fetches at most
+            // MAILBOX_PASS_CAP of them so a long backlog drains in bounded, marked-as-we-go passes instead of
+            // one pass that, if it stalls or is killed, marks nothing (iOS mailboxFetchCap / desktop
+            // MAX_FRESH_PER_PASS parity).
+            val unseen = keys.asSequence()
+                .filter { !it.contains("/__live__/") && helloSlotIsMine(it) && !seenMailbox.contains(it) }
+                .sortedBy { mailboxKeyRank(it) }
+                .toList()
+            val batch = unseen.take(MAILBOX_PASS_CAP)
+            var complete = unseen.size <= batch.size
+            for (key in batch) {
                 val env = (if (httpBase != null) relayHttpGet(httpBase, entry!!.httpToken, key).getOrNull()
-                           else runCatching { client!!.get(key) }.getOrNull()) ?: continue
-                if (routeMailboxEntry(circleId, key, env)) pendingSeenMarks.add(key)
+                           else runCatching { client!!.get(key) }.getOrNull())
+                if (env == null) { complete = false; continue }
+                if (routeMailboxEntry(circleId, key, env)) { pendingSeenMarks.add(key); mailboxPassProgress = true }
+                else complete = false   // held (e.g. a hello awaiting its slot): still owed a GET
             }
+            if (!complete) mailboxBacklogRemains = true
+            // A digest may hide keys behind a 204, so it is committed ONLY when this listing was fully drained
+            // (nothing failed, held or deferred) and only after the seen-marks below have flushed.
+            else if (httpBase != null && freshDigest != null) pendingDigests.add(digestKey to freshDigest)
         }
         // HTTP live-lane call frames when iroh dial is down.
         if (pollLiveCallFrames()) {
@@ -6324,7 +6349,7 @@ object HavenNet : InboundListener {
                 // Multi-device: a silent content-available push carries each envelope to my OWN
                 // other devices' tokens, so a pocketed sibling ingests without waiting out its
                 // next mailbox poll (Apple PushManager.syncSelf parity).
-                for ((_, env) in fanOut.take(20)) pushSyncSelf(env)
+                for ((_, env) in fanOut.take(3)) pushSyncSelf(env)
             }
             bumpActivity()   // a message arrived → keep sync tight while the conversation is live
             persist()
@@ -6339,9 +6364,29 @@ object HavenNet : InboundListener {
         // Drained, not iterated + cleared: two mailbox passes can overlap, and an add from one
         // during the other's flush threw ConcurrentModificationException (or was cleared unmarked).
         while (true) markMailboxSeen(pendingSeenMarks.poll() ?: break)
+        // Digests last: a cached digest turns the next LIST into a 204, which is only safe once every key it
+        // covered is durably marked seen.
+        while (true) {
+            val (k, d) = pendingDigests.poll() ?: break
+            synchronized(mailboxListDigests) {
+                mailboxListDigests[k] = d
+                if (mailboxListDigests.size > 500) mailboxListDigests.clear()
+            }
+        }
+        // A capped pass that moved something is followed by another at once; one that moved nothing (every
+        // remaining key held or failing) is NOT — that would spin — and waits for the normal poll cadence.
+        if (mailboxBacklogRemains && mailboxPassProgress) {
+            mailboxBacklogRemains = false; mailboxPassProgress = false
+            delay(250)
+            pollMailboxQueued.set(true)
+        } else { mailboxBacklogRemains = false; mailboxPassProgress = false }
     }
 
     private val pendingSeenMarks = java.util.concurrent.ConcurrentLinkedQueue<String>()
+    private val pendingDigests = java.util.concurrent.ConcurrentLinkedQueue<Pair<String, String>>()
+    @Volatile private var mailboxBacklogRemains = false
+    @Volatile private var mailboxPassProgress = false
+    private val MAILBOX_PASS_CAP = 200
 
     // ---- Relay history resync ("Load history from your relays" — RelayHistory.kt) ----------------
     // The few HavenNet internals the deep relay pass needs. Nothing here fans out, pushes, uploads

@@ -6,9 +6,9 @@ name: Play car-app probe
 # draft production release and runs edits.validate; the edit is always deleted, nothing is committed.
 #
 #   Play refuses  → the run is green and says so in the summary (nothing to do; checked again next week).
-#   Play accepts  → dispatches android.yml as a PRODUCTION release with car_app=true, and opens an issue asking
-#                   you to set the repo variable PLAY_CAR_APP_ALLOWED=true so later tagged releases keep the screens
-#                   (a workflow cannot set variables with the default token).
+#   Play validates → a warning only. It used to dispatch a production release; that was removed after the first run showed a
+#                   DRAFT passing validation is not evidence the car templates are allowed on production (and a release
+#                   must never start itself ahead of the QA gate).
 #   The probe broke (auth, network, build) → the run goes red; that says nothing about Play's policy.
 #
 # Release rule: this ships whatever is on main as a production release of the CURRENT version, so it will not fire
@@ -22,8 +22,6 @@ on:
 
 permissions:
   contents: read
-  actions: write
-  issues: write
 
 concurrency:
   group: android-play-publish   # same group as android.yml: Play allows one open edit per package
@@ -85,14 +83,7 @@ jobs:
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           { echo "### Play car-app probe"; echo; echo '```'; cat probe.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           [ "$rc" = "0" ] || [ "$rc" = "3" ]   # 3 = Play said no: a normal answer, not a failure
-      - name: Play accepted — release to production with the car screens
+      - name: Play validated a draft — report only, NEVER release
         if: steps.probe.outputs.rc == '0'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          gh workflow run android.yml --ref "${{ github.event.repository.default_branch }}" \
-            -f play_track=production -f car_app=true
-          gh issue create --title "Play now accepts the Android Auto car screens in production" \
-            --body "The weekly probe's production draft passed Play validation with the car app declared, so android.yml was dispatched as a production release with car_app=true.
-
-          To keep the screens in every later tagged release, set the repository variable PLAY_CAR_APP_ALLOWED=true (Settings → Secrets and variables → Actions → Variables). That also stops this weekly probe. Probe run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "::warning::edits.validate passed for a DRAFT production release that declares the car app. That is NOT proof Play allows the car templates in production: the first live attempt (2026-10-28) was stopped by an unrelated Console gate before any car-app check could run. Release decisions stay with a human."

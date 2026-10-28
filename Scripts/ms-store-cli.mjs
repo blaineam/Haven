@@ -112,15 +112,18 @@ ms(['publish', resolve(msix), '-id', appId, '--noCommit', '-v']);
 if (has('bare')) { ms(['submission', 'publish', appId]); ok('bare draft (package only, no update) committed'); process.exit(0); }
 // 2-4. listing text onto that draft, together with the package it now holds
 const sub = patch(getSubmission());
-// `submission update` replaces the WHOLE submission and the CLI rejects it unless Pricing.PriceId is a real value
-// (Tier<n> / Free / NotAvailable); the Store hands back "Base" or nothing when prices are per-market. Haven is a free
-// product (the only kind `msstore` updates), so a missing/Base id means Free — said out loud, never silently.
-const price = sub.Pricing?.PriceId;
-log(`Pricing.PriceId = ${JSON.stringify(price ?? null)}`);
-if (!price || price === 'Base') {
-  sub.Pricing ??= {};
-  sub.Pricing.PriceId = 'Free';
-  log('⚠ PriceId was missing/Base — set to "Free" (Haven is a free product)');
+// Pricing and availability is NOT ours to send. The Store's dashboard model owns it (Partner Center → Pricing and
+// availability) and rejects the legacy "sales" resource at commit (InvalidPricingAvailabilitySettings), so the update
+// carries none of it: no Pricing/markets/trial, no Visibility, no publish schedule. The draft keeps what the dashboard
+// holds. The CLI insists on Pricing.PriceId unless told otherwise — see --keep-pricing for that fallback.
+const PRICING_KEYS = ['Pricing', 'Visibility', 'TargetPublishMode', 'TargetPublishDate'];
+if (has('keep-pricing')) {
+  const price = sub.Pricing?.PriceId;
+  log(`Pricing.PriceId = ${JSON.stringify(price ?? null)} (--keep-pricing: sent as-is)`);
+  if (!price || price === 'Base') { sub.Pricing ??= {}; sub.Pricing.PriceId = 'Free'; log('⚠ PriceId was missing/Base — set to "Free"'); }
+} else {
+  for (const k of PRICING_KEYS) delete sub[k];
+  log(`pricing & availability left out of the update: ${PRICING_KEYS.join(', ')}`);
 }
 const upd = ms(['submission', 'update', appId, JSON.stringify(sub), '-v'], { allowFail: true });
 if (upd.status !== 0) die(`msstore submission update failed (exit ${upd.status})\n--- stdout ---\n${(upd.stdout || '').slice(-3500)}\n--- stderr ---\n${(upd.stderr || '').slice(-1500)}`);

@@ -108,6 +108,8 @@ if (dryRun) {
 // The package FILE is the positional argument (the CLI's loose-MSIX publisher takes .msix/.msixbundle/.msixupload
 // there; its `-i` is an input DIRECTORY, whatever the docs say). Absolute, because the CLI's cwd is not ours.
 ms(['publish', resolve(msix), '-id', appId, '--noCommit', '-v']);
+// EXPERIMENT (--bare): commit the package-only draft untouched — no `submission update`, so no pricing is re-sent.
+if (has('bare')) { ms(['submission', 'publish', appId]); ok('bare draft (package only, no update) committed'); process.exit(0); }
 // 2-4. listing text onto that draft, together with the package it now holds
 const sub = patch(getSubmission());
 // `submission update` replaces the WHOLE submission and the CLI rejects it unless Pricing.PriceId is a real value

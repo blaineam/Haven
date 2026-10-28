@@ -51,7 +51,8 @@ runs:
           submit)  FLAGS="" ;;
           draft)   FLAGS="--no-commit" ;;
           dry-run) FLAGS="--dry-run" ;;
-          *) echo "::error::mode must be submit | draft | dry-run"; exit 1 ;;
+          bare)    FLAGS="--bare" ;;
+          *) echo "::error::mode must be submit | draft | dry-run | bare"; exit 1 ;;
         esac
         MSIXARG=""; [ -n "$IN_MSIX" ] && MSIXARG="--msix $IN_MSIX"
         cat > "$RUNNER_TEMP/ms-run.sh" <<'SH'

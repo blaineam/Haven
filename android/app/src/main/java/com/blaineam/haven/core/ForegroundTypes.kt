@@ -11,17 +11,29 @@ import android.content.pm.ServiceInfo
  * `dataSync` throws. `microphone` and `mediaProjection` have no such budget, so during a call or a
  * screen share the service holds ONLY those — a call must never lose its mic because the idle
  * "Stay connected" time ran out. Below API 35 there is no budget and `dataSync` stays as before.
+ *
+ * From API 34 the idle "Stay connected" service is typed `remoteMessaging` instead of `dataSync`:
+ * it has no time budget, so the process (and its iroh node) stays alive all day and DMs/calls
+ * arrive in real time. With dataSync the budget ran out within hours, the service stopped, and a
+ * low-RAM phone then killed the cached process — iPhone→Android DMs sat on the relay until the
+ * app was reopened (Android has no push, unlike APNs on iOS).
  */
 object ForegroundTypes {
     /** First Android with the dataSync time budget (Android 15). */
     const val DATA_SYNC_BUDGET_SDK = 35
+
+    /** First Android with the budget-free `remoteMessaging` type (Android 14). */
+    const val REMOTE_MESSAGING_SDK = 34
 
     /** The types for `startForeground`, or 0 below API 29 (no typed startForeground there). */
     fun forState(sdk: Int, micWanted: Boolean, projection: Boolean): Int {
         if (sdk < 29) return 0
         val inCall = micWanted || projection
         var type = 0
-        if (!inCall || sdk < DATA_SYNC_BUDGET_SDK) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        if (!inCall || sdk < DATA_SYNC_BUDGET_SDK) {
+            type = type or if (sdk >= REMOTE_MESSAGING_SDK) ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+                           else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        }
         if (projection) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
         if (micWanted && sdk >= 34) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         // A call on API 29–33 with no projection still needs a type: keep the service alive as dataSync.

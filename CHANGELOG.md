@@ -9,6 +9,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - Android: "Stay connected" no longer expires after hours (iPhone→Android DMs and calls while backgrounded)
+Android has no push, so inbound DMs/calls only arrive while the process is alive. On Android 15 the idle service was typed
+`dataSync`, which has a ~6 h/day budget; once spent the service stopped and a low-RAM phone (Nokia 6.1, ~80 MB free) killed
+the cached process, so iPhone→Android DMs waited on the relay until the app was reopened. From Android 14 the idle service
+is now typed `remoteMessaging` (no time budget). Calls/screen-share keep mic/projection-only types as before; Android 13 and
+below keep `dataSync`. New manifest permission `FOREGROUND_SERVICE_REMOTE_MESSAGING`; Play Console needs the foreground-service
+declaration for this type. `ForegroundTypesTest` covers the new matrix.
+
 ### Changed - Android voice: verified against Google's 2026 docs; Gemini app trusted for voice calls; car notification polish
 Researched what Google documents for Gemini / Assistant (docs/ASSISTANT.md, with sources): App Actions are still
 supported but need **Google review and approval** in Play Console (the old note saying there was no separate step was

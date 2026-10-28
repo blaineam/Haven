@@ -3,14 +3,21 @@ package com.blaineam.haven.core
 import android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC as DATA_SYNC
 import android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION as PROJECTION
 import android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE as MIC
+import android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING as REMOTE
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class ForegroundTypesTest {
     @Test
-    fun idleStayConnectedIsDataSyncOnEveryVersion() {
-        for (sdk in 29..36) assertEquals("sdk $sdk", DATA_SYNC, ForegroundTypes.forState(sdk, micWanted = false, projection = false))
+    fun idleStayConnectedIsDataSyncBelowAndroid14() {
+        for (sdk in 29..33) assertEquals("sdk $sdk", DATA_SYNC, ForegroundTypes.forState(sdk, micWanted = false, projection = false))
+    }
+
+    @Test
+    fun idleStayConnectedIsRemoteMessagingFromAndroid14() {
+        // No time budget: the process must survive all day on low-RAM phones with no push.
+        for (sdk in 34..36) assertEquals("sdk $sdk", REMOTE, ForegroundTypes.forState(sdk, micWanted = false, projection = false))
     }
 
     @Test
@@ -28,8 +35,9 @@ class ForegroundTypesTest {
 
     @Test
     fun beforeAndroid15ACallKeepsDataSyncAsBefore() {
-        assertEquals(DATA_SYNC or MIC, ForegroundTypes.forState(34, micWanted = true, projection = false))
+        assertEquals(REMOTE or MIC, ForegroundTypes.forState(34, micWanted = true, projection = false))
         assertEquals(DATA_SYNC or PROJECTION, ForegroundTypes.forState(33, micWanted = true, projection = true))
+        assertEquals(REMOTE or PROJECTION, ForegroundTypes.forState(34, micWanted = false, projection = true))
         // No microphone type before 34: the call still needs SOME type to stay foreground.
         assertEquals(DATA_SYNC, ForegroundTypes.forState(30, micWanted = true, projection = false))
     }

@@ -34,6 +34,8 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Idle "Stay connected" on Android 14+: no time budget, unlike dataSync (6 h/day on 15). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
     <!-- Screen sharing in a call (MediaProjection) — Android 14+ requires this FGS type. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <!-- Capturing the mic while Haven is BACKGROUNDED needs a foreground service typed
@@ -334,7 +336,7 @@
         <service
             android:name=".core.ConnectionService"
             android:exported="false"
-            android:foregroundServiceType="dataSync|mediaProjection|microphone" />
+            android:foregroundServiceType="dataSync|remoteMessaging|mediaProjection|microphone" />
         <!-- Answer / Decline from the incoming-call notification. Not exported: only Haven's own
              notification actions may drive a call. -->
         <receiver

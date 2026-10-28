@@ -17,7 +17,7 @@
 // Flow (the CLI docs' own order — `publish` RECREATES the draft, so it must run before any metadata edit):
 //   1. msstore publish <msixbundle> -id <app> --noCommit           package into a fresh draft
 //   2. msstore submission get <app>                                the draft as JSON
-//   3. patch each locale's Title/Description/ShortDescription/ReleaseNotes from appstore-metadata[.<locale>].md
+//   3. patch each locale's Description/ShortDescription/ReleaseNotes (not Title: names are reserved) from appstore-metadata[.<locale>].md
 //      (a language the draft lacks is cloned from en-us, so it keeps the screenshots)
 //   4. msstore submission update <app> <json>                      listings + package, together
 //   5. msstore submission publish <app> ; msstore submission poll <app>
@@ -87,7 +87,9 @@ const patch = (sub) => {
       log(`${lang}: new language, cloned from en-us`);
     }
     entry.BaseListing ??= {};
-    for (const [k, v] of Object.entries(listing)) entry.BaseListing[pascal(k)] = v;
+    // NEVER the title: the Store only accepts RESERVED app names per language ("Invalid listing title(s) … Please use
+    // reserved name(s)"), and a translated title is not one. The draft keeps whatever name was reserved.
+    for (const [k, v] of Object.entries(listing)) if (k !== 'title') entry.BaseListing[pascal(k)] = v;
   }
   return sub;
 };

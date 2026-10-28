@@ -691,7 +691,11 @@ object CallManager {
             }
             return
         }
-        incoming(g.from, g.groupName, g.sessionId, members)
+        // A 1:1 call is titled by the CALLER. The sender's invite carries the thread title as THEY see it,
+        // which for a 1:1 is the callee's own name — so ringing with it shows "you" on the lock screen and the
+        // car (Apple CallManager parity: members <= 2 → the caller's display name; only a group keeps its title).
+        val title = if (members.size <= 2) HavenNet.displayName(g.from.take(8)) else g.groupName
+        incoming(g.from, title, g.sessionId, members)
     }
 
     private fun incoming(from: String, name: String, session: String, members: Set<String>) {

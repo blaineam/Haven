@@ -88,8 +88,14 @@ class CallManagerSignalingTest {
     }
 
     @Test fun an_unnamed_group_call_is_titled_group_call() {
-        handle(CallWire.GROUP_INVITE, invite(name = ""))
+        handle(CallWire.GROUP_INVITE, invite(name = "", roster = listOf(peer, other, env.me)))
         assertEquals("Group call", CallManager.peerName.value)
+    }
+
+    @Test fun a_one_to_one_call_is_titled_by_the_caller_not_by_the_title_the_caller_sent() {
+        // The sender names the thread as THEY see it — for a 1:1 that is the callee's own name.
+        handle(CallWire.GROUP_INVITE, invite(name = "Me (callee)", roster = listOf(peer, env.me)))
+        assertEquals("Pat", CallManager.peerName.value)
     }
 
     @Test fun an_invite_from_someone_who_is_not_a_contact_never_rings() {

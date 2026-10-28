@@ -22,7 +22,8 @@ jobs:
         run: |
           curl -fsSL -o msstore.tgz https://github.com/microsoft/msstore-cli/releases/download/v0.4.3/MSStoreCLI-linux-x64.tar.gz
           curl -fsSL -o msstore.sha https://github.com/microsoft/msstore-cli/releases/download/v0.4.3/MSStoreCLI-linux-x64.tar.gz.sha256.txt
-          echo "$(cut -d' ' -f1 msstore.sha)  msstore.tgz" | sha256sum -c -
+          WANT="$(tr -d '\000\r\n ' < msstore.sha | grep -oE '[0-9a-fA-F]{64}' | head -1)"
+          echo "$WANT  msstore.tgz" | sha256sum -c -
           mkdir -p bin && tar -xzf msstore.tgz -C bin && chmod +x bin/msstore
           echo "$PWD/bin" >> "$GITHUB_PATH"
           bin/msstore --version

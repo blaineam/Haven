@@ -35,6 +35,8 @@ jobs:
           VERSION=$(grep -m1 'MARKETING_VERSION:' apple/project.yml | sed 's/[^0-9.]*//g')
           MSIX=$(find out -name '*.msixbundle' | head -1); [ -n "$MSIX" ] || MSIX=$(find out -name '*.msix' | head -1)
           [ -n "$MSIX" ] || { echo '::error::no .msixbundle/.msix in the desktop-windows artifact'; exit 1; }
+          # the version is the PACKAGE's (Haven-X.Y.Z.msixbundle), not the ref's: a re-run from main after a bump must still submit what was built
+          FROMFILE=$(basename "$MSIX" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true); [ -z "$FROMFILE" ] || VERSION="$FROMFILE"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"; echo "msix=$MSIX" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/ms-store-submit
         with:

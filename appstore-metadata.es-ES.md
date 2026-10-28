@@ -47,12 +47,11 @@ Novedad en 2.0: tu relay hace el trabajo pesado con fotos y vídeos para que tu 
 • Haz clic derecho en el botón Publicar para publicar en varios círculos a la vez.
 
 ## whats_new_windows
-2.0.2 — El feed y el perfil ahora ocupan una columna centrada en las ventanas anchas, así que las fotos y los vídeos ya no se ven enormes y te desplazas menos. La pantalla Tú sigue la misma columna.
-• El cuadro de redacción ya no desaparece al salir de la pestaña Círculo y volver.
-• Las publicaciones con más de diez fotos vuelven a mostrar sus fotos.
-• Ajustes ▸ Avanzado ▸ «Reoptimizar los medios que ya compartí» recupera su botón.
-• Al llegar al final de un feed ahora se piden las publicaciones anteriores, así que el historial de un amigo nuevo se completa.
-• Una importación de Instagram interrumpida por una actualización continúa donde se quedó.
+2.1.0 — Tus colores y varios círculos a la vez.
+• Elige una paleta de colores en Ajustes ▸ Apariencia; Neutral no tiene color.
+• Haz clic derecho en Publicar para publicar en varios círculos a la vez, con un botón Seleccionar todo.
+• Al editar una publicación compartida en varios círculos, se actualizan todas las copias.
+• Las llamadas muestran el nombre correcto de quien llama.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

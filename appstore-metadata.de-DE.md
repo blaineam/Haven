@@ -47,12 +47,11 @@ Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit
 • Klicke mit der rechten Maustaste auf „Posten“, um in mehrere Kreise gleichzeitig zu posten.
 
 ## whats_new_windows
-2.0.2 — Feed und Profil stehen in breiten Fenstern jetzt in einer zentrierten Spalte, sodass Fotos und Videos nicht mehr riesig sind und du weniger scrollen musst. Der Bildschirm „Du“ nutzt dieselbe Spalte.
-• Das Eingabefeld verschwindet nicht mehr, wenn du den Kreis-Tab verlässt und zurückkehrst.
-• Beiträge mit mehr als zehn Fotos zeigen ihre Fotos wieder an.
-• Einstellungen ▸ Erweitert ▸ „Bereits geteilte Medien neu optimieren“ hat seine Schaltfläche zurück.
-• Am Ende eines Feeds werden jetzt ältere Beiträge angefordert, sodass sich der Verlauf neuer Freunde füllt.
-• Ein durch ein Update unterbrochener Instagram-Import macht dort weiter, wo er aufgehört hat.
+2.1.0 — Deine Farben und mehrere Kreise auf einmal.
+• Wähle in Einstellungen ▸ Darstellung eine Farbpalette; Neutral ist farblos.
+• Klicke mit rechts auf „Posten“, um in mehrere Kreise gleichzeitig zu posten – mit „Alle auswählen“.
+• Wenn du einen in mehrere Kreise geposteten Beitrag bearbeitest, werden alle Kopien aktualisiert.
+• Anrufe zeigen den richtigen Namen des Anrufers.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

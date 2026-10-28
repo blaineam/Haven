@@ -47,12 +47,11 @@ Novità della 2.0: il tuo relay fa il lavoro pesante con foto e video, così il 
 • Fai clic destro su Pubblica per pubblicare in più cerchie contemporaneamente.
 
 ## whats_new_windows
-2.0.2 — Il feed e il profilo ora occupano una colonna centrata nelle finestre larghe, così foto e video non sono più enormi e scorri meno. La schermata Tu segue la stessa colonna.
-• Il campo di scrittura non scompare più quando esci dalla scheda Cerchia e ci torni.
-• I post con più di dieci foto mostrano di nuovo le loro foto.
-• Impostazioni ▸ Avanzate ▸ «Riottimizza i contenuti già condivisi» ha di nuovo il suo pulsante.
-• Arrivando in fondo a un feed ora si richiedono i post più vecchi, così la cronologia di un nuovo amico si riempie.
-• Un'importazione da Instagram interrotta da un aggiornamento riprende da dove si era fermata.
+2.1.0 — I tuoi colori e più cerchie in un colpo solo.
+• Scegli una tavolozza di colori in Impostazioni ▸ Aspetto; Neutra è senza colore.
+• Clic destro su Pubblica per pubblicare in più cerchie contemporaneamente, con un pulsante Seleziona tutto.
+• Modificando un post condiviso in più cerchie si aggiornano tutte le copie.
+• Le chiamate mostrano il nome corretto di chi chiama.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

@@ -47,12 +47,11 @@ Nouveau en 2.0 : votre relay prend en charge photos et vidéos pour que votre t�
 • Faites un clic droit sur Publier pour publier dans plusieurs cercles à la fois.
 
 ## whats_new_windows
-2.0.2 — Le fil et le profil s'affichent désormais dans une colonne centrée dans les fenêtres larges : les photos et les vidéos ne sont plus énormes et vous faites défiler moins. L'écran Vous suit la même colonne.
-• Le champ de rédaction ne disparaît plus quand vous quittez l'onglet Cercle puis y revenez.
-• Les publications de plus de dix photos affichent de nouveau leurs photos.
-• Réglages ▸ Avancé ▸ « Réoptimiser les médias déjà partagés » retrouve son bouton.
-• Arriver au bout d'un fil demande désormais les publications plus anciennes, ce qui remplit l'historique d'un nouvel ami.
-• Une importation Instagram interrompue par une mise à jour reprend là où elle s'était arrêtée.
+2.1.0 — Vos couleurs, et plusieurs cercles à la fois.
+• Choisissez une palette de couleurs dans Réglages ▸ Apparence ; Neutre est sans couleur.
+• Faites un clic droit sur Publier pour publier dans plusieurs cercles à la fois, avec un bouton Tout sélectionner.
+• Modifier une publication partagée dans plusieurs cercles met à jour toutes les copies.
+• Les appels affichent le bon nom de l'appelant.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

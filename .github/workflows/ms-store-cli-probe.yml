@@ -4,7 +4,12 @@ name: ms-store-cli-probe
 # home: the CLI takes listing JSON as an argument, and Windows' 32,767-char command-line cap is smaller than nine
 # languages of listing text). Linux needs libsecret + an unlocked keyring for the CLI's credential store.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      delete_pending:
+        description: "Also DELETE the pending (draft) submission after reading it — cleanup after a draft test"
+        required: false
+        default: "false"
 
 permissions:
   contents: read
@@ -18,6 +23,7 @@ jobs:
       STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
       STORE_SELLER_ID: ${{ secrets.STORE_SELLER_ID }}
       STORE_APP_ID: ${{ secrets.STORE_APP_ID }}
+      DELETE_PENDING: ${{ inputs.delete_pending }}
     steps:
       - name: Install msstore CLI + keyring
         run: |
@@ -40,5 +46,7 @@ jobs:
             echo "::endgroup::"
           done
           msstore submission get "$STORE_APP_ID" 2>/dev/null | wc -c | sed 's/^/submission JSON bytes: /'
+          msstore submission get "$STORE_APP_ID" 2>/dev/null | grep -E '"(FileName|PackageVersion|Version|ReleaseNotes)"' | cut -c1-160 | head -20
+          if [ "$DELETE_PENDING" = "true" ]; then msstore submission delete "$STORE_APP_ID" --no-confirm 2>&1 | tail -5; msstore submission status "$STORE_APP_ID" 2>&1 | tail -2; fi
           SH
           dbus-run-session -- bash run.sh

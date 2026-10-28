@@ -70,8 +70,8 @@ on:
         required: false
         default: ""
       # Ship the templated Android Auto car app (Calls / Messages screens) on a track Play normally refuses it
-      # on. Only the weekly probe (play-car-app-probe.yml) sets this, after Play's own validation accepted a
-      # bundle that declares it. Once it has, set the repo variable PLAY_CAR_APP_ALLOWED=true so tagged releases keep it.
+      # on. A human sets this, only after Google's beta notice is gone (play-car-app-watch.yml opens an issue when it
+      # changes). To keep the screens in every tagged release afterwards set the repo variable PLAY_CAR_APP_ALLOWED=true.
       car_app:
         description: "Declare the car app categories even on beta/production (only after Play accepts them)"
         required: false

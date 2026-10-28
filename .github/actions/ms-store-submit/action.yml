@@ -1,0 +1,65 @@
+name: ms-store-submit
+description: >
+  Submit Haven's MSIX bundle + nine-language listing to the Microsoft Store with Microsoft's `msstore` CLI
+  (Scripts/ms-store-cli.mjs). Linux only: the CLI needs libsecret + an unlocked keyring, and `submission update`
+  takes the whole ~55 KB submission as one argument, which Windows' command-line limit cannot hold.
+inputs:
+  version:
+    description: "X.Y.Z — the release notes must start with it"
+    required: true
+  msix:
+    description: "Path to the .msixbundle / .msix"
+    required: false
+    default: ""
+  mode:
+    description: "submit (commit for certification) | draft (leave a draft to press Submit) | dry-run (map only, change nothing)"
+    required: false
+    default: "submit"
+  tenant-id: { required: true, description: "Partner Center tenant id" }
+  client-id: { required: true, description: "Entra app client id" }
+  client-secret: { required: true, description: "Entra app client secret" }
+  seller-id: { required: true, description: "Partner Center seller id" }
+  app-id: { required: true, description: "Store product id (9N…)" }
+runs:
+  using: composite
+  steps:
+    - name: Install msstore CLI + keyring
+      shell: bash
+      run: |
+        set -euo pipefail
+        V=v0.4.3
+        sudo apt-get update -qq && sudo apt-get install -y -qq libsecret-1-0 gnome-keyring dbus-user-session >/dev/null
+        curl -fsSL -o "$RUNNER_TEMP/msstore.tgz" "https://github.com/microsoft/msstore-cli/releases/download/$V/MSStoreCLI-linux-x64.tar.gz"
+        curl -fsSL -o "$RUNNER_TEMP/msstore.sha" "https://github.com/microsoft/msstore-cli/releases/download/$V/MSStoreCLI-linux-x64.tar.gz.sha256.txt"
+        WANT="$(tr -d '\000\r\n ' < "$RUNNER_TEMP/msstore.sha" | grep -oE '[0-9a-fA-F]{64}' | head -1)"
+        echo "$WANT  $RUNNER_TEMP/msstore.tgz" | sha256sum -c -
+        mkdir -p "$HOME/msstore-bin" && tar -xzf "$RUNNER_TEMP/msstore.tgz" -C "$HOME/msstore-bin" && chmod +x "$HOME/msstore-bin/msstore"
+    - name: Submit to the Microsoft Store
+      shell: bash
+      env:
+        IN_VERSION: ${{ inputs.version }}
+        IN_MSIX: ${{ inputs.msix }}
+        IN_MODE: ${{ inputs.mode }}
+        STORE_TENANT_ID: ${{ inputs.tenant-id }}
+        STORE_CLIENT_ID: ${{ inputs.client-id }}
+        STORE_CLIENT_SECRET: ${{ inputs.client-secret }}
+        STORE_SELLER_ID: ${{ inputs.seller-id }}
+        STORE_APP_ID: ${{ inputs.app-id }}
+      run: |
+        set -euo pipefail
+        case "$IN_MODE" in
+          submit)  FLAGS="" ;;
+          draft)   FLAGS="--no-commit" ;;
+          dry-run) FLAGS="--dry-run" ;;
+          *) echo "::error::mode must be submit | draft | dry-run"; exit 1 ;;
+        esac
+        MSIXARG=""; [ -n "$IN_MSIX" ] && MSIXARG="--msix $IN_MSIX"
+        cat > "$RUNNER_TEMP/ms-run.sh" <<'SH'
+        set -euo pipefail
+        export PATH="$HOME/msstore-bin:$PATH"
+        echo "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+        msstore reconfigure --tenantId "$STORE_TENANT_ID" --clientId "$STORE_CLIENT_ID" --clientSecret "$STORE_CLIENT_SECRET" --sellerId "$STORE_SELLER_ID" 2>&1 | tail -3
+        node Scripts/ms-store-cli.mjs --version "$IN_VERSION" $MSIXARG $FLAGS
+        SH
+        export FLAGS MSIXARG
+        dbus-run-session -- bash "$RUNNER_TEMP/ms-run.sh"

@@ -516,34 +516,36 @@ jobs:
   # Separate from the build ON PURPOSE: environmental failures here retry in ~2 minutes via
   # `gh run rerun --failed` (or the msix_run_id dispatch) without rebuilding anything.
   #
-  # Pure Ingestion API via Scripts/ms-store-publish.mjs — msstore-cli is GONE from nuget.org,
-  # refused paid-product updates, and only ever submitted the package. This lane pushes the
-  # LISTING (all 9 languages, release notes included) and the package in ONE submission.
+  # Microsoft's `msstore` CLI via Scripts/ms-store-cli.mjs (composite action ms-store-submit): the package AND the
+  # nine-language listing (release notes included) in ONE submission, committed for certification. The CLI's
+  # submission path works again for this packaged app (the hand-rolled Ingestion-API lane broke in 2026-08).
   msix-submit:
     needs: [meta, desktop]
-    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc') && vars.MSSTORE_PUBLISH == 'true' 
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc') && vars.MSSTORE_PUBLISH == 'true'
     runs-on: ubuntu-latest
-    env:
-      STORE_TENANT_ID: ${{ secrets.STORE_TENANT_ID }}
-      STORE_CLIENT_ID: ${{ secrets.STORE_CLIENT_ID }}
-      STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-      STORE_APP_ID: ${{ secrets.STORE_APP_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: desktop-windows
           path: out
-
-      - name: Submit listing + package to the Microsoft Store
-        if: env.STORE_TENANT_ID != ''
+      - name: Resolve the package
+        id: pkg
         run: |
           set -euo pipefail
-          VERSION=$(grep -m1 'MARKETING_VERSION:' apple/project.yml | sed 's/[^0-9.]*//g')   # colon = the assignment, not the $(MARKETING_VERSION) reference above it
-          MSIX=$(find out -name '*.msix' | head -1)
-          [ -n "$MSIX" ] || { echo '::error::no .msix in the desktop-windows artifact'; exit 1; }
-          echo "submitting $MSIX as $VERSION"
-          node Scripts/ms-store-publish.mjs --version "$VERSION" --msix "$MSIX"
+          MSIX=$(find out -name '*.msixbundle' | head -1); [ -n "$MSIX" ] || MSIX=$(find out -name '*.msix' | head -1)
+          [ -n "$MSIX" ] || { echo '::error::no .msixbundle/.msix in the desktop-windows artifact'; exit 1; }
+          echo "msix=$MSIX" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/ms-store-submit
+        with:
+          version: ${{ needs.meta.outputs.version }}
+          msix: ${{ steps.pkg.outputs.msix }}
+          mode: submit
+          tenant-id: ${{ secrets.STORE_TENANT_ID }}
+          client-id: ${{ secrets.STORE_CLIENT_ID }}
+          client-secret: ${{ secrets.STORE_CLIENT_SECRET }}
+          seller-id: ${{ secrets.STORE_SELLER_ID }}
+          app-id: ${{ secrets.STORE_APP_ID }}
 
   flatpak:
     needs: [meta, desktop]

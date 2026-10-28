@@ -1,4 +1,4 @@
-# Microsoft Store submit, standalone — listing (all languages) + package from an EXISTING
+# Microsoft Store submit (msstore CLI), standalone — listing (all languages) + package from an EXISTING
 # run's desktop-windows artifact. ~3 minutes; exists so Store-submission iteration never
 # rebuilds a 35-minute desktop matrix again (it did, four times, the night 1.7.0 shipped).
 name: ms-store
@@ -9,7 +9,7 @@ on:
         description: "Run id whose desktop-windows artifact holds the MSIX to submit"
         required: true
       mode:
-        description: "submit (default) or probe-ingestion (read-only map of the new Store API)"
+        description: "submit (commit for certification) | draft (leave a draft; you press Submit) | dry-run (map the listing, change nothing)"
         required: false
         default: "submit"
 
@@ -20,11 +20,6 @@ permissions:
 jobs:
   submit:
     runs-on: ubuntu-latest
-    env:
-      STORE_TENANT_ID: ${{ secrets.STORE_TENANT_ID }}
-      STORE_CLIENT_ID: ${{ secrets.STORE_CLIENT_ID }}
-      STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
-      STORE_APP_ID: ${{ secrets.STORE_APP_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -33,15 +28,21 @@ jobs:
           path: out
           run-id: ${{ inputs.msix_run_id }}
           github-token: ${{ github.token }}
-      - name: Submit listing + package to the Microsoft Store
+      - name: Resolve the package + version
+        id: pkg
         run: |
           set -euo pipefail
-          VERSION=$(grep -m1 'MARKETING_VERSION:' apple/project.yml | sed 's/[^0-9.]*//g')   # colon = the assignment, not the $(MARKETING_VERSION) reference above it
-          MSIX=$(find out -name '*.msix' | head -1)
-          [ -n "$MSIX" ] || { echo '::error::no .msix in the desktop-windows artifact'; exit 1; }
-          if [ "${{ inputs.mode }}" = "probe-ingestion" ]; then
-            node Scripts/ms-store-publish.mjs --probe-ingestion --store-id 9NKTFH1MF4LM
-          else
-            echo "submitting $MSIX as $VERSION"
-            node Scripts/ms-store-publish.mjs --version "$VERSION" --msix "$MSIX"
-          fi
+          VERSION=$(grep -m1 'MARKETING_VERSION:' apple/project.yml | sed 's/[^0-9.]*//g')
+          MSIX=$(find out -name '*.msixbundle' | head -1); [ -n "$MSIX" ] || MSIX=$(find out -name '*.msix' | head -1)
+          [ -n "$MSIX" ] || { echo '::error::no .msixbundle/.msix in the desktop-windows artifact'; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"; echo "msix=$MSIX" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/ms-store-submit
+        with:
+          version: ${{ steps.pkg.outputs.version }}
+          msix: ${{ steps.pkg.outputs.msix }}
+          mode: ${{ inputs.mode }}
+          tenant-id: ${{ secrets.STORE_TENANT_ID }}
+          client-id: ${{ secrets.STORE_CLIENT_ID }}
+          client-secret: ${{ secrets.STORE_CLIENT_SECRET }}
+          seller-id: ${{ secrets.STORE_SELLER_ID }}
+          app-id: ${{ secrets.STORE_APP_ID }}

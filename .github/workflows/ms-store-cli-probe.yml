@@ -47,6 +47,7 @@ jobs:
           done
           msstore submission get "$STORE_APP_ID" 2>/dev/null | wc -c | sed 's/^/submission JSON bytes: /'
           msstore submission get "$STORE_APP_ID" 2>/dev/null | grep -E '"(FileName|PackageVersion|Version|ReleaseNotes)"' | cut -c1-160 | head -20
+          msstore submission get "$STORE_APP_ID" 2>/dev/null | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d.slice(d.indexOf("{")));console.log("Pricing:",JSON.stringify(j.Pricing));console.log("Keys:",Object.keys(j).join(","));for(const [l,v] of Object.entries(j.Listings||{}))console.log(l,"notes:",JSON.stringify((v.BaseListing?.ReleaseNotes||"").slice(0,50)));console.log("pkgs:",(j.Packages||j.ApplicationPackages||[]).map(p=>p.FileName||p.fileName).join(","))})'
           if [ "$DELETE_PENDING" = "true" ]; then msstore submission delete "$STORE_APP_ID" --no-confirm 2>&1 | tail -5; msstore submission status "$STORE_APP_ID" 2>&1 | tail -2; fi
           SH
           dbus-run-session -- bash run.sh

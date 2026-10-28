@@ -59,6 +59,7 @@ class NetEnv(
         PinnedMediaStore.init(ctx)
         Presign.init(ctx)
         CircleRemovals.init(ctx)
+        MultiPostGroups.init(ctx)
         MediaWantedStore.init(ctx)
         EvictedMediaStore.init(ctx)
         ContactRemovals.init(ctx)

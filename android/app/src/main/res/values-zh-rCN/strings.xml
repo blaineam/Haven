@@ -778,6 +778,8 @@
     <string name="palette_neutral">中性</string>
     <string name="composer_post_long_click_label">选择要发布到的圈子</string>
     <string name="composer_circles_sheet_title">发布到圈子</string>
+    <string name="composer_circles_select_all">全选</string>
+    <string name="composer_circles_unselect_all">取消全选</string>
     <string name="composer_circles_post_button">发布到 %1$d 个圈子</string>
     <string name="composer_circles_post_button_one">发布到 1 个圈子</string>
     <string name="composer_circles_current">当前</string>

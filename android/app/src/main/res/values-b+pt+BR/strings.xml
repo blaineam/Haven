@@ -814,6 +814,8 @@ O que já tentei:
     <string name="palette_neutral">Neutra</string>
     <string name="composer_post_long_click_label">Escolher círculos para publicar</string>
     <string name="composer_circles_sheet_title">Publicar em círculos</string>
+    <string name="composer_circles_select_all">Selecionar tudo</string>
+    <string name="composer_circles_unselect_all">Desmarcar tudo</string>
     <string name="composer_circles_post_button">Publicar em %1$d círculos</string>
     <string name="composer_circles_post_button_one">Publicar em 1 círculo</string>
     <string name="composer_circles_current">Atual</string>

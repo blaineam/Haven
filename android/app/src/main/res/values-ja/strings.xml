@@ -779,6 +779,8 @@
     <string name="palette_neutral">ニュートラル</string>
     <string name="composer_post_long_click_label">投稿先のサークルを選択</string>
     <string name="composer_circles_sheet_title">サークルに投稿</string>
+    <string name="composer_circles_select_all">すべて選択</string>
+    <string name="composer_circles_unselect_all">すべての選択を解除</string>
     <string name="composer_circles_post_button">%1$d 個のサークルに投稿</string>
     <string name="composer_circles_post_button_one">1 個のサークルに投稿</string>
     <string name="composer_circles_current">現在</string>

@@ -901,6 +901,8 @@
     <string name="palette_neutral">Neutral</string>
     <string name="composer_post_long_click_label">Choose circles to post to</string>
     <string name="composer_circles_sheet_title">Post to circles</string>
+    <string name="composer_circles_select_all">Select all</string>
+    <string name="composer_circles_unselect_all">Unselect all</string>
     <string name="composer_circles_post_button">Post to %1$d circles</string>
     <string name="composer_circles_post_button_one">Post to 1 circle</string>
     <string name="composer_circles_current">Current</string>

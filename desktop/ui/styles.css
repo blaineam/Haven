@@ -1239,6 +1239,8 @@ body.drop-target::after {
 /* ---- Multi-circle post popover (right-click / long-press on Post) ---- */
 .circle-pick { min-width: 240px; max-width: 320px; padding: 8px; }
 .circle-pick .cp-title { font-size: 12px; font-weight: 700; padding: 6px 8px 8px; }
+.circle-pick .cp-all { display: block; margin: 0 8px 6px; padding: 0; background: none; border: 0; font: inherit; font-size: 12px; font-weight: 600; color: var(--p2); cursor: pointer; }
+.circle-pick .cp-all:hover { text-decoration: underline; }
 .circle-pick label {
   display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: var(--r-sm); cursor: pointer; font-size: 14px;
 }

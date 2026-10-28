@@ -779,6 +779,8 @@
     <string name="palette_neutral">Neutra</string>
     <string name="composer_post_long_click_label">Scegli i cerchi in cui pubblicare</string>
     <string name="composer_circles_sheet_title">Pubblica nei cerchi</string>
+    <string name="composer_circles_select_all">Seleziona tutto</string>
+    <string name="composer_circles_unselect_all">Deseleziona tutto</string>
     <string name="composer_circles_post_button">Pubblica in %1$d cerchi</string>
     <string name="composer_circles_post_button_one">Pubblica in 1 cerchio</string>
     <string name="composer_circles_current">Attuale</string>

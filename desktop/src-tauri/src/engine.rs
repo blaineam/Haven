@@ -453,6 +453,10 @@ pub struct Engine {
     prefs: StdMutex<Prefs>,
     dyn_state: StdMutex<DynState>,
     scheduled: StdMutex<crate::scheduled::ScheduledStore>,
+    /// Local-only index of multi-circle posts (edits fan out to every copy).
+    post_groups: StdMutex<crate::postgroups::PostGroups>,
+    /// Last created_at handed to a multi-circle copy, so no two copies share a millisecond.
+    last_post_ts: StdMutex<u64>,
     roster: StdMutex<crate::roster::DeviceRoster>,
     /// Device-local seedless state (account public bundle + granted self-sync key + verbatim roster).
     /// `enabled=false` on a primary/legacy device.
@@ -753,6 +757,7 @@ impl Engine {
         let prefs = Prefs::load(&paths);
         let media = LocalMedia::new(paths.media_dir());
         let scheduled = crate::scheduled::ScheduledStore::load(&paths.scheduled_file());
+        let post_groups = crate::postgroups::PostGroups::load(&paths.post_groups_file());
         let roster = crate::roster::DeviceRoster::load(&paths);
         // Engine acts under this device's UNIQUE transport identity (parity with iOS configure() /
         // Android init): the account id stays the sealing/trust anchor + the contact handle friends
@@ -854,6 +859,8 @@ impl Engine {
             prefs: StdMutex::new(prefs),
             dyn_state: StdMutex::new(dyn_state),
             scheduled: StdMutex::new(scheduled),
+            post_groups: StdMutex::new(post_groups),
+            last_post_ts: StdMutex::new(0),
             roster: StdMutex::new(roster),
             seedless: StdMutex::new(crate::roster::Seedless::default()),
             enroll_tickets: StdMutex::new(Vec::new()),
@@ -918,6 +925,7 @@ impl Engine {
         let prefs = Prefs::load(&paths);
         let media = LocalMedia::new(paths.media_dir());
         let scheduled = crate::scheduled::ScheduledStore::load(&paths.scheduled_file());
+        let post_groups = crate::postgroups::PostGroups::load(&paths.post_groups_file());
         // NB: NO register_device — the primary is the sole roster authority (guarded in-core too, but
         // we never even call it here). The transport still binds to the device seed in `start()`.
         let app_activity = load_app_activity(&paths);
@@ -973,6 +981,8 @@ impl Engine {
             prefs: StdMutex::new(prefs),
             dyn_state: StdMutex::new(dyn_state),
             scheduled: StdMutex::new(scheduled),
+            post_groups: StdMutex::new(post_groups),
+            last_post_ts: StdMutex::new(0),
             roster: StdMutex::new(roster),
             seedless: StdMutex::new(seedless),
             enroll_tickets: StdMutex::new(Vec::new()),
@@ -3903,23 +3913,58 @@ impl Engine {
     /// while Apple and Android both had it. (A disappearing post authored elsewhere always expired
     /// correctly here; it is only authoring that was missing.)
     pub fn post(self: &Arc<Self>, circle_id: String, body: String, media: Vec<String>, music: Option<TrackRefFfi>, mute_video: bool, retention_secs: Option<u64>) {
+        self.post_at(circle_id, body, media, music, mute_video, retention_secs, now_ms());
+    }
+
+    /// Author ONE post with an explicit `created_at`, returning its event id (None if nothing was
+    /// authored). `post` is this with the wall clock.
+    fn post_at(self: &Arc<Self>, circle_id: String, body: String, media: Vec<String>, music: Option<TrackRefFfi>, mute_video: bool, retention_secs: Option<u64>, ts: u64) -> Option<String> {
         if body.trim().is_empty() && media.is_empty() && music.is_none() {
-            return;
+            return None;
         }
         let banner = {
             let refs: Vec<&str> = media.iter().map(|s| s.as_str()).collect();
             haven_p2p::pushbanner::for_post(&circle_id, &self.circle_name(&circle_id), &body, &refs, false)
         };
-        // Hoist the timestamp so the engine-derived id of THIS post can be read back (ids are
+        // The timestamp is hoisted so the engine-derived id of THIS post can be read back (ids are
         // content-addressed at author time) — the sealed banner's `p` tag. Apple FeedView parity.
-        let ts = now_ms();
         match self.social.post(circle_id.clone(), body, media.clone(), music, retention_secs, false, mute_video, ts) {
             Ok(env) => {
                 let post_id = self.social.last_authored_event_id(circle_id.clone(), ts);
-                self.after_author(&circle_id, &env, Some(banner), post_id);
+                self.after_author(&circle_id, &env, Some(banner), post_id.clone());
                 self.upload_authored_media(circle_id, media);
+                post_id
             }
-            Err(e) => log::error!("post failed: {e}"),
+            Err(e) => {
+                log::error!("post failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Post the same content to several circles and remember the copies as one group, so a later
+    /// edit of any copy reaches all of them. Media must already be re-sealed for every circle (the
+    /// UI calls `media_reseal_for_circles` first). Each copy gets its own strictly increasing
+    /// `created_at` — an event id is BLAKE3(author‖created_at‖kind), so identical bodies authored in
+    /// the same millisecond would otherwise collide.
+    pub fn post_multi(self: &Arc<Self>, circle_ids: Vec<String>, body: String, media: Vec<String>, music: Option<TrackRefFfi>, mute_video: bool, retention_secs: Option<u64>) {
+        let mut members = Vec::new();
+        for cid in circle_ids {
+            let ts = {
+                let mut last = self.last_post_ts.lock();
+                let ts = now_ms().max(*last + 1);
+                *last = ts;
+                ts
+            };
+            if let Some(id) = self.post_at(cid.clone(), body.clone(), media.clone(), music.clone(), mute_video, retention_secs, ts) {
+                members.push((cid, id));
+            }
+        }
+        let mut g = self.post_groups.lock();
+        if g.register(members) {
+            if let Err(e) = g.save(&self.paths.post_groups_file()) {
+                log::warn!("post groups save failed: {e}");
+            }
         }
     }
 
@@ -4042,9 +4087,33 @@ impl Engine {
             }
             (None, None) => (vec![], None, mute_video.unwrap_or(false)),
         };
-        match self.social.edit(circle_id.clone(), target, body, media, music, mute_video, now_ms()) {
+        let group = {
+            let g = self.post_groups.lock();
+            let circles = g.circle_set(&circle_id, &target);
+            let live = g.live_siblings(&circle_id, &target, |c| self.social.circles().iter().any(|x| x.id == c));
+            (circles, live)
+        };
+        let (group_circles, siblings) = group;
+        match self.social.edit(circle_id.clone(), target.clone(), body.clone(), media.clone(), music.clone(), mute_video, now_ms()) {
             Ok(env) => {
                 self.after_author(&circle_id, &env, None, None); // edits keep their place — no banner
+                // Multi-circle post: author the SAME edit into every other copy. Best-effort — one
+                // failing circle never stops the rest, and the edit above already succeeded.
+                if !siblings.is_empty() {
+                    if !media.is_empty() {
+                        if let Err(e) = self.reseal_media_for_circles(&circle_id, &media, &group_circles) {
+                            log::warn!("multi-circle edit: {e}; skipping sibling copies");
+                            return Ok(());
+                        }
+                    }
+                    for (cid, eid) in siblings {
+                        match self.social.edit(cid.clone(), eid, body.clone(), media.clone(), music.clone(), mute_video, now_ms()) {
+                            Ok(env) => self.after_author(&cid, &env, None, None),
+                            Err(e) => log::warn!("multi-circle edit: sibling {cid} failed: {e}"),
+                        }
+                    }
+                    self.upload_authored_media(circle_id.clone(), media);
+                }
                 Ok(())
             }
             // Surfaced rather than swallowed. An edit that fails looked EXACTLY like one that

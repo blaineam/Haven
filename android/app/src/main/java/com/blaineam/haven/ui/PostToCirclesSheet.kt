@@ -54,8 +54,19 @@ fun PostToCirclesSheet(
         modifier = Modifier.testTag("postCirclesSheet"),
     ) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
-            Text(stringResource(R.string.composer_circles_sheet_title), color = HavenTheme.textPrimary,
-                fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.composer_circles_sheet_title), color = HavenTheme.textPrimary,
+                    fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f, fill = false))
+                val all = MultiCircle.allSelected(selection, rows)
+                Text(
+                    stringResource(if (all) R.string.composer_circles_unselect_all else R.string.composer_circles_select_all),
+                    color = HavenTheme.pink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(start = 12.dp).clip(RoundedCornerShape(8.dp))
+                        .clickable { selection = if (all) MultiCircle.clear() else MultiCircle.selectAll(rows) }
+                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                        .testTag("postCirclesSelectAll"),
+                )
+            }
             Spacer(Modifier.height(10.dp))
             Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
                 rows.forEach { t ->

@@ -1328,9 +1328,9 @@ async function renderFeed() {
       floating: true,
       // Who this reaches — said out loud by the placeholder and the labeled Post (see `Audience`).
       audience: { name: state.activeCircleName },
-      // Right-click / long-press on Post → circle checklist → one post per ticked circle. The
+      // Right-click / long-press on Post → circle checklist → one post per ticked circle (linked, so an edit syncs to all). The
       // plain click path above is untouched (no picker, no confirm).
-      onPostTo: (cid, body, music, muteVideo, retentionSecs) => invoke("post", { circleId: cid, body, media: withThumbMarkers(state.attachments), music, muteVideo, retentionSecs }),
+      onPostTo: (cids, body, music, muteVideo, retentionSecs) => invoke("post_multi", { circleIds: cids, body, media: withThumbMarkers(state.attachments), music, muteVideo, retentionSecs }),
       onSchedule: (body, music, muteVideo, sendAtMs) => invoke("schedule_message", { kind: "post", circleId: state.activeCircle, body, media: withThumbMarkers(state.attachments), music, muteVideo, sendAtMs }),
     },
   );
@@ -1556,7 +1556,7 @@ async function pickCircles(anchor, currentId) {
     const root = $("#menu-root");
     const picked = new Set([currentId]);
     const go = el("button", { class: "btn primary" });
-    const paint = () => {
+    let paint = () => {
       const n = picked.size;
       go.textContent = n === 1 ? t("post_btn") : t("post_to_n_circles", n);
       go.disabled = n === 0;
@@ -1567,11 +1567,22 @@ async function pickCircles(anchor, currentId) {
       box.addEventListener("change", () => { if (box.checked) picked.add(c.id); else picked.delete(c.id); paint(); });
       return el("label", {}, box, el("span", {}, circleDisplayName(c.id, c.name)));
     });
+    const boxes = rows.map((r) => r.querySelector("input"));
+    const all = el("button", { class: "cp-all", type: "button" });
+    const paintAll = () => { all.textContent = picked.size === circles.length ? t("unselect_all_circles") : t("select_all_circles"); };
+    const paint0 = paint;
+    paint = () => { paint0(); paintAll(); };
+    all.addEventListener("click", () => {
+      const every = picked.size === circles.length;
+      circles.forEach((c) => { if (every) picked.delete(c.id); else picked.add(c.id); });
+      boxes.forEach((b) => { b.checked = picked.has(b.dataset.circle); });
+      paint();
+    });
     const done = (v) => { closeMenu(); resolve(v); };
     go.addEventListener("click", () => { if (picked.size) done([...circles.map((c) => c.id).filter((id) => picked.has(id))]); });
     paint();
     const menu = el("div", { class: "menu glass circle-pick", role: "dialog", "aria-label": t("post_to_circles_title") },
-      el("div", { class: "cp-title muted" }, t("post_to_circles_title")), ...rows, go);
+      el("div", { class: "cp-title muted" }, t("post_to_circles_title")), all, ...rows, go);
     const backdrop = el("div", { class: "menu-backdrop", onclick: () => done(null) });
     root.replaceChildren(backdrop, menu);
     const r = anchor.getBoundingClientRect();
@@ -1679,7 +1690,7 @@ function buildComposer(onPost, placeholder = t("share_something"), opts = {}) {
           return;
         }
       }
-      for (const cid of targets) await opts.onPostTo(cid, body, music, muteVideo, retentionSecs);
+      await opts.onPostTo(targets, body, music, muteVideo, retentionSecs);
     } else {
       await onPost(body, music, muteVideo, retentionSecs);
     }

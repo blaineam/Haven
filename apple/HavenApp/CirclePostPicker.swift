@@ -18,6 +18,15 @@ struct CirclePostPicker: View {
         NavigationStack {
             List {
                 Section {
+                    let allIds = store.feedCircles.map(\.id)
+                    let everyone = MultiCirclePost.allSelected(selected, of: allIds)
+                    Button { selected = MultiCirclePost.toggleAll(selected, of: allIds) } label: {
+                        Text(everyone ? "Unselect all" : "Select all")
+                            .foregroundStyle(HavenTheme.pink)
+                    }
+                    .accessibilityIdentifier("circlePick.selectAll")
+                }
+                Section {
                     ForEach(store.feedCircles, id: \.id) { c in
                         Button { toggle(c.id) } label: {
                             HStack {

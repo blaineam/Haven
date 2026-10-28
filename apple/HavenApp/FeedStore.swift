@@ -5005,17 +5005,26 @@ final class FeedStore: ObservableObject {
                 MediaCircleSets.shared.register(
                     refs: self.authoredMediaRefs(self.withPreviewMarkers(self.withThumbMarkers(rawMedia))), circleIds: targets)
             }
-            for cid in targets {
-                await self.postNow(body, media: rawMedia, music: music, retentionSecs: retentionSecs, story: story, muteVideo: muteVideo, circleId: cid)
+            // Each copy gets its own created_at (event id = BLAKE3(author‖created_at‖kind) — same-millisecond
+            // copies of one body would collide), and the copies are remembered as a group so an edit of any
+            // one reaches the rest (`PostGroups`, local only).
+            let base = self.now()
+            var members: [PostGroups.Member] = []
+            for (i, cid) in targets.enumerated() {
+                if let eid = await self.postNow(body, media: rawMedia, music: music, retentionSecs: retentionSecs, story: story, muteVideo: muteVideo, circleId: cid,
+                                                createdAt: PostGroups.stagger(base: base, index: i)) {
+                    members.append(.init(circleId: cid, eventId: eid))
+                }
             }
+            if targets.count > 1 { PostGroups.shared.register(members) }
         }
     }
     /// The awaitable form of `post`: the new post's id once it is sealed and handed to every transport
     /// (nil when the engine is down or the seal failed). The QA driver dumps after it.
     @discardableResult
-    func postNow(_ body: String, media rawMedia: [String] = [], music: TrackRefFfi? = nil, retentionSecs: UInt64? = nil, story: Bool = false, muteVideo: Bool = false, circleId: String? = nil) async -> String? {
+    func postNow(_ body: String, media rawMedia: [String] = [], music: TrackRefFfi? = nil, retentionSecs: UInt64? = nil, story: Bool = false, muteVideo: Bool = false, circleId: String? = nil, createdAt: UInt64? = nil) async -> String? {
         let media = withPreviewMarkers(withThumbMarkers(rawMedia))
-        let ts = now()
+        let ts = createdAt ?? now()
         let cid = circleId ?? activeCircleId
         guard let engine else { return nil }
         await awaitPendingCircleOp(cid)
@@ -5386,22 +5395,44 @@ final class FeedStore: ObservableObject {
         guard let hex = dmPartnerHex(circleId) else { return (false, nil) }
         return (isConnected(hex), lastHeard[hex])
     }
-    func edit(_ id: String, _ body: String, media rawMedia: [String] = [], music: TrackRefFfi? = nil, muteVideo: Bool = false) {
+    /// Edit the post `id` that lives in `circleId`. When it was part of a multi-circle post (`PostGroups`) the
+    /// same edit is authored into every sibling circle against that circle's own copy — automatically.
+    func edit(_ id: String, _ body: String, media rawMedia: [String] = [], music: TrackRefFfi? = nil, muteVideo: Bool = false, circleId: String? = nil) {
+        let cid = circleId ?? activeCircleId   // comment edits omit it: a comment id is never in a group
         let media = withPreviewMarkers(withThumbMarkers(rawMedia))
         let before = Set(items.first(where: { $0.id == id })?.media ?? [])   // pre-edit media, for "was a video added?"
         guard let engine else { return }
-        let cid = activeCircleId
-        let ts = now()
+        let sibs = PostGroups.shared.siblings(circleId: cid, eventId: id, liveCircleIds: Set(circles.map(\.id)))
+        if !sibs.isEmpty {
+            // A newly added attachment must be readable in every circle of the group: seal it once for the
+            // whole set, before the first job enqueues (`MediaCircleSets`). Already-sealed refs just re-assert.
+            MediaCircleSets.shared.register(refs: authoredMediaRefs(media), circleIds: [cid] + sibs.map(\.circleId))
+        }
+        let base = now()
         Task { @MainActor [weak self] in
-            guard let self, let a = await self.authorEvent(engine, circleId: cid, createdAt: nil, { s in
-                try s.edit(circleId: cid, target: id, body: body, media: media, music: music, muteVideo: muteVideo, createdAt: ts)
-            }), self.engine === engine else { return }
-            let name = self.circles.first(where: { $0.id == cid })?.name ?? "your circle"
-            self.enqueueAuthoredMedia(media, circleId: cid, engine: engine)   // upload before broadcast
-            self.broadcastEvent(cid, a, banner: .forEdit(circleId: cid, circleName: name, postId: id)); self.refresh()
-            // Only a NEWLY added video is fingerprinted — an edit that merely removed a chip is respected.
-            if MediaVariants.displayRefs(media).contains(where: { MediaKind(ref: $0) == .video && !before.contains($0) }) {
-                self.identifyAndAttachSong(postId: id, circleId: cid, media: media, music: music, muteVideo: muteVideo)
+            guard let self else { return }
+            if let a = await self.authorEvent(engine, circleId: cid, createdAt: nil, { s in
+                try s.edit(circleId: cid, target: id, body: body, media: media, music: music, muteVideo: muteVideo, createdAt: base)
+            }), self.engine === engine {
+                let name = self.circles.first(where: { $0.id == cid })?.name ?? "your circle"
+                self.enqueueAuthoredMedia(media, circleId: cid, engine: engine)   // upload before broadcast
+                self.broadcastEvent(cid, a, banner: .forEdit(circleId: cid, circleName: name, postId: id)); self.refresh()
+                // Only a NEWLY added video is fingerprinted — an edit that merely removed a chip is respected.
+                if MediaVariants.displayRefs(media).contains(where: { MediaKind(ref: $0) == .video && !before.contains($0) }) {
+                    self.identifyAndAttachSong(postId: id, circleId: cid, media: media, music: music, muteVideo: muteVideo)
+                }
+            }
+            // Siblings: each in its own circle with its own target id; one failing never stops the rest.
+            for (i, sib) in sibs.enumerated() {
+                guard self.engine === engine else { return }
+                let sc = sib.circleId, target = sib.eventId
+                let ts = PostGroups.stagger(base: base, index: i + 1)
+                guard let a = await self.authorEvent(engine, circleId: sc, createdAt: nil, { s in
+                    try s.edit(circleId: sc, target: target, body: body, media: media, music: music, muteVideo: muteVideo, createdAt: ts)
+                }), self.engine === engine else { continue }
+                let name = self.circles.first(where: { $0.id == sc })?.name ?? "your circle"
+                self.enqueueAuthoredMedia(media, circleId: sc, engine: engine)
+                self.broadcastEvent(sc, a, banner: .forEdit(circleId: sc, circleName: name, postId: target)); self.refresh()
             }
         }
     }

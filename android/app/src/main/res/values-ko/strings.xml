@@ -779,6 +779,8 @@
     <string name="palette_neutral">뉴트럴</string>
     <string name="composer_post_long_click_label">게시할 서클 선택</string>
     <string name="composer_circles_sheet_title">서클에 게시</string>
+    <string name="composer_circles_select_all">모두 선택</string>
+    <string name="composer_circles_unselect_all">모두 선택 해제</string>
     <string name="composer_circles_post_button">%1$d개 서클에 게시</string>
     <string name="composer_circles_post_button_one">1개 서클에 게시</string>
     <string name="composer_circles_current">현재</string>

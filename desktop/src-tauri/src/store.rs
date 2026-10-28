@@ -61,6 +61,10 @@ impl Paths {
     pub fn prefs_file(&self) -> PathBuf {
         self.root.join("prefs.json")
     }
+    /// Local-only multi-circle post groups (see `postgroups`).
+    pub fn post_groups_file(&self) -> PathBuf {
+        self.root.join("post-groups.json")
+    }
     pub fn scheduled_file(&self) -> PathBuf {
         self.root.join("scheduled.json")
     }

@@ -14,4 +14,15 @@ enum MultiCirclePost {
     static func buttonTitle(count: Int) -> String {
         count == 1 ? String(localized: "Post to 1 circle") : String(localized: "Post to \(count) circles")
     }
+
+    /// True when every circle in `all` is selected (and there is at least one).
+    static func allSelected(_ selected: Set<String>, of all: [String]) -> Bool {
+        !all.isEmpty && all.allSatisfy(selected.contains)
+    }
+
+    /// The selection after tapping Select all / Unselect all: everything, or — when everything was already
+    /// selected — nothing.
+    static func toggleAll(_ selected: Set<String>, of all: [String]) -> Set<String> {
+        allSelected(selected, of: all) ? [] : Set(all)
+    }
 }

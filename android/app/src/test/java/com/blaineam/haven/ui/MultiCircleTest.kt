@@ -45,4 +45,17 @@ class MultiCircleTest {
         assertTrue(MultiCircle.shouldShowHint(2, 3, false))
         assertFalse(MultiCircle.shouldShowHint(2, 9, true))
     }
+
+    @Test fun selectAllClearAndAllSelected() {
+        val t = MultiCircle.targets(all)
+        assertEquals(setOf("a", "b", "c"), MultiCircle.selectAll(t))
+        assertEquals(emptySet<String>(), MultiCircle.clear())
+        assertFalse(MultiCircle.allSelected(setOf("b"), t))
+        assertFalse(MultiCircle.allSelected(setOf("a", "b"), t))
+        assertTrue(MultiCircle.allSelected(MultiCircle.selectAll(t), t))
+        assertTrue("extra ids (a DM) do not matter", MultiCircle.allSelected(setOf("a", "b", "c", "dm:x"), t))
+        assertFalse("no circles offered = nothing to unselect", MultiCircle.allSelected(emptySet(), emptyList()))
+        // Select all then toggling one off flips the button back.
+        assertFalse(MultiCircle.allSelected(MultiCircle.toggle(MultiCircle.selectAll(t), "c"), t))
+    }
 }

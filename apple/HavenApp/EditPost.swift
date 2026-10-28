@@ -194,7 +194,8 @@ struct EditPostSheet: View {
 
     private func save() {
         FeedStore.shared.edit(item.id, text.trimmingCharacters(in: .whitespacesAndNewlines),
-                              media: media, music: track, muteVideo: muteVideo)
+                              media: media, music: track, muteVideo: muteVideo,
+                              circleId: FeedStore.shared.activeCircleId)
         dismiss()
     }
 }

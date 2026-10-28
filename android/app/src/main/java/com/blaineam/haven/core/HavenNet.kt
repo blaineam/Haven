@@ -511,6 +511,7 @@ object HavenNet : InboundListener {
         Presign.init(appContext)
         CircleLock.init(appContext)
         CircleRemovals.init(appContext)
+        MultiPostGroups.init(appContext)
         ContactRemovals.init(appContext)
         CircleDeletion.init(appContext)
         // Engine runs on this device's UNIQUE identity (parity with iOS configure()); account id stays the
@@ -3933,18 +3934,20 @@ object HavenNet : InboundListener {
         for (ref in refs) enqueueBackup(circleId, ref, priority = true)
     }
 
-    /** Author a post in a circle and broadcast the sealed event to its members. */
+    /** Author a post in a circle and broadcast the sealed event to its members. Returns the authored
+     *  event id (null when the engine refused it, the id could not be read back, or this was handed to the
+     *  author lane from the main thread). [createdAt] overrides the timestamp (multi-circle staggering). */
     fun post(circleId: String, body: String, media: List<String> = emptyList(),
              music: uniffi.haven_ffi.TrackRefFfi? = null, retentionSecs: ULong? = null,
-             onPublished: (() -> Unit)? = null) {
-        if (body.isBlank() && media.isEmpty() && music == null) return
-        if (authorOffMain { post(circleId, body, media, music, retentionSecs, onPublished) }) return
+             onPublished: (() -> Unit)? = null, createdAt: ULong? = null): String? {
+        if (body.isBlank() && media.isEmpty() && music == null) return null
+        if (authorOffMain { post(circleId, body, media, music, retentionSecs, onPublished, createdAt) }) return null
         val withThumbs = withPreviewMarkers(withThumbMarkers(media))
-        val ts = nowMs()
+        val ts = createdAt ?: nowMs()
         val env = runCatching {
             // retentionSecs != null → a disappearing post (auto-expires in the feed reducer, iOS parity).
             social.post(circleId, body, withThumbs, music, retentionSecs, false, false, ts)
-        }.getOrNull() ?: return
+        }.getOrNull() ?: return null
         // Read back the engine-derived id of the post just authored so the sealed banner carries `p`
         // (exact tap route on the recipient — Apple FeedStore.post parity). Best-effort: null keeps
         // the legacy circle route.
@@ -3962,6 +3965,7 @@ object HavenNet : InboundListener {
         // "Save my posts to Photos" (per-circle override, falling back to the app-wide default).
         if (media.isNotEmpty() && CircleSettings.saveOwn(circleId))
             scope.launch { media.forEach { MediaSaver.autoSave(appContext, it) } }
+        return postId
     }
 
     /** Every blob ref [media] will upload when posted: contents plus the thumb/preview/poster/original
@@ -4010,8 +4014,36 @@ object HavenNet : InboundListener {
         if (ids.isEmpty() || (body.isBlank() && media.isEmpty() && music == null)) return
         if (authorOffMain { postToCircles(ids, body, media, music, retentionSecs, onPublished) }) return
         runCatching { sealMediaForCircles(ids, media) }.onFailure { Log.w(TAG, "multi-circle seal failed", it) }
+        // Event id = BLAKE3(author || created_at || kind): copies authored in the same millisecond with the
+        // same body would collide, so each circle gets its own created_at (1 ms apart).
+        val base = nowMs()
+        val members = ArrayList<MultiPostGroups.Member>()
         ids.forEachIndexed { i, id ->
-            post(id, body, media, music, retentionSecs, onPublished = if (i == 0) onPublished else null)
+            val eid = post(id, body, media, music, retentionSecs,
+                onPublished = if (i == 0) onPublished else null, createdAt = base + i.toULong())
+            if (eid != null) members += MultiPostGroups.Member(id, eid)
+        }
+        // Local-only link so a later edit of any copy reaches the others (see MultiPostGroups).
+        if (ids.size > 1) runCatching { MultiPostGroups.register(members) }
+    }
+
+    /**
+     * After [circleId]/[postId] was edited, author the same edit into every other copy of the same
+     * multi-circle post. [stateFor] gives the (media, music, muteVideo) to restate for one sibling, or null
+     * to skip it. A sibling whose circle is gone is forgotten; a failing sibling never aborts the rest.
+     */
+    private fun editSiblings(circleId: String, postId: String, body: String,
+                             stateFor: (MultiPostGroups.Member) -> EditCarry.Attachments?) {
+        val siblings = MultiPostGroups.siblingsOf(circleId, postId)
+        if (siblings.isEmpty()) return
+        val live = runCatching { social.circles().map { it.id }.toSet() }.getOrNull()
+        for (s in siblings) {
+            runCatching {
+                if (live != null && s.circleId !in live) { MultiPostGroups.forget(s); return@runCatching }
+                val st = stateFor(s) ?: return@runCatching
+                val env = social.edit(s.circleId, s.eventId, body, st.media, st.music, st.muteVideo, nowMs())
+                afterAuthor(s.circleId, env)
+            }.onFailure { Log.w(TAG, "multi-circle edit sibling failed", it) }
         }
     }
 
@@ -4214,10 +4246,17 @@ object HavenNet : InboundListener {
         muteVideo: Boolean,
     ) {
         if (authorOffMain { editPostFull(circleId, postId, body, media, music, muteVideo) }) return
+        // A multi-circle post: seal any new attachment for the whole group's circle set first, exactly as
+        // postToCircles does, so every copy's circle can open it.
+        val siblings = MultiPostGroups.siblingsOf(circleId, postId)
+        if (siblings.isNotEmpty()) runCatching {
+            sealMediaForCircles((listOf(circleId) + siblings.map { it.circleId }).distinct(), media)
+        }.onFailure { Log.w(TAG, "multi-circle edit seal failed", it) }
         val env = runCatching {
             social.edit(circleId, postId, body, media, music, muteVideo, nowMs())
         }.getOrNull() ?: return
         afterAuthor(circleId, env)
+        editSiblings(circleId, postId, body) { EditCarry.Attachments(media, music, muteVideo) }
     }
 
     fun editPost(circleId: String, postId: String, body: String) {
@@ -4232,6 +4271,11 @@ object HavenNet : InboundListener {
             social.edit(circleId, postId, body, keep.media, keep.music, keep.muteVideo, nowMs())
         }.getOrNull() ?: return
         afterAuthor(circleId, env)
+        // Text-only edit of a multi-circle post: each sibling keeps ITS OWN attachments.
+        editSiblings(circleId, postId, body) { s ->
+            val f = runCatching { social.feed(s.circleId, nowMs(), null) }.getOrDefault(emptyList())
+            EditCarry.forEvent(f, s.eventId)
+        }
     }
 
     // ---- Re-optimize media I already shared ----------------------------------------------------
@@ -10222,6 +10266,7 @@ object HavenNet : InboundListener {
         relayEntries.clear(); suppressedRelays.clear(); forgotAtRelays.clear(); clearedRelayForgets.clear(); erasedRelays.clear(); defaultRelayHex = ""
         Presign.reset()
         CircleLock.reset()
+        MultiPostGroups.clear()   // a new identity must not inherit the old multi-circle post index
         AvatarStore.clear()
         DmRead.wipe()   // a new identity must not inherit read watermarks (or the old seed)
         relayActive.value = false

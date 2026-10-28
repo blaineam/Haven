@@ -9,6 +9,24 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added - Posting to several circles: editing one copy edits them all, and a Select all button (all platforms)
+A post sent to several circles at once is N independent posts, so editing one used to change only the circle you were viewing. The author's
+device now remembers which circles got the same post (a LOCAL index — no wire or core change, so shipped clients simply receive ordinary
+per-circle edits) and an edit of any copy is applied automatically to every circle that has one, with each circle's own target and any
+newly added attachment sealed for the whole set. Copies get distinct timestamps so two can never collide on the same event id. Posts made
+before this change are not linked and edit as before; unsending stays per-circle. The circle picker (long-press / right-click Post) gets a
+**Select all** button that becomes **Unselect all** once everything is picked, localized in every language each platform ships (Apple and
+Android: de, es, fr, it, ja, ko, pt-BR, zh-Hans; desktop: ja, de, es, ko, pt-BR, it). New `PostGroups` (Apple), `MultiPostGroups`
+(Android), `postgroups` (desktop) with tests.
+
+### Added - Microsoft Store release through the msstore CLI
+`Scripts/ms-store-cli.mjs` (+ the `ms-store-submit` composite action) submits the MSIX bundle and the nine-language listing in one
+submission with Microsoft's own `msstore` CLI — the replacement for the Ingestion-API lane that the Store's packaged-app backend broke in
+2026-08. Runs on Linux (the CLI's `submission update` takes the whole ~55 KB submission as one argument, over Windows' 32,767-char
+limit; it needs libsecret + a keyring there), never patches titles (the Store only accepts reserved names) and sets a missing PriceId to
+Free. `ms-store.yml` gained `mode` (submit | draft | dry-run); `release.yml`'s `msix-submit` uses it when `MSSTORE_PUBLISH` is "true".
+Verified against the real Store as a draft: package uploaded, nine listings updated.
+
 ### Fixed - Android: an idle poll no longer re-downloads a 57,000-key mailbox listing
 A relay keeps every envelope for 30 days, so one circle can list ~57,000 keys, and Android downloaded, parsed, sorted and
 set-tested that whole list on EVERY poll (and a pass that stalled marked nothing, so the next poll started over — the "stuck at

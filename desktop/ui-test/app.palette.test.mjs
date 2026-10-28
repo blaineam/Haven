@@ -148,9 +148,10 @@ test('right-click on Post lists the circles (current pre-checked, DMs excluded) 
   boxes[1].checked = true; boxes[1].dispatchEvent(new app.ctx.Event('change', { bubbles: true }));
   assert.equal(app.q('#menu-root .circle-pick .btn').textContent, 'Post to 2 circles');
   await click(app, '#menu-root .circle-pick .btn');
-  const posts = app.calls.filter((c) => c.cmd === 'post');
-  assert.deepEqual(posts.map((c) => c.args.circleId), ['default', 'fam']);
-  assert.ok(posts.every((c) => c.args.body === 'to both'));
+  const posts = app.calls.filter((c) => c.cmd === 'post_multi');
+  assert.equal(posts.length, 1, 'one linked multi-circle call, not N independent posts');
+  assert.deepEqual(J(posts[0].args.circleIds), ['default', 'fam']);
+  assert.equal(posts[0].args.body, 'to both');
   assert.equal(app.qa('#menu-root .circle-pick').length, 0, 'popover closes');
   assert.equal(app.q('textarea.composer-field').value, '', 'composer cleared once');
 });
@@ -163,7 +164,23 @@ test('unticking the current circle posts only to the other one', async () => {
   cur.checked = false; cur.dispatchEvent(new app.ctx.Event('change', { bubbles: true }));
   fam.checked = true; fam.dispatchEvent(new app.ctx.Event('change', { bubbles: true }));
   await click(app, '#menu-root .circle-pick .btn');
-  assert.deepEqual(app.calls.filter((c) => c.cmd === 'post').map((c) => c.args.circleId), ['fam']);
+  assert.deepEqual(J(app.calls.filter((c) => c.cmd === 'post_multi')[0].args.circleIds), ['fam']);
+});
+
+test('Select all ticks every circle and becomes Unselect all; pressing again clears them', async () => {
+  const { app } = await boot(twoCircles());
+  type(app, 'everywhere');
+  await rightClickPost(app);
+  const all = () => app.q('#menu-root .circle-pick .cp-all');
+  const boxes = () => app.qa('#menu-root .circle-pick input[type="checkbox"]');
+  assert.equal(all().textContent, 'Select all');
+  all().click();
+  assert.deepEqual(boxes().map((b) => b.checked), [true, true]);
+  assert.equal(all().textContent, 'Unselect all');
+  assert.equal(app.q('#menu-root .circle-pick .btn.primary').textContent, 'Post to 2 circles');
+  all().click();
+  assert.deepEqual(boxes().map((b) => b.checked), [false, false]);
+  assert.equal(all().textContent, 'Select all');
 });
 
 test('with a single circle the gesture does nothing (no picker to show)', async () => {
@@ -209,7 +226,7 @@ test('with attachments every circle is selectable and no media note is shown', a
   assert.doesNotMatch(app.q('#menu-root .circle-pick').textContent, /for now/);
 });
 
-test('a multi-circle post with attachments re-seals every blob for ALL targets, then posts per circle', async () => {
+test('a multi-circle post with attachments re-seals every blob for ALL targets, then posts once via post_multi', async () => {
   const { app } = await boot(twoCircles());
   type(app, 'photo to both');
   app.ev('state.attachments.push({ ref: "img_a", url: null, isVideo: false, thumbRef: "img_t", previewRef: "img_p" }, { ref: "aud_b", url: null, isVideo: false, isAudio: true })');
@@ -217,10 +234,10 @@ test('a multi-circle post with attachments re-seals every blob for ALL targets, 
   const [, fam] = app.qa('#menu-root .circle-pick input[type="checkbox"]');
   fam.checked = true; fam.dispatchEvent(new app.ctx.Event('change', { bubbles: true }));
   await click(app, '#menu-root .circle-pick .btn');
-  const order = app.calls.filter((c) => c.cmd === 'media_reseal_for_circles' || c.cmd === 'post');
-  assert.deepEqual(order.map((c) => c.cmd), ['media_reseal_for_circles', 'post', 'post'], 'reseal exactly once, BEFORE any post');
+  const order = app.calls.filter((c) => c.cmd === 'media_reseal_for_circles' || c.cmd === 'post_multi');
+  assert.deepEqual(order.map((c) => c.cmd), ['media_reseal_for_circles', 'post_multi'], 'reseal exactly once, BEFORE the post');
   assert.deepEqual(J(order[0].args), { originCircleId: 'default', references: ['img_a', 'img_t', 'img_p', 'aud_b'], circleIds: ['default', 'fam'] });
-  assert.deepEqual(order.slice(1).map((c) => c.args.circleId), ['default', 'fam']);
+  assert.deepEqual(J(order[1].args.circleIds), ['default', 'fam']);
   assert.ok(order.slice(1).every((c) => c.args.media.includes('img_a') && c.args.media.includes('aud_b')), 'attachments ride on every circle\'s post');
   assert.equal(app.ev('state.attachments.length'), 0, 'composer cleared once');
 });
@@ -236,7 +253,7 @@ test('a post to only the other circle also re-seals (the origin is not among the
   await click(app, '#menu-root .circle-pick .btn');
   const r = app.calls.find((c) => c.cmd === 'media_reseal_for_circles');
   assert.deepEqual(J(r.args.circleIds), ['fam']);
-  assert.deepEqual(app.calls.filter((c) => c.cmd === 'post').map((c) => c.args.circleId), ['fam']);
+  assert.deepEqual(J(app.calls.filter((c) => c.cmd === 'post_multi')[0].args.circleIds), ['fam']);
 
   const one = await boot(twoCircles());
   type(one.app, 'plain click');
@@ -254,7 +271,7 @@ test('a failed re-seal aborts the multi-circle post (nothing is posted that othe
   const [, fam] = app.qa('#menu-root .circle-pick input[type="checkbox"]');
   fam.checked = true; fam.dispatchEvent(new app.ctx.Event('change', { bubbles: true }));
   await click(app, '#menu-root .circle-pick .btn');
-  assert.equal(app.calls.filter((c) => c.cmd === 'post').length, 0);
+  assert.equal(app.calls.filter((c) => c.cmd === 'post_multi').length, 0);
   assert.equal(app.q('textarea.composer-field').value, 'doomed', 'draft kept');
   assert.equal(app.ev('state.attachments.length'), 1, 'attachment kept');
   assert.match(app.q('#toast').textContent, /boom/);

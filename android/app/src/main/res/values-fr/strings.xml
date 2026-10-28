@@ -779,6 +779,8 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="palette_neutral">Neutre</string>
     <string name="composer_post_long_click_label">Choisir les cercles où publier</string>
     <string name="composer_circles_sheet_title">Publier dans des cercles</string>
+    <string name="composer_circles_select_all">Tout sélectionner</string>
+    <string name="composer_circles_unselect_all">Tout désélectionner</string>
     <string name="composer_circles_post_button">Publier dans %1$d cercles</string>
     <string name="composer_circles_post_button_one">Publier dans 1 cercle</string>
     <string name="composer_circles_current">Actuel</string>

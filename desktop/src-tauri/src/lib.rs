@@ -3,6 +3,7 @@
 //! runs only the in-process relay/mailbox (the "invisible relay", like the Mac app).
 
 mod preview;
+mod postgroups;
 mod callwire;
 mod commands;
 // The PII-free screenshot dataset. `cfg` — NOT a runtime check — so the seeder and every synthetic
@@ -589,6 +590,7 @@ pub fn run() {
             commands::set_autostart,
             commands::add_media,
             commands::media_reseal_for_circles,
+            commands::post_multi,
             commands::read_media_file_b64,
             commands::add_audio,
             commands::media_data_url,

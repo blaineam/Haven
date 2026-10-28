@@ -186,7 +186,7 @@ struct YouView: View {
                         onReact: { e in withAnimation(HavenTheme.bouncy) { feed.react(item.id, e) } },
                         onUnreact: { e in withAnimation(HavenTheme.bouncy) { feed.unreact(item.id, e) } },
                         onComment: { b, m in withAnimation(HavenTheme.smooth) { feed.comment(item.id, b, m) } },
-                        onEdit: { b in withAnimation(HavenTheme.smooth) { feed.edit(item.id, b) } },
+                        onEdit: { b in withAnimation(HavenTheme.smooth) { feed.edit(item.id, b, circleId: feed.activeCircleId) } },
                         onUnsend: { withAnimation(HavenTheme.smooth) { feed.unsend(item.id) } }
                     )
                     // Skip the whole body when this row's item is unchanged — FeedStore republishes

@@ -24,6 +24,16 @@ object MultiCircle {
     fun toggle(selection: Set<String>, id: String): Set<String> =
         if (id in selection) selection - id else selection + id
 
+    /** Every offered circle checked. */
+    fun selectAll(targets: List<PostTarget>): Set<String> = targets.map { it.id }.toSet()
+
+    /** Nothing checked (the Post button disables itself until something is). */
+    fun clear(): Set<String> = emptySet()
+
+    /** True when every offered circle is checked (and there is at least one) — the button then reads Unselect all. */
+    fun allSelected(selection: Set<String>, targets: List<PostTarget>): Boolean =
+        targets.isNotEmpty() && targets.all { it.id in selection }
+
     /** The circles to author into, active first then the sheet's order; unknown/DM ids are dropped. */
     fun orderedForPosting(selection: Set<String>, targets: List<PostTarget>, active: String): List<String> {
         val ids = targets.map { it.id }.filter { it in selection }

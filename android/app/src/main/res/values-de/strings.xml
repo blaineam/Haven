@@ -779,6 +779,8 @@
     <string name="palette_neutral">Neutral</string>
     <string name="composer_post_long_click_label">Kreise zum Posten auswählen</string>
     <string name="composer_circles_sheet_title">In Kreisen posten</string>
+    <string name="composer_circles_select_all">Alle auswählen</string>
+    <string name="composer_circles_unselect_all">Auswahl aufheben</string>
     <string name="composer_circles_post_button">In %1$d Kreisen posten</string>
     <string name="composer_circles_post_button_one">In 1 Kreis posten</string>
     <string name="composer_circles_current">Aktuell</string>

@@ -416,7 +416,7 @@ struct FeedView: View {
                                         withAnimation(HavenTheme.smooth) { proxy.scrollTo(item.id, anchor: .bottom) }
                                     }
                                 },
-                                onEdit: { b in withAnimation(HavenTheme.smooth) { store.edit(item.id, b) } },
+                                onEdit: { b in withAnimation(HavenTheme.smooth) { store.edit(item.id, b, circleId: store.activeCircleId) } },
                                 onUnsend: { withAnimation(HavenTheme.smooth) { store.unsend(item.id) } },
                                 onCommentFocus: { focused in
                                     // Hide the feed composer while commenting (it overlapped the
@@ -2860,7 +2860,7 @@ struct ProfileView: View {
                                 onReact: { e in withAnimation(HavenTheme.bouncy) { store.react(item.id, e) } },
                                 onUnreact: { e in withAnimation(HavenTheme.bouncy) { store.unreact(item.id, e) } },
                                 onComment: { b, m in withAnimation(HavenTheme.smooth) { store.comment(item.id, b, m) } },
-                                onEdit: { b in withAnimation(HavenTheme.smooth) { store.edit(item.id, b) } },
+                                onEdit: { b in withAnimation(HavenTheme.smooth) { store.edit(item.id, b, circleId: store.activeCircleId) } },
                                 onUnsend: { withAnimation(HavenTheme.smooth) { store.unsend(item.id) } }
                             )
                             // Same reason the circle feed does it: FeedStore republishes constantly,

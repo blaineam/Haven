@@ -785,6 +785,8 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="palette_neutral">Neutra</string>
     <string name="composer_post_long_click_label">Elegir círculos donde publicar</string>
     <string name="composer_circles_sheet_title">Publicar en círculos</string>
+    <string name="composer_circles_select_all">Seleccionar todo</string>
+    <string name="composer_circles_unselect_all">Deseleccionar todo</string>
     <string name="composer_circles_post_button">Publicar en %1$d círculos</string>
     <string name="composer_circles_post_button_one">Publicar en 1 círculo</string>
     <string name="composer_circles_current">Actual</string>

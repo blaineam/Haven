@@ -394,6 +394,14 @@ pub fn post(engine: Eng, circle_id: String, body: String, media: Vec<String>, mu
     engine.post(cid, body, media, music.map(|m| m.into_ffi()), mute_video.unwrap_or(false), retention_secs);
 }
 
+/// Multi-circle post: one copy per circle, recorded as a group so an edit syncs to all of them.
+/// Media must already be re-sealed for every circle (`media_reseal_for_circles`).
+#[tauri::command]
+pub fn post_multi(engine: Eng, circle_ids: Vec<String>, body: String, media: Vec<String>, music: Option<TrackInput>, mute_video: Option<bool>, retention_secs: Option<u64>) {
+    let cids = circle_ids.into_iter().map(|c| if c.is_empty() { DEFAULT_CIRCLE.to_string() } else { c }).collect();
+    engine.post_multi(cids, body, media, music.map(|m| m.into_ffi()), mute_video.unwrap_or(false), retention_secs);
+}
+
 /// "Where this is stored" — which relays hold each attachment of a post, and how many of them.
 /// Returns `[{ dest, have }]` plus the hex of the relay THIS app hosts (a copy that only reached
 /// that one is a local file write nobody else can fetch). Apple parity (`BackupDetailView`).

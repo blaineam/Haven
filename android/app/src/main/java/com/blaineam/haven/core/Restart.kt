@@ -29,6 +29,7 @@ fun startOver(context: Context) {
     runCatching { CircleLock.reset() }
     runCatching { RelayNudge.reset() }
     runCatching { CircleRemovals.clear() }
+    runCatching { MultiPostGroups.clear() }
     runCatching { ContactRemovals.clear() }
     runCatching { CircleDeletion.clear() }
     runCatching { Presign.reset() }

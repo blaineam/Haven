@@ -62,7 +62,7 @@ class FakeSocial : HavenSocial(NoHandle) {
      *  broadcast / upload legs — these tests are about what is asked, and nothing leaves the process. */
     class Authored(val verb: String, val circleId: String, val target: String = "", val body: String = "",
                    val media: List<String> = emptyList(), val music: TrackRefFfi? = null,
-                   val muteVideo: Boolean = false, val retentionSecs: ULong? = null)
+                   val muteVideo: Boolean = false, val retentionSecs: ULong? = null, val createdAt: ULong = 0uL)
     val authored = java.util.concurrent.CopyOnWriteArrayList<Authored>()
     /** When set the engine ACCEPTS what is authored and returns this envelope, so HavenNet runs its broadcast / upload legs. */
     var authorOk: ByteArray? = null
@@ -75,7 +75,7 @@ class FakeSocial : HavenSocial(NoHandle) {
     override fun `post`(`circleId`: String, `body`: String, `media`: List<String>, `music`: TrackRefFfi?, `retentionSecs`: ULong?,
                         `story`: Boolean, `muteVideo`: Boolean, `createdAt`: ULong): ByteArray =
         refuse(Authored(if (story) "story" else "post", circleId, body = body, media = media, music = music,
-            muteVideo = muteVideo, retentionSecs = retentionSecs))
+            muteVideo = muteVideo, retentionSecs = retentionSecs, createdAt = createdAt))
     override fun `react`(`circleId`: String, `target`: String, `emoji`: String, `createdAt`: ULong): ByteArray =
         refuse(Authored("react", circleId, target, body = emoji))
     override fun `unreact`(`circleId`: String, `target`: String, `emoji`: String, `createdAt`: ULong): ByteArray =

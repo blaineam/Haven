@@ -156,7 +156,7 @@ class MinifiedSmokeTest {
         assertAlive()
 
         // A call: start (call signalling through the sealed channel + WebRTC), then end it.
-        waitFor(By.desc("Video call")).click()
+        waitFor(By.desc("Haven call")).click()   // the conversation header's call button is a phone (a Haven call starts as audio)
         waitFor(By.desc("End"), LONG, "the in-call screen")
 
         if (context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE)) {

@@ -69,6 +69,13 @@ on:
         description: "Staged-rollout fraction 0.0-1.0 for a partial release (blank/1.0 = full). Only for alpha/beta/production."
         required: false
         default: ""
+      # Ship the templated Android Auto car app (Calls / Messages screens) on a track Play normally refuses it
+      # on. Only the weekly probe (play-car-app-probe.yml) sets this, after Play's own validation accepted a
+      # bundle that declares it. Once it has, set the repo variable PLAY_CAR_APP_ALLOWED=true so tagged releases keep it.
+      car_app:
+        description: "Declare the car app categories even on beta/production (only after Play accepts them)"
+        required: false
+        default: "false"
 
 permissions:
   contents: write
@@ -377,7 +384,7 @@ jobs:
           # The templated Android Auto car app (Calls / Messages screens) is a Google BETA: Play accepts it on
           # internal + closed testing and REJECTS bundles that declare it on open testing / production. Only
           # those two testing tracks get the car categories in the manifest (app/build.gradle.kts).
-          HAVEN_CAR_APP: ${{ (steps.cfg.outputs.track == 'internal' || steps.cfg.outputs.track == 'alpha') && 'true' || 'false' }}
+          HAVEN_CAR_APP: ${{ (steps.cfg.outputs.track == 'internal' || steps.cfg.outputs.track == 'alpha' || vars.PLAY_CAR_APP_ALLOWED == 'true' || github.event.inputs.car_app == 'true') && 'true' || 'false' }}
         run: |
           ./gradlew bundleRelease -PhavenVersionCode=${{ github.run_number }} -PhavenVersionName="$VN"
           mkdir -p ../out

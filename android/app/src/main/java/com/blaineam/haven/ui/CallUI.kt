@@ -294,7 +294,6 @@ private fun InCall() {
     // A peer sharing their screen takes over the main view (aspect-fit, whole screen visible).
     val screenShareEntry = CallManager.remoteScreen.entries.firstOrNull { it.value != null }
     Box(Modifier.fillMaxSize().consumesTaps().background(Color.Black)) {
-        CallStatusPill(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 16.dp))
         when {
             screenShareEntry != null -> {
                 CallVideoTile(screenShareEntry.value, Modifier.fillMaxSize(), fit = true)
@@ -328,6 +327,9 @@ private fun InCall() {
                 }
             }
         }
+
+        // Status (Calling… → Connecting… → Connected → time). Drawn AFTER the full-screen tile, or the tile covers it.
+        CallStatusPill(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 22.dp))
 
         // Local self-preview.
         Box(

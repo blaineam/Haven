@@ -2,6 +2,8 @@ package com.blaineam.haven.core
 
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 
 /**
@@ -13,6 +15,10 @@ import android.util.Log
 object CallTones {
     private const val TAG = "CallTones"
     private var gen: ToneGenerator? = null
+    private val main = Handler(Looper.getMainLooper())
+    /** Failsafe: a ringback must never outlive any call. The caller gives up after 45 s, so 60 s is already a leak. */
+    private const val MAX_RINGBACK_MS = 60_000L
+    private val failsafe = Runnable { stop() }
 
     /** The rule, pure so it is tested: only the CALLER hears ringback, only while still dialing. */
     fun shouldPlayRingback(isCaller: Boolean, connecting: Boolean, inCall: Boolean) = isCaller && connecting && !inCall
@@ -23,10 +29,13 @@ object CallTones {
         gen = runCatching {
             ToneGenerator(AudioManager.STREAM_VOICE_CALL, 70).also { it.startTone(ToneGenerator.TONE_SUP_RINGTONE) }
         }.onFailure { Log.w(TAG, "ringback unavailable: ${it.message}") }.getOrNull()
+        main.removeCallbacks(failsafe)
+        main.postDelayed(failsafe, MAX_RINGBACK_MS)
     }
 
     @Synchronized
     fun stop() {
+        main.removeCallbacks(failsafe)
         val g = gen ?: return
         gen = null
         runCatching { g.stopTone(); g.release() }

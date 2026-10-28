@@ -757,6 +757,10 @@ object CallManager {
         val a = CallWire.parseAccept(body) ?: return
         if (!validSession(a.sessionId) || !knownContact(a.from)) return   // only a contact accepts (F3)
         connecting.value = false; inCall.value = true; CallTones.stop()
+        // The media may have connected while the callee was still ringing; the answer is what makes it "Connected".
+        mediaConnected.value = lastIce.values.any {
+            it == PeerConnection.IceConnectionState.CONNECTED || it == PeerConnection.IceConnectionState.COMPLETED
+        }
         TelecomCalls.onEngineActive()
         if (roster.add(a.from)) refreshParticipants()
         startMesh()
@@ -1039,8 +1043,12 @@ object CallManager {
                 // inCall+ringing poison) and must not flip a CALLER before the peer accepted —
                 // inCall moves on ACCEPT alone; lost accepts heal via re-accept-on-retransmit.
                 if (ringing.value) return
+                // A CALLER whose peer has not accepted yet: the iPhone's VoIP ring negotiates media early, so ICE
+                // connects while it is still ringing. Clearing `connecting` here dismissed the call screen ~1 s
+                // after dialing and left the ringback playing over nothing. Stay in the dialing state — the
+                // ACCEPT (handleAccept) is what establishes the call and reads the ICE state it already has.
+                if (!inCall.value) return
                 mediaConnected.value = true   // media path is up (status: Connected + timer)
-                if (inCall.value) { /* established call: fall through to hairpin recovery */ }
                 connecting.value = false
                 // ICE RECOVERED while we were relaying — drop back to WebRTC's own (better) path.
                 // Leaving both running is two full media pipelines for one call, which is heat and
@@ -1593,6 +1601,7 @@ object CallManager {
     private var endReason: TelecomPolicy.End? = null
 
     private fun teardown() {
+        CallTones.stop()   // every end path (hang up, dial timeout, remote hangup, failure) silences the ringback
         val end = endReason ?: TelecomPolicy.End.LOCAL
         endReason = null
         telecomLive = false

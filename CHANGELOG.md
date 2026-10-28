@@ -9,6 +9,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - Android outgoing call screen: stays up, status visible, tone stops, phone icon
+When the iPhone's VoIP ring negotiated media early, the caller code cleared its dialing state before the callee answered, so the call screen
+vanished ~1 s after dialing and the ringback kept playing with nothing to stop it. Dialing now holds until the ACCEPT (the ICE state seen
+meanwhile is applied at answer). The Calling… / Connecting… / Connected + timer pill was drawn under the full-screen tile; it is now on top. Every
+end path (`teardown`) stops the ringback and a 60 s failsafe covers the rest. The conversation header's call button is a phone, not a camera
+(a Haven call starts as audio; video is a control inside it). `CallManagerMeshTest` now asserts early media does not dismiss dialing.
+
 ### Fixed - Android outgoing calls: rings the iPhone, dial tone, status, and a dial timeout
 Android never called the push worker's `/call`, so an Android→iPhone call only rang an iPhone that was already foreground and polling; it now
 seals {caller name, id} to each callee and sends the VoIP push (Apple `pushCallInvite` parity). The caller now hears a ringback tone until the

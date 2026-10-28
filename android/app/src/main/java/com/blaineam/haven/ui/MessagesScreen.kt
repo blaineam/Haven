@@ -40,7 +40,7 @@ import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DoneAll
-import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material3.Icon
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -483,7 +483,8 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                     val ring = HavenNet.dmMemberHexes(circleId).filter { it != HavenNet.nodeIdHex.lowercase() }
                     startCall(if (ring.isNotEmpty()) ring else listOf(partner.idHex), partner.name)
                 }, contentAlignment = Alignment.Center) {
-                    Icon(Icons.Filled.Videocam, stringResource(R.string.msg_video_call), tint = HavenTheme.pink)
+                    // A phone, not a camera: a Haven call starts as audio (camera off) — video is a control inside it.
+                    Icon(Icons.Filled.Call, stringResource(R.string.call_haven_call), tint = HavenTheme.pink)
                 }
             }
 

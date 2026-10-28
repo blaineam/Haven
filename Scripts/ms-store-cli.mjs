@@ -8,7 +8,6 @@
 //   node Scripts/ms-store-cli.mjs --version 2.1.0 --msix out/Haven-2.1.0.msixbundle
 //        [--no-commit]   leave the submission as a draft (you press Submit in Partner Center)
 //        [--no-wait]     commit and exit without polling certification
-//        [--cli-update]  update through `msstore submission update` (sends pricing; the Store rejects that at commit)
 //        [--dry-run]     map + print the listing patch from the CURRENT submission; change nothing
 //
 // Needs `msstore` on PATH, already configured (`msstore reconfigure …`), and STORE_APP_ID. On Linux the CLI's
@@ -113,41 +112,17 @@ ms(['publish', resolve(msix), '-id', appId, '--noCommit', '-v']);
 if (has('bare')) { ms(['submission', 'publish', appId]); ok('bare draft (package only, no update) committed'); process.exit(0); }
 // 2-4. listing text onto that draft, together with the package it now holds
 const sub = patch(getSubmission());
-// Pricing and availability is NOT ours to send. The Store's dashboard model owns it (Partner Center → Pricing and
-// availability) and rejects the legacy "sales" resource at commit (InvalidPricingAvailabilitySettings), so the update
-// carries none of it: no Pricing/markets/trial, no Visibility, no publish schedule; the draft keeps what the
-// dashboard holds. `msstore submission update` cannot do that — it refuses any JSON without a Pricing object
-// ("The JSON you provided has no 'Pricing' object") — so the update is a direct call to the SAME Partner Center
-// submission API the CLI wraps (manage.devcenter.microsoft.com, same app credentials). The CLI still makes the
-// draft + uploads the package (step 1), commits and polls. `--cli-update` restores the old all-CLI behaviour.
-const PRICING_KEYS = ['Pricing', 'Visibility', 'TargetPublishMode', 'TargetPublishDate'];
-if (has('cli-update')) {
-  const price = sub.Pricing?.PriceId;
-  log(`Pricing.PriceId = ${JSON.stringify(price ?? null)} (--cli-update: sent as-is)`);
-  if (!price || price === 'Base') { sub.Pricing ??= {}; sub.Pricing.PriceId = 'Free'; log('⚠ PriceId was missing/Base — set to "Free"'); }
-  const upd = ms(['submission', 'update', appId, JSON.stringify(sub), '-v'], { allowFail: true });
-  if (upd.status !== 0) die(`msstore submission update failed (exit ${upd.status})\n--- stdout ---\n${(upd.stdout || '').slice(-3500)}\n--- stderr ---\n${(upd.stderr || '').slice(-1500)}`);
-} else {
-  for (const k of PRICING_KEYS) delete sub[k];
-  log(`pricing & availability left out of the update: ${PRICING_KEYS.join(', ')}`);
-  const { STORE_TENANT_ID: tenant, STORE_CLIENT_ID: cid, STORE_CLIENT_SECRET: secret } = process.env;
-  if (!tenant || !cid || !secret) die('STORE_TENANT_ID / STORE_CLIENT_ID / STORE_CLIENT_SECRET must be in the environment for the REST update');
-  const tok = await fetch(`https://login.microsoftonline.com/${tenant}/oauth2/token`, {
-    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'client_credentials', client_id: cid, client_secret: secret, resource: 'https://manage.devcenter.microsoft.com' }),
-  });
-  const tj = await tok.json();
-  if (!tj.access_token) die(`Partner Center token request failed (${tok.status}): ${JSON.stringify(tj).slice(0, 300)}`);
-  // the CLI prints PascalCase; the REST API is camelCase. Dictionary keys (the language codes under Listings) stay as they are.
-  const camel = (v, dict = false) => Array.isArray(v) ? v.map((x) => camel(x)) : (v && typeof v === 'object')
-    ? Object.fromEntries(Object.entries(v).map(([k, x]) => [dict ? k : k[0].toLowerCase() + k.slice(1), camel(x, k === 'Listings')])) : v;
-  const body = camel(sub);
-  const url = `https://manage.devcenter.microsoft.com/v1.0/my/applications/${appId}/submissions/${sub.Id}`;
-  const put = await fetch(url, { method: 'PUT', headers: { authorization: `Bearer ${tj.access_token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  const pt = await put.text();
-  if (!put.ok) die(`REST PUT ${put.status} on submission ${sub.Id}: ${pt.slice(0, 2500)}`);
-  log(`REST PUT ${put.status} — submission ${sub.Id} updated without pricing/availability`);
-}
+// Pricing and availability: the Store's API REQUIRES a Pricing object on every update (the CLI: "The JSON you provided
+// has no 'Pricing' object"; the REST API: "Pricing data was not provided"), so it cannot be left out. What we can do is
+// send back EXACTLY what the draft already holds — never edit it — and make sure the draft is a clean clone of the last
+// PUBLISHED submission: a draft cloned from a previously FAILED one (CommitFailed) inherits its broken pricing
+// (a phantom 235-market "sale" → InvalidPricingAvailabilitySettings), so a failed submission must be deleted first
+// (`msstore submission delete`; ms-store-cli-probe.yml delete_pending) before the next attempt.
+const price = sub.Pricing?.PriceId;
+log(`Pricing sent back unchanged: PriceId=${JSON.stringify(price ?? null)}, markets overridden: ${Object.keys(sub.Pricing?.MarketSpecificPricings || {}).join(',') || 'none'}`);
+if (!price || price === 'Base') { sub.Pricing ??= {}; sub.Pricing.PriceId = 'Free'; log('⚠ PriceId was missing/Base — set to "Free"'); }
+const upd = ms(['submission', 'update', appId, JSON.stringify(sub), '-v'], { allowFail: true });
+if (upd.status !== 0) die(`msstore submission update failed (exit ${upd.status})\n--- stdout ---\n${(upd.stdout || '').slice(-3500)}\n--- stderr ---\n${(upd.stderr || '').slice(-1500)}`);
 ok(`draft updated: ${wanted.length} language(s) + ${msix}`);
 if (has('no-commit')) { ok('left as a DRAFT (--no-commit): review and Submit in Partner Center'); process.exit(0); }
 // 5. commit + certification

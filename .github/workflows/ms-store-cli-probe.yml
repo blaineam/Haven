@@ -28,7 +28,7 @@ jobs:
           echo "$PWD/bin" >> "$GITHUB_PATH"
           bin/msstore --version
       - name: Configure
-        run: msstore reconfigure --tenantId "$STORE_TENANT_ID" --clientId "$STORE_CLIENT_ID" --clientSecret "$STORE_CLIENT_SECRET" --sellerId "$STORE_SELLER_ID"
+        run: msstore reconfigure -v --tenantId "$STORE_TENANT_ID" --clientId "$STORE_CLIENT_ID" --clientSecret "$STORE_CLIENT_SECRET" --sellerId "$STORE_SELLER_ID"
       - name: Read-only submission commands
         continue-on-error: true
         run: |

@@ -15,7 +15,7 @@
 // `submission update` takes the whole submission as ONE argument (~55 KB with nine languages), over Windows' 32,767-char cap.
 //
 // Flow (the CLI docs' own order — `publish` RECREATES the draft, so it must run before any metadata edit):
-//   1. msstore publish <dir> -i <msix> -id <app> --noCommit        package into a fresh draft
+//   1. msstore publish <msixbundle> -id <app> --noCommit           package into a fresh draft
 //   2. msstore submission get <app>                                the draft as JSON
 //   3. patch each locale's Title/Description/ShortDescription/ReleaseNotes from appstore-metadata[.<locale>].md
 //      (a language the draft lacks is cloned from en-us, so it keeps the screenshots)
@@ -24,7 +24,7 @@
 
 import { existsSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { loadMetadata, toMsListing } from './lib/metadata.mjs';
 import { msCode } from './lib/locales.mjs';
 
@@ -103,8 +103,9 @@ if (dryRun) {
 }
 
 // 1. package → fresh draft (recreates the draft from the last published submission)
-// ABSOLUTE paths: the CLI resolves a relative input directory against its own location ("Input directory does not exist").
-ms(['publish', resolve(dirname(msix)), '-i', resolve(msix), '-id', appId, '--noCommit', '-v']);
+// The package FILE is the positional argument (the CLI's loose-MSIX publisher takes .msix/.msixbundle/.msixupload
+// there; its `-i` is an input DIRECTORY, whatever the docs say). Absolute, because the CLI's cwd is not ours.
+ms(['publish', resolve(msix), '-id', appId, '--noCommit', '-v']);
 // 2-4. listing text onto that draft, together with the package it now holds
 const sub = patch(getSubmission());
 ms(['submission', 'update', appId, JSON.stringify(sub)]);

@@ -299,11 +299,22 @@ jobs:
           HAVEN_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           HAVEN_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           HAVEN_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          # Optional FCM wake-up (content-free, opt-in in Settings) — empty/absent secrets just leave it off.
+          HAVEN_FCM_PROJECT_ID: ${{ secrets.HAVEN_FCM_PROJECT_ID }}
+          HAVEN_FCM_APP_ID: ${{ secrets.HAVEN_FCM_APP_ID }}
+          HAVEN_FCM_API_KEY: ${{ secrets.HAVEN_FCM_API_KEY }}
+          HAVEN_FCM_SENDER_ID: ${{ secrets.HAVEN_FCM_SENDER_ID }}
         run: ./gradlew assembleRelease
 
       - name: Build debug APK (beta fallback, no secrets)
         if: steps.keystore.outputs.have_keystore == 'false'
         working-directory: android
+        env:
+          # Optional FCM wake-up (content-free, opt-in in Settings) — empty/absent secrets just leave it off.
+          HAVEN_FCM_PROJECT_ID: ${{ secrets.HAVEN_FCM_PROJECT_ID }}
+          HAVEN_FCM_APP_ID: ${{ secrets.HAVEN_FCM_APP_ID }}
+          HAVEN_FCM_API_KEY: ${{ secrets.HAVEN_FCM_API_KEY }}
+          HAVEN_FCM_SENDER_ID: ${{ secrets.HAVEN_FCM_SENDER_ID }}
         run: ./gradlew assembleDebug
 
       - name: Collect APKs
@@ -357,6 +368,11 @@ jobs:
           HAVEN_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           HAVEN_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           HAVEN_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          # Optional FCM wake-up (content-free, opt-in in Settings) — empty/absent secrets just leave it off.
+          HAVEN_FCM_PROJECT_ID: ${{ secrets.HAVEN_FCM_PROJECT_ID }}
+          HAVEN_FCM_APP_ID: ${{ secrets.HAVEN_FCM_APP_ID }}
+          HAVEN_FCM_API_KEY: ${{ secrets.HAVEN_FCM_API_KEY }}
+          HAVEN_FCM_SENDER_ID: ${{ secrets.HAVEN_FCM_SENDER_ID }}
           VN: ${{ steps.cfg.outputs.version_name }}
           # The templated Android Auto car app (Calls / Messages screens) is a Google BETA: Play accepts it on
           # internal + closed testing and REJECTS bundles that declare it on open testing / production. Only

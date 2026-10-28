@@ -35,8 +35,10 @@ warn amber, destructive red, sensitive-content blur) are NOT themed.
 above — re-run it if a stop changes. Per platform:
 - iOS: alternate app icons (`CFBundleAlternateIcons`, one per non-default palette), applied with
   `UIApplication.setAlternateIconName` (the system shows its own "icon changed" alert; unavoidable).
-- macOS: set `NSApp.applicationIconImage` at runtime and on launch. Finder/Launchpad keep the bundled
-  icon — best effort, documented in the settings footer.
+- macOS: set `NSApp.applicationIconImage` at runtime and on launch. The 1024 px art is full-bleed, so
+  `NSImage.macIconStyled()` (Palette.swift) draws it into the macOS icon shape first — an 824 pt rounded tile
+  (corner ≈ 22.4 %) centred in the canvas with the soft system shadow — otherwise the Dock shows a hard-cornered
+  square. Finder/Launchpad keep the bundled icon — best effort, documented in the settings footer.
 - Android: one `<activity-alias>` per palette (launcher icon via mipmap/adaptive icon), enable the
   chosen one and disable the rest with `PackageManager.setComponentEnabledSetting(DONT_KILL_APP)`.
 - Windows/Linux (Tauri): runtime window + taskbar icon only; the packaged/Start-menu icon is fixed.

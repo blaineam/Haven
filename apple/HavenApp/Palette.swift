@@ -103,8 +103,36 @@ enum AppIconSwitcher {
         // iOS shows its own "You have changed the icon" alert; there is no way to suppress it.
         app.setAlternateIconName(p.iconName) { _ in }
         #elseif os(macOS)
-        // Runtime Dock icon only — Finder/Launchpad keep the bundled icon.
-        NSApp?.applicationIconImage = p.iconName == nil ? nil : NSImage(named: "PaletteIcon-\(p.id)")
+        // Runtime Dock icon only — Finder/Launchpad keep the bundled icon. The palette art is a full-bleed square,
+        // so it is drawn into the macOS icon shape here (the bundled default icon already has it).
+        NSApp?.applicationIconImage = p.iconName == nil ? nil : NSImage(named: "PaletteIcon-\(p.id)")?.macIconStyled()
         #endif
     }
 }
+
+#if os(macOS)
+extension NSImage {
+    /// The macOS app-icon shape: an 824 pt rounded tile (corner ≈ 22.4 %) centred in a 1024 pt canvas, with the soft
+    /// drop shadow system icons carry. Without it a full-bleed square renders in the Dock as a hard-cornered box.
+    func macIconStyled() -> NSImage {
+        NSImage(size: NSSize(width: 1024, height: 1024), flipped: false) { rect in
+            let tile = rect.insetBy(dx: 100, dy: 100)
+            let shape = NSBezierPath(roundedRect: tile, xRadius: 185, yRadius: 185)
+            NSGraphicsContext.saveGraphicsState()
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor.black.withAlphaComponent(0.3)
+            shadow.shadowBlurRadius = 24
+            shadow.shadowOffset = NSSize(width: 0, height: -12)
+            shadow.set()
+            NSColor.black.setFill()
+            shape.fill()
+            NSGraphicsContext.restoreGraphicsState()
+            NSGraphicsContext.saveGraphicsState()
+            shape.addClip()
+            self.draw(in: tile, from: .zero, operation: .sourceOver, fraction: 1)
+            NSGraphicsContext.restoreGraphicsState()
+            return true
+        }
+    }
+}
+#endif

@@ -9,6 +9,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - macOS: the palette Dock icons were hard-cornered squares
+The palette icon art is a full-bleed 1024 px square. On macOS it was set as the Dock icon as-is, so every colour except the default showed as a
+square with no rounded corners and no margin. `NSImage.macIconStyled()` now draws it into the standard macOS icon shape (824 pt rounded tile,
+~22.4 % corner radius, centred in the canvas, soft system shadow) before `applicationIconImage` is set. iOS alternate icons are unchanged
+(iOS masks them itself).
+
 ### Added - Posting to several circles: editing one copy edits them all, and a Select all button (all platforms)
 A post sent to several circles at once is N independent posts, so editing one used to change only the circle you were viewing. The author's
 device now remembers which circles got the same post (a LOCAL index — no wire or core change, so shipped clients simply receive ordinary

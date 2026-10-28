@@ -2827,8 +2827,13 @@ async function main() {
         // The pre-31 fallback SHIPS (minSdk is 29) but every Android in the fleet is API 35, so the
         // suite pins it explicitly — otherwise that branch is covered by the compiler and nothing
         // else, which is the state the API-31 deprecation fix would have left it in.
+        // Hardware-aware like the api31+ sweep above. This used to pass `true` unconditionally and was green only because
+        // nothing else touched the route: the legacy flag was read back as "earpiece" whenever it was off. Since Haven's
+        // calls became Telecom system calls, Telecom holds its own communication device for the call — on a device with
+        // no earpiece (the emulator: supportedRouteMask is SPEAKER only) that is the loudspeaker, and no app-side flag can
+        // move it to an earpiece that does not exist. Where the hardware has an earpiece the check is as strict as ever.
         await op(devices.android, { op: 'call_route_legacy', on: true }, 2000);
-        await sweep('pre-31 fallback', true);
+        await sweep('pre-31 fallback', hasEarpiece);
         await op(devices.android, { op: 'call_route_legacy', on: false }, 2000);
       }
       if (pr.answerer !== 'stub') {

@@ -68,7 +68,7 @@ for (const f of metaFiles) {
   const { listing, warnings } = toMsListing(fields);
   warnings.forEach((w) => log(`⚠ ${w}`));
   if (!Object.keys(listing).length) { log(`⚠ ${f}: nothing to push — skipped`); continue; }
-  if (fields.whats_new && !fields.whats_new.startsWith(version)) {
+  if (!has('bare') && fields.whats_new && !fields.whats_new.startsWith(version)) {
     die(`${f} whats_new starts with "${fields.whats_new.split('\n')[0].slice(0, 50)}" — must start with "${version}" (stale notes would ship)`);
   }
   wanted.push({ lang: msCode(locale), listing });

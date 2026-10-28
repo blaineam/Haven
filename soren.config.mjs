@@ -56,6 +56,7 @@ export default {
     // ── iOS: the Haven scheme's test action (HavenUITests) on a booted simulator.
     //    Signing is disabled; a real run needs macOS + Xcode + an available sim.
     ios: {
+      buildGroup: 'ios',   // one compile shared by ios, ui-ipad (same scheme, platform, signing)
       type: 'xcodebuild-test',
       project: 'apple/Haven.xcodeproj',
       scheme: 'Haven',
@@ -81,6 +82,7 @@ export default {
     //    Every test launches `-UITestMode -UITestReset` (DEBUG-only: wiped container, seeded demo
     //    cast, no network, animations off). Shut down again afterwards.
     'ui-ipad': {
+      buildGroup: 'ios',   // one compile shared by ios, ui-ipad (same scheme, platform, signing)
       type: 'xcodebuild-test',
       project: 'apple/Haven.xcodeproj',
       scheme: 'Haven',

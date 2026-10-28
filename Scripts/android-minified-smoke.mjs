@@ -63,7 +63,20 @@ function runningEmulator() {
 
 async function ensureEmulator() {
   const serial = runningEmulator();
-  if (serial) { log(`reusing ${serial}`); return { serial, booted: false }; }
+  if (serial) {
+    // Reuse a healthy emulator (a cold boot is minutes), but not a stale one: after many hours the launcher ANRs
+    // and a dialog covers every screen. Past 6h, or answering badly, or showing an ANR → restart it.
+    const up = Number((sh('cat /proc/uptime') || '').split(/\s+/)[0]);
+    const anr = /Application Not Responding|isn't responding/i.test(adb('shell', 'dumpsys window windows').stdout || '');
+    if (sh('getprop sys.boot_completed') === '1' && Number.isFinite(up) && up < 6 * 3600 && !anr) {
+      sh('settings put global hide_error_dialogs 1');
+      log(`reusing ${serial} (up ${Math.round(up / 60)}m, healthy)`);
+      return { serial, booted: false };
+    }
+    log(`${serial} is stale or unhealthy (up ${Number.isFinite(up) ? Math.round(up / 60) + 'm' : '?'}, anr=${anr}) — restarting it`);
+    adb('emu', 'kill');
+    for (let i = 0; i < 20 && runningEmulator(); i++) await new Promise((r) => setTimeout(r, 2000));
+  }
   log(`booting AVD ${AVD}…`);
   const child = spawn(EMULATOR, ['-avd', AVD, '-no-snapshot-save', '-no-boot-anim', '-no-audio'], { env, detached: true, stdio: 'ignore' });
   child.unref();
@@ -128,6 +141,9 @@ const PERMS = ['android.permission.CAMERA', 'android.permission.RECORD_AUDIO', '
   'android.permission.NEARBY_WIFI_DEVICES', 'android.permission.ACCESS_FINE_LOCATION', 'android.permission.ACCESS_COARSE_LOCATION'];
 
 // R8 failure signatures. Matched only in the app's own log lines (its uid), never system noise.
+// A THREAD_STATE line is one frame of a thread dump (ART writes one on SIGQUIT / a slow main thread) and lists every
+// thread, including JNA's idle Cleaner — a class name there is not an R8 failure.
+const NOT_R8 = /THREAD_STATE/;
 const R8_SIGNS = /ClassNotFoundException|NoSuchMethodError|NoSuchMethodException|NoSuchFieldError|NoSuchFieldException|UnsatisfiedLinkError|NoClassDefFoundError|ExceptionInInitializerError|AbstractMethodError|IncompatibleClassChangeError|VerifyError|FATAL EXCEPTION|com\.sun\.jna\.|Native\.register/;
 
 function instrument(target) {
@@ -141,9 +157,6 @@ function instrument(target) {
   // -4 = assumption failure (skipped). Fine for ConnectionServiceTimeoutTest below API 35; never for
   // the smoke flows, which must actually run.
   const skippedAll = /OK \(0 tests\)/.test(out) || /INSTRUMENTATION_STATUS_CODE: -4/.test(out);
-// A THREAD_STATE line is one frame of a thread dump (ART writes one on SIGQUIT / a slow main thread) and lists every
-// thread, including JNA's idle Cleaner — a class name there is not an R8 failure.
-const NOT_R8 = /THREAD_STATE/;
   if (ok && skippedAll && target.includes('MinifiedSmokeTest')) { fail(`${target} was skipped — it must run`); return false; }
   if (!ok) {
     const stack = out.split('\n').filter((l) => /INSTRUMENTATION_STATUS: stack=|^\s+at |Error|Exception|FAIL/.test(l)).slice(0, 40).join('\n');
@@ -195,7 +208,10 @@ async function main() {
     // emulator into a system chooser — that froze the e2e android leg's qa driver on 2026-10-06.
     adb('uninstall', TEST_PKG);
     adb('uninstall', PKG);
-    if (booted) { log('shutting the emulator down (we booted it)'); adb('emu', 'kill'); }
+    // Left running on purpose so the next run reuses it (the 6h health check above retires a stale one);
+    // SOREN_STOP_EMULATOR=1 restores the old always-shut-down behaviour.
+    if (booted && process.env.SOREN_STOP_EMULATOR) { log('shutting the emulator down (we booted it)'); adb('emu', 'kill'); }
+    else if (booted) log('leaving the emulator running for the next run to reuse');
   }
   if (process.exitCode) console.error('[android-minified] FAILED'); else log('all green');
 }

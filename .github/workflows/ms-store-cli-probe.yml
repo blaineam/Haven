@@ -2,6 +2,7 @@ name: ms-store-cli-probe
 
 # READ-ONLY check of Microsoft's msstore CLI against Haven's Store listing: does `submission status` / `get` /
 # `getListingAssets` work for this packaged app now (the legacy submission-CREATE path broke in 2026-08)? Changes nothing.
+# Windows runner: the CLI stores its credentials in the OS credential manager (libsecret on Linux needs a keyring).
 on:
   workflow_dispatch: {}
 
@@ -10,7 +11,7 @@ permissions:
 
 jobs:
   probe:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     env:
       STORE_TENANT_ID: ${{ secrets.STORE_TENANT_ID }}
       STORE_CLIENT_ID: ${{ secrets.STORE_CLIENT_ID }}
@@ -19,23 +20,27 @@ jobs:
       STORE_APP_ID: ${{ secrets.STORE_APP_ID }}
     steps:
       - name: Install msstore CLI
+        shell: pwsh
         run: |
-          curl -fsSL -o msstore.tgz https://github.com/microsoft/msstore-cli/releases/download/v0.4.3/MSStoreCLI-linux-x64.tar.gz
-          curl -fsSL -o msstore.sha https://github.com/microsoft/msstore-cli/releases/download/v0.4.3/MSStoreCLI-linux-x64.tar.gz.sha256.txt
-          WANT="$(tr -d '\000\r\n ' < msstore.sha | grep -oE '[0-9a-fA-F]{64}' | head -1)"
-          echo "$WANT  msstore.tgz" | sha256sum -c -
-          mkdir -p bin && tar -xzf msstore.tgz -C bin && chmod +x bin/msstore
-          echo "$PWD/bin" >> "$GITHUB_PATH"
-          bin/msstore --version
+          $v = "v0.4.3"
+          Invoke-WebRequest "https://github.com/microsoft/msstore-cli/releases/download/$v/MSStoreCLI-win-x64.zip" -OutFile msstore.zip
+          Invoke-WebRequest "https://github.com/microsoft/msstore-cli/releases/download/$v/MSStoreCLI-win-x64.zip.sha256.txt" -OutFile msstore.sha
+          $want = ([regex]::Match((Get-Content msstore.sha -Raw), '[0-9a-fA-F]{64}')).Value
+          $got = (Get-FileHash msstore.zip -Algorithm SHA256).Hash
+          if ($want -ne $got) { throw "checksum mismatch: $want vs $got" }
+          Expand-Archive msstore.zip -DestinationPath bin
+          "$PWD\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          & .\bin\msstore.exe --version
       - name: Configure
-        run: msstore reconfigure -v --tenantId "$STORE_TENANT_ID" --clientId "$STORE_CLIENT_ID" --clientSecret "$STORE_CLIENT_SECRET" --sellerId "$STORE_SELLER_ID"
+        shell: pwsh
+        run: msstore reconfigure -v --tenantId $env:STORE_TENANT_ID --clientId $env:STORE_CLIENT_ID --clientSecret $env:STORE_CLIENT_SECRET --sellerId $env:STORE_SELLER_ID
       - name: Read-only submission commands
+        shell: pwsh
         continue-on-error: true
         run: |
-          set +e
-          for c in "status" "get" "getListingAssets"; do
-            echo "::group::msstore submission $c"
-            msstore submission $c "$STORE_APP_ID" 2>&1 | sed -E 's/("(accessToken|token)"\s*:\s*")[^"]+/\1***/g' | head -80
-            echo "exit=${PIPESTATUS[0]}"
-            echo "::endgroup::"
-          done
+          foreach ($c in "status","get","getListingAssets") {
+            Write-Host "::group::msstore submission $c"
+            msstore submission $c $env:STORE_APP_ID 2>&1 | Select-Object -First 80
+            Write-Host "exit=$LASTEXITCODE"
+            Write-Host "::endgroup::"
+          }

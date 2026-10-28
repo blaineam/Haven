@@ -108,7 +108,18 @@ if (dryRun) {
 ms(['publish', resolve(msix), '-id', appId, '--noCommit', '-v']);
 // 2-4. listing text onto that draft, together with the package it now holds
 const sub = patch(getSubmission());
-ms(['submission', 'update', appId, JSON.stringify(sub)]);
+// `submission update` replaces the WHOLE submission and the CLI rejects it unless Pricing.PriceId is a real value
+// (Tier<n> / Free / NotAvailable); the Store hands back "Base" or nothing when prices are per-market. Haven is a free
+// product (the only kind `msstore` updates), so a missing/Base id means Free — said out loud, never silently.
+const price = sub.Pricing?.PriceId;
+log(`Pricing.PriceId = ${JSON.stringify(price ?? null)}`);
+if (!price || price === 'Base') {
+  sub.Pricing ??= {};
+  sub.Pricing.PriceId = 'Free';
+  log('⚠ PriceId was missing/Base — set to "Free" (Haven is a free product)');
+}
+const upd = ms(['submission', 'update', appId, JSON.stringify(sub), '-v'], { allowFail: true });
+if (upd.status !== 0) die(`msstore submission update failed (exit ${upd.status})\n--- stdout ---\n${(upd.stdout || '').slice(-3500)}\n--- stderr ---\n${(upd.stderr || '').slice(-1500)}`);
 ok(`draft updated: ${wanted.length} language(s) + ${msix}`);
 if (has('no-commit')) { ok('left as a DRAFT (--no-commit): review and Submit in Partner Center'); process.exit(0); }
 // 5. commit + certification

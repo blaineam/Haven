@@ -1,4 +1,5 @@
-2.0.2 — Più comoda sugli schermi grandi.
-• Su tablet e finestre ampie, feed e profilo sono ora una colonna centrata e foto e video non sono più enormi.
-• Le chiamate tramite relay non si bloccano più se si perde un frame audio e la riattivazione del microfono è affidabile.
-• I filtri di foto e video ora funzionano sui telefoni con virgola decimale (tedesco, francese, arabo…).
+2.1.0 — Chiamate che si vedono e una sveglia facoltativa.
+• Le chiamate in uscita ora mostrano Chiamata… / Connessione… / Connesso, riproducono il tono, fanno squillare l'iPhone e terminano dopo 45 s senza risposta.
+• Sveglia push facoltativa in Impostazioni (disattivata) per i telefoni che chiudono Haven in background.
+• Rimani connesso non si interrompe più dopo qualche ora.
+• Le chiamate in arrivo mostrano il nome di chi chiama; Android Auto è più chiaro.

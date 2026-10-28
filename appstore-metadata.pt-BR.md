@@ -35,14 +35,16 @@ privado,criptografado,família,amigos,mensagens,seguro,offline,chamadas,sem anú
 Novo no 2.0: seu relay faz o trabalho pesado com fotos e vídeos para o celular não esquentar, e você sempre vê quem uma publicação alcança. Continua grátis.
 
 ## whats_new
-Ao escolher fotos da sua biblioteca, agora você vê que elas estão sendo preparadas.
-• Cada foto escolhida ganha na hora um espaço reservado no compositor, e elas vão aparecendo uma a uma na ordem em que você escolheu, então uma seleção grande nunca parece ter falhado.
-• Publicar espera até que todas as fotos estejam prontas, para que uma publicação nunca saia com metade das fotos.
-• Fotos grandes, incluindo ProRAW de 48 MP, agora são lidas e otimizadas em segundo plano, então prepará-las não trava mais o compositor nem deixa o celular quente depois.
+2.1.0 — Suas cores e vários círculos de uma vez.
+• Escolha uma paleta de cores em Ajustes ▸ Aparência, com seu próprio ícone do app; Neutro não tem cor.
+• Segure o botão Publicar (clique direito no Mac) para publicar em vários círculos de uma vez.
+• Haven no CarPlay e na Siri: leia, envie e responda mensagens e faça chamadas do Haven por voz. Ative em Ajustes ▸ Carro e Siri.
+• O áudio das chamadas agora acompanha o carro, os AirPods ou o fone em vez do alto-falante do celular, e a tela de chamada mostra Conectado assim que a mídia está pronta.
 
 ## whats_new_macos
-Publicar espera pelas suas fotos.
-• Publicar fica esmaecido até que todas as fotos anexadas estejam prontas, para que uma publicação nunca saia com metade das fotos.
+2.1.0 — Suas cores e vários círculos de uma vez.
+• Escolha uma paleta de cores em Ajustes ▸ Aparência; o ícone do Dock a acompanha. Neutro não tem cor.
+• Clique com o botão direito em Publicar para publicar em vários círculos de uma vez.
 
 ## whats_new_windows
 2.0.2 — O feed e o perfil agora ficam em uma coluna centralizada nas janelas largas, então fotos e vídeos não aparecem mais enormes e você rola menos. A tela Você segue a mesma coluna.

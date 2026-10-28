@@ -1,4 +1,5 @@
-2.0.2 — Plus confortable sur grand écran.
-• Sur tablette et en fenêtre large, le fil et votre profil forment désormais une colonne centrée : les photos et vidéos ne sont plus énormes.
-• Les appels via le relais ne se bloquent plus quand une trame audio est perdue, et la réactivation du micro est fiable.
-• Les filtres photo et vidéo fonctionnent maintenant sur les téléphones à virgule décimale (allemand, français, arabe…).
+2.1.0 — Des appels visibles et un réveil facultatif.
+• Les appels sortants affichent désormais Appel… / Connexion… / Connecté, jouent une tonalité, font sonner l'iPhone et s'arrêtent après 45 s sans réponse.
+• Réveil push facultatif dans Réglages (désactivé) pour les téléphones qui ferment Haven en arrière-plan.
+• Rester connecté ne s'interrompt plus au bout de quelques heures.
+• Les appels entrants affichent le nom de l'appelant ; Android Auto est plus clair.

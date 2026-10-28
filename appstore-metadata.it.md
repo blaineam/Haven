@@ -35,14 +35,16 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Novità della 2.0: il tuo relay fa il lavoro pesante con foto e video, così il telefono resta fresco, e vedi sempre chi raggiunge un post. Sempre gratis.
 
 ## whats_new
-Quando scegli foto dalla libreria, ora le vedi mentre vengono preparate.
-• Ogni foto scelta riceve subito un segnaposto nel compositore e le foto compaiono una alla volta nell'ordine in cui le hai scelte, così una selezione grande non sembra mai fallita.
-• Pubblica attende che tutte le foto siano pronte, così un post non parte mai con metà delle foto.
-• Le foto grandi, comprese le ProRAW da 48 MP, ora vengono lette e ottimizzate in background: prepararle non blocca più il compositore e non lascia più il telefono caldo.
+2.1.0 — I tuoi colori e più cerchie in un colpo solo.
+• Scegli una tavolozza di colori in Impostazioni ▸ Aspetto, con la sua icona dell'app; Neutra è senza colore.
+• Tieni premuto il pulsante Pubblica (clic destro su Mac) per pubblicare in più cerchie contemporaneamente.
+• Haven su CarPlay e Siri: leggi, invia e rispondi ai messaggi e avvia chiamate Haven con la voce. Si attiva in Impostazioni ▸ Auto e Siri.
+• L'audio delle chiamate ora segue l'auto, gli AirPods o le cuffie invece dell'altoparlante del telefono, e la schermata di chiamata mostra Connesso appena l'audio è pronto.
 
 ## whats_new_macos
-Pubblica attende le tue foto.
-• Pubblica resta disattivato finché tutte le foto allegate non sono pronte, così un post non parte mai con metà delle foto.
+2.1.0 — I tuoi colori e più cerchie in un colpo solo.
+• Scegli una tavolozza di colori in Impostazioni ▸ Aspetto; l'icona del Dock la segue. Neutra è senza colore.
+• Fai clic destro su Pubblica per pubblicare in più cerchie contemporaneamente.
 
 ## whats_new_windows
 2.0.2 — Il feed e il profilo ora occupano una colonna centrata nelle finestre larghe, così foto e video non sono più enormi e scorri meno. La schermata Tu segue la stessa colonna.

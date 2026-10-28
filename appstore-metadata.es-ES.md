@@ -35,14 +35,16 @@ privado,cifrado,familia,amigos,mensajería,seguro,sin conexión,llamadas,sin anu
 Novedad en 2.0: tu relay hace el trabajo pesado con fotos y vídeos para que tu móvil no se caliente, y siempre ves a quién llega cada publicación. Sigue siendo gratis.
 
 ## whats_new
-Al elegir fotos de tu fototeca ahora ves cómo se preparan.
-• Cada foto que eliges recibe al instante un marcador en el compositor y se van rellenando una a una en el orden en que las elegiste, así que una selección grande nunca parece haber fallado.
-• Publicar espera a que todas las fotos estén listas, para que una publicación nunca salga con la mitad de sus fotos.
-• Las fotos grandes, incluidas las ProRAW de 48 MP, ahora se leen y optimizan en segundo plano, así que prepararlas ya no congela el compositor ni deja el teléfono caliente después.
+2.1.0 — Tus colores y varios círculos a la vez.
+• Elige una paleta de colores en Ajustes ▸ Apariencia, con su propio icono de la app; Neutral no tiene color.
+• Mantén pulsado el botón Publicar (clic derecho en el Mac) para publicar en varios círculos a la vez.
+• Haven en CarPlay y Siri: lee, envía y responde mensajes y haz llamadas de Haven por voz. Actívalo en Ajustes ▸ Coche y Siri.
+• El audio de las llamadas ahora sigue a tu coche, tus AirPods o tus auriculares en lugar del altavoz del teléfono, y la pantalla de llamada muestra Conectado en cuanto el audio está listo.
 
 ## whats_new_macos
-Publicar espera a tus fotos.
-• Publicar permanece atenuado hasta que todas las fotos adjuntas estén listas, para que una publicación nunca salga con la mitad de sus fotos.
+2.1.0 — Tus colores y varios círculos a la vez.
+• Elige una paleta de colores en Ajustes ▸ Apariencia; el icono del Dock la sigue. Neutral no tiene color.
+• Haz clic derecho en el botón Publicar para publicar en varios círculos a la vez.
 
 ## whats_new_windows
 2.0.2 — El feed y el perfil ahora ocupan una columna centrada en las ventanas anchas, así que las fotos y los vídeos ya no se ven enormes y te desplazas menos. La pantalla Tú sigue la misma columna.

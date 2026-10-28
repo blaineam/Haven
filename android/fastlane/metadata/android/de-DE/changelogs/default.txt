@@ -1,4 +1,5 @@
-2.0.2 – Ruhiger auf großen Displays.
-• Auf Tablets und breiten Fenstern sind Feed und Profil jetzt eine zentrierte Spalte, Fotos und Videos sind nicht mehr riesig.
-• Anrufe über das Relay bleiben nicht mehr hängen, wenn ein Audio-Frame verloren geht, und das Aufheben der Stummschaltung funktioniert zuverlässig.
-• Foto- und Videofilter funktionieren jetzt auch auf Geräten mit Dezimalkomma, etwa auf Deutsch, Französisch und Arabisch.
+2.1.0 – Sichtbare Anrufe, optionaler Weckruf.
+• Ausgehende Anrufe zeigen „Anruf…“ / „Verbinden…“ / „Verbunden“, spielen einen Freiton, lassen das iPhone klingeln und enden nach 45 s ohne Antwort.
+• Optionaler Push-Weckruf in den Einstellungen (standardmäßig aus) für Handys, die Haven im Hintergrund schließen.
+• „Verbunden bleiben“ läuft nach Stunden nicht mehr aus; Nachrichten und Anrufe kommen weiter an.
+• Eingehende Anrufe zeigen den Anrufernamen; Android-Auto-Hinweise sind aufgeräumter.

@@ -35,14 +35,16 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit dein Handy kühl bleibt – und du siehst immer genau, wen ein Beitrag erreicht. Kostenlos.
 
 ## whats_new
-Beim Auswählen von Fotos aus deiner Mediathek siehst du jetzt, wie sie vorbereitet werden.
-• Jedes ausgewählte Foto bekommt sofort einen Platzhalter im Eingabefeld und wird nacheinander in der gewählten Reihenfolge eingefügt, sodass eine große Auswahl nie so aussieht, als wäre sie fehlgeschlagen.
-• „Posten“ wartet, bis jedes Foto bereit ist, damit ein Beitrag nie nur mit der Hälfte seiner Fotos rausgeht.
-• Große Fotos, auch 48-MP-ProRAW, werden jetzt im Hintergrund gelesen und optimiert, sodass die Vorbereitung das Eingabefeld nicht mehr einfriert und dein Handy danach nicht mehr heiß wird.
+2.1.0 — Deine Farben und mehrere Kreise auf einmal.
+• Wähle in Einstellungen ▸ Darstellung eine Farbpalette mit passendem App-Symbol; Neutral ist farblos.
+• Halte die Taste „Posten“ gedrückt (auf dem Mac Rechtsklick), um in mehrere Kreise gleichzeitig zu posten.
+• Haven mit CarPlay und Siri: Nachrichten vorlesen, senden und beantworten und Haven-Anrufe per Sprache starten. Aktivierbar unter Einstellungen ▸ Auto und Siri.
+• Der Anrufton folgt jetzt deinem Auto, deinen AirPods oder dem Headset statt dem Telefonlautsprecher, und der Anrufbildschirm zeigt „Verbunden“, sobald die Medien stehen.
 
 ## whats_new_macos
-Das Posten wartet auf deine Fotos.
-• „Posten“ bleibt ausgegraut, bis jedes angehängte Foto bereit ist, damit ein Beitrag nie nur mit der Hälfte seiner Fotos rausgeht.
+2.1.0 — Deine Farben und mehrere Kreise auf einmal.
+• Wähle in Einstellungen ▸ Darstellung eine Farbpalette; das Dock-Symbol folgt ihr. Neutral ist farblos.
+• Klicke mit der rechten Maustaste auf „Posten“, um in mehrere Kreise gleichzeitig zu posten.
 
 ## whats_new_windows
 2.0.2 — Feed und Profil stehen in breiten Fenstern jetzt in einer zentrierten Spalte, sodass Fotos und Videos nicht mehr riesig sind und du weniger scrollen musst. Der Bildschirm „Du“ nutzt dieselbe Spalte.

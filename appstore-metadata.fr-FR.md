@@ -35,14 +35,16 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Nouveau en 2.0 : votre relay prend en charge photos et vidéos pour que votre téléphone reste frais, et vous voyez toujours qui atteint chaque publication. Gratuit.
 
 ## whats_new
-Quand vous choisissez des photos dans votre photothèque, vous les voyez maintenant se préparer.
-• Chaque photo choisie reçoit aussitôt un emplacement dans le compositeur, puis elles s'affichent une à une dans l'ordre choisi : une grande sélection n'a plus jamais l'air d'avoir échoué.
-• Publier attend que toutes les photos soient prêtes, pour qu'une publication ne parte jamais avec la moitié de ses photos.
-• Les grandes photos, y compris les ProRAW 48 Mpx, sont désormais lues et optimisées en arrière-plan : leur préparation ne fige plus le compositeur et ne laisse plus votre téléphone chaud.
+2.1.0 — Vos couleurs, et plusieurs cercles à la fois.
+• Choisissez une palette de couleurs dans Réglages ▸ Apparence, avec sa propre icône d'app ; Neutre est sans couleur.
+• Maintenez le bouton Publier (clic droit sur Mac) pour publier dans plusieurs cercles à la fois.
+• Haven sur CarPlay et Siri : lisez, envoyez et répondez aux messages et lancez des appels Haven à la voix. À activer dans Réglages ▸ Voiture et Siri.
+• Le son des appels suit désormais votre voiture, vos AirPods ou votre casque plutôt que le haut-parleur du téléphone, et l'écran d'appel affiche Connecté dès que le flux média est établi.
 
 ## whats_new_macos
-Publier attend vos photos.
-• Publier reste grisé tant que toutes les photos jointes ne sont pas prêtes, pour qu'une publication ne parte jamais avec la moitié de ses photos.
+2.1.0 — Vos couleurs, et plusieurs cercles à la fois.
+• Choisissez une palette de couleurs dans Réglages ▸ Apparence ; l'icône du Dock la suit. Neutre est sans couleur.
+• Faites un clic droit sur Publier pour publier dans plusieurs cercles à la fois.
 
 ## whats_new_windows
 2.0.2 — Le fil et le profil s'affichent désormais dans une colonne centrée dans les fenêtres larges : les photos et les vidéos ne sont plus énormes et vous faites défiler moins. L'écran Vous suit la même colonne.

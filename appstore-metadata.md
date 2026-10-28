@@ -33,14 +33,16 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 New in 2.0: your relay does the heavy lifting for photos and videos, so your phone stays cool — and you always see exactly who a post reaches. Still free.
 
 ## whats_new
-Picking photos from your library now shows them being prepared.
-• Each photo you choose gets a placeholder in the composer right away, and they fill in one by one in the order you picked them, so a big selection never looks like it failed.
-• Post waits until every photo is ready, so a post never goes out with half its photos.
-• Large photos, including 48 MP ProRAW, are now read and optimized in the background, so preparing them no longer freezes the composer or leaves your phone hot afterwards.
+2.1.0 — Your colors, and several circles at once.
+• Pick a color palette in Settings ▸ Appearance, with its own app icon; Neutral is colorless.
+• Hold the Post button (right-click on a Mac) to post to several circles at once.
+• Haven on CarPlay and Siri: read, send and reply to messages and place Haven calls by voice. Turn it on in Settings ▸ Car and Siri.
+• Call audio now follows your car, AirPods or headset instead of the phone speaker, and the call screen switches to Connected as soon as the media is up.
 
 ## whats_new_macos
-Posting waits for your photos.
-• Post stays dimmed until every photo you attached is ready, so a post never goes out with half its photos.
+2.1.0 — Your colors, and several circles at once.
+• Pick a color palette in Settings ▸ Appearance; the Dock icon follows it. Neutral is colorless.
+• Right-click the Post button to post to several circles at once.
 
 ## whats_new_windows
 2.0.2 — The feed and profile now sit in a centered column in wide windows, so photos and videos are no longer huge and you scroll less. The You screen follows the same column.

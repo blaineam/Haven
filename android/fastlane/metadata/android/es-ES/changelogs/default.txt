@@ -1,4 +1,5 @@
-2.0.2 — Más cómoda en pantallas grandes.
-• En tablets y ventanas anchas, el feed y tu perfil ahora forman una columna centrada, y las fotos y vídeos ya no se ven enormes.
-• Las llamadas por relay ya no se detienen si se pierde un fotograma de audio, y reactivar el micrófono funciona de forma fiable.
-• Los filtros de foto y vídeo ya funcionan en teléfonos con coma decimal, como alemán, francés o árabe.
+2.1.0 — Llamadas que se ven y un aviso opcional.
+• Las llamadas salientes ahora muestran Llamando… / Conectando… / Conectado, emiten tono de llamada, hacen sonar el iPhone y terminan a los 45 s sin respuesta.
+• Aviso push opcional en Ajustes (desactivado) para teléfonos que cierran Haven en segundo plano.
+• Seguir conectado ya no se agota tras unas horas.
+• Las llamadas entrantes muestran el nombre de quien llama; Android Auto, más claro.

@@ -1,4 +1,5 @@
-2.0.2 — Mais confortável em telas grandes.
-• Em tablets e janelas largas, o feed e o seu perfil agora ficam numa coluna centralizada e fotos e vídeos não ficam mais enormes.
-• Chamadas pelo relay não travam mais quando um quadro de áudio se perde, e reativar o microfone funciona de forma confiável.
-• Os filtros de foto e vídeo agora funcionam em telefones com vírgula decimal, como alemão, francês e árabe.
+2.1.0 — Chamadas que você vê e um despertar opcional.
+• As chamadas feitas agora mostram Chamando… / Conectando… / Conectado, tocam o sinal, fazem o iPhone tocar e terminam após 45 s sem resposta.
+• Despertar por push opcional em Ajustes (desativado) para celulares que fecham o Haven em segundo plano.
+• Manter conectado não acaba mais depois de algumas horas.
+• As chamadas recebidas mostram o nome de quem liga; o Android Auto está mais claro.

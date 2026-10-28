@@ -1,0 +1,54 @@
+name: Play car-app watch
+
+# Google documents when the templated Android Auto screens (Calls / Messages) may leave testing tracks. Both pages carry
+# a beta notice: "Publishing to open testing and production tracks will be permitted at a later date" and "submissions
+# containing builds on those tracks will be rejected". Once Google lifts the restriction that wording changes or goes.
+# This reads the two pages weekly and opens an issue when it does. It NEVER releases anything — turning the screens on in
+# production is a human decision (docs/ANDROID-AUTO.md: set the repo variable PLAY_CAR_APP_ALLOWED=true, then cut a release).
+#
+# An earlier version submitted a draft bundle to Play and trusted `edits.validate`; that was wrong (a draft passes
+# validation whatever the policy says) and it dispatched a release by itself. Reading Google's own statement is the
+# reliable signal. A page that moved or stopped answering fails the run loudly instead of passing silently.
+on:
+  schedule:
+    - cron: "41 7 * * 1"   # Mondays 07:41 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    if: vars.PLAY_CAR_APP_ALLOWED != 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Read Google's notices
+        id: read
+        run: |
+          set -u
+          changed=""
+          for page in templated-messaging calling; do
+            url="https://developer.android.com/training/cars/communication/$page"
+            code=$(curl -sS -L -o page.html -w '%{http_code}' "$url") || code=000
+            if [ "$code" != "200" ] || ! grep -q "Android for Cars" page.html; then
+              echo "::error::$url answered $code (or is no longer the car-app page) — the watcher's URL needs updating"; exit 1
+            fi
+            later=$(grep -c "permitted at a later date" page.html || true)
+            rejected=$(grep -c "will be rejected" page.html || true)
+            echo "$page: 'permitted at a later date'=$later 'will be rejected'=$rejected"
+            if [ "$later" = "0" ] || [ "$rejected" = "0" ]; then changed="$changed $url"; fi
+          done
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+      - name: Tell the owner when the restriction wording is gone
+        if: steps.read.outputs.changed != ''
+        run: |
+          title="Google changed the templated Android Auto publishing notice"
+          if gh issue list --state open --search "in:title \"$title\"" --json number -q '.[0].number' | grep -q .; then
+            echo "an issue is already open"; exit 0
+          fi
+          gh issue create --title "$title" --body "The beta notice that restricts the templated Android Auto screens (Calls / Messages) to internal and closed testing is no longer on:${{ steps.read.outputs.changed }}
+
+          That wording ('Publishing to open testing and production tracks will be permitted at a later date' / 'submissions … will be rejected') changed or was removed. Read the pages and confirm the restriction is lifted before doing anything. If it is: set the repository variable PLAY_CAR_APP_ALLOWED=true (that also stops this watcher), then cut a release — production builds will then declare the car categories. Nothing was released by this workflow."

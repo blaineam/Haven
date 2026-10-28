@@ -42,9 +42,7 @@ Novità della 2.0: il tuo relay fa il lavoro pesante con foto e video, così il 
 • L'audio delle chiamate ora segue l'auto, gli AirPods o le cuffie invece dell'altoparlante del telefono, e la schermata di chiamata mostra Connesso appena l'audio è pronto.
 
 ## whats_new_macos
-2.1.0 — I tuoi colori e più cerchie in un colpo solo.
-• Scegli una tavolozza di colori in Impostazioni ▸ Aspetto; l'icona del Dock la segue. Neutra è senza colore.
-• Fai clic destro su Pubblica per pubblicare in più cerchie contemporaneamente.
+Le icone del Dock delle tavolozze di colori ora hanno la forma standard delle icone macOS (riquadro arrotondato) e restano dopo il riavvio di Haven.
 
 ## whats_new_windows
 2.1.0 — I tuoi colori e più cerchie in un colpo solo.

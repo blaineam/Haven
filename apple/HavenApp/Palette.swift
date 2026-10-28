@@ -70,6 +70,11 @@ final class PaletteStore: ObservableObject {
         let p = Self.stored(in: defaults)
         self.palette = p
         Self.current = p
+        #if os(macOS)
+        // The Dock icon is a runtime override (the bundled icon never changes), so it is gone on every relaunch until
+        // it is applied again. iOS keeps its alternate icon across launches on its own.
+        DispatchQueue.main.async { AppIconSwitcher.apply(p) }
+        #endif
     }
 
     func select(_ p: HavenPalette) {

@@ -42,9 +42,7 @@ Novedad en 2.0: tu relay hace el trabajo pesado con fotos y vídeos para que tu 
 • El audio de las llamadas ahora sigue a tu coche, tus AirPods o tus auriculares en lugar del altavoz del teléfono, y la pantalla de llamada muestra Conectado en cuanto el audio está listo.
 
 ## whats_new_macos
-2.1.0 — Tus colores y varios círculos a la vez.
-• Elige una paleta de colores en Ajustes ▸ Apariencia; el icono del Dock la sigue. Neutral no tiene color.
-• Haz clic derecho en el botón Publicar para publicar en varios círculos a la vez.
+Los iconos del Dock de las paletas de colores ahora tienen la forma de icono estándar de macOS (baldosa redondeada) y se mantienen al reiniciar Haven.
 
 ## whats_new_windows
 2.1.0 — Tus colores y varios círculos a la vez.

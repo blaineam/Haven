@@ -42,9 +42,7 @@ Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit
 • Der Anrufton folgt jetzt deinem Auto, deinen AirPods oder dem Headset statt dem Telefonlautsprecher, und der Anrufbildschirm zeigt „Verbunden“, sobald die Medien stehen.
 
 ## whats_new_macos
-2.1.0 — Deine Farben und mehrere Kreise auf einmal.
-• Wähle in Einstellungen ▸ Darstellung eine Farbpalette; das Dock-Symbol folgt ihr. Neutral ist farblos.
-• Klicke mit der rechten Maustaste auf „Posten“, um in mehrere Kreise gleichzeitig zu posten.
+Die Dock-Symbole der Farbpaletten haben auf dem Mac jetzt die übliche macOS-Symbolform (abgerundete Kachel) und bleiben nach einem Neustart von Haven erhalten.
 
 ## whats_new_windows
 2.1.0 — Deine Farben und mehrere Kreise auf einmal.

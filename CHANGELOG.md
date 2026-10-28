@@ -15,6 +15,9 @@ square with no rounded corners and no margin. `NSImage.macIconStyled()` now draw
 ~22.4 % corner radius, centred in the canvas, soft system shadow) before `applicationIconImage` is set. iOS alternate icons are unchanged
 (iOS masks them itself).
 
+The palette's Dock icon was also only applied when a palette was *picked*, never on launch (despite `docs/PALETTES.md`), so every relaunch fell back to the
+default icon. `PaletteStore` now applies the stored palette's icon when it is created on macOS.
+
 ### Added - Posting to several circles: editing one copy edits them all, and a Select all button (all platforms)
 A post sent to several circles at once is N independent posts, so editing one used to change only the circle you were viewing. The author's
 device now remembers which circles got the same post (a LOCAL index — no wire or core change, so shipped clients simply receive ordinary

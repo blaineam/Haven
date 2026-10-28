@@ -9,6 +9,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added - Android: optional FCM wake-up (content-free) via the push worker
+Opt-in doorbell for phones where Android kills Haven in the background (Settings ▸ Connection ▸ "Push wake-up (Google)",
+default off). The Cloudflare push worker now accepts `platform:"android"` registrations (signed over `fcm-v1:<token>`) and
+sends a data-only high-priority `{w:1}` / `{w:1,c:1}` from `/notify` and `/call`; the app pulls and decrypts the real message from
+its relay, so Google sees only timing + the push token (same as APNs). Firebase is `firebase-messaging` only, initialised
+from BuildConfig values (no google-services plugin/json), never auto-inits, no-ops without Play services or without the
+owner's Firebase values, and `ConnectionService` stays the fallback. Strings in all 9 locales. 6 new worker tests, `FcmPolicyTest`.
+Owner setup in `push/README.md`; nothing is deployed until the owner sets `FCM_SERVICE_ACCOUNT` and the build values.
+
 ### Fixed - Android: "Stay connected" no longer expires after hours (iPhone→Android DMs and calls while backgrounded)
 Android has no push, so inbound DMs/calls only arrive while the process is alive. On Android 15 the idle service was typed
 `dataSync`, which has a ~6 h/day budget; once spent the service stopped and a low-RAM phone (Nokia 6.1, ~80 MB free) killed

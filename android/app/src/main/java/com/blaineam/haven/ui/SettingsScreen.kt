@@ -329,6 +329,29 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
 
+            // Optional FCM wake-up — only offered when this build carries Firebase values AND the phone has
+            // Play services; otherwise the row is hidden so de-Googled phones never see a dead switch.
+            if (com.blaineam.haven.core.FcmPush.available(context)) {
+                Spacer(Modifier.height(16.dp))
+                Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
+                    Text(stringResource(R.string.settings_push_header), color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                    Spacer(Modifier.height(4.dp))
+                    Text(stringResource(R.string.settings_push_desc),
+                        color = HavenTheme.textSecondary, fontSize = 12.sp)
+                    Spacer(Modifier.height(8.dp))
+                    var pushOn by remember { mutableStateOf(com.blaineam.haven.core.FcmPush.isEnabled(context)) }
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(stringResource(R.string.settings_push_wake), color = HavenTheme.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                        androidx.compose.material3.Switch(
+                            checked = pushOn,
+                            onCheckedChange = { on -> com.blaineam.haven.core.FcmPush.setEnabled(context, on); pushOn = on },
+                            colors = androidx.compose.material3.SwitchDefaults.colors(
+                                checkedThumbColor = Color.White, checkedTrackColor = HavenTheme.pink),
+                        )
+                    }
+                }
+            }
+
             Spacer(Modifier.height(16.dp))
             Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
                 Text(stringResource(R.string.settings_nearby_header), color = HavenTheme.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)

@@ -350,6 +350,9 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="car_open_haven">Abre Haven en tu teléfono para hacer llamadas.</string>
     <string name="settings_stay_connected_header">Mantente conectado</string>
     <string name="settings_stay_connected_desc">Mantente conectado para recibir publicaciones, mensajes y llamadas al instante. Gasta un poco de batería.</string>
+    <string name="settings_push_header">Aviso push (Google)</string>
+    <string name="settings_push_desc">Permite que el servicio push de Google avise cuando llega algo mientras Haven duerme. Google solo ve la hora y el token push de este teléfono, nunca el contenido: Haven obtiene y descifra el mensaje por sí mismo. Desactivado por defecto.</string>
+    <string name="settings_push_wake">Despertar con push</string>
     <string name="settings_realtime_connection">Conexión en tiempo real</string>
     <string name="settings_nearby_header">Cerca (sin conexión)</string>
     <string name="settings_nearby_desc">Comparte con quien tengas al lado por Bluetooth/Wi-Fi — no hace falta internet.</string>

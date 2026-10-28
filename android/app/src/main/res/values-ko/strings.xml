@@ -344,6 +344,9 @@
     <string name="car_open_haven">통화하려면 휴대전화에서 Haven을 여세요.</string>
     <string name="settings_stay_connected_header">연결 유지</string>
     <string name="settings_stay_connected_desc">게시물, 메시지, 통화를 바로 받아볼 수 있게 연결을 유지해요. 배터리를 조금 써요.</string>
+    <string name="settings_push_header">푸시 깨우기(Google)</string>
+    <string name="settings_push_desc">Haven이 잠들어 있는 동안 무언가 도착하면 Google 푸시 서비스로 알려 줍니다. Google은 시각과 이 휴대폰의 푸시 토큰만 볼 뿐 내용은 절대 볼 수 없으며, 메시지는 Haven이 직접 가져와 복호화합니다. 기본값은 꺼짐입니다.</string>
+    <string name="settings_push_wake">푸시로 깨우기</string>
     <string name="settings_realtime_connection">실시간 연결</string>
     <string name="settings_nearby_header">주변 기기 (오프라인)</string>
     <string name="settings_nearby_desc">블루투스/Wi-Fi로 바로 옆에 있는 사람과 공유해요 — 인터넷은 필요 없어요.</string>

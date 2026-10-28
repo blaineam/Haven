@@ -441,3 +441,129 @@ test('a registration signed by the Rust core (shared vector) verifies in the wor
     assert.equal(bad.status, 401);
   } finally { Date.now = realNow; }
 });
+
+// ── Android FCM wake (optional layer; content-free) ──────────────────────────────────────────────
+
+import { generateKeyPairSync as genKeys } from 'node:crypto';
+
+const FCM_TOKEN = 'fcm_' + 'AbC-_9:'.repeat(30);
+const fcmSa = () => JSON.stringify({
+  project_id: 'haven-test',
+  client_email: 'push@haven-test.iam.gserviceaccount.com',
+  private_key: genKeys('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }),
+  token_uri: 'https://oauth2.googleapis.com/token',
+});
+
+function stubFcm(sendStatus = 200) {
+  const calls = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    calls.push({ url: u, init, body: init?.body && u.includes('fcm.googleapis.com') ? JSON.parse(init.body) : init?.body });
+    if (u.includes('oauth2.googleapis.com')) return new Response(JSON.stringify({ access_token: 'ya29.fake' }), { status: 200 });
+    if (u.includes('fcm.googleapis.com')) {
+      return sendStatus === 200
+        ? new Response('{}', { status: 200 })
+        : new Response(JSON.stringify({ error: { status: 'UNREGISTERED' } }), { status: sendStatus });
+    }
+    return new Response('', { status: 200 });   // APNs
+  };
+  return { calls, restore: () => { globalThis.fetch = real; } };
+}
+
+async function registerAndroid(env, id, token = FCM_TOKEN) {
+  const ts = now();
+  const res = await worker.fetch(post('/register', {
+    nodeId: id.nodeId, token, platform: 'android', ts, sig: id.sign(`fcm-v1:${token}`, ts),
+  }), env);
+  return { res, body: await res.json() };
+}
+
+test('/register accepts an Android FCM token signed over fcm-v1:<token>', async () => {
+  const env = fakeEnv();
+  const id = identity();
+  const { res, body } = await registerAndroid(env, id);
+  assert.equal(res.status, 200);
+  assert.equal(body.devices, 1);
+  const rec = JSON.parse(env.TOKENS.map.get(id.nodeId).value);
+  assert.equal(rec.tokens[0].platform, 'android');
+});
+
+test('/register rejects an Android token signed WITHOUT the fcm-v1 prefix (no cross-protocol replay)', async () => {
+  const env = fakeEnv();
+  const id = identity();
+  const ts = now();
+  const res = await worker.fetch(post('/register', {
+    nodeId: id.nodeId, token: FCM_TOKEN, platform: 'android', ts, sig: id.sign(FCM_TOKEN, ts),
+  }), env);
+  assert.equal(res.status, 401);
+  // …and a non-token string never registers as android either.
+  const bad = await worker.fetch(post('/register', {
+    nodeId: id.nodeId, token: 'short', platform: 'android', ts, sig: id.sign('fcm-v1:short', ts),
+  }), env);
+  assert.equal(bad.status, 400);
+});
+
+test('/notify wakes an Android device with a data-only, content-free, high-priority message', async () => {
+  const env = { ...fakeEnv(), FCM_SERVICE_ACCOUNT: fcmSa() };
+  const id = identity();
+  await registerAndroid(env, id);
+  const fcm = stubFcm(200);
+  try {
+    const res = await worker.fetch(post('/notify', { nodeId: id.nodeId, ciphertext: 'c2VjcmV0', event: 'ZXZlbnQ=' }), env);
+    assert.equal(res.status, 200);
+    const send = fcm.calls.find((c) => c.url.includes('/v1/projects/haven-test/messages:send'));
+    assert.ok(send, 'FCM send happened');
+    assert.equal(send.init.headers.authorization, 'Bearer ya29.fake');
+    const m = send.body.message;
+    assert.equal(m.token, FCM_TOKEN);
+    assert.deepEqual(m.data, { w: '1' }, 'the wake carries no content at all');
+    assert.equal(m.notification, undefined, 'data-only: no notification block');
+    assert.equal(m.android.priority, 'HIGH');
+    assert.ok(!JSON.stringify(send.body).includes('c2VjcmV0'), 'ciphertext never reaches FCM');
+    assert.equal(fcm.calls.filter((c) => c.url.includes('apple.com')).length, 0, 'no APNs call for an Android-only node');
+  } finally { fcm.restore(); }
+});
+
+test('/notify prunes an Android token FCM reports UNREGISTERED and never touches APNs tokens', async () => {
+  const env = { ...fakeEnv(), FCM_SERVICE_ACCOUNT: fcmSa() };
+  const id = identity();
+  await register(env, id, TOKEN_A);
+  await registerAndroid(env, id);
+  const fcm = stubFcm(404);
+  try {
+    const res = await worker.fetch(post('/notify', { nodeId: id.nodeId, ciphertext: 'YQ==' }), env);
+    assert.equal(res.status, 200, 'the iOS device still succeeded');
+    const rec = JSON.parse(env.TOKENS.map.get(id.nodeId).value);
+    assert.deepEqual(rec.tokens.map((t) => t.token), [TOKEN_A], 'dead Android token dropped, iOS kept');
+    assert.ok(fcm.calls.some((c) => c.url.endsWith(TOKEN_A)), 'APNs got only the hex token');
+    assert.ok(!fcm.calls.some((c) => c.url.includes('apple.com') && c.url.includes(FCM_TOKEN)));
+  } finally { fcm.restore(); }
+});
+
+test('Android push is a silent no-op until FCM_SERVICE_ACCOUNT is configured', async () => {
+  const env = fakeEnv();   // no service account
+  const id = identity();
+  await registerAndroid(env, id);
+  const fcm = stubFcm(200);
+  try {
+    const res = await worker.fetch(post('/notify', { nodeId: id.nodeId, ciphertext: 'YQ==' }), env);
+    assert.ok([200, 502].includes(res.status), 'never a 500');
+    assert.equal(fcm.calls.length, 0, 'nothing is sent');
+  } finally { fcm.restore(); }
+});
+
+test('/call wakes Android with a short-lived data message and does not send its token to APNs', async () => {
+  const env = { ...fakeEnv(), FCM_SERVICE_ACCOUNT: fcmSa() };
+  const id = identity();
+  await registerAndroid(env, id);
+  const fcm = stubFcm(200);
+  try {
+    const res = await worker.fetch(post('/call', { nodeId: id.nodeId, ciphertext: 'c2VhbGVk' }), env);
+    assert.equal(res.status, 200);
+    const send = fcm.calls.find((c) => c.url.includes('messages:send'));
+    assert.deepEqual(send.body.message.data, { w: '1', c: '1' });
+    assert.equal(send.body.message.android.ttl, '45s');
+    assert.equal(fcm.calls.filter((c) => c.url.includes('apple.com')).length, 0);
+  } finally { fcm.restore(); }
+});

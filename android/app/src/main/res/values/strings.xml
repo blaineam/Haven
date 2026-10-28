@@ -382,6 +382,9 @@
     <string name="car_open_haven">Open Haven on your phone to place calls.</string>
     <string name="settings_stay_connected_header">Stay connected</string>
     <string name="settings_stay_connected_desc">Stay connected for instant posts, messages, and calls. Uses a little battery.</string>
+    <string name="settings_push_header">Push wake-up (Google)</string>
+    <string name="settings_push_desc">Lets Google\'s push service ring a doorbell when something arrives while Haven is asleep. Google sees only the timing and this phone\'s push token, never any content — Haven then fetches and decrypts the message itself. Off by default.</string>
+    <string name="settings_push_wake">Wake with push</string>
     <string name="settings_realtime_connection">Real-time connection</string>
     <string name="settings_nearby_header">Nearby (offline)</string>
     <string name="settings_nearby_desc">Share with people right next to you over Bluetooth/Wi-Fi — no internet needed.</string>

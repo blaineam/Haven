@@ -379,6 +379,9 @@ O que já tentei:
     <string name="car_open_haven">Abra o Haven no seu telefone para fazer chamadas.</string>
     <string name="settings_stay_connected_header">Fique conectado</string>
     <string name="settings_stay_connected_desc">Fique conectado para receber publicações, mensagens e chamadas na hora. Usa um pouco de bateria.</string>
+    <string name="settings_push_header">Despertar por push (Google)</string>
+    <string name="settings_push_desc">Permite que o serviço push do Google avise quando algo chega enquanto o Haven dorme. O Google vê apenas o horário e o token push deste telefone, nunca o conteúdo — o Haven busca e descriptografa a mensagem por conta própria. Desativado por padrão.</string>
+    <string name="settings_push_wake">Despertar com push</string>
     <string name="settings_realtime_connection">Conexão em tempo real</string>
     <string name="settings_nearby_header">Por perto (offline)</string>
     <string name="settings_nearby_desc">Compartilhe com quem está bem do seu lado por Bluetooth/Wi-Fi — sem precisar de internet.</string>

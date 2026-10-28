@@ -29,3 +29,28 @@ is free; the Worker is free to 100k req/day (~$5/mo at 10M). No third-party SDK,
 - Call `/notify` on the mailbox-upload path (offline recipient).
 
 Dev builds use the sandbox: register with `sandbox: true`.
+
+## Android wake-up via FCM (optional)
+
+Android has no APNs, so a pocketed phone that the OS has killed only hears about a DM when the app is
+reopened. The worker can ring it with a **content-free FCM data message** — a doorbell, nothing else.
+The app then pulls and decrypts the real message from its relay. Google sees timing + the device's push
+token, never content (the same level of metadata Apple sees for APNs).
+
+- `POST /register { nodeId, token, platform:"android", ts, sig }` — `token` is the FCM registration token;
+  `sig` is the identity signature over `fcm-v1:<token>` (the prefix keeps it disjoint from APNs/`/flag`).
+- `/notify` and `/call` send `{ w:"1" }` (`c:"1"` for a call, 45 s TTL) at high priority to Android tokens.
+  A dead token (FCM `UNREGISTERED`/404/`INVALID_ARGUMENT`) is pruned automatically.
+- **Off until configured:** with no `FCM_SERVICE_ACCOUNT` secret the worker never calls FCM and Android
+  simply stays on its foreground service.
+
+### Owner setup
+1. Firebase console → create a project (no Analytics) → add an **Android app** `com.blaineam.haven`.
+2. Project settings → Service accounts → **Generate new private key** (JSON).
+3. `wrangler secret put FCM_SERVICE_ACCOUNT < key.json` then `wrangler deploy`.
+4. Build the Android app with the Firebase web-app values (Project settings → Your apps): Gradle
+   properties `havenFcmProjectId`, `havenFcmAppId`, `havenFcmApiKey`, `havenFcmSenderId`, or the env vars
+   `HAVEN_FCM_PROJECT_ID`, `HAVEN_FCM_APP_ID`, `HAVEN_FCM_API_KEY`, `HAVEN_FCM_SENDER_ID` (CI secrets).
+   No `google-services.json` and no Gradle plugin are used.
+5. In the app: Settings ▸ Connection ▸ **Push wake-up (Google)** (default off; hidden when the build has no
+   Firebase values or the phone has no Play services).

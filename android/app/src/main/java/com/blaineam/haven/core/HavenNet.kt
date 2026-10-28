@@ -761,6 +761,7 @@ object HavenNet : InboundListener {
                 withContext(Dispatchers.Main) { started.value = true }
                 Log.i(TAG, "node started: ${node?.nodeIdHex()}")
                 publishAccountDevices()   // account id -> my device ids, so contacts can dial me relay-free
+                runCatching { FcmPush.sync(appContext) }   // optional FCM wake-up: no-op unless opted in + configured
                 watchNetworkPath()        // path change → re-open iroh dial gates once
                 // Matrix QA: dump our public identity so Scripts/qa-exchange-bundles.sh can seed iOS,
                 // and ingest qa-peer-bundle.bin if the driver staged a sim peer (HTTP-mailbox stub path
@@ -4556,6 +4557,22 @@ object HavenNet : InboundListener {
             .put("nodeId", accountNodeHex)
             .put("event", Base64.encodeToString(env, Base64.NO_WRAP))
             .put("silent", true))
+    }
+
+    /** Register this device's FCM token with the push worker under my node id (optional Android wake-up,
+     *  [FcmPush]). Signed over `fcm-v1:<token>` so the worker can verify it is mine and a signature made
+     *  for APNs or a /flag can't be replayed here. Fire-and-forget: polling stays the fallback. */
+    fun registerAndroidPushToken(token: String) {
+        val acct = core.account ?: return
+        if (token.isEmpty() || HavenOffline.enabled) return
+        val ts = System.currentTimeMillis() / 1000
+        val sig = acct.signPushRegistration(FcmPolicy.registrationMaterial(token), ts.toULong())
+        pushPost("/register", JSONObject()
+            .put("nodeId", accountNodeHex)
+            .put("token", token)
+            .put("platform", "android")
+            .put("ts", ts)
+            .put("sig", Base64.encodeToString(sig, Base64.NO_WRAP)))
     }
 
     /** The push worker's base URL. A seam for the JVM tests, which point it at an in-process server so no

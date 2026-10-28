@@ -333,6 +333,17 @@
         <!-- Oldest Car App API level this app can run on. ConversationItem (the Messages entry) needs level 7, and the
              setting is app-wide; every Android Auto host of the last two years is above it. -->
         <meta-data android:name="androidx.car.app.minCarApiLevel" android:value="7" />
+        <!-- Optional FCM wake-up. Firebase never initialises on its own: auto-init and analytics are
+             off, FcmPush starts it only when the user opts in. Tools-replace so a library default can't re-enable them. -->
+        <meta-data android:name="firebase_messaging_auto_init_enabled" android:value="false" />
+        <meta-data android:name="firebase_analytics_collection_enabled" android:value="false" />
+        <service
+            android:name=".core.HavenFcmService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
         <service
             android:name=".core.ConnectionService"
             android:exported="false"

@@ -28,6 +28,14 @@ android {
         manifestPlaceholders["carCallingCategory"] = if (carApp) "androidx.car.app.category.CALLING" else "com.blaineam.haven.category.CAR_APP_OFF_CALLING"
         manifestPlaceholders["carMessagingCategory"] = if (carApp) "androidx.car.app.category.MESSAGING" else "com.blaineam.haven.category.CAR_APP_OFF_MESSAGING"
         manifestPlaceholders["carAppEnabled"] = carApp.toString()
+        // Optional FCM wake-up (docs/NOTIFICATIONS.md "Android push"). The owner's Firebase web-app values; blank
+        // = push is compiled out at runtime (no Firebase init, no google-services plugin, no json in the repo).
+        // Gradle property (-PhavenFcmProjectId=…) or env (HAVEN_FCM_PROJECT_ID) so CI can supply them as secrets.
+        fun fcm(prop: String, env: String) = ((project.findProperty(prop) as String?) ?: System.getenv(env) ?: "").replace("\"", "")
+        buildConfigField("String", "FCM_PROJECT_ID", "\"${fcm("havenFcmProjectId", "HAVEN_FCM_PROJECT_ID")}\"")
+        buildConfigField("String", "FCM_APP_ID", "\"${fcm("havenFcmAppId", "HAVEN_FCM_APP_ID")}\"")
+        buildConfigField("String", "FCM_API_KEY", "\"${fcm("havenFcmApiKey", "HAVEN_FCM_API_KEY")}\"")
+        buildConfigField("String", "FCM_SENDER_ID", "\"${fcm("havenFcmSenderId", "HAVEN_FCM_SENDER_ID")}\"")
         // Our own runner, so the whole instrumented-test process is hermetic before
         // `HavenApplication.onCreate` can schedule a mailbox poll. See HavenTestRunner.
         testInstrumentationRunner = "com.blaineam.haven.HavenTestRunner"
@@ -218,6 +226,11 @@ dependencies {
 
     // Nearby Connections — offline mesh over BLE/Wi-Fi (the Android take on MultipeerConnectivity).
     implementation("com.google.android.gms:play-services-nearby:19.3.0")
+
+    // Optional FCM wake-up: messaging ONLY (no analytics / no google-services plugin). The app initialises
+    // Firebase itself from BuildConfig values and only when the user opts in AND Play services exist; the
+    // payload is a content-free wake, the real message is pulled from the relay. See FcmPush.
+    implementation("com.google.firebase:firebase-messaging:24.1.0")
 
     // WebRTC (maintained libwebrtc fork, prebuilt .so) for mesh group calls — Android side of
     // the same DTLS-SRTP media + SDP/ICE-over-sealed-channel design as iOS.

@@ -345,6 +345,9 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="car_open_haven">Ouvrez Haven sur votre téléphone pour passer des appels.</string>
     <string name="settings_stay_connected_header">Rester connecté</string>
     <string name="settings_stay_connected_desc">Restez connecté pour recevoir publications, messages et appels instantanément. Consomme un peu de batterie.</string>
+    <string name="settings_push_header">Réveil push (Google)</string>
+    <string name="settings_push_desc">Permet au service push de Google de sonner quand quelque chose arrive pendant que Haven dort. Google ne voit que l\'heure et le jeton push de ce téléphone, jamais le contenu : Haven récupère et déchiffre le message lui-même. Désactivé par défaut.</string>
+    <string name="settings_push_wake">Réveiller par push</string>
     <string name="settings_realtime_connection">Connexion en temps réel</string>
     <string name="settings_nearby_header">À proximité (hors ligne)</string>
     <string name="settings_nearby_desc">Partagez avec les personnes juste à côté de vous via Bluetooth/Wi-Fi — sans internet.</string>

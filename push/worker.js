@@ -23,10 +23,14 @@ export default {
         // A node id can have MULTIPLE devices (multi-device / linked devices) — keep a list of
         // tokens, not one, so a push reaches every device on that identity.
         const { nodeId, token, sandbox, platform, ts, sig } = await request.json();
-        if (!nodeId || !hexToken(token)) return json({ error: "nodeId + token required" }, 400);
+        // Android registers an FCM token (not hex). Its signature covers `fcm-v1:<token>` so a
+        // signature made for an APNs token or a /flag can never be replayed as an Android
+        // registration (the prefix keeps the message spaces disjoint — see flagMaterial).
+        const android = platform === "android";
+        if (!nodeId || !(android ? fcmToken(token) : hexToken(token))) return json({ error: "nodeId + token required" }, 400);
         // The registration must be signed by the identity (audit F5) — stops anyone registering
         // their token under someone else's node id (token hijack / eviction of the real device).
-        if (!(await verifyReg(nodeId, token, ts, sig))) return json({ error: "unauthorized" }, 401);
+        if (!(await verifyReg(nodeId, android ? `fcm-v1:${token}` : token, ts, sig))) return json({ error: "unauthorized" }, 401);
         const rec = (await env.TOKENS.get(nodeId, "json")) || { tokens: [] };
         const tokens = (rec.tokens || (rec.token ? [{ token: rec.token, sandbox: rec.sandbox }] : []))
           .filter((t) => t.token !== token);
@@ -87,13 +91,23 @@ export default {
         const { nodeId, ciphertext } = await request.json();
         if (!nodeId) return json({ error: "nodeId required" }, 400);
         if (await rateLimited(env, request, "call")) return json({ ok: true }, 200);
-        const jwt = await providerToken(env);
         // A call push that lands after the caller gave up (~30s) must NOT ring a ghost call —
         // tell APNs to drop it instead of storing-and-forwarding it minutes later.
         const expiry = String(Math.floor(Date.now() / 1000) + 45);
         const rec = await env.TOKENS.get(`voip:${nodeId}`, "json");
         // Every registered iOS device of this identity (list; legacy single-record migrated).
         const voip = rec ? (rec.tokens || (rec.token ? [{ token: rec.token, sandbox: rec.sandbox }] : [])) : [];
+        const nrecAll = await env.TOKENS.get(nodeId, "json");
+        const allTokens = nrecAll ? (nrecAll.tokens || (nrecAll.token ? [{ token: nrecAll.token, sandbox: nrecAll.sandbox }] : [])) : [];
+        // Android has no VoIP token: a high-priority data-only wake makes the app poll its live-call
+        // lane at once. Content-free, like the APNs path (the caller's name never leaves the sealed frame).
+        const droids = allTokens.filter((t) => t.platform === "android");
+        if (droids.length) {
+          const dead = await sendFcmWake(env, droids, { c: "1" }, 45);
+          if (dead.length) await pruneTokens(env, nodeId, dead);
+        }
+        const nonDroid = allTokens.filter((t) => t.platform !== "android");
+        const jwt = (voip.length || nonDroid.length) ? await providerToken(env) : null;
         const survivors = [];
         let anyOk = false;
         for (const t of voip) {
@@ -121,8 +135,7 @@ export default {
         // the regular alert path loudly instead of silently doing nothing. The NSE decrypts the
         // same sealed {t,h} payload into "Incoming call"; macOS gets its usual silent+decrypt.
         if (!anyOk) {
-          const nrec = await env.TOKENS.get(nodeId, "json");
-          const ntokens = nrec ? (nrec.tokens || (nrec.token ? [{ token: nrec.token, sandbox: nrec.sandbox }] : [])) : [];
+          const ntokens = nonDroid;
           for (const t of ntokens) {
             const host = t.sandbox ? "api.sandbox.push.apple.com" : (env.APNS_HOST || "api.push.apple.com");
             const quiet = t.platform === "macos";
@@ -205,6 +218,17 @@ export default {
         // Uniform response for an unknown node (audit F6) — no existence oracle.
         if (!tokens.length) return json({ ok: true }, 200);
 
+        // Android: a content-free, high-priority data wake. The app pulls the real message from the
+        // relay itself, so nothing readable ever passes through the worker or FCM.
+        const droids = tokens.filter((t) => t.platform === "android");
+        let droidOk = false;
+        if (droids.length) {
+          const dead = await sendFcmWake(env, droids, {}, 300);
+          droidOk = dead.length < droids.length;
+          if (dead.length) await pruneTokens(env, nodeId, dead);
+        }
+        const apnsTokens = tokens.filter((t) => t.platform !== "android");
+        if (!apnsTokens.length) return json({ ok: droidOk, devices: tokens.length }, droidOk ? 200 : 502);
         const jwt = await providerToken(env);
         // Payload is per-token: macOS has no Notification Service Extension, so instead of an
         // alert+mutable-content push (which the iOS NSE rewrites in place), we send macOS a
@@ -239,8 +263,8 @@ export default {
         };
 
         const survivors = [];
-        let anyOk = false;
-        for (const t of tokens) {
+        let anyOk = droidOk;
+        for (const t of apnsTokens) {
           const host = t.sandbox ? "api.sandbox.push.apple.com" : (env.APNS_HOST || "api.push.apple.com");
           // macOS uses a silent (background) push so the app can decrypt + notify itself.
           const quiet = silent || t.platform === "macos";
@@ -258,8 +282,10 @@ export default {
           else await logApns(`notify/${t.platform || "ios"}`, res, t.token);
           if (res.status !== 410) survivors.push(t);   // drop tokens APNs says are dead
         }
-        if (survivors.length !== tokens.length) {
-          if (survivors.length) await env.TOKENS.put(nodeId, JSON.stringify({ tokens: survivors }));
+        if (survivors.length !== apnsTokens.length) {
+          // Re-read so a concurrent Android prune above isn't undone, then keep every live token.
+          const keep = [...survivors, ...((await env.TOKENS.get(nodeId, "json"))?.tokens || []).filter((t) => t.platform === "android")];
+          if (keep.length) await env.TOKENS.put(nodeId, JSON.stringify({ tokens: keep }));
           else await env.TOKENS.delete(nodeId);
         }
         return json({ ok: anyOk, devices: tokens.length }, anyOk ? 200 : 502);
@@ -405,6 +431,83 @@ function rateLimited(env, request, bucket, limit = 60) {
 // puts the actual cause in a JSON `reason` (BadDeviceToken, ExpiredProviderToken, TopicDisallowed,
 // InvalidProviderToken …), which is exactly the thing needed to tell "this one token is stale" apart
 // from "no push has worked for anyone since the credentials changed". `wrangler tail` surfaces it.
+/// FCM registration tokens: URL-safe base64 plus `:` and `-`, ~150-200 chars in practice.
+const fcmToken = (t) => /^[A-Za-z0-9_:\-]{50,4096}$/.test(t || "");
+
+/// Drop the given tokens from a node's list (a token the provider reported dead).
+async function pruneTokens(env, nodeId, dead) {
+  const rec = await env.TOKENS.get(nodeId, "json");
+  const keep = (rec?.tokens || []).filter((t) => !dead.includes(t.token));
+  if (keep.length) await env.TOKENS.put(nodeId, JSON.stringify({ tokens: keep }));
+  else await env.TOKENS.delete(nodeId);
+}
+
+// ---- FCM (HTTP v1) data-only wake, optional: no-op unless FCM_SERVICE_ACCOUNT is set ----
+let _fcm = { token: null, at: 0 };
+async function fcmAccessToken(env) {
+  const now = Math.floor(Date.now() / 1000);
+  if (_fcm.token && now - _fcm.at < 3000) return _fcm.token;
+  const sa = JSON.parse(env.FCM_SERVICE_ACCOUNT);
+  const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const claims = b64url(JSON.stringify({
+    iss: sa.client_email,
+    scope: "https://www.googleapis.com/auth/firebase.messaging",
+    aud: sa.token_uri || "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
+  }));
+  const input = `${header}.${claims}`;
+  const key = await crypto.subtle.importKey(
+    "pkcs8", pemToBytes(sa.private_key),
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]
+  );
+  const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(input));
+  const res = await fetch(sa.token_uri || "https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: `grant_type=${encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer")}&assertion=${input}.${b64urlBytes(new Uint8Array(sig))}`,
+  });
+  if (!res.ok) throw new Error(`fcm oauth ${res.status}`);
+  _fcm = { token: (await res.json()).access_token, at: now };
+  return _fcm.token;
+}
+
+/// Send a bare wake to each Android token. The payload carries NO content (`w`, plus `c` for a
+/// call) — the app wakes, pulls the real message from the relay and decrypts it itself. Returns the
+/// tokens FCM says are gone so the caller can prune them. Never throws: push is best-effort, and a
+/// missing/invalid service account just means Android stays on its foreground service.
+async function sendFcmWake(env, tokens, extra, ttlSeconds) {
+  const dead = [];
+  if (!env.FCM_SERVICE_ACCOUNT) return dead;
+  let project, access;
+  try {
+    project = JSON.parse(env.FCM_SERVICE_ACCOUNT).project_id;
+    access = await fcmAccessToken(env);
+  } catch (e) {
+    console.error(`FCM auth failed: ${String(e).slice(0, 120)}`);
+    return dead;
+  }
+  for (const t of tokens) {
+    const res = await fetch(`https://fcm.googleapis.com/v1/projects/${project}/messages:send`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${access}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        message: {
+          token: t.token,
+          data: { w: "1", ...extra },
+          android: { priority: "HIGH", ttl: `${ttlSeconds}s`, collapse_key: extra.c ? "haven-call" : "haven" },
+        },
+      }),
+    });
+    if (res.ok) continue;
+    let status = "";
+    try { status = ((await res.clone().json()).error || {}).status || ""; } catch { /* not JSON */ }
+    console.error(`FCM FAIL status=${res.status} ${status} token=${String(t.token).slice(0, 8)}…`);
+    if (res.status === 404 || status === "UNREGISTERED" || status === "INVALID_ARGUMENT") dead.push(t.token);
+  }
+  return dead;
+}
+
 async function logApns(where, res, token) {
   let reason = "";
   try { reason = ((await res.clone().json()) || {}).reason || ""; } catch { /* body not JSON */ }

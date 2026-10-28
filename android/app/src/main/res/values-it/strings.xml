@@ -344,6 +344,9 @@
     <string name="car_open_haven">Apri Haven sul telefono per fare chiamate.</string>
     <string name="settings_stay_connected_header">Resta connesso</string>
     <string name="settings_stay_connected_desc">Resta connesso per ricevere post, messaggi e chiamate all\'istante. Consuma poca batteria.</string>
+    <string name="settings_push_header">Sveglia push (Google)</string>
+    <string name="settings_push_desc">Permette al servizio push di Google di suonare quando arriva qualcosa mentre Haven dorme. Google vede solo l\'orario e il token push di questo telefono, mai il contenuto: Haven recupera e decifra il messaggio da solo. Disattivato per impostazione predefinita.</string>
+    <string name="settings_push_wake">Sveglia con push</string>
     <string name="settings_realtime_connection">Connessione in tempo reale</string>
     <string name="settings_nearby_header">Nelle vicinanze (offline)</string>
     <string name="settings_nearby_desc">Condividi con chi ti sta accanto via Bluetooth/Wi-Fi — senza bisogno di internet.</string>

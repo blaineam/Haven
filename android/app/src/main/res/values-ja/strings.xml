@@ -344,6 +344,9 @@
     <string name="car_open_haven">通話するには、スマートフォンでHavenを開いてください。</string>
     <string name="settings_stay_connected_header">接続を維持</string>
     <string name="settings_stay_connected_desc">投稿・メッセージ・通話をすぐに受け取れるよう、接続を維持します。バッテリーを少し使います。</string>
+    <string name="settings_push_header">プッシュ通知で起こす（Google）</string>
+    <string name="settings_push_desc">Havenがスリープ中に何かが届いたとき、Googleのプッシュサービスで知らせます。Googleが見るのは時刻とこの端末のプッシュトークンだけで、内容は一切見えません。メッセージはHaven自身が取得して復号します。初期設定はオフです。</string>
+    <string name="settings_push_wake">プッシュで起こす</string>
     <string name="settings_realtime_connection">リアルタイム接続</string>
     <string name="settings_nearby_header">ニアバイ（オフライン）</string>
     <string name="settings_nearby_desc">すぐそばにいる人と Bluetooth / Wi-Fi で共有できます。インターネットは要りません。</string>

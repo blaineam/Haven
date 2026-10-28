@@ -344,6 +344,9 @@
     <string name="car_open_haven">请在手机上打开 Haven 以拨打电话。</string>
     <string name="settings_stay_connected_header">保持连接</string>
     <string name="settings_stay_connected_desc">保持连接，即时收到动态、消息和通话。会消耗少量电量。</string>
+    <string name="settings_push_header">推送唤醒（Google）</string>
+    <string name="settings_push_desc">当 Haven 休眠时有新内容到达，由 Google 推送服务提醒。Google 只能看到时间和本手机的推送令牌，看不到任何内容——Haven 会自行获取并解密消息。默认关闭。</string>
+    <string name="settings_push_wake">通过推送唤醒</string>
     <string name="settings_realtime_connection">实时连接</string>
     <string name="settings_nearby_header">附近（离线）</string>
     <string name="settings_nearby_desc">通过蓝牙/Wi-Fi 与身边的人分享——无需联网。</string>

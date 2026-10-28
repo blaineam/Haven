@@ -344,6 +344,9 @@
     <string name="car_open_haven">Öffne Haven auf deinem Telefon, um Anrufe zu tätigen.</string>
     <string name="settings_stay_connected_header">Verbunden bleiben</string>
     <string name="settings_stay_connected_desc">Bleib verbunden für Beiträge, Nachrichten und Anrufe in Echtzeit. Braucht etwas Akku.</string>
+    <string name="settings_push_header">Push-Weckruf (Google)</string>
+    <string name="settings_push_desc">Lässt Googles Push-Dienst anklingeln, wenn etwas eintrifft, während Haven schläft. Google sieht nur den Zeitpunkt und das Push-Token dieses Telefons, niemals Inhalte – Haven holt und entschlüsselt die Nachricht selbst. Standardmäßig aus.</string>
+    <string name="settings_push_wake">Per Push aufwecken</string>
     <string name="settings_realtime_connection">Echtzeitverbindung</string>
     <string name="settings_nearby_header">In der Nähe (offline)</string>
     <string name="settings_nearby_desc">Teile mit Leuten direkt neben dir – über Bluetooth/WLAN, ganz ohne Internet.</string>

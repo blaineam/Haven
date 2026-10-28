@@ -133,3 +133,14 @@ ASC capability). Both targets carry `keychain-access-groups` with `…kith.share
 **#51 — shipped (app side).** Self-run Cloudflare Worker + NSE, encrypted payloads. Cost ≈ $0
 to start, $5/mo at real scale. Not fully decentralized (impossible on iOS), but zero-knowledge
 on content and operated by us, not a vendor.
+
+
+## Android push (optional FCM wake-up)
+
+Android delivers in real time through the `ConnectionService` foreground service (typed `remoteMessaging`, no
+time budget on Android 14+). On low-RAM phones the OS can still kill the process, so there is an **opt-in**
+FCM doorbell: the push worker sends a data-only, high-priority `{w:1}` (`{w:1,c:1}` for a call) — no content —
+and `HavenFcmService` enqueues an expedited `SyncWorker` that pulls and decrypts from the relay. Privacy model =
+APNs: Google sees timing and the push token only. Default OFF; hidden without Firebase build values or Play
+services (GrapheneOS / de-Googled phones keep the foreground service). Setup: `push/README.md`.
+Code: `FcmPolicy` (rules), `FcmPush` (opt-in + registration), `HavenFcmService`, `HavenNet.registerAndroidPushToken`.

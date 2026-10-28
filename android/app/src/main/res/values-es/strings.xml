@@ -593,6 +593,8 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="call_incoming_call">Llamada entrante</string>
     <string name="call_tap_to_return">Toca para volver</string>
     <string name="call_connecting">Conectando…</string>
+    <string name="call_status_calling">Llamando…</string>
+    <string name="call_status_connected">Conectado</string>
     <string name="call_screen_share_notice">%1$s está compartiendo su pantalla</string>
     <string name="call_add_to_call_title">Añadir a la llamada</string>
     <string name="onb_tagline">Tus amigos y tu familia. Eso es todo el producto.</string>

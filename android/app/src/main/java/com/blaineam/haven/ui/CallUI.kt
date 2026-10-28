@@ -294,6 +294,7 @@ private fun InCall() {
     // A peer sharing their screen takes over the main view (aspect-fit, whole screen visible).
     val screenShareEntry = CallManager.remoteScreen.entries.firstOrNull { it.value != null }
     Box(Modifier.fillMaxSize().consumesTaps().background(Color.Black)) {
+        CallStatusPill(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 16.dp))
         when {
             screenShareEntry != null -> {
                 CallVideoTile(screenShareEntry.value, Modifier.fillMaxSize(), fit = true)
@@ -484,4 +485,26 @@ private fun RoundButton(icon: ImageVector, bg: Color, desc: String, enabled: Boo
         Icon(icon, desc, modifier = Modifier.size(26.dp),
             tint = (if (bg == CallChip) Color.White else Color.Black).copy(alpha = if (enabled) 1f else 0.5f))
     }
+}
+
+
+/** Calling… → Connecting… → Connected, then the running time — so a dialing call never looks dead. */
+@Composable
+private fun CallStatusPill(modifier: Modifier) {
+    val connecting by CallManager.connecting
+    val inCall by CallManager.inCall
+    val media by CallManager.mediaConnected
+    val secs by androidx.compose.runtime.produceState(0, media) {
+        value = 0
+        if (media) while (true) { kotlinx.coroutines.delay(1000); value += 1 }
+    }
+    val text = when {
+        connecting && !inCall -> stringResource(R.string.call_status_calling)
+        inCall && !media -> stringResource(R.string.call_connecting)
+        media && secs < 3 -> stringResource(R.string.call_status_connected)
+        media -> "%d:%02d".format(secs / 60, secs % 60)
+        else -> return
+    }
+    Text(text, color = Color.White, fontSize = 14.sp, modifier = modifier
+        .clip(RoundedCornerShape(12.dp)).background(Color.Black.copy(alpha = 0.5f)).padding(horizontal = 12.dp, vertical = 5.dp))
 }

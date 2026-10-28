@@ -36,6 +36,8 @@ object CallManager {
     val ringing = mutableStateOf(false)
     val connecting = mutableStateOf(false)
     val inCall = mutableStateOf(false)
+    /** Media path to the peer is up (ICE connected / relayed). Drives the "Connecting…" → "Connected" status. */
+    val mediaConnected = mutableStateOf(false)
     /** True for the WHOLE call lifecycle (ringing → connecting → in progress). Feed/story media
      *  playback checks this so post music previews and video audio never compete with the call.
      *  Reading it inside a Composable subscribes to all three states (recomposes on any flip). */
@@ -159,6 +161,10 @@ object CallManager {
     // stale invite replayed late through a relay hop), we'd ring FOREVER. Ringing always stops
     // after this timeout and the call is treated as missed.
     private const val RING_TIMEOUT_MS = 60_000L
+
+    /** How long a caller dials before giving up — matches the 45 s VoIP-push expiry the worker uses, so a callee whose
+     *  phone never rang is not left dialing forever. */
+    private const val DIAL_TIMEOUT_MS = 45_000L
     /** Invites older than this (per the sender's frame-21 timestamp) never start a ring — the
      *  caller stopped dialing long ago. Generous enough to absorb ordinary clock skew. */
     private const val INVITE_MAX_AGE_SECS = 180L
@@ -401,11 +407,17 @@ object CallManager {
         isCaller = true
         telecomLive = true
         connecting.value = true
+        CallTones.startRingback()   // dial tone until the first peer connects (Apple CallTones parity)
+        callHandler.removeCallbacks(ringTimeoutRunnable)
+        callHandler.postDelayed(ringTimeoutRunnable, DIAL_TIMEOUT_MS)   // nobody answers → stop dialing and hang up
         uiHandler.post { com.blaineam.haven.ui.MusicPlayer.stop() }   // call audio owns the stage from the first dial
         refreshParticipants()
         // Frame 21 group invite to everyone.
         val frame = CallWire.groupInvite(myHex, sessionId, name, rosterCsv())
         invitees().forEach { send(CallWire.GROUP_INVITE, frame, it) }
+        // Wake each callee that isn't running Haven (VoIP push on iOS, FCM on Android) — the frame above only
+        // rings one that is already polling.
+        invitees().forEach { HavenNet.pushCallInvite(it, name, myHex) }
         startMesh()
     }
 
@@ -423,6 +435,7 @@ object CallManager {
         // they learn the newcomer and open a peer to them; handleGroupInvite fills the mesh in).
         val frame = CallWire.groupInvite(myHex, sessionId, peerName.value, rosterCsv())
         invitees().forEach { send(CallWire.GROUP_INVITE, frame, it) }
+        fresh.forEach { HavenNet.pushCallInvite(it, peerName.value, myHex) }
         if (mediaStarted) fresh.forEach { connectPeerIfNeeded(it) }
     }
 
@@ -456,7 +469,7 @@ object CallManager {
         runCatching { Notifications.clearIncomingCall(appContext) }
         callHandler.removeCallbacks(ringTimeoutRunnable)
         ringing.value = false
-        inCall.value = true
+        inCall.value = true; CallTones.stop()
         TelecomCalls.onEngineActive()
         ConnectionService.startForCall(appContext)   // same mic claim as the outbound path
         notifyOwnDevicesHandled()   // stop my OTHER devices ringing before they can join and take the audio
@@ -619,7 +632,7 @@ object CallManager {
                     callHandler.removeCallbacks(ringTimeoutRunnable)
                     ringing.value = false
                     connecting.value = false
-                    inCall.value = true
+                    inCall.value = true; CallTones.stop()
                     TelecomCalls.onEngineActive()
                     Log.i(TAG, "glare with ${from.take(8)} — both dialing, adopting shared session ${sessionId.take(20)}")
                     send(CallWire.ACCEPT, CallWire.accept(myHex, sessionId), from)
@@ -711,7 +724,14 @@ object CallManager {
 
     /** Nobody answered and no hangup ever arrived — stop ringing and record a missed call. */
     private fun ringTimedOut() {
-        if (!ringing.value || inCall.value) return
+        if (inCall.value) return
+        if (isCaller && connecting.value) {
+            // Caller side: nobody picked up. Hang up properly so the callee's late ring is cancelled too.
+            Log.i(TAG, "dial timeout after ${DIAL_TIMEOUT_MS / 1000}s — no answer, hanging up (session=${sessionId.take(12)})")
+            hangupOnCall()
+            return
+        }
+        if (!ringing.value) return
         Log.i(TAG, "ring timeout after ${RING_TIMEOUT_MS / 1000}s — ending as missed (session=${sessionId.take(12)})")
         val who = peerName.value
         endReason = TelecomPolicy.End.MISSED
@@ -736,7 +756,7 @@ object CallManager {
     private fun handleAccept(body: ByteArray) {
         val a = CallWire.parseAccept(body) ?: return
         if (!validSession(a.sessionId) || !knownContact(a.from)) return   // only a contact accepts (F3)
-        connecting.value = false; inCall.value = true
+        connecting.value = false; inCall.value = true; CallTones.stop()
         TelecomCalls.onEngineActive()
         if (roster.add(a.from)) refreshParticipants()
         startMesh()
@@ -1019,6 +1039,7 @@ object CallManager {
                 // inCall+ringing poison) and must not flip a CALLER before the peer accepted —
                 // inCall moves on ACCEPT alone; lost accepts heal via re-accept-on-retransmit.
                 if (ringing.value) return
+                mediaConnected.value = true   // media path is up (status: Connected + timer)
                 if (inCall.value) { /* established call: fall through to hairpin recovery */ }
                 connecting.value = false
                 // ICE RECOVERED while we were relaying — drop back to WebRTC's own (better) path.
@@ -1130,7 +1151,7 @@ object CallManager {
         // The relay IS the media path now, so the call is CONNECTED. Without saying so the UI sits on
         // "connecting" while audio is already flowing, and the dialing tone keeps looping.
         connecting.value = false
-        inCall.value = true
+        inCall.value = true; CallTones.stop(); mediaConnected.value = true
         TelecomCalls.onEngineActive()
         CallMediaBridge.activate(
             remote = peer,
@@ -1623,7 +1644,7 @@ object CallManager {
         speakerChoice = null
         speakerOn.value = true   // default for the next call
         sessionId = ""; mediaStarted = false; isCaller = false; nativeAudioSuspended = false
-        ringing.value = false; connecting.value = false; inCall.value = false; minimized.value = false
+        ringing.value = false; connecting.value = false; inCall.value = false; minimized.value = false; CallTones.stop(); mediaConnected.value = false
         peerName.value = ""
     }
 }

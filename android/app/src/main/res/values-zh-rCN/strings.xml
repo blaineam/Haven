@@ -586,6 +586,8 @@
     <string name="call_incoming_call">来电</string>
     <string name="call_tap_to_return">点按返回通话</string>
     <string name="call_connecting">正在连接…</string>
+    <string name="call_status_calling">正在呼叫…</string>
+    <string name="call_status_connected">已连接</string>
     <string name="call_screen_share_notice">%1$s 正在共享屏幕</string>
     <string name="call_add_to_call_title">添加到通话</string>
     <string name="onb_tagline">你的朋友，你的家人。这就是产品的全部。</string>

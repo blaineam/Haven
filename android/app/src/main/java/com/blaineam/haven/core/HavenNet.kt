@@ -4550,6 +4550,21 @@ object HavenNet : InboundListener {
         pushPost("/notify", body)
     }
 
+    /** Ring a callee that isn't running Haven (Apple PushManager.callPush / FeedStore.pushCallInvite parity): the
+     *  caller's name + node id sealed to THEM, sent through the blind worker's `/call` — their PushKit/FCM handler
+     *  opens it. Without this an Android→iPhone call only rang an iPhone that happened to be foreground, because
+     *  the invite frame itself rides the relay and nothing woke the phone to read it. Best-effort. */
+    fun pushCallInvite(nodeId: String, callerName: String, callerHex: String) {
+        if (nodeId.isEmpty() || HavenOffline.enabled) return
+        scope.launch {
+            val json = JSONObject().put("t", callerName).put("h", callerHex).toString().toByteArray(Charsets.UTF_8)
+            val sealed = runCatching { social.sealSignedNotification(nodeId, json) }.getOrNull()
+            if (sealed == null) Log.w(TAG, "pushCallInvite: seal failed for ${nodeId.take(8)} — ringing unnamed")
+            pushPost("/call", JSONObject().put("nodeId", nodeId)
+                .put("ciphertext", sealed?.let { Base64.encodeToString(it, Base64.NO_WRAP) } ?: "_"))
+        }
+    }
+
     /** Multi-device: deliver an envelope to my OWN other devices' push tokens — a silent
      *  content-available push (no self-notify), inline event, no mailbox round-trip. */
     private fun pushSyncSelf(env: ByteArray) {

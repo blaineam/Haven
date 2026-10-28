@@ -587,6 +587,8 @@
     <string name="call_incoming_call">Chiamata in arrivo</string>
     <string name="call_tap_to_return">Tocca per tornare</string>
     <string name="call_connecting">Connessione…</string>
+    <string name="call_status_calling">Chiamata in corso…</string>
+    <string name="call_status_connected">Connesso</string>
     <string name="call_screen_share_notice">%1$s sta condividendo lo schermo</string>
     <string name="call_add_to_call_title">Aggiungi alla chiamata</string>
     <string name="onb_tagline">I tuoi amici e la tua famiglia. Il prodotto è tutto qui.</string>

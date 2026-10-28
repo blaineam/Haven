@@ -587,6 +587,8 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="call_incoming_call">Appel entrant</string>
     <string name="call_tap_to_return">Touchez pour revenir</string>
     <string name="call_connecting">Connexion…</string>
+    <string name="call_status_calling">Appel en cours…</string>
+    <string name="call_status_connected">Connecté</string>
     <string name="call_screen_share_notice">%1$s partage son écran</string>
     <string name="call_add_to_call_title">Ajouter à l\'appel</string>
     <string name="onb_tagline">Vos amis et votre famille. C\'est tout le produit.</string>

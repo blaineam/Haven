@@ -587,6 +587,8 @@
     <string name="call_incoming_call">着信</string>
     <string name="call_tap_to_return">タップで通話に戻る</string>
     <string name="call_connecting">接続中…</string>
+    <string name="call_status_calling">発信中…</string>
+    <string name="call_status_connected">接続済み</string>
     <string name="call_screen_share_notice">%1$sさんが画面を共有しています</string>
     <string name="call_add_to_call_title">通話に追加</string>
     <string name="onb_tagline">友だちと家族。それがこのアプリのすべてです。</string>

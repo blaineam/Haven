@@ -629,6 +629,8 @@
     <string name="call_incoming_call">Incoming call</string>
     <string name="call_tap_to_return">Tap to return</string>
     <string name="call_connecting">Connecting…</string>
+    <string name="call_status_calling">Calling…</string>
+    <string name="call_status_connected">Connected</string>
     <string name="call_screen_share_notice">%1$s is sharing their screen</string>
     <string name="call_add_to_call_title">Add to call</string>
     <string name="onb_tagline">Your friends and your family. That\'s the whole product.</string>

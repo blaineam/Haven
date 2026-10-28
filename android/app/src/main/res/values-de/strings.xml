@@ -587,6 +587,8 @@
     <string name="call_incoming_call">Eingehender Anruf</string>
     <string name="call_tap_to_return">Zum Zurückkehren tippen</string>
     <string name="call_connecting">Verbinden…</string>
+    <string name="call_status_calling">Anruf…</string>
+    <string name="call_status_connected">Verbunden</string>
     <string name="call_screen_share_notice">%1$s teilt den Bildschirm</string>
     <string name="call_add_to_call_title">Zum Anruf hinzufügen</string>
     <string name="onb_tagline">Deine Freunde und deine Familie. Mehr ist es nicht.</string>

@@ -622,6 +622,8 @@ O que já tentei:
     <string name="call_incoming_call">Chamada recebida</string>
     <string name="call_tap_to_return">Toque para voltar</string>
     <string name="call_connecting">Conectando…</string>
+    <string name="call_status_calling">Chamando…</string>
+    <string name="call_status_connected">Conectado</string>
     <string name="call_screen_share_notice">%1$s está compartilhando a tela</string>
     <string name="call_add_to_call_title">Adicionar à chamada</string>
     <string name="onb_tagline">Seus amigos e sua família. O produto é só isso.</string>

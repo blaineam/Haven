@@ -587,6 +587,8 @@
     <string name="call_incoming_call">수신 전화</string>
     <string name="call_tap_to_return">탭해서 돌아가기</string>
     <string name="call_connecting">연결 중…</string>
+    <string name="call_status_calling">전화 거는 중…</string>
+    <string name="call_status_connected">연결됨</string>
     <string name="call_screen_share_notice">%1$s님이 화면을 공유하고 있어요</string>
     <string name="call_add_to_call_title">통화에 추가</string>
     <string name="onb_tagline">친구, 그리고 가족. 그게 전부예요.</string>

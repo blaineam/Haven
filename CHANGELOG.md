@@ -9,6 +9,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - Android outgoing calls: rings the iPhone, dial tone, status, and a dial timeout
+Android never called the push worker's `/call`, so an Android→iPhone call only rang an iPhone that was already foreground and polling; it now
+seals {caller name, id} to each callee and sends the VoIP push (Apple `pushCallInvite` parity). The caller now hears a ringback tone until the
+call connects, sees **Calling… → Connecting… → Connected** (then the running time), and an unanswered call hangs up after 45 s instead of
+dialing forever. Also: the FCM wake now starts the foreground service and the call stack immediately for a ring (the push-woken process had no
+call router, so invites were consumed and dropped), and passing `CallRuntime` ahead of the mailbox poll makes lock-screen answers beat the
+caller's give-up. New: `CallTones`, `CallStatusPill`, `HavenNet.pushCallInvite`, strings in 9 locales, `CallTonesTest`.
+
 ### Added - Android: optional FCM wake-up (content-free) via the push worker
 Opt-in doorbell for phones where Android kills Haven in the background (Settings ▸ Connection ▸ "Push wake-up (Google)",
 default off). The Cloudflare push worker now accepts `platform:"android"` registrations (signed over `fcm-v1:<token>`) and

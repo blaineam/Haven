@@ -1,8 +1,8 @@
 name: ms-store-cli-probe
 
-# READ-ONLY check of Microsoft's msstore CLI against Haven's Store listing: does `submission status` / `get` /
-# `getListingAssets` work for this packaged app now (the legacy submission-CREATE path broke in 2026-08)? Changes nothing.
-# Windows runner: the CLI stores its credentials in the OS credential manager (libsecret on Linux needs a keyring).
+# READ-ONLY check of Microsoft's msstore CLI against Haven's Store listing on a LINUX runner (the release lane's
+# home: the CLI takes listing JSON as an argument, and Windows' 32,767-char command-line cap is smaller than nine
+# languages of listing text). Linux needs libsecret + an unlocked keyring for the CLI's credential store.
 on:
   workflow_dispatch: {}
 
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   probe:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     env:
       STORE_TENANT_ID: ${{ secrets.STORE_TENANT_ID }}
       STORE_CLIENT_ID: ${{ secrets.STORE_CLIENT_ID }}
@@ -19,28 +19,26 @@ jobs:
       STORE_SELLER_ID: ${{ secrets.STORE_SELLER_ID }}
       STORE_APP_ID: ${{ secrets.STORE_APP_ID }}
     steps:
-      - name: Install msstore CLI
-        shell: pwsh
+      - name: Install msstore CLI + keyring
         run: |
-          $v = "v0.4.3"
-          Invoke-WebRequest "https://github.com/microsoft/msstore-cli/releases/download/$v/MSStoreCLI-win-x64.zip" -OutFile msstore.zip
-          Invoke-WebRequest "https://github.com/microsoft/msstore-cli/releases/download/$v/MSStoreCLI-win-x64.zip.sha256.txt" -OutFile msstore.sha
-          $want = ([regex]::Match((Get-Content msstore.sha -Raw), '[0-9a-fA-F]{64}')).Value
-          $got = (Get-FileHash msstore.zip -Algorithm SHA256).Hash
-          if ($want -ne $got) { throw "checksum mismatch: $want vs $got" }
-          Expand-Archive msstore.zip -DestinationPath bin
-          "$PWD\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
-          & .\bin\msstore.exe --version
-      - name: Configure
-        shell: pwsh
-        run: msstore reconfigure -v --tenantId $env:STORE_TENANT_ID --clientId $env:STORE_CLIENT_ID --clientSecret $env:STORE_CLIENT_SECRET --sellerId $env:STORE_SELLER_ID
-      - name: Read-only submission commands
-        shell: pwsh
-        continue-on-error: true
+          sudo apt-get update -qq && sudo apt-get install -y -qq libsecret-1-0 gnome-keyring dbus-user-session >/dev/null
+          curl -fsSL -o msstore.tgz https://github.com/microsoft/msstore-cli/releases/download/v0.4.3/MSStoreCLI-linux-x64.tar.gz
+          curl -fsSL -o msstore.sha https://github.com/microsoft/msstore-cli/releases/download/v0.4.3/MSStoreCLI-linux-x64.tar.gz.sha256.txt
+          WANT="$(tr -d '\000\r\n ' < msstore.sha | grep -oE '[0-9a-fA-F]{64}' | head -1)"
+          echo "$WANT  msstore.tgz" | sha256sum -c -
+          mkdir -p "$HOME/msstore-bin" && tar -xzf msstore.tgz -C "$HOME/msstore-bin" && chmod +x "$HOME/msstore-bin/msstore"
+      - name: Configure + read-only commands (inside a dbus session with an unlocked keyring)
         run: |
-          foreach ($c in "status","get","getListingAssets") {
-            Write-Host "::group::msstore submission $c"
-            msstore submission $c $env:STORE_APP_ID 2>&1 | Select-Object -First 80
-            Write-Host "exit=$LASTEXITCODE"
-            Write-Host "::endgroup::"
-          }
+          cat > run.sh <<'SH'
+          set -e
+          export PATH="$HOME/msstore-bin:$PATH"
+          echo "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+          msstore reconfigure --tenantId "$STORE_TENANT_ID" --clientId "$STORE_CLIENT_ID" --clientSecret "$STORE_CLIENT_SECRET" --sellerId "$STORE_SELLER_ID" 2>&1 | tail -4
+          for c in status get; do
+            echo "::group::msstore submission $c"
+            msstore submission $c "$STORE_APP_ID" 2>&1 | head -40 || true
+            echo "::endgroup::"
+          done
+          msstore submission get "$STORE_APP_ID" 2>/dev/null | wc -c | sed 's/^/submission JSON bytes: /'
+          SH
+          dbus-run-session -- bash run.sh

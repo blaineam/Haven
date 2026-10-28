@@ -2482,6 +2482,8 @@ object HavenNet : InboundListener {
                 messages = if (circleId.startsWith("dm:")) unreadInboundMessages(circleId, feed) else emptyList(),
             ),
         )
+        Log.i(TAG, "notify-plan circle=${circleId.take(12)} kind=${copy.kind} locked=$locked detail=$detail unreadMsgs=" +
+            "${if (circleId.startsWith("dm:")) unreadInboundMessages(circleId, feed).size else -1} → ${plan::class.simpleName}")
         if (plan is CarMessaging.Plan.Messaging) {
             CarNotifications.post(appContext, plan, link)
             return

@@ -1,0 +1,40 @@
+name: ms-store-cli-probe
+
+# READ-ONLY check of Microsoft's msstore CLI against Haven's Store listing: does `submission status` / `get` /
+# `getListingAssets` work for this packaged app now (the legacy submission-CREATE path broke in 2026-08)? Changes nothing.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      STORE_TENANT_ID: ${{ secrets.STORE_TENANT_ID }}
+      STORE_CLIENT_ID: ${{ secrets.STORE_CLIENT_ID }}
+      STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
+      STORE_SELLER_ID: ${{ secrets.STORE_SELLER_ID }}
+      STORE_APP_ID: ${{ secrets.STORE_APP_ID }}
+    steps:
+      - name: Install msstore CLI
+        run: |
+          curl -fsSL -o msstore.tgz https://github.com/microsoft/msstore-cli/releases/download/v0.4.3/MSStoreCLI-linux-x64.tar.gz
+          curl -fsSL -o msstore.sha https://github.com/microsoft/msstore-cli/releases/download/v0.4.3/MSStoreCLI-linux-x64.tar.gz.sha256.txt
+          echo "$(cut -d' ' -f1 msstore.sha)  msstore.tgz" | sha256sum -c -
+          mkdir -p bin && tar -xzf msstore.tgz -C bin && chmod +x bin/msstore
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+          bin/msstore --version
+      - name: Configure
+        run: msstore reconfigure --tenantId "$STORE_TENANT_ID" --clientId "$STORE_CLIENT_ID" --clientSecret "$STORE_CLIENT_SECRET" --sellerId "$STORE_SELLER_ID"
+      - name: Read-only submission commands
+        continue-on-error: true
+        run: |
+          set +e
+          for c in "status" "get" "getListingAssets"; do
+            echo "::group::msstore submission $c"
+            msstore submission $c "$STORE_APP_ID" 2>&1 | sed -E 's/("(accessToken|token)"\s*:\s*")[^"]+/\1***/g' | head -80
+            echo "exit=${PIPESTATUS[0]}"
+            echo "::endgroup::"
+          done

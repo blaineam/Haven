@@ -57,6 +57,13 @@ object CallRuntime {
         override fun initCalls() = CallManager.init(app, HavenNet.nodeIdHex)
     }
 
+    /**
+     * Blocking [ensureReady] for a caller already off the main thread — the FCM wake's worker. A process the
+     * OS started only to deliver a push has no UI, so without this the call router stays unset and every
+     * incoming call frame is fetched, marked seen and silently dropped (a DM arrived, the ring never did).
+     */
+    fun ensureReadyNow(context: Context): Boolean = ensureReady(ProdBoot(context.applicationContext))
+
     /** One serial lane: concurrent callers wait their turn instead of booting twice. */
     private val lane = Executors.newSingleThreadExecutor { r -> Thread(r, "haven-call-runtime").apply { isDaemon = true } }
     private val main = Handler(Looper.getMainLooper())

@@ -20,6 +20,9 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         // in the instrumented-test process too — so on a device carrying a real identity this was a
         // periodic mailbox poll running underneath `connectedDebugAndroidTest`.
         if (HavenOffline.enabled) return Result.success()
+        // A push wake (FcmPush) starts a UI-less process: bring the call stack up BEFORE the first poll, or an
+        // incoming call frame is consumed with no router and the ring is lost (see CallRuntime.ensureReadyNow).
+        if (inputData.getBoolean(EXTRA_PUSH_WAKE, false)) CallRuntime.ensureReadyNow(applicationContext)
         runCatching {
             HavenNet.init(applicationContext)
             HavenNet.pollMailbox()
@@ -32,6 +35,9 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
     }
 
     companion object {
+        /** Input flag set by [HavenFcmService]: this run was started by a content-free push wake. */
+        const val EXTRA_PUSH_WAKE = "push_wake"
+
         fun schedule(context: Context) {
             Notifications.ensureChannel(context)
             if (HavenOffline.enabled) return   // haven_no_net: nothing periodic to enqueue

@@ -25,6 +25,7 @@ class HavenFcmService : FirebaseMessagingService() {
         WorkManager.getInstance(applicationContext).enqueueUniqueWork(
             "haven.fcm.wake", ExistingWorkPolicy.REPLACE,
             OneTimeWorkRequestBuilder<SyncWorker>()
+                .setInputData(androidx.work.workDataOf(SyncWorker.EXTRA_PUSH_WAKE to true))
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                 .build())
     }

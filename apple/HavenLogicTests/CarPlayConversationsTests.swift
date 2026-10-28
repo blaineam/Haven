@@ -201,9 +201,13 @@ final class CarPlayConversationsTests: XCTestCase {
     // MARK: Search ("read earlier messages from Tracy")
 
     private func snap(_ n: Int) -> [MessagingSnapshot.Message] {
-        (0..<n).map { i in
-            .init(id: "m\(i)", author: "Tracy", isMe: i % 7 == 6, at: UInt64(1_800_000_000_000 + i * 60_000),
-                  text: i % 5 == 0 ? "lunch at noon? #\(i)" : "note \(i)", unread: i >= n - 3)
+        // Split into typed lets: the one-expression form exceeded the compiler's type-check budget on CI's toolchain.
+        (0..<n).map { (i: Int) -> MessagingSnapshot.Message in
+            let at: UInt64 = UInt64(1_800_000_000_000 + i * 60_000)
+            let text: String = (i % 5 == 0) ? "lunch at noon? #\(i)" : "note \(i)"
+            let mine: Bool = (i % 7 == 6)
+            let unread: Bool = (i >= n - 3)
+            return MessagingSnapshot.Message(id: "m\(i)", author: "Tracy", isMe: mine, at: at, text: text, unread: unread)
         }
     }
 

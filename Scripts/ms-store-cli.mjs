@@ -24,7 +24,7 @@
 
 import { existsSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { loadMetadata, toMsListing } from './lib/metadata.mjs';
 import { msCode } from './lib/locales.mjs';
 
@@ -103,7 +103,8 @@ if (dryRun) {
 }
 
 // 1. package → fresh draft (recreates the draft from the last published submission)
-ms(['publish', dirname(msix), '-i', msix, '-id', appId, '--noCommit', '-v']);
+// ABSOLUTE paths: the CLI resolves a relative input directory against its own location ("Input directory does not exist").
+ms(['publish', resolve(dirname(msix)), '-i', resolve(msix), '-id', appId, '--noCommit', '-v']);
 // 2-4. listing text onto that draft, together with the package it now holds
 const sub = patch(getSubmission());
 ms(['submission', 'update', appId, JSON.stringify(sub)]);

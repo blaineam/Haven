@@ -36,8 +36,18 @@
   <script>
     const q = new URLSearchParams(location.search);
     document.getElementById('shot').src = 'assets/renders/' + (q.get('img') || 'windows-feed.png');
-    const head = q.get('head') || 'A private home for <span class="g">your people</span>';
-    document.getElementById('head').innerHTML = head;
+    const headEl = document.getElementById('head');
+    const head = q.get('head');
+    if (head) {
+      // Query-string text is untrusted: render it as text, never as markup.
+      headEl.textContent = head;
+    } else {
+      headEl.append('A private home for ');
+      const g = document.createElement('span');
+      g.className = 'g';
+      g.textContent = 'your people';
+      headEl.append(g);
+    }
     document.getElementById('sub').textContent = q.get('sub') || 'End-to-end encrypted circles — now on Windows';
   </script>
 </body>

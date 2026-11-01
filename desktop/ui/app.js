@@ -3077,6 +3077,7 @@ function optimizeVideoStrippingMetadata(file, maxDim = MEDIA_TARGETS.VIDEO_LONG_
       startAudio();
       video.play().catch(fail);
     };
+    // codeql[js/xss-through-dom] -- `url` is a blob: URL from URL.createObjectURL(file), never markup.
     prepareAudio().finally(() => { video.src = url; });
   });
 }

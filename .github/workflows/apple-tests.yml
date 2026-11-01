@@ -32,6 +32,9 @@ concurrency:
   group: apple-tests-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   logic:
     runs-on: macos-15

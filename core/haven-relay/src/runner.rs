@@ -542,7 +542,8 @@ pub async fn run(cfg: Config, probation: bool) -> Result<bool> {
                         "  probe       : GET http://127.0.0.1:{front_port}/_haven  (route table JSON)"
                     );
                 }
-                println!("  http token : {}", cfg.http_token);
+                // The bearer token is a secret: keep it out of stdout/journald. It is in interface.json (below).
+                println!("  http token : (see \"token\" in interface.json)");
 
                 // Write a paste-ready interface blob so the app learns media URL + DERP fabric +
                 // TURN in one adopt (then re-announces frame 19 to the circle). Also on disk.

@@ -17,6 +17,9 @@ on:
       - "core/**"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test-core:
     runs-on: ubuntu-latest

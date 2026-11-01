@@ -205,7 +205,15 @@
     var rest = url.slice(at + SCREEN_SEGMENT.length).split('?')[0].split('#')[0];
     var hash = files[lang + '/' + rest];
     if (!hash) return null;
-    return url.slice(0, at) + '/screens/' + lang + '/' + rest + '?v=' + hash;
+    var out = url.slice(0, at) + '/screens/' + lang + '/' + rest + '?v=' + hash;
+    // The URL is rebuilt from DOM text: only ever hand back a same-origin
+    // http(s) URL so it can never become a javascript:/data: sink.
+    try {
+      var parsed = new URL(out, document.baseURI);
+      if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+          parsed.origin !== location.origin) return null;
+    } catch (e) { return null; }
+    return out;
   }
 
   function localizeSrcset(srcset, lang, files) {

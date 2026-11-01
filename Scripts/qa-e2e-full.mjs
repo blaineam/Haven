@@ -98,6 +98,7 @@ const NF_HOLD_MS = +(process.env.E2E_NF_HOLD_MS || 20_000);
 const REQUIRE_PERF = process.env.E2E_REQUIRE_PERF !== '0';
 
 function stamp() { return new Date().toISOString().replace(/[:T]/g, '-').slice(0, 16); }
+// codeql[js/clear-text-logging] -- progress text only; credentials are never interpolated here.
 function log(m) { const s = `[e2e ${new Date().toISOString().slice(11, 19)}] ${m}`; console.log(s); appendFileSync(join(OUT, 'run.log'), s + '\n'); }
 function sh(cmd, args, opts = {}) { return execFileSync(cmd, args, { encoding: 'utf8', ...opts }); }
 // Every adb call gets a ceiling. They are synchronous, so ONE hung `adb shell am start` (a wedged

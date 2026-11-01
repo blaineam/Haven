@@ -146,7 +146,7 @@ export async function getSubmissionStatus(api, appId, submissionId) {
 export async function uploadPackageZip(fileUploadUrl, zipPath) {
   if (!fileUploadUrl) throw new Error('submission has no fileUploadUrl — recreate the submission');
   const bytes = await readFile(zipPath);
-  const r = await fetch(fileUploadUrl.replace('+', '%2B'), {
+  const r = await fetch(fileUploadUrl.replaceAll('+', '%2B'), {
     method: 'PUT',
     headers: { 'x-ms-blob-type': 'BlockBlob', 'content-type': 'application/zip' },
     body: bytes,

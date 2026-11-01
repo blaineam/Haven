@@ -293,7 +293,8 @@ export default {
 
       return json({ error: "not found" }, 404);
     } catch (e) {
-      return json({ error: String(e) }, 500);
+      console.error(`request failed: ${String(e).slice(0, 200)}`);
+      return json({ error: "internal error" }, 500);
     }
   },
 

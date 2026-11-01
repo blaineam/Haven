@@ -454,14 +454,19 @@ const fcmSa = () => JSON.stringify({
   token_uri: 'https://oauth2.googleapis.com/token',
 });
 
+// Exact-host (or subdomain) match; a substring check would also accept evil.example/?x=apple.com.
+function onHost(u, domain) {
+  try { const h = new URL(u).hostname; return h === domain || h.endsWith('.' + domain); } catch { return false; }
+}
+
 function stubFcm(sendStatus = 200) {
   const calls = [];
   const real = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     const u = String(url);
-    calls.push({ url: u, init, body: init?.body && u.includes('fcm.googleapis.com') ? JSON.parse(init.body) : init?.body });
-    if (u.includes('oauth2.googleapis.com')) return new Response(JSON.stringify({ access_token: 'ya29.fake' }), { status: 200 });
-    if (u.includes('fcm.googleapis.com')) {
+    calls.push({ url: u, init, body: init?.body && onHost(u, 'fcm.googleapis.com') ? JSON.parse(init.body) : init?.body });
+    if (onHost(u, 'oauth2.googleapis.com')) return new Response(JSON.stringify({ access_token: 'ya29.fake' }), { status: 200 });
+    if (onHost(u, 'fcm.googleapis.com')) {
       return sendStatus === 200
         ? new Response('{}', { status: 200 })
         : new Response(JSON.stringify({ error: { status: 'UNREGISTERED' } }), { status: sendStatus });
@@ -521,7 +526,7 @@ test('/notify wakes an Android device with a data-only, content-free, high-prior
     assert.equal(m.notification, undefined, 'data-only: no notification block');
     assert.equal(m.android.priority, 'HIGH');
     assert.ok(!JSON.stringify(send.body).includes('c2VjcmV0'), 'ciphertext never reaches FCM');
-    assert.equal(fcm.calls.filter((c) => c.url.includes('apple.com')).length, 0, 'no APNs call for an Android-only node');
+    assert.equal(fcm.calls.filter((c) => onHost(c.url, 'apple.com')).length, 0, 'no APNs call for an Android-only node');
   } finally { fcm.restore(); }
 });
 
@@ -537,7 +542,7 @@ test('/notify prunes an Android token FCM reports UNREGISTERED and never touches
     const rec = JSON.parse(env.TOKENS.map.get(id.nodeId).value);
     assert.deepEqual(rec.tokens.map((t) => t.token), [TOKEN_A], 'dead Android token dropped, iOS kept');
     assert.ok(fcm.calls.some((c) => c.url.endsWith(TOKEN_A)), 'APNs got only the hex token');
-    assert.ok(!fcm.calls.some((c) => c.url.includes('apple.com') && c.url.includes(FCM_TOKEN)));
+    assert.ok(!fcm.calls.some((c) => onHost(c.url, 'apple.com') && c.url.includes(FCM_TOKEN)));
   } finally { fcm.restore(); }
 });
 
@@ -564,6 +569,6 @@ test('/call wakes Android with a short-lived data message and does not send its 
     const send = fcm.calls.find((c) => c.url.includes('messages:send'));
     assert.deepEqual(send.body.message.data, { w: '1', c: '1' });
     assert.equal(send.body.message.android.ttl, '45s');
-    assert.equal(fcm.calls.filter((c) => c.url.includes('apple.com')).length, 0);
+    assert.equal(fcm.calls.filter((c) => onHost(c.url, 'apple.com')).length, 0);
   } finally { fcm.restore(); }
 });

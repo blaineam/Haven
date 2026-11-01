@@ -20,7 +20,7 @@ export function parseUiNodes(xml) {
   const re = /<node\b([^>]*?)\/?>/g;
   const attr = (s, name) => {
     const m = s.match(new RegExp(`\\s${name}="([^"]*)"`));
-    return m ? m[1].replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'") : '';
+    return m ? m[1].replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&amp;/g, '&') : '';
   };
   for (let m; (m = re.exec(String(xml || ''))); ) {
     const a = m[1];

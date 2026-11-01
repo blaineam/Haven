@@ -26,7 +26,9 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 
 const API = 'https://api.appstoreconnect.apple.com';
-const die = (m) => { console.error(`✗ ${m}`); process.exit(1); };
+const redact = (m) => String(m).replace(/eyJ[\w-]+\.[\w-]+\.[\w-]*/g, '[redacted-jwt]').replace(/-----BEGIN [\s\S]*?-----END [^-]+-----/g, '[redacted-key]');
+// codeql[js/clear-text-logging] -- status/error text only; JWTs and PEM blocks are redacted by redact().
+const die = (m) => { console.error(`✗ ${redact(m)}`); process.exit(1); };
 const b64url = (b) => Buffer.from(b).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
 function parseArgs(argv) {

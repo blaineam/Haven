@@ -39,7 +39,9 @@ import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 
 const API = 'https://api.appstoreconnect.apple.com';
-const die = (m) => { console.error(`✗ ${m}`); summary(`❌ ${m}`); process.exit(1); };
+const redact = (m) => String(m).replace(/eyJ[\w-]+\.[\w-]+\.[\w-]*/g, '[redacted-jwt]').replace(/-----BEGIN [\s\S]*?-----END [^-]+-----/g, '[redacted-key]');
+// codeql[js/clear-text-logging] -- status/error text only; JWTs and PEM blocks are redacted by redact().
+const die = (m) => { console.error(`✗ ${redact(m)}`); summary(`❌ ${redact(m)}`); process.exit(1); };
 const log = (m) => console.log(`• ${m}`);
 const b64url = (b) => Buffer.from(b).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -324,7 +326,7 @@ const PLATFORM_SECTION_SUFFIX = { IOS: 'ios', MAC_OS: 'macos', TV_OS: 'tvos', VI
 // (translations) in the same release, and the shared section used to ship to both stores.
 async function notesByLocale(dir, platform) {
 	const suffix = PLATFORM_SECTION_SUFFIX[platform];
-	const section = (md, key) => { const m = md.match(new RegExp(`^##\\s+${key}\\s*$\\n([\\s\\S]*?)(?=^##\\s+|\\s*$(?![\\s\\S]))`, 'm')); return m ? m[1].replace(/<!--[\s\S]*?-->/g, '').trim() : null; };
+	const section = (md, key) => { const m = md.match(new RegExp(`^##\\s+${key}\\s*$\\n([\\s\\S]*?)(?=^##\\s+|\\s*$(?![\\s\\S]))`, 'm')); if (!m) return null; let body = m[1], prev; do { prev = body; body = body.replace(/<!--[\s\S]*?-->/g, ''); } while (body !== prev); return body.trim(); };
 	const out = {}, promo = {};
 	let source = 'whats_new';
 	const { readdir } = await import('node:fs/promises');

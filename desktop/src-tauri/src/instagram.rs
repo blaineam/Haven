@@ -96,7 +96,8 @@ impl Archive {
     }
 
     pub fn names(&self) -> Vec<String> {
-        self.zip.file_names().map(|s| s.to_string()).collect()
+        // zip 9 reports a name that cannot be decoded as an error; such an entry is skipped.
+        self.zip.file_names().filter_map(|s| s.ok().map(|n| n.into_owned())).collect()
     }
 
     /// Uncompressed size of every entry, by name — what the preview's byte total is summed from.
@@ -104,7 +105,9 @@ impl Archive {
         let mut out = std::collections::HashMap::new();
         for i in 0..self.zip.len() {
             if let Ok(f) = self.zip.by_index(i) {
-                out.insert(f.name().to_string(), f.size());
+                if let Ok(name) = f.name() {
+                    out.insert(name.into_owned(), f.size());
+                }
             }
         }
         out

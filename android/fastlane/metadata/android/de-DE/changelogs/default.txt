@@ -1,5 +1,2 @@
-2.1.0 – Sichtbare Anrufe, optionaler Weckruf.
-• Ausgehende Anrufe zeigen „Anruf…“ / „Verbinden…“ / „Verbunden“, spielen einen Freiton, lassen das iPhone klingeln und enden nach 45 s ohne Antwort.
-• Optionaler Push-Weckruf in den Einstellungen (standardmäßig aus) für Handys, die Haven im Hintergrund schließen.
-• „Verbunden bleiben“ läuft nach Stunden nicht mehr aus; Nachrichten und Anrufe kommen weiter an.
-• Eingehende Anrufe zeigen den Anrufernamen; Android-Auto-Hinweise sind aufgeräumter.
+2.1.1 – Sicherheits- und Zuverlässigkeitsupdates.
+• Der Import von Instagram-Archiven ist besser abgesichert, und Haven schreibt weniger Details in seine Protokolle.

@@ -1,5 +1,2 @@
-2.1.0 — Calls you can see, and an optional wake-up.
-• Outgoing calls now show Calling… / Connecting… / Connected, play a dial tone, ring the iPhone, and hang up after 45 seconds if unanswered.
-• Optional push wake-up in Settings (off by default) for phones that close Haven in the background.
-• Stay connected no longer runs out after a few hours, so messages and calls keep arriving.
-• Incoming calls show the caller's name, and Android Auto notifications are tidier.
+2.1.1 — Security and reliability updates.
+• Safer Instagram archive import, and Haven now writes fewer details to its logs.

@@ -33,21 +33,15 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 New in 2.0: your relay does the heavy lifting for photos and videos, so your phone stays cool — and you always see exactly who a post reaches. Still free.
 
 ## whats_new
-2.1.0 — Your colors, and several circles at once.
-• Pick a color palette in Settings ▸ Appearance, with its own app icon; Neutral is colorless.
-• Hold the Post button (right-click on a Mac) to post to several circles at once.
-• Haven on CarPlay and Siri: read, send and reply to messages and place Haven calls by voice. Turn it on in Settings ▸ Car and Siri.
-• Call audio now follows your car, AirPods or headset instead of the phone speaker, and the call screen switches to Connected as soon as the media is up.
+2.1.1 — Security and reliability updates.
+• Safer Instagram archive import, and Haven now writes fewer details to its logs.
 
 ## whats_new_macos
 The color palette icons in the Dock now use the standard macOS icon shape (a rounded tile), and your palette's Dock icon is kept after you relaunch Haven.
 
 ## whats_new_windows
-2.1.0 — Your colors, and several circles at once.
-• Pick a color palette in Settings ▸ Appearance; Neutral is colorless.
-• Right-click the Post button to post to several circles at once, with a Select all button.
-• Editing a post you shared to several circles now updates every copy.
-• Calls show the right caller name.
+2.1.1 — Security and reliability updates.
+• Safer Instagram archive import, and Haven now writes fewer details to its logs.
 
 ## whats_new_previous
 2.0.2 — Optimized for iPhone Duo. Opened flat on a dual-screen phone, and on iPad, the feed and profile now sit in a centered column, so photos and videos are no longer huge and you scroll less.

@@ -35,11 +35,8 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit dein Handy kühl bleibt – und du siehst immer genau, wen ein Beitrag erreicht. Kostenlos.
 
 ## whats_new
-2.1.0 — Deine Farben und mehrere Kreise auf einmal.
-• Wähle in Einstellungen ▸ Darstellung eine Farbpalette mit passendem App-Symbol; Neutral ist farblos.
-• Halte die Taste „Posten“ gedrückt (auf dem Mac Rechtsklick), um in mehrere Kreise gleichzeitig zu posten.
-• Haven mit CarPlay und Siri: Nachrichten vorlesen, senden und beantworten und Haven-Anrufe per Sprache starten. Aktivierbar unter Einstellungen ▸ Auto und Siri.
-• Der Anrufton folgt jetzt deinem Auto, deinen AirPods oder dem Headset statt dem Telefonlautsprecher, und der Anrufbildschirm zeigt „Verbunden“, sobald die Medien stehen.
+2.1.1 – Sicherheits- und Zuverlässigkeitsupdates.
+• Der Import von Instagram-Archiven ist besser abgesichert, und Haven schreibt weniger Details in seine Protokolle.
 
 ## whats_new_macos
 Die Dock-Symbole der Farbpaletten haben auf dem Mac jetzt die übliche macOS-Symbolform (abgerundete Kachel) und bleiben nach einem Neustart von Haven erhalten.

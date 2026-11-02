@@ -1,5 +1,2 @@
-2.1.0 — Llamadas que se ven y un aviso opcional.
-• Las llamadas salientes ahora muestran Llamando… / Conectando… / Conectado, emiten tono de llamada, hacen sonar el iPhone y terminan a los 45 s sin respuesta.
-• Aviso push opcional en Ajustes (desactivado) para teléfonos que cierran Haven en segundo plano.
-• Seguir conectado ya no se agota tras unas horas.
-• Las llamadas entrantes muestran el nombre de quien llama; Android Auto, más claro.
+2.1.1 — Actualizaciones de seguridad y fiabilidad.
+• La importación de archivos de Instagram es más segura y Haven registra menos detalles en sus registros.

@@ -1,5 +1,2 @@
-2.1.0 — Chamadas que você vê e um despertar opcional.
-• As chamadas feitas agora mostram Chamando… / Conectando… / Conectado, tocam o sinal, fazem o iPhone tocar e terminam após 45 s sem resposta.
-• Despertar por push opcional em Ajustes (desativado) para celulares que fecham o Haven em segundo plano.
-• Manter conectado não acaba mais depois de algumas horas.
-• As chamadas recebidas mostram o nome de quem liga; o Android Auto está mais claro.
+2.1.1 — Atualizações de segurança e confiabilidade.
+• A importação de arquivos do Instagram ficou mais segura e o Haven registra menos detalhes nos logs.

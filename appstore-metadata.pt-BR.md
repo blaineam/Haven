@@ -35,11 +35,8 @@ privado,criptografado,família,amigos,mensagens,seguro,offline,chamadas,sem anú
 Novo no 2.0: seu relay faz o trabalho pesado com fotos e vídeos para o celular não esquentar, e você sempre vê quem uma publicação alcança. Continua grátis.
 
 ## whats_new
-2.1.0 — Suas cores e vários círculos de uma vez.
-• Escolha uma paleta de cores em Ajustes ▸ Aparência, com seu próprio ícone do app; Neutro não tem cor.
-• Segure o botão Publicar (clique direito no Mac) para publicar em vários círculos de uma vez.
-• Haven no CarPlay e na Siri: leia, envie e responda mensagens e faça chamadas do Haven por voz. Ative em Ajustes ▸ Carro e Siri.
-• O áudio das chamadas agora acompanha o carro, os AirPods ou o fone em vez do alto-falante do celular, e a tela de chamada mostra Conectado assim que a mídia está pronta.
+2.1.1 — Atualizações de segurança e confiabilidade.
+• A importação de arquivos do Instagram ficou mais segura e o Haven registra menos detalhes nos logs.
 
 ## whats_new_macos
 Os ícones do Dock das paletas de cores agora têm o formato padrão de ícone do macOS (bloco arredondado) e continuam após reiniciar o Haven.

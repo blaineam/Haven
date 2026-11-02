@@ -1,5 +1,2 @@
-2.1.0 — Chiamate che si vedono e una sveglia facoltativa.
-• Le chiamate in uscita ora mostrano Chiamata… / Connessione… / Connesso, riproducono il tono, fanno squillare l'iPhone e terminano dopo 45 s senza risposta.
-• Sveglia push facoltativa in Impostazioni (disattivata) per i telefoni che chiudono Haven in background.
-• Rimani connesso non si interrompe più dopo qualche ora.
-• Le chiamate in arrivo mostrano il nome di chi chiama; Android Auto è più chiaro.
+2.1.1 — Aggiornamenti di sicurezza e affidabilità.
+• L'importazione degli archivi Instagram è più sicura e Haven scrive meno dettagli nei suoi registri.

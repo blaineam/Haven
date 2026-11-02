@@ -1,2 +1,2 @@
-2.1.1 — Aggiornamenti di sicurezza e affidabilità.
+2.1.2 — Aggiornamenti di sicurezza e affidabilità.
 • L'importazione degli archivi Instagram è più sicura e Haven scrive meno dettagli nei suoi registri.

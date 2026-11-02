@@ -35,7 +35,7 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Novità della 2.0: il tuo relay fa il lavoro pesante con foto e video, così il telefono resta fresco, e vedi sempre chi raggiunge un post. Sempre gratis.
 
 ## whats_new
-2.1.1 — Aggiornamenti di sicurezza e affidabilità.
+2.1.2 — Aggiornamenti di sicurezza e affidabilità.
 • L'importazione degli archivi Instagram è più sicura e Haven scrive meno dettagli nei suoi registri.
 
 ## whats_new_macos

@@ -35,7 +35,7 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit dein Handy kühl bleibt – und du siehst immer genau, wen ein Beitrag erreicht. Kostenlos.
 
 ## whats_new
-2.1.1 – Sicherheits- und Zuverlässigkeitsupdates.
+2.1.2 – Sicherheits- und Zuverlässigkeitsupdates.
 • Der Import von Instagram-Archiven ist besser abgesichert, und Haven schreibt weniger Details in seine Protokolle.
 
 ## whats_new_macos

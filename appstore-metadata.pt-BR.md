@@ -35,7 +35,7 @@ privado,criptografado,família,amigos,mensagens,seguro,offline,chamadas,sem anú
 Novo no 2.0: seu relay faz o trabalho pesado com fotos e vídeos para o celular não esquentar, e você sempre vê quem uma publicação alcança. Continua grátis.
 
 ## whats_new
-2.1.1 — Atualizações de segurança e confiabilidade.
+2.1.2 — Atualizações de segurança e confiabilidade.
 • A importação de arquivos do Instagram ficou mais segura e o Haven registra menos detalhes nos logs.
 
 ## whats_new_macos

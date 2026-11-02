@@ -98,8 +98,13 @@ const NF_HOLD_MS = +(process.env.E2E_NF_HOLD_MS || 20_000);
 const REQUIRE_PERF = process.env.E2E_REQUIRE_PERF !== '0';
 
 function stamp() { return new Date().toISOString().replace(/[:T]/g, '-').slice(0, 16); }
-// codeql[js/clear-text-logging] -- progress text only; credentials are never interpolated here.
-function log(m) { const s = `[e2e ${new Date().toISOString().slice(11, 19)}] ${m}`; console.log(s); appendFileSync(join(OUT, 'run.log'), s + '\n'); }
+/** Strip bearer tokens and labelled secrets before anything reaches the console or run.log. */
+function redact(m) {
+  return String(m)
+    .replace(/(Bearer\s+)[^\s"']+/gi, '$1[redacted]')
+    .replace(/\b(token|secret|password|passwd|api[_-]?key|authorization)(["']?\s*[=:]\s*["']?)[^\s"',;&]+/gi, '$1$2[redacted]');
+}
+function log(m) { const s = redact(`[e2e ${new Date().toISOString().slice(11, 19)}] ${m}`); console.log(s); appendFileSync(join(OUT, 'run.log'), s + '\n'); }
 function sh(cmd, args, opts = {}) { return execFileSync(cmd, args, { encoding: 'utf8', ...opts }); }
 // Every adb call gets a ceiling. They are synchronous, so ONE hung `adb shell am start` (a wedged
 // emulator — seen on the multirelay run: 6+ minutes, with two relays and a proxy idling behind it)

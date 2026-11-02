@@ -11328,7 +11328,7 @@ impl Engine {
                 if let Some(ts) = g.sent_at {
                     let age = (now_ms() / 1000).saturating_sub(ts);
                     if age > 180 {
-                        log::info!("dropping stale call invite (age={age}s session={})", &g.session_id.chars().take(12).collect::<String>());
+                        log::info!("dropping stale call invite (age={age}s)");
                         return None;
                     }
                 }

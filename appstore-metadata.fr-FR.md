@@ -35,7 +35,7 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Nouveau en 2.0 : votre relay prend en charge photos et vidéos pour que votre téléphone reste frais, et vous voyez toujours qui atteint chaque publication. Gratuit.
 
 ## whats_new
-2.1.1 — Mises à jour de sécurité et de fiabilité.
+2.1.2 — Mises à jour de sécurité et de fiabilité.
 • L'import des archives Instagram est mieux protégé et Haven écrit moins de détails dans ses journaux.
 
 ## whats_new_macos

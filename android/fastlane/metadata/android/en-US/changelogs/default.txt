@@ -1,2 +1,2 @@
-2.1.1 — Security and reliability updates.
+2.1.2 — Security and reliability updates.
 • Safer Instagram archive import, and Haven now writes fewer details to its logs.

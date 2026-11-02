@@ -1,2 +1,2 @@
-2.1.1 — Mises à jour de sécurité et de fiabilité.
+2.1.2 — Mises à jour de sécurité et de fiabilité.
 • L'import des archives Instagram est mieux protégé et Haven écrit moins de détails dans ses journaux.

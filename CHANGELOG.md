@@ -565,6 +565,37 @@ per-circle path. Attachments (photos, videos, voice notes, files, camera capture
 appears after a few posts, and only if you are in two or more circles. All new strings ship in every
 language.
 
+## 2.1.2 (2026-11-02)
+
+Security and reliability only, from the code-scanning and dependency alerts — no feature work. The same
+tree shipped on iOS as 2.1.2; macOS 2.1.1 carried the palette Dock-icon fix on its own, so this is the
+first macOS build with the work below.
+
+### Fixed — the Instagram archive import reads a hardened zip, and skips entries it cannot name
+
+`zip` 2.4.2 → 9.2.1 closes three advisories. In zip 9 an entry whose name cannot be decoded is reported
+as an error rather than a lossy string, so `Archive::names` and the pass the preview sums its byte total
+from now skip such an entry instead of inventing a name for it — a malformed archive can no longer carry
+an entry past the preview the user approves. (`desktop/src-tauri/src/instagram.rs`.)
+
+### Fixed — Haven writes fewer details to its logs
+
+A relay printed its HTTP bearer token to stdout, the stale call-invite log included part of the session
+id, `qa-e2e-full` logged tokens and secrets unredacted, and `Scripts`' fatal logs could carry a JWT or a
+PEM. Each is now redacted or dropped where the line is written, and the push worker's 500 responses no
+longer echo the underlying error text.
+
+### Fixed — web: a query-string heading is text, and localized screenshots must be same-origin
+
+`web/win-shot.html` rendered a heading taken from the query string as HTML; it is set as text now. The
+i18n screenshot loader accepts only same-origin `http(s)` URLs.
+
+### Changed — rustls 0.23.46, and least-privilege CI tokens
+
+rustls 0.23.45 → 0.23.46 in the core and desktop lockfiles. Every workflow declares
+`permissions: contents: read` explicitly instead of inheriting the repository default, and
+`dependabot.yml` watches the Rust workspace as `cargo`.
+
 ## 2.0.3 (2026-10-22)
 
 ### Fixed — iPhone: picking photos shows them being prepared, and a 48 MP pick no longer cooks the phone

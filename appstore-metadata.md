@@ -37,7 +37,8 @@ New in 2.0: your relay does the heavy lifting for photos and videos, so your pho
 • Safer Instagram archive import, and Haven now writes fewer details to its logs.
 
 ## whats_new_macos
-The color palette icons in the Dock now use the standard macOS icon shape (a rounded tile), and your palette's Dock icon is kept after you relaunch Haven.
+2.1.2 — Security and reliability updates.
+• Safer Instagram archive import, and Haven now writes fewer details to its logs.
 
 ## whats_new_windows
 2.1.2 — Security and reliability updates.

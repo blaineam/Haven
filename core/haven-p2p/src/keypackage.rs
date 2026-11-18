@@ -281,7 +281,9 @@ impl WelcomeV2 {
 /// The Welcome is also BOUND TO THE PUBLIC COMMIT it enters at: `commit_bytes` must hash to the
 /// Welcome's `commit_hash`, be for this circle and epoch, and claim exactly the delivered tree.
 /// So a joiner only ever enters a state the rest of the circle can see and check, never one
-/// described by the Welcome alone.
+/// described by the Welcome alone. That includes the SECRETS: the epoch schedule the Welcome
+/// yields must key the commit's confirmation MAC, so a Welcome cannot carry a `joiner_secret` (or
+/// transcript hash) other than the one every member at that epoch derived.
 ///
 /// Returns the public tree, the epoch schedule every member at that epoch derives, and the
 /// joiner's private state. Pure; the envelope's sender, the commit's signature and the
@@ -313,6 +315,13 @@ pub fn enter_via_welcome_v2(
     }
     let th = treekem::tree_hash(&tree);
     let schedule = treekem::welcome_epoch_schedule(&welcome.joiner_secret, group_id, welcome.epoch, &th, &welcome.cth);
+    // The delivered `joiner_secret` and transcript hash must be the ones the commit was confirmed
+    // under: the confirmation MAC in the (signed, public) commit is keyed by this epoch's schedule.
+    // Without this a Welcome naming a real commit could seat the joiner in an epoch whose secrets
+    // its sender chose — and anyone can seal to the published one-time key.
+    if !treekem::ct_eq(&treekem::confirmation_mac(&schedule.confirm_key, &welcome.cth), &commit.confirmation_mac) {
+        return Err(CoreError::Crypto("welcome v2: secrets are not the ones the commit confirmed"));
+    }
     Ok((tree, schedule, treekem::TreePrivate::new(welcome.leaf_index, secret.leaf_secret)))
 }
 
@@ -718,5 +727,13 @@ mod tests {
         assert!(enter_via_welcome_v2(&b.secret, GID, &renamed, &other_commit.to_bytes()).is_err());
         assert!(enter_via_welcome_v2(&b.secret, b"another-circle", &w, &cb).is_err());
         assert!(enter_via_welcome_v2(&b.secret, GID, &w, &cb[..cb.len() - 1]).is_err());
+        // Secrets the commit did not confirm: a joiner secret (or transcript hash) of the sender's
+        // choosing is refused, even though every public field still matches the commit.
+        let mut chosen = w.clone();
+        chosen.joiner_secret = seed(250);
+        assert!(enter_via_welcome_v2(&b.secret, GID, &chosen, &cb).is_err());
+        let mut wrong_cth = w.clone();
+        wrong_cth.cth = seed(251);
+        assert!(enter_via_welcome_v2(&b.secret, GID, &wrong_cth, &cb).is_err());
     }
 }

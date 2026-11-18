@@ -90,7 +90,7 @@ fn parse_watching_allocs(t: &Target, bytes: &[u8]) -> (std::result::Result<bool,
 use haven_p2p::device::{AdminGrant, CircleUpgrade, DeviceCredential, DeviceList, SeedDropCapability};
 use haven_p2p::groupkey::{seal_event_in_epoch, EpochEnvelope};
 use haven_p2p::identity::Identity;
-use haven_p2p::keypackage::KeyPackage;
+use haven_p2p::keypackage::{KeyPackage, WelcomeV2};
 use haven_p2p::social::{Event, EventKind};
 use haven_p2p::treekem::{
     Commit, GroupInfo, LeafNode, ParentNode, PathSecretCiphertext, PersistTree, Proposal,
@@ -367,8 +367,20 @@ fn targets() -> Vec<Target> {
         init_bundle: r.bytes(120),
         sig: r.bytes(96),
     };
+    // The secret payload of a v2 Welcome — parsed by the joiner after it opens the envelope, so the
+    // bytes are chosen by whoever sealed it (any holder of the published one-time key).
+    let welcome_v2 = WelcomeV2 {
+        commit_hash: r.arr32(),
+        epoch: r.next_u64(),
+        leaf_index: r.next_u32(),
+        joiner_secret: r.arr32(),
+        cth: r.arr32(),
+        kp_id: r.arr32()[..16].try_into().unwrap(),
+        tree_bytes: r.bytes(200),
+    };
     vec![
         target!("keypackage::KeyPackage", KeyPackage, vec![key_package.to_bytes()], true),
+        target!("keypackage::WelcomeV2", WelcomeV2, vec![welcome_v2.to_bytes()], true),
         target!("treekem::LeafNode", LeafNode, vec![leaf_node(r).to_bytes()], true),
         target!(
             "treekem::ParentNode",

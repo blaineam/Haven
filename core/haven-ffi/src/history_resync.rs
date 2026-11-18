@@ -36,7 +36,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
     with_recv_ctx, HavenSocial, TAG_ADMIN_GRANT, TAG_CIRCLE_UPGRADE, TAG_DEVICE_ROSTER, TAG_EPOCH_EVENT,
-    TAG_KEY_COMMIT, TAG_MLS_COMMIT, TAG_MLS_JOIN, TAG_MLS_PROPOSAL, TAG_MLS_WELCOME,
+    TAG_KEY_COMMIT, TAG_MLS2_COMMIT, TAG_MLS2_JOIN, TAG_MLS2_KEYPACKAGE, TAG_MLS2_WELCOME,
+    TAG_MLS_COMMIT, TAG_MLS_JOIN, TAG_MLS_PROPOSAL, TAG_MLS_WELCOME,
 };
 
 thread_local! {
@@ -105,12 +106,12 @@ impl HavenSocial {
                     // in `drain_pending`; it just runs at the door instead of on the next drain.
                     if let Some(parsed) = &c.pending_epoch[pos].parsed {
                         let author = parsed.env.sender_hex();
-                        let newest = if author == me_hex {
-                            Some(c.my_epoch)
+                        let fossil = if author == me_hex {
+                            parsed.env.epoch + 4 < c.my_epoch
                         } else {
-                            c.peer_epoch_keys.keys().filter(|(a, _)| *a == author).map(|(_, e)| *e).max()
+                            c.parked_is_fossil(&author, parsed.env.epoch)
                         };
-                        if newest.is_some_and(|n| parsed.env.epoch + 4 < n) {
+                        if fossil {
                             c.pending_epoch.remove(pos);
                             return ReceiveStatus::Unreadable;
                         }
@@ -152,6 +153,10 @@ fn is_legacy(tag: u8) -> bool {
             | TAG_MLS_WELCOME
             | TAG_MLS_PROPOSAL
             | TAG_MLS_JOIN
+            | TAG_MLS2_KEYPACKAGE
+            | TAG_MLS2_COMMIT
+            | TAG_MLS2_WELCOME
+            | TAG_MLS2_JOIN
             | TAG_ADMIN_GRANT
             | TAG_CIRCLE_UPGRADE
     )
@@ -219,9 +224,9 @@ pub fn ingest_rank(envelope: &[u8]) -> u8 {
     match envelope.first().copied() {
         Some(TAG_DEVICE_ROSTER) => 0,
         Some(TAG_KEY_COMMIT) => 1,
-        Some(TAG_MLS_COMMIT) => 2,
-        Some(TAG_MLS_WELCOME) => 3,
-        Some(TAG_MLS_JOIN) | Some(TAG_MLS_PROPOSAL) => 4,
+        Some(TAG_MLS_COMMIT) | Some(TAG_MLS2_KEYPACKAGE) | Some(TAG_MLS2_COMMIT) => 2,
+        Some(TAG_MLS_WELCOME) | Some(TAG_MLS2_WELCOME) => 3,
+        Some(TAG_MLS_JOIN) | Some(TAG_MLS_PROPOSAL) | Some(TAG_MLS2_JOIN) => 4,
         Some(TAG_ADMIN_GRANT) | Some(TAG_CIRCLE_UPGRADE) => 5,
         Some(TAG_EPOCH_EVENT) => 6,
         _ => 7,

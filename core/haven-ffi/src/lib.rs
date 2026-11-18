@@ -43,7 +43,31 @@ const SEED_DROP_VERSION: u32 = 1;
 /// flips on. Advertised in the PROFILE only: the roster trailer is not appendable
 /// (`SeedDropCapability::from_bytes` consumes the rest as signature, so appending would break every
 /// existing peer's seed-drop verify mid-migration).
-const MLS_VERSION: u32 = 1;
+///
+/// `2` = this build also runs version 2 of the tree (docs/formal/PROTOCOL-SPEC.md §16): its own leaf
+/// key in a signed key package, one-time Welcome keys. Shipped builds test `ml >= 1`, so `2` still
+/// counts as MLS-capable for them. The marker is ACCOUNT-level: it gates only whether a device
+/// publishes a key package; the v2 genesis itself needs a key package from every authorized device.
+const MLS_VERSION: u32 = 2;
+
+#[cfg(test)]
+thread_local! {
+    /// Tests only: the `ml` version engines created on this thread advertise (and seed for their own
+    /// account). The v1-tree tests pin it to 1 so they keep exercising a fleet that never migrates.
+    static TEST_MLS_VERSION: std::cell::Cell<u32> = const { std::cell::Cell::new(MLS_VERSION) };
+}
+
+/// The `ml` value this engine advertises in its profile card.
+fn mls_version_advertised() -> u32 {
+    #[cfg(test)]
+    {
+        TEST_MLS_VERSION.with(|v| v.get())
+    }
+    #[cfg(not(test))]
+    {
+        MLS_VERSION
+    }
+}
 
 /// Compact-envelope capability version (`docs/SATELLITE-DESIGN.md` §6, S0 write-side). Advertised as
 /// `cw` in the account-signed profile card, exactly like `sd` and `ml`. `1` means "this build can
@@ -70,6 +94,15 @@ const TAG_MLS_PROPOSAL: u8 = 0x07; // a treekem::Proposal (reserved; unbundled p
 const TAG_MLS_JOIN: u8 = 0x08; // a signed join ack: "device D holds genesis G's Welcome" (the §7.2 gate)
 const TAG_ADMIN_GRANT: u8 = 0x09; // an account-signed device::AdminGrant riding the circle control lane
 const TAG_CIRCLE_UPGRADE: u8 = 0x0a; // a device::CircleUpgrade offer: legacy circle → creator-bound successor
+// Version 2 of the tree (docs/formal/PROTOCOL-SPEC.md §16, `keying_v2.rs`). Its OWN tag family, so a
+// build that only speaks the v1 tree never parses a v2 wire: there an unknown tag falls to the
+// raw-JSON `receive_legacy` arm, fails the parse and returns a per-envelope error — it is neither
+// stored nor parked for retry (`TREE_RETRYABLE` is only ever set by the v1 handlers). Emitted only
+// once every member account advertises `ml >= 2`.
+const TAG_MLS2_KEYPACKAGE: u8 = 0x10; // a keypackage::KeyPackage: a device's own leaf key + one-time Welcome key
+const TAG_MLS2_COMMIT: u8 = 0x11; // a treekem::Commit on a v2 chain
+const TAG_MLS2_WELCOME: u8 = 0x12; // a SealedEnvelope to a key package's one-time init key (keypackage::WelcomeV2)
+const TAG_MLS2_JOIN: u8 = 0x13; // a signed v2 join ack: "device D entered at commit C"
 
 /// An upgrade offer awaiting the user's decision: "`from_hex` says this legacy circle's creator-bound
 /// successor is `new_circle_id`". The signature and the successor's binding to `from_hex` are already
@@ -108,6 +141,50 @@ pub struct HistoryPageFfi {
 /// in `my_epoch_keys` — so PARK (revert to legacy) never confuses a stale legacy key with a tree key,
 /// and the two epoch spaces coexist in the SAME maps with zero change to the content path's lookups.
 const MLS_EPOCH_BASE: u64 = 1 << 40;
+
+/// Content-epoch namespace of the v2 tree: `MLS2_EPOCH_BASE + tree_epoch`. Above the v1 namespace,
+/// so a v2 key never collides with a v1 or sender-keys key in the same maps and sorts after them.
+const MLS2_EPOCH_BASE: u64 = 1 << 41;
+
+/// Which key lane a content epoch belongs to: 0 = sender keys (KeyCommit), 1 = the v1 tree, 2 = the
+/// v2 tree.
+fn epoch_lane(epoch: u64) -> u8 {
+    if epoch >= MLS2_EPOCH_BASE {
+        2
+    } else if epoch >= MLS_EPOCH_BASE {
+        1
+    } else {
+        0
+    }
+}
+
+/// Which of `epochs` (one author's key slots) the pruner keeps.
+///
+/// The retention window is applied PER LANE: each lane keeps its own `keep` most recent epochs.
+/// One numeric window over all lanes cannot work — a tree key's epoch number is 2^40 or more, so
+/// four tree keys evicted every sender key, including the current one, and a circle that parked
+/// back to sender keys after four tree epochs had nothing to seal under (and its peers pruned each
+/// sender key the moment it arrived).
+///
+/// A lane that is NOT keying the circle shrinks to its single newest key once the active lane
+/// holds a full window: by then every post has been re-sealed under the active lane several times
+/// over, and a lane nothing is added to would otherwise keep four old keys for ever. That newest
+/// key is what a park (or the flip to the next tree) picks up from. `protect` (my current
+/// sender-keys epoch) is never pruned.
+fn epochs_to_keep(epochs: &[u64], active_lane: u8, keep: usize, protect: Option<u64>) -> HashSet<u64> {
+    let active_full = epochs.iter().filter(|e| epoch_lane(**e) == active_lane).count() >= keep;
+    let mut kept: HashSet<u64> = HashSet::new();
+    for lane in 0..=2u8 {
+        let mut of_lane: Vec<u64> = epochs.iter().copied().filter(|e| epoch_lane(*e) == lane).collect();
+        of_lane.sort_unstable_by_key(|e| std::cmp::Reverse(*e));
+        let n = if lane == active_lane || !active_full { keep } else { 1 };
+        kept.extend(of_lane.into_iter().take(n));
+    }
+    if let Some(p) = protect.filter(|p| epochs.contains(p)) {
+        kept.insert(p);
+    }
+    kept
+}
 
 uniffi::setup_scaffolding!();
 
@@ -318,6 +395,8 @@ pub mod friend_invite;
 /// "Load history from your relays": the deep mailbox resync's planner + ingested-key journal.
 /// `pub` so the desktop backend drives the same planner directly.
 pub mod history_resync;
+/// Version 2 of the circle tree: key packages, v2 Welcome, v2 genesis, the v1→v2 migration.
+mod keying_v2;
 
 /// Android only: receive the app's `Context` (and, via it, the `JavaVM`) from Kotlin and hand
 /// both to `ndk-context`. iroh's TLS stack (rustls platform verifier) reads the system trust
@@ -1940,21 +2019,21 @@ impl Circle {
     /// epoch on sync, so dropping old keys never blocks re-delivery.
     fn prune_epoch_keys(&mut self) {
         const KEEP_EPOCHS: usize = 4;
+        // The lane keying this circle's content right now (see `epochs_to_keep`).
+        let active = self.mls_live_epoch.map(epoch_lane).unwrap_or(0);
         if self.my_epoch_keys.len() > KEEP_EPOCHS {
-            let mut epochs: Vec<u64> = self.my_epoch_keys.keys().copied().collect();
-            epochs.sort_unstable();
-            for e in &epochs[..epochs.len() - KEEP_EPOCHS] {
-                self.my_epoch_keys.remove(e);
-            }
+            let epochs: Vec<u64> = self.my_epoch_keys.keys().copied().collect();
+            let keep = epochs_to_keep(&epochs, active, KEEP_EPOCHS, Some(self.my_epoch));
+            self.my_epoch_keys.retain(|e, _| keep.contains(e));
         }
         let mut by_peer: HashMap<String, Vec<u64>> = HashMap::new();
         for (peer, epoch) in self.peer_epoch_keys.keys() {
             by_peer.entry(peer.clone()).or_default().push(*epoch);
         }
-        for (peer, mut epochs) in by_peer {
+        for (peer, epochs) in by_peer {
             if epochs.len() > KEEP_EPOCHS {
-                epochs.sort_unstable();
-                for e in &epochs[..epochs.len() - KEEP_EPOCHS] {
+                let keep = epochs_to_keep(&epochs, active, KEEP_EPOCHS, None);
+                for e in epochs.iter().filter(|e| !keep.contains(e)) {
                     self.peer_epoch_keys.remove(&(peer.clone(), *e));
                 }
             }
@@ -1975,6 +2054,42 @@ impl Circle {
     }
     fn current_key(&self) -> Option<[u8; 32]> {
         self.my_epoch_keys.get(&self.my_epoch).copied()
+    }
+    /// Called where the sender-keys lane is about to key content (no tree is live): make sure the
+    /// current sender-keys epoch still HAS its key. A circle a tree keyed for four or more epochs
+    /// has pruned every sender key, including the one `my_epoch` names; parking it back then found
+    /// no key to seal under (an empty bundle, and a panic on the next post). A fresh epoch is the
+    /// honest answer — the old key is gone on every device.
+    fn ensure_lane_key(&mut self) {
+        self.ensure_epoch();
+        if !self.my_epoch_keys.contains_key(&self.my_epoch) {
+            self.rotate_epoch();
+        }
+    }
+    /// Is a parked envelope sealed by `author_hex` at `epoch` provably unopenable — its key pruned
+    /// on every device? Within one key lane: more than KEEP_EPOCHS behind the newest key held for
+    /// that author. Across lanes (an envelope from a LOWER lane than a key held): only while a tree
+    /// keys this circle. A parked circle is back on sender keys, whose small epoch numbers always
+    /// sit "behind" any tree key still held; judging those by number dropped every parked post of a
+    /// parked circle.
+    fn parked_is_fossil(&self, author_hex: &str, epoch: u64) -> bool {
+        let lane = epoch_lane(epoch);
+        let mut same: Option<u64> = None;
+        let mut higher = false;
+        for (a, e) in self.peer_epoch_keys.keys() {
+            if a != author_hex {
+                continue;
+            }
+            match epoch_lane(*e).cmp(&lane) {
+                std::cmp::Ordering::Equal => same = Some(same.map_or(*e, |m: u64| m.max(*e))),
+                std::cmp::Ordering::Greater => higher = true,
+                std::cmp::Ordering::Less => {}
+            }
+        }
+        if same.is_some_and(|n| epoch + 4 < n) {
+            return true;
+        }
+        higher && self.mls_live_epoch.map(epoch_lane).is_some_and(|l| l > lane)
     }
     /// The epoch key to open an event authored by `author_hex` at `epoch` — mine or a stored peer's.
     fn key_for(&self, me_hex: &str, author_hex: &str, epoch: u64) -> Option<[u8; 32]> {
@@ -2079,6 +2194,11 @@ struct NetState {
     /// (`circle_fully_mls_capable` ships OFF); populated so the fleet's capability picture is already
     /// converged when a later release flips the gate. Not persisted — rebuilds as profiles re-sync.
     mls_capable: std::collections::HashSet<[u8; 32]>,
+    /// Accounts whose verified profile carried `ml >= 2` (version 2 of the tree, `keying_v2.rs`).
+    /// Same rules as `mls_capable`: monotonic, learned-never-inferred, not persisted. ACCOUNT-level,
+    /// so it only gates whether this device publishes a key package for a circle; whether a v2
+    /// genesis can be built is decided per DEVICE, by holding a key package from each one.
+    mls2_capable: std::collections::HashSet<[u8; 32]>,
     /// Accounts we have AFFIRMATIVELY verified as able to READ the compact envelope container —
     /// their signed profile carried `cw >= 1` (docs/SATELLITE-DESIGN.md §6). Keyed by account node
     /// id. **Monotonic — insert only, never remove**: a missing entry means "unknown, treat as
@@ -2108,6 +2228,10 @@ struct NetState {
     /// non-capable circle (shadow doesn't run). Not persisted: it rebuilds from the commit + welcome
     /// re-emitted in every bundle, exactly like `mls_capable`/`seed_drop_capable` rebuild from sync.
     shadow_trees: std::collections::HashMap<String, ShadowTree>,
+    /// Version 2 of the tree, per circle id (`keying_v2.rs`, docs/formal/STAGE3-V2-TREE.md). Lives
+    /// BESIDE the v1 tree above while a circle migrates: the v1 tree keeps keying content until the
+    /// v2 tree is all-joined, and only then is the v1 entry removed (wiped). Persisted.
+    v2_trees: std::collections::HashMap<String, ShadowTree>,
     /// MLS M3 KEYING master switch (docs/TREEKEM-DESIGN.md §4.5/§7.2). Mirrors `retire_account_key`
     /// EXACTLY: default **false**, NOT persisted, the app re-applies it on launch. When false the tree
     /// runs in M2 shadow only and content is byte-identical to today (the no-regression proof). When
@@ -2494,6 +2618,11 @@ struct ShadowTree {
     /// Random now instead of `H(root, device)`; still recoverable by the committer (seed + this map)
     /// until devices make their own leaf keys (a later stage).
     assigned_leaves: std::collections::BTreeMap<[u8; 32], [u8; 32]>,
+    /// Is this a version-2 tree (`NetState::v2_trees`)? Decides the genesis constants, and that
+    /// nothing in its replay is ever derived from the device seed.
+    is_v2: bool,
+    /// What only a v2 tree holds: key packages, their secrets, join acks by entry commit.
+    x: keying_v2::V2State,
 }
 
 /// What one replay produces: the live state, and — when the winning path is at least
@@ -2517,7 +2646,24 @@ impl ShadowTree {
             checkpoint: None,
             own_builds: std::collections::BTreeMap::new(),
             assigned_leaves: std::collections::BTreeMap::new(),
+            is_v2: false,
+            x: keying_v2::V2State::default(),
         }
+    }
+
+    /// An empty version-2 tree.
+    fn new_v2(group_id: Vec<u8>) -> Self {
+        Self { is_v2: true, ..Self::new(group_id) }
+    }
+}
+
+/// The genesis parent hash / base transcript hash of THIS tree's version. A v2 tree uses its own
+/// domain strings, so a v1 and a v2 chain can never be spliced.
+fn keying_genesis_parent(shadow: &ShadowTree) -> [u8; 32] {
+    if shadow.is_v2 {
+        shadow_domain_hash(keying_v2::GENESIS_PARENT_DOMAIN, &shadow.group_id)
+    } else {
+        shadow_genesis_parent(&shadow.group_id)
     }
 }
 
@@ -2656,8 +2802,36 @@ fn keying_new_base_init(seed: &[u8; 32], gid: &[u8]) -> [u8; 32] {
 /// Have I already authored a commit on `tip` that I still hold the inputs of? Seed derivation made
 /// re-authoring harmless (same inputs, same commit, "already authored"); with random inputs a
 /// replay that could not move past my own commit would mint a new sibling on every bundle.
-fn keying_already_authored_on(shadow: &ShadowTree, tip: &[u8; 32]) -> bool {
-    shadow.own_builds.values().any(|b| b.parent == *tip)
+///
+/// It also refuses when the tip already has a child authored from MY OWN leaf that I hold no build
+/// record for — a committer restored from an older blob, or killed between sending a commit and
+/// saving it. The walk cannot pass that commit (it cannot be rebuilt), and without this the next
+/// due commit would be a competing sibling on the same tip, forking every device that took the
+/// first one.
+fn keying_already_authored_on(shadow: &ShadowTree, cur: &KeyingState) -> bool {
+    let tip = &cur.tip_hash;
+    if shadow.own_builds.values().any(|b| b.parent == *tip) {
+        return true;
+    }
+    let Some(mp) = cur.my_private.as_ref() else { return false };
+    let mine = cur.tree.leaf(mp.leaf_index).and_then(|l| leaf_credential_ids(&l.device_credential)).map(|(d, _)| d);
+    shadow.commits.values().any(|b| {
+        treekem::Commit::from_bytes(b).is_ok_and(|c| {
+            c.epoch == cur.epoch + 1
+                && c.parent_commit_hash == *tip
+                && c.sender_leaf == mp.leaf_index
+                && c.update_path.as_ref().and_then(|up| leaf_credential_ids(&up.leaf_node.device_credential)).map(|(d, _)| d)
+                    == mine
+        })
+    })
+}
+
+/// Zero a builder's own copies of a commit's fresh leaf secret + entropy once they are recorded.
+/// (The arrays are `Copy`; this takes the caller's bindings by value and wipes that storage — the
+/// optimizer may keep others, so it narrows the window rather than closing it.)
+fn keying_wipe_material(mut new_leaf: [u8; 32], mut entropy: [u8; 32]) {
+    treekem::wipe_secret(&mut new_leaf);
+    treekem::wipe_secret(&mut entropy);
 }
 
 /// Record the inputs of the commit I just authored, so a later walk can rebuild it.
@@ -2927,6 +3101,15 @@ fn shadow_emit_bundle(st: &mut NetState, idx: usize, full_bundle: bool) -> Vec<V
     if !circle_is_mls_capable(st, idx) {
         return vec![];
     }
+    // A circle whose v2 tree took over emits no v1 tree wire and builds no v1 genesis; the v2
+    // wires (empty unless the circle runs, or is building, a v2 tree) follow the v1 ones.
+    let mut out = if keying_v2::v1_suppressed(st, idx) { Vec::new() } else { shadow_emit_bundle_v1(st, idx, full_bundle) };
+    out.extend(keying_v2::emit_bundle(st, idx, full_bundle));
+    out
+}
+
+/// The v1 tree's share of [`shadow_emit_bundle`].
+fn shadow_emit_bundle_v1(st: &mut NetState, idx: usize, full_bundle: bool) -> Vec<Vec<u8>> {
     if am_shadow_creator(st, idx) {
         build_shadow_genesis(st, idx);
         // M4 roster automation: once a genesis exists, reconcile the LIVE tree with the roster —
@@ -2950,8 +3133,8 @@ fn shadow_emit_bundle(st: &mut NetState, idx: usize, full_bundle: bool) -> Vec<V
 /// chain/fork. SHADOW — returns `false` (no content change) always. Ignored harmlessly for a
 /// non-capable circle or malformed bytes (no panic, no state change) — the legacy-peer contract.
 fn receive_mls_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, HavenError> {
-    if !circle_is_mls_capable(st, idx) {
-        return Ok(false); // shadow doesn't run here; ignore harmlessly
+    if !circle_is_mls_capable(st, idx) || keying_v2::v1_suppressed(st, idx) {
+        return Ok(false); // shadow doesn't run here (or the v2 tree took over); ignore harmlessly
     }
     let Ok(commit) = treekem::Commit::from_bytes(body) else { return Ok(false) };
     let circle_id = st.circles[idx].id.clone();
@@ -3154,7 +3337,7 @@ fn committer_removes_own_leaf(
 /// secrets under the genesis commit hash they belong to. SHADOW — returns `false` always;
 /// unopenable (not addressed to me) or non-capable circles are ignored harmlessly.
 fn receive_mls_welcome(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, HavenError> {
-    if !circle_is_mls_capable(st, idx) {
+    if !circle_is_mls_capable(st, idx) || keying_v2::v1_suppressed(st, idx) {
         return Ok(false);
     }
     let Ok(env) = SealedEnvelope::from_bytes(body) else { return Ok(false) };
@@ -3494,7 +3677,7 @@ fn keying_chain_height(shadow: &ShadowTree, tip: [u8; 32], epoch: u64) -> usize 
 
 fn keying_winning_genesis(shadow: &ShadowTree) -> Option<([u8; 32], Vec<u8>)> {
     let gid = &shadow.group_id;
-    let parent = shadow_genesis_parent(gid);
+    let parent = keying_genesis_parent(shadow);
     // (chain height, leaf count, hash) — height FIRST. See keying_chain_height for why.
     let mut best: Option<(usize, usize, [u8; 32], Vec<u8>)> = None;
     for b in shadow.commits.values() {
@@ -3683,10 +3866,12 @@ fn mls_replay_input_digest(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>
     // build records by hash + inputs.
     match &shadow.checkpoint {
         Some(ck) => {
-            let enc = encode_keying_checkpoint(ck);
+            // The encoding holds the checkpoint's secrets: zero the buffer once it is hashed.
+            let mut enc = encode_keying_checkpoint(ck);
             h.update(&[1]);
             h.update(&(enc.len() as u64).to_le_bytes());
             h.update(&enc);
+            enc.iter_mut().for_each(|b| *b = 0);
         }
         None => {
             h.update(&[0]);
@@ -3709,8 +3894,9 @@ fn mls_replay_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) ->
 
 fn mls_replay_outcome_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> ReplayOutcome {
     let gid = shadow.group_id.clone();
-    // Only the fallback for own commits authored before stage 1 (no stored build record).
-    let my_secret_root = my_device_seed.map(|s| keying_secret_root(&s, &gid));
+    // Only the fallback for own commits authored before stage 1 (no stored build record). A v2
+    // tree never had seed-derived commits: nothing in its replay reads the device seed.
+    let my_secret_root = if shadow.is_v2 { None } else { my_device_seed.map(|s| keying_secret_root(&s, &gid)) };
     // Every entry point I hold — my checkpoint, the elected genesis's Welcome, and every
     // SELF-CONTAINED Welcome (a mid-life Add or a re-entry) — walked forward along the chain; then
     // the best end state wins.
@@ -3733,8 +3919,11 @@ fn mls_replay_outcome_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 
             starts.push((k, None));
         }
     }
-    if let Some(k) = replay_start_genesis(shadow, &gid) {
-        starts.push((k, None));
+    // (Every v2 Welcome carries its tree, genesis included — there is no tree-less start.)
+    if !shadow.is_v2 {
+        if let Some(k) = replay_start_genesis(shadow, &gid) {
+            starts.push((k, None));
+        }
     }
     let mut best: Option<((bool, u64, [u8; 32]), KeyingState, Option<KeyingCheckpoint>)> = None;
     for (start, start_genesis) in starts {
@@ -3747,7 +3936,20 @@ fn mls_replay_outcome_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 
         }
     }
     match best {
-        Some((_, end, candidate)) => (Some(end), candidate),
+        Some((_, mut end, mut candidate)) => {
+            if shadow.is_v2 {
+                // A v2 device never re-delivers a `joiner_secret` (there is no re-Welcome: a device
+                // that lost its place re-enters with a fresh key package), so the live state and
+                // the checkpoint do not keep one.
+                for k in [Some(&mut end), candidate.as_mut().map(|c| &mut c.state)].into_iter().flatten() {
+                    if let Some(j) = k.joiner_secret.as_mut() {
+                        treekem::wipe_secret(j);
+                    }
+                    k.joiner_secret = None;
+                }
+            }
+            (Some(end), candidate)
+        }
         None => (None, None),
     }
 }
@@ -3755,7 +3957,7 @@ fn mls_replay_outcome_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 
 /// The epoch-1 genesis a commit descends from, following parent links through the commits I hold.
 /// `None` when the chain leaves what I hold.
 fn keying_genesis_of(shadow: &ShadowTree, mut tip: [u8; 32]) -> Option<[u8; 32]> {
-    let parent0 = shadow_genesis_parent(&shadow.group_id);
+    let parent0 = keying_genesis_parent(shadow);
     for _ in 0..4096 {
         let c = treekem::Commit::from_bytes(shadow.commits.get(&tip)?).ok()?;
         if c.epoch == 1 && c.parent_commit_hash == parent0 {
@@ -3848,6 +4050,33 @@ fn keying_chain_reaches(shadow: &ShadowTree, tip: [u8; 32], epoch: u64, more: us
     })
 }
 
+/// The child of `tip` the walk follows at epoch `next` (hash + bytes), by THE FORK RULE documented
+/// on [`replay_walk`]. `None` when the chain ends here. Shared with the v2 tree's secret-less view
+/// of the chain (`keying_v2::canonical`), so both always agree on the branch.
+fn keying_best_child(shadow: &ShadowTree, tip: &[u8; 32], next: u64) -> Option<([u8; 32], Vec<u8>)> {
+    // Children of the current tip at the next epoch (a §5 fork at this level).
+    let mut children: Vec<([u8; 32], Vec<u8>)> = shadow
+        .commits
+        .iter()
+        .filter(|(_, b)| {
+            treekem::Commit::from_bytes(b)
+                .map(|c| c.epoch == next && c.parent_commit_hash == *tip)
+                .unwrap_or(false)
+        })
+        .map(|(h, b)| (*h, b.clone()))
+        .collect();
+    if children.len() > 1 {
+        // (final, hash): see THE FORK RULE. Only evaluated at an actual fork.
+        let mut ranked: Vec<(bool, [u8; 32], Vec<u8>)> = children
+            .into_iter()
+            .map(|(h, b)| (keying_chain_reaches(shadow, h, next, KEYING_FINAL_DEPTH - 1), h, b))
+            .collect();
+        ranked.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        children = ranked.into_iter().map(|(_, h, b)| (h, b)).collect();
+    }
+    children.pop()
+}
+
 /// Walk the commit chain forward from `cur`, applying each epoch's winning commit. Returns the end
 /// state and, when the walk covered at least [`KEYING_FINAL_DEPTH`] states (the start included),
 /// the state `KEYING_FINAL_DEPTH - 1` epochs behind the end — where the checkpoint may advance to.
@@ -3870,30 +4099,7 @@ fn replay_walk(
     let mut trail: std::collections::VecDeque<KeyingState> = std::collections::VecDeque::new();
     loop {
         let next = cur.epoch + 1;
-        // Children of the current tip at the next epoch (a §5 fork at this level).
-        let mut children: Vec<([u8; 32], Vec<u8>)> = shadow
-            .commits
-            .iter()
-            .filter(|(_, b)| {
-                treekem::Commit::from_bytes(b)
-                    .map(|c| c.epoch == next && c.parent_commit_hash == cur.tip_hash)
-                    .unwrap_or(false)
-            })
-            .map(|(h, b)| (*h, b.clone()))
-            .collect();
-        if children.is_empty() {
-            break;
-        }
-        if children.len() > 1 {
-            // (final, hash): see THE FORK RULE above. Only evaluated at an actual fork.
-            let mut ranked: Vec<(bool, [u8; 32], Vec<u8>)> = children
-                .into_iter()
-                .map(|(h, b)| (keying_chain_reaches(shadow, h, next, KEYING_FINAL_DEPTH - 1), h, b))
-                .collect();
-            ranked.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-            children = ranked.into_iter().map(|(_, h, b)| (h, b)).collect();
-        }
-        let (tip, cbytes) = children.pop().unwrap();
+        let Some((tip, cbytes)) = keying_best_child(shadow, &cur.tip_hash, next) else { break };
         let Ok(c) = treekem::Commit::from_bytes(&cbytes) else { break };
         // Removal-sticky (M4): before this commit mutates the tree, record the device id of every leaf
         // it Removes (resolved against the PRE-commit tree) so the roster→Add automation never re-Adds it.
@@ -3903,6 +4109,17 @@ fn replay_walk(
                 if let Some(l) = cur.tree.leaf(*leaf_index) {
                     if let Ok(dc) = DeviceCredential::from_bytes(&l.device_credential) {
                         removed_devices.insert(dc.device.node_id_bytes());
+                    }
+                }
+            }
+        }
+        if shadow.is_v2 {
+            // A v2 commit that Adds a device it (or an earlier commit) Removed is that device's
+            // RE-ENTRY with a fresh key package, not a removal: it is not sticky-removed.
+            for p in &c.proposals {
+                if let treekem::ProposalBody::Add { leaf_node } = &p.body {
+                    if let Some((device, _)) = leaf_credential_ids(&leaf_node.device_credential) {
+                        removed_devices.remove(&device);
                     }
                 }
             }
@@ -4256,7 +4473,7 @@ fn keying_emit_join(st: &mut NetState, idx: usize) -> Option<Vec<u8>> {
 /// returns what the ack signs over — (winning genesis hash, my device seed). The signature itself is
 /// [`keying_join_wire`], a pure function, so a bundle can sign it with the engine lock released.
 fn keying_emit_join_plan(st: &mut NetState, idx: usize) -> Option<([u8; 32], [u8; 32])> {
-    if !st.mls_keying {
+    if !st.mls_keying || keying_v2::v1_suppressed(st, idx) {
         return None; // join acks only flow once keying is switched on — OFF stays byte-identical to M2
     }
     let circle_id = st.circles[idx].id.clone();
@@ -4293,7 +4510,7 @@ fn keying_join_wire(gh: &[u8; 32], seed: &[u8; 32]) -> Vec<u8> {
 /// it joined. SHADOW-lane: never touches content, returns `false`. Malformed / unauthorized / bad
 /// signature are all ignored harmlessly (the legacy-peer contract).
 fn receive_mls_join(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, HavenError> {
-    if !circle_is_mls_capable(st, idx) || body.len() < 64 {
+    if !circle_is_mls_capable(st, idx) || body.len() < 64 || keying_v2::v1_suppressed(st, idx) {
         return Ok(false);
     }
     let gh: [u8; 32] = body[0..32].try_into().unwrap();
@@ -4341,7 +4558,7 @@ fn mls_build_remove(st: &mut NetState, idx: usize, removed_leaves: &[u32]) -> bo
     let Some(cur) = mls_replay(shadow, Some(seed)) else { return false };
     let Some(mp) = &cur.my_private else { return false }; // I must be an active member
     let Some(init) = cur.init_secret else { return false };
-    if keying_already_authored_on(shadow, &cur.tip_hash) {
+    if keying_already_authored_on(shadow, &cur) {
         return false; // one own commit per tip (see `keying_already_authored_on`)
     }
     let my_leaf = mp.leaf_index;
@@ -4396,6 +4613,7 @@ fn mls_build_remove(st: &mut NetState, idx: usize, removed_leaves: &[u32]) -> bo
     shadow.commits.insert(ch, cbytes.clone());
     shadow.emit_cache.push(tagged(TAG_MLS_COMMIT, &cbytes));
     keying_record_own_build(shadow, ch, cur.tip_hash, next, new_leaf, entropy);
+    keying_wipe_material(new_leaf, entropy);
     // A Remove re-keys the committer's own leaf too, so it resets the PCS window (§6.4): the leaf
     // was just refreshed — the periodic leaf Update shouldn't also fire this bundle.
     st.circles[idx].rotated_at = now_secs();
@@ -4441,7 +4659,7 @@ fn mls_grow_tree(st: &mut NetState, idx: usize, new_devices: &[(HavenId, DeviceC
     let Some(cur) = mls_replay(shadow, Some(seed)) else { return false };
     let Some(mp) = &cur.my_private else { return false }; // I must be an active member to commit
     let Some(init) = cur.init_secret else { return false };
-    if keying_already_authored_on(shadow, &cur.tip_hash) {
+    if keying_already_authored_on(shadow, &cur) {
         return false; // one own commit per tip (see `keying_already_authored_on`)
     }
     let my_leaf = mp.leaf_index;
@@ -4510,6 +4728,7 @@ fn mls_grow_tree(st: &mut NetState, idx: usize, new_devices: &[(HavenId, DeviceC
     shadow.emit_cache.push(tagged(TAG_MLS_COMMIT, &cbytes));
     shadow.emit_cache.extend(welcome_wires);
     keying_record_own_build(shadow, ch, cur.tip_hash, next, new_leaf, entropy);
+    keying_wipe_material(new_leaf, entropy);
     if !keying_legacy_mode() {
         for (bundle, ls) in &joiners {
             let id = bundle.node_id_bytes();
@@ -4543,17 +4762,20 @@ fn mls_rewelcome_device(st: &mut NetState, idx: usize, device_id: &[u8; 32]) -> 
     // The device must be a CURRENT leaf (still admitted), and its leaf key must match a secret I
     // assigned it — the same fail-closed binding the joiner re-checks (a revoked device is blanked).
     // Stored assignment first; the seed-derived one covers leaves assigned before stage 1.
-    let Some((ls, li)) = keying_known_leaf_secrets(shadow, &seed, &gid, device_id).into_iter().find_map(|ls| {
-        let kp = treekem::node_keypair_from_path_secret(&ls);
+    let mut known = keying_known_leaf_secrets(shadow, &seed, &gid, device_id);
+    let found = known.iter().find_map(|ls| {
+        let kp = treekem::node_keypair_from_path_secret(ls);
         cur.tree.slots.iter().enumerate().find_map(|(i, s)| match s {
             treekem::TreeSlot::Leaf(l)
                 if i % 2 == 0 && l.leaf_kem_x == kp.kem_x && l.leaf_kem_pq[..] == kp.kem_pq[..] =>
             {
-                Some((ls, (i / 2) as u32))
+                Some((*ls, (i / 2) as u32))
             }
             _ => None,
         })
-    }) else { return false };
+    });
+    known.iter_mut().for_each(treekem::wipe_secret); // the candidates' heap copies
+    let Some((ls, li)) = found else { return false };
     let Some(bundle) = mls_device_bundle(st, idx, device_id) else { return false };
     let w = ShadowWelcome {
         epoch: cur.epoch,
@@ -4679,7 +4901,7 @@ fn mls_pcs_leaf_update(st: &mut NetState, idx: usize) -> bool {
     let signer = Identity::from_seed(&seed);
     let Some(shadow) = st.shadow_trees.get(&circle_id) else { return false };
     let Some(cur) = mls_replay(shadow, Some(seed)) else { return false };
-    if keying_already_authored_on(shadow, &cur.tip_hash) {
+    if keying_already_authored_on(shadow, &cur) {
         return false; // one own commit per tip (see `keying_already_authored_on`)
     }
     // Only heal a circle that is actually LIVE-keying — shadow content isn't tree-keyed, so there is
@@ -4712,6 +4934,7 @@ fn mls_pcs_leaf_update(st: &mut NetState, idx: usize) -> bool {
     shadow.commits.insert(ch, cbytes.clone());
     shadow.emit_cache.push(tagged(TAG_MLS_COMMIT, &cbytes));
     keying_record_own_build(shadow, ch, cur.tip_hash, next, new_leaf, entropy);
+    keying_wipe_material(new_leaf, entropy);
     // Stamp the window so the next bundle doesn't immediately re-Update — the weekly cadence.
     st.circles[idx].rotated_at = now_secs();
     true
@@ -4725,6 +4948,17 @@ fn mls_pcs_leaf_update(st: &mut NetState, idx: usize) -> bool {
 /// the author + re-seal paths read. When NOT live it clears `mls_live_epoch`, so content reverts to
 /// the legacy sender-keys epoch within one bundle (park). Idempotent: pure function of verified state.
 fn mls_refresh_keying(st: &mut NetState, idx: usize) -> Option<u64> {
+    // The v2 tree first: once it is all-joined it keys the content, and that is the moment the v1
+    // tree is wiped (docs/formal/STAGE3-V2-TREE.md). Until then the v1 tree below carries on.
+    if let Some(content_epoch) = keying_v2::refresh(st, idx) {
+        return Some(content_epoch);
+    }
+    if keying_v2::v1_suppressed(st, idx) {
+        // The v2 tree took over but cannot key right now (a device without a key package joined,
+        // or a new leaf has not acked): the sender-keys lane carries the circle (§7.3 park).
+        st.circles[idx].mls_live_epoch = None;
+        return None;
+    }
     let clear = |st: &mut NetState, idx: usize| {
         st.circles[idx].mls_live_epoch = None;
     };
@@ -5209,19 +5443,10 @@ fn drain_pending(st: &mut NetState, idx: usize) {
     let me_hex = hex(&st.me().node_id_bytes());
     let c = &mut st.circles[idx];
     let my_epoch = c.my_epoch;
-    let newest_by_author: std::collections::HashMap<String, u64> = {
-        let mut m: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-        for ((acct, e), _) in c.peer_epoch_keys.iter() {
-            let cur = m.entry(acct.clone()).or_insert(0);
-            if *e > *cur {
-                *cur = *e;
-            }
-        }
-        m.insert(me_hex.clone(), my_epoch);
-        m
-    };
+    let known_authors: HashSet<String> = c.peer_epoch_keys.keys().map(|(a, _)| a.clone()).collect();
     let deferred = deferred_bodies();
-    c.pending_epoch.retain(|p| {
+    let mut pending = std::mem::take(&mut c.pending_epoch);
+    pending.retain(|p| {
         let Some(parsed) = &p.parsed else { return false };
         // Re-parked only to be opened with the lock released: it is NOT stale, whatever its epoch —
         // the replay decides its fate exactly as an in-place open would have.
@@ -5230,14 +5455,18 @@ fn drain_pending(st: &mut NetState, idx: usize) {
         }
         let env = &parsed.env;
         let author = env.sender_hex();
-        match newest_by_author.get(&author) {
-            // Keep anything whose sealing epoch is still within (or ahead of) the recoverable
-            // window; drop fossils more than KEEP_EPOCHS behind the newest key we hold.
-            Some(&newest) => env.epoch + 4 >= newest,
+        // Keep anything whose sealing epoch is still within (or ahead of) the recoverable window;
+        // drop fossils more than KEEP_EPOCHS behind the newest key we hold (`parked_is_fossil`).
+        if author == me_hex {
+            env.epoch + 4 >= my_epoch
+        } else if known_authors.contains(&author) {
+            !c.parked_is_fossil(&author, env.epoch)
+        } else {
             // Unknown author (roster not learned yet) — keep; the roster drain recovers it.
-            None => true,
+            true
         }
     });
+    c.pending_epoch = pending;
 }
 
 thread_local! {
@@ -5276,6 +5505,10 @@ fn drain_pending_tree(st: &mut NetState, idx: usize) {
                 Some(&TAG_MLS_COMMIT) => receive_mls_commit(st, idx, &raw[1..]).unwrap_or(false),
                 Some(&TAG_MLS_WELCOME) => receive_mls_welcome(st, idx, &raw[1..]).unwrap_or(false),
                 Some(&TAG_MLS_JOIN) => receive_mls_join(st, idx, &raw[1..]).unwrap_or(false),
+                // A v2 wire: "applied" = it stored something, so another parked wire may now fit.
+                Some(&tag @ (TAG_MLS2_KEYPACKAGE | TAG_MLS2_COMMIT | TAG_MLS2_WELCOME | TAG_MLS2_JOIN)) => {
+                    keying_v2::receive(st, idx, tag, &raw[1..])
+                }
                 _ => false,
             };
             if applied {
@@ -6129,6 +6362,13 @@ struct PersistShadow {
     #[serde(default)]
     #[serde(with = "persist_bytes")]
     assigned_leaves: Vec<([u8; 32], [u8; 32])>,
+    /// What only a version-2 tree holds (`keying_v2::encode_state`): key packages, the secrets of
+    /// my own, join acks, the "v1 retired" mark. Empty and NOT WRITTEN for a v1 tree, so a v1
+    /// tree's blob is byte-identical to before; an older build ignores the field.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(with = "persist_bytes")]
+    v2: Vec<u8>,
 }
 
 impl PersistShadow {
@@ -6149,14 +6389,24 @@ impl PersistShadow {
             checkpoint: t.checkpoint.as_ref().map(encode_keying_checkpoint).unwrap_or_default(),
             own_builds: t.own_builds.iter().map(|(h, b)| encode_own_build(h, b)).collect(),
             assigned_leaves: t.assigned_leaves.iter().map(|(d, s)| (*d, *s)).collect(),
+            v2: if t.is_v2 { keying_v2::encode_state(t) } else { Vec::new() },
         }
     }
 
     /// Merge into `st`: a tree this session already built wins field by field (it is newer); the
     /// restored one fills what the session lacks, and the commit / Welcome / join sets union.
-    fn restore(self, st: &mut NetState) {
+    /// `v2` says which tree this record is: a v1 tree (`PersistState::shadow_trees`) or a v2 tree
+    /// (`PersistState::shadow_trees_v2`). The two never mix.
+    fn restore(self, st: &mut NetState, v2: bool) {
         let gid = self.circle.as_bytes().to_vec();
-        let t = st.shadow_trees.entry(self.circle.clone()).or_insert_with(|| ShadowTree::new(gid));
+        let t = if v2 {
+            st.v2_trees.entry(self.circle.clone()).or_insert_with(|| ShadowTree::new_v2(gid))
+        } else {
+            st.shadow_trees.entry(self.circle.clone()).or_insert_with(|| ShadowTree::new(gid))
+        };
+        if v2 {
+            keying_v2::restore_state(t, &self.v2);
+        }
         for c in self.commits {
             t.commits.entry(treekem::commit_hash(&c)).or_insert(c);
         }
@@ -6211,6 +6461,12 @@ struct PersistState {
     /// as it did before this was persisted).
     #[serde(default)]
     shadow_trees: Vec<PersistShadow>,
+    /// The circles' VERSION-2 trees (`NetState::v2_trees`). A separate list, so a build that only
+    /// knows the v1 tree never reads a v2 tree as a v1 one — it ignores the unknown field. Not
+    /// written while empty, so a state with no v2 tree serializes exactly as before.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    shadow_trees_v2: Vec<PersistShadow>,
     /// Verified device rosters (account_bundle, device_list_bytes, credential_bytes), so multi-device
     /// state survives restarts WITHOUT re-rotating epochs (those persist alongside in PersistCircle).
     #[serde(default)]
@@ -6408,6 +6664,28 @@ fn key_state_digest(st: &NetState) -> [u8; 32] {
             h.update(g);
         }
     }
+    // The v2 trees author key material too (a key package's secrets, a genesis, Welcomes), and a
+    // wipe there must reach disk as well. Hashed only when one exists: a state with no v2 tree
+    // digests exactly as before.
+    let mut trees: Vec<(&String, &ShadowTree)> = st.v2_trees.iter().collect();
+    trees.sort_by(|a, b| a.0.cmp(b.0));
+    for (id, t) in trees {
+        h.update(b"haven-key-state-v2-tree");
+        h.update(id.as_bytes());
+        h.update(&t.my_genesis.unwrap_or([0u8; 32]));
+        for k in t.commits.keys() {
+            h.update(k);
+        }
+        for k in t.my_welcomes.keys() {
+            h.update(k);
+        }
+        h.update(&t.checkpoint.as_ref().map(|ck| ck.state.tip_hash).unwrap_or([0u8; 32]));
+        h.update(&(t.emit_cache.len() as u64).to_le_bytes());
+        for w in &t.emit_cache {
+            h.update(blake3::hash(w).as_bytes());
+        }
+        keying_v2::digest_state(t, &mut h);
+    }
     *h.finalize().as_bytes()
 }
 
@@ -6444,6 +6722,13 @@ impl HavenSocial {
                     s.insert(me_pub.node_id_bytes());
                     s
                 },
+                mls2_capable: {
+                    let mut s = std::collections::HashSet::new();
+                    if mls_version_advertised() >= 2 {
+                        s.insert(me_pub.node_id_bytes());
+                    }
+                    s
+                },
                 // This build reads the compact container, so my own account must count as capable or
                 // a circle containing me could never compute as fully capable and would stay on JSON
                 // forever.
@@ -6455,6 +6740,7 @@ impl HavenSocial {
                 keep_own_posts: false,
                 retire_account_key: false,
                 shadow_trees: std::collections::HashMap::new(),
+                v2_trees: std::collections::HashMap::new(),
                 mls_keying: false,
                 live_lane_circles: std::collections::HashSet::new(),
             }),
@@ -6502,6 +6788,13 @@ impl HavenSocial {
                     s.insert(account_id);
                     s
                 },
+                mls2_capable: {
+                    let mut s = std::collections::HashSet::new();
+                    if mls_version_advertised() >= 2 {
+                        s.insert(account_id);
+                    }
+                    s
+                },
                 // This build reads the compact container; self-seed so a circle containing this
                 // account can compute as fully capable (mirrors `Self::new`).
                 compact_wire_capable: {
@@ -6512,6 +6805,7 @@ impl HavenSocial {
                 keep_own_posts: false,
                 retire_account_key: false,
                 shadow_trees: std::collections::HashMap::new(),
+                v2_trees: std::collections::HashMap::new(),
                 mls_keying: false,
                 live_lane_circles: std::collections::HashSet::new(),
             }),
@@ -6869,26 +7163,11 @@ impl HavenSocial {
         let mut st = self.state.lock().unwrap();
         let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return false };
         let Ok(target) = decode_hex32(&account_hex) else { return false };
-        let seed = st.device.as_ref().map(|d| d.secret_seed());
-        let Some(shadow) = st.shadow_trees.get(&circle_id) else { return false };
-        let Some(cur) = mls_replay(shadow, seed) else { return false };
-        // Every current leaf of the target account (a member may run multiple devices).
-        let mut leaves: Vec<u32> = Vec::new();
-        for (i, slot) in cur.tree.slots.iter().enumerate() {
-            if let treekem::TreeSlot::Leaf(l) = slot {
-                if i % 2 == 0 {
-                    if let Ok(c) = DeviceCredential::from_bytes(&l.device_credential) {
-                        if c.account_id == target {
-                            leaves.push((i / 2) as u32);
-                        }
-                    }
-                }
-            }
-        }
-        if leaves.is_empty() {
-            return false;
-        }
-        let removed = mls_build_remove(&mut st, idx, &leaves);
+        // The v2 tree, if this circle has one I can commit on (alone once it took over; beside the
+        // v1 tree while the circle migrates, so the member is cut from both).
+        let removed_v2 = keying_v2::remove_account(&mut st, idx, &target);
+        let removed_v1 = Self::mls_remove_member_v1(&mut st, idx, &circle_id, &target);
+        let removed = removed_v1 || removed_v2;
         if removed {
             // Drop the member from circle membership so the roster automation (`mls_grow_tree`) does
             // not immediately re-Add them: a tree Remove and a circle removal are one act (§4.3).
@@ -6921,7 +7200,13 @@ impl HavenSocial {
         // Recompute the flip. Some ⇒ live; None ⇒ shadow (not yet all-joined) or parked (a genesis
         // exists but the gate went false). We distinguish by whether the tree has run at all here.
         if let Some(content_epoch) = mls_refresh_keying(&mut st, idx) {
-            return MlsKeyingStatusFfi { state: "live".into(), epoch: content_epoch - MLS_EPOCH_BASE };
+            // The tree epoch, whichever tree keys the circle (the v2 tree counts from 1 again).
+            let base = if epoch_lane(content_epoch) == 2 { MLS2_EPOCH_BASE } else { MLS_EPOCH_BASE };
+            return MlsKeyingStatusFfi { state: "live".into(), epoch: content_epoch - base };
+        }
+        if keying_v2::v1_suppressed(&st, idx) {
+            // The v2 tree took over and is not keying right now: parked on the sender-keys lane.
+            return MlsKeyingStatusFfi { state: "parked".into(), epoch: 0 };
         }
         let has_tree = st
             .shadow_trees
@@ -7109,7 +7394,7 @@ impl HavenSocial {
         // a relay. An older client ignores the unknown JSON keys (proven in the field by `sd` shipping
         // the same way), so both are strictly additive; a missing marker always means "legacy," never
         // "downgraded."
-        let payload = serde_json::json!({ "n": name, "b": bio, "l": link, "a": avatar, "e": emoji, "sd": SEED_DROP_VERSION, "ml": MLS_VERSION, "cw": COMPACT_WIRE_VERSION }).to_string();
+        let payload = serde_json::json!({ "n": name, "b": bio, "l": link, "a": avatar, "e": emoji, "sd": SEED_DROP_VERSION, "ml": mls_version_advertised(), "cw": COMPACT_WIRE_VERSION }).to_string();
         // Domain-separate so a profile signature can never be confused with another signed object
         // (audit H3). The tag is part of the SIGNED bytes; the wire blob still carries only `payload`.
         let sig = me.sign(&profile_signing_bytes(payload.as_bytes()));
@@ -7207,7 +7492,12 @@ impl HavenSocial {
             .and_then(|v| v.get("ml").and_then(|x| x.as_u64()))
             .unwrap_or(0) as u32;
         if ml >= 1 {
-            self.state.lock().unwrap().mls_capable.insert(id.node_id_bytes());
+            let mut st = self.state.lock().unwrap();
+            st.mls_capable.insert(id.node_id_bytes());
+            if ml >= 2 && st.mls2_capable.insert(id.node_id_bytes()) {
+                // A v2 wire that arrived before this was known may be parked: let the poll retry it.
+                st.circles.iter_mut().for_each(|c| c.pending_tree_retries = 0);
+            }
         }
         // `cw` — can this account's client READ the compact envelope container? Learned the same
         // monotonic, affirmative-only way. Unlike `sd`/`ml` this one IS consumed in production: it
@@ -7913,7 +8203,10 @@ impl HavenSocial {
     pub fn mls_shadow_status(&self, circle_id: String) -> MlsShadowStatusFfi {
         let st = self.state.lock().unwrap();
         let none = MlsShadowStatusFfi { epoch: 0, tree_hash_hex: String::new(), converged: false, fork_count: 0 };
-        let Some(shadow) = st.shadow_trees.get(&circle_id) else { return none };
+        let Some(shadow) = st.shadow_trees.get(&circle_id) else {
+            // No v1 tree: the v2 tree took this circle over — report on that one.
+            return keying_v2::shadow_status(&st, &circle_id).unwrap_or(none);
+        };
         if shadow.commits.is_empty() {
             return none;
         }
@@ -8662,6 +8955,30 @@ have_seed={} have_device={} members={}",
 }
 
 impl HavenSocial {
+    /// The v1 tree's half of `mls_remove_member`: one chained Remove of every leaf of `target`.
+    fn mls_remove_member_v1(st: &mut NetState, idx: usize, circle_id: &str, target: &[u8; 32]) -> bool {
+        let seed = st.device.as_ref().map(|d| d.secret_seed());
+        let Some(shadow) = st.shadow_trees.get(circle_id) else { return false };
+        let Some(cur) = mls_replay(shadow, seed) else { return false };
+        // Every current leaf of the target account (a member may run multiple devices).
+        let mut leaves: Vec<u32> = Vec::new();
+        for (i, slot) in cur.tree.slots.iter().enumerate() {
+            if let treekem::TreeSlot::Leaf(l) = slot {
+                if i % 2 == 0 {
+                    if let Ok(c) = DeviceCredential::from_bytes(&l.device_credential) {
+                        if c.account_id == *target {
+                            leaves.push((i / 2) as u32);
+                        }
+                    }
+                }
+            }
+        }
+        if leaves.is_empty() {
+            return false;
+        }
+        mls_build_remove(st, idx, &leaves)
+    }
+
     /// Everything `export_state` persists, copied out of the engine state.
     fn persist_snapshot(st: &NetState) -> PersistState {
         PersistState {
@@ -8700,6 +9017,12 @@ impl HavenSocial {
             shadow_trees: {
                 let mut v: Vec<PersistShadow> =
                     st.shadow_trees.iter().map(|(c, t)| PersistShadow::from_tree(c, t)).collect();
+                v.sort_by(|a, b| a.circle.cmp(&b.circle));
+                v
+            },
+            shadow_trees_v2: {
+                let mut v: Vec<PersistShadow> =
+                    st.v2_trees.iter().map(|(c, t)| PersistShadow::from_tree(c, t)).collect();
                 v.sort_by(|a, b| a.circle.cmp(&b.circle));
                 v
             },
@@ -8851,7 +9174,9 @@ impl HavenSocial {
             // THE KEYING FLIP / PARK DECISION (§4.5/§7.3), recomputed every bundle from verified state.
             // `Some(content_epoch)` ⇒ the circle is flipped: content seals under the tree-derived key and
             // the legacy KeyCommit STOPS. `None` ⇒ shadow or parked ⇒ legacy KeyCommit + sender-keys epoch.
-            let mls_live = mls_refresh_keying(&mut st, idx);
+            // (A live epoch whose key is somehow not held is treated as not live: the sender-keys
+            // lane below always has a key, where an `expect` here would panic under the engine lock.)
+            let mls_live = mls_refresh_keying(&mut st, idx).filter(|e| st.circles[idx].my_epoch_keys.contains_key(e));
             // PERIODIC forward-secrecy rotation (audit C2) — the trigger for `rotate_if_stale`. This is the
             // only safe place for it: a full bundle (`sync_envelopes` on the P2P path, `export_my_envelopes`
             // on the relay backfill) emits the new key commit AND re-seals my entire history under it in the
@@ -8862,11 +9187,9 @@ impl HavenSocial {
             // rotation is gated OFF (the tree drives the epoch); content keys come from `mls_live` instead.
             let (epoch, key) = match mls_live {
                 Some(content_epoch) => {
-                    let key = st.circles[idx]
-                        .my_epoch_keys
-                        .get(&content_epoch)
-                        .copied()
-                        .expect("mls_refresh_keying populated my content key");
+                    let Some(key) = st.circles[idx].my_epoch_keys.get(&content_epoch).copied() else {
+                        return (vec![], 0, 0, vec![]);
+                    };
                     (content_epoch, key)
                 }
                 None => {
@@ -8875,6 +9198,7 @@ impl HavenSocial {
                     } else {
                         st.circles[idx].ensure_epoch();
                     }
+                    st.circles[idx].ensure_lane_key();
                     let e = st.circles[idx].my_epoch;
                     let Some(k) = st.circles[idx].current_key() else { return (vec![], 0, 0, vec![]) };
                     (e, k)
@@ -9299,6 +9623,21 @@ impl HavenSocial {
                 drain_pending(&mut st, idx);
                 r
             }
+            // Version 2 of the tree (`keying_v2.rs`): the same shape as the three arms above. A v2
+            // wire never changes content by itself, so the answer is always `Ok(false)`.
+            tag @ (TAG_MLS2_KEYPACKAGE | TAG_MLS2_COMMIT | TAG_MLS2_WELCOME | TAG_MLS2_JOIN) => {
+                TREE_RETRYABLE.with(|f| f.set(false));
+                if keying_v2::receive(&mut st, idx, tag, &envelope[1..]) {
+                    // It stored something: a parked wire (an orphan commit, a Welcome waiting for
+                    // its commit) may fit now.
+                    drain_pending_tree(&mut st, idx);
+                } else if TREE_RETRYABLE.with(|f| f.get()) {
+                    park_pending_tree(&mut st.circles[idx], envelope);
+                }
+                mls_refresh_keying(&mut st, idx);
+                drain_pending(&mut st, idx);
+                Ok(false)
+            }
             TAG_ADMIN_GRANT => receive_admin_grant(&mut st, idx, &envelope[1..]),
             TAG_CIRCLE_UPGRADE => receive_circle_upgrade(&mut st, idx, &envelope[1..]),
             // Unbundled proposals (§4.2 roster path) are reserved for M4; a stray one is inert.
@@ -9346,7 +9685,12 @@ impl HavenSocial {
             // The circles' TreeKEM state — BEFORE anything can build a genesis on an empty tree.
             for sh in ps.shadow_trees {
                 if st.circles.iter().any(|c| c.id == sh.circle) {
-                    sh.restore(&mut st);
+                    sh.restore(&mut st, false);
+                }
+            }
+            for sh in ps.shadow_trees_v2 {
+                if st.circles.iter().any(|c| c.id == sh.circle) {
+                    sh.restore(&mut st, true);
                 }
             }
             // A3/D8: restore the seedless verbatim roster wire + cached profile card (additive — never
@@ -9566,19 +9910,20 @@ impl HavenSocial {
         // KEY SOURCE moves (§4.5). `mls_refresh_keying` (re)derives it and sets `mls_live_epoch`; when
         // shadow/parked it returns `None` and we fall back to the legacy sender-keys epoch.
         st.circles[idx].ensure_epoch();
-        let content_epoch_live = mls_refresh_keying(&mut st, idx);
-        let (epoch, key) = match content_epoch_live {
-            Some(content_epoch) => {
-                let key = st.circles[idx]
-                    .my_epoch_keys
-                    .get(&content_epoch)
-                    .copied()
-                    .expect("mls_refresh_keying populated my content key");
-                (content_epoch, key)
-            }
+        // No `expect` on this path: it runs with the engine lock held. A live epoch whose key is
+        // not held falls back to the sender-keys lane, and that lane always ends up with a key.
+        let content_epoch_live =
+            mls_refresh_keying(&mut st, idx).filter(|e| st.circles[idx].my_epoch_keys.contains_key(e));
+        let live_key = content_epoch_live.and_then(|e| st.circles[idx].my_epoch_keys.get(&e).map(|k| (e, *k)));
+        let (epoch, key) = match live_key {
+            Some(pair) => pair,
             None => {
+                st.circles[idx].ensure_lane_key();
                 let epoch = st.circles[idx].my_epoch;
-                (epoch, st.circles[idx].current_key().expect("epoch key exists after ensure_epoch"))
+                let Some(key) = st.circles[idx].current_key() else {
+                    return Err(HavenError::Invalid { msg: "no epoch key to seal under".into() });
+                };
+                (epoch, key)
             }
         };
         // M6 (§6.5): the DM / LIVE lane gets a per-message ratchet — but ONLY when the tree is
@@ -9634,6 +9979,10 @@ fn learn_capabilities(st: &mut NetState, account: [u8; 32], payload: &[u8]) {
     }
     if marker("ml") >= 1 {
         st.mls_capable.insert(account);
+    }
+    if marker("ml") >= 2 && st.mls2_capable.insert(account) {
+        // A v2 wire that arrived before this was known may be parked: let the poll retry it.
+        st.circles.iter_mut().for_each(|c| c.pending_tree_retries = 0);
     }
     if marker("cw") >= 1 {
         st.compact_wire_capable.insert(account);
@@ -10170,6 +10519,9 @@ mod bundle_reference;
 #[cfg(test)]
 mod net_tests {
     use super::*;
+
+    /// Version 2 of the tree: key packages, the v1→v2 migration, secret hygiene.
+    mod keying_v2_tests; // src/net_tests/keying_v2_tests.rs
 
     /// Deliver everything `from` authored in a circle (its key commit + epoch events) to `to`, the
     /// way the platform's sync/hello does — the commit teaches `to` the sender's epoch key.
@@ -12005,7 +12357,7 @@ mod net_tests {
         let prof = alice.my_signed_profile("Alice".into(), "bio".into(), "".into(), "".into(), "".into());
         let sig_len = u32::from_le_bytes(prof[..4].try_into().unwrap()) as usize;
         let card: serde_json::Value = serde_json::from_slice(&prof[4 + sig_len..]).unwrap();
-        assert_eq!(card.get("ml").and_then(|x| x.as_u64()), Some(1), "`ml` rides the signed payload");
+        assert_eq!(card.get("ml").and_then(|x| x.as_u64()), Some(MLS_VERSION as u64), "`ml` rides the signed payload");
         assert_eq!(card.get("sd").and_then(|x| x.as_u64()), Some(1), "`sd` still rides beside it");
 
         // FORGED/tampered first: a flipped byte fails signature verification, so NOTHING is learned —
@@ -12732,6 +13084,9 @@ mod net_tests {
     /// Build a fully-MLS-capable fleet (device-only rosters, cross-learned capability + rosters, a
     /// pinned creator). Does NOT flip the keying switch — the caller decides. Returns the instances.
     fn mls_capable_fleet(seeds: &[[u8; 32]], devs: &[[u8; 32]], creator_idx: usize) -> (Vec<Arc<HavenSocial>>, String) {
+        // These fleets exercise the V1 tree: every engine this test creates advertises `ml: 1`, so
+        // the circle never starts the v2 migration (the v2 fleets live in `keying_v2_tests.rs`).
+        TEST_MLS_VERSION.with(|v| v.set(1));
         // AUDIT F1 — creator authority now requires an OWNED circle id that binds to the creator, so
         // the shared fleet uses an id minted from the creator's account (not the ownerless "default").
         let creator_acct = Identity::from_seed(&seeds[creator_idx]).public().node_id_bytes();

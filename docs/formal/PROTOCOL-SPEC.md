@@ -226,9 +226,9 @@ not the wiring: the wired value is `H(root, epoch)`.
 What still holds as wired: confidentiality against anyone who never obtains a member device's
 seed or stored state (T1), and cryptographic removal (T2).
 
-## 14. Implementing the fix (plan; items 1–2 implemented, not released)
+## 14. Implementing the fix (items 1–3 and 5 implemented, not released)
 
-Capability-gated like the `mls` marker (a `mls2` marker; a circle re-keys only when every device
+Capability-gated like the `mls` marker (profile value `ml: 2`; a circle re-keys only when every device
 advertises it; reversible; legacy circles unchanged). The content path does not change — it is
 keyed by the 32-byte per-epoch sender keys wherever they come from — so no post is re-encrypted
 or lost, and nothing is user-visible.
@@ -244,13 +244,14 @@ or lost, and nothing is user-visible.
 2. **Random secrets.** *Implemented with item 1.* `init_0`, leaf and update secrets from `OsRng`;
    own commits are no longer rebuilt from the seed, so their build inputs are stored until
    checkpointed. (F-a.) Existing circles keep their seed-derived genesis until item 5.
-3. **Key packages.** A device publishes a signed (leaf public key, one-time init key); the
+3. **Key packages.** *Implemented ([`STAGE3-V2-TREE.md`](STAGE3-V2-TREE.md)).* A device publishes a signed (leaf public key, one-time init key); the
    committer Adds from it and Welcomes to the init key. (F-b, F-c.)
 4. **Member updates.** Receivers accept a path-only commit from any current member; every device
    runs the weekly Update. More concurrent commits means more forks, so the fork rule
    (`TREEKEM-DESIGN.md` §5) needs re-testing under that load before this stage ships. (F-d.)
-5. **Migration.** When a circle is fully `mls2`-capable the committer issues a fresh genesis with
-   random secrets; devices drop the v1 tree state after the flip.
+5. **Migration.** *Implemented with item 3 (§16.5).* When every member is `ml: 2` and every device
+   has published a key package, the creator issues a v2 genesis with random secrets; devices drop
+   the v1 tree state at the flip.
 
 Each stage needs its own core tests and a model re-run; stages 3–4 change wire formats.
 
@@ -320,7 +321,8 @@ KeyPackage = version(1)=1 ‖ lp(group_id) ‖ kp_id(16) ‖ lp(LeafNode) ‖ lp
   signature verify under that device, and `group_id` is the circle it arrived in.
 - **One use.** A committer uses a given `kp_id` for at most one Add; the device publishes a new
   package whenever it needs to (re-)enter. `init_seed` is deleted when the device has joined and
-  that entry point is past the retention window (§15); the Welcome plaintext is never stored.
+  that entry point is past the retention window (§15). Until then the opened Welcome is kept
+  as the device's entry point (stage 1), and it is wiped at the same checkpoint.
 
 ### 16.2 Welcome v2
 
@@ -337,8 +339,10 @@ as today). Every v2 Welcome is self-contained (carries the tree), genesis includ
 A Welcome is also bound to the **public commit** it enters at: the joiner must hold the commit
 whose hash is `commit_hash`, that commit must be for this circle and epoch, pass the same
 signature and authority checks every member applies, and claim exactly the delivered tree
-(`tree_hash`). A joiner therefore never enters a state described by a Welcome alone
-(`enter_via_welcome_v2`).
+(`tree_hash`). The Welcome must be sealed by that commit's author, and the delivered
+`joiner_secret` must key the commit's confirmation MAC — anyone can seal to a published
+one-time key, so without this a sender could choose the joiner's epoch secrets. A joiner
+therefore never enters a state described by a Welcome alone (`enter_via_welcome_v2`).
 
 ### 16.3 Membership commits
 
@@ -348,7 +352,9 @@ TAG_MLS2_COMMIT = 0x11    a treekem::Commit on a v2 chain      TAG_MLS2_JOIN = 0
 
 The v2 tree has its own tag family (`0x10`–`0x13`) instead of reusing the v1 tags: a v1 build
 that receives a v2 commit under the v1 tag would park it as an orphan and retry it, and a v2 join
-ack under the v1 tag would trigger a v1 re-Welcome. Unknown tags fall through harmlessly.
+ack under the v1 tag would trigger a v1 re-Welcome. Unknown tags fall through harmlessly
+(checked against the `v2.1.2` router: a per-envelope parse error, not parked, not retried).
+The v2 join ack names the entry commit, so a re-entered device acks again.
 
 
 - **Genesis** is built by the elected creator once it holds a valid key package for every
@@ -377,14 +383,19 @@ secret and entropy are random, stored with the pending commit, and dropped at th
 ### 16.5 Migration (no user-visible step)
 
 - New capability value `ml: 2` in the profile, monotonic and learned-never-inferred like `ml: 1`.
-- While any device of the circle is `ml: 1`, the circle stays on its v1 tree (with stage 1–2
-  hygiene on upgraded devices). Nothing is emitted that a v1 build cannot parse.
-- When every authorized device is `ml: 2`, upgraded devices drop the v1 tree and wipe its
-  secrets; content keys fall back to the KeyCommit lane for the interval (the existing park
-  path), devices publish key packages, the creator builds the v2 genesis, and content flips to
-  the v2 tree at all-joined (the existing second gate). Posts are never re-encrypted or lost:
-  the content path only ever sees 32-byte epoch keys, and the daily re-seal republishes history
-  under whichever key is current.
+- While any member account is `ml: 1`, the circle stays on its v1 tree (with stage 1–2 hygiene
+  on upgraded devices). Nothing is emitted that a v1 build cannot ignore.
+- When every member account is `ml: 2`, devices publish key packages while the **v1 tree stays
+  live and keeps keying content**. The creator builds the v2 genesis only once it holds a valid
+  package for every authorized device, so one device on an old build simply leaves the circle on
+  v1. Each device files the v2 epoch's content keys as soon as it can derive them, and flips its
+  own authoring to the v2 lane when the v2 tree is all-joined; in the same step it wipes the v1
+  tree and stops emitting v1 wires. The circle never parks during migration. Posts are never
+  re-encrypted or lost: the content path only ever sees 32-byte epoch keys, and the daily
+  re-seal republishes history under whichever key is current.
+- After the flip, an authorized device with no key package (a new device on an old build) parks
+  the circle on the KeyCommit lane until it is Added; a member account advertising `ml: 1`
+  brings the v1 tree back from a new genesis.
 - A v1 device (re)joining reverses the gate exactly as §7.3 of the design does today.
 
 ## 17. Device roster

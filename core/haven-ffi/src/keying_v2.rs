@@ -20,8 +20,11 @@
 //!   * a Welcome is accepted only against the stored public commit it names;
 //!   * the migration: the v1 tree keeps keying content until the v2 tree is all-joined, and only
 //!     then is the v1 tree wiped ([`refresh`]).
-//!
-//! NOT here: member-authored leaf Updates (§16.4). Only an admin commits, as in the v1 tree.
+//!   * member updates (§16.4, docs/formal/STAGE4-MEMBER-UPDATES.md): EVERY device re-keys its own
+//!     leaf — accepted from any current leaf ([`check_commit`]), authored on the weekly chokepoint
+//!     with a per-device offset and re-issued when it lost a fork ([`member_update`]);
+//!   * a commit whose confirmation MAC fails for a device that opened its path is VOID for every
+//!     device holding that epoch, and is never selected ([`note_void`]).
 
 use super::*;
 use haven_p2p::keypackage::{self, KeyPackage, KeyPackageSecret, WelcomeV2, KP_ID_LEN};
@@ -41,6 +44,28 @@ const KEEP_OWN_PACKAGES: usize = 6;
 const KEEP_ACKS_PER_DEVICE: usize = 4;
 /// Commits held whose parent has not arrived (a Welcome may name one as its entry point).
 const KEEP_ORPHANS: usize = 16;
+/// Domain of the per-device offset added to the weekly Update window.
+const UPDATE_JITTER_DOMAIN: &[u8] = b"haven-mls-update-jitter-v1";
+/// The per-device offset is below this many seconds (24 h).
+pub(crate) const UPDATE_JITTER_SECS: u64 = 24 * 60 * 60;
+/// A device authors no Update on a tip that ends a run of this many commits of its own. A branch
+/// only one device ever wrote to therefore never reaches [`KEYING_FINAL_DEPTH`], the depth at which
+/// the fork rule makes it final and the device checkpoints past the fork point: a device cut off
+/// from the circle for weeks cannot, by its own Updates alone, grow a branch it can no longer leave.
+pub(crate) const MAX_OWN_RUN: usize = KEYING_FINAL_DEPTH - 1;
+
+/// The last commit this device authored. Every commit re-keys its author's own leaf, so this is
+/// also "my most recent own Update" — which only counts once the chain I have adopted carries the
+/// leaf key it installed (PROTOCOL-SPEC §15, FK4/FK5).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct OwnUpdate {
+    /// Id of the leaf key the commit installed for me ([`leaf_key_of`]). Public.
+    leaf_key: [u8; 32],
+    commit: [u8; 32],
+    epoch: u64,
+    /// When I authored it (unix seconds).
+    at: u64,
+}
 
 /// One of MY key packages: the secrets only this device holds, and the signed bytes it publishes
 /// (kept so every bundle re-emits the same bytes).
@@ -88,14 +113,51 @@ pub(crate) struct V2State {
     joined_at: BTreeMap<[u8; 32], Vec<[u8; 32]>>,
     /// This circle's v2 tree has keyed content, and its v1 tree was wiped then.
     retired_v1: bool,
+    /// When the leaf key of my current seat was drawn into the tree: the moment I entered (unix
+    /// seconds). The start of my Update window until an Update of mine is adopted. 0 = not known
+    /// (a state saved before member updates): the window starts at the first check.
+    leaf_at: u64,
+    /// The last commit I authored — see [`OwnUpdate`].
+    last_update: Option<OwnUpdate>,
+    /// Commits that passed every public check but whose confirmation MAC failed for me after I
+    /// opened their path secret: void for every device holding that epoch, never selected by the
+    /// fork rule. Public hashes; persisted, because once my checkpoint has passed the parent epoch
+    /// I can no longer re-derive the verdict.
+    void: BTreeSet<[u8; 32]>,
     /// Commits whose parent I do not hold yet. Session only: they also sit in `pending_tree`.
     orphans: BTreeMap<[u8; 32], Vec<u8>>,
     /// My signed join ack, by the entry commit it names. Session only.
     join_wire: Option<([u8; 32], Vec<u8>)>,
     /// [`public_state`] answers by tip. A tip's public state never changes. Session only.
     public_memo: Mutex<HashMap<[u8; 32], PublicState>>,
-    /// [`canonical`]'s answer for a commit set of this size (the set only grows). Session only.
-    canon_memo: Mutex<Option<(usize, CanonicalTip)>>,
+    /// [`canonical`]'s answer for a commit set and a void set of these sizes (both only grow).
+    /// Session only.
+    canon_memo: Mutex<Option<((usize, usize), CanonicalTip)>>,
+}
+
+// ── Void commits ───────────────────────────────────────────────────────────────────────────────
+
+/// Is `hash` a commit this device found void? Always false on a v1 tree (its set stays empty).
+pub(crate) fn is_void(shadow: &ShadowTree, hash: &[u8; 32]) -> bool {
+    shadow.x.void.contains(hash)
+}
+
+/// Record the commits a replay found void (`replay_walk`), so the fork rule and the public view
+/// ([`canonical`]) skip them from now on — also after the checkpoint has passed their parent.
+pub(crate) fn note_void(shadow: &mut ShadowTree, void: &[[u8; 32]]) {
+    for h in void {
+        if shadow.commits.contains_key(h) {
+            shadow.x.void.insert(*h);
+        }
+    }
+}
+
+/// The void set's share of the replay memo key.
+pub(crate) fn digest_void(shadow: &ShadowTree, h: &mut blake3::Hasher) {
+    h.update(&(shadow.x.void.len() as u64).to_le_bytes());
+    for v in &shadow.x.void {
+        h.update(v);
+    }
 }
 
 fn leaf_key_of(kem_x: &[u8], kem_pq: &[u8]) -> [u8; 32] {
@@ -316,7 +378,7 @@ pub(crate) fn public_state(shadow: &ShadowTree, tip: &[u8; 32]) -> Option<Public
 /// It is what a device compares its own (secret-bearing) state against to learn that it cannot
 /// follow the chain any more — see [`wants_entry`].
 fn canonical(shadow: &ShadowTree) -> CanonicalTip {
-    let n = shadow.commits.len();
+    let n = (shadow.commits.len(), shadow.x.void.len());
     {
         let memo = shadow.x.canon_memo.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((at, hit)) = memo.as_ref() {
@@ -405,7 +467,9 @@ fn check_genesis(st: &NetState, idx: usize, c: &treekem::Commit) -> Result<(), R
     Ok(())
 }
 
-/// A chained v2 commit, checked against the public tree `prev` it extends:
+/// A chained v2 commit, checked against the public tree `prev` it extends. A commit with no
+/// proposals is a MEMBER UPDATE and is valid from any current leaf (see the first branch). A
+/// commit that changes membership:
 ///
 ///   * it re-keys its author's OWN leaf: the UpdatePath leaf names the device already at
 ///     `sender_leaf`, is signed by that device, and the commit signature verifies under it;
@@ -424,6 +488,26 @@ fn check_commit(
     prev: Option<&PublicState>,
 ) -> Result<(), Refuse> {
     let up = c.update_path.as_ref().ok_or(Refuse::Never)?;
+    if let (true, Some(prev)) = (c.proposals.is_empty(), prev) {
+        // A MEMBER UPDATE (PROTOCOL-SPEC §16.4): no proposals, so no membership changes, and it
+        // is valid from ANY current leaf — admin or not. `verify_member_update` checks that the
+        // new leaf names the same device and account as the leaf it replaces, that the leaf key
+        // really changes, that the credential chains to the pinned account key, and that the leaf
+        // binding and the commit signature verify under that device. The roster rule is ours.
+        let gid = st.circles[idx].id.as_bytes();
+        if c.group_id != gid {
+            return Err(Refuse::Never);
+        }
+        let claimed = DeviceCredential::from_bytes(&up.leaf_node.device_credential).map_err(|_| Refuse::Never)?;
+        let account = mls_account_bundle_ref(st, idx, &claimed.account_id).ok_or(Refuse::Later)?;
+        let cred = keypackage::verify_member_update(&prev.tree, c, |_| Some(account.clone())).map_err(|_| Refuse::Never)?;
+        let authorized =
+            st.device_lists.get(&cred.account_id).is_some_and(|cd| cd.list.is_authorized(&cred.device_id()));
+        if !authorized {
+            return Err(Refuse::Later); // the roster naming this device may be in flight
+        }
+        return Ok(());
+    }
     let cred = check_leaf(st, idx, &up.leaf_node)?;
     let device = cred.device_id();
     if cred.device.verify(&treekem::commit_signing_bytes(c), &c.sig).is_err() {
@@ -447,7 +531,7 @@ fn check_commit(
     let admin = circle_admin_set(st, idx).is_some_and(|a| a.contains(&cred.account_id));
     if !admin {
         // Not an admin: only a leave — it removes leaves of its own account and nothing else.
-        // (A member re-keying just its own leaf is PROTOCOL-SPEC §16.4, a later stage.)
+        // (A member re-keying just its own leaf carries no proposals and was accepted above.)
         let Some(prev) = prev else { return Err(Refuse::Never) };
         let own = |li: &u32| {
             prev.tree.leaf(*li).and_then(|l| leaf_credential_ids(&l.device_credential)).map(|(_, a)| a)
@@ -684,6 +768,10 @@ fn receive_welcome(st: &mut NetState, idx: usize, body: &[u8]) -> bool {
         shadow.my_welcomes.clear();
         shadow.own_builds.clear();
         shadow.x.kp_secrets.drain(..kp_index);
+        // My seat's leaf key is the new package's: the Update I authored from the old seat is moot.
+        shadow.x.last_update = None;
+        shadow.x.leaf_at = now_secs();
+        shadow.replay_memo.lock().unwrap_or_else(|e| e.into_inner()).clear();
     } else if keying_welcome_superseded(shadow, &mut None, &welcome.commit_hash, &entry_welcome) {
         return false; // an old epoch's secrets coming back: refused (stage 1)
     }
@@ -692,6 +780,9 @@ fn receive_welcome(st: &mut NetState, idx: usize, body: &[u8]) -> bool {
         shadow.commits.insert(welcome.commit_hash, commit_bytes);
     }
     shadow.my_welcomes.insert(welcome.commit_hash, entry_welcome);
+    if shadow.x.entered_kp != Some(kp_id) {
+        shadow.x.leaf_at = now_secs(); // a new seat: my Update window starts here
+    }
     shadow.x.entered_kp = Some(kp_id);
     shadow.x.entered_commit = Some(welcome.commit_hash);
     true
@@ -948,6 +1039,7 @@ fn build_genesis(st: &mut NetState, idx: usize) {
     );
     shadow.x.entered_kp = Some(my_kp_id);
     shadow.x.entered_commit = Some(commit_hash);
+    shadow.x.leaf_at = now_secs();
     note_ack(shadow, me, commit_hash);
     shadow.emit_cache.extend(emit);
     for (bundle, _) in &devices {
@@ -957,8 +1049,9 @@ fn build_genesis(st: &mut NetState, idx: usize) {
 
 /// Author one chained commit on my tip: `removes` (leaf indices), then one Add per package in
 /// `adds`, re-keying my own leaf with a RANDOM secret. A Welcome goes to each added package's
-/// one-time key. `false` if I cannot commit here (not a deriving member, no authority, already
-/// authored on this tip).
+/// one-time key. With no removes and no adds it is a member update (§16.4), which any device may
+/// author. `false` if I cannot commit here (not a deriving member, no authority, already authored
+/// on this tip).
 fn author_commit(st: &mut NetState, idx: usize, removes: &[u32], adds: &[KeyPackage]) -> bool {
     let circle_id = st.circles[idx].id.clone();
     let gid = circle_id.as_bytes().to_vec();
@@ -981,7 +1074,8 @@ fn author_commit(st: &mut NetState, idx: usize, removes: &[u32], adds: &[KeyPack
     let own = |li: &u32| {
         cur.tree.leaf(*li).and_then(|l| leaf_credential_ids(&l.device_credential)).map(|(_, a)| a) == Some(my_account)
     };
-    if !admin && (removes.is_empty() || !adds.is_empty() || !removes.iter().all(own)) {
+    let update_only = removes.is_empty() && adds.is_empty();
+    if !admin && !update_only && (removes.is_empty() || !adds.is_empty() || !removes.iter().all(own)) {
         return false;
     }
     let next = cur.epoch + 1;
@@ -1026,14 +1120,23 @@ fn author_commit(st: &mut NetState, idx: usize, removes: &[u32], adds: &[KeyPack
     shadow.emit_cache.push(tagged(TAG_MLS2_COMMIT, &cbytes));
     shadow.emit_cache.extend(welcomes);
     keying_record_own_build(shadow, ch, cur.tip_hash, next, new_leaf, entropy);
+    // Every commit re-keys my own leaf: this one is now "my last Update", and my Update window
+    // restarts from it once the chain I adopt carries its leaf key ([`member_update`]).
+    let new_kp = treekem::node_keypair_from_path_secret(&new_leaf);
+    shadow.x.last_update =
+        Some(OwnUpdate { leaf_key: leaf_key_of(&new_kp.kem_x, &new_kp.kem_pq[..]), commit: ch, epoch: next, at: now_secs() });
     keying_wipe_material(new_leaf, entropy);
     for kp in adds {
         if let Some((device, _)) = leaf_credential_ids(&kp.leaf.device_credential) {
             shadow.x.key_packages.remove(&device);
         }
     }
-    // The commit re-keyed my own leaf: the weekly leaf Update need not also fire.
-    st.circles[idx].rotated_at = now_secs();
+    // The circle-wide stamp the sender-keys lane's weekly rotation reads, as before for the
+    // commits that existed before member updates (an admin's, a leave). A plain member's Update
+    // leaves it alone: its window is per device (`last_update`), not this stamp.
+    if admin || !update_only {
+        st.circles[idx].rotated_at = now_secs();
+    }
     true
 }
 
@@ -1250,9 +1353,11 @@ pub(crate) fn emit_bundle(st: &mut NetState, idx: usize, full_bundle: bool) -> V
     if am_committer(st, idx) {
         build_genesis(st, idx);
         sync_roster(st, idx);
-        if full_bundle {
-            leaf_update(st, idx);
-        }
+    }
+    if full_bundle {
+        // EVERY device, committer or not (§16.4). After the roster reconciliation, so a commit
+        // that already re-keyed my leaf this bundle is seen.
+        member_update(st, idx);
     }
     if let Some(t) = st.v2_trees.get(&circle_id) {
         out.extend(t.emit_cache.iter().cloned());
@@ -1261,14 +1366,90 @@ pub(crate) fn emit_bundle(st: &mut NetState, idx: usize, full_bundle: bool) -> V
     out
 }
 
-/// The committer's weekly leaf Update on a v2 tree that keys content — the v1 cadence unchanged,
-/// with a random leaf secret. (Updates by every member are PROTOCOL-SPEC §16.4, a later stage.)
-fn leaf_update(st: &mut NetState, idx: usize) -> bool {
+/// This device's offset into the weekly Update window: below [`UPDATE_JITTER_SECS`], a fixed
+/// function of (device id, circle id). Devices that entered a circle together (a genesis, the
+/// migration) would otherwise all come due on the same bundle and fork on every Update.
+pub(crate) fn update_jitter(device: &[u8; 32], gid: &[u8]) -> u64 {
+    let mut h = blake3::Hasher::new();
+    h.update(UPDATE_JITTER_DOMAIN);
+    h.update(device);
+    h.update(gid);
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&h.finalize().as_bytes()[..8]);
+    u64::from_le_bytes(first) % UPDATE_JITTER_SECS
+}
+
+/// How many chained commits ending at `tip` did `me` author in a row? (A genesis is not counted:
+/// the branches the fork rule compares start at a genesis' children.)
+fn own_run(shadow: &ShadowTree, tip: &[u8; 32], me: &[u8; 32]) -> usize {
+    let mut n = 0;
+    let mut at = *tip;
+    while n <= MAX_OWN_RUN {
+        let Some(c) = shadow.commits.get(&at).and_then(|b| treekem::Commit::from_bytes(b).ok()) else { break };
+        if c.update_path.is_none() || committer_device(&c) != Some(*me) {
+            break;
+        }
+        n += 1;
+        at = c.parent_commit_hash;
+    }
+    n
+}
+
+/// Is my own leaf due a re-key? PROTOCOL-SPEC §15/§16.4: the window is per DEVICE and counts from
+/// the last re-key of my leaf THAT IS ON THE CHAIN I HAVE ADOPTED.
+///
+///   * my last Update's leaf key is the key at my leaf on my tip — it is on the adopted chain
+///     (it is my tip or an ancestor of it; nothing else can install that key): due a week plus my
+///     offset after I authored it;
+///   * I authored an Update and my tip does NOT carry its key — it lost a fork (FK4): due NOW;
+///   * I never authored one from this seat: due a week plus my offset after I entered.
+fn update_due(shadow: &mut ShadowTree, my_leaf_key: &[u8; 32], me: &[u8; 32], now: u64) -> bool {
+    let window = ROTATE_INTERVAL_SECS + update_jitter(me, &shadow.group_id);
+    match shadow.x.last_update.as_mut() {
+        Some(u) if u.leaf_key == *my_leaf_key => {
+            if u.at > now {
+                u.at = now; // the clock went back: restart the window rather than wait it out
+            }
+            now - u.at >= window
+        }
+        Some(_) => true,
+        None => {
+            if shadow.x.leaf_at == 0 || shadow.x.leaf_at > now {
+                shadow.x.leaf_at = now;
+            }
+            now - shadow.x.leaf_at >= window
+        }
+    }
+}
+
+/// THE MEMBER UPDATE (PROTOCOL-SPEC §16.4): this device re-keys its OWN leaf with a random secret
+/// — whoever it is, committer or not. Runs on the full bundle only (the bundle that re-seals my
+/// history under the new epoch — the one place an epoch may move), and only on a tree that keys
+/// content. See [`update_due`] for when; the leaf secret and entropy are stored as a stage-1 build
+/// record and die with the checkpoint.
+///
+/// Not authored: on a tip I already authored a child of (`keying_already_authored_on`, inside
+/// `author_commit`); on a tip that ends [`MAX_OWN_RUN`] commits of my own; when my own roster no
+/// longer authorizes this device (every receiver would refuse the commit).
+fn member_update(st: &mut NetState, idx: usize) -> bool {
     let circle_id = st.circles[idx].id.clone();
+    let Some(me) = my_device_id(st) else { return false };
+    if my_credential(st).is_none() {
+        return false;
+    }
     let live = st.v2_trees.get(&circle_id).is_some_and(|shadow| {
         mls_replay(shadow, None).is_some_and(|cur| all_joined(shadow, &cur) && all_present(st, idx, shadow, &cur))
     });
-    if !live || !st.circles[idx].pcs_window_elapsed() {
+    if !live {
+        return false;
+    }
+    let now = now_secs();
+    let Some(shadow) = st.v2_trees.get_mut(&circle_id) else { return false };
+    let Some(cur) = mls_replay(shadow, None) else { return false };
+    let Some(my_leaf_key) = cur.my_private.as_ref().and_then(|mp| cur.tree.leaf(mp.leaf_index)).map(leaf_key) else {
+        return false;
+    };
+    if !update_due(shadow, &my_leaf_key, &me, now) || own_run(shadow, &cur.tip_hash, &me) >= MAX_OWN_RUN {
         return false;
     }
     author_commit(st, idx, &[], &[])
@@ -1305,6 +1486,8 @@ fn join_wire(st: &mut NetState, idx: usize) -> Option<Vec<u8>> {
 // ── Persistence ────────────────────────────────────────────────────────────────────────────────
 
 const STATE_V1: u8 = 1;
+/// [`STATE_V1`] plus the member-update tail (`leaf_at`, my last Update, the void commits).
+const STATE_V2: u8 = 2;
 
 fn put_lp(v: &mut Vec<u8>, b: &[u8]) {
     v.extend_from_slice(&(b.len() as u32).to_le_bytes());
@@ -1314,10 +1497,14 @@ fn put_lp(v: &mut Vec<u8>, b: &[u8]) {
 /// `ver(1) ‖ retired(1) ‖ opt(entered_kp 16) ‖ opt(entered_commit 32)
 ///  ‖ u32 n ‖ lp(package)×n                               — other devices' key packages
 ///  ‖ u32 n ‖ (kp_id 16 ‖ leaf 32 ‖ init_seed 32 ‖ lp(package))×n — my own, with their secrets
-///  ‖ u32 n ‖ (device 32 ‖ u32 m ‖ commit 32 × m)×n        — join acks`
+///  ‖ u32 n ‖ (device 32 ‖ u32 m ‖ commit 32 × m)×n        — join acks
+///  ‖ leaf_at(8) ‖ opt(leaf_key 32 ‖ commit 32 ‖ epoch 8 ‖ at 8) — my seat's age, my last Update
+///  ‖ u32 n ‖ commit 32 × n                                 — void commits`
+///
+/// The last two lines are what version 2 adds; a version-1 state (no tail) still decodes.
 pub(crate) fn encode_state(t: &ShadowTree) -> Vec<u8> {
     let x = &t.x;
-    let mut v = vec![STATE_V1, x.retired_v1 as u8];
+    let mut v = vec![STATE_V2, x.retired_v1 as u8];
     match &x.entered_kp {
         Some(k) => {
             v.push(1);
@@ -1352,6 +1539,21 @@ pub(crate) fn encode_state(t: &ShadowTree) -> Vec<u8> {
             v.extend_from_slice(a);
         }
     }
+    v.extend_from_slice(&x.leaf_at.to_le_bytes());
+    match &x.last_update {
+        Some(u) => {
+            v.push(1);
+            v.extend_from_slice(&u.leaf_key);
+            v.extend_from_slice(&u.commit);
+            v.extend_from_slice(&u.epoch.to_le_bytes());
+            v.extend_from_slice(&u.at.to_le_bytes());
+        }
+        None => v.push(0),
+    }
+    v.extend_from_slice(&(x.void.len() as u32).to_le_bytes());
+    for h in &x.void {
+        v.extend_from_slice(h);
+    }
     v
 }
 
@@ -1363,6 +1565,9 @@ struct DecodedState {
     packages: Vec<Vec<u8>>,
     own: Vec<KpEntry>,
     acks: Vec<([u8; 32], Vec<[u8; 32]>)>,
+    leaf_at: u64,
+    last_update: Option<OwnUpdate>,
+    void: Vec<[u8; 32]>,
 }
 
 fn decode_state(b: &[u8]) -> Option<DecodedState> {
@@ -1382,6 +1587,9 @@ fn decode_state(b: &[u8]) -> Option<DecodedState> {
         fn u32(&mut self) -> Option<usize> {
             Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?) as usize)
         }
+        fn u64(&mut self) -> Option<u64> {
+            Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+        }
         fn arr<const N: usize>(&mut self) -> Option<[u8; N]> {
             self.take(N)?.try_into().ok()
         }
@@ -1398,7 +1606,8 @@ fn decode_state(b: &[u8]) -> Option<DecodedState> {
         }
     }
     let mut r = R(b);
-    if r.u8()? != STATE_V1 {
+    let version = r.u8()?;
+    if version != STATE_V1 && version != STATE_V2 {
         return None;
     }
     let retired_v1 = r.flag()?;
@@ -1423,7 +1632,27 @@ fn decode_state(b: &[u8]) -> Option<DecodedState> {
         }
         acks.push((device, list));
     }
-    r.0.is_empty().then_some(DecodedState { retired_v1, entered_kp, entered_commit, packages, own, acks })
+    let (mut leaf_at, mut last_update, mut void) = (0, None, Vec::new());
+    if version >= STATE_V2 {
+        leaf_at = r.u64()?;
+        if r.flag()? {
+            last_update = Some(OwnUpdate { leaf_key: r.arr()?, commit: r.arr()?, epoch: r.u64()?, at: r.u64()? });
+        }
+        for _ in 0..r.u32()? {
+            void.push(r.arr::<32>()?);
+        }
+    }
+    r.0.is_empty().then_some(DecodedState {
+        retired_v1,
+        entered_kp,
+        entered_commit,
+        packages,
+        own,
+        acks,
+        leaf_at,
+        last_update,
+        void,
+    })
 }
 
 /// Merge a persisted v2 state into `t`: what this session already holds wins; the rest fills in.
@@ -1434,6 +1663,14 @@ pub(crate) fn restore_state(t: &mut ShadowTree, bytes: &[u8]) {
         t.x.entered_kp = d.entered_kp;
         t.x.entered_commit = d.entered_commit;
     }
+    if t.x.leaf_at == 0 {
+        t.x.leaf_at = d.leaf_at;
+    }
+    if t.x.last_update.is_none() {
+        t.x.last_update = d.last_update;
+    }
+    // Void commits are verdicts about public commits: they union.
+    t.x.void.extend(d.void);
     for wire in d.packages {
         let Some(device) = KeyPackage::from_bytes(&wire)
             .ok()
@@ -1468,6 +1705,12 @@ pub(crate) fn digest_state(t: &ShadowTree, h: &mut blake3::Hasher) {
         h.update(&e.secret.kp_id);
     }
     h.update(&t.x.entered_kp.unwrap_or([0u8; KP_ID_LEN]));
+    // My Update bookkeeping and the void set must reach disk too: an Update authored and sent but
+    // not recorded would be re-issued after a restart; a void verdict lost could not be re-derived
+    // once the checkpoint has passed its parent.
+    h.update(&t.x.leaf_at.to_le_bytes());
+    h.update(&t.x.last_update.map(|u| u.commit).unwrap_or([0u8; 32]));
+    h.update(&(t.x.void.len() as u64).to_le_bytes());
 }
 
 /// Test access to a v2 tree's private state (`net_tests/keying_v2_tests.rs`).
@@ -1486,6 +1729,44 @@ impl ShadowTree {
     }
     pub(crate) fn x_packages_of(&self, device: &[u8; 32]) -> usize {
         self.x.key_packages.get(device).map_or(0, |l| l.len())
+    }
+    /// Make my own leaf Update due at the next full bundle (the window stamps go back; the clock
+    /// does not move, so no other device comes due).
+    pub(crate) fn x_make_update_due(&mut self) {
+        self.x.leaf_at = 1;
+        if let Some(u) = self.x.last_update.as_mut() {
+            u.at = 1;
+        }
+    }
+    /// (commit, epoch) of the last commit I authored.
+    pub(crate) fn x_last_update(&self) -> Option<([u8; 32], u64)> {
+        self.x.last_update.map(|u| (u.commit, u.epoch))
+    }
+    /// When my current seat's leaf key entered the tree.
+    pub(crate) fn x_leaf_at(&self) -> u64 {
+        self.x.leaf_at
+    }
+    /// Forget when my seat was made and what I last authored — as a state saved before member
+    /// updates loads.
+    pub(crate) fn x_forget_update_window(&mut self) {
+        self.x.leaf_at = 0;
+        self.x.last_update = None;
+    }
+    /// (tip, epoch) of the chain every device holding my commit set agrees on.
+    pub(crate) fn x_canonical(&self) -> Option<([u8; 32], u64)> {
+        canonical(self).map(|(tip, s)| (tip, s.epoch))
+    }
+    /// The commits I found void.
+    pub(crate) fn x_void(&self) -> Vec<[u8; 32]> {
+        self.x.void.iter().copied().collect()
+    }
+    /// The v2 state as a build before member updates wrote it (version 1: no tail).
+    pub(crate) fn x_state_v1_bytes(&self) -> Vec<u8> {
+        let mut v = encode_state(self);
+        let tail = 8 + 1 + if self.x.last_update.is_some() { 80 } else { 0 } + 4 + 32 * self.x.void.len();
+        v.truncate(v.len() - tail);
+        v[0] = STATE_V1;
+        v
     }
     /// Lose every key package secret and the record of which one I entered through.
     pub(crate) fn x_forget_packages(&mut self) {

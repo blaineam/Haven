@@ -2601,6 +2601,14 @@ pub fn build_commit(
 
 // ── Commit application (§4, the receiver side) ────────────────────────────────────────────
 
+/// The error [`apply_commit`] returns when everything PUBLIC about a commit checked out and the
+/// receiver decrypted its path secret — verified level by level against the path's public keys —
+/// and the confirmation MAC still did not verify. Unlike every other failure this one is the same
+/// for every member that holds the parent epoch's state: the commit secret is fixed by the path's
+/// public keys and the init secret by the parent epoch, so the author keyed the MAC wrong for
+/// everybody. A caller may therefore treat such a commit as void rather than as "cannot follow".
+pub const ERR_CONFIRMATION_MAC: &str = "treekem: confirmation MAC did not verify";
+
 /// What a receiver learns from [`apply_commit`]: the new public tree + transcript, and — if the
 /// receiver is an active member that could derive the epoch — the schedule and its updated
 /// private state. `schedule`/`my_private` are `None` for a non-member (or a receiver removed by
@@ -2685,7 +2693,7 @@ pub fn apply_commit(
         let mut init = *prev_init_secret;
         let s = advance_epoch(&mut init, &mut commit_secret, &ctx);
         if !ct_eq(&confirmation_mac(&s.confirm_key, &cth), &commit.confirmation_mac) {
-            return Err(CoreError::Crypto("treekem: confirmation MAC did not verify"));
+            return Err(CoreError::Crypto(ERR_CONFIRMATION_MAC));
         }
         schedule = Some(s);
     }

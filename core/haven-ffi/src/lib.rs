@@ -2179,6 +2179,9 @@ struct NetState {
     /// account whose devices I haven't learned yet → that member falls back to its account key, so
     /// pre-multidevice peers keep working. See `recipients_with_devices`.
     device_lists: std::collections::HashMap<[u8; 32], ContactDevices>,
+    /// Version ties on CONTACTS' rosters (PROTOCOL-SPEC §17, finding F5) — see [`RosterTie`]. Empty
+    /// unless two verified rosters of one account carried the same version and different contents.
+    roster_ties: std::collections::HashMap<[u8; 32], RosterTie>,
     /// Accounts we have AFFIRMATIVELY verified as seed-drop-capable (their signed `seedDrop` marker
     /// checked out), keyed by account node id (D16 Phase 2 / S0). **Monotonic — insert only, never
     /// remove**: a missing entry means "unknown, treat as legacy," never "downgraded" (absence is never
@@ -2625,9 +2628,11 @@ struct ShadowTree {
     x: keying_v2::V2State,
 }
 
-/// What one replay produces: the live state, and — when the winning path is at least
-/// [`KEYING_FINAL_DEPTH`] states long — the state the checkpoint may advance to, with its genesis.
-type ReplayOutcome = (Option<KeyingState>, Option<KeyingCheckpoint>);
+/// What one replay produces: the live state; when the winning path is at least
+/// [`KEYING_FINAL_DEPTH`] states long, the state the checkpoint may advance to, with its genesis;
+/// and (v2 trees only) the commits the walk found VOID — public checks passed, the confirmation
+/// MAC did not (`keying_v2::note_void`).
+type ReplayOutcome = (Option<KeyingState>, Option<KeyingCheckpoint>, Vec<[u8; 32]>);
 
 impl ShadowTree {
     fn new(group_id: Vec<u8>) -> Self {
@@ -3883,6 +3888,10 @@ fn mls_replay_input_digest(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>
         h.update(&b.new_leaf);
         h.update(&b.entropy);
     }
+    if shadow.is_v2 {
+        // The fork rule never selects a void commit, so the void set is an input too.
+        keying_v2::digest_void(shadow, &mut h);
+    }
     *h.finalize().as_bytes()
 }
 
@@ -3926,8 +3935,9 @@ fn mls_replay_outcome_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 
         }
     }
     let mut best: Option<((bool, u64, [u8; 32]), KeyingState, Option<KeyingCheckpoint>)> = None;
+    let mut void: Vec<[u8; 32]> = Vec::new();
     for (start, start_genesis) in starts {
-        let (end, window_start) = replay_walk(shadow, &gid, my_secret_root, start);
+        let (end, window_start) = replay_walk(shadow, &gid, my_secret_root, start, &mut void);
         let genesis = keying_genesis_of(shadow, end.tip_hash).or(start_genesis);
         let on_winner = winner.is_some() && genesis == winner;
         let rank = (on_winner, end.epoch, end.tip_hash);
@@ -3948,9 +3958,9 @@ fn mls_replay_outcome_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 
                     k.joiner_secret = None;
                 }
             }
-            (Some(end), candidate)
+            (Some(end), candidate, void)
         }
-        None => (None, None),
+        None => (None, None, void),
     }
 }
 
@@ -4046,6 +4056,8 @@ fn keying_chain_reaches(shadow: &ShadowTree, tip: [u8; 32], epoch: u64, more: us
         treekem::Commit::from_bytes(b)
             .map(|c| c.epoch == epoch + 1 && c.parent_commit_hash == tip)
             .unwrap_or(false)
+            // A void commit (v2 trees only; the set is empty on a v1 tree) is not part of any chain.
+            && !keying_v2::is_void(shadow, h)
             && keying_chain_reaches(shadow, *h, epoch + 1, more - 1)
     })
 }
@@ -4054,10 +4066,22 @@ fn keying_chain_reaches(shadow: &ShadowTree, tip: [u8; 32], epoch: u64, more: us
 /// on [`replay_walk`]. `None` when the chain ends here. Shared with the v2 tree's secret-less view
 /// of the chain (`keying_v2::canonical`), so both always agree on the branch.
 fn keying_best_child(shadow: &ShadowTree, tip: &[u8; 32], next: u64) -> Option<([u8; 32], Vec<u8>)> {
+    keying_best_child_skipping(shadow, tip, next, &[])
+}
+
+/// [`keying_best_child`], never selecting a commit in `skip` (the commits this very walk found
+/// void) nor one already recorded as void. Both are empty on a v1 tree.
+fn keying_best_child_skipping(
+    shadow: &ShadowTree,
+    tip: &[u8; 32],
+    next: u64,
+    skip: &[[u8; 32]],
+) -> Option<([u8; 32], Vec<u8>)> {
     // Children of the current tip at the next epoch (a §5 fork at this level).
     let mut children: Vec<([u8; 32], Vec<u8>)> = shadow
         .commits
         .iter()
+        .filter(|(h, _)| !skip.contains(*h) && !keying_v2::is_void(shadow, h))
         .filter(|(_, b)| {
             treekem::Commit::from_bytes(b)
                 .map(|c| c.epoch == next && c.parent_commit_hash == *tip)
@@ -4093,13 +4117,14 @@ fn replay_walk(
     gid: &[u8],
     my_secret_root: Option<[u8; 32]>,
     mut cur: KeyingState,
+    void: &mut Vec<[u8; 32]>,
 ) -> (KeyingState, Option<KeyingState>) {
     let gid = gid.to_vec();
     // The last KEYING_FINAL_DEPTH states of the walk, oldest first; `cur` is pushed when superseded.
     let mut trail: std::collections::VecDeque<KeyingState> = std::collections::VecDeque::new();
     loop {
         let next = cur.epoch + 1;
-        let Some((tip, cbytes)) = keying_best_child(shadow, &cur.tip_hash, next) else { break };
+        let Some((tip, cbytes)) = keying_best_child_skipping(shadow, &cur.tip_hash, next, void) else { break };
         let Ok(c) = treekem::Commit::from_bytes(&cbytes) else { break };
         // Removal-sticky (M4): before this commit mutates the tree, record the device id of every leaf
         // it Removes (resolved against the PRE-commit tree) so the roster→Add automation never re-Adds it.
@@ -4159,6 +4184,15 @@ fn replay_walk(
             let applied =
                 match treekem::apply_commit(&cur.tree, &gid, &cur.cth, &init, &c, cur.my_private.as_ref()) {
                     Ok(a) => a,
+                    // v2 tree: the commit passed every public check when it was stored, I opened
+                    // its path secret, and its confirmation MAC is still wrong. That verdict is
+                    // the same on every device holding this epoch, so the commit is VOID: the walk
+                    // carries on with the next-best child instead of stopping behind a commit the
+                    // public view would move past (STAGE4-MEMBER-UPDATES.md §6).
+                    Err(haven_p2p::CoreError::Crypto(treekem::ERR_CONFIRMATION_MAC)) if shadow.is_v2 => {
+                        void.push(tip);
+                        continue;
+                    }
                     Err(_) => break, // a commit we can't apply cleanly: stop at the current epoch
                 };
             if applied.removed_me {
@@ -4430,10 +4464,18 @@ fn keying_checkpoint_pass(shadow: &mut ShadowTree, my_device_seed: Option<[u8; 3
     if keying_legacy_mode() {
         return;
     }
-    let (_, candidate) = mls_replay_outcome(shadow, my_device_seed);
+    let (_, candidate, void) = mls_replay_outcome(shadow, my_device_seed);
+    if shadow.is_v2 {
+        keying_v2::note_void(shadow, &void);
+    }
     if let Some(next) = candidate {
         if shadow.checkpoint.as_ref().map(|ck| ck.state.tip_hash) != Some(next.state.tip_hash) {
             shadow.checkpoint = Some(next); // the old one wipes itself (`Drop for KeyingState`)
+            // The memo still holds the states of the walk that led here — among them epochs the
+            // checkpoint has now passed, with the leaf and path secrets of that time. They are
+            // only a cache: drop them (each wipes itself) so "wiped at the checkpoint" is true of
+            // memory too, not just of the next saved blob.
+            shadow.replay_memo.lock().unwrap_or_else(|e| e.into_inner()).clear();
         }
     }
     keying_prune_superseded(shadow);
@@ -6324,6 +6366,9 @@ struct PersistCircle {
     #[serde(with = "persist_bytes")]
     admin_grants: Vec<Vec<u8>>,
 }
+/// One persisted roster: `(account_bundle, device_list_bytes, credential_bytes)`.
+type PersistRoster = (Vec<u8>, Vec<u8>, Vec<Vec<u8>>);
+
 /// On-disk form of one circle's [`ShadowTree`]. Welcomes ride their own wire encoding
 /// (`encode_shadow_welcome`); commits are keyed by their hash, recomputed on load.
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -6472,6 +6517,14 @@ struct PersistState {
     #[serde(default)]
     #[serde(with = "persist_bytes")]
     device_rosters: Vec<(Vec<u8>, Vec<u8>, Vec<Vec<u8>>)>,
+    /// Roster version ties ([`RosterTie`]): one `(account_bundle, device_list_bytes, [])` per extra
+    /// signed roster of the SAME version as the one in `device_rosters` (same shape, so the same
+    /// codec). Re-verified and re-applied on load. Not written while empty, so a state without a
+    /// tie serializes exactly as before; an older build ignores the field.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(with = "persist_bytes")]
+    roster_ties: Vec<PersistRoster>,
     /// A3: the primary-signed roster WIRE (incl. capability trailer) a SEEDLESS device rebroadcasts
     /// verbatim (it has no account key to re-mint one). `None` on a primary. Defaulted so old state loads.
     #[serde(default)]
@@ -6707,6 +6760,7 @@ impl HavenSocial {
                 device: None,
                 circles: vec![Circle::bare(DEFAULT_CIRCLE.to_string(), "My Circle".to_string())],
                 device_lists: std::collections::HashMap::new(),
+                roster_ties: std::collections::HashMap::new(),
                 // I ship the S1 verifier, so I'm seed-drop-capable — seed my own account so a fully-upgraded
                 // circle (including me) computes as such. Nothing consumes this in production yet.
                 seed_drop_capable: {
@@ -6778,6 +6832,7 @@ impl HavenSocial {
                 device: Some(Arc::new(Identity::from_seed(&dev_seed))),
                 circles: vec![Circle::bare(DEFAULT_CIRCLE.to_string(), "My Circle".to_string())],
                 device_lists: std::collections::HashMap::new(),
+                roster_ties: std::collections::HashMap::new(),
                 seed_drop_capable: {
                     let mut s = std::collections::HashSet::new();
                     s.insert(account_id);
@@ -7688,10 +7743,16 @@ impl HavenSocial {
                 continue;
             }
             if let Some(acct_pub) = bundles.get(acct_id) {
-                out.push(ContactRosterWire {
-                    account_hex: hex(acct_id),
-                    wire: tagged(TAG_DEVICE_ROSTER, &encode_roster(acct_pub, cd)),
-                });
+                // On a version tie `cd.list` is the widened view, which no signature covers: relay
+                // the roster as it was signed.
+                let wire = match st.roster_ties.get(acct_id) {
+                    Some(tie) => encode_roster(
+                        acct_pub,
+                        &ContactDevices { list: tie.signed.clone(), credentials: cd.credentials.clone() },
+                    ),
+                    None => encode_roster(acct_pub, cd),
+                };
+                out.push(ContactRosterWire { account_hex: hex(acct_id), wire: tagged(TAG_DEVICE_ROSTER, &wire) });
             }
         }
         out
@@ -8195,9 +8256,9 @@ impl HavenSocial {
     }
 
     /// TreeKEM M2 SHADOW telemetry (`docs/TREEKEM-DESIGN.md` §9 row M2). Resolves this device's
-    /// known genesis commits for a circle with the §5.1 fork rule (`select_chain`), derives the
-    /// winning epoch secret from the Welcome it holds, and reports `{epoch, tree_hash_hex,
-    /// converged, fork_count}`. Read-only and inert: the derived secret is compared/logged, never
+    /// known genesis commits for a circle with the §5.1 fork rule (`select_chain`), checks that it
+    /// holds the winner's Welcome (or a checkpoint descending from it), and reports `{epoch,
+    /// tree_hash_hex, converged, fork_count}`. Read-only and inert: no secret is derived, logged or
     /// consumed for content. This is the M2 soak signal — every device in a fully-capable circle
     /// should report `converged=true` with an equal `tree_hash_hex` once sync has quiesced.
     pub fn mls_shadow_status(&self, circle_id: String) -> MlsShadowStatusFfi {
@@ -8220,10 +8281,9 @@ impl HavenSocial {
         let wbytes = &candidates[win][0];
         let Ok(wc) = treekem::Commit::from_bytes(wbytes) else { return none };
         let wh = treekem::commit_hash(wbytes);
-        let cth = treekem::next_confirmed_transcript_hash(&shadow_genesis_cth(&gid), &wc);
         let fork_count = (shadow.commits.len() - 1) as u32;
-        // Converged iff I hold the WINNER's Welcome and can derive its epoch secret. Deriving it
-        // proves agreement on the whole schedule; the value is logged, not consumed.
+        // Converged iff I hold the WINNER's Welcome for its epoch (the secrets that derive its
+        // epoch secret). Nothing is derived here and nothing secret is logged.
         // Stage 1: once the checkpoint has passed the genesis its Welcome is wiped; a device whose
         // checkpoint descends from the winner is converged on it all the same.
         let via_checkpoint = shadow
@@ -8232,12 +8292,12 @@ impl HavenSocial {
             .is_some_and(|ck| keying_genesis_of(shadow, ck.state.tip_hash).or(ck.genesis) == Some(wh));
         let converged = via_checkpoint || match shadow.my_welcomes.get(&wh) {
             Some(w) if w.epoch == wc.epoch => {
-                let sched = treekem::welcome_epoch_schedule(&w.joiner_secret, &gid, wc.epoch, &wc.tree_hash, &cth);
+                // Nothing secret is logged: the epoch secret used to be printed here in hex. The
+                // public tree hash is what a fleet compares.
                 tracing::info!(
                     circle = %circle_id,
                     epoch = wc.epoch,
                     tree_hash = %hex(&wc.tree_hash),
-                    epoch_secret = %hex(&sched.epoch_secret),
                     fork_count,
                     "mls shadow: converged on winning tree"
                 );
@@ -9038,8 +9098,26 @@ impl HavenSocial {
                             .find(|m| m.node_id_bytes() == *acct_id)
                             .map(|m| m.to_bytes())?
                     };
-                    Some((account_bundle, cd.list.to_bytes(), cd.credentials.iter().map(|c| c.to_bytes()).collect()))
+                    // On a version tie the stored list is the widened view; what is saved is the
+                    // roster as it was SIGNED (it is re-verified on load), plus the tie below.
+                    let signed = st.roster_ties.get(acct_id).map(|t| &t.signed).unwrap_or(&cd.list);
+                    Some((account_bundle, signed.to_bytes(), cd.credentials.iter().map(|c| c.to_bytes()).collect()))
                 }).collect()
+            },
+            roster_ties: {
+                let mut v: Vec<PersistRoster> = Vec::new();
+                for (acct_id, tie) in st.roster_ties.iter() {
+                    let Some(account) =
+                        st.circles.iter().flat_map(|c| c.members.iter()).find(|m| m.node_id_bytes() == *acct_id)
+                    else {
+                        continue;
+                    };
+                    for other in &tie.others {
+                        v.push((account.to_bytes(), other.to_bytes(), Vec::new()));
+                    }
+                }
+                v.sort();
+                v
             },
         }
     }
@@ -9682,6 +9760,9 @@ impl HavenSocial {
             for (acct, list, creds) in ps.device_rosters {
                 restore_roster(&mut st, &acct, &list, &creds);
             }
+            for (acct, list, _) in ps.roster_ties {
+                restore_roster_tie(&mut st, &acct, &list);
+            }
             // The circles' TreeKEM state — BEFORE anything can build a genesis on an empty tree.
             for sh in ps.shadow_trees {
                 if st.circles.iter().any(|c| c.id == sh.circle) {
@@ -10185,12 +10266,27 @@ fn store_verified_roster(st: &mut NetState, account: &HavenId, verified: Verifie
             // device logged "devroster INGEST REJECTED … the engine refused them" on EVERY poll and
             // skipped that recovery forever, which is how an Android leg sat on 8 parked envelopes
             // it already had the roster for.
-            return RosterIngest::AlreadyCurrent;
+            //
+            // ...unless it is the same VERSION with different CONTENTS (two seed holders of the
+            // account each bumped from the same base): then every revocation in either counts.
+            if !apply_roster_tie(st, &acct_id, list) {
+                return RosterIngest::AlreadyCurrent;
+            }
+            roster_changed(st, &acct_id);
+            return RosterIngest::Stored;
         }
     }
     st.device_lists.insert(acct_id, ContactDevices { list, credentials });
+    st.roster_ties.remove(&acct_id); // a strictly newer roster settles any tie
+    roster_changed(st, &acct_id);
+    RosterIngest::Stored
+}
+
+/// A contact's roster changed what it authorizes: rotate every circle epoch the account is in and
+/// reconcile the tree — a newly learned revocation, however it was learned.
+fn roster_changed(st: &mut NetState, acct_id: &[u8; 32]) {
     for c in st.circles.iter_mut() {
-        if c.members.iter().any(|m| m.node_id_bytes() == acct_id) {
+        if c.members.iter().any(|m| m.node_id_bytes() == *acct_id) {
             c.rotate_epoch();
         }
     }
@@ -10201,7 +10297,88 @@ fn store_verified_roster(st: &mut NetState, account: &HavenId, verified: Verifie
     for i in 0..st.circles.len() {
         mls_sync_roster_to_tree(st, i);
     }
-    RosterIngest::Stored
+}
+
+/// A VERSION TIE on a contact's roster (docs/formal/PROTOCOL-SPEC.md §17, finding F5). Two seed
+/// holders of one account can each sign a roster with the same version and different contents.
+/// A verifier that kept whichever arrived first would ignore a revocation carried only by the
+/// other one — and go on sealing to the revoked device — until a merged, higher version arrives.
+///
+/// Fail closed instead: while the tie lasts, `device_lists[account].list` is WIDENED — every
+/// device revoked in ANY of the tied rosters is revoked, and the account leaf is retired if any
+/// says so. Nothing is ever authorized by a tie (a device listed only in a later-arrived roster
+/// stays unknown, as before). Every reader of the roster goes through that one stored list, so
+/// none can miss it. The widened list no longer matches its signature; the rosters as SIGNED are
+/// kept here, for the state blob (re-verified on load) and for relaying to my other devices.
+/// A strictly newer roster replaces the lot.
+struct RosterTie {
+    /// The roster first stored for this version, exactly as signed.
+    signed: DeviceList,
+    /// Every other verified roster of that version whose contents differ, as signed.
+    others: Vec<DeviceList>,
+}
+
+/// Tied rosters remembered per account. Beyond it a further roster still widens the stored list,
+/// it just is not kept (it would re-apply on re-delivery; it could not survive a restart).
+const KEEP_ROSTER_TIES: usize = 8;
+
+/// Do two rosters authorize and revoke exactly the same things?
+fn roster_same_contents(a: &DeviceList, b: &DeviceList) -> bool {
+    let set = |v: &[[u8; 32]]| v.iter().copied().collect::<std::collections::BTreeSet<[u8; 32]>>();
+    a.account_id == b.account_id
+        && a.account_leaf_retired == b.account_leaf_retired
+        && set(&a.devices) == set(&b.devices)
+        && set(&a.revoked) == set(&b.revoked)
+}
+
+/// Take a VERIFIED roster of the same version as the one stored for `acct_id`. Returns whether it
+/// changed what the stored roster authorizes (a device newly revoked, the account leaf newly
+/// retired). Idempotent: the same roster again — or the first-stored one again — changes nothing.
+fn apply_roster_tie(st: &mut NetState, acct_id: &[u8; 32], incoming: DeviceList) -> bool {
+    let Some(cd) = st.device_lists.get_mut(acct_id) else { return false };
+    if cd.list.version != incoming.version || cd.list.account_id != incoming.account_id {
+        return false;
+    }
+    // Until the first tie the stored list IS the roster as signed.
+    let tie = st.roster_ties.entry(*acct_id).or_insert_with(|| RosterTie { signed: cd.list.clone(), others: Vec::new() });
+    if roster_same_contents(&tie.signed, &incoming) || tie.others.iter().any(|o| roster_same_contents(o, &incoming)) {
+        if tie.others.is_empty() {
+            st.roster_ties.remove(acct_id); // the very same roster again: no tie
+        }
+        return false;
+    }
+    let mut changed = false;
+    for device in &incoming.revoked {
+        if !cd.list.revoked.contains(device) {
+            cd.list.revoked.push(*device);
+            // Only a device the stored roster authorized changes anything for sealing or the tree.
+            changed |= cd.list.devices.contains(device);
+        }
+    }
+    if incoming.account_leaf_retired && !cd.list.account_leaf_retired {
+        cd.list.account_leaf_retired = true;
+        changed = true;
+    }
+    if tie.others.len() < KEEP_ROSTER_TIES {
+        tie.others.push(incoming);
+    }
+    changed
+}
+
+/// Re-apply a persisted roster tie on load: the list is re-verified against the carried account
+/// bundle, and widens the roster just restored for that account — if that one has the same
+/// version. No epoch rotates (the saved epochs already reflect it).
+fn restore_roster_tie(st: &mut NetState, account_bundle: &[u8], list_bytes: &[u8]) {
+    let Ok(account) = HavenId::from_bytes(account_bundle) else { return };
+    let Ok(list) = DeviceList::from_bytes(list_bytes) else { return };
+    if list.verify(&account).is_err() {
+        return;
+    }
+    let acct_id = account.node_id_bytes();
+    if acct_id == st.me().node_id_bytes() {
+        return; // ties are tracked for contacts only
+    }
+    apply_roster_tie(st, &acct_id, list);
 }
 
 /// Restore a persisted device roster on load: re-verify it against the carried account bundle and store
@@ -10227,6 +10404,7 @@ fn restore_roster(st: &mut NetState, account_bundle: &[u8], list_bytes: &[u8], c
         }
     }
     st.device_lists.insert(acct_id, ContactDevices { list, credentials });
+    st.roster_ties.remove(&acct_id); // a tie belongs to the version it was seen at
 }
 
 /// Everything sealing a media blob needs, copied out from under the engine lock so the seal itself

@@ -1,0 +1,308 @@
+/*
+  Haven TreeKEM key schedule after STAGE 1 of the keying fix — symbolic model (Tamarin).
+
+  Spec:   docs/formal/PROTOCOL-SPEC.md §13, docs/formal/STAGE1-STORED-STATE.md
+  Source: core/haven-ffi/src/lib.rs (keying_new_update_material, keying_new_leaf_secret,
+          keying_new_base_init, keying_wrap_assigned_leaf, KeyingCheckpoint, keying_checkpoint_pass,
+          keying_prune_superseded) and core/haven-p2p/src/treekem.rs (unchanged).
+
+  Run:  tamarin-prover --auto-sources --prove docs/formal/haven_treekem_stage1.spthy
+        tamarin-prover --auto-sources --prove -DLEGACY docs/formal/haven_treekem_stage1.spthy
+
+  Same group, same schedule and the same lemmas T1-T8 as haven_treekem_as_wired.spthy, so the two
+  result columns can be read side by side. What stage 1 changes, and nothing else:
+
+   * A commit's fresh leaf secret is RANDOM (was H(root, epoch)).
+   * In a circle created under stage 1 (the default here) the genesis init and every assigned
+     leaf secret are RANDOM (were H(root), H(root, X)). With -DLEGACY the genesis is the
+     pre-change one — seed-derived init and leaves — and only what happens afterwards is new.
+     That is an existing circle after its devices upgrade.
+   * The committer's stored state no longer contains the root. It contains the leaf secrets it
+     assigned, wrapped under a key derived from its device seed (so state alone does not give
+     them, and for random leaves the seed alone does not either). In a -DLEGACY circle there is
+     nothing to store: the leaves are still H(root, X).
+   * A member's stored state no longer keeps its Welcome once its checkpoint has passed the
+     Welcome's epoch.
+
+  What stage 1 does NOT change, and so is modelled exactly as before:
+   * the committer still assigns every leaf secret and delivers it in the Welcome;
+   * a Welcome is still wrapped to the member's LONG-TERM device KEM key;
+   * only the committer authors commits — a member never refreshes its leaf.
+
+  Abstraction to keep in mind when reading T8/T9: the model has two epochs, and "state at epoch
+  2" stands for "state after the checkpoint has passed epoch 1". In the engine the checkpoint
+  trails the tip by KEYING_FINAL_DEPTH - 1 = 3 epochs, so the property holds for epochs older
+  than that window, not for the previous epoch. Fork resolution is not modelled.
+*/
+
+theory HavenTreeKemStage1
+begin
+
+builtins: signing, asymmetric-encryption, symmetric-encryption, hashing
+
+restriction Eq:   "All x y #i. Eq(x, y)@i ==> x = y"
+restriction Neq:  "All x #i. Neq(x, x)@i ==> F"
+restriction Once: "All t #i #j. Once(t)@i & Once(t)@j ==> #i = #j"
+
+/* ---- Devices ------------------------------------------------------------------------- */
+
+rule Device:
+  let sigk = h(<'sig', ~seed>)
+      kemk = h(<'kem', ~seed>)
+  in
+  [ Fr(~seed) ]
+  --[ Once(<'dev', $X>) ]->
+  [ !Dev($X, ~seed), !DevPub($X, pk(sigk), pk(kemk)), Out(<$X, pk(sigk), pk(kemk)>) ]
+
+rule RevealSeed:
+  [ !Dev(X, seed) ] --[ RevealSeed(X) ]-> [ Out(seed) ]
+
+/* ---- Genesis (epoch 1): committer builds the tree and Welcomes D and E ---------------- */
+
+#ifdef LEGACY
+rule Genesis:            /* a circle created BEFORE stage 1: init and leaves derived from the seed */
+  let root  = h(<'root', seedC, $G>)
+      init0 = h(<'init0', root>)
+      lsD   = h(<'leaf', root, $D>)
+      lsE   = h(<'leaf', root, $E>)
+      j1    = h(<'joiner', init0, 'zero', $G, '1'>)
+      es1   = h(<'epoch', j1>)
+      init1 = h(<'init', es1>)
+      wD    = aenc(<'welcome', $G, '1', j1, lsD>, kemD)
+      wE    = aenc(<'welcome', $G, '1', j1, lsE>, kemE)
+      sigk  = h(<'sig', seedC>)
+  in
+  [ !Dev($C, seedC), !DevPub($D, sigD, kemD), !DevPub($E, sigE, kemE) ]
+  --[ Once('genesis'), Neq($C, $D), Neq($C, $E), Neq($D, $E)
+    , Genesis($G, $C, $D, $E), EpochSecret($G, '1', es1) ]->
+  [ StC($C, $G, '1', es1, init1)
+  , !Grp($G, $C, $D, $E)
+  , !Leaves($G, lsD, lsE)                 /* what the committer can produce again (here: re-derive) */
+  , Out(<'welcome', $G, wD, sign(wD, sigk)>)
+  , Out(<'welcome', $G, wE, sign(wE, sigk)>)
+  , Out(<pk(h(<'node', lsD>)), pk(h(<'node', lsE>))>) ]
+#else
+rule Genesis:            /* a circle created UNDER stage 1: init and leaves are random */
+  let j1    = h(<'joiner', ~init0, 'zero', $G, '1'>)
+      es1   = h(<'epoch', j1>)
+      init1 = h(<'init', es1>)
+      wD    = aenc(<'welcome', $G, '1', j1, ~lsD>, kemD)
+      wE    = aenc(<'welcome', $G, '1', j1, ~lsE>, kemE)
+      sigk  = h(<'sig', seedC>)
+  in
+  [ Fr(~init0), Fr(~lsD), Fr(~lsE)
+  , !Dev($C, seedC), !DevPub($D, sigD, kemD), !DevPub($E, sigE, kemE) ]
+  --[ Once('genesis'), Neq($C, $D), Neq($C, $E), Neq($D, $E)
+    , Genesis($G, $C, $D, $E), EpochSecret($G, '1', es1) ]->
+  [ StC($C, $G, '1', es1, init1)
+  , !Grp($G, $C, $D, $E)
+  , !Leaves($G, ~lsD, ~lsE)               /* assigned_leaves: stored wrapped, see RevealStateC */
+  , Out(<'welcome', $G, wD, sign(wD, sigk)>)
+  , Out(<'welcome', $G, wE, sign(wE, sigk)>)
+  , Out(<pk(h(<'node', ~lsD>)), pk(h(<'node', ~lsE>))>) ]
+#endif
+
+rule JoinD:              /* a member opens its Welcome with its LONG-TERM device KEM key */
+  let kemk = h(<'kem', seedX>)
+      w    = aenc(<'welcome', $G, '1', j1, ls>, pk(kemk))
+      es1  = h(<'epoch', j1>)
+  in
+  [ In(<'welcome', $G, w, sg>), !Dev($D, seedX), !Grp($G, $C, $D, $E), !DevPub($C, sigC, kemC) ]
+  --[ Eq(verify(sg, w, sigC), true), Once(<'join', $G, $D>), Joined($D, $G, es1) ]->
+  [ StD($D, $G, '1', es1, h(<'init', es1>), ls, j1) ]   /* the Welcome is held until checkpointed */
+
+rule JoinE:              /* a member opens its Welcome with its LONG-TERM device KEM key */
+  let kemk = h(<'kem', seedX>)
+      w    = aenc(<'welcome', $G, '1', j1, ls>, pk(kemk))
+      es1  = h(<'epoch', j1>)
+  in
+  [ In(<'welcome', $G, w, sg>), !Dev($E, seedX), !Grp($G, $C, $D, $E), !DevPub($C, sigC, kemC) ]
+  --[ Eq(verify(sg, w, sigC), true), Once(<'join', $G, $E>), Joined($E, $G, es1) ]->
+  [ StE($E, $G, '1', es1, h(<'init', es1>), ls, j1) ]
+
+/* ---- Epoch 2, option A: the committer's weekly leaf Update (the PCS operation) -------- */
+
+rule Update2:
+  let ps    = h(<'path', ~nl>)                     /* the fresh leaf secret is RANDOM now */
+      cs    = h(<'commit', ps>)
+      j2    = h(<'joiner', init1, cs, $G, '2'>)
+      es2   = h(<'epoch', j2>)
+      cD    = aenc(<'path', $G, '2', ps>, pk(h(<'node', lsD>)))
+      cE    = aenc(<'path', $G, '2', ps>, pk(h(<'node', lsE>)))
+      body  = <'commit', $G, '2', 'update', cD, cE>
+  in
+  [ Fr(~nl), StC($C, $G, '1', es1, init1), !Leaves($G, lsD, lsE), !Dev($C, seedC), !Grp($G, $C, $D, $E) ]
+  --[ Once(<'commit2', $G>), Advanced($G), Updated($G), EpochSecret($G, '2', es2) ]->
+  [ StC($C, $G, '2', es2, h(<'init', es2>))
+  , Out(<body, sign(body, h(<'sig', seedC>))>) ]
+
+/* ---- Epoch 2, option B: the committer removes D (path wrapped to E only) -------------- */
+
+rule RemoveD2:
+  let ps    = h(<'path', ~nl>)
+      cs    = h(<'commit', ps>)
+      j2    = h(<'joiner', init1, cs, $G, '2'>)
+      es2   = h(<'epoch', j2>)
+      cE    = aenc(<'path', $G, '2', ps>, pk(h(<'node', lsE>)))
+      body  = <'commit', $G, '2', 'removeD', cE>
+  in
+  [ Fr(~nl), StC($C, $G, '1', es1, init1), !Leaves($G, lsD, lsE), !Dev($C, seedC), !Grp($G, $C, $D, $E) ]
+  --[ Once(<'commit2', $G>), Advanced($G), Removed($G, $D), EpochSecret($G, '2', es2) ]->
+  [ StC($C, $G, '2', es2, h(<'init', es2>))
+  , Out(<body, sign(body, h(<'sig', seedC>))>) ]
+
+/* ---- Members apply the epoch-2 commit; the epoch-1 state is consumed (deleted) -------- */
+
+rule ApplyUpdateD:
+  let cD   = aenc(<'path', $G, '2', ps>, pk(h(<'node', ls>)))
+      body = <'commit', $G, '2', 'update', cD, cE>
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, '2'>)>)
+  in
+  [ In(<body, sg>), StD($D, $G, '1', es1, init1, ls, w), !Grp($G, $C, $D, $E), !DevPub($C, sigC, kemC) ]
+  --[ Eq(verify(sg, body, sigC), true), Reached($D, $G, es2) ]->
+  [ StD($D, $G, '2', es2, h(<'init', es2>), ls, 'none') ]   /* checkpointed: the Welcome is wiped */
+
+rule ApplyUpdateE:
+  let cE   = aenc(<'path', $G, '2', ps>, pk(h(<'node', ls>)))
+      body = <'commit', $G, '2', 'update', cD, cE>
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, '2'>)>)
+  in
+  [ In(<body, sg>), StE($E, $G, '1', es1, init1, ls, w), !Grp($G, $C, $D, $E), !DevPub($C, sigC, kemC) ]
+  --[ Eq(verify(sg, body, sigC), true), Reached($E, $G, es2) ]->
+  [ StE($E, $G, '2', es2, h(<'init', es2>), ls, 'none') ]
+
+rule ApplyRemoveE:
+  let cE   = aenc(<'path', $G, '2', ps>, pk(h(<'node', ls>)))
+      body = <'commit', $G, '2', 'removeD', cE>
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, '2'>)>)
+  in
+  [ In(<body, sg>), StE($E, $G, '1', es1, init1, ls, w), !Grp($G, $C, $D, $E), !DevPub($C, sigC, kemC) ]
+  --[ Eq(verify(sg, body, sigC), true), Reached($E, $G, es2) ]->
+  [ StE($E, $G, '2', es2, h(<'init', es2>), ls, 'none') ]
+
+/* ---- Derived-state compromise (not the seed) ----------------------------------------- */
+
+/* The committer's stored state: the current epoch and init secrets — no root. For leaves it
+   assigned under stage 1 it also stores them WRAPPED under a key derived from its device seed
+   (keying_wrap_assigned_leaf), so they are given out here in that form: state alone does not open
+   them, state plus seed does. A pre-change circle stores none (they are H(root, X)). */
+#ifdef LEGACY
+rule RevealStateC:
+  [ StC(C, G, n, es, init) ]
+  --[ RevealState(C, G, n), Once(<'reveal', C, G, n>) ]->
+  [ StC(C, G, n, es, init), Out(<es, init>) ]
+#else
+rule RevealStateC:
+  [ StC(C, G, n, es, init), !Leaves(G, lsD, lsE), !Dev(C, seedC), !Grp(G, C, D, E) ]
+  --[ RevealState(C, G, n), Once(<'reveal', C, G, n>) ]->
+  [ StC(C, G, n, es, init)
+  , Out(<es, init, senc(lsD, h(<'wrap', seedC, G, D>)), senc(lsE, h(<'wrap', seedC, G, E>))>) ]
+#endif
+
+/* A member's stored state: epoch and init secrets, its leaf secret (never refreshed), and — only
+   until its checkpoint passes the Welcome's epoch — the Welcome's joiner secret (`w`). */
+rule RevealStateD:
+  [ StD(X, G, n, es, init, ls, w) ] --[ RevealState(X, G, n), Once(<'reveal', X, G, n>) ]-> [ StD(X, G, n, es, init, ls, w), Out(<es, init, ls, w>) ]
+
+rule RevealStateE:
+  [ StE(X, G, n, es, init, ls, w) ] --[ RevealState(X, G, n), Once(<'reveal', X, G, n>) ]-> [ StE(X, G, n, es, init, ls, w), Out(<es, init, ls, w>) ]
+
+/* ---- Lemmas -------------------------------------------------------------------------- */
+
+/* Sanity: both members reach epoch 2 through an Update with nothing compromised. */
+lemma executable_update:
+  exists-trace
+  "Ex G D E es #i #j #u. Reached(D, G, es)@i & Reached(E, G, es)@j & Updated(G)@u & not (D = E)
+     & not (Ex X #r. RevealSeed(X)@r) & not (Ex X G2 n #r. RevealState(X, G2, n)@r)"
+
+lemma executable_remove:
+  exists-trace
+  "Ex G D E es #i #u. Reached(E, G, es)@i & Removed(G, D)@u
+     & not (Ex X #r. RevealSeed(X)@r) & not (Ex X G2 n #r. RevealState(X, G2, n)@r)"
+
+/* T1 — baseline: with no compromise at all, no epoch secret leaks. */
+lemma T1_secrecy_without_compromise:
+  "All G n es #i #k. EpochSecret(G, n, es)@i & K(es)@k ==>
+      (Ex X #r. RevealSeed(X)@r) | (Ex X G2 m #r. RevealState(X, G2, m)@r)"
+
+/* T2 — removal: after D is removed, compromising EVERYTHING D has (seed and state) does not
+   reveal the next epoch secret. */
+lemma T2_removed_member_locked_out:
+  "All G C D E es #g #a #i #k.
+      Genesis(G, C, D, E)@g & Removed(G, D)@a & EpochSecret(G, '2', es)@i & K(es)@k ==>
+      (Ex #r. RevealSeed(C)@r) | (Ex #r. RevealSeed(E)@r)
+    | (Ex G2 m #r. RevealState(C, G2, m)@r) | (Ex G2 m #r. RevealState(E, G2, m)@r)"
+
+/* T3 — post-compromise security, derived state only: the committer's epoch-1 STATE leaks (not
+   its seed); after its Update the epoch-2 secret is safe again. */
+lemma T3_pcs_committer_state_heals:
+  "All G C D E es #g #u #i #k.
+      Genesis(G, C, D, E)@g & Updated(G)@u & EpochSecret(G, '2', es)@i & K(es)@k ==>
+      (Ex X #r. RevealSeed(X)@r)
+    | (Ex G2 m #r. RevealState(D, G2, m)@r) | (Ex G2 m #r. RevealState(E, G2, m)@r)
+    | (Ex G2 #r. RevealState(C, G2, '2')@r)"
+
+/* T4 — post-compromise security for an ORDINARY member: D's epoch-1 state leaks (not its seed);
+   the committer then performs its Update. Claimed by TREEKEM-DESIGN.md §6.4 ("every active
+   device refreshes its leaf at least weekly ... compromise windows close within one week"). */
+lemma T4_pcs_member_state_heals:
+  "All G C D E es #g #u #i #r #k.
+      Genesis(G, C, D, E)@g & Updated(G)@u & EpochSecret(G, '2', es)@i
+    & RevealState(D, G, '1')@r & #r < #u & K(es)@k
+    & not (Ex X #s. RevealSeed(X)@s)
+    & not (Ex G2 m #s. RevealState(C, G2, m)@s) & not (Ex G2 m #s. RevealState(E, G2, m)@s)
+    & not (Ex G2 #s. RevealState(D, G2, '2')@s)
+    ==> F"
+
+/* T5 — forward secrecy against a later COMMITTER seed compromise: the group has advanced to
+   epoch 2 (epoch-1 state is gone everywhere), then the committer's seed leaks. */
+lemma T5_fs_committer_seed:
+  "All G C D E es #g #a #i #r #k.
+      Genesis(G, C, D, E)@g & Advanced(G)@a & EpochSecret(G, '1', es)@i
+    & RevealSeed(C)@r & #a < #r & K(es)@k
+    & not (Ex #s. RevealSeed(D)@s) & not (Ex #s. RevealSeed(E)@s)
+    & not (Ex X G2 m #s. RevealState(X, G2, m)@s)
+    ==> F"
+
+/* T6 — forward secrecy against a later MEMBER seed compromise (the Welcome is still on record). */
+lemma T6_fs_member_seed:
+  "All G C D E es es2 #g #a #i #j #r #k.
+      Genesis(G, C, D, E)@g & Advanced(G)@a & EpochSecret(G, '1', es)@i & Reached(D, G, es2)@j
+    & RevealSeed(D)@r & #a < #r & #j < #r & K(es)@k
+    & not (Ex #s. RevealSeed(C)@s) & not (Ex #s. RevealSeed(E)@s)
+    & not (Ex X G2 m #s. RevealState(X, G2, m)@s)
+    ==> F"
+
+/* T7 — post-compromise security against a COMMITTER seed compromise: the seed leaks during
+   epoch 1; the committer then performs its Update. Does epoch 2 heal? */
+lemma T7_pcs_committer_seed:
+  "All G C D E es #g #u #i #r #k.
+      Genesis(G, C, D, E)@g & Updated(G)@u & EpochSecret(G, '2', es)@i
+    & RevealSeed(C)@r & #r < #u & K(es)@k
+    & not (Ex #s. RevealSeed(D)@s) & not (Ex #s. RevealSeed(E)@s)
+    & not (Ex X G2 m #s. RevealState(X, G2, m)@s)
+    ==> F"
+
+/* T8 — forward secrecy against a STORED-STATE compromise: D has moved to epoch 2; its epoch-2
+   state leaks (no seed). Epoch 1 should stay secret. */
+lemma T8_fs_member_state:
+  "All G C D E es es2 #g #i #j #r #k.
+      Genesis(G, C, D, E)@g & EpochSecret(G, '1', es)@i & Reached(D, G, es2)@j
+    & RevealState(D, G, '2')@r & K(es)@k
+    & not (Ex X #s. RevealSeed(X)@s)
+    & not (Ex X G2 m #s. RevealState(X, G2, m)@s & not (X = D))
+    & not (Ex #s. RevealState(D, G, '1')@s)
+    ==> F"
+
+/* T9 — forward secrecy against a COMMITTER stored-state compromise: the committer has moved to
+   epoch 2; its epoch-2 state leaks (no seed). Epoch 1 should stay secret. */
+lemma T9_fs_committer_state:
+  "All G C D E es #g #a #i #r #k.
+      Genesis(G, C, D, E)@g & Advanced(G)@a & EpochSecret(G, '1', es)@i
+    & RevealState(C, G, '2')@r & K(es)@k
+    & not (Ex X #s. RevealSeed(X)@s)
+    & not (Ex X G2 m #s. RevealState(X, G2, m)@s & not (X = C))
+    & not (Ex #s. RevealState(C, G, '1')@s)
+    ==> F"
+
+end

@@ -1,0 +1,243 @@
+/*
+  Haven TreeKEM key schedule — PROPOSED FIX, symbolic model (Tamarin).
+
+  Companion to haven_treekem_as_wired.spthy (same group shape, same schedule, same lemmas T1–T7
+  so the two can be compared line for line). Spec: docs/formal/PROTOCOL-SPEC.md §12.
+
+  Run:  tamarin-prover --auto-sources --prove docs/formal/haven_treekem_fixed.spthy
+
+  The four changes relative to the engine as wired:
+   F-a  Tree secrets are RANDOM (OsRng) and STORED, not derived from the device seed:
+        init_0, every leaf secret, and every update's fresh leaf secret are Fr() here.
+   F-b  Each device generates its OWN leaf secret and publishes only the public key, in a signed
+        key package. The committer never knows another device's leaf secret.
+   F-c  A Welcome is wrapped to a ONE-TIME key-package init key that the joiner deletes on
+        joining — not to the device's long-term KEM key. (KP is a linear fact consumed by Join.)
+   F-d  ANY member may author a leaf-Update commit (no membership proposals), so every device
+        can heal itself. Here D performs its own Update as a third option for the epoch-2 commit.
+  The long-term device key then only SIGNS. Its compromise (RevealLtk) allows impersonation
+  from then on — an active attack, out of scope for these passive-secrecy lemmas — but must not
+  reveal any epoch secret, past or future.
+
+  State compromise (RevealState) now yields what a device really stores: epoch secret, init
+  secret and its own CURRENT leaf secret.
+*/
+
+theory HavenTreeKemFixed
+begin
+
+builtins: signing, asymmetric-encryption, hashing
+
+restriction Eq:   "All x y #i. Eq(x, y)@i ==> x = y"
+restriction Neq:  "All x #i. Neq(x, x)@i ==> F"
+restriction Once: "All t #i #j. Once(t)@i & Once(t)@j ==> #i = #j"
+
+/* ---- Devices: a long-term SIGNING key only -------------------------------------------- */
+
+rule Device:
+  [ Fr(~sk) ]
+  --[ Once(<'dev', $X>) ]->
+  [ !Ltk($X, ~sk), !Pub($X, pk(~sk)), Out(<$X, pk(~sk)>) ]
+
+rule RevealLtk:
+  [ !Ltk(X, sk) ] --[ RevealLtk(X) ]-> [ Out(sk) ]
+
+/* ---- F-b / F-c: a device's signed key package (own leaf key + one-time init key) ------- */
+
+rule KeyPackage:
+  let leafpk = pk(h(<'node', ~ls>))
+      body   = <'kp', $X, $G, pk(~ik), leafpk>
+  in
+  [ Fr(~ik), Fr(~ls), !Ltk($X, sk) ]
+  --[ Once(<'kp', $X, $G>), OwnLeaf($X, $G, ~ls), InitKey($X, $G, ~ik) ]->
+  [ KP($X, $G, ~ik, ~ls), !KPPub($X, $G, pk(~ik), leafpk), Out(<body, sign(body, sk)>) ]
+
+/* ---- Genesis (epoch 1) ----------------------------------------------------------------- */
+
+rule Genesis:
+  let j1    = h(<'joiner', ~init0, 'zero', $G, '1'>)
+      es1   = h(<'epoch', j1>)
+      wD    = aenc(<'welcome', $G, '1', j1>, ikD)
+      wE    = aenc(<'welcome', $G, '1', j1>, ikE)
+  in
+  [ Fr(~init0), Fr(~lsC), !Ltk($C, skC)
+  , !KPPub($D, $G, ikD, leafD), !KPPub($E, $G, ikE, leafE) ]
+  --[ Once('genesis'), Neq($C, $D), Neq($C, $E), Neq($D, $E)
+    , Genesis($G, $C, $D, $E), EpochSecret($G, '1', es1), Init0(~init0), OwnLeaf($C, $G, ~lsC) ]->
+  [ StC($C, $G, '1', es1, h(<'init', es1>), ~lsC)
+  , !Grp($G, $C, $D, $E), !Leaf1($G, pk(h(<'node', ~lsC>)), leafD, leafE)
+  , Out(<'welcome', $G, wD, sign(wD, skC)>)
+  , Out(<'welcome', $G, wE, sign(wE, skC)>)
+  , Out(pk(h(<'node', ~lsC>))) ]
+
+rule JoinD:              /* consumes the key package: the one-time init key is DELETED here */
+  let w   = aenc(<'welcome', $G, '1', j1>, pk(ik))
+      es1 = h(<'epoch', j1>)
+  in
+  [ In(<'welcome', $G, w, sg>), KP($D, $G, ik, ls), !Grp($G, $C, $D, $E), !Pub($C, pkC) ]
+  --[ Eq(verify(sg, w, pkC), true), Joined($D, $G, es1) ]->
+  [ StD($D, $G, '1', es1, h(<'init', es1>), ls) ]
+
+rule JoinE:              /* consumes the key package: the one-time init key is DELETED here */
+  let w   = aenc(<'welcome', $G, '1', j1>, pk(ik))
+      es1 = h(<'epoch', j1>)
+  in
+  [ In(<'welcome', $G, w, sg>), KP($E, $G, ik, ls), !Grp($G, $C, $D, $E), !Pub($C, pkC) ]
+  --[ Eq(verify(sg, w, pkC), true), Joined($E, $G, es1) ]->
+  [ StE($E, $G, '1', es1, h(<'init', es1>), ls) ]
+
+/* ---- Epoch 2, option A: committer's leaf Update with a RANDOM leaf secret (F-a) -------- */
+
+rule Update2:
+  let ps   = h(<'path', ~nl>)
+      cs   = h(<'commit', ps>)
+      es2  = h(<'epoch', h(<'joiner', init1, cs, $G, '2'>)>)
+      cD   = aenc(<'path', $G, '2', ps>, leafD)
+      cE   = aenc(<'path', $G, '2', ps>, leafE)
+      body = <'commit', $G, '2', 'update', pk(h(<'node', ~nl>)), cD, cE>
+  in
+  [ Fr(~nl), StC($C, $G, '1', es1, init1, lsC), !Ltk($C, skC)
+  , !Grp($G, $C, $D, $E), !Leaf1($G, leafC, leafD, leafE) ]
+  --[ Once(<'commit2', $G>), Advanced($G), Updated($G), EpochSecret($G, '2', es2), OwnLeaf($C, $G, ~nl) ]->
+  [ StC($C, $G, '2', es2, h(<'init', es2>), ~nl)
+  , Out(<body, sign(body, skC)>) ]
+
+/* ---- Epoch 2, option B: committer removes D ---------------------------------------------- */
+
+rule RemoveD2:
+  let ps   = h(<'path', ~nl>)
+      cs   = h(<'commit', ps>)
+      es2  = h(<'epoch', h(<'joiner', init1, cs, $G, '2'>)>)
+      cE   = aenc(<'path', $G, '2', ps>, leafE)
+      body = <'commit', $G, '2', 'removeD', pk(h(<'node', ~nl>)), cE>
+  in
+  [ Fr(~nl), StC($C, $G, '1', es1, init1, lsC), !Ltk($C, skC)
+  , !Grp($G, $C, $D, $E), !Leaf1($G, leafC, leafD, leafE) ]
+  --[ Once(<'commit2', $G>), Advanced($G), Removed($G, $D), EpochSecret($G, '2', es2), OwnLeaf($C, $G, ~nl) ]->
+  [ StC($C, $G, '2', es2, h(<'init', es2>), ~nl)
+  , Out(<body, sign(body, skC)>) ]
+
+/* ---- Members apply the epoch-2 commit ---------------------------------------------------- */
+
+rule ApplyUpdateD:
+  let cD   = aenc(<'path', $G, '2', ps>, pk(h(<'node', ls>)))
+      body = <'commit', $G, '2', 'update', leafC2, cD, cE>
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, '2'>)>)
+  in
+  [ In(<body, sg>), StD($D, $G, '1', es1, init1, ls), !Grp($G, $C, $D, $E), !Pub($C, pkC) ]
+  --[ Eq(verify(sg, body, pkC), true), Reached($D, $G, '2', es2) ]->
+  [ StD($D, $G, '2', es2, h(<'init', es2>), ls) ]
+
+rule ApplyUpdateE:
+  let cE   = aenc(<'path', $G, '2', ps>, pk(h(<'node', ls>)))
+      body = <'commit', $G, '2', 'update', leafC2, cD, cE>
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, '2'>)>)
+  in
+  [ In(<body, sg>), StE($E, $G, '1', es1, init1, ls), !Grp($G, $C, $D, $E), !Pub($C, pkC) ]
+  --[ Eq(verify(sg, body, pkC), true), Reached($E, $G, '2', es2) ]->
+  [ StE($E, $G, '2', es2, h(<'init', es2>), ls) ]
+
+rule ApplyRemoveE:
+  let cE   = aenc(<'path', $G, '2', ps>, pk(h(<'node', ls>)))
+      body = <'commit', $G, '2', 'removeD', leafC2, cE>
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, '2'>)>)
+  in
+  [ In(<body, sg>), StE($E, $G, '1', es1, init1, ls), !Grp($G, $C, $D, $E), !Pub($C, pkC) ]
+  --[ Eq(verify(sg, body, pkC), true), Reached($E, $G, '2', es2) ]->
+  [ StE($E, $G, '2', es2, h(<'init', es2>), ls) ]
+
+/* ---- F-d: epoch 2, option C: member D heals itself with its OWN leaf Update -------------- */
+
+rule UpdateByD2:
+  let ps   = h(<'path', ~nl>)
+      cs   = h(<'commit', ps>)
+      es2  = h(<'epoch', h(<'joiner', init1, cs, $G, '2'>)>)
+      cC   = aenc(<'path', $G, '2', ps>, leafC)
+      cE   = aenc(<'path', $G, '2', ps>, leafE)
+      body = <'commit', $G, '2', 'memberupdate', pk(h(<'node', ~nl>)), cC, cE>
+  in
+  [ Fr(~nl), StD($D, $G, '1', es1, init1, ls), !Ltk($D, skD)
+  , !Grp($G, $C, $D, $E), !Leaf1($G, leafC, leafD, leafE) ]
+  --[ Once(<'commit2', $G>), Advanced($G), MemberUpdated($G, $D), EpochSecret($G, '2', es2)
+    , OwnLeaf($D, $G, ~nl), UpdLeaf2($D, $G, ~nl) ]->
+  [ StD($D, $G, '2', es2, h(<'init', es2>), ~nl)
+  , Out(<body, sign(body, skD)>) ]
+
+/* ---- Stored-state compromise: what a device really holds --------------------------------- */
+
+rule RevealStateC:
+  [ StC(X, G, n, es, init, ls) ] --[ RevealState(X, G, n), Once(<'reveal', X, G, n>) ]-> [ StC(X, G, n, es, init, ls), Out(<es, init, ls>) ]
+
+rule RevealStateD:
+  [ StD(X, G, n, es, init, ls) ] --[ RevealState(X, G, n), Once(<'reveal', X, G, n>) ]-> [ StD(X, G, n, es, init, ls), Out(<es, init, ls>) ]
+
+rule RevealStateE:
+  [ StE(X, G, n, es, init, ls) ] --[ RevealState(X, G, n), Once(<'reveal', X, G, n>) ]-> [ StE(X, G, n, es, init, ls), Out(<es, init, ls>) ]
+
+rule RevealKeyPackage:   /* a not-yet-joined device's stored key-package secrets */
+  [ KP(X, G, ik, ls) ] --[ RevealState(X, G, '0'), Once(<'reveal', X, G, '0'>) ]-> [ KP(X, G, ik, ls), Out(<ik, ls>) ]
+
+/* ---- Lemmas (same names and meaning as the as-wired model) -------------------------------- */
+
+/* Helper lemmas (reused by the ones below): the random secrets leak only through a reveal of
+   their owner's stored state. */
+lemma H1_init0_secret [reuse]:
+  "All x #i #k. Init0(x)@i & K(x)@k ==> F"
+
+lemma H2_init_key_secret [reuse]:
+  "All X G ik #i #k. InitKey(X, G, ik)@i & K(ik)@k ==> (Ex #r. RevealState(X, G, '0')@r)"
+
+lemma H3_leaf_secret [reuse]:
+  "All X G ls #i #k. OwnLeaf(X, G, ls)@i & K(ls)@k ==> (Ex n #r. RevealState(X, G, n)@r)"
+
+lemma H4_member_update_leaf_secret [reuse]:
+  "All X G nl #i #k. UpdLeaf2(X, G, nl)@i & K(nl)@k ==> (Ex #r. RevealState(X, G, '2')@r)"
+
+lemma executable_update:
+  exists-trace
+  "Ex G D E es #i #j #u. Reached(D, G, '2', es)@i & Reached(E, G, '2', es)@j & Updated(G)@u & not (D = E)
+     & not (Ex X #r. RevealLtk(X)@r) & not (Ex X G2 n #r. RevealState(X, G2, n)@r)"
+
+lemma executable_member_update:
+  exists-trace
+  "Ex G D #u. MemberUpdated(G, D)@u
+     & not (Ex X #r. RevealLtk(X)@r) & not (Ex X G2 n #r. RevealState(X, G2, n)@r)"
+
+/* T1 — baseline. Long-term key compromise is deliberately NOT an excuse here: a signing key
+   alone must reveal nothing. This one lemma therefore also covers T5, T6 and T7 (forward
+   secrecy and healing against long-term key compromise). */
+lemma T1_T5_T6_T7_no_secret_from_longterm_keys:
+  "All G n es #i #k. EpochSecret(G, n, es)@i & K(es)@k ==>
+      (Ex X G2 m #r. RevealState(X, G2, m)@r)"
+
+/* T2 — removal: everything D has does not reveal epoch 2. */
+lemma T2_removed_member_locked_out:
+  "All G C D E es #g #a #i #k.
+      Genesis(G, C, D, E)@g & Removed(G, D)@a & EpochSecret(G, '2', es)@i & K(es)@k ==>
+      (Ex G2 m #r. RevealState(C, G2, m)@r) | (Ex G2 m #r. RevealState(E, G2, m)@r)"
+
+/* T3 — the committer's epoch-1 stored state leaks; its Update heals epoch 2. */
+lemma T3_pcs_committer_state_heals:
+  "All G C D E es #g #u #i #k.
+      Genesis(G, C, D, E)@g & Updated(G)@u & EpochSecret(G, '2', es)@i & K(es)@k ==>
+      (Ex G2 m #r. RevealState(D, G2, m)@r) | (Ex G2 m #r. RevealState(E, G2, m)@r)
+    | (Ex G2 #r. RevealState(C, G2, '2')@r)"
+
+/* T4 — member D's stored epoch-1 state leaks; D's OWN Update heals epoch 2. */
+lemma T4_pcs_member_state_heals:
+  "All G D es #u #i #k.
+      MemberUpdated(G, D)@u & EpochSecret(G, '2', es)@i & K(es)@k ==>
+      (Ex X G2 m #r. RevealState(X, G2, m)@r & not (X = D))
+    | (Ex G2 #r. RevealState(D, G2, '2')@r)"
+
+/* T8 — forward secrecy against a STORED-STATE compromise: D has moved to epoch 2 (its epoch-1
+   state and one-time init key are gone); its epoch-2 state leaks. Epoch 1 must stay secret. */
+lemma T8_fs_member_state:
+  "All G C D E es es2 #g #i #j #r #k.
+      Genesis(G, C, D, E)@g & EpochSecret(G, '1', es)@i & Reached(D, G, '2', es2)@j
+    & RevealState(D, G, '2')@r & K(es)@k
+    & not (Ex X G2 m #s. RevealState(X, G2, m)@s & not (X = D))
+    & not (Ex #s. RevealState(D, G, '1')@s) & not (Ex #s. RevealState(D, G, '0')@s)
+    ==> F"
+
+end

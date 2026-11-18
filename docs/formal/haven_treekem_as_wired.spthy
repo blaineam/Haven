@@ -1,0 +1,267 @@
+/*
+  Haven TreeKEM key schedule AS WIRED in the engine — symbolic model (Tamarin).
+
+  Spec:   docs/formal/PROTOCOL-SPEC.md §11
+  Source: core/haven-p2p/src/treekem.rs (build_commit, apply_commit, advance_epoch)
+          core/haven-ffi/src/lib.rs (keying_secret_root, keying_leaf_secret, keying_base_init,
+          keying_update_material, mls_pcs_leaf_update, mls_build_remove, mls_commit_authorized)
+
+  Run:  tamarin-prover --auto-sources --prove docs/formal/haven_treekem_as_wired.spthy
+
+  What is modelled, and why it is faithful where it matters:
+   * The engine keeps no random tree secrets. It REPLAYS the commit chain, and the committer's
+     inputs are all deterministic functions of its long-term device seed:
+        root        = H("haven-mls-keying-root-v1", device_seed, group)
+        init_0      = H("...-init-v1", root)
+        leaf(X)     = H("...-leaf-v1", root, X)           -- the committer assigns EVERY leaf secret
+        upd_leaf(n) = H("...-upd-leaf-v1", root, n)       -- the "fresh" leaf of the update at epoch n
+     That derivation is reproduced here term for term.
+   * Only the elected committer authors commits (mls_am_committer / mls_commit_authorized), so
+     no other device ever refreshes its leaf.
+   * The tree is flattened to a star: a commit's path secret is wrapped to each remaining
+     member's leaf key. Depth changes cost, not who can decrypt what, so the dependency
+     structure (which key opens which secret) is preserved.
+   * One group, three devices: committer C, members D and E. Epoch 1 = genesis (add-only,
+     commit_secret = zero, RFC 9420 §12.4). Epoch 2 = either a leaf Update or "remove D".
+   * Epoch schedule: joiner_n = H(init_{n-1}, commit_secret_n, ctx); epoch_n = H(joiner_n);
+     init_n = H(epoch_n). Hybrid KEM and hybrid signature are single primitives here (their
+     hybrid property is checked in haven_circle_keys.spthy).
+
+  Two kinds of compromise are kept separate on purpose:
+   * RevealState(X, G, n): the state a device has stored at epoch n — epoch secret, init secret,
+     a member's leaf secret, and for the committer its persisted secret root — NOT the seed.
+   * RevealSeed(X): the device's long-term seed.
+*/
+
+theory HavenTreeKemAsWired
+begin
+
+builtins: signing, asymmetric-encryption, hashing
+
+restriction Eq:   "All x y #i. Eq(x, y)@i ==> x = y"
+restriction Neq:  "All x #i. Neq(x, x)@i ==> F"
+restriction Once: "All t #i #j. Once(t)@i & Once(t)@j ==> #i = #j"
+
+/* ---- Devices ------------------------------------------------------------------------- */
+
+rule Device:
+  let sigk = h(<'sig', ~seed>)
+      kemk = h(<'kem', ~seed>)
+  in
+  [ Fr(~seed) ]
+  --[ Once(<'dev', $X>) ]->
+  [ !Dev($X, ~seed), !DevPub($X, pk(sigk), pk(kemk)), Out(<$X, pk(sigk), pk(kemk)>) ]
+
+rule RevealSeed:
+  [ !Dev(X, seed) ] --[ RevealSeed(X) ]-> [ Out(seed) ]
+
+/* ---- Genesis (epoch 1): committer builds the tree and Welcomes D and E ---------------- */
+
+rule Genesis:
+  let root  = h(<'root', seedC, $G>)
+      init0 = h(<'init0', root>)
+      lsD   = h(<'leaf', root, $D>)
+      lsE   = h(<'leaf', root, $E>)
+      j1    = h(<'joiner', init0, 'zero', $G, '1'>)
+      es1   = h(<'epoch', j1>)
+      init1 = h(<'init', es1>)
+      wD    = aenc(<'welcome', $G, '1', j1, lsD>, kemD)
+      wE    = aenc(<'welcome', $G, '1', j1, lsE>, kemE)
+      sigk  = h(<'sig', seedC>)
+  in
+  [ !Dev($C, seedC), !DevPub($D, sigD, kemD), !DevPub($E, sigE, kemE) ]
+  --[ Once('genesis'), Neq($C, $D), Neq($C, $E), Neq($D, $E)
+    , Genesis($G, $C, $D, $E), EpochSecret($G, '1', es1) ]->
+  [ StC($C, $G, '1', es1, init1)
+  , !Grp($G, $C, $D, $E)
+  , Out(<'welcome', $G, wD, sign(wD, sigk)>)
+  , Out(<'welcome', $G, wE, sign(wE, sigk)>)
+  , Out(<pk(h(<'node', lsD>)), pk(h(<'node', lsE>))>) ]   /* leaf public keys are in the public tree */
+
+rule JoinD:              /* a member opens its Welcome with its LONG-TERM device KEM key */
+  let kemk = h(<'kem', seedX>)
+      w    = aenc(<'welcome', $G, '1', j1, ls>, pk(kemk))
+      es1  = h(<'epoch', j1>)
+  in
+  [ In(<'welcome', $G, w, sg>), !Dev($D, seedX), !Grp($G, $C, $D, $E), !DevPub($C, sigC, kemC) ]
+  --[ Eq(verify(sg, w, sigC), true), Once(<'join', $G, $D>), Joined($D, $G, es1) ]->
+  [ StD($D, $G, '1', es1, h(<'init', es1>), ls), !KeptWelcome($D, $G, j1) ]
+
+rule JoinE:              /* a member opens its Welcome with its LONG-TERM device KEM key */
+  let kemk = h(<'kem', seedX>)
+      w    = aenc(<'welcome', $G, '1', j1, ls>, pk(kemk))
+      es1  = h(<'epoch', j1>)
+  in
+  [ In(<'welcome', $G, w, sg>), !Dev($E, seedX), !Grp($G, $C, $D, $E), !DevPub($C, sigC, kemC) ]
+  --[ Eq(verify(sg, w, sigC), true), Once(<'join', $G, $E>), Joined($E, $G, es1) ]->
+  [ StE($E, $G, '1', es1, h(<'init', es1>), ls), !KeptWelcome($E, $G, j1) ]
+
+/* ---- Epoch 2, option A: the committer's weekly leaf Update (the PCS operation) -------- */
+
+rule Update2:
+  let root  = h(<'root', seedC, $G>)
+      nl    = h(<'upd', root, '2'>)                /* keying_update_material: derived, not random */
+      ps    = h(<'path', nl>)
+      cs    = h(<'commit', ps>)
+      j2    = h(<'joiner', init1, cs, $G, '2'>)
+      es2   = h(<'epoch', j2>)
+      cD    = aenc(<'path', $G, '2', ps>, pk(h(<'node', h(<'leaf', root, $D>)>)))
+      cE    = aenc(<'path', $G, '2', ps>, pk(h(<'node', h(<'leaf', root, $E>)>)))
+      body  = <'commit', $G, '2', 'update', cD, cE>
+  in
+  [ StC($C, $G, '1', es1, init1), !Dev($C, seedC), !Grp($G, $C, $D, $E) ]
+  --[ Once(<'commit2', $G>), Advanced($G), Updated($G), EpochSecret($G, '2', es2) ]->
+  [ StC($C, $G, '2', es2, h(<'init', es2>))
+  , Out(<body, sign(body, h(<'sig', seedC>))>) ]
+
+/* ---- Epoch 2, option B: the committer removes D (path wrapped to E only) -------------- */
+
+rule RemoveD2:
+  let root  = h(<'root', seedC, $G>)
+      nl    = h(<'upd', root, '2'>)
+      ps    = h(<'path', nl>)
+      cs    = h(<'commit', ps>)
+      j2    = h(<'joiner', init1, cs, $G, '2'>)
+      es2   = h(<'epoch', j2>)
+      cE    = aenc(<'path', $G, '2', ps>, pk(h(<'node', h(<'leaf', root, $E>)>)))
+      body  = <'commit', $G, '2', 'removeD', cE>
+  in
+  [ StC($C, $G, '1', es1, init1), !Dev($C, seedC), !Grp($G, $C, $D, $E) ]
+  --[ Once(<'commit2', $G>), Advanced($G), Removed($G, $D), EpochSecret($G, '2', es2) ]->
+  [ StC($C, $G, '2', es2, h(<'init', es2>))
+  , Out(<body, sign(body, h(<'sig', seedC>))>) ]
+
+/* ---- Members apply the epoch-2 commit; the epoch-1 state is consumed (deleted) -------- */
+
+rule ApplyUpdateD:
+  let cD   = aenc(<'path', $G, '2', ps>, pk(h(<'node', ls>)))
+      body = <'commit', $G, '2', 'update', cD, cE>
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, '2'>)>)
+  in
+  [ In(<body, sg>), StD($D, $G, '1', es1, init1, ls), !Grp($G, $C, $D, $E), !DevPub($C, sigC, kemC) ]
+  --[ Eq(verify(sg, body, sigC), true), Reached($D, $G, es2) ]->
+  [ StD($D, $G, '2', es2, h(<'init', es2>), ls) ]
+
+rule ApplyUpdateE:
+  let cE   = aenc(<'path', $G, '2', ps>, pk(h(<'node', ls>)))
+      body = <'commit', $G, '2', 'update', cD, cE>
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, '2'>)>)
+  in
+  [ In(<body, sg>), StE($E, $G, '1', es1, init1, ls), !Grp($G, $C, $D, $E), !DevPub($C, sigC, kemC) ]
+  --[ Eq(verify(sg, body, sigC), true), Reached($E, $G, es2) ]->
+  [ StE($E, $G, '2', es2, h(<'init', es2>), ls) ]
+
+rule ApplyRemoveE:
+  let cE   = aenc(<'path', $G, '2', ps>, pk(h(<'node', ls>)))
+      body = <'commit', $G, '2', 'removeD', cE>
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, '2'>)>)
+  in
+  [ In(<body, sg>), StE($E, $G, '1', es1, init1, ls), !Grp($G, $C, $D, $E), !DevPub($C, sigC, kemC) ]
+  --[ Eq(verify(sg, body, sigC), true), Reached($E, $G, es2) ]->
+  [ StE($E, $G, '2', es2, h(<'init', es2>), ls) ]
+
+/* ---- Derived-state compromise (not the seed) ----------------------------------------- */
+
+/* The committer's persisted state INCLUDES its secret root (PersistShadow.my_secret_root,
+   lib.rs), so a state compromise of the committer yields the root as well. */
+rule RevealStateC:
+  [ StC(C, G, n, es, init), !Dev(C, seedC) ]
+  --[ RevealState(C, G, n), Once(<'reveal', C, G, n>) ]->
+  [ StC(C, G, n, es, init), Out(<es, init, h(<'root', seedC, G>)>) ]
+
+/* A member's persisted state keeps its decrypted Welcome (ShadowTree.my_welcomes: joiner_secret +
+   leaf_secret) for replay, so a state compromise at ANY epoch yields the original joiner secret. */
+rule RevealStateD:
+  [ StD(X, G, n, es, init, ls), !KeptWelcome(X, G, j1) ] --[ RevealState(X, G, n), Once(<'reveal', X, G, n>) ]-> [ StD(X, G, n, es, init, ls), Out(<es, init, ls, j1>) ]
+
+rule RevealStateE:
+  [ StE(X, G, n, es, init, ls), !KeptWelcome(X, G, j1) ] --[ RevealState(X, G, n), Once(<'reveal', X, G, n>) ]-> [ StE(X, G, n, es, init, ls), Out(<es, init, ls, j1>) ]
+
+/* ---- Lemmas -------------------------------------------------------------------------- */
+
+/* Sanity: both members reach epoch 2 through an Update with nothing compromised. */
+lemma executable_update:
+  exists-trace
+  "Ex G D E es #i #j #u. Reached(D, G, es)@i & Reached(E, G, es)@j & Updated(G)@u & not (D = E)
+     & not (Ex X #r. RevealSeed(X)@r) & not (Ex X G2 n #r. RevealState(X, G2, n)@r)"
+
+lemma executable_remove:
+  exists-trace
+  "Ex G D E es #i #u. Reached(E, G, es)@i & Removed(G, D)@u
+     & not (Ex X #r. RevealSeed(X)@r) & not (Ex X G2 n #r. RevealState(X, G2, n)@r)"
+
+/* T1 — baseline: with no compromise at all, no epoch secret leaks. */
+lemma T1_secrecy_without_compromise:
+  "All G n es #i #k. EpochSecret(G, n, es)@i & K(es)@k ==>
+      (Ex X #r. RevealSeed(X)@r) | (Ex X G2 m #r. RevealState(X, G2, m)@r)"
+
+/* T2 — removal: after D is removed, compromising EVERYTHING D has (seed and state) does not
+   reveal the next epoch secret. */
+lemma T2_removed_member_locked_out:
+  "All G C D E es #g #a #i #k.
+      Genesis(G, C, D, E)@g & Removed(G, D)@a & EpochSecret(G, '2', es)@i & K(es)@k ==>
+      (Ex #r. RevealSeed(C)@r) | (Ex #r. RevealSeed(E)@r)
+    | (Ex G2 m #r. RevealState(C, G2, m)@r) | (Ex G2 m #r. RevealState(E, G2, m)@r)"
+
+/* T3 — post-compromise security, derived state only: the committer's epoch-1 STATE leaks (not
+   its seed); after its Update the epoch-2 secret is safe again. */
+lemma T3_pcs_committer_state_heals:
+  "All G C D E es #g #u #i #k.
+      Genesis(G, C, D, E)@g & Updated(G)@u & EpochSecret(G, '2', es)@i & K(es)@k ==>
+      (Ex X #r. RevealSeed(X)@r)
+    | (Ex G2 m #r. RevealState(D, G2, m)@r) | (Ex G2 m #r. RevealState(E, G2, m)@r)
+    | (Ex G2 #r. RevealState(C, G2, '2')@r)"
+
+/* T4 — post-compromise security for an ORDINARY member: D's epoch-1 state leaks (not its seed);
+   the committer then performs its Update. Claimed by TREEKEM-DESIGN.md §6.4 ("every active
+   device refreshes its leaf at least weekly ... compromise windows close within one week"). */
+lemma T4_pcs_member_state_heals:
+  "All G C D E es #g #u #i #r #k.
+      Genesis(G, C, D, E)@g & Updated(G)@u & EpochSecret(G, '2', es)@i
+    & RevealState(D, G, '1')@r & #r < #u & K(es)@k
+    & not (Ex X #s. RevealSeed(X)@s)
+    & not (Ex G2 m #s. RevealState(C, G2, m)@s) & not (Ex G2 m #s. RevealState(E, G2, m)@s)
+    & not (Ex G2 #s. RevealState(D, G2, '2')@s)
+    ==> F"
+
+/* T5 — forward secrecy against a later COMMITTER seed compromise: the group has advanced to
+   epoch 2 (epoch-1 state is gone everywhere), then the committer's seed leaks. */
+lemma T5_fs_committer_seed:
+  "All G C D E es #g #a #i #r #k.
+      Genesis(G, C, D, E)@g & Advanced(G)@a & EpochSecret(G, '1', es)@i
+    & RevealSeed(C)@r & #a < #r & K(es)@k
+    & not (Ex #s. RevealSeed(D)@s) & not (Ex #s. RevealSeed(E)@s)
+    & not (Ex X G2 m #s. RevealState(X, G2, m)@s)
+    ==> F"
+
+/* T6 — forward secrecy against a later MEMBER seed compromise (the Welcome is still on record). */
+lemma T6_fs_member_seed:
+  "All G C D E es es2 #g #a #i #j #r #k.
+      Genesis(G, C, D, E)@g & Advanced(G)@a & EpochSecret(G, '1', es)@i & Reached(D, G, es2)@j
+    & RevealSeed(D)@r & #a < #r & #j < #r & K(es)@k
+    & not (Ex #s. RevealSeed(C)@s) & not (Ex #s. RevealSeed(E)@s)
+    & not (Ex X G2 m #s. RevealState(X, G2, m)@s)
+    ==> F"
+
+/* T7 — post-compromise security against a COMMITTER seed compromise: the seed leaks during
+   epoch 1; the committer then performs its Update. Does epoch 2 heal? */
+lemma T7_pcs_committer_seed:
+  "All G C D E es #g #u #i #r #k.
+      Genesis(G, C, D, E)@g & Updated(G)@u & EpochSecret(G, '2', es)@i
+    & RevealSeed(C)@r & #r < #u & K(es)@k
+    & not (Ex #s. RevealSeed(D)@s) & not (Ex #s. RevealSeed(E)@s)
+    & not (Ex X G2 m #s. RevealState(X, G2, m)@s)
+    ==> F"
+
+/* T8 — forward secrecy against a STORED-STATE compromise: D has moved to epoch 2; its epoch-2
+   state leaks (no seed). Epoch 1 should stay secret. */
+lemma T8_fs_member_state:
+  "All G C D E es es2 #g #i #j #r #k.
+      Genesis(G, C, D, E)@g & EpochSecret(G, '1', es)@i & Reached(D, G, es2)@j
+    & RevealState(D, G, '2')@r & K(es)@k
+    & not (Ex X #s. RevealSeed(X)@s)
+    & not (Ex X G2 m #s. RevealState(X, G2, m)@s & not (X = D))
+    & not (Ex #s. RevealState(D, G, '1')@s)
+    ==> F"
+
+end

@@ -9,6 +9,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Security - Posts and key commits are bound to the circle they were sealed for (all platforms, core)
+A key commit and a post both name the circle they were made for, but the receiving engine filed them by the circle they *arrived* in and
+never compared the two. Someone in two of your circles (or a relay) could copy a genuine commit and post from one circle's mailbox into the
+other's, and a reader in both would see that post appear in the wrong circle. Nobody could read anything they were not already able to read —
+this was a context/integrity gap, not a confidentiality one — and existing posts are unaffected. `receive_key_commit` and
+`receive_epoch_event` now reject anything sealed for a different circle. Found by a new machine-checked protocol model
+([`docs/formal`](docs/formal/PROTOCOL-SPEC.md), Tamarin): it falsifies circle binding for the old behaviour and proves it, together with
+epoch-key secrecy, revocation, event confidentiality and sender authentication, for the fixed one. Regression test
+`commit_and_event_replayed_into_another_circle_are_rejected`. No wire, storage or migration change.
+
 ### Fixed - macOS: the palette Dock icons were hard-cornered squares
 The palette icon art is a full-bleed 1024 px square. On macOS it was set as the Dock icon as-is, so every colour except the default showed as a
 square with no rounded corners and no margin. `NSImage.macIconStyled()` now draws it into the standard macOS icon shape (824 pt rounded tile,

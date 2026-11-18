@@ -4324,6 +4324,14 @@ fn receive_key_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
     let Some(opened) = opened else {
         return Ok(false); // not addressed to me, or I was excluded from this epoch
     };
+    // Circle binding (formal model P4, docs/formal): the commit's signed-and-sealed payload names the
+    // circle it was minted for. The envelope signature does not cover that id (it is inside the
+    // ciphertext), and `idx` is only where the bytes ARRIVED — which a relay or any member of two
+    // circles controls. Without this, a genuine commit copied into another circle's mailbox filed its
+    // key under the wrong circle. Terminal, not parked: it can never become valid here.
+    if opened.circle_id != st.circles[idx].id {
+        return Ok(false);
+    }
     let is_new;
     {
         let c = &mut st.circles[idx];
@@ -4495,6 +4503,13 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8], pre: Option<P
         None => ParsedEpoch::parse(body)?,
     };
     let env: &EpochEnvelope = &parsed.env;
+    // Circle binding (formal model P4, docs/formal): the signed envelope names its circle, and the
+    // event key is derived from that name — but the key is looked up by where the bytes ARRIVED. An
+    // event sealed for another circle must not be accepted (or parked) here, or a post made to one
+    // circle could be replayed into another circle a reader shares with its author.
+    if env.circle_id != st.circles[idx].id {
+        return Ok(false);
+    }
     let sender_hex = env.sender_hex();
     let me_hex = hex(&st.me().node_id_bytes());
     let (sender, expected_author) = resolve_epoch_sender(st, idx, &sender_hex, &me_hex);
@@ -11103,6 +11118,46 @@ mod net_tests {
         assert!(!alice.receive(cid.clone(), tagged(TAG_EPOCH_EVENT, &env2.to_bytes())).unwrap(),
                 "an uncredentialed signer is not accepted");
         assert!(alice.feed(cid.clone(), 200, None).iter().all(|m| m.body != "forged"));
+    }
+
+    /// Formal-model finding P4 (docs/formal): a key commit and an event are bound to the circle they
+    /// were SEALED for. A member of two circles must not be able to copy a genuine commit + post from
+    /// circle A into circle B's mailbox and have a shared member file the key — and then the post —
+    /// under circle B. Before the check, both were accepted: the post surfaced in the wrong circle.
+    #[test]
+    fn commit_and_event_replayed_into_another_circle_are_rejected() {
+        let circle_a = DEFAULT_CIRCLE.to_string();
+        let circle_b = "circle-b".to_string();
+        let alice = HavenSocial::new([1u8; 32].to_vec()).unwrap();
+        let bob = Identity::from_seed(&[2u8; 32]);
+        alice.create_circle(circle_b.clone(), "B".into());
+        alice.add_contact_bundle(circle_a.clone(), bob.public().to_bytes()).unwrap();
+        alice.add_contact_bundle(circle_b.clone(), bob.public().to_bytes()).unwrap();
+
+        // Bob's genuine commit + post, sealed for circle A.
+        let epoch = 0u64;
+        let key = new_epoch_key();
+        let secret = new_circle_secret();
+        let alice_pub = Identity::from_seed(&[1u8; 32]).public();
+        let commit = seal_key_commit(&bob, &[alice_pub], &circle_a, epoch, &key, &secret).unwrap();
+        let ev = Event::new(&bob.public().node_id_bytes(), 100, EventKind::Message { body: "for circle A only".into() });
+        let env = seal_event_in_epoch(&bob, &circle_a, epoch, &key, &ev).unwrap();
+        let commit_wire = tagged(TAG_KEY_COMMIT, &commit.to_bytes());
+        let event_wire = tagged(TAG_EPOCH_EVENT, &env.to_bytes());
+
+        // Replayed into circle B first (the attack): neither may be applied there.
+        assert!(!alice.receive(circle_b.clone(), commit_wire.clone()).unwrap_or(false),
+                "a commit sealed for circle A must not install a key in circle B");
+        assert!(!alice.receive(circle_b.clone(), event_wire.clone()).unwrap_or(false),
+                "an event sealed for circle A must not be accepted into circle B");
+        assert!(alice.feed(circle_b.clone(), 200, None).iter().all(|m| m.body != "for circle A only"),
+                "circle A's post must not surface in circle B");
+
+        // Delivered where they belong, both still work — the check costs honest traffic nothing.
+        assert!(alice.receive(circle_a.clone(), commit_wire).unwrap());
+        assert!(alice.receive(circle_a.clone(), event_wire).unwrap());
+        assert!(alice.feed(circle_a.clone(), 200, None).iter().any(|m| m.body == "for circle A only"));
+        assert!(alice.feed(circle_b.clone(), 200, None).iter().all(|m| m.body != "for circle A only"));
     }
 
     /// Envelope sender hexes of the epoch EVENTS in an outgoing sync bundle (tag 0x02).

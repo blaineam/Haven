@@ -1,0 +1,223 @@
+/*
+  Haven circle key distribution + event sealing — symbolic model (Tamarin).
+
+  Spec:   docs/formal/PROTOCOL-SPEC.md   (read that first; every rule here cites a section)
+  Source: core/haven-p2p/src/groupkey.rs, core/haven-p2p/src/social.rs (seal_bytes),
+          core/haven-ffi/src/lib.rs (receive_key_commit)
+
+  STATUS: machine-checked with Tamarin 1.12.0 on 2026-11-18 (results: PROTOCOL-SPEC.md §7).
+  Always pass --auto-sources; without it the proofs do not terminate.
+  Scope: the sender-keys/epoch layer only. The TreeKEM layer is NOT modelled here.
+
+  Run (default, as-built):   tamarin-prover --auto-sources --prove docs/formal/haven_circle_keys.spthy
+  Run (fixed circle check):  tamarin-prover --auto-sources --prove -DCHECKED docs/formal/haven_circle_keys.spthy
+  Run (forward secrecy):     tamarin-prover --auto-sources --prove -DFS docs/formal/haven_circle_keys.spthy
+
+  Abstractions (see spec §7 for what each hides):
+   * Hybrid KEM (X25519 + ML-KEM-768) is modelled as NESTED asymmetric encryption under a
+     classical key and a post-quantum key. A nested wrap is recoverable only with BOTH secret
+     keys, which is the property the real HKDF combiner is meant to give. The two halves are
+     compromised independently (RevealKC / RevealKQ).
+   * AES-GCM is symmetric-encryption with a well-formedness check on open.
+   * Hybrid signature (Ed25519 + ML-DSA) is one signature; RevealSig breaks it.
+   * Circles and epoch numbers are public names ($C, $E); epoch numbers are small integers in
+     the code, so two circles can reuse the same number.
+   * Out of scope here: ratchet lane (M6), multi-device convergence, relay metadata, the
+     deterministic-seal equality leak (needs observational equivalence, not trace lemmas).
+*/
+
+theory HavenCircleKeys
+begin
+
+builtins: signing, asymmetric-encryption, symmetric-encryption, hashing
+
+restriction Eq:  "All x y #i. Eq(x, y)@i ==> x = y"
+restriction OnlyOnce: "All A #i #j. OnlyOnce(A)@i & OnlyOnce(A)@j ==> #i = #j"
+/* One epoch key per (author, circle, epoch number): a given author mints one key per slot. */
+restriction OneKeyPerEpoch:
+  "All A c e k1 k2 #i #j. EpochKey(A, c, e, k1)@i & EpochKey(A, c, e, k2)@j ==> k1 = k2"
+
+/* ---- Identities (spec §2) ------------------------------------------------------------ */
+
+rule Register:
+  [ Fr(~skS), Fr(~skC), Fr(~skQ) ]
+  --[ OnlyOnce($A) ]->
+  [ !Ltk($A, ~skS, ~skC, ~skQ)
+  , !Pk($A, pk(~skS), pk(~skC), pk(~skQ))
+  , Out(<$A, pk(~skS), pk(~skC), pk(~skQ)>) ]
+
+/* ---- Adversary compromise, each half of each identity independently ------------------- */
+
+rule RevealSig: [ !Ltk(A, skS, skC, skQ) ] --[ RevealSig(A) ]-> [ Out(skS) ]
+rule RevealKC:  [ !Ltk(A, skS, skC, skQ) ] --[ RevealKC(A)  ]-> [ Out(skC) ]
+rule RevealKQ:  [ !Ltk(A, skS, skC, skQ) ] --[ RevealKQ(A)  ]-> [ Out(skQ) ]
+
+/* ---- Epoch lifecycle (spec §3) ------------------------------------------------------- */
+
+rule NewEpoch:
+  [ Fr(~ek) ]
+  --[ EpochKey($A, $C, $E, ~ek) ]->
+  [ !EpochOf($A, $C, $E, ~ek)      /* what the protocol can use */
+  , OwnState($A, $C, $E, ~ek) ]    /* the copy a device compromise or prune acts on */
+
+rule RevealOwn:
+  [ OwnState(A, c, e, ek) ] --[ RevealOwn(A, c, e, ek) ]-> [ Out(ek) ]
+
+rule PruneOwn:
+  [ OwnState(A, c, e, ek) ] --[ PrunedOwn(A, c, e, ek) ]-> [ ]
+
+/* ---- KeyCommit, sender side (spec §4) ------------------------------------------------
+   inner = <'commit', circle, epoch, epoch_key>; wrapped under R's PQ key and classical key;
+   signature covers sender, recipient and ciphertext but NOT the circle id (it is inside the
+   ciphertext) — this mirrors social::SealedEnvelope::transcript. */
+rule Commit:
+  let inner = <'commit', $C, $E, ek>
+      ct    = aenc(aenc(inner, pkCr), pkQr)
+      sg    = sign(h(<'env', $A, $R, ct>), skSa)
+  in
+  [ !EpochOf($A, $C, $E, ek)
+  , !Ltk($A, skSa, skCa, skQa)
+  , !Pk($R, pkSr, pkCr, pkQr) ]
+  --[ Wrapped($A, $C, $E, ek, $R) ]->
+  [ Out(<$A, $R, ct, sg>) ]
+
+/* ---- KeyCommit, receiver side (spec §5) ---------------------------------------------
+   `cr` is the circle the commit is ROUTED into (which mailbox/prefix it arrived in). The
+   adversary controls it: the relay and any member can copy an envelope between mailboxes. */
+
+#ifdef CHECKED
+rule RecvCommit:      /* THE FIX: the payload circle must equal the routed circle (same variable c) */
+  let ct = aenc(aenc(<'commit', c, e, ek>, pk(skCr)), pk(skQr)) in
+  [ In(<A, $R, ct, sg>), In(c)
+  , !Ltk($R, skSr, skCr, skQr)
+  , !Pk(A, pkSa, pkCa, pkQa) ]
+  --[ Eq(verify(sg, h(<'env', A, $R, ct>), pkSa), true)
+    , Stored($R, A, c, c, e, ek) ]->
+  [ !PeerKeyP($R, A, c, e, ek), PeerState($R, A, c, e, ek) ]
+#else
+rule RecvCommit:      /* as built: payload circle c is never compared to the routed circle cr */
+  let ct = aenc(aenc(<'commit', c, e, ek>, pk(skCr)), pk(skQr)) in
+  [ In(<A, $R, ct, sg>), In(cr)
+  , !Ltk($R, skSr, skCr, skQr)
+  , !Pk(A, pkSa, pkCa, pkQa) ]
+  --[ Eq(verify(sg, h(<'env', A, $R, ct>), pkSa), true)
+    , Stored($R, A, cr, c, e, ek) ]->
+  [ !PeerKeyP($R, A, cr, e, ek), PeerState($R, A, cr, e, ek) ]
+#endif
+
+rule RevealPeer:
+  [ PeerState(R, A, c, e, ek) ] --[ RevealPeer(R, A, c, e, ek) ]-> [ Out(ek) ]
+
+rule PrunePeer:
+  [ PeerState(R, A, c, e, ek) ] --[ PrunedPeer(R, A, c, e, ek) ]-> [ ]
+
+/* ---- Event sealing (spec §6) --------------------------------------------------------- */
+
+rule SealEvent:
+  let pt   = <$A, ~m>                              /* Event carries its author inside the plaintext */
+      salt = h(<'salt', ek, $C, $E, pt>)
+      evk  = h(<'evk', ek, $C, $E, salt>)
+      ct   = senc(pt, evk)
+      sg   = sign(h(<'ep', $C, $E, salt, $A, ct>), skSa)
+  in
+  [ !EpochOf($A, $C, $E, ek), !Ltk($A, skSa, skCa, skQa), Fr(~m) ]
+  --[ Sealed($A, $C, $E, ek, ~m) ]->
+  [ Out(<$C, $E, salt, $A, ct, sg>) ]
+
+/* `cr` is the circle the event is ROUTED into; the key is looked up there (lib.rs
+   receive_epoch_event → key_for), while the event key is derived from the envelope's own circle c. */
+#ifdef CHECKED
+rule RecvEvent:        /* THE FIX: envelope circle must equal the routed circle (same variable c) */
+  let evk = h(<'evk', ek, c, e, salt>)
+      ct  = senc(<A, m>, evk)                      /* AEAD open + author/sender bind */
+  in
+  [ In(<c, e, salt, A, ct, sg>)
+  , !PeerKeyP($R, A, c, e, ek)
+  , !Pk(A, pkSa, pkCa, pkQa) ]
+  --[ Eq(verify(sg, h(<'ep', c, e, salt, A, ct>), pkSa), true)
+    , Accepted($R, A, c, e, m) ]->
+  [ ]
+#else
+rule RecvEvent:        /* as built: accepted into cr whatever circle c the envelope names */
+  let evk = h(<'evk', ek, c, e, salt>)
+      ct  = senc(<A, m>, evk)                      /* AEAD open + author/sender bind */
+  in
+  [ In(<c, e, salt, A, ct, sg>)
+  , !PeerKeyP($R, A, cr, e, ek)
+  , !Pk(A, pkSa, pkCa, pkQa) ]
+  --[ Eq(verify(sg, h(<'ep', c, e, salt, A, ct>), pkSa), true)
+    , Accepted($R, A, cr, e, m) ]->
+  [ ]
+#endif
+
+/* ---- Lemmas -------------------------------------------------------------------------- */
+
+/* Sanity: an honest commit + event round-trips (the model is not vacuous). result: verified. */
+lemma executable:
+  exists-trace
+  "Ex R A c e m #i. Accepted(R, A, c, e, m)@i
+     & not (Ex #r. RevealSig(A)@r) & not (Ex #r. RevealKC(R)@r) & not (Ex #r. RevealKQ(R)@r)"
+
+/* P1 — epoch-key secrecy and REVOCATION. The adversary learns an epoch key only if some
+   recipient the author actually wrapped it to lost BOTH KEM halves, or a device holding the key
+   was compromised. A member who was removed is, by construction, never in `Wrapped` for the
+   new epoch, so compromising ALL of their keys cannot reveal it. This is the revocation claim
+   of GROUP-KEYING.md. result: verified.
+   Note the third disjunct ranges over ANY circle c2 on purpose: as built, a peer's key can be
+   stored under a different circle (see P4), and device compromise leaks whichever it holds. */
+lemma epoch_key_secrecy:
+  "All A c e ek #i #k. EpochKey(A, c, e, ek)@i & K(ek)@k ==>
+      (Ex R #w #a #b. Wrapped(A, c, e, ek, R)@w & RevealKC(R)@a & RevealKQ(R)@b)
+    | (Ex #s. RevealOwn(A, c, e, ek)@s)
+    | (Ex R A2 c2 e2 #s. RevealPeer(R, A2, c2, e2, ek)@s)"
+
+/* P2 — event confidentiality reduces to epoch-key secrecy (the HKDF/salt/AEAD layer adds no
+   leak path). result: verified. */
+lemma event_confidentiality:
+  "All A c e ek m #i #k. Sealed(A, c, e, ek, m)@i & K(m)@k ==>
+      (Ex R #w #a #b. Wrapped(A, c, e, ek, R)@w & RevealKC(R)@a & RevealKQ(R)@b)
+    | (Ex #s. RevealOwn(A, c, e, ek)@s)
+    | (Ex R A2 c2 e2 #s. RevealPeer(R, A2, c2, e2, ek)@s)"
+
+/* P3 — event sender authentication: an accepted event was sealed by the claimed author unless
+   that author's signing key was revealed. (Replay of a genuine envelope is allowed; this is
+   authenticity, not freshness — replay handling lives in event ids, out of scope.)
+   The circle is part of the claim: accepted INTO circle c means sealed FOR circle c.
+   result: FALSIFIED as built (cross-circle replay, with P4); verified with -DCHECKED. */
+lemma event_authentication:
+  "All R A c e m #i. Accepted(R, A, c, e, m)@i ==>
+      (Ex ek #j. Sealed(A, c, e, ek, m)@j) | (Ex #r. RevealSig(A)@r)"
+
+/* P4 — circle binding of a stored epoch key. A stored key for (author A, circle cr) must have
+   been minted for circle cr. As built, receive_key_commit never compares the payload's
+   circle_id with the circle the commit arrived in.
+   result: FALSIFIED as built (replay of a genuine commit into another circle's
+   mailbox); verified with -DCHECKED. */
+lemma commit_circle_binding:
+  "All R A cr c e ek #i. Stored(R, A, cr, c, e, ek)@i ==>
+      cr = c | (Ex #r. RevealSig(A)@r)"
+
+#ifdef FS
+/* Single-recipient scenario so "everyone pruned" is expressible. */
+restriction OneRecipient:
+  "All A c e ek R1 R2 #i #j. Wrapped(A, c, e, ek, R1)@i & Wrapped(A, c, e, ek, R2)@j ==> R1 = R2"
+
+/* P5 — the "bounded forward secrecy" claim of GROUP-KEYING.md: once the author and the
+   recipient have both deleted an epoch key, a LATER compromise of the recipient's long-term
+   keys cannot reveal it. The adversary here is also the recorder of wire/relay traffic
+   (THREAT-MODEL.md lists a relay operator / network observer who stores ciphertext).
+   KeyCommits are wrapped to the recipient's STATIC KEM keys, so a recorded commit opens as
+   soon as both KEM secrets leak, regardless of what the clients deleted.
+   result: FALSIFIED (the counterexample is the attack). Known limit of this path; see spec F1. */
+lemma bounded_forward_secrecy:
+  "All A c e ek R #i #w #po #pp #a #b #k.
+      EpochKey(A, c, e, ek)@i & Wrapped(A, c, e, ek, R)@w
+    & PrunedOwn(A, c, e, ek)@po & PrunedPeer(R, A, c, e, ek)@pp
+    & not (Ex R2 A2 c2 e2 #s. RevealPeer(R2, A2, c2, e2, ek)@s) & not (Ex #s. RevealOwn(A, c, e, ek)@s)
+    & RevealKC(R)@a & RevealKQ(R)@b
+    & #po < #a & #po < #b & #pp < #a & #pp < #b
+    & K(ek)@k
+    ==> F"
+#endif
+
+end

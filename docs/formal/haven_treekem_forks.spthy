@@ -13,8 +13,9 @@
    - Two commits extend epoch 1: the committer's Update ('cu') and member D's own Update ('du').
    - A device that builds or applies a commit KEEPS its epoch-1 state and holds one branch state
      per commit it knows (the "retention window").
-   - Checkpoint(X, G, b): X settles on branch b and DELETES its epoch-1 state and every other
-     branch state. Modelled with persistent facts plus the restriction WindowClosed (no use and
+   - Checkpoint(X, G, b): X settles on branch b and DELETES its epoch-1 state, every other
+     branch state, and its one-time key-package init key (kept until then, because a competing
+     genesis could still need it). Modelled with persistent facts plus the restriction WindowClosed (no use and
      no reveal of window state after the checkpoint).
    - If D's Update lost the fork, D RE-ISSUES it on top of the winner (epoch 3).
 
@@ -52,7 +53,7 @@ rule KeyPackage:
   in
   [ Fr(~ik), Fr(~ls), !Ltk($X, sk) ]
   --[ Once(<'kp', $X, $G>), OwnLeaf($X, $G, ~ls), InitKey($X, $G, ~ik) ]->
-  [ KP($X, $G, ~ik, ~ls), !KPPub($X, $G, pk(~ik), leafpk), Out(<body, sign(body, sk)>) ]
+  [ !KP($X, $G, ~ik, ~ls), !KPPub($X, $G, pk(~ik), leafpk), Out(<body, sign(body, sk)>) ]
 
 /* ---- Genesis (epoch 1) ----------------------------------------------------------------- */
 
@@ -76,16 +77,16 @@ rule JoinD:
   let w   = aenc(<'welcome', $G, '1', j1>, pk(ik))
       es1 = h(<'epoch', j1>)
   in
-  [ In(<'welcome', $G, w, sg>), KP($D, $G, ik, ls), !Grp($G, $C, $D, $E), !Pub($C, pkC) ]
-  --[ Eq(verify(sg, w, pkC), true) ]->
+  [ In(<'welcome', $G, w, sg>), !KP($D, $G, ik, ls), !Grp($G, $C, $D, $E), !Pub($C, pkC) ]
+  --[ Eq(verify(sg, w, pkC), true), Once(<'join', $D, $G>), Window($D, $G) ]->
   [ !D1($D, $G, es1, h(<'init', es1>), ls) ]
 
 rule JoinE:
   let w   = aenc(<'welcome', $G, '1', j1>, pk(ik))
       es1 = h(<'epoch', j1>)
   in
-  [ In(<'welcome', $G, w, sg>), KP($E, $G, ik, ls), !Grp($G, $C, $D, $E), !Pub($C, pkC) ]
-  --[ Eq(verify(sg, w, pkC), true) ]->
+  [ In(<'welcome', $G, w, sg>), !KP($E, $G, ik, ls), !Grp($G, $C, $D, $E), !Pub($C, pkC) ]
+  --[ Eq(verify(sg, w, pkC), true), Once(<'join', $E, $G>), Window($E, $G) ]->
   [ !E1($E, $G, es1, h(<'init', es1>), ls) ]
 
 /* ---- Two competing commits on epoch 1 ---------------------------------------------------- */
@@ -203,10 +204,10 @@ rule ApplyD3E:
 
 /* ---- Stored-state compromise ------------------------------------------------------------- */
 
-rule RevealKeyPackage:
-  [ KP(X, G, ik, ls) ]
-  --[ Rev(X), RevealState(X, G, '0'), Once(<'reveal', X, G, '0'>) ]->
-  [ KP(X, G, ik, ls), Out(<ik, ls>) ]
+rule RevealKeyPackage:   /* the one-time init key lives until the checkpoint, not just until the join */
+  [ !KP(X, G, ik, ls) ]
+  --[ Rev(X), RevealState(X, G, '0'), Window(X, G), Once(<'reveal', X, G, '0'>) ]->
+  [ Out(<ik, ls>) ]
 
 rule RevealC1:
   [ !C1(X, G, es, init, ls) ]

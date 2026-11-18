@@ -3924,7 +3924,10 @@ fn mls_replay_outcome_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 
         starts.push((ck.state.clone(), ck.genesis));
     }
     for (tip_hash, welcome) in shadow.my_welcomes.iter().filter(|(_, w)| !w.tree_bytes.is_empty()) {
-        if let Some(k) = replay_start_self_contained(&gid, tip_hash, welcome) {
+        if let Some(mut k) = replay_start_self_contained(&gid, tip_hash, welcome) {
+            if shadow.is_v2 {
+                keying_v2::entry_path_secrets(shadow, tip_hash, &mut k);
+            }
             starts.push((k, None));
         }
     }
@@ -3934,13 +3937,17 @@ fn mls_replay_outcome_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 
             starts.push((k, None));
         }
     }
-    let mut best: Option<((bool, u64, [u8; 32]), KeyingState, Option<KeyingCheckpoint>)> = None;
+    let mut best: Option<((bool, bool, u64, [u8; 32]), KeyingState, Option<KeyingCheckpoint>)> = None;
     let mut void: Vec<[u8; 32]> = Vec::new();
+    // v2 tree: of several ends (one per entry point held) the one on the AGREED tip wins. The
+    // agreed chain is the heaviest, which is not always the longest, so epoch alone cannot rank
+    // them. `None` on a v1 tree: the flag is then false for every end and changes nothing.
+    let agreed = if shadow.is_v2 { keying_v2::agreed_tip(shadow) } else { None };
     for (start, start_genesis) in starts {
         let (end, window_start) = replay_walk(shadow, &gid, my_secret_root, start, &mut void);
         let genesis = keying_genesis_of(shadow, end.tip_hash).or(start_genesis);
         let on_winner = winner.is_some() && genesis == winner;
-        let rank = (on_winner, end.epoch, end.tip_hash);
+        let rank = (on_winner, agreed == Some(end.tip_hash), end.epoch, end.tip_hash);
         if best.as_ref().map(|(r, _, _)| rank > *r).unwrap_or(true) {
             best = Some((rank, end, window_start.map(|state| KeyingCheckpoint { state, genesis })));
         }
@@ -4077,6 +4084,10 @@ fn keying_best_child_skipping(
     next: u64,
     skip: &[[u8; 32]],
 ) -> Option<([u8; 32], Vec<u8>)> {
+    if shadow.is_v2 {
+        // The v2 tree's fork rule is by chain weight, not by depth-capped finality.
+        return keying_v2::best_child(shadow, tip, next, skip);
+    }
     // Children of the current tip at the next epoch (a §5 fork at this level).
     let mut children: Vec<([u8; 32], Vec<u8>)> = shadow
         .commits
@@ -4104,6 +4115,9 @@ fn keying_best_child_skipping(
 /// Walk the commit chain forward from `cur`, applying each epoch's winning commit. Returns the end
 /// state and, when the walk covered at least [`KEYING_FINAL_DEPTH`] states (the start included),
 /// the state `KEYING_FINAL_DEPTH - 1` epochs behind the end — where the checkpoint may advance to.
+///
+/// (A v2 tree does not use the rule below: it follows the child with the heaviest chain under it —
+/// `keying_v2::best_child`, docs/formal/STAGE4-MEMBER-UPDATES.md §5.)
 ///
 /// THE FORK RULE. Among the children of a tip the largest commit hash wins — except that a child
 /// whose branch is already [`KEYING_FINAL_DEPTH`] commits deep is FINAL and beats any that is not

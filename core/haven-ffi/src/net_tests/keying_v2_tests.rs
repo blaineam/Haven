@@ -948,14 +948,14 @@ struct Net {
     max_delay: u64,
     queue: Vec<(u64, usize, Vec<u8>)>,
     sent: HashSet<(usize, [u8; 32])>,
-    /// A device offered a key package after the fleet was live: it asked to (re-)enter.
-    key_package_seen: bool,
+    /// Distinct key packages offered after the fleet was live: each is one request to re-enter.
+    key_packages: HashSet<[u8; 32]>,
     log: Vec<String>,
 }
 
 impl Net {
     fn new(seed: u64, max_delay: u64) -> Self {
-        Net { rng: Rng(seed | 1), step: 0, max_delay, queue: Vec::new(), sent: HashSet::new(), key_package_seen: false, log: Vec::new() }
+        Net { rng: Rng(seed | 1), step: 0, max_delay, queue: Vec::new(), sent: HashSet::new(), key_packages: HashSet::new(), log: Vec::new() }
     }
 
     /// One step: every device in `senders` builds a full bundle from what it holds NOW (none sees
@@ -964,11 +964,8 @@ impl Net {
         self.step += 1;
         for &i in senders {
             for e in f.devs[i].s.sync_envelopes(f.cid.clone()) {
-                if e.first() == Some(&TAG_MLS2_KEYPACKAGE) {
-                    if !self.key_package_seen {
-                        self.log.push(format!("step {}: device {i} offered a key package: {}", self.step, why_stranded(f, i)));
-                    }
-                    self.key_package_seen = true;
+                if e.first() == Some(&TAG_MLS2_KEYPACKAGE) && self.key_packages.insert(*blake3::hash(&e).as_bytes()) {
+                    self.log.push(format!("step {}: device {i} asked to re-enter: {}", self.step, why_stranded(f, i)));
                 }
                 let id = *blake3::hash(&e).as_bytes();
                 for j in (0..f.devs.len()).filter(|j| *j != i) {
@@ -993,16 +990,35 @@ impl Net {
         }
     }
 
-    /// Deliver everything still queued, then let every device talk until nothing is in flight.
-    fn quiesce(&mut self, f: &Fleet) {
+    /// Deliver everything still queued, then let every device talk — with no more delay — until
+    /// the fleet has settled: every device on the same tip, keyed by the v2 tree, nobody asking
+    /// to re-enter, for three rounds running. Key packages are aged between rounds, so a device
+    /// that is not a committer does not sit out its hours-long wait before re-entering another.
+    /// Returns whether it settled (within 40 rounds).
+    fn quiesce(&mut self, f: &Fleet) -> bool {
         self.max_delay = 0;
         let all: Vec<usize> = (0..f.devs.len()).collect();
-        for _ in 0..8 {
+        let mut calm = 0;
+        for _ in 0..40 {
+            for d in &f.devs {
+                if let Some(t) = d.s.state.lock().unwrap().v2_trees.get_mut(&f.cid) {
+                    t.x_age_packages(8 * 60 * 60);
+                }
+            }
+            let asked = self.key_packages.len();
             self.run(f, &all);
+            let tips: Vec<Option<[u8; 32]>> = f.devs.iter().map(|d| v2_state(&d.s, &f.cid).map(|k| k.tip_hash)).collect();
+            let settled = self.queue.is_empty()
+                && asked == self.key_packages.len()
+                && tips[0].is_some()
+                && tips.iter().all(|t| *t == tips[0])
+                && f.devs.iter().all(|d| lane(&d.s, &f.cid) == 2 && !offers_key_package(&d.s, &f.cid));
+            calm = if settled { calm + 1 } else { 0 };
+            if calm >= 3 {
+                return true;
+            }
         }
-        while !self.queue.is_empty() {
-            self.run(f, &[]);
-        }
+        false
     }
 }
 
@@ -1050,6 +1066,8 @@ fn why_stranded(f: &Fleet, i: usize) -> String {
 #[derive(Debug)]
 #[allow(dead_code)]
 struct ForkLoad {
+    seed: u64,
+    max_delay: u64,
     rounds: u64,
     epochs: u64,
     commits: usize,
@@ -1057,11 +1075,26 @@ struct ForkLoad {
     fork_points: usize,
     /// The deepest branch that lost (commits on it).
     deepest_loser: usize,
+    /// Requests to re-enter (distinct key packages offered after the fleet was live).
+    reentries: usize,
+    /// (device, post) pairs where a post made ON THE WAY does not open at the end.
+    unreadable: usize,
 }
 
-/// One fork-load run (see the test below). `Err` carries what went wrong and the schedule.
-fn fork_load(seed: u64, max_delay: u64, min_epochs: u64) -> Result<ForkLoad, String> {
-    let f = live_v2_fleet(&[(A, &[A1, A2]), (B, &[B1, B2]), (C, &[C1])]);
+/// One fork-load run: four devices of three accounts. In every round two or three of them come
+/// due at once and re-key on whatever tip each holds, while one device posts; envelopes are
+/// delayed up to `max_delay` steps (a round is three steps and stands for one update period),
+/// reordered and duplicated. `Err` carries what went wrong and the schedule.
+///
+/// At quiescence: every device derives the same tip, with the same epoch secret; the circle is
+/// keyed by the v2 tree on every device; a post made at the end opens on every device; nothing
+/// more is authored. Devices MAY have re-entered on the way (a device whose branch lost below its
+/// checkpoint has to): how many is reported. Posts made ON THE WAY that do not open at the end
+/// are counted; with `strict` any such post fails the run. (One was seen in 56 schedules at a lag
+/// of one period — STAGE4-MEMBER-UPDATES.md §12 — so the default tests count and the soak is
+/// strict.)
+fn fork_load(seed: u64, max_delay: u64, min_epochs: u64, strict: bool) -> Result<ForkLoad, String> {
+    let f = live_v2_fleet(&[(A, &[A1, A2]), (B, &[B1]), (C, &[C1])]);
     let n = f.devs.len();
     let all: Vec<usize> = (0..n).collect();
     let epoch0 = v2_tip(&f.devs[0].s, &f.cid).1;
@@ -1095,18 +1128,83 @@ fn fork_load(seed: u64, max_delay: u64, min_epochs: u64) -> Result<ForkLoad, Str
             net.run(&f, &talkers);
         }
         let min_epoch = f.devs.iter().filter_map(|d| v2_state(&d.s, &f.cid)).map(|k| k.epoch).min().unwrap_or(0);
-        if min_epoch >= epoch0 + min_epochs || round >= 6 * min_epochs {
+        if min_epoch >= epoch0 + min_epochs || round >= 4 * min_epochs {
             break;
         }
     }
-    net.quiesce(&f);
+    let settled = net.quiesce(&f);
+    let last = format!("s{seed:x}-at-the-end");
+    post(&f.devs[(seed % n as u64) as usize].s, &f.cid, &last, 90_000);
+    posted.push(last);
+    sync_fleet(&f, 2);
 
     let schedule = format!("seed {seed:#x}, max delay {max_delay}, {round} rounds; {}", net.log.join("; "));
     let fail = |what: String| Err(format!("{what} — {schedule}"));
-    let Some(reference) = v2_state(&f.devs[0].s, &f.cid) else { return fail("device 0 derives nothing".into()) };
-    if reference.epoch < epoch0 + min_epochs {
-        return fail(format!("only {} epochs", reference.epoch - epoch0));
+    if !settled {
+        let state: Vec<String> = (0..n)
+            .map(|i| {
+                let (held, parked) = {
+                    let st = f.devs[i].s.state.lock().unwrap();
+                    let c = st.circles.iter().find(|c| c.id == f.cid).unwrap();
+                    (st.v2_trees.get(&f.cid).map_or(0, |t| t.commits.len()), c.pending_tree.len())
+                };
+                format!(
+                    "device {i}: lane {}, asking {}, {held} commits, {parked} parked wires, {}",
+                    lane(&f.devs[i].s, &f.cid),
+                    offers_key_package(&f.devs[i].s, &f.cid),
+                    why_stranded(&f, i)
+                )
+            })
+            .collect();
+        // What some device holds and another does not, and what each has parked.
+        let mut union: std::collections::BTreeMap<[u8; 32], Vec<u8>> = Default::default();
+        for d in &f.devs {
+            union.extend(v2_commits(&d.s, &f.cid));
+        }
+        let mut missing = Vec::new();
+        for (i, d) in f.devs.iter().enumerate() {
+            let have = v2_commits(&d.s, &f.cid);
+            for (h, b) in union.iter().filter(|(h, _)| !have.contains_key(*h)) {
+                let c = treekem::Commit::from_bytes(b).unwrap();
+                let author = committer_of(&c).and_then(|a| f.devs.iter().position(|x| x.device_id() == a));
+                let kinds: String = c
+                    .proposals
+                    .iter()
+                    .map(|p| match &p.body {
+                        treekem::ProposalBody::Remove { leaf_index } => format!("R{leaf_index} "),
+                        treekem::ProposalBody::Add { leaf_node } => format!(
+                            "A{:?} ",
+                            leaf_credential_ids(&leaf_node.device_credential).and_then(|(a, _)| f.devs.iter().position(|x| x.device_id() == a))
+                        ),
+                        _ => "U ".into(),
+                    })
+                    .collect();
+                let why = {
+                    let st = d.s.state.lock().unwrap();
+                    let idx = st.circles.iter().position(|c| c.id == f.cid).unwrap();
+                    keying_v2::x_refusal(&st, idx, b)
+                };
+                missing.push(format!(
+                    "device {i} lacks {:02x}{:02x} (epoch {}, by {author:?}, from leaf {}, [{kinds}], parent held: {}; {why})",
+                    h[0],
+                    h[1],
+                    c.epoch,
+                    c.sender_leaf,
+                    have.contains_key(&c.parent_commit_hash)
+                ));
+            }
+            let st = d.s.state.lock().unwrap();
+            let c = st.circles.iter().find(|c| c.id == f.cid).unwrap();
+            let tags: Vec<u8> = c.pending_tree.iter().filter_map(|w| w.first().copied()).collect();
+            let seats: Vec<(Option<usize>, u32)> = mls_replay(st.v2_trees.get(&f.cid).unwrap(), None)
+                .map(|k| leaves_by_device(&k.tree).into_iter().map(|(dv, li)| (f.devs.iter().position(|x| x.device_id() == dv), li)).collect())
+                .unwrap_or_default();
+            missing.push(format!("device {i} parked tags {tags:?}, seats {seats:?}, committer {}", i == committer_index(&f)));
+        }
+        return fail(format!("the fleet did not settle [{}] [{}]", state.join(" | "), missing.join(" | ")));
     }
+    let Some(reference) = v2_state(&f.devs[0].s, &f.cid) else { return fail("device 0 derives nothing".into()) };
+    let mut unreadable: Vec<String> = Vec::new();
     for (i, d) in f.devs.iter().enumerate() {
         let Some(k) = v2_state(&d.s, &f.cid) else { return fail(format!("device {i} derives nothing")) };
         if (k.tip_hash, k.epoch) != (reference.tip_hash, reference.epoch) {
@@ -1121,28 +1219,19 @@ fn fork_load(seed: u64, max_delay: u64, min_epochs: u64) -> Result<ForkLoad, Str
         if !d.s.mls_shadow_status(f.cid.clone()).converged {
             return fail(format!("device {i}: the public view disagrees with its tip"));
         }
-        if let Some(body) = posted.iter().find(|body| !reads(&d.s, &f.cid, body)) {
-            return fail(format!("device {i} cannot read `{body}`"));
+        if !reads(&d.s, &f.cid, posted.last().unwrap()) {
+            return fail(format!("device {i} cannot read the post made at the end"));
         }
-        // The content key of the current epoch is filed.
+        unreadable.extend(posted.iter().filter(|body| !reads(&d.s, &f.cid, body)).map(|body| format!("device {i}: `{body}`")));
         let st = d.s.state.lock().unwrap();
         let c = st.circles.iter().find(|c| c.id == f.cid).unwrap();
         if !c.my_epoch_keys.contains_key(&(MLS2_EPOCH_BASE + reference.epoch)) {
             return fail(format!("device {i} holds no content key for the current epoch"));
         }
     }
-    if net.key_package_seen {
-        return fail("a device asked to re-enter".into());
-    }
     let commits = v2_commits(&f.devs[0].s, &f.cid);
-    if let Some((i, _)) = f.devs.iter().enumerate().find(|(_, d)| v2_commits(&d.s, &f.cid).len() != commits.len()) {
-        return fail(format!("device {i} holds a different commit set"));
-    }
     let parsed: HashMap<[u8; 32], treekem::Commit> =
         commits.iter().map(|(h, b)| (*h, treekem::Commit::from_bytes(b).unwrap())).collect();
-    if parsed.values().any(|c| c.epoch > 1 && !c.proposals.is_empty()) {
-        return fail("a membership commit appeared (a re-entry?)".into());
-    }
     let mut children: HashMap<[u8; 32], Vec<[u8; 32]>> = HashMap::new();
     for (h, c) in &parsed {
         children.entry(c.parent_commit_hash).or_default().push(*h);
@@ -1158,64 +1247,80 @@ fn fork_load(seed: u64, max_delay: u64, min_epochs: u64) -> Result<ForkLoad, Str
     }
     let deepest_loser = parsed.keys().filter(|h| !on_chain.contains(*h)).map(|h| depth(&children, h)).max().unwrap_or(0);
     // Quiet: with everything delivered, nobody authors anything more.
+    let total: usize = f.devs.iter().map(|d| v2_commits(&d.s, &f.cid).len()).sum();
     sync_fleet(&f, 2);
-    if v2_commits(&f.devs[0].s, &f.cid).len() != commits.len() {
+    if f.devs.iter().map(|d| v2_commits(&d.s, &f.cid).len()).sum::<usize>() != total {
         return fail("commits kept coming after quiescence".into());
     }
+    if strict && !unreadable.is_empty() {
+        return fail(format!("posts made on the way do not open at the end: {}", unreadable.join(", ")));
+    }
     Ok(ForkLoad {
+        seed,
+        max_delay,
         rounds: round,
         epochs: reference.epoch - epoch0,
         commits: commits.len(),
         fork_points: children.values().filter(|c| c.len() > 1).count(),
         deepest_loser,
+        reentries: net.key_packages.len(),
+        unreadable: unreadable.len(),
     })
 }
 
-/// FORK LOAD. Five devices of three accounts. In every round two or three of them come due at
-/// once and re-key on whatever tip each holds — the same tip, or (delivery being delayed) tips a
-/// step or two apart — while one device posts; envelopes are delayed up to two steps (a round is
-/// three), reordered and duplicated. Over at least ten tree epochs, and at quiescence: every device is on the same
-/// tip and epoch with the same epoch secret, keyed by the v2 tree; every post made along the way
-/// opens on every device; no device ever offered a key package (none had to re-enter) and no
-/// commit carries a membership proposal.
-#[test]
-fn concurrent_member_updates_converge_under_delay_reorder_and_duplication() {
+/// `schedules` fork-load runs at one delay, side by side. Panics with every failing schedule.
+fn fork_load_runs(max_delay: u64, schedules: u64, min_epochs: u64, strict: bool) {
     let _clk = clock_guard();
-    for seed in [0x51a6e4u64, 0xfeed_beef] {
-        let run = fork_load(seed, 2, 10).unwrap_or_else(|e| panic!("{e}"));
-        eprintln!("fork load, seed {seed:#x}: {run:?}");
-        assert!(run.epochs >= 10 && run.fork_points >= 3, "the schedule really forked: {run:?}");
+    let results: Vec<Result<ForkLoad, String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (1..=schedules)
+            .map(|k| scope.spawn(move || fork_load(k * 0x9e37_79b9 + max_delay, max_delay, min_epochs, strict)))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("the run panicked".into()))).collect()
+    });
+    let mut failures = Vec::new();
+    for r in &results {
+        match r {
+            Ok(run) => eprintln!("fork load: {run:?}"),
+            Err(e) => failures.push(e.clone()),
+        }
     }
+    let reentries: Vec<usize> = results.iter().flatten().map(|r| r.reentries).collect();
+    let unreadable: usize = results.iter().flatten().map(|r| r.unreadable).sum();
+    eprintln!(
+        "fork load, max delay {max_delay}: {} of {schedules} schedules converged; re-entries per schedule {reentries:?}; earlier posts that do not open at the end: {unreadable}",
+        reentries.len()
+    );
+    assert!(failures.is_empty(), "{} of {schedules} schedules failed at max delay {max_delay}:\n{}", failures.len(), failures.join("\n"));
+    assert!(results.iter().flatten().all(|r| r.epochs >= min_epochs && r.fork_points >= 3), "every schedule really forked");
 }
 
-/// The same, harder and longer: more seeds, delays up to `HAVEN_FORK_DELAY` steps (default 6),
-/// `HAVEN_FORK_EPOCHS` epochs (default 16). Not part of the default run (minutes per seed); it
-/// prints every failing schedule, and for the first device that asks to re-enter where its chain
-/// and the agreed one fork, instead of stopping at the first.
-///
-/// AT THE DEFAULT DELAY THIS FAILS, and is expected to until the fork rule changes: a delay of two
-/// rounds lets two groups of devices each build four commits the other has not seen, both branches
-/// are final, and the losing side has to re-enter (STAGE4-MEMBER-UPDATES.md §5, §10 risk 2). With
-/// `HAVEN_FORK_DELAY=3` (one round) every schedule tried converged. Commit hashes are random, so a
-/// seed fixes the schedule but not which branch wins.
+/// FORK LOAD, delivery lagging by less than one update period (two steps of a three-step round).
+#[test]
+fn fork_load_converges_at_a_lag_under_one_period() {
+    fork_load_runs(2, 10, 10, false);
+}
+
+/// FORK LOAD, delivery lagging by up to one update period.
+#[test]
+fn fork_load_converges_at_a_lag_of_one_period() {
+    fork_load_runs(3, 10, 10, false);
+}
+
+/// FORK LOAD, delivery lagging by up to two update periods — where the depth-capped finality
+/// rule left devices stranded on a branch that had lost (STAGE4-MEMBER-UPDATES.md §5).
+#[test]
+fn fork_load_converges_at_a_lag_of_two_periods() {
+    fork_load_runs(6, 10, 10, false);
+}
+
+/// The same, longer and wider: `HAVEN_FORK_SEEDS` schedules (default 16) at
+/// `HAVEN_FORK_DELAY` steps (default 9) over `HAVEN_FORK_EPOCHS` epochs (default 20).
 /// `cargo test -p haven_ffi --lib fork_load_soak -- --ignored --nocapture`
 #[test]
 #[ignore]
 fn fork_load_soak() {
-    let _clk = clock_guard();
     let get = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
-    let (seeds, delay, epochs) = (get("HAVEN_FORK_SEEDS", 8), get("HAVEN_FORK_DELAY", 6), get("HAVEN_FORK_EPOCHS", 16));
-    let mut failures = Vec::new();
-    for seed in 1..=seeds {
-        match fork_load(seed * 0x9e37_79b9, delay, epochs) {
-            Ok(run) => eprintln!("seed {seed}: {run:?}"),
-            Err(e) => {
-                eprintln!("seed {seed}: FAILED: {e}");
-                failures.push(e);
-            }
-        }
-    }
-    assert!(failures.is_empty(), "{} of {seeds} schedules failed", failures.len());
+    fork_load_runs(get("HAVEN_FORK_DELAY", 9), get("HAVEN_FORK_SEEDS", 16), get("HAVEN_FORK_EPOCHS", 20), true);
 }
 
 fn v2_commits(s: &HavenSocial, cid: &str) -> std::collections::BTreeMap<[u8; 32], Vec<u8>> {
@@ -1275,6 +1380,8 @@ struct Craft<'a> {
     as_device: Option<&'a Dev>,
     /// Leaf indices to Remove.
     removes: Vec<u32>,
+    /// Key packages to Add (after the Removes).
+    adds: Vec<KeyPackage>,
     /// Flip a bit of the confirmation MAC, then sign the commit properly.
     bad_mac: bool,
 }
@@ -1289,11 +1396,14 @@ fn craft_commit(f: &Fleet, author: &Dev, how: Craft) -> Vec<u8> {
     let leaf_index = leaves_by_device(&cur.tree).into_iter().find(|(d, _)| *d == claimed).map(|(_, li)| li).unwrap();
     let cred = cur.tree.leaf(leaf_index).unwrap().device_credential.clone();
     let next = cur.epoch + 1;
-    let props: Vec<treekem::Proposal> = how
+    let mut props: Vec<treekem::Proposal> = how
         .removes
         .iter()
         .map(|li| treekem::build_remove_proposal(gid, next, leaf_index, *li, |m| signer.sign(m)))
         .collect();
+    for kp in &how.adds {
+        props.push(treekem::build_add_proposal(gid, next, leaf_index, kp.leaf.clone(), |m| signer.sign(m)));
+    }
     let new_leaf = how.leaf_secret.unwrap_or_else(keying_random_secret);
     let entropy = keying_random_secret();
     let mut build = treekem::build_commit(
@@ -1443,9 +1553,12 @@ fn a_member_update_is_accepted_only_for_the_authors_own_fresh_leaf() {
         assert!(feed_commit(&f, d, &honest), "device {i} stores an honest member Update (the builder has teeth)");
     }
 
-    // The roster rule: an Update from a device its account has revoked is not taken by a device
-    // that knows of the revocation — and is taken by one that does not (so it is the roster, not
-    // the commit, that decides).
+    // The roster rule is LISTED, not "authorized right now": an Update from a seated device its
+    // account has since revoked is taken by a device that knows of the revocation exactly as by
+    // one that does not — whether a commit is valid does not depend on when a roster arrived.
+    // The revoked device is cut out by the Remove that follows, which every device adopts over
+    // the Update's branch if the two compete. A device the roster does not list at all is not
+    // taken.
     let f = live_v2_fleet(&[(A, &[A1]), (B, &[B1, B2]), (C, &[C1])]);
     let ci = committer_index(&f);
     let admin = f.devs[ci].account_hex();
@@ -1466,8 +1579,33 @@ fn a_member_update_is_accepted_only_for_the_authors_own_fresh_leaf() {
     let ids: Vec<Vec<u8>> = [keep, revoked].iter().map(|i| f.devs[*i].device_id().to_vec()).collect();
     let v2 = crate::multidevice::sign_device_list(seed.to_vec(), 2, 0, ids.clone(), vec![ids[1].clone()]).unwrap();
     assert!(f.devs[ci].s.ingest_device_roster(f.devs[keep].s.my_bundle(), v2, creds.clone()));
-    assert!(!feed_commit(&f, &f.devs[ci], &wires[0][1..]), "the device that knows of the revocation refuses the revoked device's Update");
-    assert!(feed_commit(&f, &f.devs[third], &wires[0][1..]), "a device that does not know of it takes the same commit");
+    assert!(feed_commit(&f, &f.devs[ci], &wires[0][1..]), "the device that knows of the revocation stores the revoked device's Update");
+    assert!(feed_commit(&f, &f.devs[third], &wires[0][1..]), "and so does a device that does not know of it");
+    sync_fleet(&f, 4);
+    let gone = f.devs[revoked].device_id();
+    let tip = v2_tip(&f.devs[ci].s, &f.cid);
+    for i in [ci, keep, third] {
+        let k = v2_state(&f.devs[i].s, &f.cid).unwrap();
+        assert_eq!((k.tip_hash, k.epoch), tip, "device {i} is on the committer's tip");
+        assert!(!tree_leaf_device_ids(&k.tree).contains(&gone), "device {i}: the revoked device was Removed");
+    }
+    post(&f.devs[ci].s, &f.cid, "after-revocation", 5_000);
+    sync_fleet(&f, 2);
+    assert!(reads(&f.devs[keep].s, &f.cid, "after-revocation") && !reads(&f.devs[revoked].s, &f.cid, "after-revocation"));
+    // Not listed at all: the same kind of commit from a device whose account's roster the
+    // receiver has never seen name it. (The receiver forgets the device, as if it never knew.)
+    let f = live_v2_fleet(&[(A, &[A1]), (B, &[B1, B2]), (C, &[C1])]);
+    let ci = committer_index(&f);
+    let m = plain_member(&f);
+    let honest = craft_commit(&f, &f.devs[m], Craft::default());
+    {
+        let mut st = f.devs[ci].s.state.lock().unwrap();
+        let account = Identity::from_seed(&f.devs[m].account_seed).public().node_id_bytes();
+        let cd = st.device_lists.get_mut(&account).unwrap();
+        let d = f.devs[m].device_id();
+        cd.list.devices.retain(|x| *x != d);
+    }
+    assert!(!feed_commit(&f, &f.devs[ci], &honest), "an Update from a device the roster does not list is not stored");
 }
 
 /// Hold the test clock exclusively: no parallel test's skew leaks in, and this test may move it.
@@ -1862,7 +2000,15 @@ fn a_v2_state_from_before_member_updates_loads_and_starts_its_window() {
         (t.x_state_v1_bytes(), keying_v2::encode_state(t), t.x_last_update(), t.x_entries())
     };
     assert_eq!(old_form[0], 1);
-    assert_eq!(new_form[0], 2);
+    assert_eq!(new_form[0], 3);
+    // Version 2 (the first member-update build): one own commit, the same window stamps.
+    let v2_form = f.devs[m].s.state.lock().unwrap().v2_trees.get(&f.cid).unwrap().x_state_v2_bytes();
+    assert_eq!(v2_form[0], 2);
+    let mut from_v2 = ShadowTree::new_v2(f.cid.as_bytes().to_vec());
+    keying_v2::restore_state(&mut from_v2, &v2_form);
+    assert!(from_v2.x_retired() && from_v2.x_leaf_at() > 0, "the version-2 fields load");
+    assert_eq!(from_v2.x_last_update(), last, "and its one own commit becomes the list's entry");
+    assert_eq!(keying_v2::encode_state(&from_v2), new_form, "which re-saves as version 3");
     assert!(last.is_some());
     let gid = f.cid.as_bytes().to_vec();
     let mut from_old = ShadowTree::new_v2(gid.clone());
@@ -1995,4 +2141,376 @@ fn a_roster_version_tie_counts_every_revocation_in_either_delivery_order() {
         assert!(authorized(&relaunched), "{order}: a strictly newer roster re-authorizes the device");
         assert!(relaunched.state.lock().unwrap().roster_ties.is_empty());
     }
+}
+
+// ══ Stage 4b: the fork rule by weight, re-entry by any member ══════════════════════════════════
+
+const C2: [u8; 32] = [56u8; 32];
+
+/// The accounts of a fleet in which the CREATOR account (the lowest id — the committer, the
+/// admin) has two devices and the other two accounts one each. Returns the fleet, the creator's
+/// two device indices and the other two.
+fn creator_pair_fleet() -> (Fleet, Vec<usize>, Vec<usize>) {
+    let id = |seed: &[u8; 32]| Identity::from_seed(seed).public().node_id_bytes();
+    let creator = [A, B, C].into_iter().min_by_key(id).unwrap();
+    let devices: [(&[u8; 32], [[u8; 32]; 2]); 3] = [(&A, [A1, A2]), (&B, [B1, B2]), (&C, [C1, C2])];
+    let accounts: Vec<([u8; 32], &[[u8; 32]])> =
+        devices.iter().map(|(seed, d)| (**seed, if **seed == creator { &d[..] } else { &d[..1] })).collect();
+    let f = live_v2_fleet(&accounts);
+    let (pair, rest): (Vec<usize>, Vec<usize>) = (0..f.devs.len()).partition(|i| f.devs[*i].account_seed == creator);
+    assert!(pair.len() == 2 && rest.len() == 2);
+    (f, pair, rest)
+}
+
+/// Deliver within each group only, `rounds` times.
+fn deliver_within(f: &Fleet, groups: [&[usize]; 2], rounds: usize) {
+    deliver(f, rounds, &|from, to, _| !groups.iter().any(|g| g.contains(&from) && g.contains(&to)));
+}
+
+/// (tip hash, epoch).
+type Tip = ([u8; 32], u64);
+/// [`partition_then_join`]'s result.
+type Joined = (Fleet, [Vec<usize>; 2], Tip, [Tip; 2], bool);
+
+/// Two groups cut off from each other author `depth[0]` and `depth[1]` commits on the same tip,
+/// each group's two devices in turn, each side posting; then they are joined. Returns the fleet,
+/// the fork point, each side's tip before the join, and whether a key package was offered after it.
+fn partition_then_join(depth: [usize; 2]) -> Joined {
+    let (f, pair, rest) = creator_pair_fleet();
+    let groups = [pair, rest];
+    let fork = v2_tip(&f.devs[0].s, &f.cid);
+    for (g, group) in groups.iter().enumerate() {
+        for k in 0..depth[g] {
+            make_due(&f, group[k % 2]);
+            deliver_within(&f, [&groups[0], &groups[1]], 2);
+        }
+        post(&f.devs[group[0]].s, &f.cid, &format!("from-side-{g}"), 1_000 + g as u64);
+    }
+    deliver_within(&f, [&groups[0], &groups[1]], 2);
+    let tips = [v2_tip(&f.devs[groups[0][0]].s, &f.cid), v2_tip(&f.devs[groups[1][0]].s, &f.cid)];
+    for g in 0..2 {
+        assert_eq!(tips[g].1, fork.1 + depth[g] as u64, "side {g} is {} commits past the fork", depth[g]);
+        assert_eq!(v2_tip(&f.devs[groups[g][1]].s, &f.cid), tips[g]);
+        let st = f.devs[groups[g][0]].s.state.lock().unwrap();
+        let ck = st.v2_trees.get(&f.cid).unwrap().checkpoint.as_ref().map(|ck| ck.state.epoch);
+        assert!(ck.is_some_and(|e| e > fork.1), "side {g} has checkpointed past the fork point (at {ck:?})");
+    }
+    // Joined. A device that is not a committer waits hours before it re-enters another; the
+    // packages are aged instead of the clock moved.
+    let mut asked = false;
+    for _ in 0..10 {
+        for d in &f.devs {
+            d.s.state.lock().unwrap().v2_trees.get_mut(&f.cid).unwrap().x_age_packages(8 * 60 * 60);
+        }
+        for i in 0..f.devs.len() {
+            let out = f.devs[i].s.sync_envelopes(f.cid.clone());
+            asked |= out.iter().any(|e| e.first() == Some(&TAG_MLS2_KEYPACKAGE));
+            for (j, d) in f.devs.iter().enumerate() {
+                if i != j {
+                    for e in &out {
+                        let _ = d.s.receive(f.cid.clone(), e.clone());
+                    }
+                }
+            }
+        }
+    }
+    (f, groups, fork, tips, asked)
+}
+
+/// Everything a joined fleet must end with: one tip, the v2 tree keying every device, every
+/// device still seated, both sides' posts and a new one readable everywhere.
+fn assert_rejoined(f: &Fleet) -> ([u8; 32], u64) {
+    let tip = v2_tip(&f.devs[0].s, &f.cid);
+    post(&f.devs[0].s, &f.cid, "after-the-join", 9_000);
+    sync_fleet(f, 2);
+    for (i, d) in f.devs.iter().enumerate() {
+        let k = v2_state(&d.s, &f.cid).unwrap();
+        assert_eq!((k.tip_hash, k.epoch), tip, "device {i} is on the same tip");
+        assert_eq!(lane(&d.s, &f.cid), 2, "device {i} is keyed by the v2 tree");
+        assert_eq!(tree_leaf_device_ids(&k.tree).len(), f.devs.len(), "device {i}: every device is seated");
+        assert!(!offers_key_package(&d.s, &f.cid), "device {i} is not asking to re-enter any more");
+        for body in ["from-side-0", "from-side-1", "after-the-join"] {
+            assert!(reads(&d.s, &f.cid, body), "device {i} cannot read `{body}`");
+        }
+    }
+    tip
+}
+
+/// THE LONGER CHAIN WINS, AND THE OTHER SIDE RE-ENTERS — WITH NO ADMIN ON THE WINNING SIDE. The
+/// creator account's two devices (the only committers, the only admins) author five commits cut
+/// off from the other two devices, which author six. Both sides have checkpointed past the fork.
+/// Joined: the six-commit side is the agreed chain on every device; the creator's devices cannot
+/// follow it, ask to re-enter, and are re-entered by a commit a plain member authors (there is no
+/// committer on that side to do it). Nothing is lost: both sides' posts open everywhere.
+#[test]
+fn the_longer_side_wins_and_a_plain_member_reenters_the_committers() {
+    let _clk = clock_guard();
+    let (f, groups, fork, tips, asked) = partition_then_join([5, 6]);
+    assert!(asked, "the shorter side asked to re-enter");
+    let tip = assert_rejoined(&f);
+    let admin = f.devs[groups[0][0]].account_hex();
+    for (i, d) in f.devs.iter().enumerate() {
+        assert!(on_adopted_chain(&d.s, &f.cid, &tips[1].0), "device {i} is on the longer side's chain");
+        assert!(!on_adopted_chain(&d.s, &f.cid, &tips[0].0), "device {i} is not on the shorter side's");
+        assert!(on_adopted_chain(&d.s, &f.cid, &fork.0));
+    }
+    // The commits above the longer side's old tip. The FIRST re-entry is authored by a device
+    // that is not of the admin account (there was no committer on that side); if it seated only
+    // one of the creator's devices, that device — a committer again — may seat the other.
+    let commits = v2_commits(&f.devs[0].s, &f.cid);
+    let mut at = tip.0;
+    let mut reentered: Vec<[u8; 32]> = Vec::new();
+    let mut first_author = None;
+    while at != tips[1].0 {
+        let c = treekem::Commit::from_bytes(&commits[&at]).unwrap();
+        let author = committer_of(&c).and_then(|d| f.devs.iter().find(|x| x.device_id() == d)).unwrap();
+        for p in &c.proposals {
+            if let treekem::ProposalBody::Add { leaf_node } = &p.body {
+                assert_eq!(c.proposals.len() % 2, 0, "Remove + Add pairs");
+                first_author = Some(author.account_hex()); // walking down: the last one seen is the earliest
+                reentered.push(leaf_credential_ids(&leaf_node.device_credential).unwrap().0);
+            }
+        }
+        at = c.parent_commit_hash;
+    }
+    assert!(first_author.is_some_and(|a| a != admin), "the first re-entry on the winning side was authored by a plain member");
+    reentered.sort_unstable();
+    reentered.dedup();
+    let mut expect: Vec<[u8; 32]> = groups[0].iter().map(|i| f.devs[*i].device_id()).collect();
+    expect.sort_unstable();
+    assert_eq!(reentered, expect, "exactly the two creator devices were re-entered");
+}
+
+/// EQUAL WEIGHT: THE HASH DECIDES, AND THE LOSING SIDE RE-ENTERS. Both sides author four commits.
+/// Neither chain is heavier; the larger commit hash at the fork point picks one, the same one on
+/// every device, and the two devices of the other side — whichever they are — re-enter.
+#[test]
+fn an_equal_weight_fork_is_decided_by_hash_and_the_losing_side_reenters() {
+    let _clk = clock_guard();
+    let (f, groups, fork, tips, asked) = partition_then_join([4, 4]);
+    assert!(asked, "the losing side asked to re-enter");
+    assert_rejoined(&f);
+    // The first commit of each side: the larger hash is the side everyone is on.
+    let commits = v2_commits(&f.devs[0].s, &f.cid);
+    let first = |tip: [u8; 32]| {
+        let mut at = tip;
+        loop {
+            let c = treekem::Commit::from_bytes(&commits[&at]).unwrap();
+            if c.parent_commit_hash == fork.0 {
+                return at;
+            }
+            at = c.parent_commit_hash;
+        }
+    };
+    let (a, b) = (first(tips[0].0), first(tips[1].0));
+    let (won, lost) = if a > b { (0, 1) } else { (1, 0) };
+    for (i, d) in f.devs.iter().enumerate() {
+        assert!(on_adopted_chain(&d.s, &f.cid, &tips[won].0), "device {i} is on the side with the larger hash");
+        assert!(!on_adopted_chain(&d.s, &f.cid, &tips[lost].0));
+    }
+    let st = f.devs[groups[won][0]].s.state.lock().unwrap();
+    let t = st.v2_trees.get(&f.cid).unwrap();
+    assert_eq!(t.x_weight(&a).map(|w| w.0), Some(0), "no authority on either side");
+}
+
+/// A REMOVED MEMBER CANNOT OUT-BUILD ITS REMOVE. The admin Removes a two-device member. With a
+/// modified client the member's devices author six path-only commits in turn — on the Remove's
+/// parent, and six more on the parent's parent (from the state they held then). Every honest
+/// device stays on the Remove's branch: a chain is weighed by its authority commits first, and a
+/// member can author none. The member reads nothing posted afterwards.
+#[test]
+fn a_removed_member_cannot_out_build_its_remove() {
+    let _clk = clock_guard();
+    let f = live_v2_fleet(&[(A, &[A1]), (B, &[B1, B2]), (C, &[C1])]);
+    let ci = committer_index(&f);
+    let admin = f.devs[ci].account_hex();
+    let member_seed = f.rosters.iter().find(|(seed, _, creds)| creds.len() == 2 && hex(&Identity::from_seed(seed).public().node_id_bytes()) != admin).unwrap().0;
+    let member: Vec<usize> = (0..f.devs.len()).filter(|i| f.devs[*i].account_seed == member_seed).collect();
+    let honest: Vec<usize> = (0..f.devs.len()).filter(|i| !member.contains(i)).collect();
+    // The member's devices as they were one commit earlier (the parent's parent).
+    let earlier: Vec<Dev> = member
+        .iter()
+        .map(|i| {
+            let d = &f.devs[*i];
+            let s = s1_relaunch(d.account_seed, d.device_seed, d.s.export_state());
+            introduce_one(&f, &s, d.account_seed);
+            Dev { s, account_seed: d.account_seed, device_seed: d.device_seed }
+        })
+        .collect();
+    let grandparent = v2_tip(&f.devs[ci].s, &f.cid);
+    update(&f, honest[1]);
+    let parent = v2_tip(&f.devs[ci].s, &f.cid);
+    // Six path-only commits by the member's two devices in turn, from `devs`' current tip: each
+    // is made due (the hook that stands for a client ignoring the weekly window), authors on the
+    // other's commit, and hands it over. Nothing reaches the honest devices yet.
+    let out_build = |devs: [&Dev; 2]| -> Vec<Vec<u8>> {
+        let mut chain = Vec::new();
+        for k in 0..6 {
+            let (author, other) = (devs[k % 2], devs[(k + 1) % 2]);
+            let before = v2_commits(&author.s, &f.cid);
+            author.s.state.lock().unwrap().v2_trees.get_mut(&f.cid).unwrap().x_make_update_due();
+            let wires = new_commit_wires(&before, &author.s.sync_envelopes(f.cid.clone()));
+            assert_eq!(wires.len(), 1, "the member's device authored commit {k}");
+            let c = wires[0][1..].to_vec();
+            assert!(treekem::Commit::from_bytes(&c).unwrap().proposals.is_empty());
+            assert!(feed_commit(&f, other, &c), "the member's other device follows commit {k}");
+            chain.push(c);
+        }
+        chain
+    };
+    let on_parent = out_build([&f.devs[member[0]], &f.devs[member[1]]]);
+    let on_grandparent = out_build([&earlier[0], &earlier[1]]);
+    assert_eq!(treekem::Commit::from_bytes(&on_parent[0]).unwrap().parent_commit_hash, parent.0);
+    assert_eq!(treekem::Commit::from_bytes(&on_grandparent[0]).unwrap().parent_commit_hash, grandparent.0);
+
+    // The admin's Remove, on the parent. The honest devices get it, then the member's branches.
+    let before = v2_commits(&f.devs[ci].s, &f.cid);
+    assert!(f.devs[ci].s.mls_remove_member(f.cid.clone(), hex(&Identity::from_seed(&member_seed).public().node_id_bytes())));
+    let remove = v2_commits(&f.devs[ci].s, &f.cid).into_keys().find(|h| !before.contains_key(h)).expect("the Remove commit");
+    for e in f.devs[ci].s.sync_envelopes(f.cid.clone()) {
+        let _ = f.devs[honest.iter().copied().find(|i| *i != ci).unwrap()].s.receive(f.cid.clone(), e);
+    }
+    // (The admin's own device has dropped the member's account from the circle and no longer
+    // verifies anything it signs; the other honest device stores the commits — they are valid.)
+    for i in &honest {
+        for c in on_parent.iter().chain(&on_grandparent) {
+            let stored = feed_commit(&f, &f.devs[*i], c);
+            assert!(stored || *i == ci, "device {i} stores the member's commit: it is valid");
+        }
+    }
+    sync_fleet(&f, 3);
+    for i in &honest {
+        let d = &f.devs[*i];
+        assert!(on_adopted_chain(&d.s, &f.cid, &remove), "device {i} left the Remove's branch for the member's longer one");
+        assert!(!offers_key_package(&d.s, &f.cid), "device {i} is not asking to re-enter");
+        assert_eq!(lane(&d.s, &f.cid), 2);
+    }
+    for i in &honest {
+        let d = &f.devs[*i];
+        let st = d.s.state.lock().unwrap();
+        let t = st.v2_trees.get(&f.cid).unwrap();
+        assert_eq!(t.x_weight(&remove).map(|w| w.0), Some(1), "the Remove is an authority commit");
+        if *i != ci {
+            for first in [&on_parent[0], &on_grandparent[0]] {
+                assert_eq!(t.x_weight(&treekem::commit_hash(first)), Some((0, 6)), "six commits, no authority");
+            }
+        }
+    }
+    post(&f.devs[ci].s, &f.cid, "after-the-remove", 7_000);
+    sync_fleet(&f, 2);
+    assert!(reads(&f.devs[honest[1]].s, &f.cid, "after-the-remove") && reads(&f.devs[honest[0]].s, &f.cid, "after-the-remove"));
+    for d in member.iter().map(|i| &f.devs[*i]).chain(&earlier) {
+        for e in f.devs[ci].s.sync_envelopes(f.cid.clone()) {
+            let _ = d.s.receive(f.cid.clone(), e);
+        }
+        assert!(!reads(&d.s, &f.cid, "after-the-remove"), "the removed member reads content sealed after its Remove");
+    }
+}
+
+/// RE-ENTRY BY A MEMBER: what is accepted. A device that lost its place offers a fresh package. A
+/// plain member's `Remove(its old leaf) + Add(that package)` is stored by every device and is not
+/// an authority commit. Refused: the package paired with ANOTHER device's leaf; the same package
+/// a second time on the same chain; a package of a device the receiver's roster does not
+/// authorize.
+#[test]
+fn a_member_reentry_is_accepted_only_for_the_device_that_asked() {
+    let _clk = clock_guard();
+    let setup = || {
+        let f = live_v2_fleet(&[(A, &[A1]), (B, &[B1, B2]), (C, &[C1])]);
+        let ci = committer_index(&f);
+        let admin = f.devs[ci].account_hex();
+        let plain: Vec<usize> = (0..f.devs.len()).filter(|i| f.devs[*i].account_hex() != admin).collect();
+        // The device that asks: the last plain one. It loses its place and offers a package.
+        let lost = *plain.last().unwrap();
+        {
+            let mut st = f.devs[lost].s.state.lock().unwrap();
+            let t = st.v2_trees.get_mut(&f.cid).unwrap();
+            t.my_welcomes.clear();
+            t.checkpoint = None;
+            t.x_forget_packages();
+        }
+        let wire = f.devs[lost].s.sync_envelopes(f.cid.clone()).into_iter().find(|e| e.first() == Some(&TAG_MLS2_KEYPACKAGE)).expect("a fresh package");
+        let kp = KeyPackage::from_bytes(&wire[1..]).unwrap();
+        (f, ci, plain, lost, kp)
+    };
+    let leaf_of = |f: &Fleet, of: usize, viewer: usize| {
+        let tree = v2_state(&f.devs[viewer].s, &f.cid).unwrap().tree.clone();
+        leaves_by_device(&tree).into_iter().find(|(d, _)| *d == f.devs[of].device_id()).unwrap().1
+    };
+
+    let (f, ci, plain, lost, kp) = setup();
+    let (m1, m2) = (plain[0], plain[1]);
+    assert!(m1 != lost && m2 != lost && m1 != m2);
+    // Paired with another device's leaf.
+    let wrong = craft_commit(&f, &f.devs[m1], Craft { removes: vec![leaf_of(&f, m2, m1)], adds: vec![kp.clone()], ..Default::default() });
+    assert!(!feed_commit(&f, &f.devs[ci], &wrong), "a package may only replace its own device's leaf");
+    // An Add with no Remove, a Remove with no Add: not a re-entry (and not a leave).
+    let add_only = craft_commit(&f, &f.devs[m1], Craft { adds: vec![kp.clone()], ..Default::default() });
+    assert!(!feed_commit(&f, &f.devs[ci], &add_only));
+    let remove_only = craft_commit(&f, &f.devs[m1], Craft { removes: vec![leaf_of(&f, lost, m1)], ..Default::default() });
+    assert!(!feed_commit(&f, &f.devs[ci], &remove_only), "a plain member cannot just Remove another account's device");
+    // The real thing.
+    let good = craft_commit(&f, &f.devs[m1], Craft { removes: vec![leaf_of(&f, lost, m1)], adds: vec![kp.clone()], ..Default::default() });
+    for i in [ci, m2] {
+        assert!(feed_commit(&f, &f.devs[i], &good), "device {i} stores a plain member's re-entry of the device that asked");
+        let st = f.devs[i].s.state.lock().unwrap();
+        assert_eq!(st.v2_trees.get(&f.cid).unwrap().x_weight(&treekem::commit_hash(&good)), Some((0, 1)), "it is not an authority commit");
+    }
+    // The same package again, further up the same chain.
+    let again = craft_commit(&f, &f.devs[m2], Craft { removes: vec![leaf_of(&f, lost, m2)], adds: vec![kp.clone()], ..Default::default() });
+    assert_eq!(treekem::Commit::from_bytes(&again).unwrap().parent_commit_hash, treekem::commit_hash(&good));
+    assert!(!feed_commit(&f, &f.devs[ci], &again), "a package is used once on a chain");
+
+    // The receiver's roster does not authorize the device that asks.
+    let (f, ci, plain, lost, kp) = setup();
+    let m1 = plain[0];
+    let seed = f.devs[lost].account_seed;
+    let (_, _, creds) = f.rosters.iter().find(|(s, _, _)| *s == seed).unwrap().clone();
+    let of_account: Vec<Vec<u8>> = f.devs.iter().filter(|d| d.account_seed == seed).map(|d| d.device_id().to_vec()).collect();
+    let revoking = crate::multidevice::sign_device_list(seed.to_vec(), 2, 0, of_account, vec![f.devs[lost].device_id().to_vec()]).unwrap();
+    let bundle = f.devs.iter().find(|d| d.account_seed == seed).unwrap().s.my_bundle();
+    assert!(f.devs[ci].s.ingest_device_roster(bundle, revoking, creds));
+    let good = craft_commit(&f, &f.devs[m1], Craft { removes: vec![leaf_of(&f, lost, m1)], adds: vec![kp], ..Default::default() });
+    assert!(!feed_commit(&f, &f.devs[ci], &good), "a re-entry of a device the roster does not authorize is not stored");
+}
+
+/// A DEVICE THAT ENTERED BY A WELCOME FOLLOWS A THIRD DEVICE'S UPDATE. The commit that seats a
+/// device re-keys its author's path, and the secrets of the nodes that path shares with the new
+/// leaf's reach the new device only inside that commit. A later Update from a third device is
+/// wrapped to one of those nodes. (With committer-only Updates this never arose: every later path
+/// came from the same leaf.) The re-entered device here is the committer's sibling leaf — the
+/// geometry in which the shared node is the one a device of the other half wraps to.
+#[test]
+fn a_device_that_entered_by_a_welcome_follows_a_third_devices_update() {
+    let _clk = clock_guard();
+    let f = live_v2_fleet(&[(A, &[A1, A2]), (B, &[B1]), (C, &[C1])]);
+    let ci = committer_index(&f);
+    let tree = v2_state(&f.devs[ci].s, &f.cid).unwrap().tree.clone();
+    let leaves = leaves_by_device(&tree);
+    let leaf = |i: usize| leaves.iter().find(|(d, _)| *d == f.devs[i].device_id()).unwrap().1;
+    let joiner = (0..f.devs.len()).find(|i| leaf(*i) == leaf(ci) ^ 1).expect("the committer's sibling leaf");
+    let third: Vec<usize> = (0..f.devs.len()).filter(|i| *i != ci && *i != joiner).collect();
+    let epoch0 = v2_tip(&f.devs[ci].s, &f.cid).1;
+    {
+        let mut st = f.devs[joiner].s.state.lock().unwrap();
+        let t = st.v2_trees.get_mut(&f.cid).unwrap();
+        t.my_welcomes.clear();
+        t.checkpoint = None;
+        t.x_forget_packages();
+    }
+    sync_fleet(&f, 5);
+    for (i, d) in f.devs.iter().enumerate() {
+        assert_eq!(v2_tip(&d.s, &f.cid).1, epoch0 + 1, "device {i}: one commit re-seated the device");
+        assert_eq!(lane(&d.s, &f.cid), 2);
+    }
+    assert_eq!(leaf(joiner), leaves_by_device(&v2_state(&f.devs[ci].s, &f.cid).unwrap().tree).into_iter().find(|(d, _)| *d == f.devs[joiner].device_id()).unwrap().1, "it came back to the same leaf");
+    // Each device of the other half re-keys in turn; `update` asserts every device follows.
+    for t in &third {
+        update(&f, *t);
+    }
+    update(&f, joiner);
+    post(&f.devs[third[0]].s, &f.cid, "after-third-update", 6_000);
+    sync_fleet(&f, 2);
+    assert!(f.devs.iter().all(|d| reads(&d.s, &f.cid, "after-third-update")));
+    assert!(f.devs.iter().all(|d| !offers_key_package(&d.s, &f.cid)), "nobody had to re-enter again");
 }

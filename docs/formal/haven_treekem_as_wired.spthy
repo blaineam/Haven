@@ -8,6 +8,10 @@
 
   Run:  tamarin-prover --auto-sources --prove docs/formal/haven_treekem_as_wired.spthy
 
+  This file is the BASELINE: the wiring before stage 1 of the fix (random secrets, stored
+  checkpoint — docs/formal/STAGE1-STORED-STATE.md). The engine on the stage-1 branch is modelled
+  in haven_treekem_stage1.spthy, which keeps these lemma names so the two can be compared.
+
   What is modelled, and why it is faithful where it matters:
    * The engine keeps no random tree secrets. It REPLAYS the commit chain, and the committer's
      inputs are all deterministic functions of its long-term device seed:

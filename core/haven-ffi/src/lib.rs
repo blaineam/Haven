@@ -2369,6 +2369,68 @@ struct ShadowWelcome {
     tree_bytes: Vec<u8>,
 }
 
+/// A Welcome is `joiner_secret` + `leaf_secret` in the clear: when one is superseded by the
+/// checkpoint (or simply dropped) both are zeroed, not left in freed memory.
+impl Drop for ShadowWelcome {
+    fn drop(&mut self) {
+        treekem::wipe_secret(&mut self.joiner_secret);
+        treekem::wipe_secret(&mut self.leaf_secret);
+    }
+}
+
+/// The inputs of a commit THIS device authored (docs/formal/STAGE1-STORED-STATE.md (c)). A device
+/// cannot apply its own commit — the path secrets are wrapped to everyone else — so a walk that
+/// passes through one rebuilds it. The inputs used to be derived from the long-term device seed;
+/// they are random now, so they are kept here until the checkpoint reaches the commit's epoch.
+#[derive(Clone)]
+struct OwnBuild {
+    /// The tip the commit extends. Also the authoring guard: one own commit per tip.
+    parent: [u8; 32],
+    epoch: u64,
+    new_leaf: [u8; 32],
+    entropy: [u8; 32],
+}
+
+impl Drop for OwnBuild {
+    fn drop(&mut self) {
+        treekem::wipe_secret(&mut self.new_leaf);
+        treekem::wipe_secret(&mut self.entropy);
+    }
+}
+
+/// This device's keying state at one epoch of the chain it is on — a locally minted entry point
+/// that `replay_walk` continues from exactly as it continues from a self-contained Welcome
+/// (STAGE1-STORED-STATE.md (a)). Everything older than it has been wiped.
+#[derive(Clone)]
+struct KeyingCheckpoint {
+    state: KeyingState,
+    /// The epoch-1 commit the state descends from, recorded when the checkpoint was taken.
+    genesis: Option<[u8; 32]>,
+}
+
+/// How deep a branch must be before the fork it grew from is final, and how many epoch states a
+/// device keeps behind its tip (STAGE1-STORED-STATE.md (b)). The same window the content keys use.
+const KEYING_FINAL_DEPTH: usize = treekem::PersistTree::KEEP_EPOCHS;
+
+#[cfg(test)]
+thread_local! {
+    /// Tests only: author and persist keying state the way builds before stage 1 did (every secret
+    /// derived from the device seed, Welcomes kept, the root persisted, no checkpoint), so the
+    /// upgrade tests have a real pre-change device to load.
+    static KEYING_LEGACY_MODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn keying_legacy_mode() -> bool {
+    #[cfg(test)]
+    {
+        KEYING_LEGACY_MODE.with(|f| f.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
 /// Per-circle shadow ratchet-tree state. Holds the known genesis commit(s) — more than one is a
 /// §5 fork — and the Welcomes this device holds. `mls_shadow_status` resolves the fork with
 /// `select_chain` and derives the winner's epoch secret. PERSISTED with the circle state
@@ -2399,10 +2461,9 @@ struct ShadowTree {
     /// Which genesis each joined device announced (JOIN ack `gh`). A device not on the winning
     /// genesis is on the losing branch of an election fork; the committer re-Welcomes it. Not persisted.
     joined_genesis: std::collections::HashMap<[u8; 32], [u8; 32]>,
-    /// MLS M3: the secret keying root this device uses when it is the committer (creator/admin) —
-    /// derived from its DEVICE seed (§ leaf-secret secrecy), so leaf secrets + the genesis init are
-    /// unknowable to a removed device even though the commit is public. Set at genesis build; unused
-    /// by a pure receiver. Empty until built.
+    /// The seed-derived keying root builds before stage 1 kept (and persisted) here. Always `None`
+    /// now outside the tests' pre-change mode: leaf secrets and the genesis init are random, and the
+    /// root is recomputed from the seed only to rebuild commits authored before the change.
     my_secret_root: Option<[u8; 32]>,
     /// MLS M3: the sorted device-id leaf set my_genesis was built over. When the authorized device
     /// set GROWS (a straggler upgrades → §7.3 resume), this differs and the creator rebuilds genesis
@@ -2422,8 +2483,22 @@ struct ShadowTree {
     /// engine lock, with inputs that had not changed since the last call. Exact-input keyed, so it
     /// can never serve a stale state: any new commit/Welcome changes the digest. At most two entries
     /// (the with-seed and without-seed callers). Lives and dies with this tree; never persisted.
-    replay_memo: std::sync::Mutex<Vec<([u8; 32], Option<KeyingState>)>>,
+    replay_memo: std::sync::Mutex<Vec<([u8; 32], ReplayOutcome)>>,
+    /// Stage 1: where replay starts once the chain is deep enough (see [`KeyingCheckpoint`]).
+    checkpoint: Option<KeyingCheckpoint>,
+    /// Stage 1: the inputs of my own commits above the checkpoint, by commit hash.
+    own_builds: std::collections::BTreeMap<[u8; 32], OwnBuild>,
+    /// Stage 1: the leaf secret I assigned to each device I added (device id → secret, WRAPPED under
+    /// a pad derived from my device seed — `keying_wrap_assigned_leaf`). The Welcome wire carries a
+    /// device's leaf secret, so a committer has to be able to produce it again for a re-Welcome.
+    /// Random now instead of `H(root, device)`; still recoverable by the committer (seed + this map)
+    /// until devices make their own leaf keys (a later stage).
+    assigned_leaves: std::collections::BTreeMap<[u8; 32], [u8; 32]>,
 }
+
+/// What one replay produces: the live state, and — when the winning path is at least
+/// [`KEYING_FINAL_DEPTH`] states long — the state the checkpoint may advance to, with its genesis.
+type ReplayOutcome = (Option<KeyingState>, Option<KeyingCheckpoint>);
 
 impl ShadowTree {
     fn new(group_id: Vec<u8>) -> Self {
@@ -2439,6 +2514,9 @@ impl ShadowTree {
             genesis_devices: Vec::new(),
             rewelcomed: std::collections::HashSet::new(),
             replay_memo: std::sync::Mutex::new(Vec::new()),
+            checkpoint: None,
+            own_builds: std::collections::BTreeMap::new(),
+            assigned_leaves: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -2504,6 +2582,90 @@ fn keying_update_material(secret_root: &[u8; 32], epoch: u64) -> ([u8; 32], [u8;
     h.update(secret_root);
     h.update(&epoch.to_le_bytes());
     (leaf, *h.finalize().as_bytes())
+}
+
+// ── Stage 1: random secrets (docs/formal/STAGE1-STORED-STATE.md) ───────────────────────────────
+// The four derivations above made every committer secret a function of the long-term device seed.
+// New material is random. The derivations stay ONLY as the fallback for what was authored before
+// the change: an own commit with no stored build record, and a leaf assigned as `H(root, device)`.
+
+/// 32 bytes from the OS RNG.
+fn keying_random_secret() -> [u8; 32] {
+    haven_p2p::groupkey::new_epoch_key()
+}
+
+/// The fresh leaf secret + encapsulation entropy for a commit I am about to author at `epoch`.
+fn keying_new_update_material(seed: &[u8; 32], gid: &[u8], epoch: u64) -> ([u8; 32], [u8; 32]) {
+    if keying_legacy_mode() {
+        return keying_update_material(&keying_secret_root(seed, gid), epoch);
+    }
+    (keying_random_secret(), keying_random_secret())
+}
+
+/// Wrap (or unwrap — it is an XOR pad) a leaf secret I assigned to `device_id` for storage in
+/// `assigned_leaves`. The pad is a function of my device seed, so the stored map alone does not
+/// give a member's leaf secret (a stolen state blob does not open my later commits' path secrets),
+/// and — the leaf secret being random — neither does the seed alone. It takes both. One pad per
+/// (seed, group, device) and one leaf secret per device (`keying_new_leaf_secret` never reassigns),
+/// so a pad is never reused over two values.
+fn keying_wrap_assigned_leaf(seed: &[u8; 32], gid: &[u8], device_id: &[u8; 32], leaf: &[u8; 32]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"haven-mls-assigned-leaf-wrap-v1");
+    h.update(seed);
+    h.update(&(gid.len() as u64).to_le_bytes());
+    h.update(gid);
+    h.update(device_id);
+    let mut out = *h.finalize().as_bytes();
+    for (o, l) in out.iter_mut().zip(leaf.iter()) {
+        *o ^= l;
+    }
+    out
+}
+
+/// The leaf secret to assign to `device_id` in a commit I am about to author: the one I already
+/// assigned it if any (a device keeps one leaf secret across my commits, as before), else random.
+fn keying_new_leaf_secret(shadow: Option<&ShadowTree>, seed: &[u8; 32], gid: &[u8], device_id: &[u8; 32]) -> [u8; 32] {
+    if keying_legacy_mode() {
+        return keying_leaf_secret(&keying_secret_root(seed, gid), device_id);
+    }
+    shadow
+        .and_then(|s| s.assigned_leaves.get(device_id))
+        .map(|wrapped| keying_wrap_assigned_leaf(seed, gid, device_id, wrapped))
+        .unwrap_or_else(keying_random_secret)
+}
+
+/// Every leaf secret I may have assigned `device_id`: the stored one, then the seed-derived one a
+/// build before stage 1 would have used. A re-Welcome takes whichever matches the tree's leaf key.
+fn keying_known_leaf_secrets(shadow: &ShadowTree, seed: &[u8; 32], gid: &[u8], device_id: &[u8; 32]) -> Vec<[u8; 32]> {
+    let mut out = Vec::with_capacity(2);
+    if let Some(wrapped) = shadow.assigned_leaves.get(device_id) {
+        out.push(keying_wrap_assigned_leaf(seed, gid, device_id, wrapped));
+    }
+    out.push(keying_leaf_secret(&keying_secret_root(seed, gid), device_id));
+    out
+}
+
+/// The genesis init secret for a genesis I am about to build.
+fn keying_new_base_init(seed: &[u8; 32], gid: &[u8]) -> [u8; 32] {
+    if keying_legacy_mode() {
+        return keying_base_init(&keying_secret_root(seed, gid));
+    }
+    keying_random_secret()
+}
+
+/// Have I already authored a commit on `tip` that I still hold the inputs of? Seed derivation made
+/// re-authoring harmless (same inputs, same commit, "already authored"); with random inputs a
+/// replay that could not move past my own commit would mint a new sibling on every bundle.
+fn keying_already_authored_on(shadow: &ShadowTree, tip: &[u8; 32]) -> bool {
+    shadow.own_builds.values().any(|b| b.parent == *tip)
+}
+
+/// Record the inputs of the commit I just authored, so a later walk can rebuild it.
+fn keying_record_own_build(shadow: &mut ShadowTree, hash: [u8; 32], parent: [u8; 32], epoch: u64, new_leaf: [u8; 32], entropy: [u8; 32]) {
+    if keying_legacy_mode() {
+        return; // a pre-change build stored nothing: it re-derived from the seed
+    }
+    shadow.own_builds.insert(hash, OwnBuild { parent, epoch, new_leaf, entropy });
 }
 
 /// The account members whose devices populate the shadow tree (me + circle members).
@@ -2653,14 +2815,15 @@ fn build_shadow_genesis(st: &mut NetState, idx: usize) {
     // Creator scope for leaf secrets + my own leaf: the signing device's id.
     let creator_id = signer.public().node_id_bytes();
     let my_device_id = Some(creator_id);
-    // SECRET keying root (from my device seed) — the anchor the removal re-key rests on (§4.3).
-    let secret_root = keying_secret_root(&signer.secret_seed(), &gid);
+    // The leaf secrets and the genesis init are RANDOM (stage 1) — they used to be functions of my
+    // device seed, which made every epoch of the circle recomputable from that one long-term key.
+    let signer_seed = signer.secret_seed();
 
     // One Add per device, in the deterministic leaf order. leaf_index = position in the order.
     let mut adds: Vec<treekem::Proposal> = Vec::with_capacity(devices.len());
     let mut leaf_secrets: Vec<[u8; 32]> = Vec::with_capacity(devices.len());
     for (li, (bundle, cred)) in devices.iter().enumerate() {
-        let ls = keying_leaf_secret(&secret_root, &bundle.node_id_bytes());
+        let ls = keying_new_leaf_secret(st.shadow_trees.get(&circle_id), &signer_seed, &gid, &bundle.node_id_bytes());
         leaf_secrets.push(ls);
         let kp = treekem::node_keypair_from_path_secret(&ls);
         let payload = treekem::leaf_binding_payload(&gid, &kp.kem_x, &kp.kem_pq);
@@ -2684,8 +2847,8 @@ fn build_shadow_genesis(st: &mut NetState, idx: usize) {
 
     let parent = shadow_genesis_parent(&gid);
     let base_cth = shadow_genesis_cth(&gid);
-    let base_init = keying_base_init(&secret_root);
-    let build = match treekem::build_commit(
+    let mut base_init = keying_new_base_init(&signer_seed, &gid);
+    let built = treekem::build_commit(
         &treekem::RatchetTree { slots: vec![] },
         &gid,
         1,
@@ -2697,7 +2860,11 @@ fn build_shadow_genesis(st: &mut NetState, idx: usize) {
         None, // add-only ⇒ commit_secret = 0
         |m| signer.sign(m),
         |m| signer.sign(m),
-    ) {
+    );
+    // Consumed: the genesis epoch is entered through the Welcome's `joiner_secret`, never through
+    // this again, so it is not kept anywhere.
+    treekem::wipe_secret(&mut base_init);
+    let build = match built {
         Ok(b) => b,
         Err(_) => return,
     };
@@ -2735,7 +2902,15 @@ fn build_shadow_genesis(st: &mut NetState, idx: usize) {
     shadow.group_id = gid;
     shadow.commits.insert(commit_hash, commit_bytes);
     shadow.my_genesis = Some(commit_hash);
-    shadow.my_secret_root = Some(secret_root);
+    if keying_legacy_mode() {
+        shadow.my_secret_root = Some(keying_secret_root(&signer_seed, &shadow.group_id));
+    } else {
+        // Not my own: I never re-Welcome myself, and my genesis leaf is replaced by my first Update.
+        for (id, ls) in device_ids.iter().zip(leaf_secrets.iter()).filter(|(id, _)| **id != creator_id) {
+            let wrapped = keying_wrap_assigned_leaf(&signer_seed, &shadow.group_id, id, ls);
+            shadow.assigned_leaves.insert(*id, wrapped);
+        }
+    }
     shadow.genesis_devices = device_ids;
     // The creator auto-joins its own genesis (§7.2): it holds the Welcome by construction.
     shadow.joined.insert(creator_id);
@@ -3025,6 +3200,11 @@ fn receive_mls_welcome(st: &mut NetState, idx: usize, body: &[u8]) -> Result<boo
     let circle_id = st.circles[idx].id.clone();
     let gid = circle_id.as_bytes().to_vec();
     let shadow = st.shadow_trees.entry(circle_id).or_insert_with(|| ShadowTree::new(gid));
+    // Stage 1: a Welcome my checkpoint already supersedes is an old `joiner_secret` coming back
+    // (the mailbox re-delivered it, or a peer re-sent its bundle). Drop it — wiped on drop.
+    if keying_welcome_superseded(shadow, &mut None, &commit_hash, &welcome) {
+        return Ok(false);
+    }
     shadow.my_welcomes.entry(commit_hash).or_insert(welcome);
     Ok(false)
 }
@@ -3389,21 +3569,24 @@ impl Drop for KeyingState {
     }
 }
 
-/// Rebuild MY OWN commit deterministically to recover its post-commit tree/schedule/private state
-/// (`apply_commit` refuses self-application, and the rebuild-each-bundle model stores no build). The
-/// fresh leaf secret + entropy come from `keying_update_material` (the exact material used when the
-/// commit was authored), so the tree + schedule + transcript reproduce EXACTLY; the signature is
-/// irrelevant to state (the transcript blanks it), so a dummy signer is used.
+/// Rebuild MY OWN commit to recover its post-commit tree/schedule/private state (`apply_commit`
+/// refuses self-application: the path secrets are wrapped to everyone but me). `material` is the
+/// fresh leaf secret + entropy the commit was authored with — the stored [`OwnBuild`], or for a
+/// commit authored before stage 1 the seed-derived pair — so the tree + schedule + transcript
+/// reproduce EXACTLY; the signature is irrelevant to state (the transcript blanks it), so a dummy
+/// signer is used. The result is CHECKED against the stored commit: wrong material used to yield a
+/// silently different state, which was unreachable only while the material was a pure function of
+/// the seed.
 fn keying_rebuild_own_commit(
     prev: &KeyingState,
     gid: &[u8],
     target: &treekem::Commit,
     my_leaf: u32,
-    my_secret_root: &[u8; 32],
+    material: &([u8; 32], [u8; 32]),
 ) -> Option<treekem::CommitBuild> {
     let up = target.update_path.as_ref()?;
     let cred = up.leaf_node.device_credential.clone();
-    let (new_leaf, entropy) = keying_update_material(my_secret_root, target.epoch);
+    let (new_leaf, entropy) = material;
     let init = prev.init_secret?;
     // Reproduce the EXACT commit CONTENT so the schedule matches the real broadcast commit (which
     // receivers apply): the confirmed-transcript hash covers the proposals AND the UpdatePath's
@@ -3412,7 +3595,7 @@ fn keying_rebuild_own_commit(
     // re-signing could diverge). Only the commit's OWN signature is outside the transcript ⇒ dummy.
     let props: Vec<treekem::Proposal> = target.proposals.clone();
     let stored_leaf_sig = up.leaf_node.leaf_binding_sig.clone();
-    treekem::build_commit(
+    let build = treekem::build_commit(
         &prev.tree,
         gid,
         target.epoch,
@@ -3421,15 +3604,20 @@ fn keying_rebuild_own_commit(
         &init,
         my_leaf,
         props,
-        Some((&new_leaf, &cred, &entropy)),
+        Some((new_leaf, &cred, entropy)),
         move |_| stored_leaf_sig,
         |_| Vec::new(),
     )
-    .ok()
+    .ok()?;
+    (build.commit.tree_hash == target.tree_hash && build.commit.confirmation_mac == target.confirmation_mac)
+        .then_some(build)
 }
 
 /// Replay the tree commit chain to the current epoch (§5.1, §4.2/§5.5). Pure function of {known
-/// commits, my Welcomes, my device seed}. Two entry modes, unified:
+/// commits, my checkpoint, my Welcomes, my own build records, my device seed}. The seed is read
+/// only to rebuild own commits authored before stage 1. Entry modes, unified:
+///   * CHECKPOINT (stage 1): my own stored state at an epoch the chain has grown
+///     `KEYING_FINAL_DEPTH - 1` past — once it exists, the Welcomes behind it are gone.
 ///   * SELF-CONTAINED (M4): if I hold a mid-chain / re-entry Welcome carrying `tree_bytes` (the
 ///     highest-epoch one wins), I bootstrap at THAT epoch directly from the delivered tree +
 ///     `joiner_secret` + `cth` — no chain replay. This is how a mid-life joiner enters at the LIVE
@@ -3440,12 +3628,17 @@ fn keying_rebuild_own_commit(
 /// I authored it) — until the chain ends. Returns `None` if I hold no usable Welcome (I haven't
 /// joined), or if a self-contained Welcome FAILS CLOSED (my leaf absent / key mismatch ⇒ revoked).
 fn mls_replay(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> Option<KeyingState> {
+    mls_replay_outcome(shadow, my_device_seed).0
+}
+
+/// The memoized replay: the live state plus the checkpoint candidate (see [`ReplayOutcome`]).
+fn mls_replay_outcome(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> ReplayOutcome {
     let digest = mls_replay_input_digest(shadow, my_device_seed);
     let mut memo = shadow.replay_memo.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_, hit)) = memo.iter().find(|(d, _)| *d == digest) {
         return hit.clone();
     }
-    let out = mls_replay_uncached(shadow, my_device_seed);
+    let out = mls_replay_outcome_uncached(shadow, my_device_seed);
     if memo.len() >= 2 {
         memo.remove(0);
     }
@@ -3457,7 +3650,7 @@ fn mls_replay(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> Option<K
 /// without adding it here would let the memo serve a stale state, so keep the two in step.
 fn mls_replay_input_digest(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
-    h.update(b"haven-mls-replay-memo-v1");
+    h.update(b"haven-mls-replay-memo-v2");
     h.update(&(shadow.group_id.len() as u64).to_le_bytes());
     h.update(&shadow.group_id);
     match my_device_seed {
@@ -3486,15 +3679,41 @@ fn mls_replay_input_digest(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>
         h.update(&(w.tree_bytes.len() as u64).to_le_bytes());
         h.update(&w.tree_bytes);
     }
+    // The checkpoint is identified by its encoding (every field the walk continues from), the own
+    // build records by hash + inputs.
+    match &shadow.checkpoint {
+        Some(ck) => {
+            let enc = encode_keying_checkpoint(ck);
+            h.update(&[1]);
+            h.update(&(enc.len() as u64).to_le_bytes());
+            h.update(&enc);
+        }
+        None => {
+            h.update(&[0]);
+        }
+    }
+    h.update(&(shadow.own_builds.len() as u64).to_le_bytes());
+    for (k, b) in &shadow.own_builds {
+        h.update(k);
+        h.update(&b.new_leaf);
+        h.update(&b.entropy);
+    }
     *h.finalize().as_bytes()
 }
 
 /// The chain replay itself; callers go through the memoized [`mls_replay`].
+#[cfg(test)]
 fn mls_replay_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> Option<KeyingState> {
+    mls_replay_outcome_uncached(shadow, my_device_seed).0
+}
+
+fn mls_replay_outcome_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) -> ReplayOutcome {
     let gid = shadow.group_id.clone();
+    // Only the fallback for own commits authored before stage 1 (no stored build record).
     let my_secret_root = my_device_seed.map(|s| keying_secret_root(&s, &gid));
-    // Every entry point I hold — the elected genesis's Welcome, and every SELF-CONTAINED Welcome (a
-    // mid-life Add or a re-entry) — walked forward along the chain; then the best end state wins.
+    // Every entry point I hold — my checkpoint, the elected genesis's Welcome, and every
+    // SELF-CONTAINED Welcome (a mid-life Add or a re-entry) — walked forward along the chain; then
+    // the best end state wins.
     //
     // This used to take the highest-epoch self-contained Welcome UNCONDITIONALLY. A committer that
     // re-Welcomes a divergent device does so toward ITS election winner at that moment — and when
@@ -3504,25 +3723,33 @@ fn mls_replay_uncached(shadow: &ShadowTree, my_device_seed: Option<[u8; 32]>) ->
     // on (e2e: the phone and the tablet stuck at MLS epoch 1 on the desktop's genesis, friend and
     // desktop at epoch 2 on the phone's — both directions parked).
     let winner = keying_winning_genesis(shadow).map(|(h, _)| h);
-    let mut starts: Vec<KeyingState> = Vec::new();
+    // (start state, the genesis it is known to descend from when the parent links can't say)
+    let mut starts: Vec<(KeyingState, Option<[u8; 32]>)> = Vec::new();
+    if let Some(ck) = &shadow.checkpoint {
+        starts.push((ck.state.clone(), ck.genesis));
+    }
     for (tip_hash, welcome) in shadow.my_welcomes.iter().filter(|(_, w)| !w.tree_bytes.is_empty()) {
         if let Some(k) = replay_start_self_contained(&gid, tip_hash, welcome) {
-            starts.push(k);
+            starts.push((k, None));
         }
     }
     if let Some(k) = replay_start_genesis(shadow, &gid) {
-        starts.push(k);
+        starts.push((k, None));
     }
-    let mut best: Option<((bool, u64, [u8; 32]), KeyingState)> = None;
-    for start in starts {
-        let end = replay_walk(shadow, &gid, my_secret_root, start);
-        let on_winner = winner.is_some() && keying_genesis_of(shadow, end.tip_hash) == winner;
+    let mut best: Option<((bool, u64, [u8; 32]), KeyingState, Option<KeyingCheckpoint>)> = None;
+    for (start, start_genesis) in starts {
+        let (end, window_start) = replay_walk(shadow, &gid, my_secret_root, start);
+        let genesis = keying_genesis_of(shadow, end.tip_hash).or(start_genesis);
+        let on_winner = winner.is_some() && genesis == winner;
         let rank = (on_winner, end.epoch, end.tip_hash);
-        if best.as_ref().map(|(r, _)| rank > *r).unwrap_or(true) {
-            best = Some((rank, end));
+        if best.as_ref().map(|(r, _, _)| rank > *r).unwrap_or(true) {
+            best = Some((rank, end, window_start.map(|state| KeyingCheckpoint { state, genesis })));
         }
     }
-    best.map(|(_, k)| k)
+    match best {
+        Some((_, end, candidate)) => (Some(end), candidate),
+        None => (None, None),
+    }
 }
 
 /// The epoch-1 genesis a commit descends from, following parent links through the commits I hold.
@@ -3607,29 +3834,67 @@ fn replay_start_genesis(shadow: &ShadowTree, gid: &[u8]) -> Option<KeyingState> 
     })
 }
 
-/// Walk the commit chain forward from `cur` (the highest-hash child at each epoch), applying each.
-fn replay_walk(shadow: &ShadowTree, gid: &[u8], my_secret_root: Option<[u8; 32]>, mut cur: KeyingState) -> KeyingState {
+/// Is there a line of at least `more` further commits below `tip` (a commit at `epoch`) in this
+/// store? Depth-bounded, so it costs at most `more` passes over the commit set.
+fn keying_chain_reaches(shadow: &ShadowTree, tip: [u8; 32], epoch: u64, more: usize) -> bool {
+    if more == 0 {
+        return true;
+    }
+    shadow.commits.iter().any(|(h, b)| {
+        treekem::Commit::from_bytes(b)
+            .map(|c| c.epoch == epoch + 1 && c.parent_commit_hash == tip)
+            .unwrap_or(false)
+            && keying_chain_reaches(shadow, *h, epoch + 1, more - 1)
+    })
+}
+
+/// Walk the commit chain forward from `cur`, applying each epoch's winning commit. Returns the end
+/// state and, when the walk covered at least [`KEYING_FINAL_DEPTH`] states (the start included),
+/// the state `KEYING_FINAL_DEPTH - 1` epochs behind the end — where the checkpoint may advance to.
+///
+/// THE FORK RULE. Among the children of a tip the largest commit hash wins — except that a child
+/// whose branch is already [`KEYING_FINAL_DEPTH`] commits deep is FINAL and beats any that is not
+/// (docs/formal/STAGE1-STORED-STATE.md (b); `TREEKEM-DESIGN.md` §5.1 "chain extension beats hash",
+/// applied only at that depth). With no such branch — every fork at circle birth, every ordinary
+/// race — this is the hash rule exactly as before. It exists because a device that has wiped the
+/// state below its checkpoint cannot follow a late, short branch that out-hashes a long one, while
+/// a device still holding that state would; finality makes both stay on the long branch.
+fn replay_walk(
+    shadow: &ShadowTree,
+    gid: &[u8],
+    my_secret_root: Option<[u8; 32]>,
+    mut cur: KeyingState,
+) -> (KeyingState, Option<KeyingState>) {
     let gid = gid.to_vec();
+    // The last KEYING_FINAL_DEPTH states of the walk, oldest first; `cur` is pushed when superseded.
+    let mut trail: std::collections::VecDeque<KeyingState> = std::collections::VecDeque::new();
     loop {
         let next = cur.epoch + 1;
-        // Children of the current tip at the next epoch (a §5 fork at this level is resolved by hash).
-        let mut children: Vec<Vec<u8>> = shadow
+        // Children of the current tip at the next epoch (a §5 fork at this level).
+        let mut children: Vec<([u8; 32], Vec<u8>)> = shadow
             .commits
-            .values()
-            .filter(|b| {
+            .iter()
+            .filter(|(_, b)| {
                 treekem::Commit::from_bytes(b)
                     .map(|c| c.epoch == next && c.parent_commit_hash == cur.tip_hash)
                     .unwrap_or(false)
             })
-            .cloned()
+            .map(|(h, b)| (*h, b.clone()))
             .collect();
         if children.is_empty() {
             break;
         }
-        children.sort_by(|a, b| treekem::commit_hash(a).cmp(&treekem::commit_hash(b)));
-        let cbytes = children.last().unwrap().clone();
+        if children.len() > 1 {
+            // (final, hash): see THE FORK RULE above. Only evaluated at an actual fork.
+            let mut ranked: Vec<(bool, [u8; 32], Vec<u8>)> = children
+                .into_iter()
+                .map(|(h, b)| (keying_chain_reaches(shadow, h, next, KEYING_FINAL_DEPTH - 1), h, b))
+                .collect();
+            ranked.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+            children = ranked.into_iter().map(|(_, h, b)| (h, b)).collect();
+        }
+        let (tip, cbytes) = children.pop().unwrap();
         let Ok(c) = treekem::Commit::from_bytes(&cbytes) else { break };
-        let tip = treekem::commit_hash(&cbytes);
         // Removal-sticky (M4): before this commit mutates the tree, record the device id of every leaf
         // it Removes (resolved against the PRE-commit tree) so the roster→Add automation never re-Adds it.
         let mut removed_devices = cur.removed_devices.clone();
@@ -3643,22 +3908,35 @@ fn replay_walk(shadow: &ShadowTree, gid: &[u8], my_secret_root: Option<[u8; 32]>
             }
         }
         let i_committed = cur.my_private.as_ref().map(|p| p.leaf_index) == Some(c.sender_leaf);
-        if i_committed {
-            let (Some(sroot), Some(mp)) = (my_secret_root, cur.my_private.as_ref()) else { break };
+        let (stepped, cut_off) = if i_committed {
+            let Some(mp) = cur.my_private.as_ref() else { break };
             let my_leaf = mp.leaf_index;
-            let Some(build) = keying_rebuild_own_commit(&cur, &gid, &c, my_leaf, &sroot) else { break };
-            cur = KeyingState {
-                epoch: next,
-                tree: build.tree,
-                sender_root: Some(build.schedule.sender_root),
-                init_secret: Some(build.schedule.init_secret),
-                joiner_secret: Some(build.schedule.joiner_secret),
-                cth: build.confirmed_transcript_hash,
-                tip_hash: tip,
-                my_private: Some(build.my_private),
-                removed_me: false,
-                removed_devices,
+            // The inputs I stored when I authored it; else (a commit from before stage 1) the pair
+            // the old build derived from the device seed.
+            let stored = shadow.own_builds.get(&tip).map(|b| (b.new_leaf, b.entropy));
+            let legacy = my_secret_root.map(|r| keying_update_material(&r, c.epoch));
+            let Some(build) = [stored, legacy]
+                .into_iter()
+                .flatten()
+                .find_map(|m| keying_rebuild_own_commit(&cur, &gid, &c, my_leaf, &m))
+            else {
+                break;
             };
+            (
+                KeyingState {
+                    epoch: next,
+                    tree: build.tree.clone(),
+                    sender_root: Some(build.schedule.sender_root),
+                    init_secret: Some(build.schedule.init_secret),
+                    joiner_secret: Some(build.schedule.joiner_secret),
+                    cth: build.confirmed_transcript_hash,
+                    tip_hash: tip,
+                    my_private: Some(build.my_private.clone()),
+                    removed_me: false,
+                    removed_devices,
+                },
+                false,
+            )
         } else {
             let Some(init) = cur.init_secret else { break };
             let applied =
@@ -3668,36 +3946,280 @@ fn replay_walk(shadow: &ShadowTree, gid: &[u8], my_secret_root: Option<[u8; 32]>
                 };
             if applied.removed_me {
                 // I am the removed device: I cannot derive this epoch. Freeze cut off from here.
-                cur = KeyingState {
-                    epoch: next,
-                    tree: applied.tree,
-                    sender_root: None,
-                    init_secret: None,
-                    joiner_secret: None,
-                    cth: applied.confirmed_transcript_hash,
-                    tip_hash: tip,
-                    my_private: None,
-                    removed_me: true,
-                    removed_devices,
-                };
-                break;
+                (
+                    KeyingState {
+                        epoch: next,
+                        tree: applied.tree.clone(),
+                        sender_root: None,
+                        init_secret: None,
+                        joiner_secret: None,
+                        cth: applied.confirmed_transcript_hash,
+                        tip_hash: tip,
+                        my_private: None,
+                        removed_me: true,
+                        removed_devices,
+                    },
+                    true,
+                )
+            } else {
+                let Some(sched) = applied.schedule.as_ref() else { break };
+                (
+                    KeyingState {
+                        epoch: next,
+                        tree: applied.tree.clone(),
+                        sender_root: Some(sched.sender_root),
+                        init_secret: Some(sched.init_secret),
+                        joiner_secret: Some(sched.joiner_secret),
+                        cth: applied.confirmed_transcript_hash,
+                        tip_hash: tip,
+                        my_private: applied.my_private.clone(),
+                        removed_me: false,
+                        removed_devices,
+                    },
+                    false,
+                )
             }
-            let Some(sched) = applied.schedule else { break };
-            cur = KeyingState {
-                epoch: next,
-                tree: applied.tree,
-                sender_root: Some(sched.sender_root),
-                init_secret: Some(sched.init_secret),
-                joiner_secret: Some(sched.joiner_secret),
-                cth: applied.confirmed_transcript_hash,
-                tip_hash: tip,
-                my_private: applied.my_private,
-                removed_me: false,
-                removed_devices,
-            };
+        };
+        trail.push_back(std::mem::replace(&mut cur, stepped));
+        if trail.len() >= KEYING_FINAL_DEPTH {
+            trail.pop_front();
+        }
+        if cut_off {
+            break;
         }
     }
-    cur
+    // `trail` holds the up-to-(DEPTH-1) states before `cur`; full ⇒ its front is DEPTH-1 behind.
+    let window_start = (trail.len() == KEYING_FINAL_DEPTH - 1).then(|| trail.pop_front()).flatten();
+    (cur, window_start)
+}
+
+// ── Stage 1: the checkpoint (docs/formal/STAGE1-STORED-STATE.md (a), (b)) ──────────────────────
+
+const KEYING_CHECKPOINT_V1: u8 = 1;
+
+/// Serialize a checkpoint for the state blob:
+/// `ver(1) ‖ epoch(8) ‖ u32 tree_len ‖ tree ‖ has_private(1) [‖ leaf_index(4) ‖ leaf_secret(32)
+/// ‖ u32 n ‖ (node(4) ‖ path_secret(32))×n] ‖ opt(sender_root) ‖ opt(init_secret) ‖ opt(joiner_secret)
+/// ‖ cth(32) ‖ tip(32) ‖ opt(genesis) ‖ removed_me(1) ‖ u32 n ‖ device(32)×n`, `opt(x) = 0 | 1 ‖ x(32)`.
+fn encode_keying_checkpoint(ck: &KeyingCheckpoint) -> Vec<u8> {
+    fn opt(v: &mut Vec<u8>, x: &Option<[u8; 32]>) {
+        match x {
+            Some(b) => {
+                v.push(1);
+                v.extend_from_slice(b);
+            }
+            None => v.push(0),
+        }
+    }
+    let k = &ck.state;
+    let tree = k.tree.to_bytes();
+    let mut v = Vec::with_capacity(tree.len() + 512);
+    v.push(KEYING_CHECKPOINT_V1);
+    v.extend_from_slice(&k.epoch.to_le_bytes());
+    v.extend_from_slice(&(tree.len() as u32).to_le_bytes());
+    v.extend_from_slice(&tree);
+    match &k.my_private {
+        Some(p) => {
+            v.push(1);
+            v.extend_from_slice(&p.leaf_index.to_le_bytes());
+            v.extend_from_slice(&p.leaf_secret);
+            v.extend_from_slice(&(p.path_secrets.len() as u32).to_le_bytes());
+            for (node, secret) in &p.path_secrets {
+                v.extend_from_slice(&node.to_le_bytes());
+                v.extend_from_slice(secret);
+            }
+        }
+        None => v.push(0),
+    }
+    opt(&mut v, &k.sender_root);
+    opt(&mut v, &k.init_secret);
+    opt(&mut v, &k.joiner_secret);
+    v.extend_from_slice(&k.cth);
+    v.extend_from_slice(&k.tip_hash);
+    opt(&mut v, &ck.genesis);
+    v.push(k.removed_me as u8);
+    let mut removed: Vec<&[u8; 32]> = k.removed_devices.iter().collect();
+    removed.sort();
+    v.extend_from_slice(&(removed.len() as u32).to_le_bytes());
+    for d in removed {
+        v.extend_from_slice(d);
+    }
+    v
+}
+
+/// Exact-consumption decode: an unknown version, a truncated or over-long blob all fail closed.
+fn decode_keying_checkpoint(b: &[u8]) -> Option<KeyingCheckpoint> {
+    struct R<'a>(&'a [u8]);
+    impl<'a> R<'a> {
+        fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+            if self.0.len() < n {
+                return None;
+            }
+            let (a, rest) = self.0.split_at(n);
+            self.0 = rest;
+            Some(a)
+        }
+        fn u8(&mut self) -> Option<u8> {
+            self.take(1).map(|b| b[0])
+        }
+        fn u32(&mut self) -> Option<u32> {
+            Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+        }
+        fn u64(&mut self) -> Option<u64> {
+            Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+        }
+        fn arr(&mut self) -> Option<[u8; 32]> {
+            self.take(32)?.try_into().ok()
+        }
+        fn opt(&mut self) -> Option<Option<[u8; 32]>> {
+            match self.u8()? {
+                0 => Some(None),
+                1 => Some(Some(self.arr()?)),
+                _ => None,
+            }
+        }
+    }
+    let mut r = R(b);
+    if r.u8()? != KEYING_CHECKPOINT_V1 {
+        return None;
+    }
+    let epoch = r.u64()?;
+    let tree_len = r.u32()? as usize;
+    let tree = treekem::RatchetTree::from_bytes(r.take(tree_len)?).ok()?;
+    let my_private = match r.u8()? {
+        0 => None,
+        1 => {
+            let leaf_index = r.u32()?;
+            let mut p = treekem::TreePrivate::new(leaf_index, r.arr()?);
+            for _ in 0..r.u32()? {
+                let node = r.u32()?;
+                p.path_secrets.insert(node, r.arr()?);
+            }
+            Some(p)
+        }
+        _ => return None,
+    };
+    let sender_root = r.opt()?;
+    let init_secret = r.opt()?;
+    let joiner_secret = r.opt()?;
+    let cth = r.arr()?;
+    let tip_hash = r.arr()?;
+    let genesis = r.opt()?;
+    let removed_me = match r.u8()? {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
+    let mut removed_devices = std::collections::HashSet::new();
+    for _ in 0..r.u32()? {
+        removed_devices.insert(r.arr()?);
+    }
+    if !r.0.is_empty() {
+        return None;
+    }
+    Some(KeyingCheckpoint {
+        state: KeyingState {
+            epoch,
+            tree,
+            my_private,
+            sender_root,
+            init_secret,
+            joiner_secret,
+            cth,
+            tip_hash,
+            removed_me,
+            removed_devices,
+        },
+        genesis,
+    })
+}
+
+/// `hash(32) ‖ parent(32) ‖ epoch(8) ‖ new_leaf(32) ‖ entropy(32)`.
+fn encode_own_build(hash: &[u8; 32], b: &OwnBuild) -> Vec<u8> {
+    let mut v = Vec::with_capacity(136);
+    v.extend_from_slice(hash);
+    v.extend_from_slice(&b.parent);
+    v.extend_from_slice(&b.epoch.to_le_bytes());
+    v.extend_from_slice(&b.new_leaf);
+    v.extend_from_slice(&b.entropy);
+    v
+}
+
+fn decode_own_build(b: &[u8]) -> Option<([u8; 32], OwnBuild)> {
+    if b.len() != 136 {
+        return None;
+    }
+    Some((
+        b[0..32].try_into().ok()?,
+        OwnBuild {
+            parent: b[32..64].try_into().ok()?,
+            epoch: u64::from_le_bytes(b[64..72].try_into().ok()?),
+            new_leaf: b[72..104].try_into().ok()?,
+            entropy: b[104..136].try_into().ok()?,
+        },
+    ))
+}
+
+/// Is the Welcome keyed to `tip` superseded by my checkpoint — i.e. is everything it could give me
+/// already behind (or exactly at) the state I continue from? Such a Welcome is an old epoch's
+/// `joiner_secret` and nothing else, so it is wiped, and refused if it is delivered again.
+///
+/// One exception keeps the existing fork heal working: while my checkpoint sits on a genesis that
+/// is NOT the elected one, a Welcome onto the elected genesis is my door to the branch the fleet is
+/// on, whatever its epoch (`mls_refresh_keying` FORK HEALING issues exactly that).
+///
+/// `winner` caches the genesis election across calls (it is only consulted for a Welcome that is
+/// behind the checkpoint, and costs a pass over the commit set).
+fn keying_welcome_superseded(
+    shadow: &ShadowTree,
+    winner: &mut Option<Option<[u8; 32]>>,
+    tip: &[u8; 32],
+    w: &ShadowWelcome,
+) -> bool {
+    let Some(ck) = &shadow.checkpoint else { return false };
+    if !(w.epoch < ck.state.epoch || *tip == ck.state.tip_hash) {
+        return false;
+    }
+    let winner = *winner.get_or_insert_with(|| keying_winning_genesis(shadow).map(|(h, _)| h));
+    let my_genesis = keying_genesis_of(shadow, ck.state.tip_hash).or(ck.genesis);
+    if winner.is_some() && winner != my_genesis && keying_genesis_of(shadow, *tip) == winner {
+        return false;
+    }
+    true
+}
+
+/// Wipe what the checkpoint supersedes: Welcomes behind it and own build records at or below it.
+/// Also run after a restore, so an older blob cannot put a wiped secret back (§6.3-5).
+fn keying_prune_superseded(shadow: &mut ShadowTree) {
+    let Some(floor) = shadow.checkpoint.as_ref().map(|ck| ck.state.epoch) else { return };
+    shadow.own_builds.retain(|_, b| b.epoch > floor);
+    let mut winner = None;
+    let dead: Vec<[u8; 32]> = shadow
+        .my_welcomes
+        .iter()
+        .filter(|(tip, w)| keying_welcome_superseded(shadow, &mut winner, tip, w))
+        .map(|(tip, _)| *tip)
+        .collect();
+    for tip in dead {
+        shadow.my_welcomes.remove(&tip); // wiped by `Drop for ShadowWelcome`
+    }
+}
+
+/// Advance the checkpoint to where the last replay says it may go, then wipe what it supersedes.
+/// The replay decides (see [`replay_walk`]): only a winning path at least [`KEYING_FINAL_DEPTH`]
+/// states long yields a candidate, so a new circle or a fresh Welcome keeps today's behaviour —
+/// every entry point retained — for its first epochs. Idempotent; a no-op when nothing moved.
+fn keying_checkpoint_pass(shadow: &mut ShadowTree, my_device_seed: Option<[u8; 32]>) {
+    if keying_legacy_mode() {
+        return;
+    }
+    let (_, candidate) = mls_replay_outcome(shadow, my_device_seed);
+    if let Some(next) = candidate {
+        if shadow.checkpoint.as_ref().map(|ck| ck.state.tip_hash) != Some(next.state.tip_hash) {
+            shadow.checkpoint = Some(next); // the old one wipes itself (`Drop for KeyingState`)
+        }
+    }
+    keying_prune_superseded(shadow);
 }
 
 /// The §7.2 all-joined gate: every device leaf in the CURRENT tree has broadcast a join ack. A
@@ -3815,11 +4337,13 @@ fn mls_build_remove(st: &mut NetState, idx: usize, removed_leaves: &[u32]) -> bo
     let gid = circle_id.as_bytes().to_vec();
     let Some(seed) = st.device.as_ref().map(|d| d.secret_seed()) else { return false };
     let signer = Identity::from_seed(&seed);
-    let my_secret_root = keying_secret_root(&seed, &gid);
     let Some(shadow) = st.shadow_trees.get(&circle_id) else { return false };
     let Some(cur) = mls_replay(shadow, Some(seed)) else { return false };
     let Some(mp) = &cur.my_private else { return false }; // I must be an active member
     let Some(init) = cur.init_secret else { return false };
+    if keying_already_authored_on(shadow, &cur.tip_hash) {
+        return false; // one own commit per tip (see `keying_already_authored_on`)
+    }
     let my_leaf = mp.leaf_index;
     // Authority: I must be the creator/an admin, OR every removed leaf is my OWN account's (self-
     // removal / leave, always allowed). Accounts come from the tree's leaf credentials, so this is
@@ -3841,7 +4365,7 @@ fn mls_build_remove(st: &mut NetState, idx: usize, removed_leaves: &[u32]) -> bo
         return false;
     }
     let next = cur.epoch + 1;
-    let (new_leaf, entropy) = keying_update_material(&my_secret_root, next);
+    let (new_leaf, entropy) = keying_new_update_material(&seed, &gid, next);
     let Some(cred) = cur.tree.leaf(my_leaf).map(|l| l.device_credential.clone()) else { return false };
     let props: Vec<treekem::Proposal> = removed_leaves
         .iter()
@@ -3871,6 +4395,7 @@ fn mls_build_remove(st: &mut NetState, idx: usize, removed_leaves: &[u32]) -> bo
     }
     shadow.commits.insert(ch, cbytes.clone());
     shadow.emit_cache.push(tagged(TAG_MLS_COMMIT, &cbytes));
+    keying_record_own_build(shadow, ch, cur.tip_hash, next, new_leaf, entropy);
     // A Remove re-keys the committer's own leaf too, so it resets the PCS window (§6.4): the leaf
     // was just refreshed — the periodic leaf Update shouldn't also fire this bundle.
     st.circles[idx].rotated_at = now_secs();
@@ -3901,8 +4426,8 @@ fn mls_am_committer(st: &NetState, idx: usize) -> bool {
 /// tree at the next epoch (§4.2): the creator adds each device's leaf, re-keys its own path, and
 /// Welcomes each newcomer a SELF-CONTAINED Welcome (GroupInfo epoch n + the tree blob) so the
 /// joiner enters at epoch n WITHOUT replaying the chain — the replacement for M3's superseding
-/// genesis. The added leaf secrets derive from the creator's secret root (as at genesis), so a
-/// replay of this own commit reproduces identical bytes. No-op (returns false) if I'm not the
+/// genesis. The added leaf secrets are random and recorded in `assigned_leaves`; the commit's own
+/// inputs are recorded in `own_builds`, so a replay of this own commit reproduces identical state. No-op (returns false) if I'm not the
 /// committer, can't derive the epoch, or the build fails.
 fn mls_grow_tree(st: &mut NetState, idx: usize, new_devices: &[(HavenId, DeviceCredential)]) -> bool {
     if new_devices.is_empty() || !mls_am_committer(st, idx) {
@@ -3912,11 +4437,13 @@ fn mls_grow_tree(st: &mut NetState, idx: usize, new_devices: &[(HavenId, DeviceC
     let gid = circle_id.as_bytes().to_vec();
     let Some(seed) = st.device.as_ref().map(|d| d.secret_seed()) else { return false };
     let signer = Identity::from_seed(&seed);
-    let my_secret_root = keying_secret_root(&seed, &gid);
     let Some(shadow) = st.shadow_trees.get(&circle_id) else { return false };
     let Some(cur) = mls_replay(shadow, Some(seed)) else { return false };
     let Some(mp) = &cur.my_private else { return false }; // I must be an active member to commit
     let Some(init) = cur.init_secret else { return false };
+    if keying_already_authored_on(shadow, &cur.tip_hash) {
+        return false; // one own commit per tip (see `keying_already_authored_on`)
+    }
     let my_leaf = mp.leaf_index;
     let next = cur.epoch + 1;
 
@@ -3925,7 +4452,7 @@ fn mls_grow_tree(st: &mut NetState, idx: usize, new_devices: &[(HavenId, DeviceC
     let mut adds: Vec<treekem::Proposal> = Vec::with_capacity(new_devices.len());
     let mut joiners: Vec<(HavenId, [u8; 32])> = Vec::with_capacity(new_devices.len()); // (bundle, leaf_secret)
     for (bundle, cred) in new_devices {
-        let ls = keying_leaf_secret(&my_secret_root, &bundle.node_id_bytes());
+        let ls = keying_new_leaf_secret(Some(shadow), &seed, &gid, &bundle.node_id_bytes());
         let kp = treekem::node_keypair_from_path_secret(&ls);
         let payload = treekem::leaf_binding_payload(&gid, &kp.kem_x, &kp.kem_pq);
         let leaf = treekem::LeafNode {
@@ -3937,7 +4464,7 @@ fn mls_grow_tree(st: &mut NetState, idx: usize, new_devices: &[(HavenId, DeviceC
         adds.push(treekem::build_add_proposal(&gid, next, my_leaf, leaf, |m| signer.sign(m)));
         joiners.push((bundle.clone(), ls));
     }
-    let (new_leaf, entropy) = keying_update_material(&my_secret_root, next);
+    let (new_leaf, entropy) = keying_new_update_material(&seed, &gid, next);
     let Some(cred) = cur.tree.leaf(my_leaf).map(|l| l.device_credential.clone()) else { return false };
     let build = match treekem::build_commit(
         &cur.tree, &gid, next, cur.tip_hash, &cur.cth, &init, my_leaf, adds,
@@ -3982,6 +4509,13 @@ fn mls_grow_tree(st: &mut NetState, idx: usize, new_devices: &[(HavenId, DeviceC
     shadow.commits.insert(ch, cbytes.clone());
     shadow.emit_cache.push(tagged(TAG_MLS_COMMIT, &cbytes));
     shadow.emit_cache.extend(welcome_wires);
+    keying_record_own_build(shadow, ch, cur.tip_hash, next, new_leaf, entropy);
+    if !keying_legacy_mode() {
+        for (bundle, ls) in &joiners {
+            let id = bundle.node_id_bytes();
+            shadow.assigned_leaves.insert(id, keying_wrap_assigned_leaf(&seed, &gid, &id, ls));
+        }
+    }
     // An Add re-keys the committer's own leaf (its UpdatePath rides the commit), so it resets the
     // PCS window (§6.4): the periodic leaf Update shouldn't also fire this same bundle.
     st.circles[idx].rotated_at = now_secs();
@@ -3992,7 +4526,7 @@ fn mls_grow_tree(st: &mut NetState, idx: usize, new_devices: &[(HavenId, DeviceC
 /// past the mailbox TTL whose chain was pruned and whose private tree state lapsed (§5.5). The
 /// creator hands it a FRESH self-contained Welcome at the CURRENT epoch (the tree blob + the live
 /// `joiner_secret` it already holds in its replay + the device's leaf secret, which the creator
-/// re-derives from its secret root), so the sleeper jumps straight to the live epoch and reads
+/// stored when it assigned it — or re-derives from its seed for a leaf assigned before stage 1), so the sleeper jumps straight to the live epoch and reads
 /// history from the ordinary re-seal backfill — no chain replay. No-op if I'm not the committer, the
 /// device isn't a current tree leaf, or I can't derive the live epoch.
 fn mls_rewelcome_device(st: &mut NetState, idx: usize, device_id: &[u8; 32]) -> bool {
@@ -4003,21 +4537,22 @@ fn mls_rewelcome_device(st: &mut NetState, idx: usize, device_id: &[u8; 32]) -> 
     let gid = circle_id.as_bytes().to_vec();
     let Some(seed) = st.device.as_ref().map(|d| d.secret_seed()) else { return false };
     let signer = Identity::from_seed(&seed);
-    let my_secret_root = keying_secret_root(&seed, &gid);
     let Some(shadow) = st.shadow_trees.get(&circle_id) else { return false };
     let Some(cur) = mls_replay(shadow, Some(seed)) else { return false };
     let Some(joiner_secret) = cur.joiner_secret else { return false }; // I must derive the live epoch
-    // The device must be a CURRENT leaf (still admitted), and its leaf key must match the secret I
-    // re-derive — the same fail-closed binding the joiner re-checks (a revoked device is blanked).
-    let ls = keying_leaf_secret(&my_secret_root, device_id);
-    let kp = treekem::node_keypair_from_path_secret(&ls);
-    let Some(li) = cur.tree.slots.iter().enumerate().find_map(|(i, s)| match s {
-        treekem::TreeSlot::Leaf(l)
-            if i % 2 == 0 && l.leaf_kem_x == kp.kem_x && l.leaf_kem_pq[..] == kp.kem_pq[..] =>
-        {
-            Some((i / 2) as u32)
-        }
-        _ => None,
+    // The device must be a CURRENT leaf (still admitted), and its leaf key must match a secret I
+    // assigned it — the same fail-closed binding the joiner re-checks (a revoked device is blanked).
+    // Stored assignment first; the seed-derived one covers leaves assigned before stage 1.
+    let Some((ls, li)) = keying_known_leaf_secrets(shadow, &seed, &gid, device_id).into_iter().find_map(|ls| {
+        let kp = treekem::node_keypair_from_path_secret(&ls);
+        cur.tree.slots.iter().enumerate().find_map(|(i, s)| match s {
+            treekem::TreeSlot::Leaf(l)
+                if i % 2 == 0 && l.leaf_kem_x == kp.kem_x && l.leaf_kem_pq[..] == kp.kem_pq[..] =>
+            {
+                Some((ls, (i / 2) as u32))
+            }
+            _ => None,
+        })
     }) else { return false };
     let Some(bundle) = mls_device_bundle(st, idx, device_id) else { return false };
     let w = ShadowWelcome {
@@ -4126,8 +4661,9 @@ fn mls_sync_roster_to_tree(st: &mut NetState, idx: usize) {
 /// `rotate_if_stale` is the one safe rotation point. No-op (returns false) unless I am the committer,
 /// the window has elapsed, the circle is actually LIVE (all-joined — in shadow mode content isn't
 /// tree-keyed, so a leaf Update would heal nothing and just add epoch noise), and I can derive the
-/// current epoch. The leaf/entropy come from `keying_update_material` (deterministic per epoch), so a
-/// replay reconstructs this own commit byte-identically via `keying_rebuild_own_commit`.
+/// current epoch. The fresh leaf secret and entropy are RANDOM (stage 1) and recorded in `own_builds`
+/// until the checkpoint passes them, so a replay reconstructs this own commit via
+/// `keying_rebuild_own_commit` — and nothing about the new epoch is a function of the device seed.
 fn mls_pcs_leaf_update(st: &mut NetState, idx: usize) -> bool {
     if !mls_am_committer(st, idx) {
         return false; // switch OFF / not capable / not the committer ⇒ inert (byte-identical to M4)
@@ -4141,9 +4677,11 @@ fn mls_pcs_leaf_update(st: &mut NetState, idx: usize) -> bool {
     let gid = circle_id.as_bytes().to_vec();
     let Some(seed) = st.device.as_ref().map(|d| d.secret_seed()) else { return false };
     let signer = Identity::from_seed(&seed);
-    let my_secret_root = keying_secret_root(&seed, &gid);
     let Some(shadow) = st.shadow_trees.get(&circle_id) else { return false };
     let Some(cur) = mls_replay(shadow, Some(seed)) else { return false };
+    if keying_already_authored_on(shadow, &cur.tip_hash) {
+        return false; // one own commit per tip (see `keying_already_authored_on`)
+    }
     // Only heal a circle that is actually LIVE-keying — shadow content isn't tree-keyed, so there is
     // nothing for a leaf Update to heal and advancing the shadow epoch would be pure noise.
     if !keying_all_joined(shadow, &cur.tree) {
@@ -4153,7 +4691,7 @@ fn mls_pcs_leaf_update(st: &mut NetState, idx: usize) -> bool {
     let Some(init) = cur.init_secret else { return false };
     let my_leaf = mp.leaf_index;
     let next = cur.epoch + 1;
-    let (new_leaf, entropy) = keying_update_material(&my_secret_root, next);
+    let (new_leaf, entropy) = keying_new_update_material(&seed, &gid, next);
     let Some(cred) = cur.tree.leaf(my_leaf).map(|l| l.device_credential.clone()) else { return false };
     // A LEAF-ONLY Update: empty proposal set, path = Some(fresh) ⇒ a fresh UpdatePath over my direct
     // path (§6.4). Every other member decrypts it and advances; the fresh leaf secret is the healing
@@ -4173,6 +4711,7 @@ fn mls_pcs_leaf_update(st: &mut NetState, idx: usize) -> bool {
     }
     shadow.commits.insert(ch, cbytes.clone());
     shadow.emit_cache.push(tagged(TAG_MLS_COMMIT, &cbytes));
+    keying_record_own_build(shadow, ch, cur.tip_hash, next, new_leaf, entropy);
     // Stamp the window so the next bundle doesn't immediately re-Update — the weekly cadence.
     st.circles[idx].rotated_at = now_secs();
     true
@@ -4205,6 +4744,11 @@ fn mls_refresh_keying(st: &mut NetState, idx: usize) -> Option<u64> {
     let circle_id = st.circles[idx].id.clone();
     let gid = circle_id.as_bytes().to_vec();
     let seed = st.device.as_ref().map(|d| d.secret_seed());
+    // Stage 1: this is the chokepoint every bundle and every tree envelope passes, so it is where
+    // the checkpoint advances and superseded secrets are wiped.
+    if let Some(shadow) = st.shadow_trees.get_mut(&circle_id) {
+        keying_checkpoint_pass(shadow, seed);
+    }
     let Some(shadow) = st.shadow_trees.get(&circle_id) else {
         clear(st, idx);
         return None;
@@ -4241,6 +4785,11 @@ fn mls_refresh_keying(st: &mut NetState, idx: usize) -> Option<u64> {
         }
     }
     st.circles[idx].mls_live_epoch = Some(content_epoch);
+    // The content keys age out on the same window as the tree state (§6.2 "sender_key … same
+    // 4-epoch window"). On the KeyCommit path `rotate_epoch` / `receive_key_commit` call the pruner;
+    // on this path nothing did, so every tree-derived content key a device ever held stayed in its
+    // state blob — which would make the checkpoint's deletion of old epoch secrets moot.
+    st.circles[idx].prune_epoch_keys();
     // FORK HEALING (committer only). A JOIN ack names the genesis its sender is on; any admitted
     // device announcing a DIFFERENT genesis than my current tip's chain joined the LOSING branch of
     // a genesis election and holds a Welcome my epoch chain will never reach. It seals at its branch
@@ -5567,6 +6116,19 @@ struct PersistShadow {
     joined_genesis: Vec<([u8; 32], [u8; 32])>,
     #[serde(with = "persist_bytes")]
     rewelcomed: Vec<([u8; 32], [u8; 32])>,
+    /// Stage 1: the encoded [`KeyingCheckpoint`] (empty = none). Defaulted so a blob written before
+    /// stage 1 loads; a build from before stage 1 ignores the field.
+    #[serde(default)]
+    #[serde(with = "persist_bytes")]
+    checkpoint: Vec<u8>,
+    /// Stage 1: my own commits' build inputs above the checkpoint (`encode_own_build`).
+    #[serde(default)]
+    #[serde(with = "persist_bytes")]
+    own_builds: Vec<Vec<u8>>,
+    /// Stage 1: (device id, the leaf secret I assigned it — wrapped, see `keying_wrap_assigned_leaf`).
+    #[serde(default)]
+    #[serde(with = "persist_bytes")]
+    assigned_leaves: Vec<([u8; 32], [u8; 32])>,
 }
 
 impl PersistShadow {
@@ -5576,12 +6138,17 @@ impl PersistShadow {
             commits: t.commits.values().cloned().collect(),
             welcomes: t.my_welcomes.iter().map(|(h, w)| encode_shadow_welcome(h, w)).collect(),
             my_genesis: t.my_genesis,
+            // Never written since stage 1 (`ShadowTree::my_secret_root` is only ever set by the
+            // tests' pre-change mode). The field stays so older blobs and older builds still parse.
             my_secret_root: t.my_secret_root,
             genesis_devices: t.genesis_devices.clone(),
             emit_cache: t.emit_cache.clone(),
             joined: t.joined.iter().copied().collect(),
             joined_genesis: t.joined_genesis.iter().map(|(d, g)| (*d, *g)).collect(),
             rewelcomed: t.rewelcomed.iter().copied().collect(),
+            checkpoint: t.checkpoint.as_ref().map(encode_keying_checkpoint).unwrap_or_default(),
+            own_builds: t.own_builds.iter().map(|(h, b)| encode_own_build(h, b)).collect(),
+            assigned_leaves: t.assigned_leaves.iter().map(|(d, s)| (*d, *s)).collect(),
         }
     }
 
@@ -5601,8 +6168,25 @@ impl PersistShadow {
         if t.my_genesis.is_none() {
             t.my_genesis = self.my_genesis;
         }
-        if t.my_secret_root.is_none() {
-            t.my_secret_root = self.my_secret_root;
+        // A root persisted by a build before stage 1 is NOT restored: nothing reads it (it is
+        // re-derivable from the device seed for the commits that still need it) and the next save
+        // writes it as absent.
+        if let Some(mut root) = self.my_secret_root {
+            treekem::wipe_secret(&mut root);
+        }
+        // The checkpoint furthest along wins (this session's on a tie).
+        if let Some(ck) = decode_keying_checkpoint(&self.checkpoint) {
+            if t.checkpoint.as_ref().map(|have| ck.state.epoch > have.state.epoch).unwrap_or(true) {
+                t.checkpoint = Some(ck);
+            }
+        }
+        for b in &self.own_builds {
+            if let Some((h, b)) = decode_own_build(b) {
+                t.own_builds.entry(h).or_insert(b);
+            }
+        }
+        for (d, s) in self.assigned_leaves {
+            t.assigned_leaves.entry(d).or_insert(s);
         }
         if t.genesis_devices.is_empty() {
             t.genesis_devices = self.genesis_devices;
@@ -5615,6 +6199,8 @@ impl PersistShadow {
             t.joined_genesis.entry(d).or_insert(g);
         }
         t.rewelcomed.extend(self.rewelcomed);
+        // An older blob merged into a newer session must not resurrect what the checkpoint wiped.
+        keying_prune_superseded(t);
     }
 }
 
@@ -5808,6 +6394,9 @@ fn key_state_digest(st: &NetState) -> [u8; 32] {
         for k in t.my_welcomes.keys() {
             h.update(k);
         }
+        // Stage 1: a checkpoint advance wipes secrets in memory; the copy on disk still holds them
+        // until the next save, so an advance counts as unsaved state too.
+        h.update(&t.checkpoint.as_ref().map(|ck| ck.state.tip_hash).unwrap_or([0u8; 32]));
         h.update(&(t.emit_cache.len() as u64).to_le_bytes());
         for w in &t.emit_cache {
             h.update(blake3::hash(w).as_bytes());
@@ -7342,7 +7931,13 @@ impl HavenSocial {
         let fork_count = (shadow.commits.len() - 1) as u32;
         // Converged iff I hold the WINNER's Welcome and can derive its epoch secret. Deriving it
         // proves agreement on the whole schedule; the value is logged, not consumed.
-        let converged = match shadow.my_welcomes.get(&wh) {
+        // Stage 1: once the checkpoint has passed the genesis its Welcome is wiped; a device whose
+        // checkpoint descends from the winner is converged on it all the same.
+        let via_checkpoint = shadow
+            .checkpoint
+            .as_ref()
+            .is_some_and(|ck| keying_genesis_of(shadow, ck.state.tip_hash).or(ck.genesis) == Some(wh));
+        let converged = via_checkpoint || match shadow.my_welcomes.get(&wh) {
             Some(w) if w.epoch == wc.epoch => {
                 let sched = treekem::welcome_epoch_schedule(&w.joiner_secret, &gid, wc.epoch, &wc.tree_hash, &cth);
                 tracing::info!(
@@ -13631,6 +14226,563 @@ mod net_tests {
         let _clk = clock_guard();
         assert_eq!(agree(a, &cid), 2, "the memo followed the chain to the new epoch");
         assert_eq!(agree(b, &cid), 2);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+    // STAGE 1 of the keying fix (docs/formal/STAGE1-STORED-STATE.md): random secrets, a stored
+    // checkpoint, superseded secrets wiped, pre-change state still loads.
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+
+    /// Author and persist keying state the way builds before stage 1 did, for this test thread,
+    /// until dropped.
+    struct LegacyKeying;
+    impl LegacyKeying {
+        fn on() -> Self {
+            KEYING_LEGACY_MODE.with(|f| f.set(true));
+            LegacyKeying
+        }
+    }
+    impl Drop for LegacyKeying {
+        fn drop(&mut self) {
+            KEYING_LEGACY_MODE.with(|f| f.set(false));
+        }
+    }
+
+    /// This device's live keying state (a clone of what replay yields).
+    fn s1_state(s: &HavenSocial, cid: &str) -> KeyingState {
+        let st = s.state.lock().unwrap();
+        let seed = st.device.as_ref().map(|d| d.secret_seed());
+        mls_replay(st.shadow_trees.get(cid).expect("shadow tree"), seed).expect("device derives its chain")
+    }
+
+    fn s1_commits(s: &HavenSocial, cid: &str) -> std::collections::BTreeMap<[u8; 32], Vec<u8>> {
+        s.state.lock().unwrap().shadow_trees.get(cid).expect("shadow tree").commits.clone()
+    }
+
+    /// Make the committer's weekly leaf Update due and run it: one new epoch, no membership change.
+    /// (Sets the window stamp back rather than moving the clock, so a test can do several.)
+    fn s1_update(committer: &Arc<HavenSocial>, fleet: &[&Arc<HavenSocial>], cid: &str) {
+        let before = committer.mls_keying_status(cid.to_string()).epoch;
+        committer.state.lock().unwrap().circles.iter_mut().find(|c| c.id == cid).unwrap().rotated_at = 1;
+        sync_all(fleet, cid, 4);
+        for s in fleet {
+            assert_eq!(s.mls_keying_status(cid.to_string()).epoch, before + 1, "the leaf Update advanced every device one epoch");
+        }
+    }
+
+    /// A fresh engine on the same seeds, loaded from a saved blob — a kill + relaunch.
+    fn s1_relaunch(account_seed: [u8; 32], device_seed: [u8; 32], blob: Vec<u8>) -> Arc<HavenSocial> {
+        let r = HavenSocial::new(account_seed.to_vec()).unwrap();
+        assert!(r.use_device_identity(device_seed.to_vec()));
+        r.set_mls_keying(true);
+        r.import_state(blob);
+        r
+    }
+
+    /// Capability is not persisted: relaunched engines re-learn it from each other's profile cards.
+    fn s1_reintroduce(fleet: &[&Arc<HavenSocial>]) {
+        for (i, a) in fleet.iter().enumerate() {
+            for (j, b) in fleet.iter().enumerate() {
+                if i != j {
+                    a.profile_seed_drop_version(b.my_bundle(), card(b, &format!("s1-{j}")));
+                }
+            }
+        }
+    }
+
+    /// Every byte string in a state blob: base64 leaves, and (as older builds wrote them) arrays of
+    /// byte values.
+    fn s1_blob_bytes(blob: &[u8]) -> Vec<Vec<u8>> {
+        fn walk(v: &serde_json::Value, out: &mut Vec<Vec<u8>>) {
+            match v {
+                serde_json::Value::String(s) => {
+                    if let Ok(b) = data_encoding::BASE64.decode(s.as_bytes()) {
+                        out.push(b);
+                    }
+                    out.push(s.as_bytes().to_vec());
+                }
+                serde_json::Value::Array(a) => {
+                    let bytes: Option<Vec<u8>> =
+                        a.iter().map(|x| x.as_u64().and_then(|n| u8::try_from(n).ok())).collect();
+                    match bytes {
+                        Some(b) if !b.is_empty() => out.push(b),
+                        _ => a.iter().for_each(|x| walk(x, out)),
+                    }
+                }
+                serde_json::Value::Object(o) => o.values().for_each(|x| walk(x, out)),
+                _ => {}
+            }
+        }
+        let v: serde_json::Value = serde_json::from_slice(blob).expect("state blob is JSON");
+        let mut out = Vec::new();
+        walk(&v, &mut out);
+        out
+    }
+
+    fn s1_blob_has(leaves: &[Vec<u8>], secret: &[u8; 32]) -> bool {
+        leaves.iter().any(|b| b.windows(32).any(|w| w == secret))
+    }
+
+    /// The blob's `shadow_trees[0]` object.
+    fn s1_blob_shadow(blob: &[u8]) -> serde_json::Value {
+        let v: serde_json::Value = serde_json::from_slice(blob).unwrap();
+        v["shadow_trees"][0].clone()
+    }
+
+    /// Everything an attacker holding ONLY a device's long-term seed and the public commit chain
+    /// can compute by running the pre-stage-1 derivation, playing `as_device`: rebuild the genesis
+    /// from `H(root)`, take the leaf `H(root, as_device)`, then walk the chain — rebuilding the
+    /// seed-holder's commits from `H(root, epoch)` and applying the rest. `None` if it cannot even
+    /// start. Before stage 1 this reproduced the committer's real state at every epoch.
+    fn s1_seed_only_replay(
+        seed: [u8; 32],
+        gid: &[u8],
+        commits: &std::collections::BTreeMap<[u8; 32], Vec<u8>>,
+        as_device: [u8; 32],
+    ) -> Option<KeyingState> {
+        let root = keying_secret_root(&seed, gid);
+        let mut shadow = ShadowTree::new(gid.to_vec());
+        shadow.commits = commits.clone();
+        let (gh, gbytes) = keying_winning_genesis(&shadow)?;
+        let gc = treekem::Commit::from_bytes(&gbytes).ok()?;
+        let rebuilt = treekem::build_commit(
+            &treekem::RatchetTree { slots: vec![] }, gid, 1, shadow_genesis_parent(gid), &shadow_genesis_cth(gid),
+            &keying_base_init(&root), gc.sender_leaf, gc.proposals.clone(), None, |_| Vec::new(), |_| Vec::new(),
+        )
+        .ok()?;
+        let leaf_index = gc.proposals.iter().position(|p| match &p.body {
+            treekem::ProposalBody::Add { leaf_node } => {
+                leaf_credential_ids(&leaf_node.device_credential).map(|(d, _)| d) == Some(as_device)
+            }
+            _ => false,
+        })? as u32;
+        shadow.my_welcomes.insert(gh, ShadowWelcome {
+            epoch: 1,
+            leaf_index,
+            joiner_secret: rebuilt.schedule.joiner_secret,
+            leaf_secret: keying_leaf_secret(&root, &as_device),
+            cth: [0u8; 32],
+            tree_bytes: Vec::new(),
+        });
+        mls_replay_outcome_uncached(&shadow, Some(seed)).0
+    }
+
+    /// PROOF (STAGE1-STORED-STATE.md (e)): in a circle created under stage 1, the committer's
+    /// long-term device seed plus the public commit chain yields NO epoch secret — neither the
+    /// genesis epoch nor the epoch after its leaf Update. The same attack run against a circle
+    /// built the pre-change way recovers both, so the procedure is a real attack and not a check
+    /// that passes for a trivial reason.
+    #[test]
+    fn stage1_new_epoch_secrets_are_not_derivable_from_the_seed_and_the_public_chain() {
+        let _clk = clock_guard();
+        let (seed_a, dev_a, dev_b) = ([71u8; 32], [81u8; 32], [82u8; 32]);
+        let id = |d: [u8; 32]| Identity::from_seed(&d).public().node_id_bytes();
+        let run = |legacy: bool| {
+            let _mode = legacy.then(LegacyKeying::on);
+            let (insts, cid) = mls_capable_fleet(&[seed_a, [72u8; 32]], &[dev_a, dev_b], 0);
+            let (a, b) = (&insts[0], &insts[1]);
+            flip_and_join(&insts, &cid);
+            let real1 = s1_state(a, &cid);
+            let genesis_only = s1_commits(b, &cid);
+            s1_update(a, &[a, b], &cid);
+            let real2 = s1_state(a, &cid);
+            assert_eq!((real1.epoch, real2.epoch), (1, 2));
+            let gid = cid.as_bytes().to_vec();
+            // What the wire carried: B's commit store is exactly the public chain.
+            let chain = s1_commits(b, &cid);
+            let mut got: Vec<(u64, [u8; 32])> = Vec::new();
+            for commits in [&genesis_only, &chain] {
+                for as_device in [id(dev_a), id(dev_b)] {
+                    if let Some(k) = s1_seed_only_replay(dev_a, &gid, commits, as_device) {
+                        if let Some(root) = k.sender_root {
+                            got.push((k.epoch, root));
+                        }
+                    }
+                }
+            }
+            (got, real1.sender_root.unwrap(), real2.sender_root.unwrap())
+        };
+
+        let (got, real1, real2) = run(true);
+        assert!(got.contains(&(1, real1)), "pre-change: the seed alone reproduces the genesis epoch secret");
+        assert!(got.contains(&(2, real2)), "pre-change: the seed alone reproduces the post-Update epoch secret");
+
+        let (got, real1, real2) = run(false);
+        assert!(!got.is_empty(), "the attacker still computes SOMETHING — just not the circle's secrets");
+        for (epoch, root) in &got {
+            assert_ne!(*root, real1, "stage 1: the seed does not yield the genesis epoch secret (attacker epoch {epoch})");
+            assert_ne!(*root, real2, "stage 1: the seed does not yield the post-Update epoch secret (attacker epoch {epoch})");
+            assert_eq!(*epoch, 1, "the attacker's walk cannot get past the genesis: the Update's inputs are not seed-derived");
+        }
+    }
+
+    /// The limit of stage 1, pinned so a later stage has to flip it deliberately: in a circle whose
+    /// genesis was built BEFORE the change, every member's leaf secret is still `H(root, device)`.
+    /// A post-upgrade Update uses a random leaf — but wraps its path secret to those leaf keys, so
+    /// the committer's seed still opens it. Only a re-genesis (a later stage) closes this.
+    #[test]
+    fn stage1_does_not_heal_a_pre_change_circle_against_the_committer_seed() {
+        let _clk = clock_guard();
+        let (dev_a, dev_b) = ([81u8; 32], [82u8; 32]);
+        let id = |d: [u8; 32]| Identity::from_seed(&d).public().node_id_bytes();
+        let legacy = LegacyKeying::on();
+        let (insts, cid) = mls_capable_fleet(&[[71u8; 32], [72u8; 32]], &[dev_a, dev_b], 0);
+        let (a, b) = (&insts[0], &insts[1]);
+        flip_and_join(&insts, &cid);
+        drop(legacy);
+        // The first Update authored under stage 1, on the pre-change genesis.
+        s1_update(a, &[a, b], &cid);
+        let real2 = s1_state(a, &cid);
+        let gid = cid.as_bytes().to_vec();
+        let chain = s1_commits(b, &cid);
+        // Playing the committer, the seed no longer rebuilds the Update …
+        let as_committer = s1_seed_only_replay(dev_a, &gid, &chain, id(dev_a)).unwrap();
+        assert_eq!(as_committer.epoch, 1, "the Update's own inputs are random now");
+        // … but playing a member whose leaf the seed determines, it simply applies it.
+        let as_member = s1_seed_only_replay(dev_a, &gid, &chain, id(dev_b)).unwrap();
+        assert_eq!(as_member.epoch, 2);
+        assert_eq!(as_member.sender_root, real2.sender_root, "KNOWN GAP: pre-change leaves keep the circle seed-derivable until a re-genesis");
+    }
+
+    /// PROOF (STAGE1-STORED-STATE.md (b), (e)): once a device has checkpointed, its persisted blob
+    /// holds no secret of an epoch older than the retention window — not the entry Welcome, not an
+    /// old epoch's init / joiner / sender secret, not an old leaf or content key — for the committer
+    /// and for a member. The checkpoint epoch's own init secret IS in the blob, so the scan is real.
+    #[test]
+    fn stage1_checkpointed_blob_holds_no_secret_older_than_the_window() {
+        let _clk = clock_guard();
+        let (insts, cid) = mls_capable_fleet(&[[71u8; 32], [72u8; 32]], &[[81u8; 32], [82u8; 32]], 0);
+        let (a, b) = (&insts[0], &insts[1]);
+        flip_and_join(&insts, &cid);
+        let gid = cid.as_bytes().to_vec();
+        let accts = [Identity::from_seed(&[71u8; 32]).public().node_id_bytes(), Identity::from_seed(&[72u8; 32]).public().node_id_bytes()];
+        // Per epoch: every secret either device derives or holds.
+        let mut history: Vec<(u64, Vec<[u8; 32]>, [u8; 32])> = Vec::new(); // (epoch, secrets, init)
+        let record = |history: &mut Vec<(u64, Vec<[u8; 32]>, [u8; 32])>| {
+            let (ka, kb) = (s1_state(a, &cid), s1_state(b, &cid));
+            assert_eq!(ka.sender_root, kb.sender_root, "committer and member agree on the epoch");
+            let root = ka.sender_root.unwrap();
+            let mut secrets = vec![root, ka.init_secret.unwrap(), ka.joiner_secret.unwrap()];
+            let mine = ka.my_private.as_ref().unwrap();
+            secrets.push(mine.leaf_secret); // the committer's leaf is replaced by every Update
+            secrets.extend(mine.path_secrets.values().copied());
+            secrets.extend(accts.iter().map(|acct| treekem::sender_key(&root, acct, &gid, ka.epoch)));
+            history.push((ka.epoch, secrets, ka.init_secret.unwrap()));
+        };
+        record(&mut history);
+        let member_leaf = s1_state(b, &cid).my_private.as_ref().unwrap().leaf_secret;
+        for _ in 0..6 {
+            s1_update(a, &[a, b], &cid);
+            record(&mut history);
+        }
+        let tip = history.last().unwrap().0;
+        assert_eq!(tip, 7);
+        let floor = tip - (KEYING_FINAL_DEPTH as u64 - 1); // the checkpoint epoch
+
+        for (name, s) in [("committer", a), ("member", b)] {
+            {
+                let st = s.state.lock().unwrap();
+                let shadow = st.shadow_trees.get(&cid).unwrap();
+                assert_eq!(shadow.checkpoint.as_ref().map(|ck| ck.state.epoch), Some(floor), "{name}: checkpoint sits F-1 epochs behind the tip");
+                assert!(shadow.my_welcomes.is_empty(), "{name}: the entry Welcome was wiped (and its re-delivery refused)");
+                assert!(shadow.own_builds.values().all(|b| b.epoch > floor), "{name}: build records at or below the checkpoint were wiped");
+                assert!(shadow.my_secret_root.is_none(), "{name}: no keying root is held");
+            }
+            let blob = s.export_state();
+            let leaves = s1_blob_bytes(&blob);
+            let (_, _, ck_init) = history.iter().find(|(e, _, _)| *e == floor).unwrap();
+            assert!(s1_blob_has(&leaves, ck_init), "{name}: the checkpoint epoch's init secret is in the blob (the scan can see secrets)");
+            for (epoch, secrets, _) in history.iter().filter(|(e, _, _)| *e < floor) {
+                for (i, secret) in secrets.iter().enumerate() {
+                    assert!(!s1_blob_has(&leaves, secret), "{name}: blob still holds secret #{i} of epoch {epoch} (window starts at {floor})");
+                }
+            }
+            assert!(s1_blob_shadow(&blob)["my_secret_root"].is_null(), "{name}: no root is written");
+        }
+        // What stage 1 leaves in place, stated as assertions. A member never refreshes its leaf. And
+        // the committer that assigned it can still recover it — but only with its seed AND its state:
+        // the stored copy is wrapped, so the blob alone does not hold it.
+        assert!(s1_blob_has(&s1_blob_bytes(&b.export_state()), &member_leaf), "KNOWN GAP: the member's leaf secret is unchanged since genesis");
+        assert!(!s1_blob_has(&s1_blob_bytes(&a.export_state()), &member_leaf), "the committer's blob does not hold the member's leaf secret in the clear");
+        {
+            let st = a.state.lock().unwrap();
+            let shadow = st.shadow_trees.get(&cid).unwrap();
+            let b_dev = Identity::from_seed(&[82u8; 32]).public().node_id_bytes();
+            assert_eq!(
+                keying_known_leaf_secrets(shadow, &[81u8; 32], &gid, &b_dev).first(), Some(&member_leaf),
+                "KNOWN GAP: seed + stored state together still give the committer the member's leaf secret",
+            );
+            assert_ne!(
+                keying_known_leaf_secrets(shadow, &[99u8; 32], &gid, &b_dev).first(), Some(&member_leaf),
+                "the stored assignment is useless without the committer's seed",
+            );
+        }
+
+        // And the circle is none the worse for what was wiped.
+        a.post(cid.clone(), "still-flowing".into(), vec![], None, None, false, false, 9_000).unwrap();
+        sync_all(&[a, b], &cid, 3);
+        assert!(b.feed(cid.clone(), 10_000, None).iter().any(|m| m.body == "still-flowing"));
+    }
+
+    /// A checkpointed device restarts from its blob and carries on; and an OLD blob (saved while it
+    /// still held its Welcome) merged into the running engine does not put the Welcome back.
+    #[test]
+    fn stage1_checkpoint_survives_restart_and_an_old_blob_resurrects_nothing() {
+        let _clk = clock_guard();
+        let (insts, cid) = mls_capable_fleet(&[[71u8; 32], [72u8; 32]], &[[81u8; 32], [82u8; 32]], 0);
+        let (a, b) = (&insts[0], &insts[1]);
+        flip_and_join(&insts, &cid);
+        let old_blob = b.export_state();
+        assert!(!b.state.lock().unwrap().shadow_trees.get(&cid).unwrap().my_welcomes.is_empty(), "epoch 1: the Welcome is still the entry point");
+        for _ in 0..5 {
+            s1_update(a, &[a, b], &cid);
+        }
+        b.import_state(old_blob);
+        {
+            let st = b.state.lock().unwrap();
+            let shadow = st.shadow_trees.get(&cid).unwrap();
+            assert!(shadow.my_welcomes.is_empty(), "the old blob's Welcome was refused");
+            assert_eq!(shadow.checkpoint.as_ref().map(|ck| ck.state.epoch), Some(3));
+        }
+        // Both relaunch from their checkpointed blobs: same epoch, nothing re-minted, content flows.
+        let tree_wires = |s: &Arc<HavenSocial>| -> std::collections::BTreeSet<Vec<u8>> {
+            s.sync_envelopes(cid.clone())
+                .into_iter()
+                .filter(|e| matches!(e.first(), Some(&TAG_MLS_COMMIT) | Some(&TAG_MLS_WELCOME)))
+                .collect()
+        };
+        let before = tree_wires(a);
+        let a2 = s1_relaunch([71u8; 32], [81u8; 32], a.export_state());
+        let b2 = s1_relaunch([72u8; 32], [82u8; 32], b.export_state());
+        s1_reintroduce(&[&a2, &b2]);
+        assert!(tree_wires(&a2).is_subset(&before), "the relaunched committer minted no new tree wire");
+        for s in [&a2, &b2] {
+            assert_eq!(s.mls_keying_status(cid.clone()).state, "live");
+            assert_eq!(s.mls_keying_status(cid.clone()).epoch, 6);
+        }
+        s1_update(&a2, &[&a2, &b2], &cid);
+        a2.post(cid.clone(), "from-a2".into(), vec![], None, None, false, false, 9_000).unwrap();
+        b2.post(cid.clone(), "from-b2".into(), vec![], None, None, false, false, 9_100).unwrap();
+        sync_all(&[&a2, &b2], &cid, 4);
+        assert!(b2.feed(cid.clone(), 10_000, None).iter().any(|m| m.body == "from-a2"));
+        assert!(a2.feed(cid.clone(), 10_000, None).iter().any(|m| m.body == "from-b2"));
+    }
+
+    /// Strip the stage-1 fields from a blob written in the tests' pre-change mode, after checking
+    /// they are empty — leaving byte-for-byte the shape a build before stage 1 wrote.
+    fn s1_pre_change_blob(blob: Vec<u8>, expect_root: bool) -> Vec<u8> {
+        let mut v: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+        let sh = v["shadow_trees"][0].as_object_mut().expect("one shadow tree");
+        assert_eq!(!sh["my_secret_root"].is_null(), expect_root, "a pre-change committer persisted its keying root");
+        assert!(!sh["welcomes"].as_array().unwrap().is_empty(), "a pre-change device kept its Welcome");
+        for k in ["checkpoint", "own_builds", "assigned_leaves"] {
+            let empty = match sh.remove(k).expect("field present") {
+                serde_json::Value::String(s) => s.is_empty(),
+                serde_json::Value::Array(a) => a.is_empty(),
+                _ => false,
+            };
+            assert!(empty, "pre-change mode wrote nothing into `{k}`");
+        }
+        serde_json::to_vec(&v).unwrap()
+    }
+
+    /// UPGRADE — committer and member. A circle built, keyed and advanced by pre-change builds is
+    /// saved; both devices relaunch on stage 1 from those blobs. Nothing is re-minted, both stay on
+    /// the epoch they were on, every earlier post is still there, and the chain carries on with
+    /// random Updates until both have checkpointed — at which point the committer's blob holds no
+    /// root and neither blob holds the pre-change Welcome.
+    #[test]
+    fn stage1_upgrade_loads_pre_change_committer_and_member_state() {
+        let _clk = clock_guard();
+        let (acct_a, acct_b, dev_a, dev_b) = ([71u8; 32], [72u8; 32], [81u8; 32], [82u8; 32]);
+        let legacy = LegacyKeying::on();
+        let (insts, cid) = mls_capable_fleet(&[acct_a, acct_b], &[dev_a, dev_b], 0);
+        let (a, b) = (&insts[0], &insts[1]);
+        flip_and_join(&insts, &cid);
+        a.post(cid.clone(), "a-before".into(), vec![], None, None, false, false, 1_000).unwrap();
+        b.post(cid.clone(), "b-before".into(), vec![], None, None, false, false, 1_100).unwrap();
+        sync_all(&[a, b], &cid, 3);
+        s1_update(a, &[a, b], &cid); // a seed-derived Update: epoch 2
+        a.post(cid.clone(), "a-epoch2".into(), vec![], None, None, false, false, 1_200).unwrap();
+        sync_all(&[a, b], &cid, 3);
+        let gid = cid.as_bytes().to_vec();
+        let old_root = keying_secret_root(&dev_a, &gid);
+        let old_joiner_1 = {
+            let st = b.state.lock().unwrap();
+            st.shadow_trees.get(&cid).unwrap().my_welcomes.values().next().unwrap().joiner_secret
+        };
+        let wires = |s: &Arc<HavenSocial>| -> std::collections::BTreeSet<Vec<u8>> {
+            s.sync_envelopes(cid.clone())
+                .into_iter()
+                .filter(|e| matches!(e.first(), Some(&TAG_MLS_COMMIT) | Some(&TAG_MLS_WELCOME)))
+                .collect()
+        };
+        let before = wires(a);
+        let blob_a = s1_pre_change_blob(a.export_state(), true);
+        let blob_b = s1_pre_change_blob(b.export_state(), false);
+        assert!(s1_blob_has(&s1_blob_bytes(&blob_a), &old_root));
+        drop(legacy);
+
+        // ── the upgrade ──
+        let a2 = s1_relaunch(acct_a, dev_a, blob_a);
+        let b2 = s1_relaunch(acct_b, dev_b, blob_b);
+        s1_reintroduce(&[&a2, &b2]);
+        assert!(wires(&a2).is_subset(&before), "the upgraded committer minted no new tree wire");
+        for (name, s) in [("committer", &a2), ("member", &b2)] {
+            assert_eq!(s.mls_keying_status(cid.clone()).state, "live", "{name} is live after the upgrade");
+            assert_eq!(s.mls_keying_status(cid.clone()).epoch, 2, "{name} is on the epoch it was on");
+            let feed = s.feed(cid.clone(), 5_000, None);
+            for body in ["a-before", "b-before", "a-epoch2"] {
+                assert!(feed.iter().any(|m| m.body == body), "{name} still has `{body}`");
+            }
+        }
+        assert!(a2.state.lock().unwrap().shadow_trees.get(&cid).unwrap().my_secret_root.is_none(), "the persisted root was not loaded");
+        assert!(!s1_blob_has(&s1_blob_bytes(&a2.export_state()), &old_root), "and is not written back");
+
+        // The chain carries on across the boundary: seed-derived commit 2, then random ones.
+        for _ in 0..4 {
+            s1_update(&a2, &[&a2, &b2], &cid);
+        }
+        a2.post(cid.clone(), "a-after".into(), vec![], None, None, false, false, 6_000).unwrap();
+        b2.post(cid.clone(), "b-after".into(), vec![], None, None, false, false, 6_100).unwrap();
+        sync_all(&[&a2, &b2], &cid, 4);
+        for (name, s) in [("committer", &a2), ("member", &b2)] {
+            let feed = s.feed(cid.clone(), 7_000, None);
+            for body in ["a-before", "b-before", "a-epoch2", "a-after", "b-after"] {
+                assert!(feed.iter().any(|m| m.body == body), "{name} reads `{body}` after the upgrade");
+            }
+            let st = s.state.lock().unwrap();
+            let shadow = st.shadow_trees.get(&cid).unwrap();
+            assert_eq!(shadow.checkpoint.as_ref().map(|ck| ck.state.epoch), Some(3), "{name} checkpointed past the pre-change epochs");
+            assert!(shadow.my_welcomes.is_empty(), "{name}: the pre-change Welcome was wiped");
+        }
+        for (name, s) in [("committer", &a2), ("member", &b2)] {
+            let leaves = s1_blob_bytes(&s.export_state());
+            assert!(!s1_blob_has(&leaves, &old_joiner_1), "{name}: the genesis joiner secret is gone from the blob");
+            assert!(!s1_blob_has(&leaves, &old_root), "{name}: no keying root in the blob");
+        }
+        // And a second relaunch, now from stage-1 blobs that still contain a pre-change commit.
+        let a3 = s1_relaunch(acct_a, dev_a, a2.export_state());
+        s1_reintroduce(&[&a3, &b2]);
+        assert_eq!(a3.mls_keying_status(cid.clone()).epoch, 6);
+        s1_update(&a3, &[&a3, &b2], &cid);
+    }
+
+    /// UPGRADE — the sleeper. A device whose leaf was assigned by a pre-change committer loses its
+    /// keying state after the upgrade; the upgraded committer can still re-Welcome it (the leaf
+    /// secret it has to deliver is the seed-derived one), and the sleeper re-enters at the live epoch.
+    #[test]
+    fn stage1_upgraded_committer_rewelcomes_a_pre_change_sleeper() {
+        let _clk = clock_guard();
+        let accts = [[1u8; 32], [2u8; 32], [3u8; 32]];
+        let devs = [[11u8; 32], [12u8; 32], [13u8; 32]];
+        let legacy = LegacyKeying::on();
+        let (insts, cid) = mls_capable_fleet(&accts, &devs, 0);
+        flip_and_join(&insts, &cid);
+        insts[0].post(cid.clone(), "history".into(), vec![], None, None, false, false, 1_000).unwrap();
+        sync_all(&[&insts[0], &insts[1], &insts[2]], &cid, 3);
+        let blobs: Vec<Vec<u8>> = insts.iter().enumerate().map(|(i, s)| s1_pre_change_blob(s.export_state(), i == 0)).collect();
+        drop(legacy);
+        let up: Vec<Arc<HavenSocial>> =
+            blobs.into_iter().enumerate().map(|(i, blob)| s1_relaunch(accts[i], devs[i], blob)).collect();
+        let (a, b, c) = (&up[0], &up[1], &up[2]);
+        s1_reintroduce(&[a, b, c]);
+        sync_all(&[a, b, c], &cid, 2);
+        // The epoch moves while C is away, and C's keying state lapses entirely.
+        s1_update(a, &[a, b], &cid);
+        {
+            let mut st = c.state.lock().unwrap();
+            let shadow = st.shadow_trees.get_mut(&cid).unwrap();
+            shadow.my_welcomes.clear();
+            shadow.checkpoint = None;
+        }
+        assert_ne!(c.mls_keying_status(cid.clone()).state, "live");
+        let c_dev = hex(&Identity::from_seed(&devs[2]).public().node_id_bytes());
+        assert!(a.mls_rewelcome(cid.clone(), c_dev), "the upgraded committer re-Welcomes a leaf it assigned before the change");
+        sync_all(&[a, b, c], &cid, 8);
+        assert_eq!(c.mls_keying_status(cid.clone()).state, "live");
+        assert_eq!(c.mls_keying_status(cid.clone()).epoch, 2);
+        assert!(c.feed(cid.clone(), 3_000, None).iter().any(|m| m.body == "history"), "the sleeper still has its history");
+        a.post(cid.clone(), "post-reentry".into(), vec![], None, None, false, false, 4_000).unwrap();
+        sync_all(&[a, b, c], &cid, 4);
+        assert!(c.feed(cid.clone(), 5_000, None).iter().any(|m| m.body == "post-reentry"));
+    }
+
+    /// THE FORK RULE (STAGE1-STORED-STATE.md (b)). A stale copy of the committer authors an Update
+    /// on an old tip, and its commit out-hashes the one the fleet took there.
+    ///  * While the fleet's branch is shorter than `KEYING_FINAL_DEPTH`, the hash rule decides, as
+    ///    it always has: a device that can still reach the fork point switches to the late commit.
+    ///  * Once the fleet's branch is that deep it is final: a device still holding the old state
+    ///    stays on it, and so do the checkpointed devices (which could not have followed anyway) —
+    ///    the two kinds of device agree, which is the property deletion needs.
+    #[test]
+    fn stage1_a_deep_branch_is_final_and_a_shallow_fork_still_resolves_by_hash() {
+        let _clk = clock_guard();
+        let (acct_a, acct_b, dev_a, dev_b) = ([71u8; 32], [72u8; 32], [81u8; 32], [82u8; 32]);
+        let (insts, cid) = mls_capable_fleet(&[acct_a, acct_b], &[dev_a, dev_b], 0);
+        let (a, b) = (&insts[0], &insts[1]);
+        flip_and_join(&insts, &cid);
+        s1_update(a, &[a, b], &cid); // epoch 2 — the fork point
+        let (stale_a, early_b) = (a.export_state(), b.export_state());
+        s1_update(a, &[a, b], &cid); // epoch 3 — the commit the fleet took
+        let commit_at = |s: &Arc<HavenSocial>, epoch: u64| -> Vec<([u8; 32], Vec<u8>)> {
+            s1_commits(s, &cid)
+                .into_iter()
+                .filter(|(_, b)| treekem::Commit::from_bytes(b).map(|c| c.epoch == epoch).unwrap_or(false))
+                .collect()
+        };
+        let real3 = commit_at(a, 3)[0].0;
+        // A stale relaunch of the committer authors its own epoch-3 Update on the epoch-2 tip. Repeat
+        // until one out-hashes the real one (each try is a coin flip; the inputs are random).
+        let rival = (0..64)
+            .find_map(|_| {
+                let stale = s1_relaunch(acct_a, dev_a, stale_a.clone());
+                stale.profile_seed_drop_version(b.my_bundle(), card(b, "stale"));
+                stale.state.lock().unwrap().circles.iter_mut().find(|c| c.id == cid).unwrap().rotated_at = 1;
+                let _ = stale.sync_envelopes(cid.clone());
+                commit_at(&stale, 3).into_iter().find(|(h, _)| *h > real3)
+            })
+            .expect("a late epoch-3 commit with the larger hash");
+        assert_ne!(rival.0, real3);
+
+        // A device that still holds its epoch-2 state (B, as saved before epoch 3) and now sees both.
+        let holder = s1_relaunch(acct_b, dev_b, early_b);
+        let replay_with = |chain: &std::collections::BTreeMap<[u8; 32], Vec<u8>>| -> KeyingState {
+            let mut st = holder.state.lock().unwrap();
+            let seed = st.device.as_ref().map(|d| d.secret_seed());
+            let shadow = st.shadow_trees.get_mut(&cid).unwrap();
+            assert!(shadow.checkpoint.is_none(), "the holder can still reach the fork point");
+            shadow.commits = chain.clone();
+            shadow.commits.insert(rival.0, rival.1.clone());
+            mls_replay_outcome_uncached(shadow, seed).0.unwrap()
+        };
+
+        // Shallow: the fleet's branch is 3 → 4 → 5 (depth 3 < 4). Hash decides, exactly as before.
+        s1_update(a, &[a, b], &cid);
+        s1_update(a, &[a, b], &cid);
+        let shallow = replay_with(&s1_commits(a, &cid));
+        assert_eq!((shallow.epoch, shallow.tip_hash), (3, rival.0), "a fork shallower than the window still resolves by hash");
+
+        // Deep: one more commit makes the fleet's branch 3 → 6 (depth 4). It is final.
+        s1_update(a, &[a, b], &cid);
+        let tip6 = s1_state(a, &cid).tip_hash;
+        let deep = replay_with(&s1_commits(a, &cid));
+        assert_eq!((deep.epoch, deep.tip_hash), (6, tip6), "a device that could follow the late commit stays on the final branch");
+
+        // The checkpointed fleet is handed the late commit: nothing moves, and content still flows.
+        for s in [a, b] {
+            let _ = s.receive(cid.clone(), tagged(TAG_MLS_COMMIT, &rival.1));
+            assert_eq!(s.mls_keying_status(cid.clone()).state, "live");
+            assert_eq!(s.mls_keying_status(cid.clone()).epoch, 6);
+            assert_eq!(s1_state(s, &cid).tip_hash, tip6);
+        }
+        a.post(cid.clone(), "after-late-fork".into(), vec![], None, None, false, false, 9_000).unwrap();
+        sync_all(&[a, b], &cid, 3);
+        assert!(b.feed(cid.clone(), 10_000, None).iter().any(|m| m.body == "after-late-fork"));
+        // And the committer authors exactly one commit per tip, however often it is asked.
+        let n = s1_commits(a, &cid).len();
+        sync_all(&[a, b], &cid, 3);
+        assert_eq!(s1_commits(a, &cid).len(), n, "no further commit was minted on an unchanged tip");
     }
 
     /// Measurement, not an assertion: the engine-lock hold of a bundle in a LIVE TreeKEM circle.

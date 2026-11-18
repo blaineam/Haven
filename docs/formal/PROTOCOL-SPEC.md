@@ -182,16 +182,36 @@ active attack these passive-secrecy lemmas do not cover), but reveals no epoch s
 
 Tamarin 1.12.0, `--auto-sources --prove`, bounded to one group with one genesis.
 
-| # | Property | As wired | Proposed fix |
-|---|---|---|---|
-| T1 | No epoch secret leaks with nothing compromised | verified | verified |
-| T2 | A removed member is locked out of the next epoch, even with all its keys and state | verified | verified |
-| T3 | Committer's stored state leaks → its Update heals | **falsified** | verified |
-| T4 | A member's stored state leaks → healing | **falsified** (the member never updates) | verified (the member's own Update) |
-| T5 | Forward secrecy vs a later committer seed compromise | **falsified** | verified |
-| T6 | Forward secrecy vs a later member seed compromise | **falsified** | verified |
-| T7 | Healing after a committer seed compromise | **falsified** | verified |
-| T8 | Forward secrecy vs a later member stored-state compromise | **falsified** (the kept Welcome) | verified |
+"Stage 1" is [`haven_treekem_stage1.spthy`](haven_treekem_stage1.spthy): the engine after
+§14 items 1–2 ([`STAGE1-STORED-STATE.md`](STAGE1-STORED-STATE.md)). It has two columns because
+stage 1 cannot change a genesis that already exists: "new circle" is a circle created under
+stage 1; "existing circle" (`-DLEGACY`) is one whose genesis predates it.
+
+| # | Property | As wired | Stage 1, new circle | Stage 1, existing circle | Proposed fix |
+|---|---|---|---|---|---|
+| T1 | No epoch secret leaks with nothing compromised | verified | verified | verified | verified |
+| T2 | A removed member is locked out of the next epoch, even with all its keys and state | verified | verified | verified | verified |
+| T3 | Committer's stored state leaks → its Update heals | **falsified** | verified | verified | verified |
+| T4 | A member's stored state leaks → healing | **falsified** (the member never updates) | **falsified** | **falsified** | verified (the member's own Update) |
+| T5 | Forward secrecy vs a later committer seed compromise | **falsified** | verified | **falsified** | verified |
+| T6 | Forward secrecy vs a later member seed compromise | **falsified** | **falsified** | **falsified** | verified |
+| T7 | Healing after a committer seed compromise | **falsified** | verified | **falsified** | verified |
+| T8 | Forward secrecy vs a later member stored-state compromise | **falsified** (the kept Welcome) | verified | verified | verified |
+| T9 | Forward secrecy vs a later committer stored-state compromise | not run | verified | verified | not run |
+
+Reading the stage-1 columns:
+
+* T3 holds because the stored state no longer contains the root, and the leaf secrets the
+  committer assigned are stored wrapped under a seed-derived key. It is a statement about a
+  stolen state blob *without* the seed; seed and state together still open everything.
+* T5 and T7 move only for circles created under stage 1. In an existing circle the genesis init
+  and every leaf assigned before the upgrade are still functions of the committer's seed, and a
+  later commit's path secret is wrapped to those leaves.
+* T8 and T9 are about epochs the checkpoint has passed. The model has two epochs; the engine's
+  checkpoint trails the tip by 3, so read "epoch 1" as "an epoch older than the retention window".
+* T4 and T6 are untouched: members still never update, and a Welcome is still wrapped to the
+  member's long-term device key.
+* T9 was added with stage 1 and was not run against the other two models.
 
 In the fixed model T5–T7 are one lemma (`T1_T5_T6_T7_no_secret_from_longterm_keys`): a long-term
 key alone reveals nothing, so there is no excuse clause for it.
@@ -205,19 +225,24 @@ not the wiring: the wired value is `H(root, epoch)`.
 What still holds as wired: confidentiality against anyone who never obtains a member device's
 seed or stored state (T1), and cryptographic removal (T2).
 
-## 14. Implementing the fix (plan, not started)
+## 14. Implementing the fix (plan; items 1–2 implemented, not released)
 
 Capability-gated like the `mls` marker (a `mls2` marker; a circle re-keys only when every device
 advertises it; reversible; legacy circles unchanged). The content path does not change — it is
 keyed by the 32-byte per-epoch sender keys wherever they come from — so no post is re-encrypted
 or lost, and nothing is user-visible.
 
-1. **Stored, checkpointed keying state.** Persist the live `KeyingState` (tree, own path
-   secrets, `init_secret`, transcript hash, tip) and advance a checkpoint once an epoch is past
-   the fork window; delete what the checkpoint supersedes. Stop replaying from genesis.
-   Removes: the persisted root, kept Welcomes, seed derivation. (F-a, part of F-c.)
-2. **Random secrets.** `init_0`, leaf and update secrets from `OsRng`; own commits are no longer
-   rebuilt from the seed, so their build results are stored until checkpointed. (F-a.)
+1. **Stored, checkpointed keying state.** *Implemented on the stage-1 branch
+   ([`STAGE1-STORED-STATE.md`](STAGE1-STORED-STATE.md)).* Persist a checkpoint of the
+   `KeyingState` (tree, own path secrets, `init_secret`, transcript hash, tip) once an epoch is
+   past the fork window; delete what the checkpoint supersedes. Stop replaying from genesis.
+   Removes: the persisted root, kept Welcomes, seed derivation. (F-a, part of F-c.) It needed one
+   change to fork selection — a branch 4 commits deep is final — because the walk rule below the
+   genesis was hash-only, and a device that has deleted old state cannot follow a late short
+   branch.
+2. **Random secrets.** *Implemented with item 1.* `init_0`, leaf and update secrets from `OsRng`;
+   own commits are no longer rebuilt from the seed, so their build inputs are stored until
+   checkpointed. (F-a.) Existing circles keep their seed-derived genesis until item 5.
 3. **Key packages.** A device publishes a signed (leaf public key, one-time init key); the
    committer Adds from it and Welcomes to the init key. (F-b, F-c.)
 4. **Member updates.** Receivers accept a path-only commit from any current member; every device

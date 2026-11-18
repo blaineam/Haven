@@ -63,6 +63,11 @@ const REENTRY_DOMAIN: &[u8] = b"haven-mls-reentry-v1";
 /// acts at once and normally gets there first.
 const REENTRY_WAIT_SECS: u64 = 60 * 60;
 const REENTRY_SPREAD_SECS: u64 = 6 * 60 * 60;
+/// A device seated under a key package it holds waits this long for the Welcome before it takes
+/// it for lost and asks to be seated again under a fresh package. A Welcome normally arrives in
+/// the bundle that carries its commit; one that never does (its author lost its state, a mailbox
+/// dropped it) would otherwise leave the device waiting for good, and the circle parked with it.
+const WELCOME_WAIT_SECS: u64 = 60 * 60;
 
 /// The weight of a chain of commits: `(authority, length)`, compared in that order.
 type Weight = (u32, u32);
@@ -153,6 +158,10 @@ pub(crate) struct V2State {
     leaf_at: u64,
     /// The last commits I authored, oldest first — see [`OwnUpdate`]. At most [`KEEP_OWN_KEYS`].
     own_keys: Vec<OwnUpdate>,
+    /// The agreed chain seats me under this leaf key — one of my own packages — and I cannot
+    /// derive it: (leaf key id, when I first saw that). I am waiting for the Welcome; see
+    /// [`WELCOME_WAIT_SECS`]. Persisted, so the wait survives a relaunch. Public.
+    seat_wait: Option<([u8; 32], u64)>,
     /// When I first saw each key package of another device (by hash of its bytes). Session only:
     /// after a load the clock starts again.
     kp_seen: HashMap<[u8; 32], u64>,
@@ -1110,11 +1119,12 @@ fn derives(cur: &Option<KeyingState>, tip: &[u8; 32]) -> bool {
 ///   * no genesis yet: yes (the genesis needs a package from every device);
 ///   * the agreed chain has no leaf for me, and did not Remove me: yes (an Add);
 ///   * it has a leaf for me whose key is one of my packages I can still open a Welcome for: no —
-///     that Welcome is on its way;
+///     that Welcome is on its way — until I have waited [`WELCOME_WAIT_SECS`] for it (`waited`),
+///     then yes: it is lost, and I ask again with a package the chain has not used;
 ///   * it has a leaf for me and I cannot derive the agreed tip: yes — I am on a branch that lost
 ///     (on weight, or on the hash at equal weight) below my checkpoint, or lost my state, and
 ///     re-enter with a fresh package (`Remove(old leaf) + Add`).
-fn wants_entry(shadow: &ShadowTree, me: &[u8; 32], cur: &Option<KeyingState>) -> bool {
+fn wants_entry(shadow: &ShadowTree, me: &[u8; 32], cur: &Option<KeyingState>, waited: bool) -> bool {
     let Some((tip, state)) = canonical(shadow) else { return true };
     match leaf_of_device(&state.tree, me) {
         None => !state.removed.contains(me),
@@ -1124,7 +1134,7 @@ fn wants_entry(shadow: &ShadowTree, me: &[u8; 32], cur: &Option<KeyingState>) ->
             }
             let key = leaf_key(leaf);
             if shadow.x.kp_secrets.iter().any(|e| e.leaf_key() == key) {
-                return false;
+                return waited;
             }
             match cur {
                 None => true,
@@ -1145,6 +1155,29 @@ fn wants_entry(shadow: &ShadowTree, me: &[u8; 32], cur: &Option<KeyingState>) ->
     }
 }
 
+/// Keep [`V2State::seat_wait`] current and say whether the Welcome for my seat is overdue: the
+/// agreed chain seats me under one of my own packages' keys, I cannot derive it, and that has
+/// been so for [`WELCOME_WAIT_SECS`].
+fn welcome_overdue(shadow: &mut ShadowTree, me: &[u8; 32], cur: &Option<KeyingState>) -> bool {
+    let waiting_on = canonical(shadow).and_then(|(tip, state)| {
+        let key = leaf_key(leaf_of_device(&state.tree, me)?.1);
+        (!derives(cur, &tip) && shadow.x.kp_secrets.iter().any(|e| e.leaf_key() == key)).then_some(key)
+    });
+    let Some(key) = waiting_on else {
+        shadow.x.seat_wait = None;
+        return false;
+    };
+    let now = now_secs();
+    match shadow.x.seat_wait {
+        // (A clock that went back restarts the wait rather than stretch it.)
+        Some((k, since)) if k == key && since <= now => now - since >= WELCOME_WAIT_SECS,
+        _ => {
+            shadow.x.seat_wait = Some((key, now));
+            false
+        }
+    }
+}
+
 /// The key package this device offers right now, if it wants a seat: its newest one the agreed
 /// chain has not used, else a freshly generated one. `None` when it has its seat.
 fn offer_key_package(st: &mut NetState, idx: usize) -> Option<Vec<u8>> {
@@ -1154,7 +1187,8 @@ fn offer_key_package(st: &mut NetState, idx: usize) -> Option<Vec<u8>> {
     let seed = st.device.as_ref()?.secret_seed();
     let shadow = tree_mut(st, &circle_id);
     let cur = mls_replay(shadow, None);
-    if !wants_entry(shadow, &me, &cur) {
+    let waited = welcome_overdue(shadow, &me, &cur);
+    if !wants_entry(shadow, &me, &cur, waited) {
         return None;
     }
     let used: HashSet<[u8; 32]> = canonical(shadow).map(|(_, s)| s.added).unwrap_or_default();
@@ -1912,7 +1946,8 @@ fn put_lp(v: &mut Vec<u8>, b: &[u8]) {
 ///  ‖ u32 n ‖ (kp_id 16 ‖ leaf 32 ‖ init_seed 32 ‖ lp(package))×n — my own, with their secrets
 ///  ‖ u32 n ‖ (device 32 ‖ u32 m ‖ commit 32 × m)×n        — join acks
 ///  ‖ leaf_at(8) ‖ u32 n ‖ (leaf_key 32 ‖ commit 32 ‖ epoch 8 ‖ at 8)×n — my seat's age, my commits
-///  ‖ u32 n ‖ commit 32 × n                                 — void commits`
+///  ‖ u32 n ‖ commit 32 × n                                 — void commits
+///  ‖ opt(leaf_key 32 ‖ since 8)                            — the Welcome I am waiting for`
 ///
 /// The last two lines are the member-update tail. Version 1 has none; version 2 has
 /// `opt(one commit)` where version 3 has the list. Both still decode.
@@ -1965,6 +2000,14 @@ pub(crate) fn encode_state(t: &ShadowTree) -> Vec<u8> {
     for h in &x.void {
         v.extend_from_slice(h);
     }
+    match &x.seat_wait {
+        Some((key, since)) => {
+            v.push(1);
+            v.extend_from_slice(key);
+            v.extend_from_slice(&since.to_le_bytes());
+        }
+        None => v.push(0),
+    }
     v
 }
 
@@ -1979,6 +2022,7 @@ struct DecodedState {
     leaf_at: u64,
     own_keys: Vec<OwnUpdate>,
     void: Vec<[u8; 32]>,
+    seat_wait: Option<([u8; 32], u64)>,
 }
 
 fn decode_state(b: &[u8]) -> Option<DecodedState> {
@@ -2055,6 +2099,8 @@ fn decode_state(b: &[u8]) -> Option<DecodedState> {
             void.push(r.arr::<32>()?);
         }
     }
+    // (Absent in a version-3 state written before the wait was recorded: nothing follows.)
+    let seat_wait = if version >= STATE_V3 && !r.0.is_empty() && r.flag()? { Some((r.arr()?, r.u64()?)) } else { None };
     r.0.is_empty().then_some(DecodedState {
         retired_v1,
         entered_kp,
@@ -2065,6 +2111,7 @@ fn decode_state(b: &[u8]) -> Option<DecodedState> {
         leaf_at,
         own_keys,
         void,
+        seat_wait,
     })
 }
 
@@ -2083,6 +2130,9 @@ pub(crate) fn restore_state(t: &mut ShadowTree, bytes: &[u8]) {
         t.x.own_keys = d.own_keys;
         let extra = t.x.own_keys.len().saturating_sub(KEEP_OWN_KEYS);
         t.x.own_keys.drain(..extra);
+    }
+    if t.x.seat_wait.is_none() {
+        t.x.seat_wait = d.seat_wait;
     }
     // Packages restored from disk start waiting now.
     let now = now_secs();
@@ -2132,6 +2182,7 @@ pub(crate) fn digest_state(t: &ShadowTree, h: &mut blake3::Hasher) {
     h.update(&t.x.leaf_at.to_le_bytes());
     h.update(&t.x.own_keys.last().map(|u| u.commit).unwrap_or([0u8; 32]));
     h.update(&(t.x.void.len() as u64).to_le_bytes());
+    h.update(&t.x.seat_wait.map(|(_, since)| since).unwrap_or(0).to_le_bytes());
 }
 
 /// Test access to a v2 tree's private state (`net_tests/keying_v2_tests.rs`).
@@ -2211,6 +2262,12 @@ impl ShadowTree {
         v
     }
     /// Move every "first seen" stamp of other devices' key packages back by `secs`.
+    /// Make the wait for my Welcome `secs` older (the clock does not move).
+    pub(crate) fn x_age_seat_wait(&mut self, secs: u64) {
+        if let Some((_, since)) = self.x.seat_wait.as_mut() {
+            *since = since.saturating_sub(secs);
+        }
+    }
     pub(crate) fn x_age_packages(&mut self, secs: u64) {
         for at in self.x.kp_seen.values_mut() {
             *at = at.saturating_sub(secs);

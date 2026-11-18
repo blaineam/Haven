@@ -508,6 +508,56 @@ fn key_packages_are_verified_and_used_once() {
     assert!(in_tree(&a.s, &b_first_kp));
 }
 
+/// A LOST WELCOME. A device that lost its place asks, and is seated again under its new package —
+/// but the Welcome never reaches it. It is on the agreed chain under a key it holds, so it waits.
+/// After an hour it takes the Welcome for lost and asks again with ANOTHER package; that
+/// Welcome arrives, and the circle is keyed by the tree again. The first Welcome's bytes are
+/// never delivered at any point.
+#[test]
+fn a_device_whose_welcome_was_lost_asks_again_and_is_seated() {
+    let _clk = clock_guard();
+    let f = live_v2_fleet(&[(A, &[A1]), (B, &[B1]), (C, &[C1])]);
+    let ci = committer_index(&f);
+    let bi = (ci + 1) % 3;
+    let b = &f.devs[bi];
+    {
+        let mut st = b.s.state.lock().unwrap();
+        let t = st.v2_trees.get_mut(&f.cid).unwrap();
+        t.my_welcomes.clear();
+        t.checkpoint = None;
+        t.x_forget_packages();
+    }
+    let offered = |s: &HavenSocial| -> Option<Vec<u8>> {
+        s.sync_envelopes(f.cid.clone()).into_iter().find(|e| e.first() == Some(&TAG_MLS2_KEYPACKAGE))
+    };
+    let first = offered(&b.s).expect("B asks with a fresh package");
+    // Every Welcome addressed to anyone in this phase is lost on the way to B.
+    let lost: std::cell::RefCell<HashSet<Vec<u8>>> = Default::default();
+    deliver(&f, 4, &|_, to, e| {
+        if to == bi && e.first() == Some(&TAG_MLS2_WELCOME) {
+            lost.borrow_mut().insert(e.to_vec());
+            return true;
+        }
+        false
+    });
+    assert!(!lost.borrow().is_empty(), "a Welcome was sealed for B");
+    assert!(v2_state(&b.s, &f.cid).is_none_or(|k| k.sender_root.is_none()), "B has no Welcome: it derives nothing");
+    assert!(offered(&b.s).is_none(), "B is seated under a key it holds: it waits for the Welcome");
+
+    // An hour on.
+    b.s.state.lock().unwrap().v2_trees.get_mut(&f.cid).unwrap().x_age_seat_wait(60 * 60);
+    let second = offered(&b.s).expect("B takes the Welcome for lost and asks again");
+    assert_ne!(second, first, "with a package the chain has not used");
+    deliver(&f, 6, &|_, _, e| lost.borrow().contains(e));
+    for (i, d) in f.devs.iter().enumerate() {
+        assert_eq!(lane(&d.s, &f.cid), 2, "device {i} is keyed by the v2 tree again");
+        assert!(!offers_key_package(&d.s, &f.cid), "device {i} is not asking any more");
+    }
+    post(&f.devs[ci].s, &f.cid, "after-the-lost-welcome", 7_000);
+    deliver(&f, 2, &|_, _, e| lost.borrow().contains(e));
+    assert!(reads(&b.s, &f.cid, "after-the-lost-welcome"));
+}
+
 /// RE-ENTRY. A device that lost its place in the tree (here: its whole v2 state) gets back in
 /// with a FRESH key package — `Remove(old leaf) + Add(new package)` in one commit and a v2
 /// Welcome — and what it held before (the old leaf secret, the old epoch's secrets) derives

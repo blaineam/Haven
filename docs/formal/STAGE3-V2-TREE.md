@@ -227,9 +227,10 @@ Still held, or not addressed:
   is not waited for by the presence gate, but if the circle parks for another reason the KeyCommit
   lane seals to that member on any device that has not dropped it from the circle. Same as the
   v1 tree today.
-* **A lost Welcome is not healed.** The committer re-emits the same sealed bytes in every bundle;
-  if those never arrive (the committer lost its state, a mailbox dropped them) the joiner waits
-  — it is seated on the agreed chain with a key it holds, so it does not ask for re-entry.
+* *(Closed in stage 4.)* A lost Welcome used not to be healed: the joiner, seated on the agreed
+  chain under a key it holds, waited for good. It now waits one hour (`WELCOME_WAIT_SECS`, the
+  wait is persisted) and then asks again with a package the chain has not used
+  (`a_device_whose_welcome_was_lost_asks_again_and_is_seated`).
 * **Stranded-device detection needs the genesis chain.** A device that entered mid-chain and does
   not hold the commits below its entry point cannot compute the agreed tip and never concludes it
   is stranded. And a device whose own branch is at least as long as the agreed one waits (the

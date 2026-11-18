@@ -367,6 +367,21 @@ its Remove; a seated member's eight commits against the circle's five; a partiti
 plain member's re-entry of the committer's devices; an equal-weight fork decided by hash; a post
 sealed on the other branch of a fork.
 
+**Limits that remain, by design or deferred** (none weakens the secrecy results of §13):
+
+- Two or more colluding member accounts with modified clients can alternate commits and
+  out-lengthen the circle's chain; every honest device then re-enters. This is denial of service
+  by insiders. An admin Remove of those members outweighs any length.
+- A member can send one device a path ciphertext that does not open. That device re-enters; the
+  others cannot see it happened.
+- A stolen device signing key lets its holder publish a key package and be seated until the
+  device is revoked in its account's roster. The secrecy results are stated for a passive thief
+  of stored state; this is impersonation with a long-term key, as in §15.
+- The commit set is not pruned. It grows by one commit per device per week.
+- The roster tie (§17) is handled for contacts' rosters, not for an account's own roster as seen
+  by its seedless devices.
+- Returning a migrated circle to a build older than this one is not supported.
+
 **Content keys across a fork.** A content key is filed under the tree's epoch *number*, which
 both branches of a fork share. A device that moves to the other branch replaces the key (and
 drops the DM ratchets derived from the old one). An envelope that does not open under the key a
@@ -451,6 +466,8 @@ The v2 join ack names the entry commit, so a re-entered device acks again.
   entering through a member's commit waits until it holds the commit's parent tree; it does not
   take a member's word for what was removed.
 - **Remove** is unchanged: admin-authorized, or a member removing only its own leaves.
+- A device seated under a package it holds whose Welcome has not arrived after one hour takes it
+  for lost and offers another package; it is then re-entered like any other device.
 - A device entering by a Welcome opens, from the public entry commit, the path secrets of the
   nodes its path shares with the committer's (`entry_path_secrets`). Without them it could not
   follow the next Update from a third device.

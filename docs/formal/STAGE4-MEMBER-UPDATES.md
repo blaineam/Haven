@@ -46,8 +46,9 @@ A device re-keys its own leaf when all of these hold:
 * its own tip is the agreed tip (§6);
 * its **own** window has elapsed (below);
 * its tip has no child from its own leaf (`keying_already_authored_on`);
-* its tip does not end a run of three chained commits of its own (`MAX_OWN_RUN`): a device that is
-  the only one committing stops after three until another device's commit lands.
+* its tip does not end a run of three chained commits of its own account, from any of its
+  devices (`MAX_OWN_RUN`; for the account that built the genesis, of this device): an account
+  that is the only one committing stops after three until another account's commit lands.
 
 **The window is per device and is counted from the key at my leaf on my tip.** The v2 state keeps
 `leaf_at` (when the leaf key of my current seat entered the tree) and `own_keys` (my last eight
@@ -113,7 +114,10 @@ The v2 tree now follows the **heaviest chain**. The weight of a chain is
 
     (authority, length)   compared in that order
 
-* `length` — the number of commits on it;
+* `length` — the number of commits on it, except that **one account's commits in a row count
+  only up to three** (`MAX_OWN_RUN`; any of its devices; authority commits and the commits of
+  the account that built the genesis always count). A commit past the cap is valid and applied
+  like any other; it adds nothing to its branch's length;
 * `authority` — the number of commits on it that `Remove` a leaf which is not the author's own,
   whose device the same commit does not Add back, and that the author could only remove with
   authority: a leaf of **another account**, or any leaf when the author is of the account that
@@ -134,6 +138,16 @@ Why this shape:
   stored). A member that is being removed can author Updates, leaves of its own devices and
   re-entries — none of which count — so it cannot outweigh the branch that contains its Remove,
   from any fork point at or below it, with any number of commits or devices.
+
+* Length costs an author nothing, so it is capped per account. From any fork point one account
+  can add at most three to a branch's length. A branch that wins a fork with three commits
+  leaves from a point at most three behind the tip it beats, and every device's checkpoint is
+  that far behind its own tip — so a fork one account can win is one every device can still
+  follow. Without the cap a member with a modified client could author, from any old fork point,
+  a chain longer than the circle's and leave every device unable to follow
+  (`a_member_cannot_strand_the_circle_by_out_lengthening_its_chain`; with the cap removed the
+  honest devices ask to re-enter). The honest rule in §2 matches: a device does not author on a
+  tip that ends three commits in a row by its own account (the creator account: by this device).
 
 There is no depth at which a branch becomes final. The checkpoint keeps its timing (three commits
 behind the walk's tip); it no longer means "final", it means "below here I cannot switch any more;
@@ -251,7 +265,7 @@ stands for one update period. A run passes when every device ends deriving the s
 same epoch secret, the v2 tree keys the circle on every device, a post made at the end opens on
 every device, and nothing more is authored. Re-entries are allowed and counted (distinct key
 packages offered after the fleet was live). Posts made on the way that do not open at the end are
-counted; the ignored soak fails on any.
+counted, and any fails the run.
 
 Under the first version's rule (depth-capped finality; five devices): at a lag of two steps and of
 one round every run converged with no re-entry (losing branches up to 3 deep); at a lag of two
@@ -259,24 +273,35 @@ rounds 4 of 7 runs did not converge.
 
 Under the rule above, final code:
 
-| Max delay | Epochs | Schedules | Converged | Re-entries per schedule |
-|---|---|---|---|---|
-| 2 steps | ≥ 10 | 10 | 10 | 0 2 0 0 0 0 0 0 0 0 |
-| 3 steps (one round) | ≥ 10 | 10 | 10 | 1 0 2 0 2 0 0 0 0 0 |
-| 6 steps (two rounds) | ≥ 10 | 10 | 10 | 1 3 1 0 2 3 2 2 2 0 |
-| 9 steps (three rounds) | ≥ 20 | 16 | 16 | 4 5 0 3 2 2 2 2 3 3 4 3 6 3 1 2 |
+| Max delay | Epochs | Schedules | Converged | Re-entries per schedule | Posts lost |
+|---|---|---|---|---|---|
+| 2 steps | ≥ 10 | 10 | 10 | 0 0 0 0 0 0 0 2 0 0 | 0 |
+| 3 steps (one round) | ≥ 10 | 10 | 10 | 0 0 2 1 2 0 0 2 0 0 | 0 |
+| 6 steps (two rounds) | ≥ 10 | 10 | 10 | 2 1 2 2 2 0 0 2 1 3 | 0 |
+| 9 steps (three rounds, ignored soak) | ≥ 20 | 16 | 16 | 1 4 3 0 3 4 0 5 4 0 4 4 4 2 3 3 | 0 |
+
+(Final code: with the per-account length cap of §5 and the retry of envelopes sealed on another
+branch, below. A run fails on any post that does not open at the end.)
 
 On the way there, runs at 6 and 9 steps failed (1 or 2 schedules in 10 to 28), each time for one
 of the three defects listed in §7. With the first two fixed, 28 of 28 schedules at 6 steps
 converged; the table is with all three.
 
-**A post made on the way was lost once.** In a further 56 schedules at 3 steps (run to chase an
-intermittent failure of the ten-schedule test, whose own output was not captured and may have been
-the same thing) every one converged, and in one of them a post a device made in round 5 did not
-open on one other device at the end, although both ended on the same tip with the same epoch
-secret and the author re-seals its history in every full bundle. Not diagnosed. The runs in the
-table had none. (The first version's runs checked the same thing and had none in 13.) It is counted
-by the default tests and fails the soak.
+**A post made on the way was lost once, and why.** In 56 further schedules at 3 steps, run
+before the table above, one post made in round 5 did not open on one other device at the end,
+although both ended on the same tip with the same epoch secret. Cause: a content key is filed
+under the tree epoch *number*, which both branches of a fork share. The envelope reached the
+reader while it stood on the other branch, holding another key under that number; the open
+failed and the envelope was dropped. When the reader moved to the author's branch the author's
+re-seal was the same bytes (the seal is deterministic), and a mailbox serves the same bytes
+once. Fixed in `receive_epoch_event`: an envelope that does not open under the key held for a
+tree epoch is parked in the retry buffer like one whose key is not held yet; every tree wire
+that lands retries the buffer, and the entry ages out with its epoch. In the same change, a
+tree-derived content key that replaces a different key under the same number drops the DM
+ratchets derived from the old one (`Circle::set_tree_key`). Test:
+`a_post_sealed_on_the_other_branch_of_a_fork_opens_once_the_reader_moves_there` (fails with the
+parking removed). Every fork-load run, default and soak, now fails on any post that does not
+open at the end.
 
 Commit hashes are random, so a seed fixes the schedule but not which branch wins; the same seed
 does not reproduce the same run.
@@ -295,19 +320,15 @@ does not reproduce the same run.
 
 **Risks**
 
-0. **A post can stay unreadable on one device after a fork** (§11): seen once in 56 schedules at a
-   lag of one period, cause unknown. A lost post is user-visible; this needs finding before
-   release. One thing to look at: the content epoch number is the tree epoch, which two branches
-   share, and an event's seal is deterministic — so an envelope a device could not open while it
-   held the other branch's key for that number is, byte for byte, the envelope it is offered again.
-1. **A member can still force a fleet-wide re-entry.** Length is the second term of the weight and
-   costs a member nothing: from any old fork point a modified client can author a chain longer
-   than the honest one. Every honest device then sees an agreed chain it cannot derive and asks to
-   re-enter — onto the member's chain, if the member seats them, or nowhere if it does not, and
-   under §6 they author nothing meanwhile. What the rule gives is a way out: an admin `Remove` of
-   the member, authored from the honest branch (the exception in §6), outweighs any such chain.
-   The depth-capped rule had the same exposure at even odds; this one is certain but recoverable
-   by the admin. Not closed, and the recovery is a user-visible action.
+0. *(Closed.)* A post could stay unreadable on one device after a fork — diagnosed and fixed, §11.
+1. **Two colluding member accounts can still force a fleet-wide re-entry.** One account cannot:
+   its commits in a row add at most three to a branch's length (§5). Two accounts with modified
+   clients can alternate and build a chain of any counted length from an old fork point; every
+   honest device then asks to re-enter and authors nothing meanwhile. The way out is an admin
+   `Remove` of those members from the honest branch (the exception in §6), which outweighs any
+   length — a user-visible action. A ratcheted DM that arrives under the other branch's key is
+   also not parked (its per-message key is consumed); the plain re-seal in the next full bundle
+   recovers it.
 2. **Removing a member one device at a time** leaves it a device to author with until the last is
    gone. `mls_remove_member` removes all of an account's leaves in one commit.
 3. **A stale unused package looks like a request.** A device seated under one key that once
@@ -344,6 +365,8 @@ was made, the test failed at the assertion it is about, and the change was rever
 | `a_removed_member_cannot_out_build_its_remove` | §5: six Updates by two devices in turn on the Remove's parent and on the parent's parent | yes: authority term dropped → fails |
 | `the_longer_side_wins_and_a_plain_member_reenters_the_committers` | §5, §7: 5 against 6 commits, both sides checkpointed past the fork; the first re-entry is authored by a plain member (a creator device it seats may then seat its sibling) | yes: member re-entry authoring disabled → the creator's devices stay out |
 | `an_equal_weight_fork_is_decided_by_hash_and_the_losing_side_reenters` | §5, §6: 4 against 4 | yes: the "same genesis, other tip" clause removed → the losing side never asks |
+| `a_member_cannot_strand_the_circle_by_out_lengthening_its_chain` | §5: eight commits by one account against the circle's five | yes: the length cap removed → the honest devices ask to re-enter |
+| `a_post_sealed_on_the_other_branch_of_a_fork_opens_once_the_reader_moves_there` | §11: the lost post | yes: the parking removed → the post never opens |
 | `a_member_reentry_is_accepted_only_for_the_device_that_asked` | §7: refused for another device's leaf, an Add alone, a Remove alone, a package used on the chain, an unauthorized device; accepted otherwise; weight `(0, 1)` | accepted control |
 | `a_device_that_entered_by_a_welcome_follows_a_third_devices_update` | §7, first defect | yes: `entry_path_secrets` disabled → the re-entered device does not follow |
 | `a_commit_with_a_bad_confirmation_mac_is_void_and_strands_nobody` | §8 | yes for the rule (first version); **no** for persisting the set |

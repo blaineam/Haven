@@ -2091,6 +2091,23 @@ impl Circle {
         }
         higher && self.mls_live_epoch.map(epoch_lane).is_some_and(|l| l > lane)
     }
+    /// File a TREE-derived content key: `author`'s (an account id; `mine` = my own account) at
+    /// `epoch`. A tree epoch NUMBER is shared by every branch of a fork, so the key under it can
+    /// change when this device moves to another branch. The DM ratchets were derived from the key
+    /// that was there: one that outlived it would seal my next DM under a key no one on the new
+    /// branch holds, and never open a peer's. Drop them with the key they came from.
+    fn set_tree_key(&mut self, author: &[u8; 32], mine: bool, epoch: u64, key: [u8; 32]) {
+        if mine {
+            if self.my_epoch_keys.insert(epoch, key).is_some_and(|old| old != key) {
+                self.mls_ratchet.send.remove(&epoch);
+            }
+        } else {
+            let slot = (hex(author), epoch);
+            if self.peer_epoch_keys.insert(slot.clone(), key).is_some_and(|old| old != key) {
+                self.mls_ratchet.recv.remove(&slot);
+            }
+        }
+    }
     /// The epoch key to open an event authored by `author_hex` at `epoch` — mine or a stored peer's.
     fn key_for(&self, me_hex: &str, author_hex: &str, epoch: u64) -> Option<[u8; 32]> {
         if author_hex == me_hex {
@@ -5068,11 +5085,7 @@ fn mls_refresh_keying(st: &mut NetState, idx: usize) -> Option<u64> {
     // holds the same `sender_root`, so every member computes the identical key for each account.
     for acct in tree_leaf_accounts(&cur.tree) {
         let key = treekem::sender_key(&sender_root, &acct, &gid, cur.epoch);
-        if acct == me_acct {
-            st.circles[idx].my_epoch_keys.insert(content_epoch, key);
-        } else {
-            st.circles[idx].peer_epoch_keys.insert((hex(&acct), content_epoch), key);
-        }
+        st.circles[idx].set_tree_key(&acct, acct == me_acct, content_epoch, key);
     }
     st.circles[idx].mls_live_epoch = Some(content_epoch);
     // The content keys age out on the same window as the tree state (§6.2 "sender_key … same
@@ -5436,7 +5449,19 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8], pre: Option<P
                 .find_map(|k| open_epoch_event_memo(&sender, k, &parsed, expected_author.as_deref()).ok())
             {
                 Some(e) => e,
-                None => return Ok(false),
+                None => {
+                    // On a tree lane the key I hold under this epoch NUMBER may be another
+                    // branch's: a fork gives two branches the same number and different keys. If I
+                    // then move to the author's branch the envelope would open — but it is not
+                    // offered again (the mailbox serves identical bytes once, and a re-seal under
+                    // the same key is identical bytes). So keep it, like one whose key I do not
+                    // hold yet: every tree wire that lands retries the buffer, and it ages out
+                    // with its epoch (`drain_pending`).
+                    if epoch_lane(env.epoch) != 0 {
+                        park_pending(&mut st.circles[idx], body, Some(parsed.clone()));
+                    }
+                    return Ok(false);
+                }
             }
         }
     };

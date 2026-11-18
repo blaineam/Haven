@@ -246,7 +246,7 @@ not the wiring: the wired value is `H(root, epoch)`.
 What still holds as wired: confidentiality against anyone who never obtains a member device's
 seed or stored state (T1), and cryptographic removal (T2).
 
-## 14. Implementing the fix (items 1–3 and 5 implemented, not released)
+## 14. Implementing the fix (items 1–5 implemented, not released)
 
 Capability-gated like the `mls` marker (profile value `ml: 2`; a circle re-keys only when every device
 advertises it; reversible; legacy circles unchanged). The content path does not change — it is
@@ -266,9 +266,11 @@ or lost, and nothing is user-visible.
    checkpointed. (F-a.) Existing circles keep their seed-derived genesis until item 5.
 3. **Key packages.** *Implemented ([`STAGE3-V2-TREE.md`](STAGE3-V2-TREE.md)).* A device publishes a signed (leaf public key, one-time init key); the
    committer Adds from it and Welcomes to the init key. (F-b, F-c.)
-4. **Member updates.** Receivers accept a path-only commit from any current member; every device
-   runs the weekly Update. More concurrent commits means more forks, so the fork rule
-   (`TREEKEM-DESIGN.md` §5) needs re-testing under that load before this stage ships. (F-d.)
+4. **Member updates.** *Implemented ([`STAGE4-MEMBER-UPDATES.md`](STAGE4-MEMBER-UPDATES.md)).*
+   Receivers accept a path-only commit from any current member; every device runs the weekly
+   Update. More concurrent commits means more forks, and under that load the stage-1 fork rule
+   (a branch 4 commits deep is final) left devices stranded, so the v2 tree has its own fork
+   rule (§15). (F-d.)
 5. **Migration.** *Implemented with item 3 (§16.5).* When every member is `ml: 2` and every device
    has published a key package, the creator issues a v2 genesis with random secrets; devices drop
    the v1 tree state at the flip.
@@ -298,8 +300,9 @@ What this fixes as rules for the implementation:
 
 - **Forward secrecy is delayed by the window, not lost.** Until a device checkpoints, a leak of
   its state exposes the epoch it is leaving and every branch it holds. So the window must be
-  bounded: checkpoint when the next epoch has a child the device has applied, or after a fixed
-  age, whichever comes first. FK2 is the guarantee from that point on.
+  bounded. As built, a device checkpoints three epochs behind its tip (`KEYING_FINAL_DEPTH`):
+  the window is counted in epochs, not in time, and every device re-keys its own leaf weekly, so
+  in a circle with any activity it is days. FK2 is the guarantee from that point on.
 - **A healing Update only counts once it is on the adopted chain** (FK4). A device whose Update
   lost a fork must re-issue it at its next bundle (FK5). The cadence code has to track "my last
   Update is an ancestor of my tip", not "I sent an Update this week".
@@ -311,11 +314,64 @@ What this fixes as rules for the implementation:
   which these secrecy properties do not cover; §16.2 binds a Welcome to a public commit so
   nothing short of that key suffices.
 
-Not modelled here: *which* branch wins. Agreement is a property of a pure function of the commits
-a device has seen (longest chain, then larger hash) and is exercised by the convergence
-simulation in `core/haven-p2p/src/treekem.rs` (random commits by any member, partitions,
-redelivery, forced forks). A device that checkpointed a branch that later loses to a longer chain
-cannot switch; it re-enters with a fresh key package (§16.3).
+### 15.1 Which branch wins (v2 tree)
+
+Not modelled in Tamarin: agreement is a property of a pure function of the public commits a
+device holds, and is exercised by tests on the real engine (below). The v1 tree keeps the
+stage-1 rule. The v2 rule (`keying_v2::best_child`, `chain_index`):
+
+- Every chain of commits has a **weight** `(authority, length)`, compared in that order.
+  *Authority* is the number of commits on it that Remove a leaf other than the author's own
+  without Adding the same device back, and that only an admin could author. *Length* is the
+  number of commits on it, except that **one account's commits in a row count only up to three**
+  (`MAX_OWN_RUN`, any of its devices; the account that built the genesis is exempt).
+- At a fork a device follows the child with the heaviest chain under it; on equal weight, the
+  larger commit hash. There is no depth at which a branch becomes final.
+- A device **authors nothing on a tip that is not the agreed one** (exception: an admin's plain
+  Remove). A device that cannot derive the agreed tip, because the chain left from a point below
+  its checkpoint, asks to **re-enter** (§16.3).
+
+Why this converges where the stage-1 rule did not:
+
+- *The agreed tip's weight only rises.* Commits are only ever added, a weight is a maximum over
+  chains, and honest devices extend only the agreed tip. So a branch that has lost never wins
+  again by honest action, and the device that authored the agreed tip never left it: there is
+  always a device holding the state from which a stranded device can be re-entered.
+- *A removed member cannot out-build its Remove.* The Remove is an authority commit; the member
+  can author only path-only commits and re-entries, which carry none.
+- *A seated member cannot strand the circle by out-lengthening it.* From any fork point one
+  account can add at most three to a branch's length. A branch that wins a fork with three
+  commits leaves from a point no further than three behind the tip it beats, and every device's
+  checkpoint is that far behind its own tip: a fork one account can win is a fork every device
+  can still follow. Two colluding member accounts can alternate and are not bounded by this; the
+  recovery is an admin Remove, which outweighs any length.
+
+Test evidence (`core/haven-ffi/src/net_tests/keying_v2_tests.rs`; four devices of three
+accounts, every device re-keying, delivery delayed, reordered and duplicated; a run passes only
+if every device ends on one tip with one epoch secret and **every** post made on the way opens
+on every device):
+
+| Max delay | Epochs | Schedules | Converged | Re-entries per schedule | Posts lost |
+|---|---|---|---|---|---|
+| 2 steps | ≥ 10 | 10 | 10 | 0 0 0 0 0 0 0 2 0 0 | 0 |
+| 3 steps (one round) | ≥ 10 | 10 | 10 | 0 0 2 1 2 0 0 2 0 0 | 0 |
+| 6 steps (two rounds) | ≥ 10 | 10 | 10 | 2 1 2 2 2 0 0 2 1 3 | 0 |
+| 9 steps (three rounds, ignored soak) | ≥ 20 | 16 | 16 | 1 4 3 0 3 4 0 5 4 0 4 4 4 2 3 3 | 0 |
+
+A round is three delivery steps and stands for one update period. Under the stage-1 rule 4 of 7
+runs at six steps did not converge. A re-entry is a device that could not follow the agreed
+chain and was seated again under a fresh key; it is automatic and not user-visible.
+
+Named cases, each with a mutation that makes it fail: a removed member's twelve commits against
+its Remove; a seated member's eight commits against the circle's five; a partition healed by a
+plain member's re-entry of the committer's devices; an equal-weight fork decided by hash; a post
+sealed on the other branch of a fork.
+
+**Content keys across a fork.** A content key is filed under the tree's epoch *number*, which
+both branches of a fork share. A device that moves to the other branch replaces the key (and
+drops the DM ratchets derived from the old one). An envelope that does not open under the key a
+device holds for a tree epoch is kept in the retry buffer, not dropped — the mailbox serves the
+same bytes once — and is retried whenever a tree wire lands; it ages out with its epoch.
 
 ## 16. Version 2 of the tree: wire formats and rules (stages 3–5)
 
@@ -385,20 +441,42 @@ The v2 join ack names the entry commit, so a re-entered device acks again.
   or asleep past retention) is a `Remove(old leaf) + Add(new key package)` in one commit — there
   is no separate "re-Welcome" that re-delivers an old leaf secret, because nobody but the device
   ever had it.
+- **Re-entry may be authored by any current member**, not only an admin: a commit of k pairs
+  `Remove(L) + Add(package)` where each package is signed by the same device and account that
+  sits at `L`, `L` is never the author's own leaf, and the usual Add checks hold (device
+  authorized in the roster, package used once on this chain). Membership does not change, and
+  the device comes back under a key only it holds. The committer does it at once; any other
+  device does it at once when the device asking is a committer's, and otherwise after one hour
+  plus up to six (per device and package), so the committer normally gets there first. A device
+  entering through a member's commit waits until it holds the commit's parent tree; it does not
+  take a member's word for what was removed.
 - **Remove** is unchanged: admin-authorized, or a member removing only its own leaves.
+- A device entering by a Welcome opens, from the public entry commit, the path secrets of the
+  nodes its path shares with the committer's (`entry_path_secrets`). Without them it could not
+  follow the next Update from a third device.
 
 ### 16.4 Member updates (F-d)
 
 A commit with **no proposals** and an UpdatePath is valid from **any current leaf** when:
 
 1. the UpdatePath leaf's credential names the same device as the sender's current leaf;
-2. that device is authorized in its account's verified roster;
-3. the leaf binding and the commit signature verify under that device (`verify_leaf`).
+2. that device is **listed** in its account's verified roster, authorized or revoked;
+3. the leaf binding and the commit signature verify under that device (`verify_leaf`);
+4. the new leaf key differs from the one it replaces.
+
+Rule 2 is "listed", not "authorized now", so that whether an Update is valid does not depend on
+when a receiver learned of a revocation: a device that learned it first would refuse a commit
+the rest of the circle built on. A revoked device is cut out by the Remove that follows, which
+no number of Updates outweighs (§15.1).
 
 Cadence: each device updates its own leaf at the weekly full-bundle chokepoint, offset by a
-per-device jitter so devices do not collide by construction, and **re-issues** at its next bundle
-whenever its last Update is not on the chain it has adopted (§15, FK4/FK5). The update's leaf
-secret and entropy are random, stored with the pending commit, and dropped at the checkpoint.
+per-device jitter so devices do not collide by construction. The week is counted from when **the
+key at the device's leaf on its adopted tip** was installed, so an Update that lost a fork is
+re-issued at the next bundle (§15, FK4/FK5) and a commit that lost for another reason does not
+trigger one. A device does not author on a tip that ends three commits in a row by its own
+account. The update's leaf secret and entropy are random, stored with the pending commit, and
+dropped at the checkpoint. A commit whose confirmation MAC fails for a device that opened its
+path secret is void for every device and is never selected by the fork rule.
 
 ### 16.5 Migration (no user-visible step)
 
@@ -445,17 +523,19 @@ is advisory, because that key signs rosters. Only seedless devices can be crypto
 revoked. The primary (and any device restored from a backup of the account seed) is outside that
 guarantee; so is the account recovery phrase.
 
-**F5 — A revocation can be ignored on a version tie (low; not fixed).** For a contact's roster,
-`store_verified_roster` returns `AlreadyCurrent` when the incoming version equals the stored
-one, without comparing contents. If two seed-holding devices of one account sign different
+**F5 — A revocation can be ignored on a version tie (low; fixed for contacts' rosters, not
+released).** For a contact's roster, `store_verified_roster` returned `AlreadyCurrent` when the
+incoming version equalled the stored one, without comparing contents. If two seed-holding devices of one account sign different
 rosters with the same version (each bumped from the same base before seeing the other), a
 contact who stored the one without the revocation never takes the one with it. The contact keeps
 treating the revoked device as authorized — and keeps sealing to it — until a seed holder that
 has seen both publishes the merged, higher version (`DeviceList::merge`, which keeps a
 revocation on a tie). Reachable only for accounts with more than one seed holder; an outsider
-cannot cause it. Proposed fix, verifier-side and fail-closed: on an equal-version roster that
-verifies but differs, treat every device revoked in *either* as revoked until a strictly newer
-roster arrives.
+cannot cause it. The fix is verifier-side and fail-closed (`apply_roster_tie`): on an
+equal-version roster that verifies but differs, every device revoked in *either* is treated as
+revoked until a strictly newer roster arrives; the verdict is stored and survives a restart.
+Still open: the same tie on an account's **own** roster as seen by its seedless devices, and a
+tied roster is not relayed to other contacts.
 
 ## 18. Deterministic event seal: what an observer can tell apart
 

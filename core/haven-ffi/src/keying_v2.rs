@@ -70,6 +70,10 @@ type Weight = (u32, u32);
 /// [`chain_index`]'s answer, with the (commit set size, void set size) it was computed for.
 type IndexMemo = ((usize, usize), std::sync::Arc<ChainIndex>);
 
+/// Of a commit: (its author's account, how many chained commits ending at it that account authored
+/// in a row, the account that built the genesis it hangs off).
+type Run = (Option<[u8; 32]>, u32, Option<[u8; 32]>);
+
 /// One seat of a tree: (device, leaf index, account, leaf key id).
 type Seat = ([u8; 32], u32, [u8; 32], [u8; 32]);
 
@@ -264,8 +268,25 @@ fn chain_index(shadow: &ShadowTree) -> std::sync::Arc<ChainIndex> {
         .filter_map(|(h, b)| Some((*h, treekem::Commit::from_bytes(b).ok()?)))
         .collect();
     let epoch_of: HashMap<[u8; 32], u64> = parsed.iter().map(|(h, c)| (*h, c.epoch)).collect();
+    // Parents before children: for every commit, how many chained commits ending at it were
+    // authored in a row by the same ACCOUNT, and the account that built the genesis it hangs off.
+    parsed.sort_by_key(|(_, c)| c.epoch);
+    let mut runs: HashMap<[u8; 32], Run> = HashMap::new();
+    for (h, c) in &parsed {
+        let author = committer_account(c);
+        let above = (epoch_of.get(&c.parent_commit_hash) == Some(&(c.epoch.wrapping_sub(1))))
+            .then(|| runs.get(&c.parent_commit_hash))
+            .flatten();
+        let entry = match above {
+            Some((prev_author, n, creator)) => {
+                (author, if author.is_some() && *prev_author == author { n + 1 } else { 1 }, *creator)
+            }
+            None => (author, 1, (c.epoch == 1).then(|| genesis_author_account(c)).flatten()),
+        };
+        runs.insert(*h, entry);
+    }
     // Children before parents.
-    parsed.sort_by_key(|(_, c)| std::cmp::Reverse(c.epoch));
+    parsed.reverse();
     let mut index = ChainIndex::default();
     for (h, c) in &parsed {
         let below = index
@@ -274,7 +295,18 @@ fn chain_index(shadow: &ShadowTree) -> std::sync::Arc<ChainIndex> {
             .and_then(|cs| cs.iter().filter_map(|k| index.weight.get(k)).max().copied())
             .unwrap_or((0, 0));
         let own = is_authority(shadow, c) as u32;
-        index.weight.insert(*h, (own + below.0, 1 + below.1));
+        // LENGTH IS CAPPED PER ACCOUNT. A commit adds to its chain's length only while it is one
+        // of the first [`MAX_OWN_RUN`] in a row by its author's account (any of its devices) —
+        // unless it is an authority commit, or its author is of the account that built the
+        // genesis. Length costs an author nothing, so uncapped a member with a modified client
+        // could, from any old fork point, author a chain longer than the one the circle is on and
+        // leave every device that had checkpointed past that point unable to follow. Capped, one
+        // account can stretch a branch by at most `MAX_OWN_RUN` commits, and every checkpoint is
+        // that far behind its device's tip: a fork one account can win is a fork every device can
+        // still follow. The commit stays valid and is applied like any other; it only weighs 0.
+        let counts = own == 1
+            || runs.get(h).is_none_or(|(author, n, creator)| *n as usize <= MAX_OWN_RUN || (author.is_some() && author == creator));
+        index.weight.insert(*h, (own + below.0, counts as u32 + below.1));
         // A child is the next epoch of its parent (a genesis hangs off the genesis constant).
         let linked = match epoch_of.get(&c.parent_commit_hash) {
             Some(parent_epoch) => c.epoch == parent_epoch + 1,
@@ -638,6 +670,13 @@ fn check_leaf(st: &NetState, idx: usize, leaf: &treekem::LeafNode) -> Result<Dev
 
 /// The device that authored a commit: the device of its UpdatePath leaf, or — a genesis has no
 /// path — of the leaf at `sender_leaf` among its Adds.
+fn committer_account(c: &treekem::Commit) -> Option<[u8; 32]> {
+    match &c.update_path {
+        Some(up) => leaf_credential_ids(&up.leaf_node.device_credential).map(|(_, a)| a),
+        None => genesis_author_account(c),
+    }
+}
+
 fn committer_device(c: &treekem::Commit) -> Option<[u8; 32]> {
     if let Some(up) = &c.update_path {
         return leaf_credential_ids(&up.leaf_node.device_credential).map(|(d, _)| d);
@@ -1614,11 +1653,7 @@ pub(crate) fn refresh(st: &mut NetState, idx: usize) -> Option<u64> {
     let me_acct = st.me().node_id_bytes();
     for acct in tree_leaf_accounts(&cur.tree) {
         let key = treekem::sender_key(&sender_root, &acct, &gid, cur.epoch);
-        if acct == me_acct {
-            st.circles[idx].my_epoch_keys.insert(content_epoch, key);
-        } else {
-            st.circles[idx].peer_epoch_keys.insert((hex(&acct), content_epoch), key);
-        }
+        st.circles[idx].set_tree_key(&acct, acct == me_acct, content_epoch, key);
     }
     if !live {
         st.circles[idx].prune_epoch_keys();
@@ -1720,14 +1755,35 @@ pub(crate) fn update_jitter(device: &[u8; 32], gid: &[u8]) -> u64 {
     u64::from_le_bytes(first) % UPDATE_JITTER_SECS
 }
 
-/// How many chained commits ending at `tip` did `me` author in a row? (A genesis is not counted:
-/// the branches the fork rule compares start at a genesis' children.)
-fn own_run(shadow: &ShadowTree, tip: &[u8; 32], me: &[u8; 32]) -> usize {
+#[cfg(test)]
+thread_local! {
+    /// Test hook: this thread's engines ignore the own-run limit, as a modified client would.
+    static MODIFIED_CLIENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Test hook: see [`MODIFIED_CLIENT`].
+#[cfg(test)]
+pub(crate) fn x_modified_client(on: bool) {
+    MODIFIED_CLIENT.set(on);
+}
+
+/// How many chained commits ending at `tip` did I author in a row? (A genesis is not counted: the
+/// branches the fork rule compares start at a genesis' children.)
+///
+/// "I" is my ACCOUNT, any of its devices — as the fork rule's length cap is ([`chain_index`]): past
+/// [`MAX_OWN_RUN`] a further commit of the same account adds no weight to its branch. For the
+/// account that built the genesis, which the cap exempts, it is this DEVICE, as it was before the
+/// cap: a device cut off from the circle must still not grow a branch by itself.
+fn own_run(shadow: &ShadowTree, tip: &[u8; 32], me: &[u8; 32], my_account: &[u8; 32]) -> usize {
+    let creator = keying_genesis_of(shadow, *tip)
+        .and_then(|g| treekem::Commit::from_bytes(shadow.commits.get(&g)?).ok())
+        .and_then(|g| genesis_author_account(&g));
+    let per_device = creator == Some(*my_account);
     let mut n = 0;
     let mut at = *tip;
     while n <= MAX_OWN_RUN {
         let Some(c) = shadow.commits.get(&at).and_then(|b| treekem::Commit::from_bytes(b).ok()) else { break };
-        if c.update_path.is_none() || committer_device(&c) != Some(*me) {
+        let mine = if per_device { committer_device(&c) == Some(*me) } else { committer_account(&c) == Some(*my_account) };
+        if c.update_path.is_none() || !mine {
             break;
         }
         n += 1;
@@ -1772,7 +1828,7 @@ fn update_due(shadow: &mut ShadowTree, my_leaf_key: &[u8; 32], me: &[u8; 32], no
 /// record and die with the checkpoint.
 ///
 /// Not authored: on a tip I already authored a child of (`keying_already_authored_on`, inside
-/// `author_commit`); on a tip that ends [`MAX_OWN_RUN`] commits of my own; when my own roster no
+/// `author_commit`); on a tip that ends [`MAX_OWN_RUN`] commits of my own account; when my own roster no
 /// longer authorizes this device (every receiver would refuse the commit).
 fn member_update(st: &mut NetState, idx: usize) -> bool {
     let circle_id = st.circles[idx].id.clone();
@@ -1792,7 +1848,19 @@ fn member_update(st: &mut NetState, idx: usize) -> bool {
     let Some(my_leaf_key) = cur.my_private.as_ref().and_then(|mp| cur.tree.leaf(mp.leaf_index)).map(leaf_key) else {
         return false;
     };
-    if !update_due(shadow, &my_leaf_key, &me, now) || own_run(shadow, &cur.tip_hash, &me) >= MAX_OWN_RUN {
+    let Some(my_account) = cur
+        .my_private
+        .as_ref()
+        .and_then(|mp| cur.tree.leaf(mp.leaf_index))
+        .and_then(|l| leaf_credential_ids(&l.device_credential))
+        .map(|(_, a)| a)
+    else {
+        return false;
+    };
+    let run_spent = own_run(shadow, &cur.tip_hash, &me, &my_account) >= MAX_OWN_RUN;
+    #[cfg(test)]
+    let run_spent = run_spent && !MODIFIED_CLIENT.get();
+    if !update_due(shadow, &my_leaf_key, &me, now) || run_spent {
         return false;
     }
     author_commit(st, idx, &[], &[])

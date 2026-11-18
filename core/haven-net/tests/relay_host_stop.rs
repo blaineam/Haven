@@ -17,6 +17,11 @@ use haven_net::blobstore::BlobClient;
 use haven_net::{PathRouter, PathRouterConfig, RelayNode};
 use haven_p2p::identity::Identity;
 
+/// One test at a time. Each test asks the OS for a free port and then binds it itself; run side
+/// by side, one test's relay took the port another had just been handed (seen: "a concurrent
+/// start moved the relay off its fixed port", "port … is already served by another listener").
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
@@ -28,6 +33,7 @@ fn accepting(port: u16) -> bool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disabling_the_relay_releases_its_http_port_and_connections() {
+    let _serial = SERIAL.lock().await;
     let dir = std::env::temp_dir().join(format!("haven-host-stop-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -73,6 +79,7 @@ async fn disabling_the_relay_releases_its_http_port_and_connections() {
 /// access to the store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_open_iroh_blob_connection_does_not_keep_a_stopped_relay_serving() {
+    let _serial = SERIAL.lock().await;
     let dir = std::env::temp_dir().join(format!("haven-host-stop-iroh-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -117,6 +124,7 @@ async fn an_open_iroh_blob_connection_does_not_keep_a_stopped_relay_serving() {
 /// every member. Concurrent starts must agree on the one fixed-port interface.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_http_starts_share_the_fixed_port() {
+    let _serial = SERIAL.lock().await;
     let dir = std::env::temp_dir().join(format!("haven-host-serve-race-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -146,6 +154,7 @@ async fn concurrent_http_starts_share_the_fixed_port() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropping_the_path_router_stops_it() {
+    let _serial = SERIAL.lock().await;
     let port = free_port();
     let router = PathRouter::spawn(&PathRouterConfig {
         bind: format!("127.0.0.1:{port}"),

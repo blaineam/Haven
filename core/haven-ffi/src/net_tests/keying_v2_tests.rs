@@ -1091,8 +1091,9 @@ struct ForkLoad {
 /// more is authored. Devices MAY have re-entered on the way (a device whose branch lost below its
 /// checkpoint has to): how many is reported. Posts made ON THE WAY that do not open at the end
 /// are counted; with `strict` any such post fails the run. (One was seen in 56 schedules at a lag
-/// of one period — STAGE4-MEMBER-UPDATES.md §12 — so the default tests count and the soak is
-/// strict.)
+/// of one period before envelopes sealed on another branch were kept for a retry —
+/// `a_post_sealed_on_the_other_branch_of_a_fork_opens_once_the_reader_moves_there`. Every run is
+/// strict now.)
 fn fork_load(seed: u64, max_delay: u64, min_epochs: u64, strict: bool) -> Result<ForkLoad, String> {
     let f = live_v2_fleet(&[(A, &[A1, A2]), (B, &[B1]), (C, &[C1])]);
     let n = f.devs.len();
@@ -1297,20 +1298,20 @@ fn fork_load_runs(max_delay: u64, schedules: u64, min_epochs: u64, strict: bool)
 /// FORK LOAD, delivery lagging by less than one update period (two steps of a three-step round).
 #[test]
 fn fork_load_converges_at_a_lag_under_one_period() {
-    fork_load_runs(2, 10, 10, false);
+    fork_load_runs(2, 10, 10, true);
 }
 
 /// FORK LOAD, delivery lagging by up to one update period.
 #[test]
 fn fork_load_converges_at_a_lag_of_one_period() {
-    fork_load_runs(3, 10, 10, false);
+    fork_load_runs(3, 10, 10, true);
 }
 
 /// FORK LOAD, delivery lagging by up to two update periods — where the depth-capped finality
 /// rule left devices stranded on a branch that had lost (STAGE4-MEMBER-UPDATES.md §5).
 #[test]
 fn fork_load_converges_at_a_lag_of_two_periods() {
-    fork_load_runs(6, 10, 10, false);
+    fork_load_runs(6, 10, 10, true);
 }
 
 /// The same, longer and wider: `HAVEN_FORK_SEEDS` schedules (default 16) at
@@ -2313,6 +2314,121 @@ fn an_equal_weight_fork_is_decided_by_hash_and_the_losing_side_reenters() {
     assert_eq!(t.x_weight(&a).map(|w| w.0), Some(0), "no authority on either side");
 }
 
+/// A POST SEALED ON THE OTHER BRANCH OF A FORK. Two devices re-key at the same time: two branches
+/// with the same epoch number and different keys. The device on the branch that will win posts,
+/// and its envelope reaches the other device first — which holds a key under that epoch number,
+/// the wrong one. Then the winning commit arrives and the reader moves over. The envelope is NOT
+/// offered again (a mailbox serves the same bytes once): it must open from the retry buffer.
+#[test]
+fn a_post_sealed_on_the_other_branch_of_a_fork_opens_once_the_reader_moves_there() {
+    let _clk = clock_guard();
+    let f = live_v2_fleet(&[(A, &[A1]), (B, &[B1]), (C, &[C1])]);
+    let fork = v2_tip(&f.devs[0].s, &f.cid);
+    let mut commits: Vec<Vec<u8>> = Vec::new();
+    for i in [0, 1] {
+        let before = v2_commits(&f.devs[i].s, &f.cid);
+        make_due(&f, i);
+        let wires = new_commit_wires(&before, &f.devs[i].s.sync_envelopes(f.cid.clone()));
+        assert_eq!(wires.len(), 1, "device {i} authored its Update");
+        commits.push(wires[0][1..].to_vec());
+        assert_eq!(v2_tip(&f.devs[i].s, &f.cid).1, fork.1 + 1);
+    }
+    let (w, l) = if treekem::commit_hash(&commits[0]) > treekem::commit_hash(&commits[1]) { (0, 1) } else { (1, 0) };
+    assert_eq!(lane(&f.devs[w].s, &f.cid), 2);
+    post(&f.devs[w].s, &f.cid, "from-the-winning-branch", 7_000);
+    let sealed: Vec<Vec<u8>> =
+        f.devs[w].s.sync_envelopes(f.cid.clone()).into_iter().filter(|e| e.first() == Some(&TAG_EPOCH_EVENT)).collect();
+    assert!(!sealed.is_empty());
+    for e in &sealed {
+        let _ = f.devs[l].s.receive(f.cid.clone(), e.clone());
+    }
+    assert!(!reads(&f.devs[l].s, &f.cid, "from-the-winning-branch"), "the reader is on the other branch: another key");
+    // The winning commit, and nothing else: no content envelope is offered a second time.
+    assert!(feed_commit(&f, &f.devs[l], &commits[w]));
+    assert_eq!(v2_tip(&f.devs[l].s, &f.cid).0, treekem::commit_hash(&commits[w]), "the reader moved to the winning branch");
+    assert!(reads(&f.devs[l].s, &f.cid, "from-the-winning-branch"), "the envelope that arrived early was dropped, not kept");
+    sync_fleet(&f, 3);
+    for (i, d) in f.devs.iter().enumerate() {
+        assert!(reads(&d.s, &f.cid, "from-the-winning-branch"), "device {i}");
+    }
+}
+
+/// `n` path-only commits by one member's two devices in turn, from `devs`' current tip, as a
+/// MODIFIED CLIENT would author them: each is made due (ignoring the weekly window) and authors
+/// past the own-run limit, on the other's commit, and hands it over. Nothing reaches anyone else.
+fn out_build(f: &Fleet, devs: [&Dev; 2], n: usize) -> Vec<Vec<u8>> {
+    keying_v2::x_modified_client(true);
+    let mut chain = Vec::new();
+    for k in 0..n {
+        let (author, other) = (devs[k % 2], devs[(k + 1) % 2]);
+        let before = v2_commits(&author.s, &f.cid);
+        author.s.state.lock().unwrap().v2_trees.get_mut(&f.cid).unwrap().x_make_update_due();
+        let wires = new_commit_wires(&before, &author.s.sync_envelopes(f.cid.clone()));
+        assert_eq!(wires.len(), 1, "the member's device authored commit {k}");
+        let c = wires[0][1..].to_vec();
+        assert!(treekem::Commit::from_bytes(&c).unwrap().proposals.is_empty());
+        assert!(feed_commit(f, other, &c), "the member's other device follows commit {k}");
+        chain.push(c);
+    }
+    keying_v2::x_modified_client(false);
+    chain
+}
+
+/// A MEMBER CANNOT STRAND THE CIRCLE BY OUT-LENGTHENING ITS CHAIN. A two-device member that is
+/// still seated keeps the state it held at an old tip. The circle moves on five commits, by two
+/// accounts in turn — far enough that every checkpoint has passed that old tip. With a modified
+/// client the member then authors EIGHT commits on the old tip: more commits than the circle's
+/// chain has. Every honest device stays where it is and asks for nothing: one account's commits
+/// in a row add to a chain's length only up to `MAX_OWN_RUN`, so the eight weigh three.
+#[test]
+fn a_member_cannot_strand_the_circle_by_out_lengthening_its_chain() {
+    let _clk = clock_guard();
+    let f = live_v2_fleet(&[(A, &[A1]), (B, &[B1, B2]), (C, &[C1])]);
+    let ci = committer_index(&f);
+    let admin = f.devs[ci].account_hex();
+    let member_seed = f.rosters.iter().find(|(seed, _, creds)| creds.len() == 2 && hex(&Identity::from_seed(seed).public().node_id_bytes()) != admin).unwrap().0;
+    let member: Vec<usize> = (0..f.devs.len()).filter(|i| f.devs[*i].account_seed == member_seed).collect();
+    let honest: Vec<usize> = (0..f.devs.len()).filter(|i| !member.contains(i)).collect();
+    assert_ne!(f.devs[honest[0]].account_hex(), f.devs[honest[1]].account_hex());
+    let earlier: Vec<Dev> = member
+        .iter()
+        .map(|i| {
+            let d = &f.devs[*i];
+            let s = s1_relaunch(d.account_seed, d.device_seed, d.s.export_state());
+            introduce_one(&f, &s, d.account_seed);
+            Dev { s, account_seed: d.account_seed, device_seed: d.device_seed }
+        })
+        .collect();
+    let old_tip = v2_tip(&f.devs[ci].s, &f.cid);
+    for k in 0..5 {
+        update(&f, honest[k % 2]);
+    }
+    let tip = v2_tip(&f.devs[ci].s, &f.cid);
+    assert_eq!(tip.1, old_tip.1 + 5);
+
+    let longer = out_build(&f, [&earlier[0], &earlier[1]], 8);
+    assert_eq!(treekem::Commit::from_bytes(&longer[0]).unwrap().parent_commit_hash, old_tip.0);
+    for d in &f.devs {
+        for c in &longer {
+            assert!(feed_commit(&f, d, c), "the member's commit is valid and is stored");
+        }
+    }
+    sync_fleet(&f, 3);
+    for (i, d) in f.devs.iter().enumerate() {
+        assert!(on_adopted_chain(&d.s, &f.cid, &tip.0), "device {i} left the circle's chain for the member's longer one");
+        assert!(!offers_key_package(&d.s, &f.cid), "device {i} is asking to re-enter");
+        assert_eq!(lane(&d.s, &f.cid), 2);
+        let st = d.s.state.lock().unwrap();
+        let t = st.v2_trees.get(&f.cid).unwrap();
+        assert_eq!(t.x_weight(&treekem::commit_hash(&longer[0])), Some((0, keying_v2::MAX_OWN_RUN as u32)));
+    }
+    post(&f.devs[honest[0]].s, &f.cid, "after-the-longer-chain", 7_000);
+    sync_fleet(&f, 2);
+    for (i, d) in f.devs.iter().enumerate() {
+        assert!(reads(&d.s, &f.cid, "after-the-longer-chain"), "device {i} reads a post made after the member's chain arrived");
+    }
+}
+
 /// A REMOVED MEMBER CANNOT OUT-BUILD ITS REMOVE. The admin Removes a two-device member. With a
 /// modified client the member's devices author six path-only commits in turn — on the Remove's
 /// parent, and six more on the parent's parent (from the state they held then). Every honest
@@ -2340,26 +2456,9 @@ fn a_removed_member_cannot_out_build_its_remove() {
     let grandparent = v2_tip(&f.devs[ci].s, &f.cid);
     update(&f, honest[1]);
     let parent = v2_tip(&f.devs[ci].s, &f.cid);
-    // Six path-only commits by the member's two devices in turn, from `devs`' current tip: each
-    // is made due (the hook that stands for a client ignoring the weekly window), authors on the
-    // other's commit, and hands it over. Nothing reaches the honest devices yet.
-    let out_build = |devs: [&Dev; 2]| -> Vec<Vec<u8>> {
-        let mut chain = Vec::new();
-        for k in 0..6 {
-            let (author, other) = (devs[k % 2], devs[(k + 1) % 2]);
-            let before = v2_commits(&author.s, &f.cid);
-            author.s.state.lock().unwrap().v2_trees.get_mut(&f.cid).unwrap().x_make_update_due();
-            let wires = new_commit_wires(&before, &author.s.sync_envelopes(f.cid.clone()));
-            assert_eq!(wires.len(), 1, "the member's device authored commit {k}");
-            let c = wires[0][1..].to_vec();
-            assert!(treekem::Commit::from_bytes(&c).unwrap().proposals.is_empty());
-            assert!(feed_commit(&f, other, &c), "the member's other device follows commit {k}");
-            chain.push(c);
-        }
-        chain
-    };
-    let on_parent = out_build([&f.devs[member[0]], &f.devs[member[1]]]);
-    let on_grandparent = out_build([&earlier[0], &earlier[1]]);
+    // Six path-only commits by the member's two devices in turn, on each of the two tips.
+    let on_parent = out_build(&f, [&f.devs[member[0]], &f.devs[member[1]]], 6);
+    let on_grandparent = out_build(&f, [&earlier[0], &earlier[1]], 6);
     assert_eq!(treekem::Commit::from_bytes(&on_parent[0]).unwrap().parent_commit_hash, parent.0);
     assert_eq!(treekem::Commit::from_bytes(&on_grandparent[0]).unwrap().parent_commit_hash, grandparent.0);
 
@@ -2392,7 +2491,8 @@ fn a_removed_member_cannot_out_build_its_remove() {
         assert_eq!(t.x_weight(&remove).map(|w| w.0), Some(1), "the Remove is an authority commit");
         if *i != ci {
             for first in [&on_parent[0], &on_grandparent[0]] {
-                assert_eq!(t.x_weight(&treekem::commit_hash(first)), Some((0, 6)), "six commits, no authority");
+                // Six commits, no authority — and only the first three of one account's run count.
+                assert_eq!(t.x_weight(&treekem::commit_hash(first)), Some((0, keying_v2::MAX_OWN_RUN as u32)));
             }
         }
     }

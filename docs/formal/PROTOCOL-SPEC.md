@@ -126,10 +126,12 @@ Kotlin implementations, side channels, key storage, the KEM combiner's computati
 
 ## 10. Remaining models (not done)
 
-1. Device roster / seed-drop revocation.
+1. ~~Device roster / seed-drop revocation.~~ Done: §17.
 2. An observational-equivalence model for the deterministic seal.
-3. Fork resolution without a delivery service (`TREEKEM-DESIGN.md` §5): convergence is a
-   liveness/agreement property and needs its own model.
+3. Fork resolution without a delivery service (`TREEKEM-DESIGN.md` §5). The *secrecy* side
+   (what the retention window costs, healing across a fork) is done: §15. *Agreement* — every
+   device with the same commits picks the same branch — is a property of a pure function, tested
+   by simulation in `treekem.rs`, not modelled.
 4. A computational (game-based) argument for the hybrid KEM combiner — outside what a symbolic
    tool can establish; needs a cryptographer.
 
@@ -197,7 +199,7 @@ stage 1; "existing circle" (`-DLEGACY`) is one whose genesis predates it.
 | T6 | Forward secrecy vs a later member seed compromise | **falsified** | **falsified** | **falsified** | verified |
 | T7 | Healing after a committer seed compromise | **falsified** | verified | **falsified** | verified |
 | T8 | Forward secrecy vs a later member stored-state compromise | **falsified** (the kept Welcome) | verified | verified | verified |
-| T9 | Forward secrecy vs a later committer stored-state compromise | not run | verified | verified | not run |
+| T9 | Forward secrecy vs a later committer stored-state compromise | **falsified** (the stored root) | verified | verified | verified |
 
 Reading the stage-1 columns:
 
@@ -211,7 +213,6 @@ Reading the stage-1 columns:
   checkpoint trails the tip by 3, so read "epoch 1" as "an epoch older than the retention window".
 * T4 and T6 are untouched: members still never update, and a Welcome is still wrapped to the
   member's long-term device key.
-* T9 was added with stage 1 and was not run against the other two models.
 
 In the fixed model T5–T7 are one lemma (`T1_T5_T6_T7_no_secret_from_longterm_keys`): a long-term
 key alone reveals nothing, so there is no excuse clause for it.
@@ -385,3 +386,42 @@ secret and entropy are random, stored with the pending commit, and dropped at th
   the content path only ever sees 32-byte epoch keys, and the daily re-seal republishes history
   under whichever key is current.
 - A v1 device (re)joining reverses the gate exactly as §7.3 of the design does today.
+
+## 17. Device roster
+
+Model: [`haven_device_roster.spthy`](haven_device_roster.spthy). Code: `device.rs`
+(`DeviceCredential`, `DeviceList::adopt_if_newer`, `merge`) and `store_verified_roster`.
+
+An account has a long-term signing key that contacts pin out of band. It signs a credential for
+each device and a versioned roster; a verifier adopts a roster only if it verifies under the
+pinned key and has a strictly higher version, and treats a device as authorized only per the
+roster it currently holds. A *seed holder* is a device that also holds the account key (the
+primary; every device before seedless enrollment). The model's roster speaks about one device;
+the real one is a set (sound for the per-device properties below).
+
+| # | Property | Result |
+|---|---|---|
+| R1 | If a verifier treats (device, key) as a device of the account, the account enrolled it and a seed holder signed the roster relied on — unless the account key leaked | verified |
+| R2 | A revocation is not rolled back: after adopting it, the device counts as authorized again only on a strictly newer roster a seed holder signed. Replays, and a seedless device's own keys, do nothing | verified |
+| R3 | A revoked device that **holds the account key** can re-authorize itself (a trace exists) | confirmed — known limit |
+| R4 | Two seed holders can sign different rosters with the **same version**; a verifier holding the one that still authorizes a device never adopts the one that revokes it (a trace exists) | confirmed — finding F5 |
+| R5 | With a single seed holder, a version identifies one roster | verified |
+
+Mutation check: removing the signature check from the verifier falsifies R1, R2 and R5.
+
+**R3 is the known reason for seedless enrollment.** Revoking a device that holds the account key
+is advisory, because that key signs rosters. Only seedless devices can be cryptographically
+revoked. The primary (and any device restored from a backup of the account seed) is outside that
+guarantee; so is the account recovery phrase.
+
+**F5 — A revocation can be ignored on a version tie (low; not fixed).** For a contact's roster,
+`store_verified_roster` returns `AlreadyCurrent` when the incoming version equals the stored
+one, without comparing contents. If two seed-holding devices of one account sign different
+rosters with the same version (each bumped from the same base before seeing the other), a
+contact who stored the one without the revocation never takes the one with it. The contact keeps
+treating the revoked device as authorized — and keeps sealing to it — until a seed holder that
+has seen both publishes the merged, higher version (`DeviceList::merge`, which keeps a
+revocation on a tie). Reachable only for accounts with more than one seed holder; an outsider
+cannot cause it. Proposed fix, verifier-side and fail-closed: on an equal-version roster that
+verifies but differs, treat every device revoked in *either* as revoked until a strictly newer
+roster arrives.

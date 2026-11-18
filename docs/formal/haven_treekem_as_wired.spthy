@@ -268,4 +268,15 @@ lemma T8_fs_member_state:
     & not (Ex #s. RevealState(D, G, '1')@s)
     ==> F"
 
+/* T9 — forward secrecy against a COMMITTER stored-state compromise (added with stage 1): the
+   committer has moved to epoch 2; its epoch-2 stored state leaks (no seed). Epoch 1 should stay
+   secret. EXPECTED TO FAIL as wired: the stored state contains the keying root. */
+lemma T9_fs_committer_state:
+  "All G C D E es #g #i #r #k.
+      Genesis(G, C, D, E)@g & EpochSecret(G, '1', es)@i & RevealState(C, G, '2')@r & K(es)@k
+    & not (Ex X #s. RevealSeed(X)@s)
+    & not (Ex X G2 m #s. RevealState(X, G2, m)@s & not (X = C))
+    & not (Ex #s. RevealState(C, G, '1')@s)
+    ==> F"
+
 end

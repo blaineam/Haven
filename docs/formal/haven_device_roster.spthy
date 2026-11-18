@@ -100,13 +100,13 @@ rule SignRevoked:
 rule VerifierAdopt:
   let l = <'list', $A, %w, D, st> in
   [ In(<l, sg>), !Pin($A, pka) ]
-  --[ Eq(verify(sg, l, pka), true), Adopt($V, $A, %w, D, st) ]->
+  --[ Eq(verify(sg, l, pka), true), Adopt($Ver, $A, %w, D, st) ]->
   [ ]
 
 rule VerifierAccept:     /* seal to D, or accept something D signed, as a device of A */
   let cred = <'cred', $A, D, dpk> in
   [ In(<cred, sg>), In(%v), !Pin($A, pka) ]
-  --[ Eq(verify(sg, cred, pka), true), AcceptAuth($V, $A, D, dpk, %v) ]->
+  --[ Eq(verify(sg, cred, pka), true), AcceptAuth($Ver, $A, D, dpk, %v) ]->
   [ ]
 
 /* ---- Sanity -------------------------------------------------------------------------------- */

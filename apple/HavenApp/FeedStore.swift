@@ -2901,7 +2901,11 @@ final class FeedStore: ObservableObject {
             }
             return c
         }
-        for k in ["device_rosters", "seedless_roster_wire", "cached_profile"] { root.removeValue(forKey: k) }
+        // The key trees too: a checkpoint, held Welcomes and key-package secrets are one device's
+        // seat in a circle. Merged into another identity they would fill in where the running
+        // one holds nothing yet, and it would then try to act from a leaf that is not its own.
+        for k in ["device_rosters", "seedless_roster_wire", "cached_profile",
+                  "shadow_trees", "shadow_trees_v2", "roster_ties"] { root.removeValue(forKey: k) }
         guard events > 0, let out = try? JSONSerialization.data(withJSONObject: root) else { return nil }
         return (out, events)
     }

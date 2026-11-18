@@ -188,7 +188,7 @@ rule ReissueD3:
   [ Fr(~nl), !D2($D, $G, 'cu', es2, init2, ls), !Ltk($D, skD)
   , !Leaf1($G, leafC, leafD, leafE), !LeafCu($G, leafC2) ]
   --[ Once(<'d3', $G>), EpochSecret($G, '3', es3), Reissued($G, $D)
-    , OwnLeaf($D, $G, ~nl), D3Leaf($D, $G, ~nl) ]->
+    , OwnLeaf($D, $G, ~nl), D3Leaf($D, $G, ~nl), D3Path($G, $D, ps) ]->
   [ !D3($D, $G, es3, h(<'init', es3>), ~nl)
   , Out(<body, sign(body, skD)>) ]
 
@@ -261,6 +261,13 @@ lemma H4_du_leaf_secret [reuse]:
 lemma H5_d3_leaf_secret [reuse]:
   "All X G nl #i #k. D3Leaf(X, G, nl)@i & K(nl)@k ==> (Ex #r. RevealState(X, G, '3')@r)"
 
+/* The re-issued Update's path secret reaches only the other members' CURRENT leaf keys. */
+lemma H6_d3_path_secret [reuse]:
+  "All G D ps #i #k. D3Path(G, D, ps)@i & K(ps)@k ==>
+      (Ex X #r. Rev(X)@r & not (X = D))
+    | (Ex #r. RevealState(D, G, '3')@r)
+    | (Ex Y #r. RevealLtk(Y)@r)"
+
 /* ---- Sanity -------------------------------------------------------------------------------- */
 
 lemma executable_fork:
@@ -315,11 +322,13 @@ lemma FK4_competing_branch_is_not_healed:
     & not (Ex #r. RevealState(D, G, '3')@r) & not (Ex X #r. RevealLtk(X)@r)"
 
 /* FK5 — the re-issue heals. D's Update lost; D re-issues it on the winning branch. That epoch
-   is secret even if EVERYTHING D stored before the re-issue leaked. */
+   is secret even if EVERYTHING D stored before the re-issue leaked. (As in FK2, a stolen
+   signing key is a different, active attack.) */
 lemma FK5_reissued_update_heals:
   "All G D es #m #i #k.
       Reissued(G, D)@m & EpochSecret(G, '3', es)@i & K(es)@k ==>
       (Ex X #r. Rev(X)@r & not (X = D))
-    | (Ex #r. RevealState(D, G, '3')@r)"
+    | (Ex #r. RevealState(D, G, '3')@r)
+    | (Ex Y #r. RevealLtk(Y)@r)"
 
 end

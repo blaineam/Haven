@@ -270,7 +270,7 @@ that retention costs.
 | FK2 | After the checkpoint, a leak of the settled state exposes neither the earlier epoch nor the losing branch | verified |
 | FK3 | The epoch a device's own Update creates is secret whatever leaked from that device before | verified |
 | FK4 | A **competing** branch is not healed by that Update (a trace exists) | confirmed |
-| FK5 | Re-issuing the Update on the winning branch heals, even if everything the device stored before leaked | FK5_RESULT |
+| FK5 | Re-issuing the Update on the winning branch heals, even if everything the device stored before leaked | verified |
 
 What this fixes as rules for the implementation:
 
@@ -283,7 +283,7 @@ What this fixes as rules for the implementation:
   Update is an ancestor of my tip", not "I sent an Update this week".
 - **Old leaf secrets die at the checkpoint**, not at the Update. Between the two the device holds
   both, because the branch that still needs the old leaf key may win.
-- FK2 assumes no signing key is compromised. Dropping that premise, the prover finds the expected
+- FK2 and FK5 assume no signing key is compromised. Dropping that premise, the prover finds the expected
   active attack: with the committer's signing key an adversary forges a Welcome and seats a
   joiner in a group whose secrets it chose. That is impersonation with a stolen long-term key,
   which these secrecy properties do not cover; §16.2 binds a Welcome to a public commit so

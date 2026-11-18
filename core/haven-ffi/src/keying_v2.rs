@@ -2235,7 +2235,7 @@ impl ShadowTree {
     /// The v2 state as a build before member updates wrote it (version 1: no tail).
     pub(crate) fn x_state_v1_bytes(&self) -> Vec<u8> {
         let mut v = encode_state(self);
-        let tail = 8 + 4 + 80 * self.x.own_keys.len() + 4 + 32 * self.x.void.len();
+        let tail = 8 + 4 + 80 * self.x.own_keys.len() + 4 + 32 * self.x.void.len() + 1 + self.x.seat_wait.map_or(0, |_| 40);
         v.truncate(v.len() - tail);
         v[0] = STATE_V1;
         v
@@ -2261,13 +2261,13 @@ impl ShadowTree {
         }
         v
     }
-    /// Move every "first seen" stamp of other devices' key packages back by `secs`.
     /// Make the wait for my Welcome `secs` older (the clock does not move).
     pub(crate) fn x_age_seat_wait(&mut self, secs: u64) {
         if let Some((_, since)) = self.x.seat_wait.as_mut() {
             *since = since.saturating_sub(secs);
         }
     }
+    /// Move every "first seen" stamp of other devices' key packages back by `secs`.
     pub(crate) fn x_age_packages(&mut self, secs: u64) {
         for at in self.x.kp_seen.values_mut() {
             *at = at.saturating_sub(secs);

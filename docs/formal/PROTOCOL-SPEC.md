@@ -189,17 +189,37 @@ Tamarin 1.12.0, `--auto-sources --prove`, bounded to one group with one genesis.
 stage 1 cannot change a genesis that already exists: "new circle" is a circle created under
 stage 1; "existing circle" (`-DLEGACY`) is one whose genesis predates it.
 
-| # | Property | As wired | Stage 1, new circle | Stage 1, existing circle | Proposed fix |
-|---|---|---|---|---|---|
-| T1 | No epoch secret leaks with nothing compromised | verified | verified | verified | verified |
-| T2 | A removed member is locked out of the next epoch, even with all its keys and state | verified | verified | verified | verified |
-| T3 | Committer's stored state leaks → its Update heals | **falsified** | verified | verified | verified |
-| T4 | A member's stored state leaks → healing | **falsified** (the member never updates) | **falsified** | **falsified** | verified (the member's own Update) |
-| T5 | Forward secrecy vs a later committer seed compromise | **falsified** | verified | **falsified** | verified |
-| T6 | Forward secrecy vs a later member seed compromise | **falsified** | **falsified** | **falsified** | verified |
-| T7 | Healing after a committer seed compromise | **falsified** | verified | **falsified** | verified |
-| T8 | Forward secrecy vs a later member stored-state compromise | **falsified** (the kept Welcome) | verified | verified | verified |
-| T9 | Forward secrecy vs a later committer stored-state compromise | **falsified** (the stored root) | verified | verified | verified |
+| # | Property | As wired | Stage 1, new circle | Stage 1, existing circle | Proposed fix | v2 tree as built |
+|---|---|---|---|---|---|---|
+| T1 | No epoch secret leaks with nothing compromised | verified | verified | verified | verified | verified |
+| T2 | A removed member is locked out of the next epoch, even with all its keys and state | verified | verified | verified | verified | verified |
+| T3 | Committer's stored state leaks → its Update heals | **falsified** | verified | verified | verified | verified |
+| T4 | A member's stored state leaks → healing | **falsified** (the member never updates) | **falsified** | **falsified** | verified (the member's own Update) | verified |
+| T5 | Forward secrecy vs a later committer seed compromise | **falsified** | verified | **falsified** | verified | verified |
+| T6 | Forward secrecy vs a later member seed compromise | **falsified** | **falsified** | **falsified** | verified | verified |
+| T7 | Healing after a committer seed compromise | **falsified** | verified | **falsified** | verified | verified |
+| T8 | Forward secrecy vs a later member stored-state compromise | **falsified** (the kept Welcome) | verified | verified | verified | verified |
+| T9 | Forward secrecy vs a later committer stored-state compromise | **falsified** (the stored root) | verified | verified | verified | verified |
+
+"v2 tree as built" is [`haven_treekem_v2_built.spthy`](haven_treekem_v2_built.spthy): the tree the
+engine runs after stages 1–4 (§14, §16). It differs from the "proposed fix" model in one way that
+matters: the design deletes a device's previous-epoch state and its one-time key-package key the
+moment it moves on, and the engine cannot (a competing commit may still arrive), so it holds them
+until its checkpoint passes that epoch. The model gives the adversary everything the engine holds
+at the moment of a leak; its header maps each fact and rule to the code. In it:
+
+* T3 and T4 allow everything the device stored before its Update to leak, key-package secrets
+  included, and even its kept previous-epoch state to leak afterwards.
+* T8 and T9 are stated by time: everything the device holds leaks at any point after its
+  checkpoint passed the epoch. With the deletion at the checkpoint switched off the prover
+  falsifies both in 16 steps, so the result rests on that deletion.
+* `W_window_exposes_the_previous_epoch` (a trace exists) records the cost: a leak before the
+  checkpoint exposes the previous epoch too. The window is 3 commits (§15).
+* The column is about a circle on the v2 tree. A circle that has not migrated (a member on an
+  old build) is the "stage 1, existing circle" column.
+* Stolen signing keys are not an excuse in any of these lemmas, but they are passive statements:
+  a device seed lets its holder sign as that device, publish a key package and be re-seated until
+  the device is revoked in its account's roster (§17).
 
 Reading the stage-1 columns:
 

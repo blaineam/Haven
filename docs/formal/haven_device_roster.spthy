@@ -1,0 +1,173 @@
+/*
+  Haven device roster — who counts as "a device of this account". Symbolic model (Tamarin).
+
+  Code: core/haven-p2p/src/device.rs (DeviceCredential, DeviceList, adopt_if_newer, merge) and
+  core/haven-ffi/src/lib.rs (store_verified_roster). Spec: docs/formal/PROTOCOL-SPEC.md §17.
+
+  Run:  tamarin-prover --auto-sources --prove docs/formal/haven_device_roster.spthy
+
+  What is modelled
+   - An ACCOUNT has a long-term signing key. Contacts pin its public key out of band (QR/link).
+   - A DEVICE has its own key. The account signs a CREDENTIAL binding the device to the account.
+   - The account signs a versioned ROSTER. A verifier adopts a roster only if it verifies under
+     the pinned account key and its version is STRICTLY higher than the one it holds
+     (DeviceList::adopt_if_newer), and treats a device as authorized only per the roster it
+     currently holds.
+   - SEED HOLDERS are devices that hold the account signing key and can therefore sign rosters
+     (the primary device; every device before seedless enrollment). A SEEDLESS device holds only
+     its own device key.
+
+  Abstraction: a roster here makes a statement about ONE device ('ok' or 'revoked'); the real
+  list is a set. That is sound for the per-device properties below (a list that does not
+  mention a device does not authorize it). The multi-master UNION merge a seed holder runs on
+  its own account's rosters is not modelled beyond "a seed holder may sign any newer version".
+*/
+
+theory HavenDeviceRoster
+begin
+
+builtins: signing, natural-numbers
+
+restriction Eq:   "All x y #i. Eq(x, y)@i ==> x = y"
+restriction Once: "All t #i #j. Once(t)@i & Once(t)@j ==> #i = #j"
+
+/* One honest seed holder never signs two rosters with the same or a lower version. */
+restriction HolderVersionsGrow:
+  "All A H %v %w D1 D2 s1 s2 #i #j.
+      Signed(A, H, %v, D1, s1)@i & Signed(A, H, %w, D2, s2)@j & #i < #j ==> %v << %w"
+
+/* DeviceList::adopt_if_newer — a verifier only ever moves to a strictly higher version. */
+restriction VerifierVersionsGrow:
+  "All V A %v %w D1 D2 s1 s2 #i #j.
+      Adopt(V, A, %v, D1, s1)@i & Adopt(V, A, %w, D2, s2)@j & #i < #j ==> %v << %w"
+
+/* A verifier judges a device by the roster it CURRENTLY holds (its latest adoption). */
+restriction AcceptUsesCurrentRoster:
+  "All V A D dpk %v #i. AcceptAuth(V, A, D, dpk, %v)@i ==>
+      (Ex #a. Adopt(V, A, %v, D, 'ok')@a & #a < #i
+         & not (Ex %w D2 s2 #b. Adopt(V, A, %w, D2, s2)@b & #a < #b & #b < #i))"
+
+/* ---- Keys ---------------------------------------------------------------------------------- */
+
+rule Account:
+  [ Fr(~ask) ]
+  --[ Once(<'acct', $A>) ]->
+  [ !Acct($A, ~ask), !Pin($A, pk(~ask)), Out(pk(~ask)) ]
+
+rule RevealAccount:      /* the account key itself leaks (e.g. a recovery phrase) */
+  [ !Acct(A, ask) ] --[ RevealAccount(A) ]-> [ Out(ask) ]
+
+rule Device:
+  [ Fr(~dsk) ]
+  --[ Once(<'dev', $D>), DevKey($D, pk(~dsk)) ]->
+  [ !Dev($D, ~dsk), Out(pk(~dsk)) ]
+
+rule RevealDevice:       /* everything a SEEDLESS device holds */
+  [ !Dev(D, dsk) ] --[ RevealDevice(D) ]-> [ Out(dsk) ]
+
+/* ---- Enrollment ---------------------------------------------------------------------------- */
+
+rule Credential:
+  let cred = <'cred', $A, $D, pk(dsk)> in
+  [ !Acct($A, ask), !Dev($D, dsk) ]
+  --[ Enrolled($A, $D) ]->
+  [ Out(<cred, sign(cred, ask)>) ]
+
+rule SeedHolder:         /* this device also holds the account signing key */
+  [ !Acct($A, ask), !Dev($H, dsk) ]
+  --[ SeedHolder($A, $H), Once(<'holder', $A, $H>) ]->
+  [ !Holds($A, $H, ask) ]
+
+rule RevealSeedHolder:   /* everything a SEED-HOLDING device holds, account key included */
+  [ !Holds(A, H, ask), !Dev(H, dsk) ] --[ RevealSeed(A, H), RevealDevice(H) ]-> [ Out(<ask, dsk>) ]
+
+/* ---- Rosters ------------------------------------------------------------------------------- */
+
+rule SignOk:
+  let l = <'list', $A, %w, $D, 'ok'> in
+  [ !Holds($A, $H, ask), In(%w) ]
+  --[ Signed($A, $H, %w, $D, 'ok') ]->
+  [ Out(<l, sign(l, ask)>) ]
+
+rule SignRevoked:
+  let l = <'list', $A, %w, $D, 'revoked'> in
+  [ !Holds($A, $H, ask), In(%w) ]
+  --[ Signed($A, $H, %w, $D, 'revoked') ]->
+  [ Out(<l, sign(l, ask)>) ]
+
+/* ---- Verifier (a contact, or a seedless sibling device) ------------------------------------ */
+
+rule VerifierAdopt:
+  let l = <'list', $A, %w, D, st> in
+  [ In(<l, sg>), !Pin($A, pka) ]
+  --[ Eq(verify(sg, l, pka), true), Adopt($V, $A, %w, D, st) ]->
+  [ ]
+
+rule VerifierAccept:     /* seal to D, or accept something D signed, as a device of A */
+  let cred = <'cred', $A, D, dpk> in
+  [ In(<cred, sg>), In(%v), !Pin($A, pka) ]
+  --[ Eq(verify(sg, cred, pka), true), AcceptAuth($V, $A, D, dpk, %v) ]->
+  [ ]
+
+/* ---- Sanity -------------------------------------------------------------------------------- */
+
+lemma executable_accept:
+  exists-trace
+  "Ex V A D dpk %v #i. AcceptAuth(V, A, D, dpk, %v)@i
+     & not (Ex B #r. RevealAccount(B)@r) & not (Ex B H #r. RevealSeed(B, H)@r)"
+
+lemma executable_revoke_then_reauthorize:
+  exists-trace
+  "Ex V A D dpk %v %w #j #i. Adopt(V, A, %v, D, 'revoked')@j & AcceptAuth(V, A, D, dpk, %w)@i & #j < #i
+     & not (Ex B #r. RevealAccount(B)@r) & not (Ex B H #r. RevealSeed(B, H)@r)"
+
+/* ---- Properties ---------------------------------------------------------------------------- */
+
+/* R1 — authorization is sound. If a verifier treats (D, dpk) as a device of A, then the account
+   really enrolled D with that key and a seed holder signed the roster the verifier relies on —
+   unless the account key leaked. No relay, contact or seedless device can forge it. */
+lemma R1_authorization_is_sound:
+  "All V A D dpk %v #i. AcceptAuth(V, A, D, dpk, %v)@i ==>
+      ( (Ex #e. Enrolled(A, D)@e) & (Ex #d. DevKey(D, dpk)@d)
+        & (Ex H #s. Signed(A, H, %v, D, 'ok')@s) )
+    | (Ex #r. RevealAccount(A)@r) | (Ex H #r. RevealSeed(A, H)@r)"
+
+/* R2 — a revocation cannot be rolled back. Once a verifier holds a roster revoking D, it treats
+   D as authorized again only on a STRICTLY NEWER roster that a seed holder signed — replaying an
+   old roster does nothing, and D's own keys (RevealDevice, for a seedless D) do not help. */
+lemma R2_revocation_is_not_rolled_back:
+  "All V A D dpk %v %w #j #i.
+      Adopt(V, A, %v, D, 'revoked')@j & AcceptAuth(V, A, D, dpk, %w)@i & #j < #i ==>
+      ( (%v << %w) & (Ex H #s. Signed(A, H, %w, D, 'ok')@s) )
+    | (Ex #r. RevealAccount(A)@r) | (Ex H #r. RevealSeed(A, H)@r)"
+
+/* R3 — KNOWN LIMIT (a trace exists): a revoked device that HOLDS THE ACCOUNT KEY re-authorizes
+   itself. Revoking a seed-holding device is advisory; this is what seedless enrollment is for. */
+lemma R3_revoked_seed_holder_can_reauthorize_itself:
+  exists-trace
+  "Ex V A D dpk %v %w #j #r #i.
+      Adopt(V, A, %v, D, 'revoked')@j & RevealSeed(A, D)@r & AcceptAuth(V, A, D, dpk, %w)@i & #j < #i
+    & not (Ex H #s. Signed(A, H, %w, D, 'ok')@s)
+    & not (Ex #x. RevealAccount(A)@x)"
+
+/* R4 — EXPECTED (a trace exists): two honest seed holders sign DIFFERENT rosters with the SAME
+   version; a verifier that adopted the one that still authorizes D never adopts the one that
+   revokes it (not strictly newer). The revocation takes effect only when a seed holder publishes
+   a merged, higher version. */
+lemma R4_same_version_rosters_can_hide_a_revocation:
+  exists-trace
+  "Ex V A D dpk H1 %v #s #i.
+      Signed(A, H1, %v, D, 'revoked')@s & AcceptAuth(V, A, D, dpk, %v)@i & #s < #i
+    & not (Ex B #r. RevealAccount(B)@r) & not (Ex B H #r. RevealSeed(B, H)@r)"
+
+/* R5 — with a SINGLE seed holder (the primary; every other device seedless) that cannot happen:
+   a version identifies one roster, so a signed revocation at version v is what every verifier at
+   version v holds. */
+lemma R5_single_seed_holder_rosters_are_unique:
+  "All V A D D2 st H %v #s #a.
+      Signed(A, H, %v, D, 'revoked')@s & Adopt(V, A, %v, D2, st)@a
+    & (All H2 #h. SeedHolder(A, H2)@h ==> H2 = H)
+    ==> (D2 = D & st = 'revoked')
+      | (Ex #r. RevealAccount(A)@r) | (Ex H3 #r. RevealSeed(A, H3)@r)"
+
+end

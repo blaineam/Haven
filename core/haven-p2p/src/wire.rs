@@ -12,7 +12,7 @@
 //! the bytes, which is most of a parse error's diagnostic value.
 //!
 //! Everything here fails closed and cannot panic on hostile input — the property
-//! `tests/fuzz_wire_parsers.rs` exercises across all fifteen public parsers.
+//! `tests/fuzz_wire_parsers.rs` exercises across all sixteen public parsers.
 
 use crate::{CoreError, Result};
 

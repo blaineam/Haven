@@ -90,6 +90,7 @@ fn parse_watching_allocs(t: &Target, bytes: &[u8]) -> (std::result::Result<bool,
 use haven_p2p::device::{AdminGrant, CircleUpgrade, DeviceCredential, DeviceList, SeedDropCapability};
 use haven_p2p::groupkey::{seal_event_in_epoch, EpochEnvelope};
 use haven_p2p::identity::Identity;
+use haven_p2p::keypackage::KeyPackage;
 use haven_p2p::social::{Event, EventKind};
 use haven_p2p::treekem::{
     Commit, GroupInfo, LeafNode, ParentNode, PathSecretCiphertext, PersistTree, Proposal,
@@ -359,7 +360,15 @@ fn targets() -> Vec<Target> {
 
     // The trailing `true`/`false` is the EXACT-CONSUMPTION contract (see `Target`): treekem's
     // formats are terminal; the roster wire deliberately carries appended trailers.
+    let key_package = KeyPackage {
+        group_id: r.bytes(24),
+        kp_id: r.arr32()[..16].try_into().unwrap(),
+        leaf: leaf_node(r),
+        init_bundle: r.bytes(120),
+        sig: r.bytes(96),
+    };
     vec![
+        target!("keypackage::KeyPackage", KeyPackage, vec![key_package.to_bytes()], true),
         target!("treekem::LeafNode", LeafNode, vec![leaf_node(r).to_bytes()], true),
         target!(
             "treekem::ParentNode",

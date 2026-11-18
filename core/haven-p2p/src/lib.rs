@@ -32,6 +32,7 @@ pub mod enroll;
 pub mod friend_invite;
 pub mod groupkey;
 pub mod identity;
+pub mod keypackage;
 pub mod link;
 pub mod mediaref;
 pub mod mediavariants;

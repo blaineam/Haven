@@ -1,0 +1,325 @@
+/*
+  Haven TreeKEM — FORKS, the retention window and re-issued updates. Symbolic model (Tamarin).
+
+  Extends haven_treekem_fixed.spthy (same primitives, same fix F-a..F-d). Spec:
+  docs/formal/PROTOCOL-SPEC.md §15.
+
+  Run:  tamarin-prover --auto-sources --prove docs/formal/haven_treekem_forks.spthy
+
+  Haven has no delivery service, so two commits can extend the same epoch (TREEKEM-DESIGN.md §5).
+  A device therefore cannot delete its epoch-n state the moment it applies a commit: it must keep
+  it until the fork is settled, in case the other branch wins. This model asks what that costs:
+
+   - Two commits extend epoch 1: the committer's Update ('cu') and member D's own Update ('du').
+   - A device that builds or applies a commit KEEPS its epoch-1 state and holds one branch state
+     per commit it knows (the "retention window").
+   - Checkpoint(X, G, b): X settles on branch b and DELETES its epoch-1 state and every other
+     branch state. Modelled with persistent facts plus the restriction WindowClosed (no use and
+     no reveal of window state after the checkpoint).
+   - If D's Update lost the fork, D RE-ISSUES it on top of the winner (epoch 3).
+
+  Which branch wins is a pure function of the commits a device has seen (larger hash, longer
+  chain first). That agreement property is not a secrecy property and is not modelled here; it
+  is covered by the convergence simulation in core/haven-p2p/src/treekem.rs.
+*/
+
+theory HavenTreeKemForks
+begin
+
+builtins: signing, asymmetric-encryption, hashing
+
+restriction Eq:   "All x y #i. Eq(x, y)@i ==> x = y"
+restriction Neq:  "All x #i. Neq(x, x)@i ==> F"
+restriction Once: "All t #i #j. Once(t)@i & Once(t)@j ==> #i = #j"
+
+/* Deletion at the checkpoint: epoch-1 and branch state is neither used nor revealed afterwards. */
+restriction WindowClosed:
+  "All X G b #c #w. Checkpoint(X, G, b)@c & Window(X, G)@w ==> #w < #c"
+
+/* ---- Devices: a long-term SIGNING key only -------------------------------------------- */
+
+rule Device:
+  [ Fr(~sk) ]
+  --[ Once(<'dev', $X>) ]->
+  [ !Ltk($X, ~sk), !Pub($X, pk(~sk)), Out(<$X, pk(~sk)>) ]
+
+rule RevealLtk:
+  [ !Ltk(X, sk) ] --[ RevealLtk(X) ]-> [ Out(sk) ]
+
+rule KeyPackage:
+  let leafpk = pk(h(<'node', ~ls>))
+      body   = <'kp', $X, $G, pk(~ik), leafpk>
+  in
+  [ Fr(~ik), Fr(~ls), !Ltk($X, sk) ]
+  --[ Once(<'kp', $X, $G>), OwnLeaf($X, $G, ~ls), InitKey($X, $G, ~ik) ]->
+  [ KP($X, $G, ~ik, ~ls), !KPPub($X, $G, pk(~ik), leafpk), Out(<body, sign(body, sk)>) ]
+
+/* ---- Genesis (epoch 1) ----------------------------------------------------------------- */
+
+rule Genesis:
+  let j1    = h(<'joiner', ~init0, 'zero', $G, '1'>)
+      es1   = h(<'epoch', j1>)
+      wD    = aenc(<'welcome', $G, '1', j1>, ikD)
+      wE    = aenc(<'welcome', $G, '1', j1>, ikE)
+  in
+  [ Fr(~init0), Fr(~lsC), !Ltk($C, skC)
+  , !KPPub($D, $G, ikD, leafD), !KPPub($E, $G, ikE, leafE) ]
+  --[ Once('genesis'), Neq($C, $D), Neq($C, $E), Neq($D, $E)
+    , Genesis($G, $C, $D, $E), EpochSecret($G, '1', es1), Init0(~init0), OwnLeaf($C, $G, ~lsC) ]->
+  [ !C1($C, $G, es1, h(<'init', es1>), ~lsC)
+  , !Grp($G, $C, $D, $E), !Leaf1($G, pk(h(<'node', ~lsC>)), leafD, leafE)
+  , Out(<'welcome', $G, wD, sign(wD, skC)>)
+  , Out(<'welcome', $G, wE, sign(wE, skC)>)
+  , Out(pk(h(<'node', ~lsC>))) ]
+
+rule JoinD:
+  let w   = aenc(<'welcome', $G, '1', j1>, pk(ik))
+      es1 = h(<'epoch', j1>)
+  in
+  [ In(<'welcome', $G, w, sg>), KP($D, $G, ik, ls), !Grp($G, $C, $D, $E), !Pub($C, pkC) ]
+  --[ Eq(verify(sg, w, pkC), true) ]->
+  [ !D1($D, $G, es1, h(<'init', es1>), ls) ]
+
+rule JoinE:
+  let w   = aenc(<'welcome', $G, '1', j1>, pk(ik))
+      es1 = h(<'epoch', j1>)
+  in
+  [ In(<'welcome', $G, w, sg>), KP($E, $G, ik, ls), !Grp($G, $C, $D, $E), !Pub($C, pkC) ]
+  --[ Eq(verify(sg, w, pkC), true) ]->
+  [ !E1($E, $G, es1, h(<'init', es1>), ls) ]
+
+/* ---- Two competing commits on epoch 1 ---------------------------------------------------- */
+
+rule CommitCu:           /* the committer's leaf Update */
+  let ps   = h(<'path', ~nl>)
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, 'cu'>)>)
+      cD   = aenc(<'path', $G, 'cu', ps>, leafD)
+      cE   = aenc(<'path', $G, 'cu', ps>, leafE)
+      body = <'commit', $G, 'cu', pk(h(<'node', ~nl>)), cD, cE>
+  in
+  [ Fr(~nl), !C1($C, $G, es1, init1, lsC), !Ltk($C, skC)
+  , !Grp($G, $C, $D, $E), !Leaf1($G, leafC, leafD, leafE) ]
+  --[ Once(<'cu', $G>), Window($C, $G), EpochSecret($G, 'cu', es2), OwnLeaf($C, $G, ~nl) ]->
+  [ !CBr($C, $G, 'cu', es2, h(<'init', es2>), ~nl), !LeafCu($G, pk(h(<'node', ~nl>)))
+  , Out(<body, sign(body, skC)>) ]
+
+rule CommitDu:           /* member D's own leaf Update, concurrent with the above */
+  let ps   = h(<'path', ~nl>)
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, 'du'>)>)
+      cC   = aenc(<'path', $G, 'du', ps>, leafC)
+      cE   = aenc(<'path', $G, 'du', ps>, leafE)
+      body = <'commit', $G, 'du', pk(h(<'node', ~nl>)), cC, cE>
+  in
+  [ Fr(~nl), !D1($D, $G, es1, init1, ls), !Ltk($D, skD)
+  , !Grp($G, $C, $D, $E), !Leaf1($G, leafC, leafD, leafE) ]
+  --[ Once(<'du', $G>), Window($D, $G), EpochSecret($G, 'du', es2), MemberUpdated($G, $D)
+    , OwnLeaf($D, $G, ~nl), DuLeaf($D, $G, ~nl) ]->
+  [ !DBr($D, $G, 'du', es2, h(<'init', es2>), ~nl)
+  , Out(<body, sign(body, skD)>) ]
+
+/* ---- Applying a commit keeps the epoch-1 state (the window) ------------------------------ */
+
+rule ApplyCuD:
+  let cD   = aenc(<'path', $G, 'cu', ps>, pk(h(<'node', ls>)))
+      body = <'commit', $G, 'cu', leafC2, cD, cE>
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, 'cu'>)>)
+  in
+  [ In(<body, sg>), !D1($D, $G, es1, init1, ls), !Grp($G, $C, $D, $E), !Pub($C, pkC) ]
+  --[ Eq(verify(sg, body, pkC), true), Window($D, $G), Once(<'apply', $D, $G, 'cu'>)
+    , Reached($D, $G, 'cu', es2) ]->
+  [ !DBr($D, $G, 'cu', es2, h(<'init', es2>), ls) ]
+
+rule ApplyCuE:
+  let cE   = aenc(<'path', $G, 'cu', ps>, pk(h(<'node', ls>)))
+      body = <'commit', $G, 'cu', leafC2, cD, cE>
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, 'cu'>)>)
+  in
+  [ In(<body, sg>), !E1($E, $G, es1, init1, ls), !Grp($G, $C, $D, $E), !Pub($C, pkC) ]
+  --[ Eq(verify(sg, body, pkC), true), Window($E, $G), Once(<'apply', $E, $G, 'cu'>)
+    , Reached($E, $G, 'cu', es2) ]->
+  [ !EBr($E, $G, 'cu', es2, h(<'init', es2>), ls) ]
+
+rule ApplyDuC:
+  let cC   = aenc(<'path', $G, 'du', ps>, pk(h(<'node', ls>)))
+      body = <'commit', $G, 'du', leafD2, cC, cE>
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, 'du'>)>)
+  in
+  [ In(<body, sg>), !C1($C, $G, es1, init1, ls), !Grp($G, $C, $D, $E), !Pub($D, pkD) ]
+  --[ Eq(verify(sg, body, pkD), true), Window($C, $G), Once(<'apply', $C, $G, 'du'>)
+    , Reached($C, $G, 'du', es2) ]->
+  [ !CBr($C, $G, 'du', es2, h(<'init', es2>), ls) ]
+
+rule ApplyDuE:
+  let cE   = aenc(<'path', $G, 'du', ps>, pk(h(<'node', ls>)))
+      body = <'commit', $G, 'du', leafD2, cC, cE>
+      es2  = h(<'epoch', h(<'joiner', init1, h(<'commit', ps>), $G, 'du'>)>)
+  in
+  [ In(<body, sg>), !E1($E, $G, es1, init1, ls), !Grp($G, $C, $D, $E), !Pub($D, pkD) ]
+  --[ Eq(verify(sg, body, pkD), true), Window($E, $G), Once(<'apply', $E, $G, 'du'>)
+    , Reached($E, $G, 'du', es2) ]->
+  [ !EBr($E, $G, 'du', es2, h(<'init', es2>), ls) ]
+
+/* ---- Checkpoint: settle on one branch, delete the epoch-1 state and the other branch ----- */
+
+rule CheckpointC:
+  [ !C1($C, $G, es1, init1, ls1), !CBr($C, $G, b, es2, init2, ls2) ]
+  --[ Checkpoint($C, $G, b), Once(<'ck', $C, $G>) ]->
+  [ !C2($C, $G, b, es2, init2, ls2) ]
+
+rule CheckpointD:
+  [ !D1($D, $G, es1, init1, ls1), !DBr($D, $G, b, es2, init2, ls2) ]
+  --[ Checkpoint($D, $G, b), Once(<'ck', $D, $G>) ]->
+  [ !D2($D, $G, b, es2, init2, ls2) ]
+
+rule CheckpointE:
+  [ !E1($E, $G, es1, init1, ls1), !EBr($E, $G, b, es2, init2, ls2) ]
+  --[ Checkpoint($E, $G, b), Once(<'ck', $E, $G>) ]->
+  [ !E2($E, $G, b, es2, init2, ls2) ]
+
+/* ---- D's Update lost the fork: D re-issues it on top of the winner (epoch 3) ------------- */
+
+rule ReissueD3:
+  let ps   = h(<'path', ~nl>)
+      es3  = h(<'epoch', h(<'joiner', init2, h(<'commit', ps>), $G, '3'>)>)
+      cC   = aenc(<'path', $G, '3', ps>, leafC2)
+      cE   = aenc(<'path', $G, '3', ps>, leafE)
+      body = <'commit', $G, '3', pk(h(<'node', ~nl>)), cC, cE>
+  in
+  [ Fr(~nl), !D2($D, $G, 'cu', es2, init2, ls), !Ltk($D, skD)
+  , !Leaf1($G, leafC, leafD, leafE), !LeafCu($G, leafC2) ]
+  --[ Once(<'d3', $G>), EpochSecret($G, '3', es3), Reissued($G, $D)
+    , OwnLeaf($D, $G, ~nl), D3Leaf($D, $G, ~nl) ]->
+  [ !D3($D, $G, es3, h(<'init', es3>), ~nl)
+  , Out(<body, sign(body, skD)>) ]
+
+rule ApplyD3E:
+  let cE   = aenc(<'path', $G, '3', ps>, pk(h(<'node', ls>)))
+      body = <'commit', $G, '3', leafD3, cC, cE>
+      es3  = h(<'epoch', h(<'joiner', init2, h(<'commit', ps>), $G, '3'>)>)
+  in
+  [ In(<body, sg>), !E2($E, $G, 'cu', es2, init2, ls), !Grp($G, $C, $D, $E), !Pub($D, pkD) ]
+  --[ Eq(verify(sg, body, pkD), true), Once(<'apply', $E, $G, '3'>), Reached($E, $G, '3', es3) ]->
+  [ ]
+
+/* ---- Stored-state compromise ------------------------------------------------------------- */
+
+rule RevealKeyPackage:
+  [ KP(X, G, ik, ls) ]
+  --[ Rev(X), RevealState(X, G, '0'), Once(<'reveal', X, G, '0'>) ]->
+  [ KP(X, G, ik, ls), Out(<ik, ls>) ]
+
+rule RevealC1:
+  [ !C1(X, G, es, init, ls) ]
+  --[ Rev(X), RevealState(X, G, '1'), Window(X, G), Once(<'reveal', X, G, '1'>) ]-> [ Out(<es, init, ls>) ]
+rule RevealD1:
+  [ !D1(X, G, es, init, ls) ]
+  --[ Rev(X), RevealState(X, G, '1'), Window(X, G), Once(<'reveal', X, G, '1'>) ]-> [ Out(<es, init, ls>) ]
+rule RevealE1:
+  [ !E1(X, G, es, init, ls) ]
+  --[ Rev(X), RevealState(X, G, '1'), Window(X, G), Once(<'reveal', X, G, '1'>) ]-> [ Out(<es, init, ls>) ]
+
+rule RevealCBr:
+  [ !CBr(X, G, b, es, init, ls) ]
+  --[ Rev(X), RevealBr(X, G, b), Window(X, G), Once(<'revealbr', X, G, b>) ]-> [ Out(<es, init, ls>) ]
+rule RevealDBr:
+  [ !DBr(X, G, b, es, init, ls) ]
+  --[ Rev(X), RevealBr(X, G, b), Window(X, G), Once(<'revealbr', X, G, b>) ]-> [ Out(<es, init, ls>) ]
+rule RevealEBr:
+  [ !EBr(X, G, b, es, init, ls) ]
+  --[ Rev(X), RevealBr(X, G, b), Window(X, G), Once(<'revealbr', X, G, b>) ]-> [ Out(<es, init, ls>) ]
+
+rule RevealC2:
+  [ !C2(X, G, b, es, init, ls) ]
+  --[ Rev(X), RevealState(X, G, '2'), Once(<'reveal', X, G, '2'>) ]-> [ Out(<es, init, ls>) ]
+rule RevealD2:
+  [ !D2(X, G, b, es, init, ls) ]
+  --[ Rev(X), RevealState(X, G, '2'), Once(<'reveal', X, G, '2'>) ]-> [ Out(<es, init, ls>) ]
+rule RevealE2:
+  [ !E2(X, G, b, es, init, ls) ]
+  --[ Rev(X), RevealState(X, G, '2'), Once(<'reveal', X, G, '2'>) ]-> [ Out(<es, init, ls>) ]
+
+rule RevealD3:
+  [ !D3(X, G, es, init, ls) ]
+  --[ Rev(X), RevealState(X, G, '3'), Once(<'reveal', X, G, '3'>) ]-> [ Out(<es, init, ls>) ]
+
+/* ---- Helper lemmas ------------------------------------------------------------------------ */
+
+lemma H1_init0_secret [reuse]:
+  "All x #i #k. Init0(x)@i & K(x)@k ==> F"
+
+lemma H2_init_key_secret [reuse]:
+  "All X G ik #i #k. InitKey(X, G, ik)@i & K(ik)@k ==> (Ex #r. RevealState(X, G, '0')@r)"
+
+lemma H3_leaf_secret [reuse]:
+  "All X G ls #i #k. OwnLeaf(X, G, ls)@i & K(ls)@k ==> (Ex #r. Rev(X)@r)"
+
+lemma H4_du_leaf_secret [reuse]:
+  "All X G nl #i #k. DuLeaf(X, G, nl)@i & K(nl)@k ==>
+      (Ex #r. RevealBr(X, G, 'du')@r)
+    | (Ex #r #c. RevealState(X, G, '2')@r & Checkpoint(X, G, 'du')@c)"
+
+lemma H5_d3_leaf_secret [reuse]:
+  "All X G nl #i #k. D3Leaf(X, G, nl)@i & K(nl)@k ==> (Ex #r. RevealState(X, G, '3')@r)"
+
+/* ---- Sanity -------------------------------------------------------------------------------- */
+
+lemma executable_fork:
+  exists-trace
+  "Ex G E a b #i #j. Reached(E, G, 'cu', a)@i & Reached(E, G, 'du', b)@j
+     & not (Ex X #r. RevealLtk(X)@r) & not (Ex X #r. Rev(X)@r)"
+
+lemma executable_reissue:
+  exists-trace
+  "Ex G E es #i. Reached(E, G, '3', es)@i
+     & not (Ex X #r. RevealLtk(X)@r) & not (Ex X #r. Rev(X)@r)"
+
+/* ---- Properties ----------------------------------------------------------------------------- */
+
+/* FK1 — with forks, still nothing leaks unless some device's stored state does. */
+lemma FK1_no_secret_without_state_compromise:
+  "All G n es #i #k. EpochSecret(G, n, es)@i & K(es)@k ==> (Ex X #r. Rev(X)@r)"
+
+/* FK2 — forward secrecy once the window closes. Device X settled on branch b and its settled
+   state leaks (nothing else does). Then epoch 1 and the LOSING branch stay secret: the only
+   secrets exposed are X's own branch and what follows it.
+   No signing key is compromised here: with the committer's signing key an adversary can forge a
+   Welcome and seat a joiner in a group whose secrets it chose — an ACTIVE impersonation attack
+   (the prover finds it if this premise is dropped), which no forward-secrecy claim covers. */
+lemma FK2_fs_after_checkpoint:
+  "All G X b n es #c #i #r #k.
+      Checkpoint(X, G, b)@c & EpochSecret(G, n, es)@i & RevealState(X, G, '2')@r & K(es)@k
+    & not (Ex Y #s. Rev(Y)@s & not (Y = X))
+    & not (Ex #s. RevealState(X, G, '0')@s) & not (Ex #s. RevealState(X, G, '1')@s)
+    & not (Ex b2 #s. RevealBr(X, G, b2)@s) & not (Ex #s. RevealState(X, G, '3')@s)
+    & not (Ex Y #s. RevealLtk(Y)@s)
+    ==> (n = b) | (n = '3')"
+
+/* FK3 — healing on D's own branch: whatever leaked from D before its Update, the epoch its
+   Update creates is secret. */
+lemma FK3_pcs_on_own_branch:
+  "All G D es #m #i #k.
+      MemberUpdated(G, D)@m & EpochSecret(G, 'du', es)@i & K(es)@k ==>
+      (Ex X #r. Rev(X)@r & not (X = D))
+    | (Ex #r. RevealBr(D, G, 'du')@r)
+    | (Ex #r #c. RevealState(D, G, '2')@r & Checkpoint(D, G, 'du')@c)"
+
+/* FK4 — EXPECTED TO HOLD (a trace exists): the competing branch is NOT healed. With only D's
+   epoch-1 state leaked, the adversary reads the committer's branch. So D is healed only once
+   its Update is on the chain the circle adopts. */
+lemma FK4_competing_branch_is_not_healed:
+  exists-trace
+  "Ex G D es #m #i #k.
+      MemberUpdated(G, D)@m & EpochSecret(G, 'cu', es)@i & K(es)@k
+    & not (Ex X #r. Rev(X)@r & not (X = D))
+    & not (Ex b #r. RevealBr(D, G, b)@r) & not (Ex #r. RevealState(D, G, '2')@r)
+    & not (Ex #r. RevealState(D, G, '3')@r) & not (Ex X #r. RevealLtk(X)@r)"
+
+/* FK5 — the re-issue heals. D's Update lost; D re-issues it on the winning branch. That epoch
+   is secret even if EVERYTHING D stored before the re-issue leaked. */
+lemma FK5_reissued_update_heals:
+  "All G D es #m #i #k.
+      Reissued(G, D)@m & EpochSecret(G, '3', es)@i & K(es)@k ==>
+      (Ex X #r. Rev(X)@r & not (X = D))
+    | (Ex #r. RevealState(D, G, '3')@r)"
+
+end

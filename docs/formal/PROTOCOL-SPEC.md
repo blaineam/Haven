@@ -227,3 +227,127 @@ or lost, and nothing is user-visible.
    random secrets; devices drop the v1 tree state after the flip.
 
 Each stage needs its own core tests and a model re-run; stages 3–4 change wire formats.
+
+## 15. Forks and the retention window
+
+Model: [`haven_treekem_forks.spthy`](haven_treekem_forks.spthy) (the fixed design of §12, plus
+two commits extending the same epoch, a retention window, and a re-issued Update).
+
+Haven has no delivery service, so two commits can extend the same epoch
+(`TREEKEM-DESIGN.md` §5). A device therefore cannot delete its epoch-n state the instant it
+applies a commit; it keeps it, plus one branch state per commit it knows, until it **checkpoints**:
+settles on a branch and deletes the epoch-n state and every other branch. The model asks what
+that retention costs.
+
+| # | Property | Result |
+|---|---|---|
+| FK1 | With forks, no epoch secret leaks unless some device's stored state does | verified |
+| FK2 | After the checkpoint, a leak of the settled state exposes neither the earlier epoch nor the losing branch | verified |
+| FK3 | The epoch a device's own Update creates is secret whatever leaked from that device before | verified |
+| FK4 | A **competing** branch is not healed by that Update (a trace exists) | confirmed |
+| FK5 | Re-issuing the Update on the winning branch heals, even if everything the device stored before leaked | FK5_RESULT |
+
+What this fixes as rules for the implementation:
+
+- **Forward secrecy is delayed by the window, not lost.** Until a device checkpoints, a leak of
+  its state exposes the epoch it is leaving and every branch it holds. So the window must be
+  bounded: checkpoint when the next epoch has a child the device has applied, or after a fixed
+  age, whichever comes first. FK2 is the guarantee from that point on.
+- **A healing Update only counts once it is on the adopted chain** (FK4). A device whose Update
+  lost a fork must re-issue it at its next bundle (FK5). The cadence code has to track "my last
+  Update is an ancestor of my tip", not "I sent an Update this week".
+- **Old leaf secrets die at the checkpoint**, not at the Update. Between the two the device holds
+  both, because the branch that still needs the old leaf key may win.
+- FK2 assumes no signing key is compromised. Dropping that premise, the prover finds the expected
+  active attack: with the committer's signing key an adversary forges a Welcome and seats a
+  joiner in a group whose secrets it chose. That is impersonation with a stolen long-term key,
+  which these secrecy properties do not cover; §16.2 binds a Welcome to a public commit so
+  nothing short of that key suffices.
+
+Not modelled here: *which* branch wins. Agreement is a property of a pure function of the commits
+a device has seen (longest chain, then larger hash) and is exercised by the convergence
+simulation in `core/haven-p2p/src/treekem.rs` (random commits by any member, partitions,
+redelivery, forced forks). A device that checkpointed a branch that later loses to a longer chain
+cannot switch; it re-enters with a fresh key package (§16.3).
+
+## 16. Version 2 of the tree: wire formats and rules (stages 3–5)
+
+Stage 1–2 (stored state, random secrets) change nothing on the wire, so they apply to existing
+trees in place. Everything below is a new tree version and takes effect only after the
+re-genesis in §16.5. Primitive layer: [`core/haven-p2p/src/keypackage.rs`](../../core/haven-p2p/src/keypackage.rs).
+
+### 16.1 Key package (F-b, F-c)
+
+```
+TAG_MLS_KEYPACKAGE = 0x09
+KeyPackage = version(1)=1 ‖ lp(group_id) ‖ kp_id(16) ‖ lp(LeafNode) ‖ lp(init_bundle) ‖ lp(sig)
+             # LeafNode  : the device's OWN leaf public key, its account-signed credential, and the
+             #             leaf binding — now really DEVICE-signed, because the device holds the key
+             # init_bundle: public bundle of a throwaway identity drawn from a random 32-byte seed
+             # sig       : DEVICE hybrid signature over "haven-mls-kp-v1" ‖ all preceding bytes
+```
+
+- The device keeps `(kp_id, leaf_secret, init_seed)` in its state blob and re-emits the same
+  package bytes in every bundle until it is used (byte-stable, so the mailbox stays deduped).
+- A receiver accepts a package only if: the credential chains to the pinned account key, the
+  device is authorized in that account's verified roster, the leaf binding and the package
+  signature verify under that device, and `group_id` is the circle it arrived in.
+- **One use.** A committer uses a given `kp_id` for at most one Add; the device publishes a new
+  package whenever it needs to (re-)enter. `init_seed` is deleted when the device has joined and
+  that entry point is past the retention window (§15); the Welcome plaintext is never stored.
+
+### 16.2 Welcome v2
+
+```
+TAG_MLS2_WELCOME = 0x0A        SealedEnvelope to the key package's init identity (seal_bytes rail)
+plaintext = commit_hash(32) ‖ epoch(8) ‖ leaf_index(4) ‖ joiner_secret(32) ‖ cth(32) ‖ kp_id(16)
+            ‖ u32 tree_len ‖ tree_bytes
+```
+
+No leaf secret travels: the joiner already holds it. The joiner checks that the tree's leaf at
+`leaf_index` carries exactly the leaf key of its package `kp_id`, else it rejects (fail closed,
+as today). Every v2 Welcome is self-contained (carries the tree), genesis included.
+
+A Welcome is also bound to the **public commit** it enters at: the joiner must hold the commit
+whose hash is `commit_hash`, that commit must be for this circle and epoch, pass the same
+signature and authority checks every member applies, and claim exactly the delivered tree
+(`tree_hash`). A joiner therefore never enters a state described by a Welcome alone
+(`enter_via_welcome_v2`).
+
+### 16.3 Membership commits
+
+- **Genesis** is built by the elected creator once it holds a valid key package for every
+  authorized device; the Adds carry the packages' leaves verbatim. `init_0`, the creator's own
+  leaf secret and all path entropy come from the OS RNG. The v2 genesis parent constant uses a
+  new domain (`haven-mls-genesis-parent-v2`), so v1 and v2 chains can never be spliced.
+- **Add** needs the new device's key package. **Re-entry** (a device stranded on a losing branch
+  or asleep past retention) is a `Remove(old leaf) + Add(new key package)` in one commit — there
+  is no separate "re-Welcome" that re-delivers an old leaf secret, because nobody but the device
+  ever had it.
+- **Remove** is unchanged: admin-authorized, or a member removing only its own leaves.
+
+### 16.4 Member updates (F-d)
+
+A commit with **no proposals** and an UpdatePath is valid from **any current leaf** when:
+
+1. the UpdatePath leaf's credential names the same device as the sender's current leaf;
+2. that device is authorized in its account's verified roster;
+3. the leaf binding and the commit signature verify under that device (`verify_leaf`).
+
+Cadence: each device updates its own leaf at the weekly full-bundle chokepoint, offset by a
+per-device jitter so devices do not collide by construction, and **re-issues** at its next bundle
+whenever its last Update is not on the chain it has adopted (§15, FK4/FK5). The update's leaf
+secret and entropy are random, stored with the pending commit, and dropped at the checkpoint.
+
+### 16.5 Migration (no user-visible step)
+
+- New capability value `ml: 2` in the profile, monotonic and learned-never-inferred like `ml: 1`.
+- While any device of the circle is `ml: 1`, the circle stays on its v1 tree (with stage 1–2
+  hygiene on upgraded devices). Nothing is emitted that a v1 build cannot parse.
+- When every authorized device is `ml: 2`, upgraded devices drop the v1 tree and wipe its
+  secrets; content keys fall back to the KeyCommit lane for the interval (the existing park
+  path), devices publish key packages, the creator builds the v2 genesis, and content flips to
+  the v2 tree at all-joined (the existing second gate). Posts are never re-encrypted or lost:
+  the content path only ever sees 32-byte epoch keys, and the daily re-seal republishes history
+  under whichever key is current.
+- A v1 device (re)joining reverses the gate exactly as §7.3 of the design does today.

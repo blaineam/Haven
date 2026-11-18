@@ -304,7 +304,7 @@ re-genesis in §16.5. Primitive layer: [`core/haven-p2p/src/keypackage.rs`](../.
 ### 16.1 Key package (F-b, F-c)
 
 ```
-TAG_MLS_KEYPACKAGE = 0x09
+TAG_MLS2_KEYPACKAGE = 0x10
 KeyPackage = version(1)=1 ‖ lp(group_id) ‖ kp_id(16) ‖ lp(LeafNode) ‖ lp(init_bundle) ‖ lp(sig)
              # LeafNode  : the device's OWN leaf public key, its account-signed credential, and the
              #             leaf binding — now really DEVICE-signed, because the device holds the key
@@ -324,7 +324,7 @@ KeyPackage = version(1)=1 ‖ lp(group_id) ‖ kp_id(16) ‖ lp(LeafNode) ‖ lp
 ### 16.2 Welcome v2
 
 ```
-TAG_MLS2_WELCOME = 0x0A        SealedEnvelope to the key package's init identity (seal_bytes rail)
+TAG_MLS2_WELCOME = 0x12           SealedEnvelope to the key package's init identity (seal_bytes rail)
 plaintext = commit_hash(32) ‖ epoch(8) ‖ leaf_index(4) ‖ joiner_secret(32) ‖ cth(32) ‖ kp_id(16)
             ‖ u32 tree_len ‖ tree_bytes
 ```
@@ -340,6 +340,15 @@ signature and authority checks every member applies, and claim exactly the deliv
 (`enter_via_welcome_v2`).
 
 ### 16.3 Membership commits
+
+```
+TAG_MLS2_COMMIT = 0x11    a treekem::Commit on a v2 chain      TAG_MLS2_JOIN = 0x13    the v2 join ack
+```
+
+The v2 tree has its own tag family (`0x10`–`0x13`) instead of reusing the v1 tags: a v1 build
+that receives a v2 commit under the v1 tag would park it as an orphan and retry it, and a v2 join
+ack under the v1 tag would trigger a v1 re-Welcome. Unknown tags fall through harmlessly.
+
 
 - **Genesis** is built by the elected creator once it holds a valid key package for every
   authorized device; the Adds carry the packages' leaves verbatim. `init_0`, the creator's own

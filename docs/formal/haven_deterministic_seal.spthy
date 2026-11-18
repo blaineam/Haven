@@ -1,0 +1,80 @@
+/*
+  Haven deterministic event seal — what an observer can tell apart. Symbolic model (Tamarin,
+  observational equivalence).
+
+  Code: core/haven-p2p/src/groupkey.rs `seal_event_in_epoch`, crypto.rs `seal_reproducible`.
+  Spec: docs/formal/PROTOCOL-SPEC.md §18.
+
+  Run each variant (they are separate questions, so one equivalence each):
+    tamarin-prover --diff --prove -DUNIQUE          docs/formal/haven_deterministic_seal.spthy
+    tamarin-prover --diff --prove -DUNIQUE -DORACLE docs/formal/haven_deterministic_seal.spthy
+    tamarin-prover --diff --prove -DRESEAL          docs/formal/haven_deterministic_seal.spthy
+    tamarin-prover --diff --prove -DGUESS           docs/formal/haven_deterministic_seal.spthy
+    tamarin-prover --diff --prove -DGUESS -DORACLE  docs/formal/haven_deterministic_seal.spthy
+
+  The seal, for epoch key ek and event plaintext m (circle id and epoch are public constants here):
+      salt      = PRF_ek(m)                    (BLAKE3 keyed by ek, truncated to 16 bytes)
+      event_key = KDF(ek, salt)                (HKDF)
+      envelope  = < salt, senc(m, event_key) > (AES-GCM, nonce derived from event_key)
+  The same m under the same ek therefore seals to the same bytes. That is deliberate: the
+  mailbox is content-addressed, so a re-sealed event dedupes instead of piling up.
+
+  The observer is a relay or network attacker: it sees every envelope and does not hold ek.
+
+  Variants
+    UNIQUE  one envelope whose plaintext is one of two FRESH events (every real event carries a
+            random id and a timestamp). Can the observer tell which?            expected: no
+    RESEAL  two envelopes: the same event twice, versus two different events.   expected: YES
+            (equality of identical re-seals is visible — the dedup property)
+    GUESS   one envelope whose plaintext is one of two values the observer KNOWS (a guessable
+            event). Can it tell which, without ek?                              expected: no
+    ORACLE  additionally, the observer can get a member to seal plaintexts of its choosing.
+            With UNIQUE it still cannot tell; with GUESS it can (it asks for a seal of its
+            guess and compares).                                                expected: no / YES
+*/
+
+theory HavenDeterministicSeal
+begin
+
+builtins: symmetric-encryption
+functions: prf/2, kdf/2
+
+restriction Once: "All t #i #j. Once(t)@i & Once(t)@j ==> #i = #j"
+
+rule EpochKey:
+  [ Fr(~ek) ] --[ Once('ek') ]-> [ !Ek(~ek) ]
+
+#ifdef ORACLE
+rule SealChosenPlaintext:
+  let salt = prf(ek, m) in
+  [ !Ek(ek), In(m) ] --> [ Out(<salt, senc(m, kdf(ek, salt))>) ]
+#endif
+
+#ifdef UNIQUE
+rule Challenge:
+  let m    = diff(~m0, ~m1)
+      salt = prf(ek, m)
+  in
+  [ !Ek(ek), Fr(~m0), Fr(~m1) ] --[ Once('challenge') ]-> [ Out(<salt, senc(m, kdf(ek, salt))>) ]
+#endif
+
+#ifdef RESEAL
+rule Challenge:
+  let m     = diff(~m0, ~m1)
+      salt0 = prf(ek, ~m0)
+      salt  = prf(ek, m)
+  in
+  [ !Ek(ek), Fr(~m0), Fr(~m1) ]
+  --[ Once('challenge') ]->
+  [ Out(<salt0, senc(~m0, kdf(ek, salt0))>), Out(<salt, senc(m, kdf(ek, salt))>) ]
+#endif
+
+#ifdef GUESS
+rule Challenge:
+  let m    = diff('yes', 'no')
+      salt = prf(ek, m)
+  in
+  [ !Ek(ek) ] --[ Once('challenge') ]-> [ Out(<salt, senc(m, kdf(ek, salt))>) ]
+#endif
+
+end

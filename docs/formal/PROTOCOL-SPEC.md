@@ -127,7 +127,7 @@ Kotlin implementations, side channels, key storage, the KEM combiner's computati
 ## 10. Remaining models (not done)
 
 1. ~~Device roster / seed-drop revocation.~~ Done: §17.
-2. An observational-equivalence model for the deterministic seal.
+2. ~~An observational-equivalence model for the deterministic seal.~~ Done: §18.
 3. Fork resolution without a delivery service (`TREEKEM-DESIGN.md` §5). The *secrecy* side
    (what the retention window costs, healing across a fork) is done: §15. *Agreement* — every
    device with the same commits picks the same branch — is a property of a pure function, tested
@@ -425,3 +425,37 @@ revocation on a tie). Reachable only for accounts with more than one seed holder
 cannot cause it. Proposed fix, verifier-side and fail-closed: on an equal-version roster that
 verifies but differs, treat every device revoked in *either* as revoked until a strictly newer
 roster arrives.
+
+## 18. Deterministic event seal: what an observer can tell apart
+
+Model: [`haven_deterministic_seal.spthy`](haven_deterministic_seal.spthy) (Tamarin `--diff`,
+observational equivalence; five variants, one question each). Code: `seal_event_in_epoch`,
+`seal_reproducible`.
+
+`salt = PRF_ek(m)`, `event_key = KDF(ek, salt)`, envelope `= ⟨salt, senc(m, event_key)⟩`. The
+same event under the same epoch key seals to the same bytes, on purpose: the mailbox is
+content-addressed, so a re-sealed event dedupes. The observer is a relay or network attacker
+without the epoch key.
+
+| Variant | Question | Result |
+|---|---|---|
+| UNIQUE | One envelope; the plaintext is one of two fresh events. Can the observer tell which? | no (equivalence verified) |
+| UNIQUE + ORACLE | Same, and the observer can have plaintexts of its choice sealed | no (verified) |
+| RESEAL | The same event twice, versus two different events | **yes** (trace found) — the dedup property |
+| GUESS | One envelope; the plaintext is one of two values the observer knows | no (verified): guesses cannot be tested without the epoch key |
+| GUESS + ORACLE | Same, and the observer can have plaintexts of its choice sealed | **yes** (trace found) |
+
+What this says about Haven:
+
+- An observer learns **that two envelopes in the same epoch are the same event** and nothing
+  else about content. Across epochs the keys differ, so the daily re-seal under a new epoch is
+  not linkable this way (size and timing still are; envelopes also carry sender and circle ids
+  in the clear — metadata, outside this model).
+- The scheme relies on **events being unique**: every event carries a random id and a timestamp,
+  so two different posts never share a plaintext. The last row is why that matters — if a member
+  could be made to seal an attacker-chosen plaintext equal to a guessed one, the guess could be
+  confirmed. No code path seals attacker-supplied bytes as a whole event; keep it that way.
+- Symbolic limits: this treats the 16-byte truncated PRF output as collision-free and AES-GCM
+  as ideal. A salt collision between two different events under one epoch key (about 2⁻⁶⁴ per
+  pair) would reuse a GCM key and nonce; that bound, and the PRF/KDF assumptions, belong to the
+  computational analysis in §10-4.

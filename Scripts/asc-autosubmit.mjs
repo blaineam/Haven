@@ -328,7 +328,7 @@ async function notesByLocale(dir, platform) {
 	const suffix = PLATFORM_SECTION_SUFFIX[platform];
 	const section = (md, key) => { const m = md.match(new RegExp(`^##\\s+${key}\\s*$\\n([\\s\\S]*?)(?=^##\\s+|\\s*$(?![\\s\\S]))`, 'm')); if (!m) return null; let body = m[1], prev; do { prev = body; body = body.replace(/<!--[\s\S]*?-->/g, ''); } while (body !== prev); return body.trim(); };
 	const out = {}, promo = {};
-	let source = 'whats_new';
+	let source = 'whats_new', review = null;
 	const { readdir } = await import('node:fs/promises');
 	for (const f of await readdir(dir)) {
 		const m = f.match(/^appstore-metadata(?:\.([A-Za-z-]+))?\.md$/);
@@ -341,8 +341,26 @@ async function notesByLocale(dir, platform) {
 		if (locale === 'en-US') source = own != null ? `whats_new_${suffix}` : 'whats_new';
 		const p = (suffix ? section(md, `promotional_text_${suffix}`) : null) ?? section(md, 'promotional_text');
 		if (p) promo[locale] = p;
+		if (locale === 'en-US') review = (suffix ? section(md, `review_notes_${suffix}`) : null) ?? section(md, 'review_notes');
 	}
-	return Object.assign(out, { __promo: promo, __source: source });
+	return Object.assign(out, { __promo: promo, __source: source, __review: review });
+}
+
+// App Review notes (`## review_notes`, or `## review_notes_<platform>`). A new version inherits
+// the previous version's notes, so a release whose notes say something the reviewer must read
+// first (2.1.3: a security patch to prioritise) went into review with the old text until this
+// existed. Not fatal: a submission is worth more than its notes.
+async function setReviewNotes(versionId, platform, notes) {
+	const text = notes.__review;
+	if (!text) return;
+	if (text.length > 4000) die(`review_notes is ${text.length} chars (ASC max 4000)`);
+	try {
+		const d = (await api('GET', `/v1/appStoreVersions/${versionId}/appStoreReviewDetail`)).data;
+		if (!d) { log(`${platform}: no review detail yet, review notes not set`); return; }
+		if ((d.attributes.notes || '') === text) return;
+		await api('PATCH', `/v1/appStoreReviewDetails/${d.id}`, { data: { type: 'appStoreReviewDetails', id: d.id, attributes: { notes: text } } });
+		log(`${platform}: review notes set (${text.length} chars)`);
+	} catch (e) { log(`${platform}: review notes NOT set: ${e.message}`); }
 }
 
 async function setNotes(versionId, version, notes, { dryRun }) {
@@ -543,6 +561,7 @@ async function main() {
 		log(`${platform}: editable version ${args.version} (${state})`);
 		if (!args.dryRun) {
 			await setNotes(version.id, args.version, notes, { dryRun: false });
+			await setReviewNotes(version.id, platform, notes);
 			const attached = await api('GET', `/v1/appStoreVersions/${version.id}/build?fields[builds]=version`).catch(() => null);
 			if (attached?.data?.id !== build.id) {
 				await api('PATCH', `/v1/appStoreVersions/${version.id}/relationships/build`, { data: { type: 'builds', id: build.id } });

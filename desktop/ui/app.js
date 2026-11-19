@@ -3,7 +3,24 @@
 // when the backend emits `haven:changed`.
 
 const TAURI = window.__TAURI__ || {};
-const invoke = TAURI.core ? TAURI.core.invoke : async () => { throw new Error("Tauri not ready"); };
+const hostInvoke = TAURI.core ? TAURI.core.invoke : async () => { throw new Error("Tauri not ready"); };
+// Most commands need nothing but the engine and are shared with the browser build
+// (haven_client::commands); the host exposes them all through ONE entry point, `engine_invoke`.
+// The rest are the host's own (window, files, onboarding, importer). The host says which is which:
+// `engine_invoke` rejects a name it does not have with the fixed string "unknown-command", and
+// that name goes straight to the host from then on.
+const hostOnlyCommands = new Set();
+async function invoke(cmd, args = {}) {
+  if (!hostOnlyCommands.has(cmd)) {
+    try {
+      return await hostInvoke("engine_invoke", { name: cmd, args });
+    } catch (e) {
+      if (e !== "unknown-command") throw e;
+      hostOnlyCommands.add(cmd);
+    }
+  }
+  return hostInvoke(cmd, args);
+}
 const listen = TAURI.event ? TAURI.event.listen : async () => {};
 
 // i18n — strings.js (a plain script loaded before this module) provides t()/tEn()/HAVEN_LANG.

@@ -339,6 +339,9 @@ export async function loadApp({ backend = {}, lang = 'en-US', ua = 'Mozilla/5.0 
     removeItem: (k) => store.delete(k), clear: () => store.clear(), get length() { return store.size; }, key: (i) => [...store.keys()][i] ?? null,
   };
   const invoke = async (cmd, args = {}) => {
+    // The frontend reaches shared engine commands through `engine_invoke`; to a test that is the
+    // same call as before, so it is recorded and answered under the command's own name.
+    if (cmd === 'engine_invoke') return invoke(args.name, args.args ?? {});
     calls.push({ cmd, args });
     const fn = backend[cmd];
     if (fn === undefined) return undefined;

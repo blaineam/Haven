@@ -19,7 +19,11 @@
 //!
 //! See `docs/WEB-PARITY.md`.
 
+// `commands!` walks ~140 function definitions one at a time.
+#![recursion_limit = "512"]
+
 pub mod callwire;
+pub mod commands;
 pub mod engine;
 pub mod fs;
 pub mod host;

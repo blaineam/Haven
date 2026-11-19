@@ -221,10 +221,14 @@ async fn an_automatic_repair_ask_is_answered_silently_and_an_unsolicited_announc
     b.request_media_when_available(r.clone(), DEFAULT_CIRCLE.into(), post_id.clone(), ah[..8].to_string(), false);
     assert!(b.prefs.lock().media_wanted.contains(&r) && !b.media_is_wanted(&r));
     let available = a.social.seal_call_frame(bh.clone(), wire::MEDIA_AVAILABLE, a.media_frame_body(&r, DEFAULT_CIRCLE, &post_id)).unwrap();
-    let rows = b.activity().len();
     b.handle_media_available(&available);
     assert!(!b.prefs.lock().media_wanted.contains(&r));
-    assert_eq!(b.activity().len(), rows, "no notification for an automatic repair");
+    // Not a row count: the new-post banner for a's photo is raised from a spawned task (after its
+    // prefetch), so its bell row can land at any point during this test.
+    assert!(
+        !b.activity().iter().any(|row| row.kind == "app" && row.actor_name == "Media is available again"),
+        "no notification for an automatic repair"
+    );
 
     // An announce for something nobody asked about is a quiet prefetch, throttled per ref.
     let other = "img_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";

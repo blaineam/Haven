@@ -101,7 +101,10 @@ nearby Bluetooth/Wi-Fi mesh daily. Done so far:
   fully working. See [`docs/SEED-DROP-DESIGN.md`](docs/SEED-DROP-DESIGN.md).
 - **MLS-style group encryption — TreeKEM on our own PQ primitives (1.0.7, enabled for owner-verified circles).** A
   ratchet-tree group layer adding post-compromise security, a forward-secrecy deletion discipline,
-  and per-message forward secrecy for DMs, reusing Haven's existing hybrid primitives. It is
+  and per-message forward secrecy for DMs, reusing Haven's existing hybrid primitives. (Through
+  2.1.2 the tree did not deliver those two properties against theft of a device's identity seed;
+  2.1.3 rebuilt it and moves circles over automatically. See the CHANGELOG and
+  [`docs/formal`](docs/formal/PROTOCOL-SPEC.md).) It is
   **MLS-*shaped*, not RFC-9420 wire-interoperable** (every ratified MLS ciphersuite is classical;
   interop would regress the PQ posture). It is **enabled in 1.0.7 for circles with a verified
   owner** — circles created from 1.0.7 on, whose id is cryptographically bound to their creator.
@@ -235,6 +238,7 @@ policy on AI‑assisted changes.
 - [`docs/GROUP-KEYING.md`](docs/GROUP-KEYING.md) — epoch sender-keys: revocation + bounded forward secrecy (PQ-preserving)
 - [`docs/SEED-DROP-DESIGN.md`](docs/SEED-DROP-DESIGN.md) — per-device keys + seedless linking: cryptographic device revocation (1.0.7)
 - [`docs/TREEKEM-DESIGN.md`](docs/TREEKEM-DESIGN.md) — MLS-style TreeKEM on our own PQ primitives: PCS + forward secrecy (enabled in 1.0.7 for circles with a verified owner; older circles carry across only by invitation; internal audit, external review planned)
+- [`docs/formal/PROTOCOL-SPEC.md`](docs/formal/PROTOCOL-SPEC.md) — machine-checked (Tamarin) models of circle keying, the key tree, forks and the device roster: what is proven, what is not, and the limits that remain; re-proved in CI on every change
 - [`docs/LINK-SYSTEM.md`](docs/LINK-SYSTEM.md) — the reach-me link / QR design
 - [`docs/MULTI-DEVICE.md`](docs/MULTI-DEVICE.md) — per-device transport identity + own-device sync convergence; many-device account design ahead
 - [`docs/SCHEDULED-MESSAGES.md`](docs/SCHEDULED-MESSAGES.md) — "send later" without a server

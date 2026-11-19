@@ -1,0 +1,72 @@
+name: security-proofs
+
+# Keeps Haven's security argument from rotting.
+#
+#   proofs  — re-proves every Tamarin model in docs/formal and fails if any lemma's result
+#             differs from docs/formal/EXPECTED.txt (a proof that stops verifying, or a
+#             documented limit that silently "starts" verifying, both fail).
+#   keying  — runs the Rust core's own test suite, which holds the tests that tie the code to
+#             the models: forward secrecy and healing of the circle key tree, fork agreement
+#             under load, removed-member lockout, replay rejection, state migration.
+#
+# What this does and does not show is written down in docs/formal/PROTOCOL-SPEC.md: the proofs
+# are symbolic (Dolev-Yao) proofs about the models, and the tests are what connect the models
+# to the code. Neither is a computational proof or an external audit.
+#
+# Runs on every change to the core or the models, on demand, and weekly (so a new prover or
+# toolchain release that changes a result is noticed even when the code is quiet).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "core/**"
+      - "docs/formal/**"
+      - ".github/workflows/security-proofs.yml"
+  pull_request:
+    paths:
+      - "core/**"
+      - "docs/formal/**"
+      - ".github/workflows/security-proofs.yml"
+  schedule:
+    - cron: "17 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-proofs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  proofs:
+    name: Tamarin models
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tamarin
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew install tamarin-prover/tap/tamarin-prover
+          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+          tamarin-prover --version
+      - name: Prove every lemma and compare with EXPECTED.txt
+        env:
+          TAMARIN_RTS: "-N4 -M13G"
+          LEMMA_TIMEOUT: "1200"
+        run: docs/formal/verify.sh
+
+  keying:
+    name: Core tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: Test the core workspace
+        run: cargo test --workspace --manifest-path core/Cargo.toml

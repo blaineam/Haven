@@ -9,6 +9,41 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Security - Circle keys now heal after a device compromise and protect past posts, as documented (all platforms, core)
+**Severity: high. Update when you can; nothing else is asked of you.** Requires an attacker who has already taken a member device's secret
+identity key. Not exploitable by a relay, a network observer or someone outside the circle. No exploitation is known.
+
+*What was wrong.* The circle key tree (the "TreeKEM" layer, on since 1.0.7) is meant to give two guarantees: a stolen device key cannot
+open posts made before the theft (forward secrecy), and the circle recovers by itself once the thief is locked out (post-compromise
+security). As built, it gave neither against one kind of theft. Each device derived its key-tree secrets from its long-term identity seed and
+rebuilt them from the circle's first key change every time. Someone who obtained that seed (malware on the device, a forensic copy of an
+unlocked device, an unencrypted backup) and who could also collect the circle's encrypted traffic (for example from a relay) could work out
+that circle's keys, past and future, for as long as the device stayed a member. Posts stayed end-to-end encrypted against relays and
+everyone without such a seed throughout. Earlier wording in this project that claimed forward secrecy and post-compromise security for
+circles was stronger than the code.
+
+*What changed.* Key-tree secrets are now random, never derived from the identity seed. Each device keeps the tree state it needs and deletes
+what it no longer needs, so older keys cannot be rebuilt later. Devices publish one-time key packages; new members are welcomed to those
+instead of to their long-term key. Every member device, not only the one making a change, refreshes its own part of the tree. When two
+devices change the tree at once, every device now settles on the same branch (admin changes first, then the longer branch, with a cap so
+one member cannot push the circle around), and a post sealed on the losing branch is kept and opened once the reader catches up. A device
+that missed its welcome asks again by itself.
+
+*Migration.* Automatic and silent. A circle moves to the new tree in the background once every device of every member runs this release,
+and every existing post, comment and attachment stays readable. Until then the circle keeps working exactly as before, on the old tree,
+so the stronger guarantees start for a circle when its last device updates. Going back to an older build after a circle has moved is not
+supported.
+
+*What this cannot do.* It cannot protect, after the fact, traffic that was already recorded before a circle moved if a device seed from
+that time is later stolen. If you believe a device was compromised, remove it from your devices (which revokes it) as before.
+
+*Evidence.* The old and new designs are modelled in Tamarin ([`docs/formal`](docs/formal/PROTOCOL-SPEC.md)). The model of the old tree
+falsifies forward secrecy; the model of the tree as now built verifies secrecy, removed-member lockout, healing after state theft and
+forward secrecy (rows T1 to T9), and separate models cover competing branches and the device roster. These are symbolic proofs about
+models, connected to the code by tests (fork agreement under load, lost posts, lost welcomes, state migration from every earlier format);
+they are not a computational proof or an outside audit, and the spec lists the limits that remain. CI now re-proves every lemma and runs
+the core tests on each change (`.github/workflows/security-proofs.yml`, `docs/formal/verify.sh`).
+
 ### Security - Posts and key commits are bound to the circle they were sealed for (all platforms, core)
 A key commit and a post both name the circle they were made for, but the receiving engine filed them by the circle they *arrived* in and
 never compared the two. Someone in two of your circles (or a relay) could copy a genuine commit and post from one circle's mailbox into the

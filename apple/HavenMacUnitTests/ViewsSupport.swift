@@ -56,6 +56,15 @@ enum ViewFixtures {
     static func jpeg(_ tag: String = "", side: Int = 48) -> (ref: String, data: Data) {
         let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8, samplesPerPixel: 4,
                                    hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        // Paint it. An untouched bitmap encodes as solid black, which an off-screen capture cannot
+        // tell from "nothing drawn" (unpainted pixels read back as black too): a tile whose image had
+        // already decoded then counted as a flat fill, and the test passed only while the decode lost
+        // the race with the capture.
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor.systemOrange.setFill(); NSRect(x: 0, y: 0, width: side, height: side).fill()
+        NSColor.systemTeal.setFill(); NSRect(x: 0, y: 0, width: side / 2, height: side / 2).fill()
+        NSGraphicsContext.restoreGraphicsState()
         var d = rep.representation(using: .jpeg, properties: [:])!
         d.append(contentsOf: (tag + UUID().uuidString).utf8)
         return (MediaStore.contentRef(.image, d), d)

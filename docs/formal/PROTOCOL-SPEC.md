@@ -124,6 +124,21 @@ Covers the abstract protocol above under the stated adversary. Does not cover: t
 Kotlin implementations, side channels, key storage, the KEM combiner's computational security
 (needs a game-based proof), relay metadata (`IP ↔ node id`), or anything in §Out-of-scope.
 
+### 9.1 Keeping the results true
+
+Every result quoted in this document is re-checked mechanically. [`verify.sh`](verify.sh) proves
+each lemma of each model, one at a time, and compares the outcome with
+[`EXPECTED.txt`](EXPECTED.txt); any difference fails, in either direction (a proof that stops
+verifying, or a documented limit that starts verifying, which would mean the model no longer says
+what this document says). `.github/workflows/security-proofs.yml` runs it, together with the whole
+core test suite (the tests are what tie the code to the models), on every change to `core/` or
+`docs/formal/`, and once a week so a new prover release that changes a result is noticed.
+
+What that buys: the models and this document cannot drift apart unnoticed, and a code change that
+breaks a tested security property fails CI. What it does not buy: evidence that the code matches
+the model beyond what the tests exercise. That gap is closed only by review of the code against
+this spec, and it is the first thing an outside audit should look at.
+
 ## 10. Remaining models (not done)
 
 1. ~~Device roster / seed-drop revocation.~~ Done: §17.
@@ -192,7 +207,7 @@ stage 1; "existing circle" (`-DLEGACY`) is one whose genesis predates it.
 | # | Property | As wired | Stage 1, new circle | Stage 1, existing circle | Proposed fix | v2 tree as built |
 |---|---|---|---|---|---|---|
 | T1 | No epoch secret leaks with nothing compromised | verified | verified | verified | verified | verified |
-| T2 | A removed member is locked out of the next epoch, even with all its keys and state | verified | verified | verified | verified | verified |
+| T2 | A removed member is locked out of the next epoch, even with all its keys and state | verified | verified | not re-proved (see note) | verified | verified |
 | T3 | Committer's stored state leaks → its Update heals | **falsified** | verified | verified | verified | verified |
 | T4 | A member's stored state leaks → healing | **falsified** (the member never updates) | **falsified** | **falsified** | verified (the member's own Update) | verified |
 | T5 | Forward secrecy vs a later committer seed compromise | **falsified** | verified | **falsified** | verified | verified |
@@ -200,6 +215,11 @@ stage 1; "existing circle" (`-DLEGACY`) is one whose genesis predates it.
 | T7 | Healing after a committer seed compromise | **falsified** | verified | **falsified** | verified | verified |
 | T8 | Forward secrecy vs a later member stored-state compromise | **falsified** (the kept Welcome) | verified | verified | verified | verified |
 | T9 | Forward secrecy vs a later committer stored-state compromise | **falsified** (the stored root) | verified | verified | verified | verified |
+
+Note on T2, stage 1, existing circle: an earlier run reported this cell as verified. Proved on its
+own on 2026-11-18 the prover ran out of memory (14 GB) twice, so the result is not reproduced and
+is not claimed here. It concerns the superseded stage 1 design only; T2 for the tree that ships
+(last column) is re-proved in CI. `verify.sh` lists the lemma as skipped.
 
 "v2 tree as built" is [`haven_treekem_v2_built.spthy`](haven_treekem_v2_built.spthy): the tree the
 engine runs after stages 1–4 (§14, §16). It differs from the "proposed fix" model in one way that

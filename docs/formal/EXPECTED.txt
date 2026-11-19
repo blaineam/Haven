@@ -1,0 +1,106 @@
+haven_circle_keys :: commit_circle_binding :: falsified
+haven_circle_keys :: epoch_key_secrecy :: verified
+haven_circle_keys :: event_authentication :: falsified
+haven_circle_keys :: event_confidentiality :: verified
+haven_circle_keys :: executable :: verified
+haven_circle_keys -DCHECKED :: commit_circle_binding :: verified
+haven_circle_keys -DCHECKED :: epoch_key_secrecy :: verified
+haven_circle_keys -DCHECKED :: event_authentication :: verified
+haven_circle_keys -DCHECKED :: event_confidentiality :: verified
+haven_circle_keys -DCHECKED :: executable :: verified
+haven_circle_keys -DFS :: bounded_forward_secrecy :: falsified
+haven_circle_keys -DFS :: commit_circle_binding :: falsified
+haven_circle_keys -DFS :: epoch_key_secrecy :: verified
+haven_circle_keys -DFS :: event_authentication :: falsified
+haven_circle_keys -DFS :: event_confidentiality :: verified
+haven_circle_keys -DFS :: executable :: verified
+haven_circle_keys -DCHECKED -DFS :: bounded_forward_secrecy :: falsified
+haven_circle_keys -DCHECKED -DFS :: commit_circle_binding :: verified
+haven_circle_keys -DCHECKED -DFS :: epoch_key_secrecy :: verified
+haven_circle_keys -DCHECKED -DFS :: event_authentication :: verified
+haven_circle_keys -DCHECKED -DFS :: event_confidentiality :: verified
+haven_circle_keys -DCHECKED -DFS :: executable :: verified
+haven_device_roster :: R1_authorization_is_sound :: verified
+haven_device_roster :: R2_revocation_is_not_rolled_back :: verified
+haven_device_roster :: R3_revoked_seed_holder_can_reauthorize_itself :: verified
+haven_device_roster :: R4_same_version_rosters_can_hide_a_revocation :: verified
+haven_device_roster :: R5_single_seed_holder_rosters_are_unique :: verified
+haven_device_roster :: executable_accept :: verified
+haven_device_roster :: executable_revoke_then_reauthorize :: verified
+haven_treekem_as_wired :: T1_secrecy_without_compromise :: verified
+haven_treekem_as_wired :: T2_removed_member_locked_out :: verified
+haven_treekem_as_wired :: T3_pcs_committer_state_heals :: falsified
+haven_treekem_as_wired :: T4_pcs_member_state_heals :: falsified
+haven_treekem_as_wired :: T5_fs_committer_seed :: falsified
+haven_treekem_as_wired :: T6_fs_member_seed :: falsified
+haven_treekem_as_wired :: T7_pcs_committer_seed :: falsified
+haven_treekem_as_wired :: T8_fs_member_state :: falsified
+haven_treekem_as_wired :: T9_fs_committer_state :: falsified
+haven_treekem_as_wired :: executable_remove :: verified
+haven_treekem_as_wired :: executable_update :: verified
+haven_treekem_stage1 :: T1_secrecy_without_compromise :: verified
+haven_treekem_stage1 :: T2_removed_member_locked_out :: verified
+haven_treekem_stage1 :: T3_pcs_committer_state_heals :: verified
+haven_treekem_stage1 :: T4_pcs_member_state_heals :: falsified
+haven_treekem_stage1 :: T5_fs_committer_seed :: verified
+haven_treekem_stage1 :: T6_fs_member_seed :: falsified
+haven_treekem_stage1 :: T7_pcs_committer_seed :: verified
+haven_treekem_stage1 :: T8_fs_member_state :: verified
+haven_treekem_stage1 :: T9_fs_committer_state :: verified
+haven_treekem_stage1 :: executable_remove :: verified
+haven_treekem_stage1 :: executable_update :: verified
+haven_treekem_stage1 -DLEGACY :: T1_secrecy_without_compromise :: verified
+haven_treekem_stage1 -DLEGACY :: T2_removed_member_locked_out :: skipped (not re-proved, see verify.sh)
+haven_treekem_stage1 -DLEGACY :: T3_pcs_committer_state_heals :: verified
+haven_treekem_stage1 -DLEGACY :: T4_pcs_member_state_heals :: falsified
+haven_treekem_stage1 -DLEGACY :: T5_fs_committer_seed :: falsified
+haven_treekem_stage1 -DLEGACY :: T6_fs_member_seed :: falsified
+haven_treekem_stage1 -DLEGACY :: T7_pcs_committer_seed :: falsified
+haven_treekem_stage1 -DLEGACY :: T8_fs_member_state :: verified
+haven_treekem_stage1 -DLEGACY :: T9_fs_committer_state :: verified
+haven_treekem_stage1 -DLEGACY :: executable_remove :: verified
+haven_treekem_stage1 -DLEGACY :: executable_update :: verified
+haven_treekem_fixed :: H1_init0_secret :: verified
+haven_treekem_fixed :: H2_init_key_secret :: verified
+haven_treekem_fixed :: H3_leaf_secret :: verified
+haven_treekem_fixed :: H4_member_update_leaf_secret :: verified
+haven_treekem_fixed :: T1_T5_T6_T7_no_secret_from_longterm_keys :: verified
+haven_treekem_fixed :: T2_removed_member_locked_out :: verified
+haven_treekem_fixed :: T3_pcs_committer_state_heals :: verified
+haven_treekem_fixed :: T4_pcs_member_state_heals :: verified
+haven_treekem_fixed :: T8_fs_member_state :: verified
+haven_treekem_fixed :: T9_fs_committer_state :: verified
+haven_treekem_fixed :: executable_member_update :: verified
+haven_treekem_fixed :: executable_update :: verified
+haven_treekem_forks :: FK1_no_secret_without_state_compromise :: verified
+haven_treekem_forks :: FK2_fs_after_checkpoint :: verified
+haven_treekem_forks :: FK3_pcs_on_own_branch :: verified
+haven_treekem_forks :: FK4_competing_branch_is_not_healed :: verified
+haven_treekem_forks :: FK5_reissued_update_heals :: verified
+haven_treekem_forks :: H1_init0_secret :: verified
+haven_treekem_forks :: H2_init_key_secret :: verified
+haven_treekem_forks :: H3_leaf_secret :: verified
+haven_treekem_forks :: H4_du_leaf_secret :: verified
+haven_treekem_forks :: H5_d3_leaf_secret :: verified
+haven_treekem_forks :: H6_d3_path_secret :: verified
+haven_treekem_forks :: executable_fork :: verified
+haven_treekem_forks :: executable_reissue :: verified
+haven_treekem_v2_built :: H1_init0_secret :: verified
+haven_treekem_v2_built :: H2_init_key_secret :: verified
+haven_treekem_v2_built :: H3_leaf_secret :: verified
+haven_treekem_v2_built :: H4_update_leaf_secret :: verified
+haven_treekem_v2_built :: T1_T5_T6_T7_no_secret_from_longterm_keys :: verified
+haven_treekem_v2_built :: T2_removed_member_locked_out :: verified
+haven_treekem_v2_built :: T3_pcs_committer_state_heals :: verified
+haven_treekem_v2_built :: T4_pcs_member_state_heals :: verified
+haven_treekem_v2_built :: T8_fs_member_state :: verified
+haven_treekem_v2_built :: T9_fs_committer_state :: verified
+haven_treekem_v2_built :: W_window_exposes_the_previous_epoch :: verified
+haven_treekem_v2_built :: executable_checkpoint :: verified
+haven_treekem_v2_built :: executable_member_update :: verified
+haven_treekem_v2_built :: executable_update :: verified
+haven_deterministic_seal --diff -DUNIQUE :: Observational_equivalence :: verified
+haven_deterministic_seal --diff -DUNIQUE -DORACLE :: Observational_equivalence :: verified
+haven_deterministic_seal --diff -DRESEAL :: Observational_equivalence :: falsified
+haven_deterministic_seal --diff -DGUESS :: Observational_equivalence :: verified
+haven_deterministic_seal --diff -DGUESS -DORACLE :: Observational_equivalence :: falsified

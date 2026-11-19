@@ -359,7 +359,7 @@ build-from-source rule binds, and AGPL-3.0-or-later is an OSI-approved license.
    [`flatpak-cargo-generator`](https://github.com/flatpak/flatpak-builder-tools/tree/master/cargo)
    against `desktop/src-tauri/Cargo.lock` and add it as a source. This regenerates on every
    dependency bump — wire it into CI or it *will* go stale.
-3. Confirm the **GNOME 47 runtime** still carries the WebKitGTK the Tauri WebView needs when
+3. Confirm the **GNOME 51 runtime** still carries the WebKitGTK the Tauri WebView needs when
    building from source rather than consuming the `.deb`'s deps.
 
 ### Metainfo — done

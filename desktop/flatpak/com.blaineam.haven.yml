@@ -6,14 +6,16 @@
 # This builds from the .deb that CI already produces (the GNOME runtime ships WebKitGTK, which
 # the Tauri WebView needs). To rebuild locally:
 #
-#   flatpak install -y flathub org.gnome.Platform//47 org.gnome.Sdk//47
+#   flatpak install -y flathub org.gnome.Platform//51 org.gnome.Sdk//51
 #   flatpak-builder --user --install --force-clean build desktop/flatpak/com.blaineam.haven.yml
 #
 # For a Flathub *submission* you must build from source instead (flatpak-cargo-generator to
 # vendor the crates offline) — see desktop/flatpak/README.md.
 app-id: com.blaineam.haven
 runtime: org.gnome.Platform
-runtime-version: "47"
+# Bump with the builder image tag (gnome-NN) in .github/workflows/desktop.yml and release.yml.
+# GNOME supports the two newest runtimes; an end-of-life one makes the CI build flaky.
+runtime-version: "51"
 sdk: org.gnome.Sdk
 command: haven-desktop
 

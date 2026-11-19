@@ -9,7 +9,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
-## 2.1.3 (security release, pending)
+## 2.1.3 (security release, 2026-11-19)
 
 Security only: no feature or interface change since 2.1.2.
 
@@ -45,8 +45,9 @@ that time is later stolen. If you believe a device was compromised, remove it fr
 falsifies forward secrecy; the model of the tree as now built verifies secrecy, removed-member lockout, healing after state theft and
 forward secrecy (rows T1 to T9), and separate models cover competing branches and the device roster. These are symbolic proofs about
 models, connected to the code by tests (fork agreement under load, lost posts, lost welcomes, state migration from every earlier format);
-they are not a computational proof or an outside audit, and the spec lists the limits that remain. CI now re-proves every lemma and runs
-the core tests on each change (`.github/workflows/security-proofs.yml`, `docs/formal/verify.sh`).
+they are not a computational proof or an outside audit, and the spec lists the limits that remain. CI now re-proves every lemma when a model
+changes (`.github/workflows/security-proofs.yml`, `docs/formal/verify.sh`) and runs the core tests when the core changes
+(`.github/workflows/core-security-tests.yml`).
 
 ### Security - Posts and key commits are bound to the circle they were sealed for (all platforms, core)
 A key commit and a post both name the circle they were made for, but the receiving engine filed them by the circle they *arrived* in and

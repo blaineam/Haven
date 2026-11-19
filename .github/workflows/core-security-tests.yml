@@ -1,0 +1,40 @@
+name: core-security-tests
+
+# Runs the Rust core's own test suite, which holds the tests that tie the code to the models
+# in docs/formal: forward secrecy and healing of the circle key tree, fork agreement under
+# load, removed-member lockout, replay rejection, state migration.
+#
+# Runs only when the core changes; run it by hand (workflow_dispatch) for a re-check.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "core/**"
+      - ".github/workflows/core-security-tests.yml"
+  pull_request:
+    paths:
+      - "core/**"
+      - ".github/workflows/core-security-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-security-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  keying:
+    name: Core tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: Test the core workspace
+        run: cargo test --workspace --manifest-path core/Cargo.toml

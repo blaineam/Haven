@@ -130,9 +130,10 @@ Every result quoted in this document is re-checked mechanically. [`verify.sh`](v
 each lemma of each model, one at a time, and compares the outcome with
 [`EXPECTED.txt`](EXPECTED.txt); any difference fails, in either direction (a proof that stops
 verifying, or a documented limit that starts verifying, which would mean the model no longer says
-what this document says). `.github/workflows/security-proofs.yml` runs it, together with the whole
-core test suite (the tests are what tie the code to the models), on every change to `core/` or
-`docs/formal/`, and once a week so a new prover release that changes a result is noticed.
+what this document says). `.github/workflows/security-proofs.yml` runs it whenever anything in
+`docs/formal/` changes, and `.github/workflows/core-security-tests.yml` runs the whole core test
+suite (the tests are what tie the code to the models) whenever `core/` changes. Neither runs
+otherwise; both can be started by hand, for example after a prover upgrade.
 
 What that buys: the models and this document cannot drift apart unnoticed, and a code change that
 breaks a tested security property fails CI. What it does not buy: evidence that the code matches

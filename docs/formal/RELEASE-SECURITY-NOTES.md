@@ -57,7 +57,7 @@ old keys. If a device seed from that period is stolen later, that old traffic is
 The remaining limits of the new design are listed in `PROTOCOL-SPEC.md` §15.1.
 
 **What backs the claim.** Machine-checked symbolic proofs of the design as built (Tamarin), tests
-that tie the code to the model, and a CI job that re-runs both on every change. Not a
+that tie the code to the model, and CI jobs that re-run each when its inputs change. Not a
 computational proof and not an outside audit; both are named as future work.
 
 ## 2. Reviewer notes

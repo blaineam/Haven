@@ -4663,13 +4663,6 @@ impl Engine {
         Some(MessageAuthorTarget { dm, name, draft: wire::post_url(&circle_id, &post_id).unwrap_or_default() })
     }
 
-    /// A DM's read watermark: its `dm_last_read` entry, else the first-run seed (so pre-feature
-    /// history doesn't badge). Mirrors iOS `DMReadStore.watermark`.
-    fn dm_watermark(&self, circle_id: &str) -> u64 {
-        let p = self.prefs.lock();
-        p.dm_last_read.get(circle_id).copied().unwrap_or(p.dm_read_seeded_at)
-    }
-
     /// The user is viewing a DM thread: advance its watermark to "now or the newest visible message,
     /// whichever is later". Taking the message time into account absorbs sender clock skew — a
     /// message stamped slightly in our future would otherwise stay "unread" forever. Monotonic; the

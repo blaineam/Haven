@@ -244,26 +244,9 @@ async fn handle_client(mut client: TcpStream, state: &ProxyState) -> Result<()> 
 
     let path = parse_request_path(&head).unwrap_or("/");
     let kind = classify_path(path);
-    // Optional request log for diagnosing trycloudflare / browser oddities.
-    // Enable with HAVEN_PATH_PROXY_LOG=/path/to/file (append).
-    if let Ok(log_path) = std::env::var("HAVEN_PATH_PROXY_LOG") {
-        let line = format!(
-            "{:?} kind={} path={} head_first={:?}\n",
-            std::time::SystemTime::now(),
-            kind.as_str(),
-            path,
-            std::str::from_utf8(&head[..head.len().min(160)]).unwrap_or("?")
-        );
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .and_then(|mut f| {
-                use std::io::Write;
-                f.write_all(line.as_bytes())
-            });
-    }
-
+    // No request log, and no switch that turns one on: the relay's "no logs are written" is a
+    // promise to the circle's members, not to its operator, and a path is metadata (a mailbox
+    // prefix names a circle; a timestamp says when someone fetched). Diagnose from the client side.
     match kind {
         RouteKind::Status => {
             serve_status(&mut client, &head, state).await?;
@@ -596,6 +579,18 @@ fn parse_request_method(head: &[u8]) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The relay's "no logs are written" is absolute — there must be no way, not even an opt-in
+    /// environment variable, to make the front door record requests. This file is the whole proxy:
+    /// outside this test module it must not touch the filesystem or read the environment at all.
+    #[test]
+    fn the_front_door_cannot_write_a_request_log() {
+        let source = include_str!("path_router.rs");
+        let shipped = source.split("#[cfg(test)]\nmod tests {").next().unwrap();
+        for forbidden in ["std::fs", "OpenOptions", "File::", "env::var", "tracing::", "log::", "println!", "eprintln!"] {
+            assert!(!shipped.contains(forbidden), "path_router.rs must not use `{forbidden}` outside its tests");
+        }
+    }
 
     #[test]
     fn classifies_media() {

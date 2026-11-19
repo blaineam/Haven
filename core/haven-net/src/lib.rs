@@ -646,10 +646,10 @@ impl Node {
                         }
                     };
                     if evicted {
-                        println!(
-                            "send watchdog: no ack from {} in 20s — evicting cached connection (next send re-dials)",
-                            hex(peer.as_bytes())
-                        );
+                        // No peer id in this line: the same node code runs inside a relay, whose
+                        // stdout is a service journal, and "who, when" there is exactly the record
+                        // a relay promises not to keep.
+                        println!("send watchdog: a peer did not ack in 20s — evicting its cached connection (next send re-dials)");
                         watched.close(0u32.into(), b"send-unacked");
                     }
                 }

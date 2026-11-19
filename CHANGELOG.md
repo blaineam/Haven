@@ -9,6 +9,17 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Security - The relay's front-door proxy could be told to log requests (relay, in-app relay host)
+**Severity: low. Relay operators: update; members: nothing to do.** The path proxy that fronts a relay's public address had a
+diagnostic switch: if whoever runs the relay set the environment variable `HAVEN_PATH_PROXY_LOG`, it appended every request's time,
+path and first bytes to a file. Nothing was logged unless the operator set it, no message content or key was ever in it (requests
+carry only sealed data), and it was never documented or set by any Haven build or script. But a path names a circle's mailbox and a
+time says when someone fetched, which is the metadata the relay promises not to keep, and that promise is to a circle's members, who
+cannot see how their relay is run. The switch is removed; there is no longer any way to make a relay write a request log.
+Also removed: a "send watchdog" status line that named the unresponsive peer's node id. On a relay run as a service that line lands
+in the service journal, a dated record of a member's id. It now says only that a peer did not answer. A test in the proxy fails the
+build if it ever reads the environment or touches the filesystem again.
+
 ### Fixed - A post from one of your own devices could go missing on another until relaunch (all platforms, core)
 Each of an account's devices makes its own key for a circle and they settle on one once each has seen the other's. If a post from one
 device reached another before that device's key announcement did (each message travels separately, so this order is ordinary), the

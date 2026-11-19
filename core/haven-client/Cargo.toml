@@ -1,0 +1,15 @@
+[package]
+name = "haven-client"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "The Haven client layer shared by the desktop app and the browser build: app wire protocol, sync and relay policy, driven through platform traits"
+
+# This crate must build for wasm32-unknown-unknown as well as every native target: no tokio
+# runtime, no filesystem, no sockets, no Tauri. Anything that needs one of those reaches it through
+# a trait in `platform`, implemented by the desktop app (Tauri/tokio/disk) and by `haven-web`.
+[dependencies]
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

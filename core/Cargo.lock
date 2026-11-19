@@ -1587,6 +1587,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "haven-client"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "haven-demo"
 version = "0.0.1"
 dependencies = [
@@ -1696,6 +1704,7 @@ name = "haven-web"
 version = "0.0.1"
 dependencies = [
  "futures-channel",
+ "haven-client",
  "haven-p2p",
  "haven_ffi",
  "iroh",

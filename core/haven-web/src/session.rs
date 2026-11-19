@@ -15,7 +15,9 @@ use haven_ffi::HavenSocial;
 use haven_p2p::identity::Identity;
 use wasm_bindgen::prelude::*;
 
-use crate::{err, hex, now_secs, secret32, wire, WebNode};
+use haven_client::wire;
+
+use crate::{err, hex, now_secs, secret32, WebNode};
 
 fn now_ms() -> u64 {
     web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
@@ -188,7 +190,7 @@ fn on_frame(inner: &Rc<RefCell<Inner>>, _from: &str, frame: &[u8]) {
         wire::EVENT => {
             let st = inner.borrow();
             match (st.social.as_ref(), wire::parse_event(body)) {
-                (Some(social), Some((circle, envelope))) => social.receive(circle, envelope.to_vec()).unwrap_or(false),
+                (Some(social), Some(ev)) => social.receive(ev.circle_id, ev.envelope).unwrap_or(false),
                 _ => false,
             }
         }

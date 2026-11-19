@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 haven_ffi = { path = "../haven-ffi" }
 haven-p2p = { path = "../haven-p2p" }
+haven-client = { path = "../haven-client" }
 # Relay-only: a tab cannot bind UDP or accept inbound connections, so every path rides the
 # circle relay's WebSocket (DERP) front door. No n0 discovery, no portmapper, no metrics.
 iroh = { version = "1", default-features = false, features = ["tls-ring"] }

@@ -2,9 +2,12 @@
 //! shared Rust core (`haven_ffi`). The GUI is the WebView2 frontend in `../ui`; `--headless`
 //! runs only the in-process relay/mailbox (the "invisible relay", like the Mac app).
 
+// The platform-independent client layer lives in `core/haven-client` (shared with the browser
+// build). Re-exported under the names these modules had here, so `crate::wire::…` still resolves.
+#[allow(unused_imports)] // each is used by a subset of the modules below
+pub(crate) use haven_client::{callwire, mediaholding, relayhealth, relayintro, relayparking, relayscope, secret, wire};
 mod preview;
 mod postgroups;
-mod callwire;
 mod commands;
 // The PII-free screenshot dataset. `cfg` — NOT a runtime check — so the seeder and every synthetic
 // identity in it are absent from a release binary: no env var can reach code that isn't compiled.
@@ -17,27 +20,20 @@ mod igencode;
 mod igimport;
 mod instagram;
 mod localmedia;
-mod mediaholding;
 mod mediaresume;
 mod netgate;
 // qa-cmd v2 driver (docs/QA.md) — same rule as demo: `cfg`, not a runtime check, so no release
 // binary carries a file-drop remote control. See qa.rs for the contract.
 #[cfg(debug_assertions)]
 mod qa;
-mod relayhealth;
-mod relayintro;
-mod relayparking;
-mod relayscope;
 mod reoptimize;
 mod roster;
 mod scheduled;
-mod secret;
 mod seenjournal;
 mod selfsync;
 mod selfsyncrot;
 mod songsuggest;
 mod store;
-mod wire;
 #[cfg(test)]
 mod covtest_util;
 #[cfg(test)]

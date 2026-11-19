@@ -9,6 +9,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 2.1.3 (security release, pending)
+
+Security only: no feature or interface change since 2.1.2.
+
 ### Security - Circle keys now heal after a device compromise and protect past posts, as documented (all platforms, core)
 **Severity: high. Update when you can; nothing else is asked of you.** Requires an attacker who has already taken a member device's secret
 identity key. Not exploitable by a relay, a network observer or someone outside the circle. No exploitation is known.
@@ -53,6 +57,8 @@ this was a context/integrity gap, not a confidentiality one — and existing pos
 ([`docs/formal`](docs/formal/PROTOCOL-SPEC.md), Tamarin): it falsifies circle binding for the old behaviour and proves it, together with
 epoch-key secrecy, revocation, event confidentiality and sender authentication, for the fixed one. Regression test
 `commit_and_event_replayed_into_another_circle_are_rejected`. No wire, storage or migration change.
+
+## Shipped in 2.1.0 to 2.1.2 (entries not split by version at the time)
 
 ### Fixed - macOS: the palette Dock icons were hard-cornered squares
 The palette icon art is a full-bleed 1024 px square. On macOS it was set as the Dock icon as-is, so every colour except the default showed as a

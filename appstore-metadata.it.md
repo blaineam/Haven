@@ -35,19 +35,16 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Novità della 2.0: il tuo relay fa il lavoro pesante con foto e video, così il telefono resta fresco, e vedi sempre chi raggiunge un post. Sempre gratis.
 
 ## whats_new
-2.1.2 — Aggiornamenti di sicurezza e affidabilità.
-• L'importazione degli archivi Instagram è più sicura e Haven scrive meno dettagli nei suoi registri.
+2.1.3 — Aggiornamento di sicurezza. Aggiorna tutti i tuoi dispositivi.
+• Protezione più forte per le chiavi di cifratura delle tue cerchie se un dispositivo venisse compromesso. Si applica automaticamente quando tutti in una cerchia hanno aggiornato. I tuoi post restano intatti.
 
 ## whats_new_macos
-2.1.2 — Aggiornamenti di sicurezza e affidabilità.
-• L'importazione degli archivi Instagram è più sicura e Haven scrive meno dettagli nei suoi registri.
+2.1.3 — Aggiornamento di sicurezza. Aggiorna tutti i tuoi dispositivi.
+• Protezione più forte per le chiavi di cifratura delle tue cerchie se un dispositivo venisse compromesso. Si applica automaticamente quando tutti in una cerchia hanno aggiornato. I tuoi post restano intatti.
 
 ## whats_new_windows
-2.1.0 — I tuoi colori e più cerchie in un colpo solo.
-• Scegli una tavolozza di colori in Impostazioni ▸ Aspetto; Neutra è senza colore.
-• Clic destro su Pubblica per pubblicare in più cerchie contemporaneamente, con un pulsante Seleziona tutto.
-• Modificando un post condiviso in più cerchie si aggiornano tutte le copie.
-• Le chiamate mostrano il nome corretto di chi chiama.
+2.1.3 — Aggiornamento di sicurezza. Aggiorna tutti i tuoi dispositivi.
+• Protezione più forte per le chiavi di cifratura delle tue cerchie se un dispositivo venisse compromesso. Si applica automaticamente quando tutti in una cerchia hanno aggiornato. I tuoi post restano intatti.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

@@ -35,19 +35,16 @@ privado,cifrado,familia,amigos,mensajería,seguro,sin conexión,llamadas,sin anu
 Novedad en 2.0: tu relay hace el trabajo pesado con fotos y vídeos para que tu móvil no se caliente, y siempre ves a quién llega cada publicación. Sigue siendo gratis.
 
 ## whats_new
-2.1.2 — Actualizaciones de seguridad y fiabilidad.
-• La importación de archivos de Instagram es más segura y Haven registra menos detalles en sus registros.
+2.1.3 — Actualización de seguridad. Actualiza todos tus dispositivos.
+• Mayor protección para las claves de cifrado de tus círculos si un dispositivo llegara a verse comprometido. Se aplica automáticamente cuando todos en un círculo han actualizado. Tus publicaciones no cambian.
 
 ## whats_new_macos
-2.1.2 — Actualizaciones de seguridad y fiabilidad.
-• La importación de archivos de Instagram es más segura y Haven registra menos detalles en sus registros.
+2.1.3 — Actualización de seguridad. Actualiza todos tus dispositivos.
+• Mayor protección para las claves de cifrado de tus círculos si un dispositivo llegara a verse comprometido. Se aplica automáticamente cuando todos en un círculo han actualizado. Tus publicaciones no cambian.
 
 ## whats_new_windows
-2.1.0 — Tus colores y varios círculos a la vez.
-• Elige una paleta de colores en Ajustes ▸ Apariencia; Neutral no tiene color.
-• Haz clic derecho en Publicar para publicar en varios círculos a la vez, con un botón Seleccionar todo.
-• Al editar una publicación compartida en varios círculos, se actualizan todas las copias.
-• Las llamadas muestran el nombre correcto de quien llama.
+2.1.3 — Actualización de seguridad. Actualiza todos tus dispositivos.
+• Mayor protección para las claves de cifrado de tus círculos si un dispositivo llegara a verse comprometido. Se aplica automáticamente cuando todos en un círculo han actualizado. Tus publicaciones no cambian.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

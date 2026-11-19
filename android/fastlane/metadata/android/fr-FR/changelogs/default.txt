@@ -1,2 +1,2 @@
-2.1.2 — Mises à jour de sécurité et de fiabilité.
-• L'import des archives Instagram est mieux protégé et Haven écrit moins de détails dans ses journaux.
+2.1.3 — Mise à jour de sécurité. Mettez à jour tous vos appareils.
+• Protection renforcée des clés de chiffrement de vos cercles si un appareil venait à être compromis. Elle s'applique automatiquement dès que tous les membres d'un cercle ont fait la mise à jour. Vos publications restent intactes.

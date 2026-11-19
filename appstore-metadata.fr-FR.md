@@ -35,19 +35,16 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Nouveau en 2.0 : votre relay prend en charge photos et vidéos pour que votre téléphone reste frais, et vous voyez toujours qui atteint chaque publication. Gratuit.
 
 ## whats_new
-2.1.2 — Mises à jour de sécurité et de fiabilité.
-• L'import des archives Instagram est mieux protégé et Haven écrit moins de détails dans ses journaux.
+2.1.3 — Mise à jour de sécurité. Mettez à jour tous vos appareils.
+• Protection renforcée des clés de chiffrement de vos cercles si un appareil venait à être compromis. Elle s'applique automatiquement dès que tous les membres d'un cercle ont fait la mise à jour. Vos publications restent intactes.
 
 ## whats_new_macos
-2.1.2 — Mises à jour de sécurité et de fiabilité.
-• L'import des archives Instagram est mieux protégé et Haven écrit moins de détails dans ses journaux.
+2.1.3 — Mise à jour de sécurité. Mettez à jour tous vos appareils.
+• Protection renforcée des clés de chiffrement de vos cercles si un appareil venait à être compromis. Elle s'applique automatiquement dès que tous les membres d'un cercle ont fait la mise à jour. Vos publications restent intactes.
 
 ## whats_new_windows
-2.1.0 — Vos couleurs, et plusieurs cercles à la fois.
-• Choisissez une palette de couleurs dans Réglages ▸ Apparence ; Neutre est sans couleur.
-• Faites un clic droit sur Publier pour publier dans plusieurs cercles à la fois, avec un bouton Tout sélectionner.
-• Modifier une publication partagée dans plusieurs cercles met à jour toutes les copies.
-• Les appels affichent le bon nom de l'appelant.
+2.1.3 — Mise à jour de sécurité. Mettez à jour tous vos appareils.
+• Protection renforcée des clés de chiffrement de vos cercles si un appareil venait à être compromis. Elle s'applique automatiquement dès que tous les membres d'un cercle ont fait la mise à jour. Vos publications restent intactes.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

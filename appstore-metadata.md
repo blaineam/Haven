@@ -33,16 +33,16 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 New in 2.0: your relay does the heavy lifting for photos and videos, so your phone stays cool — and you always see exactly who a post reaches. Still free.
 
 ## whats_new
-2.1.2 — Security and reliability updates.
-• Safer Instagram archive import, and Haven now writes fewer details to its logs.
+2.1.3 — Security update. Please update all your devices.
+• Stronger protection for your circles' encryption keys if a device is ever compromised. It applies automatically once everyone in a circle has updated. Your posts are untouched.
 
 ## whats_new_macos
-2.1.2 — Security and reliability updates.
-• Safer Instagram archive import, and Haven now writes fewer details to its logs.
+2.1.3 — Security update. Please update all your devices.
+• Stronger protection for your circles' encryption keys if a device is ever compromised. It applies automatically once everyone in a circle has updated. Your posts are untouched.
 
 ## whats_new_windows
-2.1.2 — Security and reliability updates.
-• Safer Instagram archive import, and Haven now writes fewer details to its logs.
+2.1.3 — Security update. Please update all your devices.
+• Stronger protection for your circles' encryption keys if a device is ever compromised. It applies automatically once everyone in a circle has updated. Your posts are untouched.
 
 ## whats_new_previous
 2.0.2 — Optimized for iPhone Duo. Opened flat on a dual-screen phone, and on iPad, the feed and profile now sit in a centered column, so photos and videos are no longer huge and you scroll less.
@@ -61,26 +61,29 @@ https://wemiller.com/
 https://wemiller.com/privacy/
 
 ## review_notes
+SECURITY UPDATE — PLEASE PRIORITISE (2.1.3)
+This version is a security patch: no new features, no UI changes, same permissions, entitlements and data collection (none). It fixes a high-severity weakness in how group ("circle") encryption keys are protected: an attacker who had already stolen a device's secret key could also read that circle's earlier messages and was not locked out when keys rotated. Not remotely exploitable; no exploitation is known; users stay exposed until they update. The fix applies automatically in the background and no content is lost.
+
 Haven is a serverless, peer-to-peer, end-to-end encrypted social app for small private circles. There is no central server and no login.
 
 HOW TO EXERCISE IT
-On first launch the app generates a local identity (no account, phone number, or email is required or collected). Because content is shared only between devices that have added each other, the easiest way to review is with two devices: on device A tap the Connect tab → "Invite a friend" to show a QR/invite link; on device B choose Connect → scan the QR (or open the invite link). Once connected, posts, photos, stories, direct messages, and voice calls travel directly device-to-device — over the internet, or over Bluetooth/Wi-Fi when nearby and offline. If only one device is available, the app still launches, generates an identity, and the full UI (feed, composer, camera, circles, settings) is navigable; peer features simply have no peer to talk to.
+On first launch the app generates a local identity (no account, phone number or email). Content is shared only between devices that have added each other, so review is easiest with two devices: on device A tap Connect → "Invite a friend" to show a QR/invite link; on device B choose Connect → scan the QR (or open the link). Posts, photos, stories, direct messages and voice calls then travel device-to-device, over the internet or over Bluetooth/Wi-Fi when nearby and offline. With one device the app still launches and the full UI (feed, composer, camera, circles, settings) is navigable.
 
 USER-GENERATED CONTENT & SAFETY (Guideline 1.2)
-All content is end-to-end encrypted between members of a private, invite-only circle, and is encrypted on-device before it ever leaves. The developer operates no server that can see content and logs nothing, so there is no copy of user content for the developer to store or inspect — server-side *content* scanning is not possible in a zero-knowledge peer-to-peer system. The app nonetheless ships user REPORTING: a member can report another member, which files a circle-scoped report visible to that circle and also sends the developer a content-free, cryptographically signed notice carrying only the reported identity key, the action, and an offense category — never any content, and the reporter's key is verified but not stored. User safety is otherwise enforced client-side and is robust: a user approves every person who joins (nothing arrives from strangers), and can BLOCK a member and REMOVE them from a circle at any time. Removal/blocking is cryptographically enforced — a removed member is excluded from the circle's new encryption epoch and cannot decrypt anything posted afterward, not merely hidden. Developer contact info is published in the app and in this listing.
+All content is end-to-end encrypted between members of a private, invite-only circle, on-device, before it leaves. The developer operates no server that can see content and logs nothing, so server-side content scanning is not possible. The app ships user REPORTING: a member can report another member, which files a circle-scoped report visible to that circle and sends the developer a content-free, signed notice carrying only the reported identity key, the action and an offense category. A user approves every person who joins (nothing arrives from strangers) and can BLOCK a member and REMOVE them from a circle at any time. Removal is cryptographically enforced: a removed member is excluded from the circle's new encryption epoch and cannot decrypt anything posted afterward. Developer contact info is published in the app and in this listing.
 
 ENCRYPTION / EXPORT COMPLIANCE
-Haven uses only standard, published cryptographic algorithms (X25519 + ML-KEM-768 key exchange, Ed25519 + ML-DSA signatures, AES-256-GCM, HKDF-SHA256) — no proprietary cryptography. Info.plist sets ITSAppUsesNonExemptEncryption = NO; the app qualifies for the standard exemption and no French declaration applies.
+Haven uses only standard, published cryptographic algorithms (X25519 + ML-KEM-768 key exchange, Ed25519 + ML-DSA signatures, AES-256-GCM, HKDF-SHA256), no proprietary cryptography. Info.plist sets ITSAppUsesNonExemptEncryption = NO; the app qualifies for the standard exemption and no French declaration applies.
 
 NOTIFICATIONS
-Push uses a self-hosted relay (a Cloudflare Worker) that is BLIND: it forwards an already-encrypted payload and cannot read it; a Notification Service Extension decrypts it on-device into the banner. No content is stored on any server.
+Push uses a self-hosted relay (a Cloudflare Worker) that is BLIND: it forwards an already-encrypted payload it cannot read; a Notification Service Extension decrypts it on-device. No content is stored on any server.
 
 NETWORK SERVER ENTITLEMENT (macOS — com.apple.security.network.server)
-Haven is peer-to-peer: every install is a network peer, so the app must ACCEPT incoming connections, not just make outgoing ones. The server entitlement is required for core functionality, in three ways:
-1. Inbound P2P transport: the app binds a QUIC (UDP) endpoint and listens for incoming connections from the user's own linked devices and invited circle members — this is how posts, photos, direct messages, and call signaling arrive device-to-device (there is no cloud server to pull from).
-2. The built-in circle relay (Settings → Storage → "Host a relay"): the user's Mac can volunteer as their circle's always-on encrypted mailbox. It accepts incoming connections from circle members to store-and-forward end-to-end-encrypted envelopes while recipients are offline, and serves an authenticated local HTTP interface (port 8674) for large media.
+Haven is peer-to-peer, so the app must ACCEPT incoming connections. The entitlement is required for core functionality:
+1. Inbound P2P transport: the app binds a QUIC (UDP) endpoint and listens for connections from the user's own linked devices and invited circle members. This is how posts, photos, messages and call signaling arrive (there is no cloud server to pull from).
+2. The built-in circle relay (Settings → Storage → "Host a relay"): the user's Mac can act as their circle's always-on encrypted mailbox, accepting connections from circle members to store and forward end-to-end-encrypted envelopes, and serving an authenticated local HTTP interface (port 8674) for large media.
 3. NAT traversal (hole-punching) requires receiving unsolicited inbound UDP packets.
-Removing it would break all inbound peer connectivity and the app's core purpose. To observe: enable "Host a relay" on the Mac, then post from a second device — the Mac accepts the inbound connection and stores the sealed envelope.
+To observe: enable "Host a relay" on the Mac, then post from a second device.
 
 ## review_first_name
 Blaine

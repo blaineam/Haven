@@ -1,2 +1,2 @@
-2.1.2 — Aggiornamenti di sicurezza e affidabilità.
-• L'importazione degli archivi Instagram è più sicura e Haven scrive meno dettagli nei suoi registri.
+2.1.3 — Aggiornamento di sicurezza. Aggiorna tutti i tuoi dispositivi.
+• Protezione più forte per le chiavi di cifratura delle tue cerchie se un dispositivo venisse compromesso. Si applica automaticamente quando tutti in una cerchia hanno aggiornato. I tuoi post restano intatti.

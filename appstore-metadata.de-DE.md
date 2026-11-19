@@ -35,19 +35,16 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit dein Handy kühl bleibt – und du siehst immer genau, wen ein Beitrag erreicht. Kostenlos.
 
 ## whats_new
-2.1.2 – Sicherheits- und Zuverlässigkeitsupdates.
-• Der Import von Instagram-Archiven ist besser abgesichert, und Haven schreibt weniger Details in seine Protokolle.
+2.1.3 – Sicherheitsupdate. Bitte aktualisiere alle deine Geräte.
+• Stärkerer Schutz für die Verschlüsselungsschlüssel deiner Kreise, falls ein Gerät einmal kompromittiert wird. Er greift automatisch, sobald alle in einem Kreis aktualisiert haben. Deine Beiträge bleiben unverändert.
 
 ## whats_new_macos
-2.1.2 – Sicherheits- und Zuverlässigkeitsupdates.
-• Der Import von Instagram-Archiven ist besser abgesichert, und Haven schreibt weniger Details in seine Protokolle.
+2.1.3 – Sicherheitsupdate. Bitte aktualisiere alle deine Geräte.
+• Stärkerer Schutz für die Verschlüsselungsschlüssel deiner Kreise, falls ein Gerät einmal kompromittiert wird. Er greift automatisch, sobald alle in einem Kreis aktualisiert haben. Deine Beiträge bleiben unverändert.
 
 ## whats_new_windows
-2.1.0 — Deine Farben und mehrere Kreise auf einmal.
-• Wähle in Einstellungen ▸ Darstellung eine Farbpalette; Neutral ist farblos.
-• Klicke mit rechts auf „Posten“, um in mehrere Kreise gleichzeitig zu posten – mit „Alle auswählen“.
-• Wenn du einen in mehrere Kreise geposteten Beitrag bearbeitest, werden alle Kopien aktualisiert.
-• Anrufe zeigen den richtigen Namen des Anrufers.
+2.1.3 – Sicherheitsupdate. Bitte aktualisiere alle deine Geräte.
+• Stärkerer Schutz für die Verschlüsselungsschlüssel deiner Kreise, falls ein Gerät einmal kompromittiert wird. Er greift automatisch, sobald alle in einem Kreis aktualisiert haben. Deine Beiträge bleiben unverändert.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

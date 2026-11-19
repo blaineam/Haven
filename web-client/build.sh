@@ -36,3 +36,24 @@ target=${CARGO_TARGET_DIR:-$core/target}
 rm -rf "$here/pkg"
 "$bindgen" --target web --out-dir "$here/pkg" "$target/wasm32-unknown-unknown/release/haven_web.wasm"
 echo "built $here/pkg"
+
+# ── dist/: the bundle a relay serves under /app/ ─────────────────────────────────────────────
+# The UI is the desktop frontend (desktop/ui), unchanged, with a host shim in place of Tauri.
+ui="$here/../desktop/ui"
+dist="$here/dist"
+rm -rf "$dist"
+mkdir -p "$dist/pkg" "$dist/vendor" "$dist/palette-icons"
+cp "$ui/app.js" "$ui/strings.js" "$ui/styles.css" "$ui/imgworker.js" "$dist/"
+cp "$ui"/vendor/* "$dist/vendor/"
+cp "$ui"/palette-icons/* "$dist/palette-icons/"
+cp "$here/web-host.js" "$here/storage.js" "$here/responsive.css" "$dist/"
+cp "$here/pkg/haven_web.js" "$here/pkg/haven_web_bg.wasm" "$dist/pkg/"
+# index.html: the desktop page with the host shim loaded first and the responsive layer last.
+awk '
+  /<script src="strings.js"/ && !done_host { print "    <script src=\"web-host.js\"></script>"; done_host = 1 }
+  /<\/head>/ && !done_css { print "    <link rel=\"stylesheet\" href=\"responsive.css\" />"; done_css = 1 }
+  { print }
+' "$ui/index.html" > "$dist/index.html"
+grep -q 'web-host.js' "$dist/index.html" || { echo "index.html: host shim not injected" >&2; exit 1; }
+grep -q 'responsive.css' "$dist/index.html" || { echo "index.html: responsive layer not injected" >&2; exit 1; }
+echo "built $dist ($(find "$dist" -type f | wc -l | tr -d ' ') files)"

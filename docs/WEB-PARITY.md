@@ -115,8 +115,23 @@ Next, in order:
 - [ ] Per-circle consent. Web access is a host-level switch today. "This circle allows web
       devices" needs a device class in the credential and members refusing to seal to a web device
       a circle has not allowed — a protocol change, to be modelled before it is built.
-- [ ] A command dispatcher for the browser (the 164 Tauri commands `desktop/ui` calls), then the UI
-      itself, made responsive from phone to desktop.
+- [x] **The UI.** The browser runs the desktop frontend (`desktop/ui`) unchanged, with a host shim
+      in place of Tauri (`web-client/web-host.js`).
+      - 141 of the desktop app's 164 commands need only the engine and moved to
+        `haven_client::commands`, behind one dispatcher both hosts call (`engine_invoke` on
+        desktop, `WebApp.invoke` in a tab). The other 23 belong to the application; the browser
+        answers the ones that make sense there and refuses the rest.
+      - A browser is offered linking and nothing else: no "new to Haven", no "move my account",
+        and a `haven-seed:` code is refused before it goes anywhere.
+      - Responsive layer (`web-client/responsive.css`): the desktop layout from 1025px up; on a
+        tablet, sheets sized to the screen; on a phone the tabs become a bottom bar with the
+        composer floating above it, and sheets cover both bars.
+      - `web-client/build.sh` assembles the bundle a relay serves in `web-client/dist`.
+      - `smoke/engine.mjs` now drives this real UI: paste the ticket, get approved, reload, post
+        both ways, see both posts rendered. `SMOKE_SHOTS=<dir>` saves phone/tablet/desktop shots.
+- [ ] Settings that make no sense in a browser are still shown (Identities, hosting a relay,
+      start at login, Instagram import, music search). They fail politely; they should be hidden.
+- [ ] File attachments from a browser: the composer's picker and drag-and-drop assume file paths.
 - [ ] Media in a browser: the cache lives in the in-memory tree today, which is fine for text and
       wrong for video. It needs a blob store of its own (OPFS / Cache API).
 - [ ] Secrets at rest: "my computer" wraps storage under a non-extractable browser key; "public

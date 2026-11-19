@@ -77,11 +77,11 @@ export function startPeer(bin, args = ["127.0.0.1:0"]) {
   return { proc, lines, line, write: (s) => proc.stdin.write(s), kill: () => proc.kill() };
 }
 
-/** Open the smoke page in headless Chromium, with the wasm module loaded as `window.haven`. */
-export async function openPage(url) {
+/** Open a page in headless Chromium and wait until `ready()` is true in it. */
+export async function openPage(url, { ready = () => window.havenReady === true, before } = {}) {
   const browser = await chromium.launch();
   const page = await browser.newPage();
-  page.on("console", (m) => console.log(`   [page ${m.type()}] ${m.text()}`));
+  page.on("console", (m) => { if (process.env.SMOKE_CONSOLE || m.type() === "error") console.log(`   [page ${m.type()}] ${m.text()}`); });
   page.on("pageerror", (e) => console.log(`   [page error] ${e.message}`));
   if (process.env.SMOKE_HTTP) {
     // Every relay request the page makes, with its outcome (for diagnosing a smoke).
@@ -89,10 +89,10 @@ export async function openPage(url) {
       const u = new URL(r.url());
       if (/^\/(k|l|t)\//.test(u.pathname)) console.log(`   [page http] ${r.request().method()} ${u.pathname.slice(0, 90)} -> ${r.status()}`);
     });
-    page.on("requestfailed", (r) => console.log(`   [page http] ${r.method()} ${r.url().slice(0, 110)} FAILED ${r.failure()?.errorText}`));
   }
+  if (before) await before(page);
   await page.goto(url);
-  await page.waitForFunction(() => window.havenReady === true, null, { timeout: 30000 });
+  await page.waitForFunction(ready, null, { timeout: 30000 });
   return { browser, page };
 }
 

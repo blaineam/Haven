@@ -110,6 +110,28 @@ impl WebApp {
         engine::onboard_seedless(ticket_text).map_err(js_err)
     }
 
+    /// Run an engine command by name — the browser's end of the UI's `invoke(name, args)`. The
+    /// arguments and the result are JSON text. Rejects with the bare string `"unknown-command"`
+    /// for a name the engine does not have (the page's host layer answers those), and with the
+    /// command's own message otherwise — the same contract the desktop app's `engine_invoke` has.
+    pub async fn invoke(&self, name: String, args_json: String) -> Result<String, JsValue> {
+        use haven_client::commands::{dispatch, DispatchError, Eng, NAMES};
+        if !NAMES.contains(&name.as_str()) {
+            return Err(JsValue::from_str("unknown-command"));
+        }
+        // Clone the handle out: nothing may stay borrowed across the await.
+        let engine = self.engine.borrow().clone();
+        let Some(engine) = engine else {
+            return Err(JsValue::from_str("the engine is not running yet"));
+        };
+        let args: serde_json::Value = serde_json::from_str(&args_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        match dispatch(Eng(&engine), &name, &args).await {
+            Ok(v) => Ok(v.to_string()),
+            Err(DispatchError::Unknown) => Err(JsValue::from_str("unknown-command")),
+            Err(e) => Err(JsValue::from_str(&e.to_string())),
+        }
+    }
+
     /// `{seedless, linked, linking}`.
     pub fn status(&self) -> Result<String, JsError> {
         let (seedless, linked, linking) = self.engine()?.seedless_status();
@@ -173,6 +195,28 @@ pub fn set_log_level(level: &str) {
     static LOGGER: ConsoleLog = ConsoleLog;
     let _ = log::set_logger(&LOGGER);
     log::set_max_level(level.parse().unwrap_or(log::LevelFilter::Off));
+}
+
+/// The engine self-test as the UI's "self test" command reports it (JSON).
+#[wasm_bindgen(js_name = engineSelfTestReport)]
+pub fn engine_self_test_report() -> String {
+    let r = haven_ffi::self_test();
+    serde_json::json!({
+        "identity_ok": r.identity_ok,
+        "hybrid_kem_ok": r.hybrid_kem_ok,
+        "signature_ok": r.signature_ok,
+        "link_ok": r.link_ok,
+        "all_ok": r.all_ok,
+        "node_id_hex": r.node_id_hex,
+        "summary": r.summary,
+    })
+    .to_string()
+}
+
+/// This build's version.
+#[wasm_bindgen]
+pub fn version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 /// Keep this page off the push worker (for harnesses driving throwaway identities).

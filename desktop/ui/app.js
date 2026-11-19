@@ -3,6 +3,9 @@
 // when the backend emits `haven:changed`.
 
 const TAURI = window.__TAURI__ || {};
+// The browser build runs this same file with a host shim in place of Tauri (web-client/web-host.js).
+// A browser is only ever a LINKED device: no account is created or moved into one.
+const HOST_WEB = !!(window.__HAVEN_HOST__ && window.__HAVEN_HOST__.web);
 const hostInvoke = TAURI.core ? TAURI.core.invoke : async () => { throw new Error("Tauri not ready"); };
 // Most commands need nothing but the engine and are shared with the browser build
 // (haven_client::commands); the host exposes them all through ONE entry point, `engine_invoke`.
@@ -40,7 +43,8 @@ const HAVEN_LANG = window.HAVEN_LANG || "en";
 const HOST_OS = /Windows|Win64|WOW64/i.test(navigator.userAgent) ? "windows"
   : /Macintosh|Mac OS X/i.test(navigator.userAgent) ? "macos"
   : "linux";
-document.documentElement.dataset.os = HOST_OS;
+// In a browser the tab IS the window: no OS chrome of ours at all, whatever the user agent says.
+document.documentElement.dataset.os = HOST_WEB ? "web" : HOST_OS;
 
 // ---- tiny helpers ----------------------------------------------------------------------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -8324,13 +8328,15 @@ function renderOnboarding() {
     return m;
   };
 
-  const code = el("input", { class: "field-capsule", placeholder: "haven-enroll:… or haven-seed:…", style: "width:100%" });
+  const code = el("input", { class: "field-capsule", placeholder: HOST_WEB ? "haven-enroll:…" : "haven-enroll:… or haven-seed:…", style: "width:100%" });
   const linkBox = () => el("div", { class: "col", style: "width:100%;gap:8px" },
+    HOST_WEB ? el("div", { class: "muted small", style: "white-space:normal" }, t("web_trust_note")) : null,
     el("div", { class: "muted small" }, linkMode === "move"
       ? t("link_move_hint")
       : t("link_add_hint")),
     code,
-    el("button", { class: "btn ghost small", style: "align-self:flex-start", onclick: () => { showLink = false; draw(); } }, t("back_arrow")),
+    // In a browser linking is the only path, so there is nothing to go back to.
+    HOST_WEB ? null : el("button", { class: "btn ghost small", style: "align-self:flex-start", onclick: () => { showLink = false; draw(); } }, t("back_arrow")),
     el("button", { class: "btn primary", style: "width:100%", onclick: async () => {
       const c = code.value.trim();
       if (!c) { toast(t("paste_link_code_first")); return; }
@@ -8342,6 +8348,7 @@ function renderOnboarding() {
         // credential + granted self-sync key and NEVER the master seed. The legacy `haven-seed:` /
         // raw-seed transfer still works (an old primary in the wild) via onboard_link.
         if (/^haven-enroll:/i.test(c)) await invoke("onboard_link_seedless", { ticket: c });
+        else if (HOST_WEB) { toast(t("web_link_only")); return; }   // never a seed in a browser
         else await invoke("onboard_link", { code: c });
       }
       catch (e) { toast(t("couldnt_link", e)); }
@@ -8367,7 +8374,7 @@ function renderOnboarding() {
     el("h1", { style: "font-size:34px;font-weight:800;margin:6px 0 0" }, t("welcome_haven")),
     el("p", { class: "muted", style: "margin:0;white-space:pre-line" },
       t("welcome_sub")),
-    showLink ? linkBox()
+    (showLink || HOST_WEB) ? linkBox()
              : el("div", { class: "col", style: "width:100%;gap:10px" },
                  choice(t("new_to_haven_t"),
                         t("new_to_haven_s"),
@@ -8445,7 +8452,8 @@ function renderOnboarding() {
     next.disabled = needName;
     next.style.opacity = needName ? 0.5 : 1;
     dots.innerHTML = "";
-    for (let i = 0; i < 4; i++) dots.appendChild(el("div", { class: "dot" + (i === step ? " on" : "") }));
+    // A browser has one step (link), so there is no progress to show.
+    for (let i = 0; i < (HOST_WEB ? 0 : 4); i++) dots.appendChild(el("div", { class: "dot" + (i === step ? " on" : "") }));
   }
 
   const card = el("div", { class: "col", style: "max-width:520px;width:100%;align-items:center;gap:14px" },

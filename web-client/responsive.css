@@ -1,0 +1,55 @@
+/* Layout for the browser build, layered over the desktop app's styles.css (which is written for a
+   resizable desktop window). Loaded last. Everything here is a size or flow adjustment — colours,
+   type and components stay the desktop app's.
+
+   Breakpoints: ≤ 640px phone, 641–1024px tablet, above that the desktop layout as it is. */
+
+/* A browser tab has no window to drag and its own height changes as its chrome shows and hides. */
+.content { height: 100dvh; }
+.titlebar {
+  padding-left: max(13px, env(safe-area-inset-left));
+  padding-right: max(13px, env(safe-area-inset-right));
+  top: env(safe-area-inset-top);
+}
+
+/* Fingers: comfortable targets, and inputs at 16px so iOS does not zoom the page on focus. */
+@media (pointer: coarse) {
+  .icon-btn { min-width: 40px; min-height: 40px; }
+  .tab { padding-top: 8px; padding-bottom: 8px; }
+  input, textarea, select, .composer-field, .field-capsule { font-size: 16px; }
+}
+
+/* ── Phone ─────────────────────────────────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  /* Navigation moves to the bottom, where a thumb is. The top bar keeps the bell and the per-tab
+     controls (circle switcher, settings), which no longer have to share a row with the tabs. */
+  .tabs {
+    position: fixed; top: auto; left: 50%; transform: translateX(-50%);
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    z-index: 101; padding: 4px;
+  }
+  .tab { padding: 10px 20px; font-size: 14px; }
+  :root { --haven-tabbar: calc(64px + env(safe-area-inset-bottom)); }
+
+  /* The composer floats above the tab bar; the feed scrolls under both. */
+  #composer-slot { bottom: var(--haven-tabbar); }
+  .composer { padding: 8px 12px; }
+  .view { padding-left: 12px; padding-right: 12px; padding-bottom: calc(var(--haven-tabbar) + 76px); }
+
+  /* Sheets take the whole screen's width and sit above BOTH bars (on a desktop window the title
+     bar stays visible over a sheet; on a phone that leaves the sheet's own header underneath it). */
+  .modal-backdrop { z-index: 150; }
+  .modal { width: calc(100vw - 16px); max-width: none; max-height: calc(100dvh - 24px - env(safe-area-inset-top)); }
+  .modal.plain { padding: 18px 16px; }
+  #toast { bottom: calc(var(--haven-tabbar) + 12px); }
+
+  .bubble-media img, .bubble-media video { max-width: min(240px, 68vw); }
+
+  /* Two-column settings rows stack. */
+  .grid2 { grid-template-columns: 1fr; }
+}
+
+/* ── Tablet ────────────────────────────────────────────────────────────────────────────────── */
+@media (min-width: 641px) and (max-width: 1024px) {
+  .modal { max-width: min(92vw, 720px); max-height: calc(100dvh - 48px); }
+}

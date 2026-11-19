@@ -19,6 +19,7 @@ async fn main() -> anyhow::Result<()> {
         media_backend: String::new(),
         derp_backend: String::new(),
         http_token: String::new(),
+        web_app: None,
     })
     .await?
     .expect("bind path proxy");

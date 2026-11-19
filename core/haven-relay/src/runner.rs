@@ -274,6 +274,7 @@ pub async fn run(cfg: Config, probation: bool) -> Result<bool> {
                         media_backend: format!("127.0.0.1:{port}"),
                         derp_backend,
                         http_token: cfg.http_token.clone(),
+                        web_app: None,
                     };
                     match haven_net::PathRouter::spawn(&rcfg).await {
                         Ok(Some(router)) => {

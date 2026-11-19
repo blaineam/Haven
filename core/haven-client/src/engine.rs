@@ -6029,6 +6029,7 @@ impl Engine {
                     media_backend: format!("127.0.0.1:{port}"),
                     derp_backend: format!("127.0.0.1:{dport}"),
                     http_token: token.clone(),
+                    web_app: None,
                 };
                 // Prefer path proxy (one free cloudflared). Retry once on ephemeral bind if :8675 busy.
                 for attempt in 1u8..=2 {

@@ -33,6 +33,7 @@ pub mod relay;
 pub mod s3tunnel;
 pub mod statuspage;
 pub mod turn;
+pub mod webbundle;
 pub mod ws_hairpin;
 
 pub use derp::{DerpConfig, DerpServer, DEFAULT_DERP_BIND};
@@ -44,6 +45,7 @@ pub use endpoint_builder::{
 pub use path_router::{
     classify_path, PathRouter, PathRouterConfig, RouteKind, DEFAULT_PATH_ROUTER_BIND,
 };
+pub use webbundle::WebBundle;
 pub use ws_hairpin::HairpinHub;
 pub use turn::{
     host_from_http_url, parse_turn_urls, suggest_turn_urls, turn_url, TurnConfig, TurnServer,

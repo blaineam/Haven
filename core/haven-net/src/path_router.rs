@@ -46,6 +46,8 @@ pub enum RouteKind {
     Hairpin,
     /// Served by the proxy itself (health + route map).
     Status,
+    /// The web client's files, served by the proxy from memory (when the host enabled web access).
+    App,
     /// No matching prefix — proxy returns 404.
     Unknown,
 }
@@ -57,6 +59,7 @@ impl RouteKind {
             Self::Fabric => "fabric",
             Self::Hairpin => "hairpin",
             Self::Status => "status",
+            Self::App => "app",
             Self::Unknown => "unknown",
         }
     }
@@ -73,6 +76,11 @@ pub fn classify_path(path: &str) -> RouteKind {
     // Status (proxy-local) — keep under /_haven so it never collides with store keys.
     if path == "/" || path == "/_haven" || path.starts_with("/_haven/") {
         return RouteKind::Status;
+    }
+
+    // The web client — its own prefix, so it can never collide with a store key or a fabric path.
+    if path == "/app" || path.starts_with(crate::webbundle::APP_PREFIX) {
+        return RouteKind::App;
     }
 
     // Call-media WebSocket hairpin (free CF compatible).
@@ -112,6 +120,9 @@ pub struct PathRouterConfig {
     pub derp_backend: String,
     /// Optional shared secret; if join JSON includes `token`, it must match.
     pub http_token: String,
+    /// The web client to serve under `/app/`, or `None` (the default) for a relay that does not
+    /// offer web access — then `/app/…` is a 404 like any unknown path.
+    pub web_app: Option<Arc<crate::webbundle::WebBundle>>,
 }
 
 impl Default for PathRouterConfig {
@@ -121,6 +132,7 @@ impl Default for PathRouterConfig {
             media_backend: "127.0.0.1:8674".into(),
             derp_backend: "127.0.0.1:3340".into(),
             http_token: String::new(),
+            web_app: None,
         }
     }
 }
@@ -145,6 +157,7 @@ impl PathRouter {
         let media = cfg.media_backend.trim().to_string();
         let derp = cfg.derp_backend.trim().to_string();
         let http_token = cfg.http_token.clone();
+        let web_app = cfg.web_app.clone().filter(|b| !b.is_empty());
         let listener = TcpListener::bind(bind)
             .await
             .with_context(|| format!("path-proxy bind {bind}"))?;
@@ -155,6 +168,7 @@ impl PathRouter {
             http_token,
             local_addr,
             hairpin: Arc::new(HairpinHub::new()),
+            web_app,
         });
         let task = tokio::spawn(async move {
             // Connections live in a JoinSet owned by THIS task, so stopping the router (aborting
@@ -202,6 +216,7 @@ struct ProxyState {
     http_token: String,
     local_addr: SocketAddr,
     hairpin: Arc<HairpinHub>,
+    web_app: Option<Arc<crate::webbundle::WebBundle>>,
 }
 
 impl ProxyState {
@@ -216,8 +231,13 @@ impl ProxyState {
         } else {
             format!("\"{}\"", self.derp_backend)
         };
+        // Web access: off, or the digest of the exact build this relay serves under /app/.
+        let web = match &self.web_app {
+            Some(b) => format!(r#"{{"path":"/app/","files":{},"digest":"{}"}}"#, b.len(), b.digest()),
+            None => "null".into(),
+        };
         format!(
-            r#"{{"service":"haven-path-proxy","bind":"{}","routes":[{{"kind":"media","paths":["/k/*","/l/*","/t/*"],"backend":{media}}},{{"kind":"fabric","paths":["/relay","/relay/*","/derp","/derp/*","/ping","/ping/*"],"backend":{fabric},"note":"iroh DERP — live frames + call signaling"}},{{"kind":"hairpin","paths":["/webrtc","/webrtc/hairpin"],"backend":"local","note":"WebSocket call-media bipipe — works over free Cloudflare tunnels"}},{{"kind":"status","paths":["/","/_haven","/_haven/*"],"backend":"local"}}]}}"#,
+            r#"{{"service":"haven-path-proxy","bind":"{}","routes":[{{"kind":"media","paths":["/k/*","/l/*","/t/*"],"backend":{media}}},{{"kind":"fabric","paths":["/relay","/relay/*","/derp","/derp/*","/ping","/ping/*"],"backend":{fabric},"note":"iroh DERP — live frames + call signaling"}},{{"kind":"hairpin","paths":["/webrtc","/webrtc/hairpin"],"backend":"local","note":"WebSocket call-media bipipe — works over free Cloudflare tunnels"}},{{"kind":"status","paths":["/","/_haven","/_haven/*"],"backend":"local"}}],"web":{web}}}"#,
             self.local_addr
         )
     }
@@ -250,6 +270,9 @@ async fn handle_client(mut client: TcpStream, state: &ProxyState) -> Result<()> 
     match kind {
         RouteKind::Status => {
             serve_status(&mut client, &head, state).await?;
+        }
+        RouteKind::App => {
+            serve_app(&mut client, &head, path, state).await?;
         }
         RouteKind::Media => {
             let backend = state.media_backend.as_str();
@@ -288,11 +311,66 @@ async fn handle_client(mut client: TcpStream, state: &ProxyState) -> Result<()> 
                  media:   /k/… /l/… /t/…\n\
                  fabric:  /relay /derp /ping\n\
                  hairpin: /webrtc/hairpin  (WebSocket call media over free CF)\n\
-                 status:  /  /_haven\n"
+                 status:  /  /_haven\n\
+                 web:     /app/  (when this relay offers web access)\n"
             );
             write_simple(&mut client, 404, "no route", body.as_bytes()).await?;
         }
     }
+    Ok(())
+}
+
+/// Serve one file of the web client from memory. GET/HEAD only; an exact, known name or 404.
+async fn serve_app(client: &mut TcpStream, head: &[u8], path: &str, state: &ProxyState) -> Result<()> {
+    let Some(bundle) = state.web_app.as_ref() else {
+        return write_simple(client, 404, "no route", b"this relay does not offer web access\n").await;
+    };
+    let method = parse_request_method(head).unwrap_or("GET");
+    if method != "GET" && method != "HEAD" {
+        return write_simple(client, 405, "method not allowed", b"GET or HEAD only\n").await;
+    }
+    let path_only = path.split('?').next().unwrap_or(path);
+    if path_only == "/app" {
+        // Relative URLs in the page resolve against `/app/`, so the bare prefix must redirect.
+        let resp = "HTTP/1.1 308 Permanent Redirect\r\nLocation: /app/\r\nContent-Length: 0\r\n\
+                    X-Haven-Path-Proxy: 1\r\nConnection: close\r\n\r\n";
+        client.write_all(resp.as_bytes()).await?;
+        let _ = client.shutdown().await;
+        return Ok(());
+    }
+    let Some(file) = bundle.lookup(path_only) else {
+        return write_simple(client, 404, "not found", b"not part of the web client\n").await;
+    };
+    // `no-cache` = "revalidate every time", not "don't store": the page always runs the build this
+    // relay serves now, and an unchanged file costs one 304.
+    let common = format!(
+        "ETag: {}\r\n\
+         Cache-Control: no-cache\r\n\
+         Content-Security-Policy: {}\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         Cross-Origin-Opener-Policy: same-origin\r\n\
+         Cross-Origin-Resource-Policy: same-origin\r\n\
+         X-Haven-Path-Proxy: 1\r\n\
+         Connection: close\r\n",
+        file.etag,
+        crate::webbundle::CONTENT_SECURITY_POLICY
+    );
+    if header_value(head, "if-none-match").map(|v| v.split(',').any(|t| t.trim() == file.etag)).unwrap_or(false) {
+        client.write_all(format!("HTTP/1.1 304 Not Modified\r\n{common}\r\n").as_bytes()).await?;
+        let _ = client.shutdown().await;
+        return Ok(());
+    }
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n{common}\r\n",
+        file.content_type,
+        file.body.len()
+    );
+    client.write_all(resp.as_bytes()).await?;
+    if method == "GET" {
+        client.write_all(&file.body).await?;
+    }
+    let _ = client.shutdown().await;
     Ok(())
 }
 

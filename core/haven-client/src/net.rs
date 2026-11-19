@@ -13,7 +13,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub use haven_net::{
     active_derp_urls, apply_derp_urls, haven_fabric_active, host_from_http_url, parse_turn_urls, suggest_turn_urls,
-    DerpConfig, DerpServer, PathRouter, PathRouterConfig, TurnConfig, TurnServer, DEFAULT_DERP_BIND,
+    DerpConfig, DerpServer, PathRouter, PathRouterConfig, TurnConfig, TurnServer, WebBundle, DEFAULT_DERP_BIND,
     DEFAULT_PATH_ROUTER_BIND, DEFAULT_TURN_BIND, DEFAULT_TURN_USER,
 };
 
@@ -97,7 +97,12 @@ pub mod hosting {
         pub media_backend: String,
         pub derp_backend: String,
         pub http_token: String,
+        pub web_app: Option<std::sync::Arc<WebBundle>>,
     }
+
+    /// The web client's files, as a hosting relay would serve them. Never built in a browser.
+    #[derive(Clone, Debug, Default)]
+    pub struct WebBundle;
 
     pub struct PathRouter {
         pub local_addr: std::net::SocketAddr,

@@ -96,10 +96,17 @@ Done and proven (each line names what proves it):
 
 Next, in order:
 
-- [ ] **The relay serves the page** (path proxy: static bundle + mailbox + DERP on one origin). A
-      page can only use a relay's mailbox same-origin, and a newly linked device learns the circle's
-      current keys through the mailbox — so primary → tab posts, self-sync, history and media all
-      wait on this. `engine.mjs` then runs against a real relay and asserts both directions.
+- [ ] **The relay serves the page.** A page can only use a relay's mailbox same-origin, and a
+      newly linked device learns the circle's current keys through the mailbox — so primary → tab
+      posts, self-sync, history and media all wait on this.
+      - [x] The path proxy serves a bundle under `/app/` from memory (`haven_net::webbundle`): a
+            fixed set of names, exact-match lookup, a closed list of content types, CSP and
+            no-sniff headers, ETag revalidation; off unless the host hands it a bundle; its digest
+            is in `/_haven`. The proxy still never touches the filesystem (it has a test for that).
+            Tests: `webbundle` unit tests, `core/haven-net/tests/path_proxy_webapp.rs`.
+      - [ ] Hosts hand it the bundle: the in-app relay host and `haven-relay`, behind a per-circle
+            "web access" switch that is off by default, with the bundle built into the release.
+      - [ ] `engine.mjs` runs against a hosting relay and asserts both directions.
 - [ ] A command dispatcher for the browser (the 164 Tauri commands `desktop/ui` calls), then the UI
       itself, made responsive from phone to desktop.
 - [ ] Media in a browser: the cache lives in the in-memory tree today, which is fine for text and

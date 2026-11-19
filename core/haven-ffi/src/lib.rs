@@ -1182,6 +1182,7 @@ impl PathRouterHandle {
             media_backend,
             derp_backend,
             http_token,
+            web_app: None,
         };
         let router = haven_net::PathRouter::spawn(&cfg)
             .await

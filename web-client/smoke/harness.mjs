@@ -87,7 +87,10 @@ export async function openPage(url, { ready = () => window.havenReady === true, 
     // Every relay request the page makes, with its outcome (for diagnosing a smoke).
     page.on("response", (r) => {
       const u = new URL(r.url());
-      if (/^\/(k|l|t)\//.test(u.pathname)) console.log(`   [page http] ${r.request().method()} ${u.pathname.slice(0, 90)} -> ${r.status()}`);
+      if (/^\/(k|l|t)\//.test(u.pathname)) {
+        const sent = r.request().postDataBuffer()?.length ?? 0;
+        console.log(`   [page http] ${r.request().method()} ${u.host}${u.pathname.slice(0, 120)} body=${sent} -> ${r.status()}`);
+      }
     });
   }
   if (before) await before(page);

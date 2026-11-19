@@ -31,6 +31,7 @@
     // A harness driving throwaway identities asks, before any script runs, that this page never
     // call the push worker.
     if (window.__HAVEN_HARNESS__ && window.__HAVEN_HARNESS__.pushOff) haven.setPushOff(true);
+    if (window.__HAVEN_HARNESS__ && window.__HAVEN_HARNESS__.log) haven.setLogLevel(window.__HAVEN_HARNESS__.log);
     const { attachStorage } = await import("./storage.js");
     storage = await attachStorage(haven);
     app = new haven.WebApp((name, json) => emit(name, JSON.parse(json)));

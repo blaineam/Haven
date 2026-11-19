@@ -36,7 +36,8 @@ const invoke = (page, name, args = {}) =>
   page.evaluate(([name, args]) => window.__TAURI__.core.invoke("engine_invoke", { name, args }), [name, args]);
 
 /** Before the app's own scripts run: keep a throwaway identity off the production push worker. */
-const quiet = (page) => page.addInitScript(() => { window.__HAVEN_HARNESS__ = { pushOff: true }; });
+const quiet = (page) =>
+  page.addInitScript((log) => { window.__HAVEN_HARNESS__ = { pushOff: true, log }; }, process.env.SMOKE_LOG || "");
 
 const SIZES = { phone: [390, 844], tablet: [820, 1180], desktop: [1440, 900] };
 async function shots(page, label) {
@@ -105,6 +106,19 @@ await run(
     const fromPrimary = await until("the primary's post in the tab", async () => (await feed()).find((p) => p.body === "hello from the primary"));
     if (!fromPrimary.is_me) throw new Error("the primary's post should read as this account's own in the tab");
     step("tab shows the primary's post (same account)");
+
+    // Media, each way: sealed in one engine, stored on the relay, fetched and opened by the other.
+    const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    const ref = await invoke(page, "add_media", { circleId: "", dataBase64: PNG, isVideo: false });
+    await invoke(page, "post", { circleId: "", body: "picture from the browser", media: [ref] });
+    await until("the tab's picture on the primary", async () => peer.lines.includes("FEED me picture from the browser [media 1]"), 120000);
+    step("primary fetched and opened a picture posted from the tab");
+
+    peer.write("!img picture from the primary\n");
+    const pic = await until("the primary's picture post in the tab", async () => (await feed()).find((p) => p.body === "picture from the primary"), 120000);
+    const url = await until("the primary's picture bytes in the tab", () => invoke(page, "media_data_url", { circleId: "", reference: pic.media[0] }), 120000);
+    if (!url.startsWith("data:image/png;base64,") || !url.endsWith(PNG)) throw new Error(`the tab opened different bytes: ${url.slice(0, 60)}…`);
+    step("tab fetched and opened a picture posted from the primary (byte-identical)");
 
     // And the UI actually renders them.
     await until("both posts on screen", async () =>

@@ -12,18 +12,22 @@
 //! dir; every listener on a free loopback port (so it can run beside a real Haven app); no tunnel,
 //! no TURN, no push. Prints `ORIGIN=` (the relay's front door — the page is at `<origin>/app/`),
 //! `ACCOUNT=`, `TICKET=`; approves the first enrollment request (`ENROLLED <device>`); posts each
-//! line it reads on stdin; and prints `FEED <me|other> <body>` for every post as it appears.
+//! line it reads on stdin (`!img <caption>` attaches a tiny PNG); and prints
+//! `FEED <me|other> <body>[ [media N]]` for every post once it holds the post's attachments.
 
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use haven_client::commands::Eng;
 use haven_client::engine::{Engine, HostingOptions};
 use haven_client::net::WebBundle;
 use haven_client::store::{Paths, Prefs};
 
 const CIRCLE: &str = "default";
+/// A 1×1 PNG, base64 — the smallest real image.
+const PNG_1X1: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
 type AnyResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -143,14 +147,32 @@ async fn run() -> AnyResult<()> {
                 println!("ENROLLED {device}");
             }
         }
-        while let Ok(body) = posts.try_recv() {
-            if !body.trim().is_empty() {
-                engine.post(CIRCLE.into(), body.trim().to_string(), vec![], None, false, None);
+        while let Ok(line) = posts.try_recv() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
             }
+            // `!img <caption>` attaches a tiny PNG; anything else is a text post.
+            let (body, media) = match line.strip_prefix("!img ") {
+                Some(caption) => {
+                    let reference = haven_client::commands::add_media(Eng(&engine), CIRCLE.into(), PNG_1X1.into(), false)
+                        .map_err(|e| format!("add_media: {e}"))?;
+                    (caption.to_string(), vec![reference])
+                }
+                None => (line.to_string(), vec![]),
+            };
+            engine.post(CIRCLE.into(), body, media, None, false, None);
         }
         for item in engine.feed(CIRCLE) {
-            if shown.insert(item.id.clone()) {
-                println!("FEED {} {}", if item.is_me { "me" } else { "other" }, item.body);
+            if !shown.contains(&item.id) {
+                // An attachment is reported only once this device actually holds its bytes.
+                let have = item.media.iter().filter(|r| engine.media_bytes(CIRCLE, r).is_some()).count();
+                if have < item.media.len() {
+                    continue; // still fetching — report it on a later pass
+                }
+                let media = if item.media.is_empty() { String::new() } else { format!(" [media {have}]") };
+                println!("FEED {} {}{media}", if item.is_me { "me" } else { "other" }, item.body);
+                shown.insert(item.id.clone());
             }
         }
     }

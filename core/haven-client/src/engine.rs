@@ -5957,8 +5957,10 @@ impl Engine {
         let _ = p.save(&self.paths);
     }
 
-    pub fn relay_web_access(&self) -> bool {
-        self.prefs.lock().relay_web_access
+    /// `(available, enabled)`: whether this host handed over a web client to serve at all, and
+    /// whether the operator turned web access on.
+    pub fn web_access_status(&self) -> (bool, bool) {
+        (self.hosting.lock().web_app.is_some(), self.prefs.lock().relay_web_access)
     }
 
     pub fn set_relay_media_limits(&self, max_age_days: u32, max_bytes: u64) {

@@ -771,6 +771,14 @@ pub struct RelayMediaLimitsDto {
 
 
 #[derive(Serialize)]
+pub struct WebAccessDto {
+    /// This build ships the web client, so its relay CAN serve it.
+    pub available: bool,
+    /// The operator turned it on.
+    pub enabled: bool,
+}
+
+#[derive(Serialize)]
 pub struct AutostartDto {
     pub login_item: bool,
     pub host_on_launch: bool,
@@ -1714,6 +1722,17 @@ pub async fn start_hosting(engine: Eng<'_>) -> R<String> {
 
 pub fn stop_hosting(engine: Eng) {
     engine.stop_hosting();
+}
+
+/// Can this device's hosted relay offer the web client, and is it set to?
+pub fn relay_web_access(engine: Eng) -> WebAccessDto {
+    let (available, enabled) = engine.web_access_status();
+    WebAccessDto { available, enabled }
+}
+
+/// Turn web access on or off. Takes effect the next time hosting starts.
+pub fn set_relay_web_access(engine: Eng, on: bool) {
+    engine.set_relay_web_access(on);
 }
 
 pub fn relay_public_settings(engine: Eng) -> RelayPublicSettingsDto {

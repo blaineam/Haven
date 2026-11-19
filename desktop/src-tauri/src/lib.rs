@@ -39,6 +39,28 @@ use tauri::{Emitter, Manager};
 
 use crate::engine::Engine;
 
+/// The web client this build carries (`web-client/dist`), if any: `HAVEN_WEB_APP_DIR` for a
+/// development build, else the `web-client` directory among the app's bundled resources. A build
+/// without one simply has no "Web access" switch.
+fn load_web_client(app: &tauri::AppHandle) -> Option<haven_client::net::WebBundle> {
+    let dir = std::env::var_os("HAVEN_WEB_APP_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| app.path().resource_dir().ok().map(|d| d.join("web-client")))?;
+    if !dir.is_dir() {
+        return None;
+    }
+    match haven_client::net::load_web_bundle(&dir) {
+        Ok(b) => {
+            log::info!("web client available ({} files, digest {})", b.len(), &b.digest()[..16]);
+            Some(b)
+        }
+        Err(e) => {
+            log::warn!("web client at {} not usable: {e}", dir.display());
+            None
+        }
+    }
+}
+
 /// The engine's view of this application: UI events go to the webview, notifications to the OS.
 struct TauriHost(tauri::AppHandle);
 
@@ -388,6 +410,14 @@ pub fn run() {
                 // on Tauri's runtime (which, unlike a bare `tokio::spawn`, is reachable from the
                 // transport's callback threads).
                 setup_engine.set_app(haven_client::host::AppHandle::new(Arc::new(TauriHost(handle.clone()))));
+                // The web client, if this build ships it: handed to the engine so its hosted relay
+                // CAN serve it. Whether it does is the user's "Web access" switch (off by default).
+                if let Some(bundle) = load_web_client(&handle) {
+                    setup_engine.set_hosting_options(haven_client::engine::HostingOptions {
+                        web_app: Some(Arc::new(bundle)),
+                        ..Default::default()
+                    });
+                }
                 // haven:// deep links (a tapped invite, or a shared post) — surface the window and hand
                 // the URL to the frontend (parity with the iOS URL scheme / Android intent filter).
                 // Windows/Linux register the scheme at install time via the plugin; register_all covers

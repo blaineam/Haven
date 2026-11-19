@@ -118,6 +118,9 @@ fn print_help() {
          PATH PROXY (default ON with HTTP — one origin routes by path):\n  \
          --proxy-bind <addr>       local path-proxy bind (default 127.0.0.1:8675)\n  \
          --no-proxy                disable path proxy (tunnel media :8674 only; dual-origin DERP)\n  \
+         --web-app <dir>           serve the Haven web client (a web-client/dist build) under /app/ so\n  \
+                                   members can link a browser as a device. OFF unless given: the relay\n  \
+                                   (and anything in front of it) delivers that page's code.\n  \
            /k/* /l/* /t/*          → media mailbox\n  \
            /relay /derp /ping      → fabric (iroh DERP; call-signaling hairpin)\n  \
            /  /_haven              → status JSON (route table)\n  \

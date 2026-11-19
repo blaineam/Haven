@@ -5663,7 +5663,28 @@ async function relaySheet() {
       s3.configured ? el("button", { class: "btn danger small", onclick: async () => { await invoke("erase_relay", { nodeHex: "s3:" + s3.bucket }); await invoke("s3_clear"); toast(t("s3_removed")); renderRelay(); } }, t("remove")) : null,
     ),
   );
-  sheet(t("relays"), el("div", { class: "col", style: "gap:16px" }, hostCard, liveTunnelCard, publicCard, alwaysOn, adoptCard, s3card, headless));
+  // Web access: let circle members link a browser through THIS relay. Shown only where it can
+  // work — a host that ships the web client, and never inside the web client itself.
+  // (A host that does not know the command answers nothing at all: treat that as "not available".)
+  const wa = (HOST_WEB ? null : await invoke("relay_web_access").catch(() => null)) || { available: false };
+  const webCard = (() => {
+    if (!wa.available) return null;
+    const chk = el("input", { type: "checkbox", style: "width:auto" }); chk.checked = !!wa.enabled;
+    chk.addEventListener("change", async () => {
+      try {
+        await invoke("set_relay_web_access", { on: chk.checked });
+        toast(s.hosting ? t("saved_restart_hosting") : t("saved"));
+      } catch (e) { chk.checked = !chk.checked; toast("" + e); }
+    });
+    const live = s.hosting && wa.enabled && s.path_routed && s.live_media_url ? s.live_media_url.replace(/\/+$/, "") + "/app/" : "";
+    return el("div", { class: "card col" },
+      el("h3", {}, t("web_access")),
+      el("div", { class: "muted small", style: "white-space:normal" }, t("web_access_hint")),
+      el("label", { class: "row", style: "gap:8px;align-items:center;margin-top:6px" }, chk, el("span", {}, t("web_access_on"))),
+      live ? el("div", { class: "muted small", style: "word-break:break-all" }, t("web_access_address"), " ", el("span", { style: "color:var(--tint)" }, live)) : null,
+      el("div", { class: "muted small", style: "white-space:normal" }, t("web_access_warn")));
+  })();
+  sheet(t("relays"), el("div", { class: "col", style: "gap:16px" }, hostCard, liveTunnelCard, publicCard, webCard, alwaysOn, adoptCard, s3card, headless));
 }
 
 // ---- You / Settings --------------------------------------------------------------------

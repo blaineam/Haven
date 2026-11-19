@@ -17,6 +17,10 @@ pub use haven_net::{
     DEFAULT_PATH_ROUTER_BIND, DEFAULT_TURN_BIND, DEFAULT_TURN_USER,
 };
 
+/// Load a built web client from disk (hosts only).
+#[cfg(not(target_arch = "wasm32"))]
+pub use haven_net::webbundle_dir::load as load_web_bundle;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub mod blobstore {
     pub use haven_net::blobstore::{media_scope_key, MEDIA_SCOPE_BODY, RELAY_INTERFACE_KEY};

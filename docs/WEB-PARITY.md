@@ -110,8 +110,20 @@ Next, in order:
         account's own key — not a contact, not another linked device.
       - Fixed on the way: the proxy stripped `Connection: Upgrade` from WebSocket upgrades, which
         every browser rejects (native clients never checked).
-- [ ] Hosts ship the bundle: the desktop/Mac/Android relay hosts and `haven-relay` need it built
-      into their releases and a "web access" switch in their settings.
+- [x] **Hosts can offer it.**
+      - `haven-relay run … --web-app <web-client/dist>` (or `"web_app"` in its JSON config) loads
+        the bundle into memory and serves it; without the flag there is no web access. Checked
+        against the real daemon.
+      - The desktop app hands its hosted relay the bundle it finds among its resources
+        (`web-client/`, or `HAVEN_WEB_APP_DIR` in development) and shows a **Web access** switch in
+        Settings ▸ Relays — off by default, with the trust warning on the card and the address
+        members open (`<front door>/app/`) once it is on.
+      - Media works each way (the smoke posts a picture from the tab and one to it).
+- [ ] Release packaging: the desktop installers do not yet include `web-client/dist` (the build
+      needs the wasm toolchain in CI), so the switch does not appear in shipped builds. The Mac
+      app's and Android's in-app relay hosts need the same hand-over and switch in their own UIs.
+- [ ] Bundle size: ~10.8 MB of WebAssembly, served uncompressed. Needs `wasm-opt` and
+      pre-compressed (brotli) variants in the proxy.
 - [ ] Per-circle consent. Web access is a host-level switch today. "This circle allows web
       devices" needs a device class in the credential and members refusing to seal to a web device
       a circle has not allowed — a protocol change, to be modelled before it is built.

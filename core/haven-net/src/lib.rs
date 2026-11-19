@@ -34,6 +34,7 @@ pub mod s3tunnel;
 pub mod statuspage;
 pub mod turn;
 pub mod webbundle;
+pub mod webbundle_dir;
 pub mod ws_hairpin;
 
 pub use derp::{DerpConfig, DerpServer, DEFAULT_DERP_BIND};

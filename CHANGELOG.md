@@ -45,12 +45,15 @@ receiving device tried the key it already had, failed, discarded the post, and t
 app stayed open. The post is now kept and opened as soon as the key arrives. No security impact: nothing was readable that should not
 have been. Regression test: `s4_ffi_own_device_events_open_in_any_delivery_order`.
 
-### Added - Web client groundwork (not shipped; `feat/web-client`)
-The desktop app's client layer (engine, stores, wire protocol) moved to a shared crate, `core/haven-client`, and now also builds for
-the browser, so a tab runs the same engine the desktop app runs. Proven in headless Chromium against that engine running natively: a
-fresh tab links as a seedless device with an enroll ticket, stays linked across a reload, and a post written in the tab reaches the
-account's primary device. Desktop behaviour is unchanged (its tests pass in their new home). No UI yet, and posts toward the tab wait
-on the relay serving the page. Design, trust statement and progress: [`docs/WEB-PARITY.md`](docs/WEB-PARITY.md) and D21 in
+### Added - Web client (not shipped; `feat/web-client`)
+Haven can run in a web browser. A circle's relay can serve the web client under `/app/`, and a member links the browser as one more
+of their own devices with a secure link code from a device they already use; the browser never holds the account's master key and
+can be removed like any device. It is the desktop app's interface and engine (the engine compiled to WebAssembly), laid out for
+phones, tablets and desktops. Web access is **off by default** on every relay: `haven-relay --web-app <dir>`, or the Web access
+switch in the desktop app's Relays settings. Proven end to end in headless Chromium against a native device hosting the relay:
+linking, staying linked across a reload, posts and pictures in both directions. Still missing: shipping the bundle in the
+installers, the switch on the Mac and Android relay hosts, calls, encrypted storage at rest, a scan-to-link flow, and the formal
+model. Design, trust statement and progress: [`docs/WEB-PARITY.md`](docs/WEB-PARITY.md) and D21 in
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## 2.1.3 (security release, 2026-11-19)

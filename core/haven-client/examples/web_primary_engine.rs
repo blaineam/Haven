@@ -22,7 +22,6 @@ use std::time::Duration;
 
 use haven_client::commands::Eng;
 use haven_client::engine::{Engine, HostingOptions};
-use haven_client::net::WebBundle;
 use haven_client::store::{Paths, Prefs};
 
 const CIRCLE: &str = "default";
@@ -57,30 +56,6 @@ fn free_port() -> std::io::Result<u16> {
     Ok(std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
 }
 
-/// The web client's files: everything under a built bundle directory (`web-client/dist`).
-fn load_bundle(dir: &Path) -> AnyResult<WebBundle> {
-    fn walk(root: &Path, dir: &Path, bundle: &mut WebBundle) -> AnyResult<()> {
-        for entry in std::fs::read_dir(dir)? {
-            let path = entry?.path();
-            if path.is_dir() {
-                walk(root, &path, bundle)?;
-                continue;
-            }
-            let name = path.strip_prefix(root)?.to_string_lossy().replace('\\', "/");
-            if !bundle.insert(&name, std::fs::read(&path)?) {
-                return Err(format!("{name} is not a servable bundle file").into());
-            }
-        }
-        Ok(())
-    }
-    let mut bundle = WebBundle::new();
-    walk(dir, dir, &mut bundle).map_err(|e| format!("{}: {e}", dir.display()))?;
-    if bundle.lookup("/app/").is_none() {
-        return Err(format!("{} has no index.html — run web-client/build.sh", dir.display()).into());
-    }
-    Ok(bundle)
-}
-
 /// Runs until killed; the temp directory is the OS's to reap.
 async fn run() -> AnyResult<()> {
     // A throwaway identity has nobody to wake; keep test traffic off the production push worker.
@@ -91,7 +66,7 @@ async fn run() -> AnyResult<()> {
         log::set_max_level(level);
     }
     let web_dir = std::env::args().nth(1).ok_or("usage: web_primary_engine <web-client/dist>")?;
-    let bundle = load_bundle(Path::new(&web_dir))?;
+    let bundle = haven_client::net::load_web_bundle(Path::new(&web_dir)).map_err(|e| e.to_string())?;
 
     let (http, derp, proxy) = (free_port()?, free_port()?, free_port()?);
     let origin = format!("http://127.0.0.1:{proxy}");

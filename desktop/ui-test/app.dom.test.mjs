@@ -962,6 +962,38 @@ test('relays: hosting starts and stops, and shows the link and live tunnel while
   assert.match(routed.app.q('#modal-root').textContent, /one\.example/);
 });
 
+test('relays: web access is offered only by a host that ships the web client, and is a plain switch', async () => {
+  // A build without the web client (or an older host that does not know the command): no card.
+  const without = await boot();
+  await openSettingsRow(without.app, /Relays/);
+  assert.doesNotMatch(without.app.q('#modal-root').textContent, /Web access/);
+
+  // Available, off, hosting on one origin: the card, the warning, no address until it is on.
+  const off = await boot({ be: {
+    relay_web_access: { available: true, enabled: false },
+    relay_status: { hosting: true, started: true, internet_active: true, relay_link: null, live_media_url: 'https://one.example/', live_derp_url: null, path_routed: true },
+  } });
+  await openSettingsRow(off.app, /Relays/);
+  const text = off.app.q('#modal-root').textContent;
+  assert.match(text, /Web access/);
+  assert.match(text, /could change it/, 'the trust warning is on the card');
+  assert.doesNotMatch(text, /one\.example\/app\//, 'no address while it is off');
+  const box = [...off.app.qa('#modal-root input[type=checkbox]')].find((b) => b.parentElement.textContent.includes('Offer Haven in a browser'));
+  assert.ok(box && !box.checked);
+  box.checked = true;
+  box.dispatchEvent(new off.app.ctx.Event('change'));
+  await off.app.settle();
+  assert.equal(lastCall(off.app, 'set_relay_web_access').args.on, true);
+
+  // On: the address members open is the front door's /app/.
+  const on = await boot({ be: {
+    relay_web_access: { available: true, enabled: true },
+    relay_status: { hosting: true, started: true, internet_active: true, relay_link: null, live_media_url: 'https://one.example/', live_derp_url: null, path_routed: true },
+  } });
+  await openSettingsRow(on.app, /Relays/);
+  assert.match(on.app.q('#modal-root').textContent, /https:\/\/one\.example\/app\//);
+});
+
 test('relays: the front-door mode and URLs are saved together; token entry follows the mode', async () => {
   const { app } = await boot();
   await openSettingsRow(app, /Relays/);

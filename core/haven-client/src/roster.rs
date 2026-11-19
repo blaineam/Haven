@@ -50,7 +50,7 @@ impl DeviceRoster {
     }
 
     pub fn load(paths: &Paths) -> Self {
-        let mut r: Self = std::fs::read(Self::file(paths))
+        let mut r: Self = crate::fs::read(Self::file(paths))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
@@ -64,8 +64,8 @@ impl DeviceRoster {
     }
 
     pub fn save(&self, paths: &Paths) -> std::io::Result<()> {
-        let _ = std::fs::create_dir_all(&paths.root);
-        std::fs::write(Self::file(paths), serde_json::to_vec(self).unwrap_or_default())
+        let _ = crate::fs::create_dir_all(&paths.root);
+        crate::fs::write(Self::file(paths), serde_json::to_vec(self).unwrap_or_default())
     }
 
     fn device_account(&self) -> std::sync::Arc<haven_ffi::Account> {
@@ -229,7 +229,7 @@ impl Seedless {
     }
 
     pub fn load(paths: &Paths) -> Self {
-        std::fs::read(Self::file(paths))
+        crate::fs::read(Self::file(paths))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default()
@@ -242,14 +242,14 @@ impl Seedless {
     }
 
     pub fn save(&self, paths: &Paths) -> std::io::Result<()> {
-        let _ = std::fs::create_dir_all(&paths.root);
+        let _ = crate::fs::create_dir_all(&paths.root);
         let file = Self::file(paths);
-        std::fs::write(&file, serde_json::to_vec(self).unwrap_or_default())?;
+        crate::fs::write(&file, serde_json::to_vec(self).unwrap_or_default())?;
         // 0600 — the granted self-sync key is seed-grade; treat like the account seed on disk.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+            let _ = crate::fs::set_permissions(&file, crate::fs::Permissions::from_mode(0o600));
         }
         Ok(())
     }
@@ -273,9 +273,9 @@ mod seedless_tests {
         let dir = std::env::temp_dir().join(format!(
             "haven-seedless-test-{tag}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_nanos()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::fs::create_dir_all(&dir).unwrap();
         Paths { base: dir.clone(), root: dir }
     }
 
@@ -318,7 +318,7 @@ mod seedless_tests {
         bad.self_sync_key = vec![1, 2, 3];
         assert_eq!(bad.self_sync_key32(), None);
 
-        let _ = std::fs::remove_dir_all(&paths.root);
+        let _ = crate::fs::remove_dir_all(&paths.root);
     }
 
     #[cfg(unix)]
@@ -330,10 +330,10 @@ mod seedless_tests {
         s.enabled = true;
         s.self_sync_key = vec![5u8; 32];
         s.save(&paths).unwrap();
-        let mode = std::fs::metadata(Seedless::file(&paths)).unwrap().permissions().mode();
+        let mode = crate::fs::metadata(Seedless::file(&paths)).unwrap().permissions().mode();
         // The granted self-sync key is seed-grade — the file must be owner-only.
         assert_eq!(mode & 0o777, 0o600, "seedless.json must be 0600");
-        let _ = std::fs::remove_dir_all(&paths.root);
+        let _ = crate::fs::remove_dir_all(&paths.root);
     }
 }
 

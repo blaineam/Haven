@@ -5,7 +5,7 @@
 //! into every sibling. Pure logic + a tiny JSON persistence layer so it is testable without the
 //! engine. Posts made before this existed have no group and edit one circle only, as before.
 
-use std::fs;
+use crate::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};

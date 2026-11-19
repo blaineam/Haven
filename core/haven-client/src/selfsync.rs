@@ -27,7 +27,7 @@ use haven_ffi::HavenSocial;
 /// Paths dir (`selfsync-device.bin`), and NEVER synced.
 pub fn device_id(paths: &Paths) -> [u8; 32] {
     let path = paths.selfsync_device_file();
-    if let Ok(bytes) = std::fs::read(&path) {
+    if let Ok(bytes) = crate::fs::read(&path) {
         if bytes.len() == 32 {
             let mut id = [0u8; 32];
             id.copy_from_slice(&bytes);
@@ -36,7 +36,7 @@ pub fn device_id(paths: &Paths) -> [u8; 32] {
     }
     let mut id = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut id);
-    let _ = std::fs::write(&path, id);
+    let _ = crate::fs::write(&path, id);
     id
 }
 
@@ -278,7 +278,7 @@ fn bool_value(v: &[u8]) -> Option<bool> {
 /// desktop leg, a debug build). Callers run this first, with no lock held; `apply_local` then holds
 /// prefs only for the cheap map work. Returns how many wires were offered to the engine.
 pub fn ingest_synced_rosters(entries: &[(String, Vec<u8>)], social: &HavenSocial) -> usize {
-    let t0 = std::time::Instant::now();
+    let t0 = web_time::Instant::now();
     let mut n = 0usize;
     for (k, v) in entries {
         if k.starts_with("roster:") {

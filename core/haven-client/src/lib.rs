@@ -14,6 +14,7 @@
 
 // ── Every target ─────────────────────────────────────────────────────────────────────────────
 pub mod callwire;
+pub mod fs;
 pub mod mediaholding;
 pub mod relayhealth;
 pub mod relayintro;

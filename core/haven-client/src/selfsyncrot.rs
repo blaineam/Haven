@@ -37,21 +37,21 @@ impl SelfSyncRotation {
     }
 
     pub fn load(paths: &Paths) -> Self {
-        std::fs::read(Self::file(paths))
+        crate::fs::read(Self::file(paths))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default()
     }
 
     pub fn save(&self, paths: &Paths) -> std::io::Result<()> {
-        let _ = std::fs::create_dir_all(&paths.root);
+        let _ = crate::fs::create_dir_all(&paths.root);
         let file = Self::file(paths);
-        std::fs::write(&file, serde_json::to_vec(self).unwrap_or_default())?;
+        crate::fs::write(&file, serde_json::to_vec(self).unwrap_or_default())?;
         // 0600 — the rotated key is seed-grade; guard it like the account seed / the seedless grant.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+            let _ = crate::fs::set_permissions(&file, crate::fs::Permissions::from_mode(0o600));
         }
         Ok(())
     }
@@ -97,9 +97,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "haven-ssrot-test-{tag}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_nanos()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::fs::create_dir_all(&dir).unwrap();
         Paths { base: dir.clone(), root: dir }
     }
 
@@ -141,7 +141,7 @@ mod tests {
         let loaded = SelfSyncRotation::load(&paths);
         assert_eq!(loaded.epoch, 1);
         assert_eq!(loaded.key32(), Some([3u8; 32]));
-        let _ = std::fs::remove_dir_all(&paths.root);
+        let _ = crate::fs::remove_dir_all(&paths.root);
     }
 
     #[cfg(unix)]
@@ -152,8 +152,8 @@ mod tests {
         let mut r = SelfSyncRotation::default();
         r.rotate_to([1u8; 32]);
         r.save(&paths).unwrap();
-        let mode = std::fs::metadata(SelfSyncRotation::file(&paths)).unwrap().permissions().mode();
+        let mode = crate::fs::metadata(SelfSyncRotation::file(&paths)).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "selfsync-rotation.json must be 0600");
-        let _ = std::fs::remove_dir_all(&paths.root);
+        let _ = crate::fs::remove_dir_all(&paths.root);
     }
 }

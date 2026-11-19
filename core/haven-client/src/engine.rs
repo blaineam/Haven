@@ -23,7 +23,7 @@ use std::sync::{Arc, Weak};
 /// Note the guards are `!Send`, so holding one across an `.await` is now a COMPILE error rather
 /// than a latent deadlock — worth keeping in mind when this shape appears.
 use parking_lot::Mutex as StdMutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use base64::Engine as _; // for `.encode` on the base64 engine (this module's `Engine` is unrelated)
@@ -278,7 +278,7 @@ pub struct ActivityRow {
 
 /// Load the persisted app-layer activity rows (bounded — see `append_app_activity`).
 fn load_app_activity(paths: &Paths) -> Vec<ActivityRow> {
-    std::fs::read(paths.root.join("activity-app.json"))
+    crate::fs::read(paths.root.join("activity-app.json"))
         .ok()
         .and_then(|d| serde_json::from_slice(&d).ok())
         .unwrap_or_default()
@@ -303,7 +303,7 @@ fn load_seen_mailbox(paths: &Paths) -> HashSet<String> {
         );
     }
     let latch = paths.root.join("seen-hello-repair-2.done");
-    if !latch.exists() {
+    if !crate::fs::exists(&latch) {
         let before = set.len();
         set.retain(|k| !k.contains("/__hello__/"));
         if set.len() != before {
@@ -311,12 +311,12 @@ fn load_seen_mailbox(paths: &Paths) -> HashSet<String> {
                 "mailbox seen: one-shot repair forgot {} hello key(s) a pre-fix build marked-and-dropped",
                 before - set.len()
             );
-            let _ = std::fs::write(
+            let _ = crate::fs::write(
                 paths.root.join("mailbox-seen.txt"),
                 set.iter().cloned().collect::<Vec<_>>().join("\n"),
             );
         }
-        let _ = std::fs::write(&latch, b"1");
+        let _ = crate::fs::write(&latch, b"1");
     }
     set
 }
@@ -476,7 +476,7 @@ pub struct Engine {
     /// before apply_profile_card existed. Established contacts otherwise re-hello ~never, which
     /// left them as initials forever (reported: "it should never show the initial").
     card_backfill_done: std::sync::atomic::AtomicBool,
-    roster_pull_at: StdMutex<HashMap<String, std::time::Instant>>,
+    roster_pull_at: StdMutex<HashMap<String, web_time::Instant>>,
     relay_clients: TokioMutex<HashMap<String, Arc<RelayClient>>>,
     /// Per-relay backoff health, keyed by node hex — drives graceful fallback.
     relay_health: StdMutex<HashMap<String, crate::relayhealth::RelayHealth>>,
@@ -774,8 +774,8 @@ impl Engine {
         {
             let acct = social.my_node_hex();
             let dev = social.my_device_node_hex();
-            let _ = std::fs::write(paths.root.join("qa-account-hex.txt"), &acct);
-            let _ = std::fs::write(paths.root.join("qa-device-hex.txt"), &dev);
+            let _ = crate::fs::write(paths.root.join("qa-account-hex.txt"), &acct);
+            let _ = crate::fs::write(paths.root.join("qa-device-hex.txt"), &dev);
             eprintln!(
                 "qa-identity account={} device={}",
                 &acct[..acct.len().min(12)],
@@ -785,10 +785,10 @@ impl Engine {
         // Matrix QA: optional peer public bundle at `qa-peer-bundle.bin` (parity with Android
         // `ingestQaPeerBundleIfPresent`). Lets circle crypto form when HELLO cannot dial and the
         // Mac is a second device of the iOS account that needs the Android friend in members.
-        if let Ok(bundle) = std::fs::read(paths.root.join("qa-peer-bundle.bin")) {
+        if let Ok(bundle) = crate::fs::read(paths.root.join("qa-peer-bundle.bin")) {
             if bundle.len() >= 32 {
                 if let Ok(hex) = social.add_contact_bundle("default".into(), bundle) {
-                    let name = std::fs::read_to_string(paths.root.join("qa-peer-name.txt"))
+                    let name = crate::fs::read_to_string(paths.root.join("qa-peer-name.txt"))
                         .ok()
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
@@ -809,14 +809,14 @@ impl Engine {
         let app_activity = load_app_activity(&paths);
         let dyn_state = DynState {
             seen_mailbox: load_seen_mailbox(&paths),
-            notified: std::fs::read_to_string(paths.root.join("notified.txt"))
+            notified: crate::fs::read_to_string(paths.root.join("notified.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
-            media_backed_up: std::fs::read_to_string(paths.root.join("media-backed-up.txt"))
+            media_backed_up: crate::fs::read_to_string(paths.root.join("media-backed-up.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
             media_unopenable: HashSet::new(),
-            media_upload_progress: std::fs::read_to_string(paths.root.join("media-upload-progress.txt"))
+            media_upload_progress: crate::fs::read_to_string(paths.root.join("media-upload-progress.txt"))
                 .map(|t| {
                     t.lines()
                         .filter_map(|l| l.split_once('\t'))
@@ -931,14 +931,14 @@ impl Engine {
         let app_activity = load_app_activity(&paths);
         let dyn_state = DynState {
             seen_mailbox: load_seen_mailbox(&paths),
-            notified: std::fs::read_to_string(paths.root.join("notified.txt"))
+            notified: crate::fs::read_to_string(paths.root.join("notified.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
-            media_backed_up: std::fs::read_to_string(paths.root.join("media-backed-up.txt"))
+            media_backed_up: crate::fs::read_to_string(paths.root.join("media-backed-up.txt"))
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
             media_unopenable: HashSet::new(),
-            media_upload_progress: std::fs::read_to_string(paths.root.join("media-upload-progress.txt"))
+            media_upload_progress: crate::fs::read_to_string(paths.root.join("media-upload-progress.txt"))
                 .map(|t| {
                     t.lines()
                         .filter_map(|l| l.split_once('\t'))
@@ -1114,7 +1114,7 @@ impl Engine {
             rows.clone()
         };
         if let Ok(d) = serde_json::to_vec(&snapshot) {
-            let _ = std::fs::write(self.paths.root.join("activity-app.json"), d);
+            let _ = crate::fs::write(self.paths.root.join("activity-app.json"), d);
         }
     }
 
@@ -1521,7 +1521,7 @@ impl Engine {
                 ids.save(&self.paths)?;
                 store::delete_identity_seed(node_hex);
                 if !dir.is_empty() {
-                    let _ = std::fs::remove_dir_all(self.paths.base.join(dir));
+                    let _ = crate::fs::remove_dir_all(self.paths.base.join(dir));
                 }
                 self.emit_changed();
                 Ok(())
@@ -2801,7 +2801,7 @@ impl Engine {
             }
         }
         self.persist();
-        let _ = std::fs::write(self.paths.selfsync_state_file(), base.to_bytes());
+        let _ = crate::fs::write(self.paths.selfsync_state_file(), base.to_bytes());
         log::info!("seedless self-sync base primed from primary slot ({} keys)", entries.len());
     }
 
@@ -5148,7 +5148,7 @@ impl Engine {
                 for hex in due {
                     me.roster_pull_at
                         .lock()
-                        .insert(hex.to_lowercase(), std::time::Instant::now());
+                        .insert(hex.to_lowercase(), web_time::Instant::now());
                     me.fetch_contact_roster(&hex).await;
                 }
                 me.roster_pull_in_flight
@@ -5930,7 +5930,7 @@ impl Engine {
             return Err(anyhow::anyhow!("relay host: messaging node not started yet"));
         };
         let dir = self.paths.relay_dir();
-        std::fs::create_dir_all(&dir).ok();
+        crate::fs::create_dir_all(&dir).ok();
         // attach_with_limits, not attach: plain `attach` runs media UNLIMITED, so hosting meant
         // volunteering the whole disk with no way to say otherwise.
         let (max_age_days, max_bytes) = self.prefs.lock().relay_media_limits();
@@ -6197,7 +6197,7 @@ impl Engine {
         }
         let path = self.paths.relay_dir().join("interface.json");
         if let Ok(bytes) = serde_json::to_vec_pretty(&interface) {
-            let _ = std::fs::write(&path, bytes);
+            let _ = crate::fs::write(&path, bytes);
             log::info!("relay interface written to {}", path.display());
         }
     }
@@ -6740,7 +6740,7 @@ impl Engine {
             return Err(anyhow::anyhow!("messaging node missing after rebind"));
         };
         let dir = self.paths.relay_dir();
-        std::fs::create_dir_all(&dir).ok();
+        crate::fs::create_dir_all(&dir).ok();
         let (max_age_days, max_bytes) = self.prefs.lock().relay_media_limits();
         let handle = RelayServerHandle::attach_with_limits(
             node,
@@ -8105,7 +8105,7 @@ impl Engine {
             st.media_backed_up_dirty = false;
             st.media_backed_up.iter().cloned().collect::<Vec<_>>().join("\n")
         };
-        let _ = std::fs::write(self.paths.root.join("media-backed-up.txt"), snapshot);
+        let _ = crate::fs::write(self.paths.root.join("media-backed-up.txt"), snapshot);
     }
     /// How many leading windows to SKIP for one destination: the ones we ourselves wrote there from
     /// these exact sealed bytes (`mediaresume::trusted_prefix`) AND that it still holds. The probe is
@@ -8194,7 +8194,7 @@ impl Engine {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let _ = std::fs::write(self.paths.root.join("media-upload-progress.txt"), snapshot);
+        let _ = crate::fs::write(self.paths.root.join("media-upload-progress.txt"), snapshot);
     }
 
     /// Forget a destination's media confirmations (relay forgotten/erased) so we re-mirror to it
@@ -8533,7 +8533,7 @@ impl Engine {
             }
         }
         let repair_marker = self.paths.root.join("repair-storm-burn-v1");
-        if !repair_marker.exists() {
+        if !crate::fs::exists(&repair_marker) {
             let removed = {
                 let mut st = self.dyn_state.lock();
                 let before = st.seen_mailbox.len();
@@ -8541,7 +8541,7 @@ impl Engine {
                 st.seen_journal.note_removed();
                 before - st.seen_mailbox.len()
             };
-            let _ = std::fs::write(&repair_marker, b"1");
+            let _ = crate::fs::write(&repair_marker, b"1");
             if removed > 0 {
                 self.flush_seen_mailbox();
                 log::info!("mailbox seen: storm-burn repair forgot {removed} keys — full re-drain");
@@ -9234,7 +9234,7 @@ impl Engine {
             st.notified_dirty = false;
             st.notified.iter().cloned().collect::<Vec<_>>().join("\n")
         };
-        let _ = std::fs::write(self.paths.root.join("notified.txt"), snapshot);
+        let _ = crate::fs::write(self.paths.root.join("notified.txt"), snapshot);
     }
 
     /// Configure (and verify) a BYO S3/R2/B2 bucket. Stores the secret in the keychain, the rest
@@ -10474,7 +10474,7 @@ impl Engine {
     /// therefore fails the match and restarts, which is the safe direction.
     fn restore_resume_load(&self, reference: &str, chunks: usize, fp: &str) -> usize {
         let part = self.media.sealed_part_path(reference);
-        let Ok(txt) = std::fs::read_to_string(Self::restore_meta_path(&part)) else { return 0 };
+        let Ok(txt) = crate::fs::read_to_string(Self::restore_meta_path(&part)) else { return 0 };
         let mut it = txt.split_whitespace();
         let (Some(c), Some(g)) = (
             it.next().and_then(|v| v.parse::<usize>().ok()),
@@ -10483,7 +10483,7 @@ impl Engine {
             return 0;
         };
         let recorded_fp = it.next().unwrap_or("");
-        if c == chunks && recorded_fp == fp && g > 0 && g <= chunks && part.exists() {
+        if c == chunks && recorded_fp == fp && g > 0 && g <= chunks && crate::fs::exists(&part) {
             g
         } else {
             0
@@ -10492,12 +10492,12 @@ impl Engine {
 
     fn restore_resume_save(&self, reference: &str, chunks: usize, got: usize, fp: &str) {
         let part = self.media.sealed_part_path(reference);
-        let _ = std::fs::write(Self::restore_meta_path(&part), format!("{chunks} {got} {fp}"));
+        let _ = crate::fs::write(Self::restore_meta_path(&part), format!("{chunks} {got} {fp}"));
     }
 
     fn restore_resume_clear(&self, reference: &str) {
         let part = self.media.sealed_part_path(reference);
-        let _ = std::fs::remove_file(Self::restore_meta_path(&part));
+        let _ = crate::fs::remove_file(Self::restore_meta_path(&part));
     }
 
     /// Open (or start) the resumable part file for `reference` given the manifest's chunk count.
@@ -10723,7 +10723,7 @@ impl Engine {
         if circles.is_empty() {
             return true; // nothing to judge it against — under-claiming corruption is the safe direction
         }
-        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let size = crate::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         if size == 0 {
             // Nothing to judge: an empty file is a MISS, never "found but corrupt" — blacklisting
             // it would stop every retry this session for a blob that may be fine on the relay.
@@ -10742,7 +10742,7 @@ impl Engine {
                     probe.to_string_lossy().into_owned(),
                 )
             });
-            let _ = std::fs::remove_file(&probe);
+            let _ = crate::fs::remove_file(&probe);
             ok
         } else {
             let Some(stored) = self.media.raw_sealed(reference) else { return false };
@@ -12372,7 +12372,7 @@ impl Engine {
         }
 
         // 1. Base = last converged state (or empty).
-        let mut base = match std::fs::read(self.paths.selfsync_state_file()) {
+        let mut base = match crate::fs::read(self.paths.selfsync_state_file()) {
             Ok(bytes) => AccountState::from_bytes(&bytes).unwrap_or_default(),
             Err(_) => AccountState::default(),
         };
@@ -12485,7 +12485,7 @@ impl Engine {
         // Unconditional is safe: sync_with_contacts single-flights, takes at most 3 contacts per
         // pass, backs off 10 minutes per contact, and skips anyone already resolvable.
         self.sync_with_contacts();
-        let _ = std::fs::write(self.paths.selfsync_state_file(), base.to_bytes());
+        let _ = crate::fs::write(self.paths.selfsync_state_file(), base.to_bytes());
 
         // 5. Re-publish our own slot (sealed) to every relay/bucket for redundancy. Seal under the
         //    rotated key/epoch (v1) once rotated, else the v0 seed-derived key — byte-identical to today.
@@ -12926,8 +12926,8 @@ impl Engine {
 // grant, ingests it, and adopts the ticket relays so standard sync carries everything else.
 
 fn friend_invite_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }

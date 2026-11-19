@@ -9,7 +9,7 @@
 //! and it rendered. Refs are minted and verified through `haven_p2p::mediaref` now — one definition of
 //! the address shared with iOS, Android and the relay-side tests, rather than three that can drift.
 
-use std::fs;
+use crate::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -258,7 +258,7 @@ impl LocalMedia {
     }
 
     pub fn has(&self, reference: &str) -> bool {
-        self.dir.join(bare_id(reference)).exists()
+        fs::exists(self.dir.join(bare_id(reference)))
     }
 
     /// Load decrypted bytes trying every circle's key (for serving a media request). Verified too:
@@ -279,7 +279,7 @@ impl LocalMedia {
     /// work off the file rather than read it into RAM (a several-hundred-MB video).
     pub fn sealed_path(&self, reference: &str) -> Option<PathBuf> {
         let p = self.dir.join(bare_id(reference));
-        if p.exists() { Some(p) } else { None }
+        if fs::exists(&p) { Some(p) } else { None }
     }
 
     /// The at-rest sealed blob for a ref — uploaded to the relay verbatim.
@@ -581,10 +581,10 @@ impl LocalMedia {
         grace_secs: u64,
         live_parts: &std::collections::HashMap<String, u64>,
     ) -> (u64, usize) {
-        let cutoff = std::time::SystemTime::now()
+        let cutoff = web_time::SystemTime::now()
             .checked_sub(std::time::Duration::from_secs(grace_secs));
-        let abandoned = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let abandoned = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
             .saturating_sub(crate::mediaresume::EXPIRY_SECS);
@@ -648,7 +648,7 @@ impl LocalMedia {
                 let mtime = md
                     .modified()
                     .ok()
-                    .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                    .and_then(|m| m.duration_since(web_time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 out.push((name.to_string(), md.len(), mtime));
@@ -695,8 +695,8 @@ impl LocalMedia {
         if max_age_secs == 0 && max_bytes == 0 {
             return (0, 0, evict);
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         struct Cand {
@@ -727,7 +727,7 @@ impl LocalMedia {
                 let Some(mtime) = md
                     .modified()
                     .ok()
-                    .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                    .and_then(|m| m.duration_since(web_time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs())
                 else {
                     continue;
@@ -785,7 +785,7 @@ impl LocalMedia {
     pub fn gc_due(&self, min_interval_secs: u64) -> bool {
         let stamp = self.dir.join(".gc-stamp");
         match fs::metadata(&stamp).and_then(|m| m.modified()) {
-            Ok(m) => std::time::SystemTime::now()
+            Ok(m) => web_time::SystemTime::now()
                 .duration_since(m)
                 .map(|d| d.as_secs() >= min_interval_secs)
                 .unwrap_or(false),
@@ -900,7 +900,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!(
             "haven-localmedia-test-{}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+            web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_nanos(),
             SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         (LocalMedia::new(base.clone()), base)
@@ -911,7 +911,7 @@ mod tests {
     fn write_aged(dir: &Path, name: &str, size: usize, age_secs: u64) {
         let p = dir.join(name);
         fs::write(&p, vec![0u8; size]).unwrap();
-        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+        let when = web_time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
         let f = fs::OpenOptions::new().write(true).open(&p).unwrap();
         f.set_modified(when).unwrap();
     }
@@ -938,8 +938,8 @@ mod tests {
     #[test]
     fn sweep_spares_a_live_partial_and_expires_an_abandoned_one() {
         let (m, dir) = tmp_media();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs();
         // Both are old enough for the 48h grace to judge them.
         write_aged(&dir, "incoming_p2p_live.part", 1000, 72 * 3600);
         write_aged(&dir, "incoming_p2p_dead.part", 1000, 72 * 3600);

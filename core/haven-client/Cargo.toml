@@ -14,6 +14,8 @@ test-util = []
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Clocks that exist in a browser too (std's on native — the same types).
+web-time = "1"
 
 # The engine and its stores. Native-only for now: they still reach the filesystem, the OS keyring,
 # tokio and the native node directly. They move behind the `rt`/`host` seams (and a storage seam)

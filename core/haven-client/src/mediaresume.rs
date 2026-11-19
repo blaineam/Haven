@@ -40,8 +40,8 @@ pub const MAX_RECORDS: usize = 512;
 const SAVE_INTERVAL_SECS: u64 = 2;
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
@@ -86,7 +86,7 @@ impl ReassemblyIndex {
     /// deleting the bytes of the ones that expired. Call once at engine construction.
     pub fn load(path: PathBuf, dir: PathBuf) -> Self {
         let mut me = Self { path, dir, ..Default::default() };
-        if let Ok(text) = std::fs::read_to_string(&me.path) {
+        if let Ok(text) = crate::fs::read_to_string(&me.path) {
             for line in text.lines() {
                 if let Some((reference, rec)) = parse_line(line) {
                     me.records.insert(reference, rec);
@@ -108,10 +108,10 @@ impl ReassemblyIndex {
         let mut dropped = Vec::new();
         for (reference, r) in self.records.iter() {
             let p = dir.join(&r.part);
-            let exists = p.exists();
+            let exists = crate::fs::exists(&p);
             if !exists || r.updated < cutoff {
                 if exists {
-                    let _ = std::fs::remove_file(&p);
+                    let _ = crate::fs::remove_file(&p);
                 }
                 dropped.push(reference.clone());
             }
@@ -215,7 +215,7 @@ impl ReassemblyIndex {
         by_age.sort_by_key(|(_, t)| *t);
         for (reference, _) in by_age.into_iter().take(self.records.len() - MAX_RECORDS) {
             if let Some(r) = self.records.remove(&reference) {
-                let _ = std::fs::remove_file(self.dir.join(&r.part));
+                let _ = crate::fs::remove_file(self.dir.join(&r.part));
             }
         }
     }
@@ -236,7 +236,7 @@ impl ReassemblyIndex {
         self.last_save_secs = now_secs();
         let body: Vec<String> =
             self.records.iter().map(|(reference, r)| encode_line(reference, r)).collect();
-        let _ = std::fs::write(&self.path, body.join("\n"));
+        let _ = crate::fs::write(&self.path, body.join("\n"));
     }
 
     /// Flush whatever the debounce is still holding. Cheap and idempotent.
@@ -387,9 +387,9 @@ mod tests {
         let p = std::env::temp_dir().join(format!(
             "haven-reassembly-{tag}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_nanos()
         ));
-        std::fs::create_dir_all(&p).unwrap();
+        crate::fs::create_dir_all(&p).unwrap();
         p
     }
 
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn a_1599_of_1600_partial_survives_a_relaunch() {
         let dir = tmp_dir("relaunch");
-        std::fs::write(dir.join("incoming_p2p_x.part"), b"bytes").unwrap();
+        crate::fs::write(dir.join("incoming_p2p_x.part"), b"bytes").unwrap();
         {
             let mut ix = index(&dir);
             ix.begin("img_x", "incoming_p2p_x.part".into(), 1600);
@@ -417,34 +417,34 @@ mod tests {
         assert_eq!(got.len(), 1599);
         let missing: Vec<u32> = (0..1600).filter(|i| !got.contains(i)).collect();
         assert_eq!(missing, vec![1599], "a resume must ask for exactly the one chunk it lacks");
-        std::fs::remove_dir_all(&dir).ok();
+        crate::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn a_record_whose_part_vanished_is_dropped_not_resumed_into() {
         let dir = tmp_dir("vanished");
-        std::fs::write(dir.join("incoming_p2p_y.part"), b"bytes").unwrap();
+        crate::fs::write(dir.join("incoming_p2p_y.part"), b"bytes").unwrap();
         {
             let mut ix = index(&dir);
             ix.begin("img_y", "incoming_p2p_y.part".into(), 8);
             ix.mark("img_y", 0);
             ix.flush();
         }
-        std::fs::remove_file(dir.join("incoming_p2p_y.part")).unwrap();
+        crate::fs::remove_file(dir.join("incoming_p2p_y.part")).unwrap();
         // The bitmap without the bytes it describes is a lie — resuming on it leaves permanent holes.
         let ix = index(&dir);
         assert!(ix.get("img_y").is_none());
         assert!(ix.resume_hint("img_y").is_none());
-        std::fs::remove_dir_all(&dir).ok();
+        crate::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn an_abandoned_partial_expires_with_its_bytes() {
         let dir = tmp_dir("expire");
         let part = dir.join("incoming_p2p_z.part");
-        std::fs::write(&part, b"bytes").unwrap();
+        crate::fs::write(&part, b"bytes").unwrap();
         let stale = now_secs() - EXPIRY_SECS - 60;
-        std::fs::write(
+        crate::fs::write(
             dir.join("media-reassembly.txt"),
             format!("img_z\tincoming_p2p_z.part\t8\t{stale}\t01"),
         )
@@ -452,7 +452,7 @@ mod tests {
         let ix = index(&dir);
         assert!(ix.get("img_z").is_none());
         assert!(!part.exists(), "an expired partial's bytes must go too, not just its record");
-        std::fs::remove_dir_all(&dir).ok();
+        crate::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -461,7 +461,7 @@ mod tests {
         let mut ix = index(&dir);
         for i in 0..(MAX_RECORDS + 10) {
             let part = format!("incoming_p2p_{i}.part");
-            std::fs::write(dir.join(&part), b"b").unwrap();
+            crate::fs::write(dir.join(&part), b"b").unwrap();
             ix.begin(&format!("img_{i}"), part, 8);
             // Stamp ages by hand so the eviction order is deterministic (all inserts land in the
             // same second otherwise).
@@ -469,38 +469,38 @@ mod tests {
         }
         // The cap runs on insert, so the last insert trims to exactly MAX_RECORDS.
         assert!(ix.records.len() <= MAX_RECORDS, "index grew to {}", ix.records.len());
-        std::fs::remove_dir_all(&dir).ok();
+        crate::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn live_parts_names_only_resumable_partials() {
         let dir = tmp_dir("live");
-        std::fs::write(dir.join("incoming_p2p_a.part"), b"b").unwrap();
+        crate::fs::write(dir.join("incoming_p2p_a.part"), b"b").unwrap();
         let mut ix = index(&dir);
         ix.begin("img_a", "incoming_p2p_a.part".into(), 4);
         assert!(ix.live_parts().contains_key("incoming_p2p_a.part"));
         ix.clear("img_a");
         assert!(ix.live_parts().is_empty(), "a cleared reassembly must stop sparing its scratch");
-        std::fs::remove_dir_all(&dir).ok();
+        crate::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn a_disagreeing_total_restarts_rather_than_reusing_a_bitmap_for_other_bytes() {
         let dir = tmp_dir("total");
-        std::fs::write(dir.join("incoming_p2p_b.part"), b"b").unwrap();
+        crate::fs::write(dir.join("incoming_p2p_b.part"), b"b").unwrap();
         let mut ix = index(&dir);
         ix.begin("img_b", "incoming_p2p_b.part".into(), 100);
         ix.mark("img_b", 7);
         let (_, fresh) = ix.begin("img_b", "incoming_p2p_b.part".into(), 200);
         assert!(fresh, "a different chunking is a different transfer");
         assert_eq!(ix.progress("img_b"), Some(0));
-        std::fs::remove_dir_all(&dir).ok();
+        crate::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn mark_ignores_an_out_of_range_index_and_completes_exactly_once() {
         let dir = tmp_dir("mark");
-        std::fs::write(dir.join("incoming_p2p_c.part"), b"b").unwrap();
+        crate::fs::write(dir.join("incoming_p2p_c.part"), b"b").unwrap();
         let mut ix = index(&dir);
         ix.begin("img_c", "incoming_p2p_c.part".into(), 2);
         assert_eq!(ix.mark("img_c", 99), Some(false)); // past `total` — never counts toward completion
@@ -508,14 +508,14 @@ mod tests {
         assert_eq!(ix.mark("img_c", 0), Some(false)); // a duplicate chunk is not progress
         assert_eq!(ix.mark("img_c", 1), Some(true));
         assert_eq!(ix.mark("img_nope", 0), None);
-        std::fs::remove_dir_all(&dir).ok();
+        crate::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn a_corrupt_persisted_line_is_dropped_not_guessed_at() {
         let dir = tmp_dir("corrupt");
-        std::fs::write(dir.join("incoming_p2p_d.part"), b"b").unwrap();
-        std::fs::write(
+        crate::fs::write(dir.join("incoming_p2p_d.part"), b"b").unwrap();
+        crate::fs::write(
             dir.join("media-reassembly.txt"),
             // In order: absurd total (a 536 MB bitmap if believed), zero total, bitmap too short for
             // the total, non-hex bitmap, missing fields — then one good line.
@@ -534,7 +534,7 @@ mod tests {
         let (total, got) = ix.resume_hint("img_d").unwrap();
         assert_eq!(total, 8);
         assert_eq!(got, [0u32, 7].into_iter().collect::<HashSet<u32>>());
-        std::fs::remove_dir_all(&dir).ok();
+        crate::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -542,11 +542,11 @@ mod tests {
         // Nothing to tell the server, so the caller must fall back to a plain frame 3 — the common
         // path stays byte-for-byte what every peer in the field already understands.
         let dir = tmp_dir("empty");
-        std::fs::write(dir.join("incoming_p2p_e.part"), b"b").unwrap();
+        crate::fs::write(dir.join("incoming_p2p_e.part"), b"b").unwrap();
         let mut ix = index(&dir);
         ix.begin("img_e", "incoming_p2p_e.part".into(), 4);
         assert!(ix.resume_hint("img_e").is_none());
-        std::fs::remove_dir_all(&dir).ok();
+        crate::fs::remove_dir_all(&dir).ok();
     }
 
     // ---- Upload-side resume ------------------------------------------------------------------

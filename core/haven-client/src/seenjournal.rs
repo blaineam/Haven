@@ -67,7 +67,7 @@ pub fn wants_compaction(lines: usize, distinct: usize) -> bool {
 /// Read the journal; blank lines (an append's leading separator) are skipped. Returns the set and
 /// whether it should be compacted.
 pub fn load(path: &Path) -> (HashSet<String>, bool) {
-    let Ok(text) = std::fs::read_to_string(path) else { return (HashSet::new(), false) };
+    let Ok(text) = crate::fs::read_to_string(path) else { return (HashSet::new(), false) };
     let mut lines = 0usize;
     let mut set = HashSet::new();
     for l in text.lines().filter(|l| !l.is_empty()) {
@@ -83,7 +83,7 @@ pub fn perform(w: &SeenWrite, path: &Path) -> bool {
     match w {
         SeenWrite::Rewrite(keys) => {
             let tmp = path.with_extension("txt.tmp");
-            std::fs::write(&tmp, keys.join("\n")).is_ok() && std::fs::rename(&tmp, path).is_ok()
+            crate::fs::write(&tmp, keys.join("\n")).is_ok() && crate::fs::rename(&tmp, path).is_ok()
         }
         SeenWrite::Append(keys) => {
             if keys.is_empty() {
@@ -91,7 +91,7 @@ pub fn perform(w: &SeenWrite, path: &Path) -> bool {
             }
             // Leading newline: a file written by the old whole-set saver has no trailing one.
             let chunk = format!("\n{}", keys.join("\n"));
-            std::fs::OpenOptions::new()
+            crate::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)
@@ -107,11 +107,11 @@ mod tests {
 
     fn tmpdir() -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("seenjournal-{}-{}", std::process::id(), rand_suffix()));
-        std::fs::create_dir_all(&d).unwrap();
+        crate::fs::create_dir_all(&d).unwrap();
         d
     }
     fn rand_suffix() -> u128 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_nanos()
     }
 
     #[test]
@@ -119,11 +119,11 @@ mod tests {
         let d = tmpdir();
         let p = d.join("mailbox-seen.txt");
         let old: Vec<String> = (0..3000).map(|i| format!("haven/mailbox/c/{i:064}")).collect();
-        std::fs::write(&p, old.join("\n")).unwrap(); // old format: no trailing newline
+        crate::fs::write(&p, old.join("\n")).unwrap(); // old format: no trailing newline
         let (mut set, compact) = load(&p);
         assert_eq!(set.len(), 3000);
         assert!(!compact);
-        let before = std::fs::metadata(&p).unwrap().len();
+        let before = crate::fs::metadata(&p).unwrap().len();
 
         let mut j = SeenJournal::default();
         for k in ["new-1", "new-2"] {
@@ -133,10 +133,10 @@ mod tests {
         let w = j.take(&set).unwrap();
         assert_eq!(w, SeenWrite::Append(vec!["new-1".into(), "new-2".into()]));
         assert!(perform(&w, &p));
-        assert_eq!(std::fs::metadata(&p).unwrap().len(), before + "\nnew-1\nnew-2".len() as u64);
+        assert_eq!(crate::fs::metadata(&p).unwrap().len(), before + "\nnew-1\nnew-2".len() as u64);
         assert_eq!(load(&p).0, set, "first appended key must not fuse with the old last line");
         assert!(j.take(&set).is_none());
-        let _ = std::fs::remove_dir_all(d);
+        let _ = crate::fs::remove_dir_all(d);
     }
 
     #[test]
@@ -154,7 +154,7 @@ mod tests {
         assert!(matches!(w, SeenWrite::Rewrite(_)));
         assert!(perform(&w, &p));
         assert_eq!(load(&p).0, set);
-        let _ = std::fs::remove_dir_all(d);
+        let _ = crate::fs::remove_dir_all(d);
     }
 
     #[test]

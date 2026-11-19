@@ -3,7 +3,7 @@
 //! same rule the iOS Keychain and Android Keystore enforce — plus a small JSON prefs file
 //! and the binary social-state blob on disk in the app data directory.
 
-use std::fs;
+use crate::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -861,8 +861,8 @@ impl Prefs {
     }
 
     fn now_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0)
     }
@@ -1504,13 +1504,13 @@ mod atomic_write_tests {
     #[test]
     fn an_atomic_write_replaces_the_whole_file_and_leaves_no_temp() {
         let dir = std::env::temp_dir().join(format!("haven-atomic-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("state.bin");
         write_atomic(&f, b"first version, longer than the second").unwrap();
         write_atomic(&f, b"second").unwrap();
-        assert_eq!(std::fs::read(&f).unwrap(), b"second");
+        assert_eq!(crate::fs::read(&f).unwrap(), b"second");
         assert!(!f.with_extension("tmp-write").exists());
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = crate::fs::remove_dir_all(&dir);
     }
 }
 
@@ -1711,7 +1711,7 @@ mod state_format_migration_tests {
 
     #[test]
     fn a_decimal_array_state_file_loads_and_saves_compact() {
-        let legacy = std::fs::read(
+        let legacy = crate::fs::read(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../haven-ffi/tests/fixtures/real_106_state.bin"),
         )
         .expect("legacy state fixture");

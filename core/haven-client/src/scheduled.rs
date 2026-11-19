@@ -4,7 +4,7 @@
 //! Because Haven is serverless, delivery only happens while the app is running — exactly like
 //! the iOS behaviour.
 
-use std::fs;
+use crate::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};

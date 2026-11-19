@@ -24,7 +24,7 @@
     }
   }
 
-  let haven, app, storage;
+  let haven, app, storage, storageModule;
   const ready = (async () => {
     haven = await import("./pkg/haven_web.js");
     await haven.default();
@@ -32,8 +32,11 @@
     // call the push worker.
     if (window.__HAVEN_HARNESS__ && window.__HAVEN_HARNESS__.pushOff) haven.setPushOff(true);
     if (window.__HAVEN_HARNESS__ && window.__HAVEN_HARNESS__.log) haven.setLogLevel(window.__HAVEN_HARNESS__.log);
-    const { attachStorage } = await import("./storage.js");
-    storage = await attachStorage(haven);
+    storageModule = await import("./storage.js");
+    // Continue whatever this browser already has ("my computer", or this tab's own session);
+    // a browser that has not linked yet stores nothing until the person chooses, when linking.
+    const mode = await storageModule.resumeMode();
+    if (mode) storage = await storageModule.attachStorage(haven, { mode });
     app = new haven.WebApp((name, json) => emit(name, JSON.parse(json)));
     // The relay that served this page is, by construction, one this device can reach.
     app.setRelays([location.origin]);
@@ -43,8 +46,15 @@
 
   /** Persist everything, then start over — what the desktop app does by relaunching. */
   async function relaunch() {
-    await storage.flush();
+    if (storage) await storage.flush();
     location.reload();
+  }
+
+  /** Unlink this browser: nothing of Haven's is left in it. */
+  async function eraseEverything() {
+    if (storage) storage.stop();
+    storage = null;
+    await storageModule.eraseStorage();
   }
 
   const NOT_IN_A_BROWSER = "not available in a browser";
@@ -57,7 +67,13 @@
     ui_log: ({ line }) => { console.log("ui:", line); },
     self_test: () => JSON.parse(haven.engineSelfTestReport()),
     // Linking: persist the ticket, then restart into the linking engine (it sends the request).
-    onboard_link_seedless: async ({ ticket }) => { app.onboardLink(ticket); await relaunch(); },
+    // `remember` is the person's answer to "is this your computer?" — it decides, before the
+    // first byte is written, whether this browser keeps the link or forgets it with the tab.
+    onboard_link_seedless: async ({ ticket, remember }) => {
+      if (!storage) storage = await storageModule.attachStorage(haven, { mode: remember ? "persist" : "session" });
+      app.onboardLink(ticket);
+      await relaunch();
+    },
     // The grant landed: restart into the linked engine.
     finish_enroll: () => relaunch(),
     // A browser never holds an account seed, so it can neither create nor adopt an account.
@@ -73,7 +89,10 @@
     if (cmd === "engine_invoke") {
       // Rejects with the string "unknown-command" for a name the engine does not have — the same
       // contract as the desktop host — and app.js then asks for it by its own name.
-      return JSON.parse(await app.invoke(args.name, JSON.stringify(args.args ?? {})));
+      const out = JSON.parse(await app.invoke(args.name, JSON.stringify(args.args ?? {})));
+      // "Start over" must leave nothing behind in the browser either. (app.js reloads next.)
+      if (args.name === "reset") await eraseEverything();
+      return out;
     }
     const fn = host[cmd];
     if (!fn) throw `${cmd}: ${NOT_IN_A_BROWSER}`;
@@ -94,5 +113,5 @@
   };
 
   // For the smokes and the console.
-  window.__HAVEN_WEB__ = { ready, flush: () => storage.flush(), app: () => app, haven: () => haven };
+  window.__HAVEN_WEB__ = { ready, flush: () => (storage ? storage.flush() : undefined), mode: () => (storage ? storage.mode : null), app: () => app, haven: () => haven };
 })();

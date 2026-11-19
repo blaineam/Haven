@@ -141,13 +141,24 @@ Next, in order:
       - `web-client/build.sh` assembles the bundle a relay serves in `web-client/dist`.
       - `smoke/engine.mjs` now drives this real UI: paste the ticket, get approved, reload, post
         both ways, see both posts rendered. `SMOKE_SHOTS=<dir>` saves phone/tablet/desktop shots.
-- [ ] Settings that make no sense in a browser are still shown (Identities, hosting a relay,
-      start at login, Instagram import, music search). They fail politely; they should be hidden.
-- [ ] File attachments from a browser: the composer's picker and drag-and-drop assume file paths.
+- [x] Settings that cannot work in a browser are hidden there (identities, hosting a relay and
+      its front door, start at login, the Instagram importer).
+- [ ] Drag-and-drop of files onto the page (the desktop app uses Tauri's path-based drop). The
+      composer's own picker already works in a browser.
 - [ ] Media in a browser: the cache lives in the in-memory tree today, which is fine for text and
       wrong for video. It needs a blob store of its own (OPFS / Cache API).
-- [ ] Secrets at rest: "my computer" wraps storage under a non-extractable browser key; "public
-      computer" never persists. Today everything persists unwrapped in IndexedDB.
+- [x] **Storage modes** (`web-client/storage.js`), chosen on the link screen before anything is
+      written. Every record is AES-GCM ciphertext with its path as associated data.
+      - *Shared or public computer* (the default): a randomly named database whose key lives only
+        in the tab's sessionStorage. Leaving the page by anything but a reload discards the session;
+        its database is deleted on the next visit.
+      - *This is my computer*: one database under a non-extractable WebCrypto key.
+      - *Start over* erases every Haven database in the browser.
+      - The smoke asserts all four: no plaintext in any record, nothing left after leaving a
+        shared session, the remembered link survives with a non-extractable key, Start over wipes.
+      - What this does NOT do: protect an open session on a compromised machine, or protect
+        "my computer" storage from someone using that browser profile. A browser's own "reopen
+        closed tab" may also bring a shared session back until the window is closed.
 - [ ] Scan-to-link: the tab shows a QR and the phone scans it (today the tab must be given the
       ticket text — fine for a second computer, not for phone-to-kiosk).
 - [ ] The same against a shipping native app, and through a real Cloudflare tunnel.

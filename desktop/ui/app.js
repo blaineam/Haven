@@ -8357,12 +8357,21 @@ function renderOnboarding() {
   };
 
   const code = el("input", { class: "field-capsule", placeholder: HOST_WEB ? "haven-enroll:…" : "haven-enroll:… or haven-seed:…", style: "width:100%" });
+  // Browser only: whether this browser keeps the link. Unticked by default — the safe answer on
+  // a machine that is not yours — and decided before anything is stored.
+  const remember = el("input", { type: "checkbox", style: "width:auto;margin-top:2px" });
+  const rememberRow = () => el("label", { class: "row", style: "gap:8px;align-items:flex-start;text-align:left" },
+    remember,
+    el("span", { class: "col", style: "gap:2px" },
+      el("span", {}, t("web_remember")),
+      el("span", { class: "muted small", style: "white-space:normal" }, t("web_remember_hint"))));
   const linkBox = () => el("div", { class: "col", style: "width:100%;gap:8px" },
     HOST_WEB ? el("div", { class: "muted small", style: "white-space:normal" }, t("web_trust_note")) : null,
     el("div", { class: "muted small" }, linkMode === "move"
       ? t("link_move_hint")
       : t("link_add_hint")),
     code,
+    HOST_WEB ? rememberRow() : null,
     // In a browser linking is the only path, so there is nothing to go back to.
     HOST_WEB ? null : el("button", { class: "btn ghost small", style: "align-self:flex-start", onclick: () => { showLink = false; draw(); } }, t("back_arrow")),
     el("button", { class: "btn primary", style: "width:100%", onclick: async () => {
@@ -8375,7 +8384,7 @@ function renderOnboarding() {
         // seed-drop S4: the new secure link (`haven-enroll:`) gives this device its OWN key +
         // credential + granted self-sync key and NEVER the master seed. The legacy `haven-seed:` /
         // raw-seed transfer still works (an old primary in the wild) via onboard_link.
-        if (/^haven-enroll:/i.test(c)) await invoke("onboard_link_seedless", { ticket: c });
+        if (/^haven-enroll:/i.test(c)) await invoke("onboard_link_seedless", HOST_WEB ? { ticket: c, remember: remember.checked } : { ticket: c });
         else if (HOST_WEB) { toast(t("web_link_only")); return; }   // never a seed in a browser
         else await invoke("onboard_link", { code: c });
       }

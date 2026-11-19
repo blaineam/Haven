@@ -13,8 +13,9 @@
 //
 // Proves: the relay serves the page; a fresh browser is offered linking and nothing else; pasting
 // a `haven-enroll:` ticket and the primary's approval link it; the linked state survives the
-// reload (IndexedDB); a post travels EACH way and is attributed to the account on both devices;
-// and the post shows in the rendered feed.
+// reloads (IndexedDB); posts and pictures travel EACH way; the posts show in the rendered feed;
+// everything stored is ciphertext; a shared-computer session is gone once the page is left; "this
+// is my computer" survives, under a non-extractable key; and Start over erases it all.
 //
 // SMOKE_SHOTS=<dir> saves screenshots at phone, tablet and desktop widths.
 import { mkdirSync } from "node:fs";
@@ -38,6 +39,59 @@ const invoke = (page, name, args = {}) =>
 /** Before the app's own scripts run: keep a throwaway identity off the production push worker. */
 const quiet = (page) =>
   page.addInitScript((log) => { window.__HAVEN_HARNESS__ = { pushOff: true, log }; }, process.env.SMOKE_LOG || "");
+
+/** Every stored Haven record in this browser, raw, per database: `{ db: [[path, record], …] }`. */
+const rawStorage = (page) =>
+  page.evaluate(async () => {
+    const out = {};
+    for (const { name } of await indexedDB.databases()) {
+      if (!name || !name.startsWith("haven")) continue;
+      const db = await new Promise((ok, no) => { const r = indexedDB.open(name); r.onsuccess = () => ok(r.result); r.onerror = () => no(r.error); });
+      const rows = [];
+      if (db.objectStoreNames.contains("files")) {
+        await new Promise((ok, no) => {
+          const req = db.transaction("files", "readonly").objectStore("files").openCursor();
+          req.onerror = () => no(req.error);
+          req.onsuccess = () => {
+            const c = req.result;
+            if (!c) return ok();
+            const v = c.value;
+            // Latin-1 view of the stored bytes, so the test can search them for plaintext.
+            const bytes = new Uint8Array(v.data instanceof ArrayBuffer ? v.data : v.data?.buffer ?? []);
+            let text = "";
+            for (let i = 0; i < Math.min(bytes.length, 200000); i++) text += String.fromCharCode(bytes[i]);
+            rows.push([c.key, { hasIv: v.iv instanceof Uint8Array && v.iv.length === 12, len: bytes.length, text }]);
+            c.continue();
+          };
+        });
+      }
+      db.close();
+      out[name] = rows;
+    }
+    return out;
+  });
+
+/** Records are ciphertext: none of the engine's plaintext (JSON keys, the account id) is in them. */
+function assertEncrypted(dbs, account, what) {
+  const rows = Object.values(dbs).flat();
+  if (rows.length === 0) throw new Error(`${what}: nothing was stored`);
+  for (const [path, rec] of rows) {
+    if (!rec.hasIv) throw new Error(`${what}: ${path} is stored without a nonce (not encrypted)`);
+    for (const needle of ['"relay_entries"', '"contacts"', "pending_ticket", account]) {
+      if (rec.text.includes(needle)) throw new Error(`${what}: ${path} contains plaintext ${needle}`);
+    }
+  }
+  return rows.length;
+}
+
+/** Fill the link screen and submit; `remember` ticks "this is my computer". */
+async function linkWith(page, ticket, remember) {
+  const code = page.locator("input.field-capsule").first();
+  await code.waitFor({ timeout: 30000 });
+  await code.fill(ticket);
+  if (remember) await page.locator('input[type="checkbox"]').first().check();
+  await page.locator("button.btn.primary").first().click();
+}
 
 const SIZES = { phone: [390, 844], tablet: [820, 1180], desktop: [1440, 900] };
 async function shots(page, label) {
@@ -78,10 +132,11 @@ await run(
     if (!(await page.evaluate(() => window.__HAVEN_WEB__.app().needsOnboarding()))) throw new Error("a seed code created an identity in the browser");
     step("a seed code is refused in a browser");
 
-    await code.fill(ticket);
-    await page.locator("button.btn.primary").first().click();
+    // Default: "this is my computer" is NOT ticked — a shared-computer session.
+    if (await page.locator('input[type="checkbox"]').first().isChecked()) throw new Error("'this is my computer' is ticked by default");
+    await linkWith(page, ticket, false);
     await peer.line("ENROLLED ", 90000);
-    step("pasted the ticket; the primary approved");
+    step("pasted the ticket (not my computer); the primary approved");
 
     // The UI reloads itself on linking and again when the grant lands. The engine that RECEIVED the
     // grant already reports "linked" for the instant before that second reload, but it is still on
@@ -125,6 +180,59 @@ await run(
       page.evaluate(() => ["hello from the primary", "hello from the browser"].every((b) => document.body.innerText.includes(b))));
     await shots(page, "2-you");
     step("both posts are rendered in the feed");
+
+    // ── At rest, and after the tab is left ───────────────────────────────────────────────────
+    await page.evaluate(() => window.__HAVEN_WEB__.flush());
+    if ((await page.evaluate(() => window.__HAVEN_WEB__.mode())) !== "session") throw new Error("expected a session-mode store");
+    const n = assertEncrypted(await rawStorage(page), account, "session mode");
+    step(`everything stored is ciphertext (${n} records; no JSON keys, no account id)`);
+
+    // Leaving the page (anything but a reload) ends a shared-computer session for good.
+    if (!process.env.SMOKE_SHOTS) {
+      await page.goto(`${origin}/app/`);
+      await page.waitForFunction(() => !!window.__HAVEN_WEB__, null, { timeout: 30000 });
+      await page.evaluate(() => window.__HAVEN_WEB__.ready);
+      if (!(await page.evaluate(() => window.__HAVEN_WEB__.app().needsOnboarding()))) throw new Error("a shared-computer session survived leaving the page");
+      const left = await rawStorage(page);
+      if (Object.keys(left).length !== 0) throw new Error(`session databases were left behind: ${Object.keys(left)}`);
+      step("after leaving the page the browser holds no identity and no Haven database");
+
+      // "This is my computer": the link survives leaving and coming back, and is encrypted at rest.
+      peer.write("!ticket\n");
+      const ticket2 = await peer.line("TICKET2=");
+      await linkWith(page, ticket2, true);
+      await until("the remembered browser to be linked", async () => {
+        const s = await invoke(page, "seedless_status");
+        return s && s.linked && (await invoke(page, "my_node_hex")) === account;
+      });
+      await page.evaluate(() => window.__HAVEN_WEB__.flush());
+      await page.goto(`${origin}/app/`);
+      await page.waitForFunction(() => !!window.__HAVEN_WEB__, null, { timeout: 30000 });
+      await page.evaluate(() => window.__HAVEN_WEB__.ready);
+      if (await page.evaluate(() => window.__HAVEN_WEB__.app().needsOnboarding())) throw new Error("'this is my computer' did not survive leaving the page");
+      if ((await page.evaluate(() => window.__HAVEN_WEB__.mode())) !== "persist") throw new Error("expected a persist-mode store");
+      const kept = await rawStorage(page);
+      if (Object.keys(kept).join() !== "haven") throw new Error(`expected only the 'haven' database, found ${Object.keys(kept)}`);
+      assertEncrypted(kept, account, "persist mode");
+      const extractable = await page.evaluate(async () => {
+        const db = await new Promise((ok) => { const r = indexedDB.open("haven"); r.onsuccess = () => ok(r.result); });
+        const key = await new Promise((ok) => { const r = db.transaction("keys").objectStore("keys").get("k1"); r.onsuccess = () => ok(r.result); });
+        db.close();
+        return key instanceof CryptoKey ? key.extractable : "not a CryptoKey";
+      });
+      if (extractable !== false) throw new Error(`the storage key must be a non-extractable CryptoKey (got ${extractable})`);
+      step("'this is my computer' stays linked across visits; records are ciphertext under a non-extractable key");
+
+      // Start over: nothing of Haven's is left in the browser.
+      await invoke(page, "reset");
+      await page.reload();
+      await page.waitForFunction(() => !!window.__HAVEN_WEB__, null, { timeout: 30000 });
+      await page.evaluate(() => window.__HAVEN_WEB__.ready);
+      if (!(await page.evaluate(() => window.__HAVEN_WEB__.app().needsOnboarding()))) throw new Error("Start over left an identity behind");
+      const after = await rawStorage(page);
+      if (Object.keys(after).length !== 0) throw new Error(`Start over left databases behind: ${Object.keys(after)}`);
+      step("Start over erases every Haven database in the browser");
+    }
 
     // The other views, for the screenshots (and as a check that they render without an error).
     if (process.env.SMOKE_SHOTS) {

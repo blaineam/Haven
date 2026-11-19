@@ -11,9 +11,10 @@
 //! Hermetic: a throwaway account in a fresh temp directory, never the OS keyring or a real data
 //! dir; every listener on a free loopback port (so it can run beside a real Haven app); no tunnel,
 //! no TURN, no push. Prints `ORIGIN=` (the relay's front door — the page is at `<origin>/app/`),
-//! `ACCOUNT=`, `TICKET=`; approves the first enrollment request (`ENROLLED <device>`); posts each
-//! line it reads on stdin (`!img <caption>` attaches a tiny PNG); and prints
-//! `FEED <me|other> <body>[ [media N]]` for every post once it holds the post's attachments.
+//! `ACCOUNT=`, `TICKET=`; approves every enrollment request made with one of its tickets
+//! (`ENROLLED <device>`); posts each line it reads on stdin (`!img <caption>` attaches a tiny PNG,
+//! `!ticket` mints another ticket as `TICKET<n>=`); and prints `FEED <me|other> <body>[ [media N]]`
+//! for every post once it holds the post's attachments.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -111,20 +112,24 @@ async fn run() -> AnyResult<()> {
         }
     });
 
-    let mut enrolled = false;
+    let mut tickets = 1;
     let mut shown: HashSet<String> = HashSet::new();
     loop {
         tokio::time::sleep(Duration::from_millis(200)).await;
-        if !enrolled {
-            if let Some((device, _name)) = engine.enroll_pending().into_iter().next() {
-                engine.approve_enroll(device.clone()).map_err(|e| e.to_string())?;
-                enrolled = true;
-                println!("ENROLLED {device}");
-            }
+        // Approve every enrollment request that verified against a ticket this device minted.
+        for (device, _name) in engine.enroll_pending() {
+            engine.approve_enroll(device.clone()).map_err(|e| e.to_string())?;
+            println!("ENROLLED {device}");
         }
         while let Ok(line) = posts.try_recv() {
             let line = line.trim();
             if line.is_empty() {
+                continue;
+            }
+            // `!ticket` mints another link ticket (`TICKET<n>=`).
+            if line == "!ticket" {
+                tickets += 1;
+                println!("TICKET{tickets}={}", engine.mint_enroll_ticket().map_err(|e| e.to_string())?);
                 continue;
             }
             // `!img <caption>` attaches a tiny PNG; anything else is a text post.

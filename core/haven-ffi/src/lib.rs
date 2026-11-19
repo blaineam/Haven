@@ -1201,6 +1201,36 @@ impl PathRouterHandle {
         }))
     }
 
+    /// [`spawn`](Self::spawn), also serving the Haven web client under `/app/` from `web_app_dir`
+    /// (a built `web-client/dist`, read into memory once, here). For a host whose user turned
+    /// "Web access" ON — it is off unless the host calls this instead of `spawn`. Fails, rather
+    /// than quietly serving without it, if the directory is not a web client build.
+    #[uniffi::constructor]
+    pub async fn spawn_with_web_app(
+        bind: String,
+        media_backend: String,
+        derp_backend: String,
+        http_token: String,
+        web_app_dir: String,
+    ) -> Result<Arc<Self>, HavenError> {
+        let bundle = haven_net::webbundle_dir::load(std::path::Path::new(&web_app_dir))
+            .map_err(|e| HavenError::Invalid { msg: format!("web client: {e}") })?;
+        let cfg = haven_net::PathRouterConfig {
+            bind,
+            media_backend,
+            derp_backend,
+            http_token,
+            web_app: Some(Arc::new(bundle)),
+        };
+        let router = haven_net::PathRouter::spawn(&cfg)
+            .await
+            .map_err(|e| HavenError::Invalid { msg: format!("path router spawn: {e}") })?
+            .ok_or_else(|| HavenError::Invalid { msg: "path router disabled".into() })?;
+        let local_addr = router.local_addr.to_string();
+        let local_port = router.local_port();
+        Ok(Arc::new(Self { local_addr, local_port, _router: router }))
+    }
+
     pub fn local_addr(&self) -> String {
         self.local_addr.clone()
     }
@@ -1208,6 +1238,16 @@ impl PathRouterHandle {
     pub fn local_port(&self) -> u16 {
         self.local_port
     }
+}
+
+/// The digest of a web client build on disk (what a relay serving it reports in `/_haven`), or an
+/// error if the directory is not one. Lets a host show the user exactly which build it would serve.
+#[cfg(not(target_arch = "wasm32"))]
+#[uniffi::export]
+pub fn web_app_digest(web_app_dir: String) -> Result<String, HavenError> {
+    haven_net::webbundle_dir::load(std::path::Path::new(&web_app_dir))
+        .map(|b| b.digest())
+        .map_err(|e| HavenError::Invalid { msg: format!("web client: {e}") })
 }
 
 // ===== Live social demo =====

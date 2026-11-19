@@ -146,7 +146,7 @@ own entry point, not at whatever starts it.
 |---|---|---|---|
 | Apple | `HAVEN_NO_NET=1` (process env) | `apple/Shared/OfflineGate.swift` → `HavenNet.offline` | yes |
 | Android | `haven_no_net` (launch-intent extra, or the test runner) | `core/OfflineGate.kt` → `HavenOffline.enabled` | **no** |
-| desktop | `HAVEN_NO_NET=1` (process env; `HAVEN_DEMO=1` implies it) | `src-tauri/src/netgate.rs` → `netgate::offline()` | **no** |
+| desktop | `HAVEN_NO_NET=1` (process env; `HAVEN_DEMO=1` implies it) | `core/haven-client/src/netgate.rs` → `netgate::offline()` | **no** |
 
 Android and desktop stay debug-only on purpose. iOS reads a process environment variable nothing
 outside the harness can set; Android reads an Intent extra on an **exported** activity, which any

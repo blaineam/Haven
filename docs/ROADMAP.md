@@ -233,7 +233,7 @@ ScreenCaptureKit, iOS ReplayKit, Android MediaProjection, desktop `getDisplayMed
 
 ### ✅ Scheduled messages (D17)
 **Built and shipping on all three clients** — this was long marked "designed only", and that was
-wrong. `desktop/src-tauri/src/scheduled.rs` (5 unit tests) + a headless always-on firer
+wrong. `core/haven-client/src/scheduled.rs` (5 unit tests) + a headless always-on firer
 (`lib.rs:422-455`); `apple/HavenApp/ScheduledStore.swift` (30s timer, encrypted at rest, picker
 UI); `android/.../core/ScheduledStore.kt`. *(Only the relay timed-release variant — "Option B" in
 `SCHEDULED-MESSAGES.md` — is genuinely unbuilt.)*

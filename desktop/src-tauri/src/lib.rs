@@ -5,39 +5,27 @@
 // The platform-independent client layer lives in `core/haven-client` (shared with the browser
 // build). Re-exported under the names these modules had here, so `crate::wire::…` still resolves.
 #[allow(unused_imports)] // each is used by a subset of the modules below
-pub(crate) use haven_client::{callwire, mediaholding, relayhealth, relayintro, relayparking, relayscope, secret, wire};
-mod preview;
-mod postgroups;
+pub(crate) use haven_client::{
+    callwire, engine, localmedia, mediaholding, mediaresume, netgate, postgroups, preview, relayhealth, relayintro,
+    relayparking, relayscope, reoptimize, roster, scheduled, secret, seenjournal, selfsync, selfsyncrot, store, wire,
+};
+#[cfg(test)]
+pub(crate) use haven_client::covtest_util;
 mod commands;
 // The PII-free screenshot dataset. `cfg` — NOT a runtime check — so the seeder and every synthetic
 // identity in it are absent from a release binary: no env var can reach code that isn't compiled.
 #[cfg(debug_assertions)]
 mod demo;
-mod engine;
 // The Instagram "Download your information" importer: archive parser, song suggester, runner.
 // Apple parity — apple/HavenApp/Instagram{Archive,Importer,ImportView}.swift.
 mod igencode;
 mod igimport;
 mod instagram;
-mod localmedia;
-mod mediaresume;
-mod netgate;
 // qa-cmd v2 driver (docs/QA.md) — same rule as demo: `cfg`, not a runtime check, so no release
 // binary carries a file-drop remote control. See qa.rs for the contract.
 #[cfg(debug_assertions)]
 mod qa;
-mod reoptimize;
-mod roster;
-mod scheduled;
-mod seenjournal;
-mod selfsync;
-mod selfsyncrot;
 mod songsuggest;
-mod store;
-#[cfg(test)]
-mod covtest_util;
-#[cfg(test)]
-mod tests_store;
 #[cfg(test)]
 mod tests_lib;
 
@@ -50,6 +38,19 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
 
 use crate::engine::Engine;
+
+/// The engine's view of this application: UI events go to the webview, notifications to the OS.
+struct TauriHost(tauri::AppHandle);
+
+impl haven_client::host::Host for TauriHost {
+    fn emit(&self, event: &str, payload: serde_json::Value) -> Result<(), String> {
+        self.0.emit(event, payload).map_err(|e| e.to_string())
+    }
+    fn notify(&self, title: &str, body: &str) {
+        use tauri_plugin_notification::NotificationExt;
+        let _ = self.0.notification().builder().title(title).body(body).show();
+    }
+}
 use crate::store::Paths;
 
 /// Minimal stderr backend for the `log` facade. The crate logged through `log::info!`/`warn!`
@@ -342,6 +343,9 @@ fn startup_identity() -> Result<Option<Startup>> {
 
 /// Run the full GUI app.
 pub fn run() {
+    // The shared client layer spawns its background work here — on Tauri's runtime, exactly where
+    // it ran when the engine lived in this crate.
+    haven_client::rt::set_runtime(tauri::async_runtime::handle().inner().clone());
     init_logging();
     // Fresh install → no engine; the frontend shows the welcome screen and `onboard_*` relaunches.
     let existing = startup_identity().expect("resolve identity");
@@ -380,7 +384,10 @@ pub fn run() {
             builder.manage(engine).setup(move |app| {
                 let handle = app.handle().clone();
                 apply_window_chrome(&handle);
-                setup_engine.set_app(handle.clone());
+                // The engine reaches the UI and the OS through this app; its background work runs
+                // on Tauri's runtime (which, unlike a bare `tokio::spawn`, is reachable from the
+                // transport's callback threads).
+                setup_engine.set_app(haven_client::host::AppHandle::new(Arc::new(TauriHost(handle.clone()))));
                 // haven:// deep links (a tapped invite, or a shared post) — surface the window and hand
                 // the URL to the frontend (parity with the iOS URL scheme / Android intent filter).
                 // Windows/Linux register the scheme at install time via the plugin; register_all covers
@@ -670,6 +677,7 @@ pub fn run_headless() {
         .enable_all()
         .build()
         .expect("tokio runtime");
+    haven_client::rt::set_runtime(rt.handle().clone());
     rt.block_on(async {
         let (seed, paths) = ensure_active_identity().expect("load or create identity");
 

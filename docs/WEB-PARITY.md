@@ -60,6 +60,7 @@ owner turns it on, because other members' posts become readable in that browser.
 
 | Piece | Path |
 |---|---|
+| Client layer shared by desktop and browser (engine, stores, wire) | `core/haven-client` |
 | Browser core: engine + relay-only transport (wasm32 only) | `core/haven-web` |
 | Build → `web-client/pkg` | `web-client/build.sh` |
 | Transport smoke (headless Chromium vs. the native wire) | `web-client/smoke/smoke.mjs`, `core/haven-net/examples/web_peer.rs` |
@@ -82,7 +83,14 @@ supplies the transport. `web/` is still only the static invite-landing site.
 - [ ] The same against a shipping native app, and through a real Cloudflare tunnel.
 - [ ] Scan-to-link: the tab shows a QR and the phone scans it (today the tab must be given the
       ticket text, which suits a second computer but not a phone-to-kiosk link).
-- [ ] Engine IO loop in the browser (what `desktop/src-tauri/src/engine.rs` does natively), storage.
+- [x] Client layer lifted out of the desktop app into `core/haven-client`: the engine, its stores,
+      wire, self-sync, roster, media and relay policy, with their tests. The desktop app keeps only
+      its Tauri glue, commands, QA, demo and Instagram import, and reaches the engine through two
+      seams: `rt` (where background work runs) and `host` (UI events, notifications).
+- [ ] The engine tier compiles for wasm32. Still native-only: filesystem (→ a storage seam), OS
+      keyring (→ a secrets seam), tokio timers, the native node and relay client (→ a transport
+      seam over the relay-only node), relay hosting and tunnels (stay native), AVIF preview encode.
+- [ ] A command dispatcher for the browser (the 164 Tauri commands the UI calls).
 - [ ] Responsive UI (phone → desktop), from `desktop/ui`.
 - [ ] Calls (WebRTC + the relay hairpin), Web Push.
 - [ ] Tamarin model for the web device class + CI guards, before any release.
@@ -93,10 +101,6 @@ supplies the transport. `web/` is still only the static invite-landing site.
   on. Today it is given the circle's DERP alone. Native devices also keep n0's public relays in
   their map and may be homed on one, so the tab should probably carry them too where the network
   allows, and fall back to the mailbox where it does not.
-- **Shared client layer.** The desktop app's client logic (`desktop/src-tauri/src/engine.rs`, wire,
-  self-sync, roster, store) is what the browser needs too, but it is tied to Tauri, tokio and the
-  filesystem. The plan is to lift it into a crate with transport/storage/event traits that both
-  link, rather than write it a second time in JavaScript.
 
 ## History — why it was abandoned (2026-06-22)
 

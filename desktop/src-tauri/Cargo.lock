@@ -2483,7 +2483,31 @@ dependencies = [
 name = "haven-client"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "data-encoding",
+ "dirs 5.0.1",
+ "haven-net",
+ "haven-p2p",
+ "haven-s3",
+ "haven_ffi",
+ "hex",
+ "hkdf",
+ "image",
+ "keyring",
+ "libc",
+ "log",
+ "parking_lot",
+ "rand 0.8.6",
+ "ravif",
+ "reqwest 0.12.28",
+ "rgb",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "tokio",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

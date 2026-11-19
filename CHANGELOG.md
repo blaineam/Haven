@@ -19,7 +19,9 @@ have been. Regression test: `s4_ffi_own_device_events_open_in_any_delivery_order
 ### Added - Web client groundwork (not shipped; `feat/web-client`)
 A browser tab can now run the Haven engine and join a circle as a seedless linked device, reaching other devices only through the
 circle's own relay. Proven in headless Chromium against the native wire: linking with an enroll ticket, and sealed posts both ways.
-No UI yet. Design, trust statement and progress: [`docs/WEB-PARITY.md`](docs/WEB-PARITY.md) and D21 in
+The desktop app's client layer (engine, stores, wire protocol) moved to a shared crate,
+`core/haven-client`, so the browser build links the same code; desktop behaviour is unchanged (same 443 tests). No UI yet. Design,
+trust statement and progress: [`docs/WEB-PARITY.md`](docs/WEB-PARITY.md) and D21 in
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## 2.1.3 (security release, 2026-11-19)

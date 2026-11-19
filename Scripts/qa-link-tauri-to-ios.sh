@@ -75,7 +75,7 @@ PY
 echo "iOS seed → $OUT/ios-to-tauri-haven-seed.txt"
 
 # ---- 2) Install seed into desktop keyring + identities roster ----
-# Uses the same service/account names as desktop/src-tauri/src/store.rs
+# Uses the same service/account names as core/haven-client/src/store.rs
 python3 - "$SEED_B64" "$DATA_DIR" <<'PY'
 import base64, json, os, subprocess, sys
 from pathlib import Path

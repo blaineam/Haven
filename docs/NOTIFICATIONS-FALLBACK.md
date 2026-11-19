@@ -12,7 +12,7 @@ compile-time constant in three languages:
 |---|---|
 | `apple/HavenApp/PushManager.swift:22` (before this branch) | Swift |
 | `android/…/core/Moderation.kt:28` | Kotlin |
-| `desktop/src-tauri/src/engine.rs:30` | Rust |
+| `core/haven-client/src/engine.rs:30` | Rust |
 
 If that Worker stops — bill unpaid, account closed, the operator dies — every installed copy of
 Haven keeps trying to POST to a dead host forever, and there is no way to redirect them without

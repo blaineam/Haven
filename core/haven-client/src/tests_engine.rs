@@ -18,19 +18,8 @@ pub(crate) fn deliver(from: &Arc<Engine>, to: &Arc<Engine>, cid: &str) {
     }
 }
 
-/// Feed `from`'s signed hello into `to`, the way the transport would deliver it.
-pub(crate) fn hello_into(to: &Arc<Engine>, from: &Arc<Engine>) {
-    to.handle_hello(&from.hello_payload(DEFAULT_CIRCLE).expect("hello builds"));
-}
-
-/// Test-only view of private engine state for sibling test modules.
-pub(crate) fn prefs_of(e: &Engine) -> parking_lot::MutexGuard<'_, Prefs> {
-    e.prefs.lock()
-}
-
-pub(crate) fn is_foreground(e: &Engine) -> bool {
-    e.dyn_state.lock().foreground
-}
+// `hello_into`, `prefs_of` and `is_foreground` live in `engine::testing`, where the crates that host
+// the engine can reach them too.
 
 /// Make `a` and `b` contacts of each other on the default circle via the real hello handlers.
 pub(crate) fn befriend(a: &Arc<Engine>, b: &Arc<Engine>) {

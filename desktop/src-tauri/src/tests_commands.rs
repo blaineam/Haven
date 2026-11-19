@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::covtest_util::engine as new_engine;
-use crate::engine::cov_engine_tests::{hello_into, is_foreground, prefs_of};
+use crate::engine::testing::{hello_into, is_foreground, prefs_of};
 use tauri::{Manager, State};
 
 type St<'a> = State<'a, Arc<Engine>>;

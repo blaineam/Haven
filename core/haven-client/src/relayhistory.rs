@@ -283,7 +283,7 @@ impl Engine {
         log::info!("relay history: start");
         self.emit_changed();
         let me = self.clone();
-        tauri::async_runtime::spawn(async move { me.relay_history_run(cancel).await });
+        crate::rt::spawn(async move { me.relay_history_run(cancel).await });
         true
     }
 
@@ -451,7 +451,7 @@ impl Engine {
                     None
                 }
             });
-            let handles: Vec<_> = futs.map(tauri::async_runtime::spawn).collect();
+            let handles: Vec<_> = futs.map(crate::rt::spawn).collect();
             for h in handles {
                 got.push(h.await.ok().flatten());
             }

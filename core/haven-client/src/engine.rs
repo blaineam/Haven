@@ -33,7 +33,7 @@ use haven_ffi::{
 };
 use haven_s3::{S3Config, S3Mailbox};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter};
+use crate::host::AppHandle;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::callwire;
@@ -1040,7 +1040,7 @@ impl Engine {
         }
     }
 
-    pub(crate) fn emit_changed(&self) {
+    pub fn emit_changed(&self) {
         if let Some(app) = self.app.lock().clone() {
             let _ = app.emit("haven:changed", ());
         }
@@ -1049,7 +1049,7 @@ impl Engine {
     /// Emit an arbitrary frontend event. The archive importer runs on its own thread for minutes at
     /// a time and pushes progress with this rather than making the UI poll — and it is a no-op in
     /// headless mode, where there is no window to tell.
-    pub(crate) fn emit_event(&self, name: &str, payload: serde_json::Value) {
+    pub fn emit_event(&self, name: &str, payload: serde_json::Value) {
         if let Some(app) = self.app.lock().clone() {
             let _ = app.emit(name, payload);
         }
@@ -1057,7 +1057,7 @@ impl Engine {
 
     /// This identity's data directory (the archive importer's resume checkpoint lives beside
     /// `prefs.json` / `scheduled.json`).
-    pub(crate) fn paths(&self) -> &Paths {
+    pub fn paths(&self) -> &Paths {
         &self.paths
     }
 
@@ -1085,8 +1085,7 @@ impl Engine {
             // Native OS notification (Action Center / toast) — skipped while frontmost, where the
             // in-app toast below is the better surface.
             if !self.dyn_state.lock().foreground {
-                use tauri_plugin_notification::NotificationExt;
-                let _ = app.notification().builder().title(title).body(body).show();
+                app.notify(title, body);
             }
             // …and an in-app event for a toast if a window is open.
             let _ = app.emit(
@@ -1225,7 +1224,7 @@ impl Engine {
         }
         qa_media::bump(&qa_media::PUSH_NOTIFY, 1);
         let http = self.http.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             // Manual JSON body — this crate's reqwest is built without the `json` feature.
             let _ = http
                 .post(format!("{PUSH_RELAY}/notify"))
@@ -1365,7 +1364,7 @@ impl Engine {
         let node = self.node.lock().clone();
         let Some(node) = node else { return };
         let social = self.social.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             match node.publish_account_devices(social).await {
                 Ok(ids) if !ids.is_empty() => log::info!("discovery published devices={}", ids.len()),
                 Ok(_) => {}
@@ -1395,7 +1394,7 @@ impl Engine {
             asked.insert(key.clone(), now);
         }
         let me = self.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             let Ok(ids) = node.resolve_account_devices(key.clone()).await else { return };
             if ids.is_empty() {
                 return;
@@ -1767,7 +1766,7 @@ impl Engine {
     /// is single-flight, so a slow pass is skipped over, never stacked.
     fn start_self_sync_loop(self: &Arc<Self>) {
         let me = self.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let now = now_ms();
@@ -1827,7 +1826,7 @@ impl Engine {
         if mutating {
             self.bump_activity();
             let me = self.clone();
-            tauri::async_runtime::spawn(async move {
+            crate::rt::spawn(async move {
                 me.poll_mailbox().await;
                 me.poll_self_sync().await;
             });
@@ -1862,7 +1861,7 @@ impl Engine {
     fn start_mailbox_loop(self: &Arc<Self>) {
         self.start_self_sync_loop();
         let me = self.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 let now = now_ms();
@@ -2324,7 +2323,7 @@ impl Engine {
         }
         let account_hex = self.node_id_hex();
         let me = self.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             me.distribute_self_sync_grants(&seed, &account_hex, epoch, &key, survivors).await;
             // Re-publish our own slot under the rotated key straight away so authorized devices pick
             // up the new epoch without waiting a full poll cycle.
@@ -2603,7 +2602,7 @@ impl Engine {
         }
         // 6. Push full state so the new device can prime its self-sync base from my pushed slot.
         let me = self.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             me.poll_self_sync().await;
         });
         self.emit_changed();
@@ -3028,7 +3027,7 @@ impl Engine {
             accounts.iter().flat_map(|a| self.social.device_node_ids_for(a.clone())).collect();
         let list = replace_member_set(&self.social.my_node_hex(), &self.node_id_hex(), &accounts, &devices);
         let me = self.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             for hex in relays {
                 let Some(client) = me.relay_client_for(&hex).await else { continue };
                 if client.enroll_members_replace(circle_id.clone(), list.clone()).await {
@@ -3087,7 +3086,7 @@ impl Engine {
         }
         let me = self.clone();
         let cid = circle_id.to_string();
-        tauri::async_runtime::spawn_blocking(move || {
+        crate::rt::spawn_blocking(move || {
             // Same retention the display paths pass to `feed`: the global pref for circles, none
             // for DM threads (`messages` renders without a viewer window).
             let retention = if cid.starts_with("dm:") {
@@ -3212,7 +3211,7 @@ impl Engine {
             return;
         }
         let me = self.clone();
-        tauri::async_runtime::spawn_blocking(move || {
+        crate::rt::spawn_blocking(move || {
             let _ = me.cleanup_unused_media();
             me.media.touch_gc_stamp();
         });
@@ -3650,7 +3649,7 @@ impl Engine {
             Ok(env) => {
                 self.after_author(&circle_id, &env, None, None);
                 let me = self.clone();
-                tauri::async_runtime::spawn(async move {
+                crate::rt::spawn(async move {
                     for r in media {
                         me.upload_media(&circle_id, &r).await;
                     }
@@ -3832,7 +3831,7 @@ impl Engine {
             .unwrap_or_default();
         let me = self.clone();
         let my_hex = self.node_id_hex();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             if me.fetch_media_healing(&circle_id, &reference).await {
                 me.emit_changed();
                 return;
@@ -3886,7 +3885,7 @@ impl Engine {
             st.limit_sweep_in_flight = true;
         }
         let me = self.clone();
-        tauri::async_runtime::spawn_blocking(move || {
+        crate::rt::spawn_blocking(move || {
             let pinned = me.pinned_names();
             let in_use = me.media_referenced_names();
             let (bytes, files, evict) = me.media.perform_limit_sweep(max_days, max_gb, &pinned, &in_use, 48 * 3600);
@@ -4266,7 +4265,7 @@ impl Engine {
             return;   // HAVEN_NO_NET: no ledger row leaves the harness
         }
         let http = self.http.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             // Manual JSON body — this crate's reqwest is built without the `json` feature
             // (default-features = false), which is what broke the beta.30 release build.
             let _ = http
@@ -4385,7 +4384,7 @@ impl Engine {
         let me = self.clone();
         let cid = circle_id.to_string();
         let env = env.to_vec();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             // The epoch HEAD (roster + current key commit) rides along with every authored event:
             // a relay-only peer could otherwise pull the event long before the commit that opens it
             // (it would sit in their pending-epoch buffer until the next full backfill). Cheap —
@@ -4704,7 +4703,7 @@ impl Engine {
         if let Some(tv) = Self::friend_invite_extract(&trimmed) {
             self.friend_invite_accept(&tv);
             let me = self.clone();
-            tauri::async_runtime::spawn(async move { me.friend_invite_tick().await });
+            crate::rt::spawn(async move { me.friend_invite_tick().await });
         }
         self.send_hello(DEFAULT_CIRCLE, &info.id_hex);
         true
@@ -4735,7 +4734,7 @@ impl Engine {
             // the acceptor completes the friendship whenever they next come online.
             let me = self.clone();
             let hex = req.id_hex.clone();
-            tauri::async_runtime::spawn(async move { me.friend_invite_note_approved(&hex).await });
+            crate::rt::spawn(async move { me.friend_invite_note_approved(&hex).await });
             self.emit_changed();
         }
     }
@@ -4818,7 +4817,7 @@ impl Engine {
             // can pull it from the relay if the direct back-fill doesn't reach them.
             let me = self.clone();
             let cid = circle_id.to_string();
-            tauri::async_runtime::spawn(async move { me.backfill_history_to_relay(&cid).await; });
+            crate::rt::spawn(async move { me.backfill_history_to_relay(&cid).await; });
         }
     }
 
@@ -5012,7 +5011,7 @@ impl Engine {
             let cid = circle_id.to_string();
             let to = to_node_hex.to_string();
             let hello = hello.clone();
-            tauri::async_runtime::spawn(async move {
+            crate::rt::spawn(async move {
                 me.offer_hello_mailbox(&cid, &to, &hello).await;
             });
         }
@@ -5145,7 +5144,7 @@ impl Engine {
         {
             log::info!("devroster: pulling {} contact roster(s) from relays", due.len());
             let me = self.clone();
-            tauri::async_runtime::spawn(async move {
+            crate::rt::spawn(async move {
                 for hex in due {
                     me.roster_pull_at
                         .lock()
@@ -5190,7 +5189,7 @@ impl Engine {
                 self.dyn_state.lock().own_device_catchup_in_flight = false;
             } else {
                 let me = self.clone();
-                tauri::async_runtime::spawn(async move {
+                crate::rt::spawn(async move {
                     for c in me.social.circles() {
                         // ALL authors — the point is my friends' messages that reached one device only.
                         let envs = me
@@ -5248,7 +5247,7 @@ impl Engine {
         for to in targets {
             let node = node.clone();
             let frame = frame.clone();
-            tauri::async_runtime::spawn(async move {
+            crate::rt::spawn(async move {
                 if let Err(e) = node.send_to_node(to.clone(), frame).await {
                     log::debug!("send type={t} to {} failed: {e}", &to.chars().take(8).collect::<String>());
                 }
@@ -5284,7 +5283,7 @@ impl Engine {
             }
         }
         let me = self.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             me.dyn_state.lock().internet_active = true;
             match t {
                 wire::HELLO => {
@@ -5585,7 +5584,7 @@ impl Engine {
         let drained = self.dyn_state.lock().parked_relay_announces.drain(now_ms());
         for p in drained {
             let me = self.clone();
-            tauri::async_runtime::spawn(async move {
+            crate::rt::spawn(async move {
                 me.handle_relay_node(&wire::event_payload(&p.circle_id, &p.sealed)).await; // [LP cid][sealed]
             });
         }
@@ -5802,7 +5801,7 @@ impl Engine {
             );
         }
         let me = self.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             // relay_client_for self-guards (own node) and honors the backoff window.
             let Some(client) = me.relay_client_for(&lower).await else { return };
             let Some(data) = client.get(haven_net::blobstore::RELAY_INTERFACE_KEY.to_string()).await
@@ -6163,7 +6162,7 @@ impl Engine {
         // drop the dead URL and learn the new one (parity with Apple RelayHost.reannounceBurst).
         self.reannounce_own_relay();
         let me = Arc::clone(self);
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             for secs in [2u64, 5, 12, 25] {
                 tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
                 if !me.dyn_state.lock().hosting {
@@ -6606,7 +6605,7 @@ impl Engine {
             st.debounce_gen
         };
         let eng = Arc::clone(self);
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             if eng.fabric_rebind.lock().debounce_gen != gen {
                 return; // superseded by a newer schedule
@@ -7386,7 +7385,7 @@ impl Engine {
             *last = now;
         }
         let me = self.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             // Scoped: only the circles whose epoch actually moved (Android measured 96s when this
             // re-signed every circle's history per trigger).
             for cid in circle_ids {
@@ -7803,7 +7802,7 @@ impl Engine {
             st.keyless_rescope_pending = true;
         }
         let me = self.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(Self::KEYLESS_RESCOPE_DELAY_MS)).await;
             me.dyn_state.lock().keyless_rescope_pending = false;
             me.rescope_keyless_circles().await;
@@ -7812,7 +7811,7 @@ impl Engine {
 
     /// Backfill each circle that was key-less at the last look and can now use a relay it could not before:
     /// an event authored before the relay was known had uploaded to nowhere. Returns the circles re-sent.
-    pub(crate) async fn rescope_keyless_circles(self: &Arc<Self>) -> Vec<String> {
+    pub async fn rescope_keyless_circles(self: &Arc<Self>) -> Vec<String> {
         let circles: Vec<String> = self.social.circles().into_iter().map(|c| c.id).collect();
         for c in &circles {
             self.ensure_relay_scope(c);
@@ -9129,7 +9128,7 @@ impl Engine {
         prefetch.retain(|r| !LocalMedia::is_synthetic(r) && !self.media.has(r) && !self.evicted_contains(r));
         let me = self.clone();
         let cid = circle_id.to_string();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             for r in &prefetch {
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(5),
@@ -9260,7 +9259,7 @@ impl Engine {
         }
         *self.s3.lock().await = Some(Arc::new(client));
         let me = self.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             for c in me.social.circles() {
                 me.backfill_mailbox(&c.id).await;
             }
@@ -9526,7 +9525,7 @@ impl Engine {
                 }
             }
             let me = self.clone();
-            tauri::async_runtime::spawn(async move {
+            crate::rt::spawn(async move {
                 if me.fetch_media_healing(&cid, &t).await {
                     me.emit_changed();
                 }
@@ -9583,7 +9582,7 @@ impl Engine {
             let me = self.clone();
             let my_hex = my_hex.clone();
             let skip_relay = unopenable.contains(&reference);
-            tauri::async_runtime::spawn(async move {
+            crate::rt::spawn(async move {
                 // ALWAYS try the circle's mailbox (relay/S3) first — content-addressed + idempotent, no flood.
                 //
                 // Except for a ref whose stored copy we already downloaded and could not decrypt:
@@ -9632,7 +9631,7 @@ impl Engine {
             };
             if arm {
                 let me = self.clone();
-                tauri::async_runtime::spawn(async move {
+                crate::rt::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     me.dyn_state.lock().fast_sweep_armed = false;
                     me.request_missing_media();
@@ -10032,7 +10031,7 @@ impl Engine {
         let ordered = Self::upload_order(&media);
         let authored_at = now_ms();
         let me = self.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             for r in ordered {
                 // A ref another circle's post of the same (multi-circle) attachment already
                 // uploaded sits in the (dest, ref) ledger: scope it into THIS circle too.
@@ -10806,7 +10805,7 @@ impl Engine {
         }
         let me = self.clone();
         let reference = reference.to_string();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(8)).await;
             let progressed = {
                 let mut st = me.dyn_state.lock();
@@ -11734,7 +11733,7 @@ impl Engine {
         let me = self.clone();
         let reference = reference.to_string();
         let circle_id = circle_id.to_string();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             if me.fetch_media_healing(&circle_id, &reference).await {
                 me.emit_changed();
                 log::info!(
@@ -11932,7 +11931,7 @@ impl Engine {
             }
             let node = node.clone();
             let inner = inner.to_vec();
-            tauri::async_runtime::spawn(async move {
+            crate::rt::spawn(async move {
                 let _ = node.send_to_node(dest, inner).await;
             });
         }
@@ -11953,7 +11952,7 @@ impl Engine {
         }
         self.dialing.lock().begin(&session_id);
         let this = self.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             for _ in 0..callwire::INVITE_RETRANSMIT_MAX {
                 tokio::time::sleep(std::time::Duration::from_millis(callwire::INVITE_RETRANSMIT_MS)).await;
                 if !this.dialing.lock().is_dialing(&session_id) {
@@ -12027,7 +12026,7 @@ impl Engine {
         let node = self.node.lock().clone();
         let Some(node) = node else { return };
         let frames: Vec<Vec<u8>> = payloads.iter().map(|p| wire::frame(t, p)).collect();
-        tauri::async_runtime::spawn(async move {
+        crate::rt::spawn(async move {
             for dev in targets {
                 for f in &frames {
                     let _ = node.send_to_node(dev.clone(), f.clone()).await;
@@ -12194,18 +12193,18 @@ impl Engine {
     // needs; they compile out of release entirely, along with their only caller.
 
     #[cfg(debug_assertions)]
-    pub(crate) fn demo_social(&self) -> &Arc<HavenSocial> {
+    pub fn demo_social(&self) -> &Arc<HavenSocial> {
         &self.social
     }
 
     #[cfg(debug_assertions)]
-    pub(crate) fn demo_persist(&self) {
+    pub fn demo_persist(&self) {
         self.persist();
     }
 
     /// Mutate + save prefs directly, skipping the networked broadcast `set_profile` does.
     #[cfg(debug_assertions)]
-    pub(crate) fn demo_with_prefs(&self, f: impl FnOnce(&mut Prefs)) {
+    pub fn demo_with_prefs(&self, f: impl FnOnce(&mut Prefs)) {
         let mut p = self.prefs.lock();
         f(&mut p);
         if let Err(e) = p.save(&self.paths) {
@@ -12216,7 +12215,7 @@ impl Engine {
     /// Report the node as started without one: demo mode never binds it, and the status dot reads
     /// `dyn_state`, so the UI would otherwise sit on "starting…" through every screenshot.
     #[cfg(debug_assertions)]
-    pub(crate) fn demo_mark_started(&self) {
+    pub fn demo_mark_started(&self) {
         self.dyn_state.lock().started = true;
         self.emit_changed();
     }
@@ -12700,15 +12699,36 @@ impl InboundListener for NodeListener {
     }
 }
 
+/// Test-only views into an engine, for this crate's tests and for the tests of the crates that host
+/// one (the desktop app's command and QA tests). Not compiled into a shipped build.
+#[cfg(any(test, feature = "test-util"))]
+pub mod testing {
+    use super::*;
+
+    /// Feed `from`'s signed hello into `to`, the way the transport would deliver it.
+    pub fn hello_into(to: &Arc<Engine>, from: &Arc<Engine>) {
+        to.handle_hello(&from.hello_payload(DEFAULT_CIRCLE).expect("hello builds"));
+    }
+
+    /// The engine's live prefs, locked.
+    pub fn prefs_of(e: &Engine) -> parking_lot::MutexGuard<'_, Prefs> {
+        e.prefs.lock()
+    }
+
+    pub fn is_foreground(e: &Engine) -> bool {
+        e.dyn_state.lock().foreground
+    }
+}
+
 #[cfg(test)]
 #[path = "tests_engine.rs"]
-pub(crate) mod cov_engine_tests;
+pub mod cov_engine_tests;
 #[cfg(test)]
 #[path = "tests_engine_media.rs"]
 mod cov_engine_media_tests;
 #[cfg(test)]
 #[path = "tests_engine_http.rs"]
-pub(crate) mod cov_engine_http_tests;
+pub mod cov_engine_http_tests;
 #[cfg(test)]
 #[path = "tests_engine_peermedia.rs"]
 mod cov_engine_peermedia_tests;
@@ -12877,19 +12897,19 @@ pub struct MessageAuthorTarget {
 impl Engine {
     /// The active identity's data dir — where `qa-cmd.json` / `qa-dump.json` live (next to the
     /// `qa-account-hex.txt` / `qa-device-hex.txt` the matrix harness already reads).
-    pub(crate) fn data_root(&self) -> std::path::PathBuf {
+    pub fn data_root(&self) -> std::path::PathBuf {
         self.paths.root.clone()
     }
 
     /// The dump's media-blob gate for one ref: real refs are "present" when the sealed blob is on
     /// disk; synthetic refs (geo pins etc.) are vacuously present — nothing can ever fetch them,
     /// so gating on them would fail every media check forever.
-    pub(crate) fn media_present(&self, reference: &str) -> bool {
+    pub fn media_present(&self, reference: &str) -> bool {
         LocalMedia::is_synthetic(reference) || self.media.has(reference)
     }
 
     /// A circle's member account ids (excludes me) — the dump's `members` array.
-    pub(crate) fn circle_member_ids(&self, circle_id: &str) -> Vec<String> {
+    pub fn circle_member_ids(&self, circle_id: &str) -> Vec<String> {
         self.social.contact_node_ids(circle_id.to_string())
     }
 }
@@ -13065,7 +13085,7 @@ impl Engine {
     }
 
     /// One pass of every pending invite duty — heartbeat sync bucket; cheap no-op when idle.
-    pub(crate) async fn friend_invite_tick(self: &Arc<Self>) {
+    pub async fn friend_invite_tick(self: &Arc<Self>) {
         self.friend_invite_prune();
         self.friend_invite_write_drops().await;
         self.friend_invite_poll_grants().await;
@@ -13230,7 +13250,7 @@ impl Engine {
 
     /// The user approved a connection request (or the mutual-add race made approval implicit).
     /// Write the grant under every matching pending ticket and consume it.
-    pub(crate) async fn friend_invite_note_approved(self: &Arc<Self>, account_hex: &str) {
+    pub async fn friend_invite_note_approved(self: &Arc<Self>, account_hex: &str) {
         let hex = account_hex.to_lowercase();
         let matches: Vec<crate::store::IssuedFriendInvite> = {
             let p = self.prefs.lock();
@@ -13279,7 +13299,7 @@ impl Engine {
 
 /// Relay-first media counters for the DEBUG qa dump (e2e step `relayfirst`, docs/QA.md) — Apple
 /// `QaMediaStats` / Android `QaStats` parity. Bumps compile to nothing in a release build.
-pub(crate) mod qa_media {
+pub mod qa_media {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     pub static SERVED_DIRECT_FRIEND: AtomicU64 = AtomicU64::new(0);
@@ -13356,7 +13376,7 @@ mod companion_tests {
 /// circle's OTHER relays)]. A circle's relays are those it is configured with that are live now,
 /// plus our own hosted relay (`my_hex`, which serves every circle we are in); a circle with a single
 /// relay teaches nothing. Per circle — see `teach_sibling_relays`. Apple/Android parity.
-pub(crate) fn sibling_teach_plan(
+pub fn sibling_teach_plan(
     circle_ids: &[String],
     relays_for: impl Fn(&str) -> Vec<String>,
     live: &std::collections::BTreeSet<String>,

@@ -65,7 +65,7 @@ if let Some(circle) = mailbox_circle(key) {          // "default" from haven/mai
 ```
 
 The relay authorizes `members[<circle tag from the link>]`. The desktop client's circle id is the
-constant `DEFAULT_CIRCLE = "default"` (`desktop/src-tauri/src/engine.rs:27`), so it writes
+constant `DEFAULT_CIRCLE = "default"` (`core/haven-client/src/engine.rs:27`), so it writes
 `haven/mailbox/default/…`. I linked the relay with `--circle fieldrun` — a tag the docs explicitly
 describe as arbitrary:
 
@@ -95,7 +95,7 @@ client **fetched all three mailbox entries** (atime proof). Then:
 
 The posts never appeared in the feed. The client consumed the envelopes, wrote them into the
 **persisted seen-set**, and discarded them — and because `upload_event()` early-returns on
-`seen_mailbox.contains(&key)` (`desktop/src-tauri/src/engine.rs:2541`), those events will **never
+`seen_mailbox.contains(&key)` (`core/haven-client/src/engine.rs:2541`), those events will **never
 be re-fetched**. Offline delivery therefore fails *closed and silently, with permanent loss*, on
 the one path the relay exists to serve.
 
@@ -117,7 +117,7 @@ run once with `--link <code>` (the code the Haven app shows you)
 
 But the only code that builds that link is `apple/HavenApp/FeedView.swift:1694` and
 `haven-desktop --headless` (`desktop/src-tauri/src/lib.rs:445`). The **desktop GUI never does** —
-`engine.relay_link()` (`desktop/src-tauri/src/engine.rs:1777`) despite its name returns the **bare
+`engine.relay_link()` (`core/haven-client/src/engine.rs:1777`) despite its name returns the **bare
 node id**, and the UI's copy button toasts *"Relay id copied"*. Android has nothing.
 
 So a Linux or Windows self-hoster following the published instructions **cannot complete them**.

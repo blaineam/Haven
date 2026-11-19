@@ -105,6 +105,8 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+# The engine test helpers (throwaway data dir + engine) the command/QA/import tests build on.
+haven-client = { path = "../../core/haven-client", features = ["test-util"] }
 # `tauri::test::mock_app()` lets the command bodies be called with a real `State<Arc<Engine>>`
 # (tests only — the shipped binary does not get the mock runtime).
 tauri = { version = "2", features = ["test"] }

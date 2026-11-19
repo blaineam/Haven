@@ -20,8 +20,8 @@ export default {
     'apple/HavenApp/AccountStore.swift',   // Apple account-key storage (Keychain)
     'apple/HavenApp/DeviceRoster.swift',   // per-device identity + revocation state
     'android/app/src/main/java/com/blaineam/haven/core', // Android key/seed storage + core bridges
-    'desktop/src-tauri/src/secret.rs',     // desktop OS secret store
-    'desktop/src-tauri/src/store.rs',
+    'core/haven-client/src',   // the client layer shared by desktop + browser: engine, stores (OS secret store), wire
+    'core/haven-web/src',      // the browser build: relay-only node + seedless session
   ],
 
   // Weight these domains heavily — they are Haven's crown jewels.

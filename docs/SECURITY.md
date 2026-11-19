@@ -45,7 +45,7 @@ This document records what Haven protects, how, and the limits — including the
   account-state self-sync stream, so a revoked device can no longer read or write profile / contacts /
   circles / settings. Every shipping client turns the switch on for a seed-holding device
   (`apple/HavenApp/FeedStore.swift:792`, `android/…/core/HavenNet.kt:569`,
-  `desktop/src-tauri/src/engine.rs:683`), but the **gate lives in core**, not the client: a circle with
+  `core/haven-client/src/engine.rs:683`), but the **gate lives in core**, not the client: a circle with
   even one un-upgraded member stays on the legacy dual-seal path and everyone keeps reading
   (`docs/SWITCH-FLIP-1.0.7.md`). **The honest residue:** a **primary** device still holds the seed, so
   compromising *it* is a full account compromise — the remedy there is starting a new identity, not
@@ -124,7 +124,7 @@ claims, and only the first is about cryptography:
   (`apple/HavenApp/FeedView.swift:540-547`) and Android (`Moderation.kt` exposes report only), and a
   block is not representable on the Worker at all: `/flag` hard-rejects every action but `report`
   (`push/worker.js:159`), so no block can be stored even by an old or modified client. *(The desktop
-  client still POSTs on block — `desktop/src-tauri/src/engine.rs:1311` — but the Worker refuses it,
+  client still POSTs on block — `core/haven-client/src/engine.rs:1311` — but the Worker refuses it,
   so nothing is recorded. It should stop asking; tracked below.)*
 
 **What the ledger does and does not hold** (all four properties are enforced in code, per audit F1):
@@ -150,7 +150,7 @@ content-free, actor-free, and expiring — but it is not nothing, and it is the 
 developer holds nothing" instinct needs a qualifier.
 
 **Known gap:** the desktop client has not caught up to the signing above — it still sends the old
-unsigned `{actor, subject, action, reason}` body (`desktop/src-tauri/src/engine.rs:1056-1076`). The
+unsigned `{actor, subject, action, reason}` body (`core/haven-client/src/engine.rs:1056-1076`). The
 Worker rejects it (401), so desktop reports currently reach the *circle* but never the ledger, and
 desktop's block POST is refused (400). No data is exposed by this; it is a parity bug, not a leak.
 

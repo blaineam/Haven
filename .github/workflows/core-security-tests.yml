@@ -36,5 +36,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+      # haven-client (the client layer shared by the desktop app and the browser build) links the
+      # OS keyring — libdbus on Linux — and rav1e, which wants nasm.
+      - name: System libraries for haven-client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config nasm
       - name: Test the core workspace
         run: cargo test --workspace --manifest-path core/Cargo.toml

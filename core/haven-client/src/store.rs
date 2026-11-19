@@ -1712,7 +1712,7 @@ mod state_format_migration_tests {
     #[test]
     fn a_decimal_array_state_file_loads_and_saves_compact() {
         let legacy = std::fs::read(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/haven-ffi/tests/fixtures/real_106_state.bin"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../haven-ffi/tests/fixtures/real_106_state.bin"),
         )
         .expect("legacy state fixture");
         let dir = std::env::temp_dir().join(format!("haven-state-fmt-{}", std::process::id()));

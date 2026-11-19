@@ -510,6 +510,12 @@ fn rewrite_proxy_head(head: &[u8], backend: &str) -> Vec<u8> {
     if lines.is_empty() {
         return head.to_vec();
     }
+    // A protocol upgrade (the DERP WebSocket) is the one request whose `Connection` header is part
+    // of the protocol: RFC 6455 requires `Connection: Upgrade` on the request, and a backend that
+    // does not see it answers a 101 without it — which every browser then refuses ("'Connection'
+    // header value must contain 'Upgrade'"). Native clients never checked, so only a browser
+    // reaching the relay directly or through a pass-through front door ever saw this.
+    let upgrading = lines.iter().skip(1).any(|l| l.to_ascii_lowercase().starts_with("upgrade:"));
     // request line stays; rewrite Host + Connection.
     let mut out = String::with_capacity(head.len() + 32);
     out.push_str(lines[0]);
@@ -529,7 +535,12 @@ fn rewrite_proxy_head(head: &[u8], backend: &str) -> Vec<u8> {
             continue;
         }
         if lower.starts_with("connection:") {
-            out.push_str("Connection: close\r\n");
+            if upgrading {
+                out.push_str(line);
+                out.push_str("\r\n");
+            } else {
+                out.push_str("Connection: close\r\n");
+            }
             saw_conn = true;
             continue;
         }
@@ -546,7 +557,7 @@ fn rewrite_proxy_head(head: &[u8], backend: &str) -> Vec<u8> {
         out.push_str("\r\n");
     }
     if !saw_conn {
-        out.push_str("Connection: close\r\n");
+        out.push_str(if upgrading { "Connection: Upgrade\r\n" } else { "Connection: close\r\n" });
     }
     out.push_str("\r\n");
     out.push_str(rest);
@@ -579,6 +590,30 @@ fn parse_request_method(head: &[u8]) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A WebSocket upgrade keeps its `Connection: Upgrade` on the way to the backend (a browser
+    /// refuses the 101 otherwise); every other request is still forced to `close`.
+    #[test]
+    fn an_upgrade_request_keeps_its_connection_header() {
+        let ws = b"GET /relay HTTP/1.1\r\nHost: relay.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+                   Sec-WebSocket-Key: x\r\nKeep-Alive: 5\r\n\r\n";
+        let out = String::from_utf8(rewrite_proxy_head(ws, "127.0.0.1:3340")).unwrap();
+        assert!(out.contains("\r\nConnection: Upgrade\r\n"), "{out}");
+        assert!(!out.contains("Connection: close") && !out.contains("Keep-Alive"));
+        assert!(out.contains("\r\nHost: 127.0.0.1:3340\r\n") && out.contains("\r\nUpgrade: websocket\r\n"));
+
+        // An upgrade that omitted the header gets the one the protocol requires.
+        let bare = b"GET /relay HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n\r\n";
+        assert!(String::from_utf8(rewrite_proxy_head(bare, "b:1")).unwrap().contains("\r\nConnection: Upgrade\r\n"));
+
+        for plain in [
+            &b"GET /k/haven/x HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n"[..],
+            &b"GET /k/haven/x HTTP/1.1\r\nHost: x\r\n\r\n"[..],
+        ] {
+            let out = String::from_utf8(rewrite_proxy_head(plain, "b:1")).unwrap();
+            assert!(out.contains("\r\nConnection: close\r\n") && !out.contains("keep-alive"), "{out}");
+        }
+    }
 
     /// The relay's "no logs are written" is absolute — there must be no way, not even an opt-in
     /// environment variable, to make the front door record requests. This file is the whole proxy:

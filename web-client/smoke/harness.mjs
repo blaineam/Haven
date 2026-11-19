@@ -22,7 +22,8 @@ if (!chromium) {
   process.exit(2);
 }
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+/** The web-client/ directory (the bundle a relay serves, after build.sh). */
+export const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".wasm": "application/wasm" };
 
 /** Serve web-client/ on a loopback port; `/` is the smoke page. Returns `{ url, close }`. */
@@ -82,20 +83,28 @@ export async function openPage(url) {
   const page = await browser.newPage();
   page.on("console", (m) => console.log(`   [page ${m.type()}] ${m.text()}`));
   page.on("pageerror", (e) => console.log(`   [page error] ${e.message}`));
+  if (process.env.SMOKE_HTTP) {
+    // Every relay request the page makes, with its outcome (for diagnosing a smoke).
+    page.on("response", (r) => {
+      const u = new URL(r.url());
+      if (/^\/(k|l|t)\//.test(u.pathname)) console.log(`   [page http] ${r.request().method()} ${u.pathname.slice(0, 90)} -> ${r.status()}`);
+    });
+    page.on("requestfailed", (r) => console.log(`   [page http] ${r.method()} ${r.url().slice(0, 110)} FAILED ${r.failure()?.errorText}`));
+  }
   await page.goto(url);
   await page.waitForFunction(() => window.havenReady === true, null, { timeout: 30000 });
   return { browser, page };
 }
 
 /** Run a smoke body; print PASS/FAIL, clean up, and exit with the right code. */
-export async function run(usage, body) {
+export async function run(usage, body, { peerArgs } = {}) {
   const bin = process.argv[2];
   if (!bin) {
     console.error(`usage: ${usage}`);
     process.exit(2);
   }
   const site = await serve();
-  const peer = startPeer(bin);
+  const peer = startPeer(bin, peerArgs);
   const cleanup = [];
   let failed = false;
   try {

@@ -998,3 +998,102 @@ async fn the_legacy_device_enrollment_hands_a_credential_to_a_second_device_of_t
     assert!(!s.device_roster_dto().2.iter().any(|x| x.node_hex == hex), "a seedless device authorizes nobody");
     p.step_down_as_primary();
 }
+
+// ── frame 36: the account tells its own devices how to reach its relays ───────────────────────
+
+/// A seedless device linked to `p`, rebuilt from its persisted state the way a relaunch does (so
+/// its engine is on the real account, not the linking placeholder).
+async fn linked_seedless(p: &Arc<Engine>) -> Arc<Engine> {
+    let paths = crate::covtest_util::tmp_paths();
+    let s = Engine::new_seedless(paths.clone()).expect("a linking device builds");
+    let ticket = haven_ffi::enroll::enroll_ticket_parse(p.mint_enroll_ticket().unwrap()).unwrap();
+    {
+        let mut sl = s.seedless.lock();
+        sl.enabled = true;
+        sl.pending_ticket = Some(crate::roster::PendingTicketRec {
+            account_id: ticket.account_id.clone(),
+            verification: ticket.verification.clone(),
+            secret: ticket.secret.clone(),
+            primary_device: ticket.primary_device.clone(),
+            issued_at: ticket.issued_at,
+            relays: ticket.relays.clone(),
+        });
+    }
+    let now = now_ms() / 1000;
+    let (dev_bundle, dev_hex) = {
+        let r = s.roster.lock();
+        (r.device_bundle(), r.device_node_hex())
+    };
+    let req = haven_ffi::enroll::enroll_build_request(ticket.secret.clone(), dev_bundle.clone(), "Tab".into(), now).unwrap();
+    p.handle_seedless_enroll_request(None, &req);
+    p.approve_enroll(dev_hex).expect("approved");
+    let grant = haven_ffi::enroll::enroll_assemble_grant(
+        p.seed.unwrap().to_vec(), ticket.secret.clone(), dev_bundle, "Tab".into(), now,
+        p.social.my_device_roster_wire(), vec![],
+    )
+    .unwrap();
+    s.handle_seedless_enroll_grant(&grant).await;
+    assert!(s.seedless.lock().linked);
+    drop(s);
+    Engine::new_seedless(paths).expect("relaunches linked")
+}
+
+#[tokio::test]
+async fn a_relay_interface_is_learned_only_from_the_accounts_own_key() {
+    const RELAY: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
+    let (p, _) = new_engine(241);
+    let s = linked_seedless(&p).await;
+    let me = p.node_id_hex();
+    assert_eq!(s.social.my_node_hex(), me, "the linked device is on the primary's account");
+    let dev_hex = s.social.my_device_node_hex();
+    let relays = serde_json::json!([
+        { "node": RELAY, "urls": ["https://relay.example"], "token": "tok", "derp": "https://relay.example/" },
+        { "node": "not-a-node", "urls": ["https://evil.example"], "token": "x" },
+        { "node": "d2".repeat(32), "urls": ["ftp://nope"], "token": "x" },
+    ]);
+    let body = |account: &str| wire::relay_interface_frame(account, &serde_json::to_vec(&relays).unwrap());
+    let learned = |e: &Engine| e.prefs.lock().relay_http(RELAY);
+
+    // A stranger's account key, even naming MY account in the body: refused.
+    let (stranger, _) = new_engine(242);
+    stranger.social.add_contact_bundle(DEFAULT_CIRCLE.into(), s.social.my_device_bundle()).ok();
+    if let Ok(forged) = stranger.social.seal_call_frame(dev_hex.clone(), wire::RELAY_INTERFACE, body(&me)) {
+        s.handle_relay_interface(&forged).await;
+    }
+    assert!(learned(&s).is_none(), "a frame not signed by my account teaches nothing");
+
+    // A frame signed by a DEVICE of the account (here the linked device's own key) is not the
+    // account key, however validly that device speaks for the account elsewhere: refused.
+    let device_signed = s.social.seal_call_frame(dev_hex.clone(), wire::RELAY_INTERFACE, body(&me)).expect("seals to itself");
+    s.handle_relay_interface(&device_signed).await;
+    assert!(learned(&s).is_none(), "a linked device cannot repoint its siblings' relays");
+
+    // The same bytes as another frame type do not open as a relay interface.
+    let wrong_type = p.social.seal_call_frame(dev_hex.clone(), wire::CALL_HANDLED, body(&me)).expect("seals");
+    s.handle_relay_interface(&wrong_type).await;
+    assert!(learned(&s).is_none());
+
+    // The account key: learned — URLs, token and DERP, for the well-formed entry only.
+    let real = p.social.seal_call_frame(dev_hex.clone(), wire::RELAY_INTERFACE, body(&me)).expect("seals");
+    s.handle_relay_interface(&real).await;
+    assert_eq!(learned(&s), Some((vec!["https://relay.example".to_string()], "tok".to_string())));
+    {
+        let prefs = s.prefs.lock();
+        assert_eq!(prefs.relay_entries[RELAY].derp_url, "https://relay.example");
+        assert!(prefs.relays.get(DEFAULT_CIRCLE).is_some_and(|l| l.iter().any(|h| h == RELAY)));
+        assert!(!prefs.relay_entries.contains_key("not-a-node"));
+        assert!(prefs.relay_http(&"d2".repeat(32)).is_none(), "a non-http URL is not an interface");
+    }
+
+    // A relay the user deleted on this device is not resurrected by the every-tick repeat.
+    {
+        let mut prefs = s.prefs.lock();
+        prefs.relay_entries.remove(RELAY);
+        prefs.suppressed_relays.push(RELAY.to_string());
+    }
+    s.handle_relay_interface(&real).await;
+    assert!(learned(&s).is_none());
+
+    // And a seedless device never sends one (it holds no account key to sign with).
+    s.teach_my_devices_relay_interfaces(); // must be a no-op, not a panic
+}

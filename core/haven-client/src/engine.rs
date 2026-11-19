@@ -404,6 +404,37 @@ enum DeskFrontDoor {
     LanOnly,
 }
 
+/// How a relay hosted by this engine binds its listeners, and the web client it may serve. The
+/// defaults are what the desktop app has always done; a host changes them before
+/// [`Engine::start_hosting`] (a second instance on one machine, a harness, an app that ships the
+/// web client).
+#[derive(Clone, Debug)]
+pub struct HostingOptions {
+    /// Sealed-media mailbox HTTP interface.
+    pub http_bind: String,
+    /// Embedded iroh-relay (DERP).
+    pub derp_bind: String,
+    /// The path proxy — the one origin a front door (tunnel / reverse proxy) points at.
+    pub proxy_bind: String,
+    /// Start the embedded TURN server (a UDP listener on every interface).
+    pub turn: bool,
+    /// The web client's files. Served under `/app/` only while the `relay_web_access` setting is
+    /// on; `None` = this build ships no web client.
+    pub web_app: Option<Arc<crate::net::WebBundle>>,
+}
+
+impl Default for HostingOptions {
+    fn default() -> Self {
+        Self {
+            http_bind: "0.0.0.0:8674".into(),
+            derp_bind: crate::net::DEFAULT_DERP_BIND.into(),
+            proxy_bind: crate::net::DEFAULT_PATH_ROUTER_BIND.into(),
+            turn: true,
+            web_app: None,
+        }
+    }
+}
+
 pub struct Engine {
     /// A coalesced state write is already scheduled — see `persist_coalesced`.
     persist_pending: std::sync::atomic::AtomicBool,
@@ -448,6 +479,8 @@ pub struct Engine {
     path_routed: StdMutex<bool>,
     /// Embedded circle TURN for WebRTC ICE — own UDP socket (not a second Endpoint).
     turn_server: StdMutex<Option<crate::net::TurnServer>>,
+    /// How the hosted relay binds, and the web client it may serve. See [`HostingOptions`].
+    hosting: StdMutex<HostingOptions>,
     prefs: StdMutex<Prefs>,
     dyn_state: StdMutex<DynState>,
     scheduled: StdMutex<crate::scheduled::ScheduledStore>,
@@ -858,6 +891,7 @@ impl Engine {
             path_router: StdMutex::new(None),
             path_routed: StdMutex::new(false),
             turn_server: StdMutex::new(None),
+            hosting: StdMutex::new(HostingOptions::default()),
             prefs: StdMutex::new(prefs),
             dyn_state: StdMutex::new(dyn_state),
             scheduled: StdMutex::new(scheduled),
@@ -980,6 +1014,7 @@ impl Engine {
             path_router: StdMutex::new(None),
             path_routed: StdMutex::new(false),
             turn_server: StdMutex::new(None),
+            hosting: StdMutex::new(HostingOptions::default()),
             prefs: StdMutex::new(prefs),
             dyn_state: StdMutex::new(dyn_state),
             scheduled: StdMutex::new(scheduled),
@@ -2602,6 +2637,9 @@ impl Engine {
                 }
             }
         }
+        // 5b. Tell the new device how to reach our relays (URLs + token). A browser device cannot
+        //     learn that any other way before it holds circle keys — see `wire::RELAY_INTERFACE`.
+        self.teach_my_devices_relay_interfaces();
         // 6. Push full state so the new device can prime its self-sync base from my pushed slot.
         let me = self.clone();
         crate::rt::spawn(async move {
@@ -5211,6 +5249,8 @@ impl Engine {
         // Re-emit our own relay id whenever we re-greet contacts, so a peer that just came online surfaces
         // our relay instead of missing the one-shot announce.
         self.reannounce_own_relay();
+        // …and my own other devices how to reach those relays (a browser device has no other way).
+        self.teach_my_devices_relay_interfaces();
     }
 
     fn send_frame(self: &Arc<Self>, t: u8, payload: &[u8], to_node_hex: &str) {
@@ -5297,6 +5337,7 @@ impl Engine {
                     me.retry_parked_relay_announces();
                 }
                 wire::RELAY_NODE => me.handle_relay_node(&body).await,
+                wire::RELAY_INTERFACE => me.handle_relay_interface(&body).await,
                 wire::MEDIA_REQ => me.handle_media_request(&body).await,
                 wire::MEDIA_RESUME_REQ => me.handle_media_resume_request(&body).await,
                 wire::MEDIA_CHUNK => me.handle_media_chunk(&body),
@@ -5902,6 +5943,24 @@ impl Engine {
 
     /// Set the host's media limits. Takes effect when the relay NEXT STARTS — the retention is handed
     /// to the store at attach time, so the UI says so rather than pretending a live change applied.
+    /// Change how the hosted relay binds / what web client it may serve. Takes effect at the next
+    /// [`start_hosting`](Self::start_hosting).
+    pub fn set_hosting_options(&self, options: HostingOptions) {
+        *self.hosting.lock() = options;
+    }
+
+    /// Offer (or stop offering) the web client from this device's hosted relay. Off by default.
+    /// Takes effect at the next [`start_hosting`](Self::start_hosting).
+    pub fn set_relay_web_access(&self, on: bool) {
+        let mut p = self.prefs.lock();
+        p.relay_web_access = on;
+        let _ = p.save(&self.paths);
+    }
+
+    pub fn relay_web_access(&self) -> bool {
+        self.prefs.lock().relay_web_access
+    }
+
     pub fn set_relay_media_limits(&self, max_age_days: u32, max_bytes: u64) {
         let mut p = self.prefs.lock();
         p.relay_media_max_age_days = Some(max_age_days);
@@ -5970,7 +6029,8 @@ impl Engine {
             }
             p.relay_http_token.clone()
         };
-        let port = match handle.serve_http("0.0.0.0:8674".into(), token.clone()).await {
+        let hosting = self.hosting.lock().clone();
+        let port = match handle.serve_http(hosting.http_bind.clone(), token.clone()).await {
             Ok(p) => p,
             Err(_) => match handle.serve_http("0.0.0.0:0".into(), token.clone()).await {
                 Ok(p) => p,
@@ -6024,17 +6084,21 @@ impl Engine {
         let mut path_routed = false;
         if let Some(dport) = derp_local {
             if sibling_derp.is_none() {
+                // The web client rides the same origin, but only when this build ships one AND the
+                // host turned web access on (off by default: a web session's code is delivered by
+                // this relay and whatever sits in front of it — docs/WEB-PARITY.md).
+                let web_app = if self.prefs.lock().relay_web_access { hosting.web_app.clone() } else { None };
                 let rcfg = crate::net::PathRouterConfig {
-                    bind: crate::net::DEFAULT_PATH_ROUTER_BIND.into(),
+                    bind: hosting.proxy_bind.clone(),
                     media_backend: format!("127.0.0.1:{port}"),
                     derp_backend: format!("127.0.0.1:{dport}"),
                     http_token: token.clone(),
-                    web_app: None,
+                    web_app,
                 };
                 // Prefer path proxy (one free cloudflared). Retry once on ephemeral bind if :8675 busy.
                 for attempt in 1u8..=2 {
                     let bind = if attempt == 1 {
-                        crate::net::DEFAULT_PATH_ROUTER_BIND.to_string()
+                        hosting.proxy_bind.clone()
                     } else {
                         "127.0.0.1:0".into()
                     };
@@ -6130,7 +6194,7 @@ impl Engine {
             )
             .await;
 
-        let turn_info = self.start_desktop_turn(&urls).await;
+        let turn_info = if hosting.turn { self.start_desktop_turn(&urls).await } else { None };
 
         // Always record HTTP when we have URLs; DERP can land even on LAN-only media
         // (local DERP still useful, public DERP only if we resolved a URL).
@@ -6209,7 +6273,7 @@ impl Engine {
     async fn spawn_desktop_derp_local(self: &Arc<Self>) -> Option<u16> {
         let dcfg = crate::net::DerpConfig {
             enabled: true,
-            bind: crate::net::DEFAULT_DERP_BIND.into(),
+            bind: self.hosting.lock().derp_bind.clone(),
             public_url: String::new(),
         };
         match crate::net::DerpServer::spawn(&dcfg).await {
@@ -6755,7 +6819,8 @@ impl Engine {
         let token = self.prefs.lock().relay_http_token.clone();
         if !token.is_empty() {
             // Prefer the well-known port so existing cloudflared front doors keep working.
-            if let Err(e) = handle.serve_http("0.0.0.0:8674".into(), token.clone()).await {
+            let http_bind = self.hosting.lock().http_bind.clone();
+            if let Err(e) = handle.serve_http(http_bind, token.clone()).await {
                 log::warn!("reattach http :8674 failed ({e}); trying ephemeral");
                 let _ = handle
                     .serve_http("0.0.0.0:0".into(), token.clone())
@@ -6937,6 +7002,102 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Tell my OWN other devices how to reach the relays I know (frame 36, `wire::RELAY_INTERFACE`):
+    /// each relay's HTTP URLs + token and DERP URL, sealed per device and signed by the account key.
+    /// Only a seed-holding device sends it — a seedless device has no account key to sign with, and
+    /// receivers accept nothing less. Cheap (one small sealed frame per sibling), so it rides the
+    /// sync tick: a sibling that was offline when it linked still learns its relays.
+    fn teach_my_devices_relay_interfaces(self: &Arc<Self>) {
+        if self.seed.is_none() {
+            return;
+        }
+        let others = self.my_other_device_hexes();
+        if others.is_empty() {
+            return;
+        }
+        let hexes: Vec<String> = {
+            let p = self.prefs.lock();
+            p.relay_entries
+                .values()
+                .filter(|e| e.active && !e.is_s3 && e.hex.len() == 64 && !e.http_urls.is_empty())
+                .map(|e| e.hex.clone())
+                .collect()
+        };
+        let relays: Vec<serde_json::Value> = hexes
+            .iter()
+            .filter_map(|h| serde_json::from_slice::<serde_json::Value>(&self.relay_announce_body(h)).ok())
+            .filter(|v| v.is_object())
+            .collect();
+        if relays.is_empty() {
+            return;
+        }
+        let Ok(json) = serde_json::to_vec(&relays) else { return };
+        let frame = wire::relay_interface_frame(&self.social.my_node_hex(), &json);
+        for dev in others {
+            self.send_call_frame(wire::RELAY_INTERFACE, &frame, &dev);
+        }
+    }
+
+    /// A frame-36 relay interface arrived. Accept it ONLY when it is signed by MY OWN ACCOUNT KEY:
+    /// not a contact (they use the circle-sealed frame 19), and not another device of mine speaking
+    /// for the account — a linked device that was compromised must not be able to repoint its
+    /// siblings at a relay of an attacker's choosing.
+    async fn handle_relay_interface(self: &Arc<Self>, sealed: &[u8]) {
+        let Some(opened) = self.social.open_call_frame(wire::RELAY_INTERFACE, sealed.to_vec()) else { return };
+        let me = self.social.my_node_hex().to_lowercase();
+        if me.len() != 64 || !opened.sender_hex.eq_ignore_ascii_case(&me) {
+            return; // signer is not my account key
+        }
+        let Some((declared, relays)) = wire::parse_relay_interface_frame(&opened.data) else { return };
+        if declared != me {
+            return;
+        }
+        let circle_ids: Vec<String> = self.social.circles().into_iter().map(|c| c.id).collect();
+        let mut changed = false;
+        {
+            let mut p = self.prefs.lock();
+            for v in relays.iter().take(32) {
+                let node = v["node"].as_str().unwrap_or_default().trim().to_lowercase();
+                if node.len() != 64 || !node.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    continue;
+                }
+                // A relay the user deleted on THIS device stays deleted; self-sync carries re-adds.
+                if p.suppressed_relays.contains(&node) || p.relay_forgotten_at_ms(&node) > 0 {
+                    continue;
+                }
+                let urls: Vec<String> = v["urls"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|u| u.as_str()).filter(|u| u.starts_with("http")).map(str::to_string).collect())
+                    .unwrap_or_default();
+                let token = v["token"].as_str().unwrap_or_default().to_string();
+                if !urls.is_empty() {
+                    changed |= p.set_relay_http(&node, urls, token);
+                }
+                if let Some(d) = v["derp"].as_str().map(|d| d.trim().trim_end_matches('/')).filter(|d| d.starts_with("http")) {
+                    changed |= p.set_relay_derp(&node, d);
+                }
+                for cid in &circle_ids {
+                    let list = p.relays.entry(cid.clone()).or_default();
+                    if !list.contains(&node) {
+                        list.push(node.clone());
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                let _ = p.save(&self.paths);
+            }
+        }
+        if !changed {
+            return; // the every-tick repeat of what we already hold
+        }
+        log::info!("relay interface learned from my account ({} relay(s))", relays.len());
+        self.refresh_haven_fabric();
+        self.poll_self_sync().await;
+        self.poll_mailbox().await;
+        self.emit_changed();
     }
 
     /// Periodically mirror MY OWN media to every circle relay I know (idempotent backup). The cross-device

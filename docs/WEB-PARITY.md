@@ -96,17 +96,25 @@ Done and proven (each line names what proves it):
 
 Next, in order:
 
-- [ ] **The relay serves the page.** A page can only use a relay's mailbox same-origin, and a
-      newly linked device learns the circle's current keys through the mailbox — so primary → tab
-      posts, self-sync, history and media all wait on this.
-      - [x] The path proxy serves a bundle under `/app/` from memory (`haven_net::webbundle`): a
-            fixed set of names, exact-match lookup, a closed list of content types, CSP and
-            no-sniff headers, ETag revalidation; off unless the host hands it a bundle; its digest
-            is in `/_haven`. The proxy still never touches the filesystem (it has a test for that).
-            Tests: `webbundle` unit tests, `core/haven-net/tests/path_proxy_webapp.rs`.
-      - [ ] Hosts hand it the bundle: the in-app relay host and `haven-relay`, behind a per-circle
-            "web access" switch that is off by default, with the bundle built into the release.
-      - [ ] `engine.mjs` runs against a hosting relay and asserts both directions.
+- [x] **The relay serves the page, and the tab uses its mailbox.** `engine.mjs` now loads the web
+      client from a hosting relay's own front door and asserts posts in BOTH directions.
+      - The path proxy serves a bundle under `/app/` from memory (`haven_net::webbundle`): a fixed
+        set of names, exact-match lookup, a closed list of content types, CSP and no-sniff headers,
+        ETag revalidation; its digest is in `/_haven`. The proxy still never touches the
+        filesystem (it has a test for that).
+      - A hosting engine hands it the bundle (`HostingOptions.web_app`) only while the
+        `relay_web_access` setting is on — **off by default**.
+      - A new frame, 36 (`wire::RELAY_INTERFACE`): the account's seed-holding device tells its own
+        other devices each relay's URLs + token. A browser has no blob transport and holds no
+        circle key yet, so it could not learn them any other way. Accepted only when signed by the
+        account's own key — not a contact, not another linked device.
+      - Fixed on the way: the proxy stripped `Connection: Upgrade` from WebSocket upgrades, which
+        every browser rejects (native clients never checked).
+- [ ] Hosts ship the bundle: the desktop/Mac/Android relay hosts and `haven-relay` need it built
+      into their releases and a "web access" switch in their settings.
+- [ ] Per-circle consent. Web access is a host-level switch today. "This circle allows web
+      devices" needs a device class in the credential and members refusing to seal to a web device
+      a circle has not allowed — a protocol change, to be modelled before it is built.
 - [ ] A command dispatcher for the browser (the 164 Tauri commands `desktop/ui` calls), then the UI
       itself, made responsive from phone to desktop.
 - [ ] Media in a browser: the cache lives in the in-memory tree today, which is fine for text and

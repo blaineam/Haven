@@ -379,6 +379,12 @@ pub struct Prefs {
     /// media URL; free auto still spins a second trycloudflare origin.
     #[serde(default)]
     pub relay_derp_url: String,
+    /// Serve the web client from OUR hosted relay (under `/app/` on its public origin), so circle
+    /// members can link a browser as one of their devices. **Off by default**: a web session's code
+    /// is delivered by this relay and by whatever sits in front of it, and whoever delivers it can
+    /// change it. See `docs/WEB-PARITY.md` § "What the web client trusts".
+    #[serde(default)]
+    pub relay_web_access: bool,
     /// Local notification preview detail: "full" | "private" | "minimal" (Apple/Android parity).
     #[serde(default)]
     pub notification_detail: Option<String>,

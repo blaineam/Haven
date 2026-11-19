@@ -46,6 +46,40 @@ pub const CALL_HANDLED: u8 = 30;
 /// ended elsewhere left this one in a dead call. Apple/Android frame 35 parity.
 pub const CALL_ENDED_ELSEWHERE: u8 = 35;
 
+/// "Here is how to reach our relays" — the account's seed-holding device tells one of its OWN other
+/// devices each relay's HTTP interface (URLs + access token) and DERP URL.
+/// `[hex64 account][JSON array of relay announce objects]` (the frame-19 object shape), sealed to the
+/// recipient device and signed by the ACCOUNT key (the call-frame envelope).
+///
+/// Why it exists: a new device learns a relay's interface either from the relay itself over the
+/// node's blob transport, or from a frame-19 announce — which is sealed under the circle's key, and
+/// a new device gets that key through the relay mailbox. A browser has no blob transport, so it
+/// could never take the first step. Receivers accept it ONLY from their own account's key — never
+/// from a contact, and never from another (possibly seedless) device of the account, so a
+/// compromised linked device cannot repoint its siblings' relays.
+pub const RELAY_INTERFACE: u8 = 36;
+
+/// Body of a [`RELAY_INTERFACE`] frame.
+pub fn relay_interface_frame(account_hex: &str, relays_json: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64 + relays_json.len());
+    out.extend_from_slice(account_hex.as_bytes());
+    out.extend_from_slice(relays_json);
+    out
+}
+
+/// Inverse of [`relay_interface_frame`]: `(declared account hex, relay objects)`.
+pub fn parse_relay_interface_frame(body: &[u8]) -> Option<(String, Vec<serde_json::Value>)> {
+    if body.len() < 64 {
+        return None;
+    }
+    let account = std::str::from_utf8(&body[..64]).ok()?.to_lowercase();
+    if !account.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let relays = serde_json::from_slice::<Vec<serde_json::Value>>(&body[64..]).ok()?;
+    Some((account, relays))
+}
+
 /// "Put this media back" — a reader asks a post's AUTHOR to re-upload a blob a relay has swept.
 /// `[hex64 sender][LP ref][LP circleId][LP postId]`. iOS/Android-compat.
 ///
@@ -349,6 +383,19 @@ pub fn chunk_frame(ref_bytes: &[u8], index: u32, total: u32, sealed: &[u8]) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_interface_frame_round_trips_and_rejects_malformed_bodies() {
+        let acct = "ab".repeat(32);
+        let json = br#"[{"node":"x","urls":["https://r.example"],"token":"t"}]"#;
+        let (a, relays) = parse_relay_interface_frame(&relay_interface_frame(&acct, json)).unwrap();
+        assert_eq!(a, acct);
+        assert_eq!(relays.len(), 1);
+        assert_eq!(relays[0]["urls"][0], "https://r.example");
+        assert!(parse_relay_interface_frame(b"short").is_none());
+        assert!(parse_relay_interface_frame(&relay_interface_frame(&"zz".repeat(32), json)).is_none());
+        assert!(parse_relay_interface_frame(&relay_interface_frame(&acct, b"{not an array}")).is_none());
+    }
 
     #[test]
     fn media_frame_roundtrip() {

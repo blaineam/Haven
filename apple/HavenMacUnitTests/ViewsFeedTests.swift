@@ -127,7 +127,17 @@ final class ViewsFeedTests: XCTestCase {
             @State var zoom: ZoomTarget?
             var body: some View { PostMasonryTile(item: item, media: [ref], ref: ref, height: 160, zoomTarget: $zoom).frame(width: 200, height: 160) }
         }
-        await ViewBench.renderDrawn(Holder(item: ViewFixtures.item("m1", media: [photo.ref]), ref: photo.ref), width: 220, height: 180)
+        // The bitmap decodes off the main thread and the tile's placeholder is a faint fill that an
+        // off-screen capture cannot tell from nothing (in light mode it is black at 12% alpha), so
+        // wait for the photo itself rather than asserting on whatever the first frames hold.
+        let host = await ViewBench.render(Holder(item: ViewFixtures.item("m1", media: [photo.ref]), ref: photo.ref), width: 220, height: 180)
+        var drawn = false
+        for _ in 0..<100 where !drawn {
+            host.layoutSubtreeIfNeeded()
+            drawn = ViewBench.colours(host) > 1
+            if !drawn { try? await Task.sleep(nanoseconds: 50_000_000) }
+        }
+        XCTAssertTrue(drawn, "the stored photo is drawn in its tile")
         let gone = "img_" + String(repeating: "9", count: 64)
         await ViewBench.render(Holder(item: ViewFixtures.item("m2", media: [gone]), ref: gone), width: 220, height: 180)
     }

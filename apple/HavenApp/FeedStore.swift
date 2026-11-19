@@ -5963,6 +5963,9 @@ final class FeedStore: ObservableObject {
     /// frame-19 to every member over iroh and re-arms dials to unreachable ids).
     func reannounceOwnRelay() {
         guard let engine else { return }
+        // My own other devices learn how to REACH those relays here too (a linked browser has no
+        // other way) — see `teachMyDevicesRelayInterfaces`.
+        teachMyDevicesRelayInterfaces()
         // Snapshot membership + announce plaintext on main (cheap), seal OFF main on the engine
         // actor — sealCircleMedia is real crypto and used to run for every circle×relay
         // on the main actor during the 45s host reannounce tick (beachball under concurrent receive).
@@ -6034,6 +6037,35 @@ final class FeedStore: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Frame 37 (`RELAY_INTERFACE`, core/haven-client/src/wire.rs): tell my OWN other devices how to
+    /// reach the relays I know — each relay's HTTP URLs + token and DERP URL — sealed per device and
+    /// signed by the ACCOUNT key. `[hex64 account][JSON array of frame-19 announce objects]`.
+    ///
+    /// A native device learns a relay's interface from the relay itself over the node's blob
+    /// transport, or from a frame-19 announce once it holds the circle's key. A BROWSER linked to
+    /// this account has no blob transport and gets the circle's key THROUGH the relay mailbox, so
+    /// without this it can never take the first step. Receivers accept it only from the account's
+    /// own key (never a contact, never another linked device), so only a seed-holding device sends
+    /// it. Cheap — one small sealed frame per sibling — so it rides the re-announce tick, and goes
+    /// to a device the moment it is linked (`to:`). Desktop/Android parity:
+    /// `Engine::teach_my_devices_relay_interfaces`, `HavenNet.teachMyDevicesRelayInterfaces`.
+    func teachMyDevicesRelayInterfaces(to only: String? = nil) {
+        guard engine != nil, AccountStore.storedSeed() != nil else { return }   // seedless devices cannot sign it
+        let targets = only.map { [$0.lowercased()] } ?? myOtherDeviceHexes()
+        guard !targets.isEmpty else { return }
+        let store = RelayMailboxStore.shared
+        let relays: [[String: Any]] = store.entries.keys.sorted().compactMap { hex in
+            guard hex.count == 64, !hex.hasPrefix("s3:"), store.isActive(hex),
+                  let http = store.httpInterface(hex), !http.urls.isEmpty else { return nil }
+            return (try? JSONSerialization.jsonObject(with: relayAnnounceData(hex))) as? [String: Any]
+        }
+        guard !relays.isEmpty,
+              let json = try? JSONSerialization.data(withJSONObject: relays, options: [.sortedKeys]) else { return }
+        var body = Data(myNodeHex.lowercased().utf8)
+        body.append(json)
+        for dev in targets { sendCallFrame(37, body, to: dev) }
     }
 
     /// The frame-19 announce body for one relay: bare 64-hex, or JSON with media/DERP/TURN.
@@ -7909,6 +7941,8 @@ final class FeedStore: ObservableObject {
             }
             self.nearbyBroadcast(29, grant)
             self.sendToDeviceHex(29, grant, request.deviceHex)   // directed to the requester
+            // …and how to reach our relays, which a browser device cannot learn any other way.
+            self.teachMyDevicesRelayInterfaces(to: request.deviceHex)
             // Populate the newly-seedless device: its self-sync base initializes from this pushed slot.
             self.pushFullStateToMyDevices()
             NotificationManager.shared.notify(title: "New device linked",

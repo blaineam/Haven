@@ -168,12 +168,12 @@ Next, in order:
 - [x] **Formal model** — `docs/formal/haven_web_device.spthy`, re-proved by `docs/formal/verify.sh`
       (and so by the `security-proofs` workflow) against `EXPECTED.txt`. With the network, the
       relay and any number of linked devices in the adversary's hands:
-      - W1: a device learns a relay's address only from its own account's key (frame 36);
+      - W1: a device learns a relay's address only from its own account's key (frame 37);
       - W2: a compromised linked device cannot enrol another device;
       - W3: the account key is never learned from a linked device;
       - W4: the relay token is readable only by the device it was sealed to.
       The `-DDEVICE_SPEAKS` variant models the looser rule that was NOT built ("any credentialed
-      device may send frame 36") and W1 is falsified there, on record. The code side of W1 is the
+      device may send frame 37") and W1 is falsified there, on record. The code side of W1 is the
       unit test `a_relay_interface_is_learned_only_from_the_accounts_own_key`. A symbolic model:
       it says nothing about a browser that is compromised while a session is open, which stays
       the stated limit of a web session.

@@ -57,7 +57,12 @@ pub const CALL_ENDED_ELSEWHERE: u8 = 35;
 /// could never take the first step. Receivers accept it ONLY from their own account's key — never
 /// from a contact, and never from another (possibly seedless) device of the account, so a
 /// compromised linked device cannot repoint its siblings' relays.
-pub const RELAY_INTERFACE: u8 = 36;
+pub const RELAY_INTERFACE: u8 = 37;
+
+/// RESERVED — the Apple apps' history hand-off nudge between a user's own devices ("look at the
+/// account lane now", `HistoryHandoff.nudgeFrame`). Desktop, Android and the browser neither send
+/// nor act on it (docs/MULTI-DEVICE.md); it is named here so the number is never reused.
+pub const HISTORY_NUDGE: u8 = 36;
 
 /// Body of a [`RELAY_INTERFACE`] frame.
 pub fn relay_interface_frame(account_hex: &str, relays_json: &[u8]) -> Vec<u8> {
@@ -383,6 +388,22 @@ pub fn chunk_frame(ref_bytes: &[u8], index: u32, total: u32, sealed: &[u8]) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Frame numbers are shared with the Apple and Android apps; two meanings for one number is a
+    /// cross-platform bug that no single platform's tests see.
+    #[test]
+    fn every_frame_type_has_its_own_number() {
+        let all = [
+            HELLO, EVENT, MEDIA_REQ, MEDIA_CHUNK, RELAY, CALL_INVITE, CALL_ACCEPT, CALL_HANGUP, CALL_AUDIO, CALL_VIDEO,
+            SDP_OFFER, SDP_ANSWER, ICE, RELAY_NODE, PRESIGN, GROUP_INVITE, CALL_CAMERA, DEVICE_ENROLL, DEVICE_GRANT,
+            DEVICE_ROSTER, SEEDLESS_ENROLL_REQ, SEEDLESS_ENROLL_GRANT, CALL_HANDLED, MEDIA_WANTED, MEDIA_AVAILABLE,
+            MEDIA_RESUME_REQ, HISTORY_REQ, CALL_ENDED_ELSEWHERE, HISTORY_NUDGE, RELAY_INTERFACE,
+        ];
+        let unique: std::collections::BTreeSet<u8> = all.iter().copied().collect();
+        assert_eq!(unique.len(), all.len(), "two frame types share a number");
+        assert_eq!(HISTORY_NUDGE, 36, "36 belongs to the Apple apps' history hand-off nudge");
+        assert_eq!(RELAY_INTERFACE, 37);
+    }
 
     #[test]
     fn relay_interface_frame_round_trips_and_rejects_malformed_bodies() {

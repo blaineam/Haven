@@ -22,6 +22,11 @@ object Wire {
     const val MEDIA_CHUNK: Int = 5
     const val RELAY: Int = 9
     const val RELAY_NODE: Int = 19   // circle relay/mailbox node id share
+    /** "Here is how to reach our relays" — the account's seed-holding device to its OWN other devices:
+     *  `[hex64 account][JSON array of relay announce objects]`, sealed per device, signed by the
+     *  account key. A linked browser has no other way to learn a relay's URL + token. Desktop
+     *  `wire::RELAY_INTERFACE`, iOS frame 37. (36 is iOS's history hand-off nudge.) */
+    const val RELAY_INTERFACE: Int = 37
     const val PRESIGN: Int = 20      // S3 pre-signed URL pool bootstrap
     const val DEVICE_ENROLL: Int = 24 // a device asks its primary to authorize it (multi-device, iOS-compat)
     const val DEVICE_GRANT: Int = 25  // the primary returns a signed credential to the requesting device

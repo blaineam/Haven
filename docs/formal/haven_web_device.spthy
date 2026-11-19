@@ -8,7 +8,7 @@
   things that bound that compromise, and the one new message the web client added.
 
   Code: core/haven-client/src/engine.rs (teach_my_devices_relay_interfaces, handle_relay_interface),
-  core/haven-client/src/wire.rs (RELAY_INTERFACE, frame 36), core/haven-p2p/src/device.rs
+  core/haven-client/src/wire.rs (RELAY_INTERFACE, frame 37), core/haven-p2p/src/device.rs
   (DeviceCredential), core/haven-p2p/src/enroll.rs. Spec: docs/WEB-PARITY.md.
 
   Run:  tamarin-prover --auto-sources --prove docs/formal/haven_web_device.spthy
@@ -20,7 +20,7 @@
      against the ticket).
    - A DEVICE has a signing key and an encryption key. The account signs a CREDENTIAL binding a
      device's keys to the account.
-   - RELAY INTERFACE (frame 36): the seed holder tells one of its own devices how to reach a relay
+   - RELAY INTERFACE (frame 37): the seed holder tells one of its own devices how to reach a relay
      — a URL and the relay's access TOKEN — sealed to that device's encryption key and signed.
      AS BUILT, the receiver accepts it only when the signature verifies under the pinned ACCOUNT
      key.
@@ -72,7 +72,7 @@ rule VerifierAccept:     /* anyone holding the pinned account key judges a prese
   --[ Eq(verify(sg, cred, pka), true), AcceptDevice($Ver, $A, D, dspk) ]->
   [ ]
 
-/* ---- Relay interface (frame 36) ------------------------------------------------------------ */
+/* ---- Relay interface (frame 37) ------------------------------------------------------------ */
 
 rule TeachRelay:         /* the seed holder tells its device D how to reach relay R */
   let body = <'iface', $A, $D, $R, ~tok> in

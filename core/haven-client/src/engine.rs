@@ -7006,7 +7006,7 @@ impl Engine {
         }
     }
 
-    /// Tell my OWN other devices how to reach the relays I know (frame 36, `wire::RELAY_INTERFACE`):
+    /// Tell my OWN other devices how to reach the relays I know (frame 37, `wire::RELAY_INTERFACE`):
     /// each relay's HTTP URLs + token and DERP URL, sealed per device and signed by the account key.
     /// Only a seed-holding device sends it — a seedless device has no account key to sign with, and
     /// receivers accept nothing less. Cheap (one small sealed frame per sibling), so it rides the
@@ -7042,7 +7042,7 @@ impl Engine {
         }
     }
 
-    /// A frame-36 relay interface arrived. Accept it ONLY when it is signed by MY OWN ACCOUNT KEY:
+    /// A frame-37 relay interface arrived. Accept it ONLY when it is signed by MY OWN ACCOUNT KEY:
     /// not a contact (they use the circle-sealed frame 19), and not another device of mine speaking
     /// for the account — a linked device that was compromised must not be able to repoint its
     /// siblings at a relay of an attacker's choosing.

@@ -2937,6 +2937,8 @@ object HavenNet : InboundListener {
             }.getOrNull() ?: return@launch
             NearbyTransport.broadcast(Wire.frame(Wire.SEEDLESS_ENROLL_GRANT, grant))
             runCatching { sendFrame(Wire.SEEDLESS_ENROLL_GRANT, grant, prompt.deviceHex) }
+            // …and how to reach our relays, which a browser device cannot learn any other way.
+            runCatching { teachMyDevicesRelayInterfaces(only = prompt.deviceHex) }
             pendingTickets.remove(secretHex)
             pendingRequestSecret = null
             scope.launch(Dispatchers.Main) { seedlessTicketUri.value = "" }
@@ -4717,6 +4719,9 @@ object HavenNet : InboundListener {
      * sync tick + on each connect. iOS reannounceOwnRelay parity.
      */
     private fun reannounceOwnRelay() {
+        // My own other devices learn how to REACH the relays I know here too (a linked browser has no
+        // other way) — whether or not this device hosts one itself.
+        runCatching { teachMyDevicesRelayInterfaces() }
         val hex = runCatching { relayHost?.nodeIdHex() }.getOrNull() ?: return
         if (hex.length != 64) return
         for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {
@@ -4838,7 +4843,9 @@ object HavenNet : InboundListener {
      * reliable cross-NAT media path too. Sealed to the circle either way; legacy receivers that expect
      * a bare hex simply ignore the JSON form (wrong length), so mixed versions stay compatible.
      */
-    private fun relayAnnounceBlob(circleId: String, nodeHex: String): ByteArray? {
+    /** The frame-19 announce OBJECT for one relay (`{node, addedAt, urls, token, derp, turn…}`), or
+     *  null when there is nothing but the bare id to say. */
+    private fun relayAnnounceJson(nodeHex: String): org.json.JSONObject? {
         val e = relayEntries[nodeHex]
         val addedAt = e?.addedAtMs ?: 0L
         val hasHttp = e != null && e.httpUrls.isNotEmpty() && e.httpToken.isNotEmpty()
@@ -4847,18 +4854,54 @@ object HavenNet : InboundListener {
         // ignores JSON it can't read as a bare hex (wrong length), so mixed versions stay compatible.
         val hasDerp = e != null && e.derpUrl.isNotEmpty()
         val hasTurn = e != null && e.turnUrls.isNotEmpty()
-        val payload = if (hasHttp || addedAt > 0 || hasDerp || hasTurn) {
-            org.json.JSONObject().put("node", nodeHex).put("addedAt", addedAt).apply {
-                if (hasHttp) { put("urls", JSONArray(e!!.httpUrls)); put("token", e.httpToken) }
-                if (hasDerp) put("derp", e!!.derpUrl)
-                if (hasTurn) {
-                    put("turn", JSONArray(e!!.turnUrls))
-                    if (e.turnUser.isNotEmpty()) put("turnUser", e.turnUser)
-                    if (e.turnPass.isNotEmpty()) put("turnPass", e.turnPass)
-                }
-            }.toString().toByteArray(Charsets.UTF_8)
-        } else nodeHex.toByteArray(Charsets.UTF_8)
+        if (!(hasHttp || addedAt > 0 || hasDerp || hasTurn)) return null
+        return org.json.JSONObject().put("node", nodeHex).put("addedAt", addedAt).apply {
+            if (hasHttp) { put("urls", JSONArray(e!!.httpUrls)); put("token", e.httpToken) }
+            if (hasDerp) put("derp", e!!.derpUrl)
+            if (hasTurn) {
+                put("turn", JSONArray(e!!.turnUrls))
+                if (e.turnUser.isNotEmpty()) put("turnUser", e.turnUser)
+                if (e.turnPass.isNotEmpty()) put("turnPass", e.turnPass)
+            }
+        }
+    }
+
+    private fun relayAnnounceBlob(circleId: String, nodeHex: String): ByteArray? {
+        val payload = (relayAnnounceJson(nodeHex)?.toString() ?: nodeHex).toByteArray(Charsets.UTF_8)
         return runCatching { social.sealCircleMedia(circleId, payload) }.getOrNull()
+    }
+
+    /**
+     * Frame 37 (`RELAY_INTERFACE`, core/haven-client/src/wire.rs): tell my OWN other devices how to
+     * reach the relays I know — each relay's HTTP URLs + token and DERP URL — sealed per device and
+     * signed by the ACCOUNT key. `[hex64 account][JSON array of frame-19 announce objects]`.
+     *
+     * A native device learns a relay's interface from the relay itself over the node's blob transport,
+     * or from a frame-19 announce once it holds the circle's key. A BROWSER linked to this account has
+     * no blob transport and gets the circle's key THROUGH the relay mailbox, so without this it can
+     * never take the first step. Receivers accept it only from the account's own key (never a contact,
+     * never another linked device), so only a seed-holding device sends it. Cheap — one small sealed
+     * frame per sibling — so it rides the sync tick, and goes to a device the moment it is linked
+     * ([only]). iOS/desktop parity: `FeedStore.teachMyDevicesRelayInterfaces`,
+     * `Engine::teach_my_devices_relay_interfaces`.
+     */
+    private fun teachMyDevicesRelayInterfaces(only: String? = null) {
+        if (core.seedless) return   // a seedless device holds no account key to sign it with
+        val targets = only?.let { listOf(it.lowercase()) } ?: runCatching { myOtherDeviceHexes() }.getOrDefault(emptyList())
+        if (targets.isEmpty()) return
+        val relays = JSONArray()
+        for ((hex, e) in relayEntries.toSortedMap()) {
+            if (hex.length != 64 || e.isS3 || !e.active || e.httpUrls.isEmpty() || e.httpToken.isEmpty()) continue
+            relayAnnounceJson(hex)?.let { relays.put(it) }
+        }
+        if (relays.length() == 0) return
+        val account = runCatching { social.myNodeHex() }.getOrNull()?.lowercase() ?: return
+        val body = account.toByteArray(Charsets.UTF_8) + relays.toString().toByteArray(Charsets.UTF_8)
+        for (dev in targets) {
+            val sealed = runCatching { social.sealCallFrame(dev, Wire.RELAY_INTERFACE.toUByte(), body) }.getOrNull() ?: continue
+            if (sealed.isEmpty()) continue
+            runCatching { sendFrame(Wire.RELAY_INTERFACE, sealed, dev) }
+        }
     }
 
     /** Frame 19: [LP circleId][sealCircleMedia(relay node hex | {"node","urls","token"} JSON)].

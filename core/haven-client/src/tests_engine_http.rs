@@ -999,7 +999,7 @@ async fn the_legacy_device_enrollment_hands_a_credential_to_a_second_device_of_t
     p.step_down_as_primary();
 }
 
-// ── frame 36: the account tells its own devices how to reach its relays ───────────────────────
+// ── frame 37: the account tells its own devices how to reach its relays ───────────────────────
 
 /// A seedless device linked to `p`, rebuilt from its persisted state the way a relaunch does (so
 /// its engine is on the real account, not the linking placeholder).

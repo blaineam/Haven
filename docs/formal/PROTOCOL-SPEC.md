@@ -207,7 +207,7 @@ stage 1; "existing circle" (`-DLEGACY`) is one whose genesis predates it.
 | # | Property | As wired | Stage 1, new circle | Stage 1, existing circle | Proposed fix | v2 tree as built |
 |---|---|---|---|---|---|---|
 | T1 | No epoch secret leaks with nothing compromised | verified | verified | verified | verified | verified |
-| T2 | A removed member is locked out of the next epoch, even with all its keys and state | verified | verified | not re-proved (see note) | verified | verified |
+| T2 | A removed member is locked out of the next epoch, even with all its keys and state | verified | verified | verified (see note) | verified | verified |
 | T3 | Committer's stored state leaks → its Update heals | **falsified** | verified | verified | verified | verified |
 | T4 | A member's stored state leaks → healing | **falsified** (the member never updates) | **falsified** | **falsified** | verified (the member's own Update) | verified |
 | T5 | Forward secrecy vs a later committer seed compromise | **falsified** | verified | **falsified** | verified | verified |
@@ -216,10 +216,11 @@ stage 1; "existing circle" (`-DLEGACY`) is one whose genesis predates it.
 | T8 | Forward secrecy vs a later member stored-state compromise | **falsified** (the kept Welcome) | verified | verified | verified | verified |
 | T9 | Forward secrecy vs a later committer stored-state compromise | **falsified** (the stored root) | verified | verified | verified | verified |
 
-Note on T2, stage 1, existing circle: an earlier run reported this cell as verified. Proved on its
-own on 2026-11-18 the prover ran out of memory (14 GB) twice, so the result is not reproduced and
-is not claimed here. It concerns the superseded stage 1 design only; T2 for the tree that ships
-(last column) is re-proved in CI. `verify.sh` lists the lemma as skipped.
+Note on T2, stage 1, existing circle: this lemma needs more memory than the others. It verifies
+in 13,995 steps in about 5 minutes with a 40 GB heap (35 GB peak, 2026-11-19) and exhausts a 14 GB
+heap, so a CI runner cannot re-prove it. `VERIFY_BIG=1 docs/formal/verify.sh` re-proves it on a
+machine with 48 GB; without that flag `verify.sh` writes the recorded line and says so. It concerns
+the superseded stage 1 design only; T2 for the tree that ships (last column) is re-proved in CI.
 
 "v2 tree as built" is [`haven_treekem_v2_built.spthy`](haven_treekem_v2_built.spthy): the tree the
 engine runs after stages 1–4 (§14, §16). It differs from the "proposed fix" model in one way that

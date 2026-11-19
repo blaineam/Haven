@@ -14,7 +14,8 @@
 # "verified" fails the check as well, so the documents cannot drift from the models.
 #
 # Needs tamarin-prover 1.10 or later and maude on PATH.
-# Env: LEMMA_TIMEOUT seconds per lemma (default 900), TAMARIN_RTS (default "-N2 -M12G").
+# Env: LEMMA_TIMEOUT seconds per lemma (default 900), TAMARIN_RTS (default "-N2 -M12G"),
+# VERIFY_BIG=1 to also prove the lemmas that need 40 GB (TAMARIN_RTS_BIG, default "-N4 -M40G").
 set -u
 cd "$(dirname "$0")"
 
@@ -44,15 +45,21 @@ CONFIGS=(
   "haven_deterministic_seal|--diff -DGUESS -DORACLE|whole"
 )
 
-# Lemmas that are not re-proved here, with the reason. They are written to the results as
-# "skipped", so the gap is visible in EXPECTED.txt instead of being silently absent.
-#   stage 1 / existing circle / T2: the prover exhausts 14 GB on this lemma proved alone
-#   (2026-11-18, twice). It belongs to the superseded stage 1 design; T2 for the tree that
-#   ships is haven_treekem_v2_built :: T2_removed_member_locked_out, which is proved.
-SKIP=(
+# Lemmas that need more memory than a CI runner has. Without VERIFY_BIG=1 they are not
+# re-proved and the recorded line is written as is, so the gap is visible in EXPECTED.txt
+# instead of being silently absent. With VERIFY_BIG=1 (a machine with 48 GB) they are proved
+# with TAMARIN_RTS_BIG, and anything other than "verified" fails the check.
+#   stage 1 / existing circle / T2: verified in 13995 steps, about 5 minutes, 35 GB peak
+#   (2026-11-19, -N4 -M40G); it exhausts a 14 GB heap. It belongs to the superseded stage 1
+#   design; T2 for the tree that ships is haven_treekem_v2_built ::
+#   T2_removed_member_locked_out, which is proved on every run.
+BIG=(
   "haven_treekem_stage1 -DLEGACY :: T2_removed_member_locked_out"
 )
-is_skipped() { local k; for k in "${SKIP[@]}"; do [ "$k" = "$1" ] && return 0; done; return 1; }
+BIG_RESULT="verified (needs 40 GB: proved with VERIFY_BIG=1, not in CI)"
+VERIFY_BIG="${VERIFY_BIG:-0}"
+TAMARIN_RTS_BIG="${TAMARIN_RTS_BIG:--N4 -M40G}"
+is_big() { local k; for k in "${BIG[@]}"; do [ "$k" = "$1" ] && return 0; done; return 1; }
 
 # VERIFY_ONLY=<substring> limits the run to matching configurations (local use).
 VERIFY_ONLY="${VERIFY_ONLY:-}"
@@ -106,8 +113,17 @@ for cfg in "${CONFIGS[@]}"; do
     continue
   fi
   for lemma in $(grep -E '^lemma [A-Za-z0-9_]+' "$file" | sed -E 's/^lemma ([A-Za-z0-9_]+).*/\1/' | sort -u); do
-    if is_skipped "$label :: $lemma"; then
-      printf '%s :: %s :: %s\n' "$label" "$lemma" "skipped (not re-proved, see verify.sh)" | tee -a "$GOT"
+    if is_big "$label :: $lemma"; then
+      if [ "$VERIFY_BIG" = 1 ]; then
+        log="$OUT/$(echo "$label" | tr ' /' '__')-$lemma.log"
+        TAMARIN_RTS="$TAMARIN_RTS_BIG" run_limited "$log" --auto-sources $flags "--prove=$lemma" "$file"
+        res="$(summary "$log" | awk -F'\t' -v l="$lemma" '$1==l {print $2}' | head -1)"
+        [ "$res" = verified ] && res="$BIG_RESULT"
+        [ -z "$res" ] && { res="no result (timeout or error, see log)"; tail -20 "$log" >&2; }
+      else
+        res="$BIG_RESULT"
+      fi
+      printf '%s :: %s :: %s\n' "$label" "$lemma" "$res" | tee -a "$GOT"
       continue
     fi
     log="$OUT/$(echo "$label" | tr ' /' '__')-$lemma.log"

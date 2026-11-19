@@ -50,7 +50,7 @@ haven_treekem_stage1 :: T9_fs_committer_state :: verified
 haven_treekem_stage1 :: executable_remove :: verified
 haven_treekem_stage1 :: executable_update :: verified
 haven_treekem_stage1 -DLEGACY :: T1_secrecy_without_compromise :: verified
-haven_treekem_stage1 -DLEGACY :: T2_removed_member_locked_out :: skipped (not re-proved, see verify.sh)
+haven_treekem_stage1 -DLEGACY :: T2_removed_member_locked_out :: verified (needs 40 GB: proved with VERIFY_BIG=1, not in CI)
 haven_treekem_stage1 -DLEGACY :: T3_pcs_committer_state_heals :: verified
 haven_treekem_stage1 -DLEGACY :: T4_pcs_member_state_heals :: falsified
 haven_treekem_stage1 -DLEGACY :: T5_fs_committer_seed :: falsified

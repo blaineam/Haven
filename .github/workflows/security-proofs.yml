@@ -43,6 +43,9 @@ jobs:
       - name: Install Tamarin
         run: |
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          # Homebrew refuses formulae from a tap until it is trusted; maude comes from the same tap.
+          brew tap tamarin-prover/tap
+          brew trust tamarin-prover/tap
           brew install tamarin-prover/tap/tamarin-prover
           echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
           tamarin-prover --version

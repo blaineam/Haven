@@ -344,11 +344,22 @@ async fn serve_app(client: &mut TcpStream, head: &[u8], path: &str, state: &Prox
     let Some(file) = bundle.lookup(path_only) else {
         return write_simple(client, 404, "not found", b"not part of the web client\n").await;
     };
+    // Send the pre-compressed body to a client that says it takes gzip. The ETag names the
+    // representation, so a cache never confuses the two.
+    let gz = file.gzip.as_ref().filter(|_| {
+        header_value(head, "accept-encoding")
+            .map(|v| v.split(',').any(|e| e.trim().split(';').next().map(|n| n.trim().eq_ignore_ascii_case("gzip")).unwrap_or(false)))
+            .unwrap_or(false)
+    });
+    let body: &[u8] = gz.map(|g| g.as_slice()).unwrap_or(&file.body);
+    let etag = if gz.is_some() { format!("{}-gz\"", file.etag.trim_end_matches('"')) } else { file.etag.clone() };
     // `no-cache` = "revalidate every time", not "don't store": the page always runs the build this
     // relay serves now, and an unchanged file costs one 304.
     let common = format!(
-        "ETag: {}\r\n\
+        "ETag: {etag}\r\n\
          Cache-Control: no-cache\r\n\
+         Vary: Accept-Encoding\r\n\
+         {}\
          Content-Security-Policy: {}\r\n\
          X-Content-Type-Options: nosniff\r\n\
          Referrer-Policy: no-referrer\r\n\
@@ -356,10 +367,10 @@ async fn serve_app(client: &mut TcpStream, head: &[u8], path: &str, state: &Prox
          Cross-Origin-Resource-Policy: same-origin\r\n\
          X-Haven-Path-Proxy: 1\r\n\
          Connection: close\r\n",
-        file.etag,
+        if gz.is_some() { "Content-Encoding: gzip\r\n" } else { "" },
         crate::webbundle::CONTENT_SECURITY_POLICY
     );
-    if header_value(head, "if-none-match").map(|v| v.split(',').any(|t| t.trim() == file.etag)).unwrap_or(false) {
+    if header_value(head, "if-none-match").map(|v| v.split(',').any(|t| t.trim() == etag)).unwrap_or(false) {
         client.write_all(format!("HTTP/1.1 304 Not Modified\r\n{common}\r\n").as_bytes()).await?;
         let _ = client.shutdown().await;
         return Ok(());
@@ -367,11 +378,11 @@ async fn serve_app(client: &mut TcpStream, head: &[u8], path: &str, state: &Prox
     let resp = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n{common}\r\n",
         file.content_type,
-        file.body.len()
+        body.len()
     );
     client.write_all(resp.as_bytes()).await?;
     if method == "GET" {
-        client.write_all(&file.body).await?;
+        client.write_all(body).await?;
     }
     let _ = client.shutdown().await;
     Ok(())

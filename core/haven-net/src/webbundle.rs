@@ -30,6 +30,25 @@ pub struct WebFile {
     pub body: Vec<u8>,
     /// Strong validator: lower-hex BLAKE3 of the body, quoted.
     pub etag: String,
+    /// The body gzip-compressed, when that is meaningfully smaller — made once, at insert. Served
+    /// to a client that accepts gzip (a 10 MB WebAssembly module is about a third of that).
+    pub gzip: Option<Vec<u8>>,
+}
+
+/// gzip `body` if it is a compressible type and the result saves at least a tenth.
+fn gzip_if_worth_it(content_type: &str, body: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write;
+    let compressible = content_type.starts_with("text/")
+        || content_type.starts_with("application/json")
+        || content_type == "application/wasm"
+        || content_type == "image/svg+xml";
+    if !compressible || body.len() < 1024 {
+        return None;
+    }
+    let mut enc = flate2::write::GzEncoder::new(Vec::with_capacity(body.len() / 3), flate2::Compression::best());
+    enc.write_all(body).ok()?;
+    let out = enc.finish().ok()?;
+    (out.len() * 10 <= body.len() * 9).then_some(out)
 }
 
 /// The files of one build of the web client.
@@ -85,7 +104,8 @@ impl WebBundle {
             return false;
         }
         let etag = format!("\"{}\"", blake3::hash(&body).to_hex());
-        self.files.insert(name.to_string(), WebFile { content_type, body, etag });
+        let gzip = gzip_if_worth_it(content_type, &body);
+        self.files.insert(name.to_string(), WebFile { content_type, body, etag, gzip });
         true
     }
 
@@ -172,6 +192,24 @@ mod tests {
         }
         assert!(b.is_empty());
         assert!(b.insert("palette-icons/a-1_b.svg", b"<svg/>".to_vec()));
+    }
+
+    #[test]
+    fn large_compressible_files_carry_a_gzip_body_that_inflates_to_the_original() {
+        use std::io::Read;
+        let mut b = WebBundle::new();
+        let js: Vec<u8> = b"export function hello() { return 'haven'; }\n".iter().cycle().take(40_000).copied().collect();
+        assert!(b.insert("app.js", js.clone()));
+        assert!(b.insert("tiny.js", b"export{}".to_vec()));
+        assert!(b.insert("icon.png", vec![7u8; 5000]));
+        let f = b.lookup("/app/app.js").unwrap();
+        let gz = f.gzip.as_ref().expect("a large script is pre-compressed");
+        assert!(gz.len() * 10 <= js.len() * 9);
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(&gz[..]).read_to_end(&mut out).unwrap();
+        assert_eq!(out, js);
+        assert!(b.lookup("/app/tiny.js").unwrap().gzip.is_none(), "not worth it for a tiny file");
+        assert!(b.lookup("/app/icon.png").unwrap().gzip.is_none(), "images are already compressed");
     }
 
     #[test]

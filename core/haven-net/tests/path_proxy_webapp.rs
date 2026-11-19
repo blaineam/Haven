@@ -122,3 +122,39 @@ async fn a_relay_without_web_access_serves_no_app_and_says_so_in_status() {
     let text = String::from_utf8_lossy(&status_json).to_string();
     assert!(text.contains(&format!("\"web\":{{\"path\":\"/app/\",\"files\":2,\"digest\":\"{}\"}}", b.digest())), "{text}");
 }
+
+#[tokio::test]
+async fn a_client_that_accepts_gzip_gets_the_compressed_body_and_others_get_it_plain() {
+    use std::io::Read;
+    let script: Vec<u8> = b"export const haven = 'private little place';\n".iter().cycle().take(60_000).copied().collect();
+    let mut b = WebBundle::new();
+    assert!(b.insert("index.html", b"<!doctype html>".to_vec()));
+    assert!(b.insert("app.js", script.clone()));
+    let r = router(Some(Arc::new(b))).await;
+
+    let (status, headers, body) = request(&r, "GET /app/app.js HTTP/1.1\r\nHost: x\r\nAccept-Encoding: br, gzip;q=0.9\r\n\r\n").await;
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(headers.contains("content-encoding: gzip") && headers.contains("vary: accept-encoding"));
+    assert!(body.len() < script.len() / 2, "compressed on the wire");
+    let mut plain = Vec::new();
+    flate2::read::GzDecoder::new(&body[..]).read_to_end(&mut plain).unwrap();
+    assert_eq!(plain, script);
+    let gz_etag = headers.lines().find_map(|l| l.strip_prefix("etag: ")).unwrap().to_string();
+
+    let (status, headers, body) = request(&r, &get("/app/app.js")).await;
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(!headers.contains("content-encoding"));
+    assert_eq!(body, script);
+    let plain_etag = headers.lines().find_map(|l| l.strip_prefix("etag: ")).unwrap().to_string();
+    assert_ne!(gz_etag, plain_etag, "the two representations have different validators");
+
+    // Revalidation works per representation.
+    let (status, _, _) = request(&r, &format!("GET /app/app.js HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\nIf-None-Match: {gz_etag}\r\n\r\n")).await;
+    assert_eq!(status, "HTTP/1.1 304 Not Modified");
+    let (status, _, _) = request(&r, &format!("GET /app/app.js HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\nIf-None-Match: {plain_etag}\r\n\r\n")).await;
+    assert_eq!(status, "HTTP/1.1 200 OK");
+
+    // A small file is served as it is, whatever the client accepts.
+    let (_, headers, _) = request(&r, "GET /app/ HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\n\r\n").await;
+    assert!(!headers.contains("content-encoding"));
+}

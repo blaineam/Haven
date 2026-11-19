@@ -45,6 +45,23 @@ pub fn offline() -> bool {
     }
 }
 
+static PUSH_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stop this process from calling the push worker (a harness driving throwaway identities has no
+/// one to wake, and must not send test traffic to the production worker).
+pub fn set_push_off(off: bool) {
+    PUSH_OFF.store(off, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Must this process stay away from the push worker? True when [`offline`], when a harness asked
+/// ([`set_push_off`]), or when `HAVEN_NO_PUSH` is set in the environment.
+pub fn push_off() -> bool {
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    offline()
+        || PUSH_OFF.load(std::sync::atomic::Ordering::Relaxed)
+        || *ENV.get_or_init(|| std::env::var("HAVEN_NO_PUSH").map(|v| !v.is_empty() && v != "0").unwrap_or(false))
+}
+
 /// The gate for ONE relay HTTP base URL (`relay_http_reachable`, `http_get/put/head/list_delta`). In a
 /// release build this is exactly [`offline`]. In a unit test it additionally lets through the loopback
 /// stub relays a test registered with [`register_test_stub`] — and nothing else — so the lane can be
@@ -84,6 +101,17 @@ fn decide(no_net: Option<&str>, demo: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_harness_can_keep_the_process_off_the_push_worker() {
+        // (HAVEN_NO_NET is set for this test binary, so `push_off` is already true; check the switch
+        // itself rather than the combined answer.)
+        use std::sync::atomic::Ordering::Relaxed;
+        super::set_push_off(true);
+        assert!(super::PUSH_OFF.load(Relaxed) && super::push_off());
+        super::set_push_off(false);
+        assert!(!super::PUSH_OFF.load(Relaxed));
+    }
+
     use super::decide;
 
     #[test]

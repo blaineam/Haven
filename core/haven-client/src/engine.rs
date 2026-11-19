@@ -1203,7 +1203,7 @@ impl Engine {
     /// republish traffic). Fire-and-forget — polling still carries everything if push is down.
     /// Parity with iOS `PushManager.wake` / `syncSelf`.
     fn push_wake(&self, node_hex: &str, ciphertext: Option<String>, event: Option<String>, silent: bool) {
-        if node_hex.is_empty() {
+        if node_hex.is_empty() || crate::netgate::push_off() {
             return;
         }
         let mut body = serde_json::json!({

@@ -64,7 +64,8 @@ owner turns it on, because other members' posts become readable in that browser.
 | Browser core: engine + relay-only transport (wasm32 only) | `core/haven-web` |
 | Build → `web-client/pkg` | `web-client/build.sh` |
 | Transport smoke (headless Chromium vs. the native wire) | `web-client/smoke/smoke.mjs`, `core/haven-net/examples/web_peer.rs` |
-| Session smoke (link + sealed posts both ways) | `web-client/smoke/session.mjs`, `core/haven-ffi/examples/web_primary.rs` |
+| Engine smoke (the shared engine in a tab ↔ the same engine natively) | `web-client/smoke/engine.mjs`, `core/haven-client/examples/web_primary_engine.rs` |
+| Durable storage for a tab (IndexedDB write-behind) | `web-client/storage.js` |
 | Request signing shared by relay, native clients and browser | `core/haven-p2p/src/httpauth.rs` |
 
 `haven_ffi` (the engine) now builds for `wasm32-unknown-unknown`: its native-only parts — the iroh
@@ -73,26 +74,44 @@ supplies the transport. `web/` is still only the static invite-landing site.
 
 ## Progress
 
-- [x] Engine and crypto core compile to WebAssembly; the engine self-test passes in Chromium.
-- [x] Relay-only iroh node in a tab: reaches a native node and is reached by one, through a circle
-      DERP, sender ids authenticated, 2 MiB frames (`web-client/smoke`).
-- [x] Seedless enrollment of a tab with a `haven-enroll:` ticket (frames 28/29); a tampered grant is
-      refused (`web-client/smoke/session.mjs` against `core/haven-ffi/examples/web_primary.rs`).
-- [x] One sealed post each way between a tab and the account's primary device, over the app wire.
-- [ ] Signed mailbox over `fetch`, same-origin with the relay; the relay serves the bundle.
-- [ ] The same against a shipping native app, and through a real Cloudflare tunnel.
+Done and proven (each line names what proves it):
+
+- [x] The engine and crypto core compile to WebAssembly; the engine self-test passes in Chromium
+      (`web-client/smoke/smoke.mjs`).
+- [x] Relay-only node in a tab: reaches a native node and is reached by one through a circle DERP,
+      sender ids authenticated, 2 MiB frames (`smoke.mjs`, `core/haven-net/examples/web_peer.rs`).
+- [x] The client layer is one crate, `core/haven-client`, shared by the desktop app and the browser:
+      the engine, its stores, wire, self-sync, roster, media and relay policy. The desktop app keeps
+      its Tauri glue, commands, QA, demo and Instagram import. Native: 347 tests there + 108 in
+      desktop.
+- [x] That whole crate builds for wasm32, behind five seams (see its `lib.rs`): `rt` (tasks,
+      timers), `host` (UI events, notifications), `fs` (std::fs | an in-memory tree), `secrets`
+      (OS keyring | a corner of `fs`), `transport`/`net` (native node + hosting | relay-only node,
+      no hosting).
+- [x] **The real engine runs in a tab** (`web-client/smoke/engine.mjs` against the same engine
+      running natively, `core/haven-client/examples/web_primary_engine.rs`): a fresh tab holds no
+      identity; it links with a `haven-enroll:` ticket and the primary's approval; the linked state
+      survives a reload (IndexedDB, `web-client/storage.js`); a post authored in the tab is opened
+      by the primary and attributed to the account.
+
+Next, in order:
+
+- [ ] **The relay serves the page** (path proxy: static bundle + mailbox + DERP on one origin). A
+      page can only use a relay's mailbox same-origin, and a newly linked device learns the circle's
+      current keys through the mailbox — so primary → tab posts, self-sync, history and media all
+      wait on this. `engine.mjs` then runs against a real relay and asserts both directions.
+- [ ] A command dispatcher for the browser (the 164 Tauri commands `desktop/ui` calls), then the UI
+      itself, made responsive from phone to desktop.
+- [ ] Media in a browser: the cache lives in the in-memory tree today, which is fine for text and
+      wrong for video. It needs a blob store of its own (OPFS / Cache API).
+- [ ] Secrets at rest: "my computer" wraps storage under a non-extractable browser key; "public
+      computer" never persists. Today everything persists unwrapped in IndexedDB.
 - [ ] Scan-to-link: the tab shows a QR and the phone scans it (today the tab must be given the
-      ticket text, which suits a second computer but not a phone-to-kiosk link).
-- [x] Client layer lifted out of the desktop app into `core/haven-client`: the engine, its stores,
-      wire, self-sync, roster, media and relay policy, with their tests. The desktop app keeps only
-      its Tauri glue, commands, QA, demo and Instagram import, and reaches the engine through two
-      seams: `rt` (where background work runs) and `host` (UI events, notifications).
-- [ ] The engine tier compiles for wasm32. Still native-only: filesystem (→ a storage seam), OS
-      keyring (→ a secrets seam), tokio timers, the native node and relay client (→ a transport
-      seam over the relay-only node), relay hosting and tunnels (stay native), AVIF preview encode.
-- [ ] A command dispatcher for the browser (the 164 Tauri commands the UI calls).
-- [ ] Responsive UI (phone → desktop), from `desktop/ui`.
+      ticket text — fine for a second computer, not for phone-to-kiosk).
+- [ ] The same against a shipping native app, and through a real Cloudflare tunnel.
 - [ ] Calls (WebRTC + the relay hairpin), Web Push.
+- [ ] Account → device discovery in a browser (resolve/publish are stubs; rosters and inbound
+      frames supply device ids for now).
 - [ ] Tamarin model for the web device class + CI guards, before any release.
 
 ## Open questions
@@ -101,6 +120,12 @@ supplies the transport. `web/` is still only the static invite-landing site.
   on. Today it is given the circle's DERP alone. Native devices also keep n0's public relays in
   their map and may be homed on one, so the tab should probably carry them too where the network
   allows, and fall back to the mailbox where it does not.
+
+- **Push from a browser.** The engine wakes other devices through the push worker. A page cannot
+  call it today (no CORS), so a web device relies on the mailbox poll and live frames. Allowing it
+  means the worker accepting browser origins — a decision about maker-run infrastructure.
+- **Engine restart.** The engine has no shutdown; the desktop app relaunches after linking, and a
+  tab reloads. Fine, but it means every "switch identity / unlink" path in a browser is a reload.
 
 ## History — why it was abandoned (2026-06-22)
 

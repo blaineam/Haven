@@ -1,0 +1,222 @@
+//! Haven running in a tab: the shared client [`Engine`] (`haven-client` — the same code the
+//! desktop app runs) on a relay-only node, with the page as its host.
+//!
+//! A browser device is always a **seedless linked device**: it is given a `haven-enroll:` ticket by
+//! one of the account's devices, proves possession of it, and receives a credential, the signed
+//! roster and the self-sync key — never the account's master seed. There is no web sign-up.
+
+use std::cell::RefCell;
+use std::sync::Arc;
+
+use haven_client::engine::{self, Engine};
+use haven_client::host::{AppHandle, Host};
+use haven_client::roster::Seedless;
+use haven_client::store::{self, Paths};
+use wasm_bindgen::prelude::*;
+
+/// The page, as the engine sees it: UI events go to one callback as `(name, json)`.
+struct PageHost {
+    on_event: js_sys::Function,
+}
+
+// SAFETY: wasm32-unknown-unknown without the atomics feature has exactly one thread; the engine's
+// `Host` contract asks for `Send + Sync` because native hosts are called from many. A `Function`
+// never leaves the thread it was created on here.
+unsafe impl Send for PageHost {}
+unsafe impl Sync for PageHost {}
+
+impl Host for PageHost {
+    fn emit(&self, event: &str, payload: serde_json::Value) -> Result<(), String> {
+        self.on_event
+            .call2(&JsValue::NULL, &JsValue::from_str(event), &JsValue::from_str(&payload.to_string()))
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    fn notify(&self, title: &str, body: &str) {
+        // The page decides how to surface it (Notifications API when permitted, a toast otherwise).
+        let payload = serde_json::json!({ "title": title, "body": body });
+        let _ = self.emit("haven:os-notify", payload);
+    }
+}
+
+fn js_err(e: impl std::fmt::Display) -> JsError {
+    JsError::new(&e.to_string())
+}
+
+/// The data dir of the active identity, if this browser has one.
+fn active_paths() -> Result<Option<Paths>, JsError> {
+    let base = Paths::resolve().map_err(js_err)?;
+    let ids = store::Identities::load(&base);
+    let Some(entry) = ids.active_entry().cloned() else { return Ok(None) };
+    Paths::resolve_for(&entry.dir).map(Some).map_err(js_err)
+}
+
+/// One Haven device in this tab.
+#[wasm_bindgen]
+pub struct WebApp {
+    host: AppHandle,
+    engine: RefCell<Option<Arc<Engine>>>,
+}
+
+#[wasm_bindgen]
+impl WebApp {
+    /// Create the app. `on_event(name, json)` receives every engine UI event (`haven:changed`,
+    /// `haven:enrolled`, `haven:notify`, `haven:call`, …). Nothing is started yet: call
+    /// [`set_relays`](Self::set_relays) then [`boot`](Self::boot).
+    #[wasm_bindgen(constructor)]
+    pub fn new(on_event: js_sys::Function) -> WebApp {
+        WebApp { host: AppHandle::new(Arc::new(PageHost { on_event })), engine: RefCell::new(None) }
+    }
+
+    /// The relay front door(s) this page was served from (DERP base URLs). They stay in the
+    /// node's relay map alongside whatever relays the linked account knows. Must be set before
+    /// [`boot`](Self::boot): the relay map is fixed when the node binds.
+    #[wasm_bindgen(js_name = setRelays)]
+    pub fn set_relays(&self, derp_urls: Vec<String>) {
+        haven_client::net::set_origin_relays(derp_urls);
+    }
+
+    /// Does this browser hold no identity yet (so the page must show the link screen)?
+    #[wasm_bindgen(js_name = needsOnboarding)]
+    pub fn needs_onboarding(&self) -> Result<bool, JsError> {
+        Ok(active_paths()?.is_none())
+    }
+
+    /// Start the engine for the stored identity and bring its node online. Resolves `false` when
+    /// there is no identity to boot. Once per page load: after `haven:enrolled` the page flushes
+    /// storage and reloads, and the next boot builds the engine from the now-linked state — the
+    /// same relaunch the desktop app does.
+    pub async fn boot(&self) -> Result<bool, JsError> {
+        if self.engine.borrow().is_some() {
+            return Err(JsError::new("the engine is already running; reload the page to restart it"));
+        }
+        let Some(paths) = active_paths()? else { return Ok(false) };
+        if !Seedless::is_enabled(&paths) {
+            return Err(JsError::new("this browser's stored identity is not a linked device"));
+        }
+        let engine = Engine::new_seedless(paths).map_err(js_err)?;
+        engine.set_app(self.host.clone());
+        *self.engine.borrow_mut() = Some(engine.clone());
+        engine.start().await;
+        Ok(true)
+    }
+
+    /// Begin linking this browser to an account with a `haven-enroll:` ticket from one of its
+    /// devices. Persists the linking state; then call [`boot`](Self::boot), which sends the request.
+    /// `haven:enrolled` fires once that device's owner approves and the grant passes every check.
+    #[wasm_bindgen(js_name = onboardLink)]
+    pub fn onboard_link(&self, ticket_text: &str) -> Result<(), JsError> {
+        engine::onboard_seedless(ticket_text).map_err(js_err)
+    }
+
+    /// `{seedless, linked, linking}`.
+    pub fn status(&self) -> Result<String, JsError> {
+        let (seedless, linked, linking) = self.engine()?.seedless_status();
+        Ok(serde_json::json!({ "seedless": seedless, "linked": linked, "linking": linking }).to_string())
+    }
+
+    /// The account's id (hex).
+    #[wasm_bindgen(js_name = accountIdHex)]
+    pub fn account_id_hex(&self) -> Result<String, JsError> {
+        Ok(self.engine()?.node_id_hex())
+    }
+
+    /// Author a text post to a circle.
+    pub fn post(&self, circle_id: String, body: String) -> Result<(), JsError> {
+        self.engine()?.post(circle_id, body, vec![], None, false, None);
+        Ok(())
+    }
+
+    /// A circle's feed as JSON: `[{id, author, isMe, createdAt, body}]`.
+    pub fn feed(&self, circle_id: &str) -> Result<String, JsError> {
+        let items: Vec<serde_json::Value> = self
+            .engine()?
+            .feed(circle_id)
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "id": i.id, "author": i.author_short, "isMe": i.is_me, "createdAt": i.created_at, "body": i.body,
+                })
+            })
+            .collect();
+        Ok(serde_json::Value::Array(items).to_string())
+    }
+}
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = log)]
+    fn console_log(line: &str);
+}
+
+/// The engine's diagnostics, written to the page's own console. They never leave the browser —
+/// the same rule as the apps' on-device trace files.
+struct ConsoleLog;
+
+impl log::Log for ConsoleLog {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        m.level() <= log::max_level()
+    }
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            console_log(&format!("[haven {}] {}", record.level(), record.args()));
+        }
+    }
+    fn flush(&self) {}
+}
+
+/// Send the engine's log lines to the console at `level` (`"error"`, `"warn"`, `"info"`,
+/// `"debug"`); anything else turns them off. Off by default.
+#[wasm_bindgen(js_name = setLogLevel)]
+pub fn set_log_level(level: &str) {
+    static LOGGER: ConsoleLog = ConsoleLog;
+    let _ = log::set_logger(&LOGGER);
+    log::set_max_level(level.parse().unwrap_or(log::LevelFilter::Off));
+}
+
+/// Keep this page off the push worker (for harnesses driving throwaway identities).
+#[wasm_bindgen(js_name = setPushOff)]
+pub fn set_push_off(off: bool) {
+    haven_client::netgate::set_push_off(off);
+}
+
+/// Load one file into the engine's storage at startup, before [`WebApp::boot`]. The page calls
+/// this for every record it persisted (see `web-client/storage.js`).
+#[wasm_bindgen(js_name = storagePreload)]
+pub fn storage_preload(path: String, data: Vec<u8>, modified_ms: f64) {
+    let modified = web_time::UNIX_EPOCH + std::time::Duration::from_millis(modified_ms.max(0.0) as u64);
+    haven_client::fs::preload(path, data, modified);
+}
+
+/// Everything the engine wrote or removed since the last call, for the page to persist:
+/// an array of `[path, Uint8Array]` (write) and `[path, null]` (remove), each path once.
+#[wasm_bindgen(js_name = storageTakeChanges)]
+pub fn storage_take_changes() -> js_sys::Array {
+    use haven_client::fs::Change;
+    let out = js_sys::Array::new();
+    for change in haven_client::fs::take_changes() {
+        let (path, data) = match change {
+            // A file removed again since the change was recorded is reported as a removal.
+            Change::Put(p) => {
+                let data = haven_client::fs::snapshot(&p);
+                (p, data)
+            }
+            Change::Remove(p) => (p, None),
+        };
+        let pair = js_sys::Array::new();
+        pair.push(&JsValue::from_str(&path.to_string_lossy()));
+        pair.push(&match data {
+            Some(bytes) => js_sys::Uint8Array::from(bytes.as_slice()).into(),
+            None => JsValue::NULL,
+        });
+        out.push(&pair);
+    }
+    out
+}
+
+impl WebApp {
+    fn engine(&self) -> Result<Arc<Engine>, JsError> {
+        self.engine.borrow().clone().ok_or_else(|| JsError::new("the engine is not running — call boot() first"))
+    }
+}

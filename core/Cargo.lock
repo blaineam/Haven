@@ -1805,13 +1805,14 @@ dependencies = [
 name = "haven-web"
 version = "0.0.1"
 dependencies = [
- "futures-channel",
  "haven-client",
  "haven-p2p",
  "haven_ffi",
  "iroh",
  "js-sys",
+ "log",
  "rand 0.8.6",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",

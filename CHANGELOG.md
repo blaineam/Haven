@@ -17,11 +17,11 @@ app stayed open. The post is now kept and opened as soon as the key arrives. No 
 have been. Regression test: `s4_ffi_own_device_events_open_in_any_delivery_order`.
 
 ### Added - Web client groundwork (not shipped; `feat/web-client`)
-A browser tab can now run the Haven engine and join a circle as a seedless linked device, reaching other devices only through the
-circle's own relay. Proven in headless Chromium against the native wire: linking with an enroll ticket, and sealed posts both ways.
-The desktop app's client layer (engine, stores, wire protocol) moved to a shared crate,
-`core/haven-client`, so the browser build links the same code; desktop behaviour is unchanged (same 443 tests). No UI yet. Design,
-trust statement and progress: [`docs/WEB-PARITY.md`](docs/WEB-PARITY.md) and D21 in
+The desktop app's client layer (engine, stores, wire protocol) moved to a shared crate, `core/haven-client`, and now also builds for
+the browser, so a tab runs the same engine the desktop app runs. Proven in headless Chromium against that engine running natively: a
+fresh tab links as a seedless device with an enroll ticket, stays linked across a reload, and a post written in the tab reaches the
+account's primary device. Desktop behaviour is unchanged (its tests pass in their new home). No UI yet, and posts toward the tab wait
+on the relay serving the page. Design, trust statement and progress: [`docs/WEB-PARITY.md`](docs/WEB-PARITY.md) and D21 in
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## 2.1.3 (security release, 2026-11-19)

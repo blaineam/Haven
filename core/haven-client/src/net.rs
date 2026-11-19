@@ -34,8 +34,8 @@ pub mod cfquicktunnel {
 pub use hosting::*;
 #[cfg(target_arch = "wasm32")]
 pub use portable::{
-    active_derp_urls, apply_derp_urls, haven_fabric_active, host_from_http_url, parse_turn_urls, suggest_turn_urls,
-    DEFAULT_DERP_BIND, DEFAULT_PATH_ROUTER_BIND, DEFAULT_TURN_BIND, DEFAULT_TURN_USER,
+    active_derp_urls, apply_derp_urls, haven_fabric_active, host_from_http_url, parse_turn_urls, set_origin_relays,
+    suggest_turn_urls, DEFAULT_DERP_BIND, DEFAULT_PATH_ROUTER_BIND, DEFAULT_TURN_BIND, DEFAULT_TURN_USER,
 };
 #[cfg(target_arch = "wasm32")]
 pub mod blobstore {
@@ -317,15 +317,37 @@ pub mod portable {
 
     /// The circle-hosted DERP URLs this client knows — the fabric a browser node is bound to.
     static DERP_URLS: RwLock<Vec<String>> = RwLock::new(Vec::new());
+    /// The relay front door(s) that served this page. Always part of the fabric: before a browser
+    /// is linked it knows no circle and has no prefs, and this is the one relay it can be sure of.
+    static ORIGIN_URLS: RwLock<Vec<String>> = RwLock::new(Vec::new());
 
-    /// Install the known Haven DERP URLs (trimmed, de-duplicated, sorted). Empty = none.
-    pub fn apply_derp_urls(urls: Vec<String>) {
+    fn clean(urls: Vec<String>) -> Vec<String> {
         let mut cleaned: Vec<String> =
             urls.into_iter().map(|u| u.trim().trim_end_matches('/').to_string()).filter(|u| !u.is_empty()).collect();
         cleaned.sort();
         cleaned.dedup();
+        cleaned
+    }
+
+    /// Name the relay front door(s) the page was served from. Call before the node binds.
+    pub fn set_origin_relays(urls: Vec<String>) {
+        let origin = clean(urls);
+        if let Ok(mut g) = ORIGIN_URLS.write() {
+            *g = origin.clone();
+        }
         if let Ok(mut g) = DERP_URLS.write() {
-            *g = cleaned;
+            let known = std::mem::take(&mut *g);
+            *g = clean(known.into_iter().chain(origin).collect());
+        }
+    }
+
+    /// Install the known Haven DERP URLs (trimmed, de-duplicated, sorted) on top of the page's
+    /// own relay(s).
+    pub fn apply_derp_urls(urls: Vec<String>) {
+        let origin = ORIGIN_URLS.read().map(|g| g.clone()).unwrap_or_default();
+        let all = clean(urls.into_iter().chain(origin).collect());
+        if let Ok(mut g) = DERP_URLS.write() {
+            *g = all;
         }
     }
 
@@ -341,6 +363,18 @@ pub mod portable {
     #[cfg(test)]
     mod parity {
         use super::*;
+
+        #[test]
+        fn the_pages_own_relay_survives_every_fabric_refresh() {
+            set_origin_relays(vec!["https://relay.example.com/".into()]);
+            assert_eq!(active_derp_urls(), ["https://relay.example.com"]);
+            // The engine re-applies prefs' URLs on every refresh — including "none".
+            apply_derp_urls(vec![]);
+            assert_eq!(active_derp_urls(), ["https://relay.example.com"]);
+            apply_derp_urls(vec![" https://b.example.com ".into(), "https://relay.example.com".into()]);
+            assert_eq!(active_derp_urls(), ["https://b.example.com", "https://relay.example.com"]);
+            assert!(haven_fabric_active());
+        }
 
         #[test]
         fn constants_match_haven_net() {

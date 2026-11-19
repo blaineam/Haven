@@ -50,6 +50,7 @@ async fn a_binary_upload_sent_in_one_segment_reaches_the_media_backend_intact() 
         media_backend: backend,
         derp_backend: String::new(),
         http_token: String::new(),
+        web_app: None,
     })
     .await
     .unwrap()
@@ -82,6 +83,7 @@ async fn an_unparseable_request_is_a_400_not_the_status_page() {
         media_backend: String::new(),
         derp_backend: String::new(),
         http_token: String::new(),
+        web_app: None,
     })
     .await
     .unwrap()

@@ -19,6 +19,7 @@ apple/*.xcworkspace
 # Web
 web/node_modules/
 web/dist/
+web-client/pkg/
 
 # Generated bindings
 core/haven-ffi/generated/

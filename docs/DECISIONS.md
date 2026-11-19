@@ -431,3 +431,30 @@ France and mainland China stay excluded (`docs/EXPORT-COMPLIANCE.md`); the web, 
 copy say free; the Microsoft Store submission can now be automated (`msstore publish` supports
 free products over Actions — `MSSTORE_PUBLISH`). D12's licensing reasoning is unchanged: the
 code stays PolyForm Noncommercial, the official binaries stay the copyright holder's.
+
+
+## D21 — A web client, as a seedless relay-only device (2026-11-19)
+
+**Decision:** Reverse the 2026-06-22 abandonment and build a full-featured web client. A browser
+tab is a **seedless linked device** (D16) running the same Rust engine compiled to WebAssembly,
+whose only network path is the circle's own relay front door (mailbox over HTTPS, iroh DERP over
+WebSocket). It is enrolled from an existing device and revocable from it. There is no web sign-up,
+and the master seed never enters a browser. Details and progress: [`WEB-PARITY.md`](WEB-PARITY.md).
+
+**Why now:** the original objection was that a web client needs a public server every circle
+depends on. Circle relays now expose exactly the HTTPS/WSS front door a tab needs, seedless
+enrollment exists, and iroh runs relay-only in a browser — so the dependency is the circle's own
+relay, which it already has.
+
+**Security posture — the honest trade:** whoever delivers the page's code can change it: the relay
+host, the tunnel provider that terminates TLS, or a TLS-inspecting network. No browser mechanism
+fully closes that. The design therefore bounds it: a compromised web session acts as one device
+until revoked — never the account, never the seed, no authority over other devices, cut off from
+new content on revocation. The maker hosts nothing (D15, and the mandate that the maker is never a
+bypass vector), so the bundle is served by the circle's relay. Web access is opt-in per circle by
+its owner, and labelled as weaker than a native app. The relay still writes no logs.
+
+**Consequences:** `haven_ffi` builds for `wasm32` with its native networking compiled out; the
+request-signing transcript moved to `haven_p2p::httpauth` so relay, native clients and browser
+share one implementation; a new `core/haven-web` crate holds the browser transport. Before any
+release the web device class needs Tamarin coverage and CI guards (the security release bar).

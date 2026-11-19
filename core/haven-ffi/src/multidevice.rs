@@ -264,6 +264,7 @@ pub struct S3ConfigFfi {
     pub secret_key: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn s3_mailbox(c: &S3ConfigFfi) -> Result<haven_s3::S3Mailbox, HavenError> {
     haven_s3::S3Mailbox::new(haven_s3::S3Config {
         endpoint: c.endpoint.clone(),
@@ -276,6 +277,7 @@ fn s3_mailbox(c: &S3ConfigFfi) -> Result<haven_s3::S3Mailbox, HavenError> {
     .map_err(|e| HavenError::Invalid { msg: format!("s3 config: {e}") })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// PUT a blob to `key` in the bucket.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn s3_put(config: S3ConfigFfi, key: String, data: Vec<u8>) -> Result<(), HavenError> {
@@ -285,6 +287,7 @@ pub async fn s3_put(config: S3ConfigFfi, key: String, data: Vec<u8>) -> Result<(
         .map_err(|e| HavenError::Invalid { msg: format!("s3 put: {e}") })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// GET a blob (None if absent).
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn s3_get(config: S3ConfigFfi, key: String) -> Result<Option<Vec<u8>>, HavenError> {
@@ -294,6 +297,7 @@ pub async fn s3_get(config: S3ConfigFfi, key: String) -> Result<Option<Vec<u8>>,
         .map_err(|e| HavenError::Invalid { msg: format!("s3 get: {e}") })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// LIST keys under `prefix`.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn s3_list(config: S3ConfigFfi, prefix: String) -> Result<Vec<String>, HavenError> {

@@ -31,6 +31,7 @@ pub mod device;
 pub mod enroll;
 pub mod friend_invite;
 pub mod groupkey;
+pub mod httpauth;
 pub mod identity;
 pub mod keypackage;
 pub mod link;

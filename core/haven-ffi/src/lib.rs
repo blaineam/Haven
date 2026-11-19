@@ -8,8 +8,11 @@ use std::sync::{Arc, Mutex};
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(not(target_arch = "wasm32"))]
 use haven_net::Node;
+#[cfg(not(target_arch = "wasm32"))]
 use haven_net::blobstore::BlobClient;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use haven_p2p::crypto::{decapsulate, encapsulate_to, open, seal, Encapsulation};
 use haven_p2p::device::{
@@ -192,6 +195,7 @@ uniffi::setup_scaffolding!();
 /// `<dir>/iroh-trace.log`, so a specific relay dial can be watched step-by-step (candidate paths,
 /// hole-punch attempts, DERP fallback, connect, and the blob accept/serve on the far side). Idempotent;
 /// safe no-op if a subscriber is already set. Never panics (falls back to a sink on file error).
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export]
 pub fn init_logging(dir: String) {
     use std::sync::Once;
@@ -231,18 +235,21 @@ pub fn init_logging(dir: String) {
 /// [`HavenNode::shutdown`]) to pick up a new map — desktop does this via soft rebind when fabric
 /// is first learned mid-session. WebRTC ICE still follows app-side fabric prefs
 /// (Apple `HavenFabric` / Android `haven.fabric`).
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export]
 pub fn apply_derp_urls(urls: Vec<String>) {
     haven_net::apply_derp_urls(urls);
 }
 
 /// True when ≥1 Haven DERP URL is installed in the process policy (n0 is not sole fabric).
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export]
 pub fn haven_fabric_active() -> bool {
     haven_net::haven_fabric_active()
 }
 
 /// Active custom DERP URLs from the process policy (empty when n0-only).
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export]
 pub fn active_derp_urls() -> Vec<String> {
     haven_net::active_derp_urls()
@@ -382,6 +389,15 @@ pub fn low_data_allowance_on(link: LinkConstraint, traffic: Traffic) -> Allowanc
 #[uniffi::export]
 pub fn low_data_active() -> bool {
     !matches!(link_constraint(), LinkConstraint::Normal)
+}
+
+/// Wall and monotonic clocks. `std::time` has no clock on `wasm32-unknown-unknown` (both `now()`s
+/// panic), so the browser build reads the page's clock instead; every other target is `std`.
+mod clock {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) use web_time::{Instant, SystemTime, UNIX_EPOCH};
 }
 
 /// Multi-device (D16): device-credential + account-state self-sync FFI surface.
@@ -810,7 +826,8 @@ pub fn parse_relay_link(uri: String) -> Option<RelayLinkInfo> {
 #[uniffi::export]
 pub fn http_auth_header(seed: Vec<u8>, token: String, method: String, key: String, body: Vec<u8>) -> Result<String, HavenError> {
     let seed: [u8; 32] = seed.try_into().map_err(|_| HavenError::Invalid { msg: "seed must be 32 bytes".into() })?;
-    Ok(haven_net::httprelay::auth_header(&auth_node_secret(&seed), &token, &method, &key, &body))
+    let ts = clock::SystemTime::now().duration_since(clock::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    Ok(haven_p2p::httpauth::auth_header_at(&auth_node_secret(&seed), &token, &method, &key, &body, ts))
 }
 
 /// seed → node-signing-secret, cached. `Identity::from_seed` derives the FULL hybrid identity —
@@ -837,6 +854,7 @@ fn auth_node_secret(seed: &[u8; 32]) -> [u8; 32] {
 /// Client to a circle's blob mailbox (a relay's local-disk store, reached over Haven Net /
 /// iroh). Used to upload a circle-sealed media blob and fetch it later — no shared bucket
 /// credentials, just the relay's node id. The relay never sees content (blobs are sealed).
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(uniffi::Object)]
 pub struct RelayClient {
     /// Shared with the node's per-peer cache (`blob_client_cached`) so the app and the relay mesh use
@@ -846,6 +864,7 @@ pub struct RelayClient {
     inner: Arc<BlobClient>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export(async_runtime = "tokio")]
 impl RelayClient {
     /// Tell this relay who ELSE serves `circleId`, so it mesh-replicates with them instead of only
@@ -952,11 +971,13 @@ impl RelayClient {
 /// in-process iroh node made iroh's path manager churn unboundedly (the tens-of-GB leak). Its
 /// `node_id_hex` is therefore the ACCOUNT node id; that's the `volunteer_node_id` for the relay link.
 /// Hold the object to keep serving; drop it (or call `disable`) to stop.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(uniffi::Object)]
 pub struct RelayServerHandle {
     node: Arc<HavenNode>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export(async_runtime = "tokio")]
 impl RelayServerHandle {
     /// Attach the relay/mailbox to a running [`HavenNode`], serving blobs from `dir` on that node's
@@ -1076,6 +1097,7 @@ impl RelayServerHandle {
 ///
 /// Separate listen socket from the messaging node (same-key second-endpoint scar). Hold this
 /// object while hosting; drop stops the server. Desktop / macOS hosts call this; iOS usually does not.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(uniffi::Object)]
 pub struct DerpServerHandle {
     public_url: String,
@@ -1084,6 +1106,7 @@ pub struct DerpServerHandle {
     _server: haven_net::DerpServer,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export(async_runtime = "tokio")]
 impl DerpServerHandle {
     /// Start DERP on `bind` (e.g. `127.0.0.1:3340`). `public_url` may be empty until a tunnel is up.
@@ -1133,6 +1156,7 @@ impl DerpServerHandle {
 ///
 /// `/relay`, `/derp`, `/ping` → DERP backend; everything else → media. Used so free trycloudflare
 /// and single-hostname named tunnels front both roles without a second cloudflared process.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(uniffi::Object)]
 pub struct PathRouterHandle {
     local_addr: String,
@@ -1140,6 +1164,7 @@ pub struct PathRouterHandle {
     _router: haven_net::PathRouter,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export(async_runtime = "tokio")]
 impl PathRouterHandle {
     /// Bind `bind` (e.g. `127.0.0.1:8675`) and proxy to media/derp host:port backends.
@@ -1499,6 +1524,7 @@ fn short(node_hex: &str) -> String {
 // ===== Networking: a live P2P node =====
 
 /// Foreign listener that receives inbound sealed-envelope bytes.
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export(with_foreign)]
 pub trait InboundListener: Send + Sync {
     /// `from_hex` is the sender's AUTHENTICATED transport node id (the iroh connection's remote
@@ -1511,11 +1537,13 @@ pub trait InboundListener: Send + Sync {
 
 /// A live peer-to-peer node: listens for inbound sealed posts and dials peers by
 /// ticket. The bytes it moves are already E2E-encrypted by `haven-p2p`.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(uniffi::Object)]
 pub struct HavenNode {
     node: Node,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export(async_runtime = "tokio")]
 impl HavenNode {
     /// Start a node bound to the given transport seed (so its node id == that seed's Haven id); inbound
@@ -1839,8 +1867,8 @@ const ROTATE_INTERVAL_SECS: u64 = 7 * 24 * 60 * 60;
 /// Wall clock in unix seconds (0 if the clock predates the epoch — treated as "unstamped").
 /// Rotation is time-driven, so tests override this to jump weeks ahead without sleeping.
 fn now_secs() -> u64 {
-    let real = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let real = clock::SystemTime::now()
+        .duration_since(clock::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     #[cfg(test)]
@@ -6604,7 +6632,7 @@ struct EngineLock<T> {
 
 struct EngineGuard<'a, T> {
     guard: std::sync::MutexGuard<'a, T>,
-    taken: std::time::Instant,
+    taken: clock::Instant,
     taken_cpu: Option<std::time::Duration>,
     site: &'static std::panic::Location<'static>,
 }
@@ -6634,7 +6662,7 @@ impl<T> EngineLock<T> {
     fn lock(&self) -> Result<EngineGuard<'_, T>, std::sync::PoisonError<std::sync::MutexGuard<'_, T>>> {
         let site = std::panic::Location::caller();
         let guard = self.inner.lock()?;
-        Ok(EngineGuard { guard, taken: std::time::Instant::now(), taken_cpu: thread_cpu_time(), site })
+        Ok(EngineGuard { guard, taken: clock::Instant::now(), taken_cpu: thread_cpu_time(), site })
     }
 }
 
@@ -9187,7 +9215,7 @@ impl HavenSocial {
 
 /// Names the envelope kind behind a long `receive_locked` hold (the lock watchdog only knows the site).
 struct SlowApply {
-    at: std::time::Instant,
+    at: clock::Instant,
     tag: u8,
     len: usize,
 }
@@ -9472,6 +9500,7 @@ impl HavenSocial {
     ///
     /// NOT exported — the seed must never cross the FFI boundary a second time. `None` on a seedless
     /// device (seed-drop S4), which therefore cannot publish; the primary publishes for the account.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // only the native node publishes discovery
     pub(crate) fn account_secret_bytes(&self) -> Option<[u8; 32]> {
         let st = self.state.lock().unwrap();
         st.me_secret.as_ref().map(|id| id.node_secret_bytes())
@@ -9481,6 +9510,7 @@ impl HavenSocial {
     /// definitely running), then the rest of my authorized roster. Excludes the account id: an
     /// account key is an identity, never a transport address, so publishing it as a dial target
     /// would only buy contacts a connect timeout.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // only the native node publishes discovery
     pub(crate) fn discovery_device_ids(&self) -> Vec<String> {
         let acct = self.my_node_hex().to_lowercase();
         let mut out = vec![self.my_device_node_hex()];
@@ -9672,7 +9702,7 @@ impl HavenSocial {
     ) -> Option<Result<bool, HavenError>> {
         let mut st = self.state.lock().unwrap();
         // Declared after the guard, so it drops first: times the hold, not the wait for the lock.
-        let _slow = SlowApply { at: std::time::Instant::now(), tag: envelope[0], len: envelope.len() };
+        let _slow = SlowApply { at: clock::Instant::now(), tag: envelope[0], len: envelope.len() };
         let idx = st.circles.iter().position(|c| c.id == circle_id)?;
         Some(match envelope[0] {
             TAG_KEY_COMMIT => receive_key_commit(&mut st, idx, &envelope[1..]),

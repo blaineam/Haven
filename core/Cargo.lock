@@ -1692,6 +1692,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "haven-web"
+version = "0.0.1"
+dependencies = [
+ "haven-p2p",
+ "haven_ffi",
+ "iroh",
+ "js-sys",
+ "rand 0.8.6",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-time",
+]
+
+[[package]]
 name = "haven_ffi"
 version = "0.0.1"
 dependencies = [
@@ -1710,6 +1724,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uniffi",
+ "web-time",
 ]
 
 [[package]]

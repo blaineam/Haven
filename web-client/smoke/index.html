@@ -1,0 +1,10 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Haven web transport smoke</title>
+<script type="module">
+  import init, * as haven from "/pkg/haven_web.js";
+  await init();
+  // The smoke driver (smoke.mjs) calls into this from the outside.
+  window.haven = haven;
+  window.havenReady = true;
+</script>

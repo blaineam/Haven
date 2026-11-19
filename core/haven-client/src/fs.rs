@@ -238,25 +238,28 @@ pub mod mem {
         })
     }
 
-    /// An open file: reads come from a snapshot taken at open; writes are buffered and committed
-    /// on `flush`, `sync_all` and drop.
+    /// An open file with one cursor, like the real thing: reads and writes happen at the cursor
+    /// and advance it; a write past the end extends the file. The bytes are a private copy taken
+    /// at open and committed back on `flush`, `sync_all` and drop.
     pub struct File {
         path: PathBuf,
         buf: Vec<u8>,
         pos: usize,
         writable: bool,
+        /// Every write goes to the end, wherever the cursor is (`OpenOptions::append`).
+        append: bool,
         dirty: bool,
     }
 
     impl File {
         pub fn open(path: impl AsRef<Path>) -> io::Result<File> {
             let p = path.as_ref();
-            Ok(File { path: p.to_path_buf(), buf: read(p)?, pos: 0, writable: false, dirty: false })
+            Ok(File { path: p.to_path_buf(), buf: read(p)?, pos: 0, writable: false, append: false, dirty: false })
         }
         pub fn create(path: impl AsRef<Path>) -> io::Result<File> {
             let p = path.as_ref().to_path_buf();
             write(&p, [])?;
-            Ok(File { path: p, buf: Vec::new(), pos: 0, writable: true, dirty: false })
+            Ok(File { path: p, buf: Vec::new(), pos: 0, writable: true, append: false, dirty: false })
         }
         pub fn sync_all(&mut self) -> io::Result<()> {
             self.flush()
@@ -280,7 +283,15 @@ pub mod mem {
             if !self.writable {
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied, "file not opened for writing"));
             }
-            self.buf.extend_from_slice(data);
+            if self.append {
+                self.pos = self.buf.len();
+            }
+            let end = self.pos + data.len();
+            if end > self.buf.len() {
+                self.buf.resize(end, 0); // a seek past the end leaves a zero-filled hole, as on disk
+            }
+            self.buf[self.pos..end].copy_from_slice(data);
+            self.pos = end;
             self.dirty = true;
             Ok(data.len())
         }
@@ -290,6 +301,21 @@ pub mod mem {
                 write(&self.path, &self.buf)?;
             }
             Ok(())
+        }
+    }
+
+    impl io::Seek for File {
+        fn seek(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+            let target = match to {
+                io::SeekFrom::Start(n) => n as i128,
+                io::SeekFrom::End(d) => self.buf.len() as i128 + d as i128,
+                io::SeekFrom::Current(d) => self.pos as i128 + d as i128,
+            };
+            if target < 0 {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "seek before the start of the file"));
+            }
+            self.pos = target as usize;
+            Ok(self.pos as u64)
         }
     }
 
@@ -348,8 +374,14 @@ pub mod mem {
                 }
                 Err(e) => return Err(e),
             };
-            // Appends land at the end because writes always extend the buffer; `pos` only reads.
-            Ok(File { path: p.to_path_buf(), buf, pos: 0, writable: self.write || self.append, dirty: false })
+            Ok(File {
+                path: p.to_path_buf(),
+                buf,
+                pos: 0,
+                writable: self.write || self.append,
+                append: self.append,
+                dirty: false,
+            })
         }
     }
 
@@ -410,6 +442,16 @@ pub mod mem {
             File::open(d.join("log")).unwrap().read_to_string(&mut s).unwrap();
             assert_eq!(s, "abcd");
             assert!(OpenOptions::new().append(true).open(d.join("missing")).is_err());
+            // Positioned writes: overwrite in the middle, then leave a hole past the end.
+            {
+                use std::io::{Seek, SeekFrom};
+                let mut f = OpenOptions::new().write(true).open(d.join("log")).unwrap();
+                f.seek(SeekFrom::Start(1)).unwrap();
+                f.write_all(b"XY").unwrap();
+                f.seek(SeekFrom::End(2)).unwrap();
+                f.write_all(b"!").unwrap();
+            }
+            assert_eq!(read(d.join("log")).unwrap(), b"aXYd\0\0!");
             assert!(File::open(d.join("log")).unwrap().write_all(b"x").is_err());
         }
 

@@ -6,56 +6,48 @@
 //! build (`haven-web`) links the same code instead of a second implementation. The application
 //! around it supplies a runtime ([`rt`]) and a way to reach the user ([`host`]).
 //!
-//! Two tiers, for now:
-//! * modules that build for every target, `wasm32-unknown-unknown` included — no runtime, no
-//!   filesystem, no socket;
-//! * the engine and its stores, which still touch the disk, the OS keyring and the native node and
-//!   are compiled only off wasm32 until those go behind seams too. See `docs/WEB-PARITY.md`.
+//! Every module builds for every target, `wasm32-unknown-unknown` included. What differs per
+//! target sits behind five seams, each the real thing natively and a browser equivalent on wasm32:
+//!
+//! | Seam | Native | Browser |
+//! |---|---|---|
+//! | [`rt`] — tasks, timers | the host's tokio runtime | the page's event loop |
+//! | [`host`] — UI events, notifications | Tauri | page callbacks |
+//! | [`fs`] — persistence | `std::fs` | an in-memory tree the page persists |
+//! | [`secrets`] — secret store | OS keyring | a reserved corner of [`fs`] |
+//! | [`transport`] / [`net`] — node, mailbox, hosting | iroh node + blob ALPN + `haven-net` | relay-only node, HTTPS mailbox, no hosting |
+//!
+//! See `docs/WEB-PARITY.md`.
 
-// ── Every target ─────────────────────────────────────────────────────────────────────────────
 pub mod callwire;
+pub mod engine;
 pub mod fs;
+pub mod host;
+pub mod localmedia;
 pub mod mediaholding;
+pub mod mediaresume;
+pub mod net;
+pub mod netgate;
+pub mod postgroups;
+pub mod preview;
 pub mod relayhealth;
 pub mod relayintro;
 pub mod relayparking;
 pub mod relayscope;
+pub mod reoptimize;
+pub mod roster;
+pub mod rt;
+pub mod scheduled;
 pub mod secret;
+pub mod secrets;
+pub mod seenjournal;
+pub mod selfsync;
+pub mod selfsyncrot;
+pub mod store;
+pub mod transport;
 pub mod wire;
 
-// ── Native only (for now) ────────────────────────────────────────────────────────────────────
-#[cfg(not(target_arch = "wasm32"))]
-pub mod engine;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod host;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod localmedia;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod mediaresume;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod netgate;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod postgroups;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod preview;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod reoptimize;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod roster;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod rt;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod scheduled;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod seenjournal;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod selfsync;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod selfsyncrot;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod store;
-
-#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-util")))]
+#[cfg(any(test, feature = "test-util"))]
 pub mod covtest_util;
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod tests_store;

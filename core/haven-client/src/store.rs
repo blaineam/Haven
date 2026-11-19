@@ -7,6 +7,8 @@ use crate::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+// The OS secret store natively; a reserved corner of `crate::fs` in a browser. Same `Entry` API.
+use crate::secrets as keyring;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +46,11 @@ impl Paths {
                 return Ok(Self { base: base.clone(), root: base });
             }
         }
+        // A browser has no data directory: the tree lives in `crate::fs` under a fixed root, which
+        // the page maps onto its own storage.
+        #[cfg(target_arch = "wasm32")]
+        let base = PathBuf::from("/haven");
+        #[cfg(not(target_arch = "wasm32"))]
         let base = dirs::data_dir().ok_or_else(|| anyhow!("no data dir"))?.join("Haven");
         fs::create_dir_all(&base).with_context(|| format!("create {}", base.display()))?;
         let root = if dir_rel.is_empty() { base.clone() } else { base.join(dir_rel) };
@@ -692,9 +699,9 @@ impl Prefs {
         self.relay_auto_tunnel.unwrap_or(true)
     }
 
-    /// Explicit front-door policy (see `haven_net::cfquicktunnel::FrontDoorMode`).
-    pub fn front_door_mode(&self) -> haven_net::cfquicktunnel::FrontDoorMode {
-        use haven_net::cfquicktunnel::FrontDoorMode;
+    /// Explicit front-door policy (see `crate::net::cfquicktunnel::FrontDoorMode`).
+    pub fn front_door_mode(&self) -> crate::net::cfquicktunnel::FrontDoorMode {
+        use crate::net::cfquicktunnel::FrontDoorMode;
         match self.relay_front_door.as_deref() {
             Some(s) if !s.trim().is_empty() => FrontDoorMode::parse(s),
             // Legacy: URL without token → manual; token+url → bundled; else auto.

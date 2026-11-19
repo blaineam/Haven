@@ -27,10 +27,8 @@ use web_time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use base64::Engine as _; // for `.encode` on the base64 engine (this module's `Engine` is unrelated)
-use haven_ffi::{
-    parse_link, Account, CircleUpgradeOffer, FeedItemFfi, HavenNode, HavenSocial, InboundListener,
-    RelayClient, RelayServerHandle, TrackRefFfi,
-};
+use haven_ffi::{parse_link, Account, CircleUpgradeOffer, FeedItemFfi, HavenSocial, TrackRefFfi};
+use crate::transport::{HavenNode, InboundListener, RelayClient, RelayServerHandle};
 use haven_s3::{S3Config, S3Mailbox};
 use sha2::{Digest, Sha256};
 use crate::host::AppHandle;
@@ -401,7 +399,7 @@ struct PendingEnrollRequest {
 
 /// Result of applying front-door prefs when the relay HTTP interface starts.
 enum DeskFrontDoor {
-    Spawned(haven_net::cfquicktunnel::QuickTunnel),
+    Spawned(crate::net::cfquicktunnel::QuickTunnel),
     AnnounceOnly(String),
     LanOnly,
 }
@@ -439,17 +437,17 @@ pub struct Engine {
     relay_host: StdMutex<Option<Arc<RelayServerHandle>>>,
     /// Live cloudflared process (quick or named) for the **public front door** (media, or
     /// path-router when fabric is unified). Dropped when hosting stops. Manual never sets this.
-    quick_tunnel: StdMutex<Option<haven_net::cfquicktunnel::QuickTunnel>>,
+    quick_tunnel: StdMutex<Option<crate::net::cfquicktunnel::QuickTunnel>>,
     /// Second free trycloudflare only when dual-origin DERP (sibling hostname / path-router off).
-    derp_tunnel: StdMutex<Option<haven_net::cfquicktunnel::QuickTunnel>>,
+    derp_tunnel: StdMutex<Option<crate::net::cfquicktunnel::QuickTunnel>>,
     /// Embedded iroh-relay (DERP) — separate listen socket; drop stops the fabric role.
-    derp_server: StdMutex<Option<haven_net::DerpServer>>,
+    derp_server: StdMutex<Option<crate::net::DerpServer>>,
     /// Local path router: one origin → media + DERP by path (`/relay` → fabric).
-    path_router: StdMutex<Option<haven_net::PathRouter>>,
+    path_router: StdMutex<Option<crate::net::PathRouter>>,
     /// True while hosting with path proxy active (one public origin / one free cloudflared).
     path_routed: StdMutex<bool>,
     /// Embedded circle TURN for WebRTC ICE — own UDP socket (not a second Endpoint).
-    turn_server: StdMutex<Option<haven_net::TurnServer>>,
+    turn_server: StdMutex<Option<crate::net::TurnServer>>,
     prefs: StdMutex<Prefs>,
     dyn_state: StdMutex<DynState>,
     scheduled: StdMutex<crate::scheduled::ScheduledStore>,
@@ -627,12 +625,16 @@ fn http_put_timeout(len: usize) -> std::time::Duration {
 /// and a short idle-pool lifetime so a pooled keep-alive connection to a relay whose front door
 /// restarted is not handed to the next request.
 fn engine_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    // In a browser requests go through `fetch`: the browser owns the sockets and their pooling,
+    // so there is nothing to tune here (each request still carries its own ceiling).
+    #[cfg(target_arch = "wasm32")]
+    let builder = reqwest::Client::builder();
+    #[cfg(not(target_arch = "wasm32"))]
+    let builder = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(4))
         .tcp_keepalive(std::time::Duration::from_secs(30))
-        .pool_idle_timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_default()
+        .pool_idle_timeout(std::time::Duration::from_secs(30));
+    builder.build().unwrap_or_default()
 }
 
 /// The marker an owned circle's id carries. The core mints and verifies these ids — nothing here
@@ -1565,7 +1567,7 @@ impl Engine {
                 self.publish_account_devices();
                 // Record which fabric map this bind used so mid-session learns can soft-rebind only
                 // when the set actually changes (not on every refresh).
-                self.fabric_rebind.lock().bound_derp_urls = haven_net::active_derp_urls();
+                self.fabric_rebind.lock().bound_derp_urls = crate::net::active_derp_urls();
                 self.dyn_state.lock().started = true;
                 self.emit_changed();
                 self.sync_with_contacts();
@@ -1768,7 +1770,7 @@ impl Engine {
         let me = self.clone();
         crate::rt::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                crate::rt::sleep(std::time::Duration::from_secs(2)).await;
                 let now = now_ms();
                 let due = {
                     let mut st = me.dyn_state.lock();
@@ -1863,7 +1865,7 @@ impl Engine {
         let me = self.clone();
         crate::rt::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                crate::rt::sleep(std::time::Duration::from_secs(10)).await;
                 let now = now_ms();
                 // Scheduled posts are time-sensitive — check every heartbeat so they fire punctually
                 // regardless of the adaptive back-off below (cheap: just compares due timestamps).
@@ -4412,7 +4414,7 @@ impl Engine {
                     }
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                crate::rt::sleep(std::time::Duration::from_secs(delay_secs)).await;
                 delay_secs *= 3;
             }
         });
@@ -5663,12 +5665,12 @@ impl Engine {
                     announced_derp = Some(d.to_string());
                 }
             }
-            announced_turn = haven_net::parse_turn_urls(&v["turn"]);
+            announced_turn = crate::net::parse_turn_urls(&v["turn"]);
             announced_turn_user = v["turnUser"].as_str().unwrap_or_default().to_string();
             announced_turn_pass = v["turnPass"].as_str().unwrap_or_default().to_string();
             // Fallback: reuse media token as TURN password when user/pass omitted.
             if announced_turn_user.is_empty() && !announced_turn.is_empty() {
-                announced_turn_user = haven_net::DEFAULT_TURN_USER.to_string();
+                announced_turn_user = crate::net::DEFAULT_TURN_USER.to_string();
             }
             if announced_turn_pass.is_empty() && !announced_turn.is_empty() && !announced_token.is_empty()
             {
@@ -5804,7 +5806,7 @@ impl Engine {
         crate::rt::spawn(async move {
             // relay_client_for self-guards (own node) and honors the backoff window.
             let Some(client) = me.relay_client_for(&lower).await else { return };
-            let Some(data) = client.get(haven_net::blobstore::RELAY_INTERFACE_KEY.to_string()).await
+            let Some(data) = client.get(crate::net::blobstore::RELAY_INTERFACE_KEY.to_string()).await
             else {
                 return;
             };
@@ -5835,7 +5837,7 @@ impl Engine {
                     derp = Some(d.to_string());
                 }
             }
-            let turn = haven_net::parse_turn_urls(&v["turn"]);
+            let turn = crate::net::parse_turn_urls(&v["turn"]);
             let turn_user = v["turnUser"].as_str().unwrap_or_default().to_string();
             let turn_pass = v["turnPass"].as_str().unwrap_or_default().to_string();
             log::info!(
@@ -6022,8 +6024,8 @@ impl Engine {
         let mut path_routed = false;
         if let Some(dport) = derp_local {
             if sibling_derp.is_none() {
-                let rcfg = haven_net::PathRouterConfig {
-                    bind: haven_net::DEFAULT_PATH_ROUTER_BIND.into(),
+                let rcfg = crate::net::PathRouterConfig {
+                    bind: crate::net::DEFAULT_PATH_ROUTER_BIND.into(),
                     media_backend: format!("127.0.0.1:{port}"),
                     derp_backend: format!("127.0.0.1:{dport}"),
                     http_token: token.clone(),
@@ -6031,13 +6033,13 @@ impl Engine {
                 // Prefer path proxy (one free cloudflared). Retry once on ephemeral bind if :8675 busy.
                 for attempt in 1u8..=2 {
                     let bind = if attempt == 1 {
-                        haven_net::DEFAULT_PATH_ROUTER_BIND.to_string()
+                        crate::net::DEFAULT_PATH_ROUTER_BIND.to_string()
                     } else {
                         "127.0.0.1:0".into()
                     };
                     let mut try_cfg = rcfg.clone();
                     try_cfg.bind = bind;
-                    match haven_net::PathRouter::spawn(&try_cfg).await {
+                    match crate::net::PathRouter::spawn(&try_cfg).await {
                         Ok(Some(router)) => {
                             front_port = router.local_port();
                             path_routed = true;
@@ -6052,7 +6054,7 @@ impl Engine {
                         Err(e) => {
                             log::warn!("path router attempt {attempt} failed: {e:#}");
                             if attempt == 1 {
-                                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                                crate::rt::sleep(std::time::Duration::from_millis(400)).await;
                             }
                         }
                     }
@@ -6105,7 +6107,7 @@ impl Engine {
             Err(e) => {
                 log::warn!("relay front door unavailable: {e}");
                 if let Some(u) = configured_public {
-                    if let Ok(n) = haven_net::cfquicktunnel::normalize_public_url(&u) {
+                    if let Ok(n) = crate::net::cfquicktunnel::normalize_public_url(&u) {
                         urls.push(n);
                     } else {
                         urls.push(u);
@@ -6164,7 +6166,7 @@ impl Engine {
         let me = Arc::clone(self);
         crate::rt::spawn(async move {
             for secs in [2u64, 5, 12, 25] {
-                tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                crate::rt::sleep(std::time::Duration::from_secs(secs)).await;
                 if !me.dyn_state.lock().hosting {
                     return;
                 }
@@ -6204,12 +6206,12 @@ impl Engine {
 
     /// Bind local iroh-relay only; public URL is filled after the front door / path router is up.
     async fn spawn_desktop_derp_local(self: &Arc<Self>) -> Option<u16> {
-        let dcfg = haven_net::DerpConfig {
+        let dcfg = crate::net::DerpConfig {
             enabled: true,
-            bind: haven_net::DEFAULT_DERP_BIND.into(),
+            bind: crate::net::DEFAULT_DERP_BIND.into(),
             public_url: String::new(),
         };
-        match haven_net::DerpServer::spawn(&dcfg).await {
+        match crate::net::DerpServer::spawn(&dcfg).await {
             Ok(Some(srv)) => {
                 let port = srv.local_port();
                 log::info!("iroh DERP fabric on {}", srv.local_addr);
@@ -6311,20 +6313,20 @@ impl Engine {
             .or_else(|| {
                 media_urls
                     .iter()
-                    .find_map(|u| haven_net::host_from_http_url(u))
+                    .find_map(|u| crate::net::host_from_http_url(u))
                     .filter(|h| !h.contains("trycloudflare.com"))
             })
             .unwrap_or_else(|| "127.0.0.1".into());
         let public_urls =
-            haven_net::suggest_turn_urls(media_urls, lan.as_deref(), 3478);
-        let tcfg = haven_net::TurnConfig {
+            crate::net::suggest_turn_urls(media_urls, lan.as_deref(), 3478);
+        let tcfg = crate::net::TurnConfig {
             enabled: true,
-            bind: haven_net::DEFAULT_TURN_BIND.into(),
+            bind: crate::net::DEFAULT_TURN_BIND.into(),
             public_ip,
             secret,
             public_urls,
         };
-        match haven_net::TurnServer::spawn(&tcfg).await {
+        match crate::net::TurnServer::spawn(&tcfg).await {
             Ok(Some(srv)) => {
                 log::info!(
                     "circle TURN on {} urls={:?}",
@@ -6349,8 +6351,8 @@ impl Engine {
 
     fn start_desktop_derp_quick_tunnel(
         port: u16,
-    ) -> anyhow::Result<haven_net::cfquicktunnel::QuickTunnel> {
-        use haven_net::cfquicktunnel::{
+    ) -> anyhow::Result<crate::net::cfquicktunnel::QuickTunnel> {
+        use crate::net::cfquicktunnel::{
             ensure_cloudflared, executable_dir, QuickTunnel, TunnelSpec,
         };
         let local = format!("http://127.0.0.1:{port}");
@@ -6374,12 +6376,12 @@ impl Engine {
     /// Locate bundled/PATH cloudflared and apply front-door mode (manual never spawns).
     fn start_desktop_front_door(
         port: u16,
-        mode: haven_net::cfquicktunnel::FrontDoorMode,
+        mode: crate::net::cfquicktunnel::FrontDoorMode,
         public_url: Option<&str>,
         tunnel_token: Option<&str>,
         auto_quick: bool,
     ) -> anyhow::Result<DeskFrontDoor> {
-        use haven_net::cfquicktunnel::{
+        use crate::net::cfquicktunnel::{
             ensure_cloudflared, executable_dir, resolve_front_door, FrontDoorAction, QuickTunnel,
         };
         let local = format!("http://127.0.0.1:{port}");
@@ -6433,7 +6435,7 @@ impl Engine {
         p.relay_public_url = public_url.trim().trim_end_matches('/').to_string();
         p.relay_cf_tunnel_token = tunnel_token.trim().to_string();
         p.relay_auto_tunnel = Some(auto_tunnel);
-        let mode = haven_net::cfquicktunnel::FrontDoorMode::parse(&front_door);
+        let mode = crate::net::cfquicktunnel::FrontDoorMode::parse(&front_door);
         p.relay_front_door = Some(mode.as_str().to_string());
         p.relay_derp_url = derp_url.trim().trim_end_matches('/').to_string();
         let _ = p.save(&self.paths);
@@ -6560,9 +6562,9 @@ impl Engine {
     /// RelayMap without requiring a full app restart.
     pub fn refresh_haven_fabric(self: &Arc<Self>) {
         let urls = self.prefs.lock().all_derp_urls();
-        haven_net::apply_derp_urls(urls.clone());
-        let target = if haven_net::haven_fabric_active() {
-            haven_net::active_derp_urls()
+        crate::net::apply_derp_urls(urls.clone());
+        let target = if crate::net::haven_fabric_active() {
+            crate::net::active_derp_urls()
         } else {
             Vec::new()
         };
@@ -6606,7 +6608,7 @@ impl Engine {
         };
         let eng = Arc::clone(self);
         crate::rt::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            crate::rt::sleep(std::time::Duration::from_secs(2)).await;
             if eng.fabric_rebind.lock().debounce_gen != gen {
                 return; // superseded by a newer schedule
             }
@@ -6636,7 +6638,7 @@ impl Engine {
             Ok(()) => {
                 log::info!(
                     "fabric rebind ok — messaging node on Haven RelayMap ({})",
-                    haven_net::active_derp_urls().join(", ")
+                    crate::net::active_derp_urls().join(", ")
                 );
                 self.fabric_rebind.lock().in_flight = false;
                 self.emit_haven_fabric(&urls_after, false);
@@ -6655,9 +6657,9 @@ impl Engine {
 
     async fn rebind_transport_for_fabric_inner(self: &Arc<Self>) -> Result<()> {
         let target = {
-            haven_net::apply_derp_urls(self.prefs.lock().all_derp_urls());
-            if haven_net::haven_fabric_active() {
-                haven_net::active_derp_urls()
+            crate::net::apply_derp_urls(self.prefs.lock().all_derp_urls());
+            if crate::net::haven_fabric_active() {
+                crate::net::active_derp_urls()
             } else {
                 Vec::new()
             }
@@ -6697,11 +6699,11 @@ impl Engine {
         if let Some(old) = old {
             old.shutdown().await;
             // Brief pause so OS UDP / iroh internals finish teardown.
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            crate::rt::sleep(std::time::Duration::from_millis(250)).await;
         }
 
         // Policy again (may have learned more during debounce), then bind.
-        haven_net::apply_derp_urls(self.prefs.lock().all_derp_urls());
+        crate::net::apply_derp_urls(self.prefs.lock().all_derp_urls());
         let listener: Arc<dyn InboundListener> = Arc::new(NodeListener {
             engine: Arc::downgrade(self),
         });
@@ -6716,7 +6718,7 @@ impl Engine {
         // None while the node is down instead of binding a same-key clone). Everything from here on
         // dials warm over this endpoint.
         self.relay_clients.lock().await.clear();
-        self.fabric_rebind.lock().bound_derp_urls = haven_net::active_derp_urls();
+        self.fabric_rebind.lock().bound_derp_urls = crate::net::active_derp_urls();
         self.dyn_state.lock().started = true;
 
         if was_hosting {
@@ -6773,7 +6775,7 @@ impl Engine {
             let pub_url = self.prefs.lock().relay_public_url.clone();
             let t = pub_url.trim().trim_end_matches('/');
             if !t.is_empty() {
-                if let Ok(n) = haven_net::cfquicktunnel::normalize_public_url(t) {
+                if let Ok(n) = crate::net::cfquicktunnel::normalize_public_url(t) {
                     urls.push(n);
                 } else {
                     urls.push(t.to_string());
@@ -6857,7 +6859,7 @@ impl Engine {
         *self.turn_server.lock() = None;
         // Also sweep orphans — lost Process/Child refs leave dual free tunnels that make the
         // public URL look like "Iroh Relay only" or 401 after toggle off/on.
-        haven_net::cfquicktunnel::kill_orphan_cloudflareds(&[]);
+        crate::net::cfquicktunnel::kill_orphan_cloudflareds(&[]);
         self.dyn_state.lock().hosting = false;
         self.emit_changed();
     }
@@ -7424,11 +7426,11 @@ impl Engine {
             if let Some(d) = v["derp"].as_str() {
                 derp = d.trim().trim_end_matches('/').to_string();
             }
-            turn_urls = haven_net::parse_turn_urls(&v["turn"]);
+            turn_urls = crate::net::parse_turn_urls(&v["turn"]);
             turn_user = v["turnUser"].as_str().unwrap_or_default().to_string();
             turn_pass = v["turnPass"].as_str().unwrap_or_default().to_string();
             if turn_user.is_empty() && !turn_urls.is_empty() {
-                turn_user = haven_net::DEFAULT_TURN_USER.to_string();
+                turn_user = crate::net::DEFAULT_TURN_USER.to_string();
             }
             if turn_pass.is_empty() && !turn_urls.is_empty() && !token.is_empty() {
                 turn_pass = token.clone();
@@ -7803,7 +7805,7 @@ impl Engine {
         }
         let me = self.clone();
         crate::rt::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(Self::KEYLESS_RESCOPE_DELAY_MS)).await;
+            crate::rt::sleep(std::time::Duration::from_millis(Self::KEYLESS_RESCOPE_DELAY_MS)).await;
             me.dyn_state.lock().keyless_rescope_pending = false;
             me.rescope_keyless_circles().await;
         });
@@ -9130,7 +9132,7 @@ impl Engine {
         let cid = circle_id.to_string();
         crate::rt::spawn(async move {
             for r in &prefetch {
-                let _ = tokio::time::timeout(
+                let _ = crate::rt::timeout(
                     std::time::Duration::from_secs(5),
                     me.fetch_media_healing(&cid, r),
                 )
@@ -9300,7 +9302,7 @@ impl Engine {
     // relay that doesn't serve the circle refuses the marker (403) and is then no destination for this
     // circle's media. Blob keys are unchanged, so readers (and older clients/relays) are unaffected.
     fn media_scope_key(reference: &str, circle_id: &str) -> String {
-        haven_net::blobstore::media_scope_key(reference, circle_id)
+        crate::net::blobstore::media_scope_key(reference, circle_id)
     }
 
     /// "<node>|<circle>" → until-ms: that relay refused to scope media into that circle.
@@ -9632,7 +9634,7 @@ impl Engine {
             if arm {
                 let me = self.clone();
                 crate::rt::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    crate::rt::sleep(std::time::Duration::from_secs(5)).await;
                     me.dyn_state.lock().fast_sweep_armed = false;
                     me.request_missing_media();
                 });
@@ -9711,7 +9713,7 @@ impl Engine {
     fn http_auth(&self, token: &str, method: &str, key: &str, body: &[u8]) -> Option<String> {
         let seed: [u8; 32] = self.roster.lock().device_seed.clone().try_into().ok()?;
         let secret = haven_p2p::identity::Identity::from_seed(&seed).node_secret_bytes();
-        Some(haven_net::httprelay::auth_header(&secret, token, method, key, body))
+        Some(crate::net::httprelay::auth_header(&secret, token, method, key, body))
     }
     /// GET one key. `Ok(Some)` = bytes, `Ok(None)` = reachable but 404 (a real MISS — the iroh path
     /// serves the same store, so skip dialing it), `Err(Unreachable)` = dead endpoint,
@@ -9834,12 +9836,12 @@ impl Engine {
             .header("authorization", auth)
             .timeout(HTTP_LIST_TIMEOUT);
         if let Some(d) = digest.filter(|d| !d.is_empty()) {
-            req = req.header(haven_net::httprelay::LIST_DIGEST_HEADER, d);
+            req = req.header(crate::net::httprelay::LIST_DIGEST_HEADER, d);
         }
         let resp = req.send().await.map_err(|_| RelayErr::Unreachable)?;
         let resp_digest = resp
             .headers()
-            .get(haven_net::httprelay::LIST_DIGEST_HEADER)
+            .get(crate::net::httprelay::LIST_DIGEST_HEADER)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
         match resp.status().as_u16() {
@@ -9999,7 +10001,7 @@ impl Engine {
             let mut scoped = false;
             if let Some((urls, token)) = self.relay_http_reachable(&node_hex) {
                 for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
-                    match self.http_put(base, &token, &scope_key, haven_net::blobstore::MEDIA_SCOPE_BODY.to_vec()).await {
+                    match self.http_put(base, &token, &scope_key, crate::net::blobstore::MEDIA_SCOPE_BODY.to_vec()).await {
                         Ok(()) => { scoped = true; break; }
                         Err(RelayErr::Forbidden) => { self.note_scope_refused(&node_hex, circle_id, own_relay); scoped = true; break; }
                         Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
@@ -10008,7 +10010,7 @@ impl Engine {
             }
             if scoped { continue; }
             if let Some(client) = self.relay_client_for(&node_hex).await {
-                if let Err(e) = client.put(scope_key.clone(), haven_net::blobstore::MEDIA_SCOPE_BODY.to_vec()).await {
+                if let Err(e) = client.put(scope_key.clone(), crate::net::blobstore::MEDIA_SCOPE_BODY.to_vec()).await {
                     if e.to_string().to_lowercase().contains("forbidden") {
                         self.note_scope_refused(&node_hex, circle_id, own_relay);
                     } else {
@@ -10150,7 +10152,7 @@ impl Engine {
                 // this circle — or an upload). A refusal: this relay doesn't serve the circle.
                 let mut refused = false;
                 for base in urls.iter().filter(|u| !self.http_url_bad(u)) {
-                    match self.http_put(base, token, &scope_key, haven_net::blobstore::MEDIA_SCOPE_BODY.to_vec()).await {
+                    match self.http_put(base, token, &scope_key, crate::net::blobstore::MEDIA_SCOPE_BODY.to_vec()).await {
                         Ok(()) => { scoped = true; break; }
                         Err(RelayErr::Forbidden) => { refused = true; break; }
                         Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
@@ -10205,7 +10207,7 @@ impl Engine {
             if let Some(client) = self.relay_client_for(&node_hex).await {
                 if !scoped {
                     // No HTTP door took the marker: scope over the dial (same store, same gate).
-                    if let Err(e) = client.put(scope_key.clone(), haven_net::blobstore::MEDIA_SCOPE_BODY.to_vec()).await {
+                    if let Err(e) = client.put(scope_key.clone(), crate::net::blobstore::MEDIA_SCOPE_BODY.to_vec()).await {
                         if e.to_string().to_lowercase().contains("forbidden") {
                             self.note_scope_refused(&node_hex, circle_id, own_relay);
                         } else {
@@ -10666,7 +10668,7 @@ impl Engine {
                 break claim;
             }
             while self.media.fetch_in_flight(reference) {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                crate::rt::sleep(std::time::Duration::from_millis(100)).await;
             }
             if self.media.has(reference) {
                 return true;
@@ -10806,7 +10808,7 @@ impl Engine {
         let me = self.clone();
         let reference = reference.to_string();
         crate::rt::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+            crate::rt::sleep(std::time::Duration::from_secs(8)).await;
             let progressed = {
                 let mut st = me.dyn_state.lock();
                 st.resume_fallback.remove(&reference);
@@ -11954,7 +11956,7 @@ impl Engine {
         let this = self.clone();
         crate::rt::spawn(async move {
             for _ in 0..callwire::INVITE_RETRANSMIT_MAX {
-                tokio::time::sleep(std::time::Duration::from_millis(callwire::INVITE_RETRANSMIT_MS)).await;
+                crate::rt::sleep(std::time::Duration::from_millis(callwire::INVITE_RETRANSMIT_MS)).await;
                 if !this.dialing.lock().is_dialing(&session_id) {
                     return;
                 }
@@ -13515,7 +13517,7 @@ mod relay_http_timeout_tests {
         });
         let http = engine_http_client();
         let started = Instant::now();
-        let out = tokio::time::timeout(
+        let out = crate::rt::timeout(
             Duration::from_secs(10),
             http.get(format!("http://{addr}/l/haven%2Fmailbox%2Fdefault"))
                 .timeout(Duration::from_millis(300))

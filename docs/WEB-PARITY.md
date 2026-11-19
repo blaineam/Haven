@@ -63,6 +63,7 @@ owner turns it on, because other members' posts become readable in that browser.
 | Browser core: engine + relay-only transport (wasm32 only) | `core/haven-web` |
 | Build → `web-client/pkg` | `web-client/build.sh` |
 | Transport smoke (headless Chromium vs. the native wire) | `web-client/smoke/smoke.mjs`, `core/haven-net/examples/web_peer.rs` |
+| Session smoke (link + sealed posts both ways) | `web-client/smoke/session.mjs`, `core/haven-ffi/examples/web_primary.rs` |
 | Request signing shared by relay, native clients and browser | `core/haven-p2p/src/httpauth.rs` |
 
 `haven_ffi` (the engine) now builds for `wasm32-unknown-unknown`: its native-only parts — the iroh
@@ -74,14 +75,28 @@ supplies the transport. `web/` is still only the static invite-landing site.
 - [x] Engine and crypto core compile to WebAssembly; the engine self-test passes in Chromium.
 - [x] Relay-only iroh node in a tab: reaches a native node and is reached by one, through a circle
       DERP, sender ids authenticated, 2 MiB frames (`web-client/smoke`).
-- [ ] Seedless enrollment of a tab from a native device.
+- [x] Seedless enrollment of a tab with a `haven-enroll:` ticket (frames 28/29); a tampered grant is
+      refused (`web-client/smoke/session.mjs` against `core/haven-ffi/examples/web_primary.rs`).
+- [x] One sealed post each way between a tab and the account's primary device, over the app wire.
 - [ ] Signed mailbox over `fetch`, same-origin with the relay; the relay serves the bundle.
-- [ ] One sealed message each way between a tab and a native device.
-- [ ] The same through a real Cloudflare tunnel.
+- [ ] The same against a shipping native app, and through a real Cloudflare tunnel.
+- [ ] Scan-to-link: the tab shows a QR and the phone scans it (today the tab must be given the
+      ticket text, which suits a second computer but not a phone-to-kiosk link).
 - [ ] Engine IO loop in the browser (what `desktop/src-tauri/src/engine.rs` does natively), storage.
 - [ ] Responsive UI (phone → desktop), from `desktop/ui`.
 - [ ] Calls (WebRTC + the relay hairpin), Web Push.
 - [ ] Tamarin model for the web device class + CI guards, before any release.
+
+## Open questions
+
+- **Which relays a tab uses.** A tab reaches a peer only through a relay that peer is registered
+  on. Today it is given the circle's DERP alone. Native devices also keep n0's public relays in
+  their map and may be homed on one, so the tab should probably carry them too where the network
+  allows, and fall back to the mailbox where it does not.
+- **Shared client layer.** The desktop app's client logic (`desktop/src-tauri/src/engine.rs`, wire,
+  self-sync, roster, store) is what the browser needs too, but it is tied to Tauri, tokio and the
+  filesystem. The plan is to lift it into a crate with transport/storage/event traits that both
+  link, rather than write it a second time in JavaScript.
 
 ## History — why it was abandoned (2026-06-22)
 

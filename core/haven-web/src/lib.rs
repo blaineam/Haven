@@ -11,6 +11,11 @@
 //! This crate is empty on every target but `wasm32`.
 #![cfg(target_arch = "wasm32")]
 
+mod session;
+mod wire;
+
+pub use session::WebSession;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;

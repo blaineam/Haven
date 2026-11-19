@@ -1695,6 +1695,7 @@ dependencies = [
 name = "haven-web"
 version = "0.0.1"
 dependencies = [
+ "futures-channel",
  "haven-p2p",
  "haven_ffi",
  "iroh",

@@ -7,93 +7,14 @@
 //
 // Proves, in a real browser: the engine's self-test passes in wasm; the tab registers on the
 // circle's relay; the tab can DIAL a native node and get its echo; a native node can DIAL the tab.
-import { spawn } from "node:child_process";
-import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
-import { dirname, join, normalize } from "node:path";
-import { fileURLToPath } from "node:url";
-import { createRequire } from "node:module";
+import { openPage, run } from "./harness.mjs";
 
-const require = createRequire(import.meta.url);
-// Playwright is a dev tool, not a dependency of this repo: resolve it from NODE_PATH or a global
-// install (`playwright`, or `playwright-core` with its browser already downloaded).
-let chromium;
-for (const name of ["playwright", "playwright-core"]) {
-  try {
-    ({ chromium } = require(name));
-    break;
-  } catch {}
-}
-if (!chromium) {
-  console.error("playwright not found — install it or point NODE_PATH at a node_modules that has it");
-  process.exit(2);
-}
+await run("smoke.mjs <web_peer binary>", async ({ site, peer, step, onExit }) => {
+  const derp = await peer.line("DERP=");
+  const nativeId = await peer.line("NODE=");
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const peerBin = process.argv[2];
-if (!peerBin) {
-  console.error("usage: smoke.mjs <web_peer binary>");
-  process.exit(2);
-}
-
-const TYPES = { ".html": "text/html", ".js": "text/javascript", ".wasm": "application/wasm" };
-const server = createServer(async (req, res) => {
-  const path = normalize(decodeURIComponent(new URL(req.url, "http://x").pathname));
-  const file = path === "/" ? "/smoke/index.html" : path;
-  try {
-    const body = await readFile(join(root, file));
-    res.writeHead(200, { "content-type": TYPES[file.slice(file.lastIndexOf("."))] ?? "application/octet-stream" });
-    res.end(body);
-  } catch {
-    res.writeHead(404).end();
-  }
-});
-await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
-const pageUrl = `http://127.0.0.1:${server.address().port}/`;
-
-const peer = spawn(peerBin, ["127.0.0.1:0"], { stdio: ["pipe", "pipe", "inherit"] });
-const peerLines = [];
-const waiters = [];
-let buf = "";
-peer.stdout.on("data", (d) => {
-  buf += d;
-  let i;
-  while ((i = buf.indexOf("\n")) >= 0) {
-    const line = buf.slice(0, i);
-    buf = buf.slice(i + 1);
-    peerLines.push(line);
-    for (const w of [...waiters]) w();
-  }
-});
-function peerLine(prefix, ms = 30000) {
-  return new Promise((ok, fail) => {
-    const timer = setTimeout(() => fail(new Error(`native peer never printed ${prefix} (saw: ${peerLines.join(" | ")})`)), ms);
-    const check = () => {
-      const hit = peerLines.find((l) => l.startsWith(prefix));
-      if (hit) {
-        clearTimeout(timer);
-        waiters.splice(waiters.indexOf(check), 1);
-        ok(hit.slice(prefix.length));
-      }
-    };
-    waiters.push(check);
-    check();
-  });
-}
-
-let browser;
-let failed = false;
-const step = (name) => console.log(`ok  ${name}`);
-try {
-  const derp = await peerLine("DERP=");
-  const nativeId = await peerLine("NODE=");
-
-  browser = await chromium.launch();
-  const page = await browser.newPage();
-  page.on("console", (m) => console.log(`   [page ${m.type()}] ${m.text()}`));
-  page.on("pageerror", (e) => console.log(`   [page error] ${e.message}`));
-  await page.goto(pageUrl);
-  await page.waitForFunction(() => window.havenReady === true, null, { timeout: 30000 });
+  const { browser, page } = await openPage(site.url);
+  onExit(() => browser.close());
 
   if (!(await page.evaluate(() => window.haven.engineSelfTest()))) throw new Error("engine self-test failed in the browser");
   step("engine self-test passes in wasm");
@@ -117,18 +38,18 @@ try {
   step(`browser node online via ${derp} as ${webId.slice(0, 12)}…`);
 
   // Native dials the tab FIRST — before the tab has ever dialed out — so this is a true inbound.
-  peer.stdin.write(webId + "\n");
+  peer.write(webId + "\n");
   await page.waitForFunction(() => window.inbox.some((m) => m.text === "hello-from-native"), null, { timeout: 30000 });
   const inboundFrom = await page.evaluate(() => window.inbox.find((m) => m.text === "hello-from-native").from);
   if (inboundFrom !== nativeId) throw new Error(`inbound frame attributed to ${inboundFrom}, expected ${nativeId}`);
-  await peerLine("DIALED ");
+  await peer.line("DIALED ");
   step("native node dialed the tab; sender id authenticated");
 
   await page.evaluate(async (id) => {
     await window.node.sendToNode(id, new TextEncoder().encode("hello-from-browser"));
   }, nativeId);
   await page.waitForFunction(() => window.inbox.some((m) => m.text === "echo:hello-from-browser"), null, { timeout: 30000 });
-  const got = await peerLine(`RECV from=${webId}`);
+  const got = await peer.line(`RECV from=${webId}`);
   if (!got.includes("bytes=18")) throw new Error(`native saw unexpected frame: ${got}`);
   step("tab → native frame delivered and echoed back");
 
@@ -154,16 +75,6 @@ try {
     return window.inbox.length - before;
   }, nativeId);
   if (big !== 1) throw new Error("2 MiB frame was not echoed");
-  await peerLine(`RECV from=${webId} bytes=2097152`);
+  await peer.line(`RECV from=${webId} bytes=2097152`);
   step("2 MiB frame round-trips");
-
-  console.log("PASS");
-} catch (e) {
-  failed = true;
-  console.error(`FAIL ${e.message}`);
-} finally {
-  await browser?.close();
-  peer.kill();
-  server.close();
-}
-process.exit(failed ? 1 : 0);
+});

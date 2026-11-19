@@ -5478,16 +5478,23 @@ fn receive_epoch_event(st: &mut NetState, idx: usize, body: &[u8], pre: Option<P
             {
                 Some(e) => e,
                 None => {
-                    // On a tree lane the key I hold under this epoch NUMBER may be another
-                    // branch's: a fork gives two branches the same number and different keys. If I
-                    // then move to the author's branch the envelope would open — but it is not
-                    // offered again (the mailbox serves identical bytes once, and a re-seal under
-                    // the same key is identical bytes). So keep it, like one whose key I do not
-                    // hold yet: every tree wire that lands retries the buffer, and it ages out
-                    // with its epoch (`drain_pending`).
-                    if epoch_lane(env.epoch) != 0 {
-                        park_pending(&mut st.circles[idx], body, Some(parsed.clone()));
-                    }
+                    // Holding A key under this epoch number is not the same as holding THE key.
+                    // On a tree lane it may be another branch's: a fork gives two branches the same
+                    // number and different keys. On the sender-keys lane it may be a SIBLING
+                    // device's: every device of an account mints its own random key per epoch
+                    // (`ensure_epoch`) and they only converge once each has seen the other's key
+                    // commit — so an event a sibling sealed under ITS key, arriving before that
+                    // commit, cannot open under the one I hold for the same account and epoch.
+                    // Each frame is its own stream, so that order is ordinary.
+                    //
+                    // Either way the envelope would open once the right key lands — but it is not
+                    // offered again (the mailbox serves identical bytes once, a re-seal under the
+                    // same key is identical bytes, and `receive` records these bytes as seen). So
+                    // keep it, like one whose key I do not hold yet: the commit that supplies the
+                    // key drains the buffer, and it ages out with its epoch (`drain_pending`).
+                    // Dropping it here lost the event for the rest of the session however many
+                    // times the peer re-sent it.
+                    park_pending(&mut st.circles[idx], body, Some(parsed.clone()));
                     return Ok(false);
                 }
             }
@@ -12968,6 +12975,61 @@ mod net_tests {
         let forged = DeviceList::signed(&imposter, 99, 9, vec![Identity::from_seed(&[77u8; 32]).public().node_id_bytes()], vec![]);
         assert!(!bob.ingest_device_roster(primary.my_bundle(), forged.to_bytes(), vec![]),
                 "a roster not signed by the account key is rejected");
+    }
+
+    /// Own-device delivery is ORDER-INDEPENDENT. Every frame is its own stream, so the envelopes of a
+    /// sync bundle arrive in any order — including an event BEFORE the key commit that opens it, at
+    /// a device that already minted its own key for that epoch. Whatever order the primary's bundle
+    /// reaches a freshly linked seedless device in, and whatever order that device's bundle comes
+    /// back in, each ends up reading the other's post from that ONE delivery (identical bytes are
+    /// never processed twice, so there is no second chance).
+    #[test]
+    fn s4_ffi_own_device_events_open_in_any_delivery_order() {
+        let cid = DEFAULT_CIRCLE.to_string();
+        // Forward, reverse, and each rotation — every envelope gets to be first and to be last.
+        let orders = |n: usize| -> Vec<Vec<usize>> {
+            let mut out = vec![(0..n).collect::<Vec<_>>(), (0..n).rev().collect()];
+            for r in 1..n {
+                out.push((0..n).map(|i| (i + r) % n).collect());
+            }
+            out
+        };
+        let has = |e: &HavenSocial, body: &str| e.feed(cid.clone(), 9_000, None).iter().any(|m| m.body == body);
+        // One fresh pair per (down, up) order: the first delivery is the only one that counts.
+        let exchange = |down: Option<&[usize]>, up: Option<&[usize]>| -> (usize, usize, bool, bool) {
+            let (primary, seedless, _wire, _key) = grant_seedless([98u8; 32]);
+            primary.post(cid.clone(), "from the primary".into(), vec![], None, None, false, false, 2_000).unwrap();
+            let bundle = primary.sync_envelopes(cid.clone());
+            let forward: Vec<usize> = (0..bundle.len()).collect();
+            for &i in down.unwrap_or(&forward) {
+                let _ = seedless.receive(cid.clone(), bundle[i].clone());
+            }
+            seedless.post(cid.clone(), "from the seedless device".into(), vec![], None, None, false, false, 2_500).unwrap();
+            let back = seedless.sync_envelopes(cid.clone());
+            let forward: Vec<usize> = (0..back.len()).collect();
+            for &i in up.unwrap_or(&forward) {
+                let _ = primary.receive(cid.clone(), back[i].clone());
+            }
+            (bundle.len(), back.len(), has(&seedless, "from the primary"), has(&primary, "from the seedless device"))
+        };
+        let (n_down, n_up, down_ok, up_ok) = exchange(None, None);
+        assert!(down_ok && up_ok, "in-order delivery works");
+        assert!(n_down >= 3 && n_up >= 3, "each bundle carries a roster, a commit and an event");
+        let mut failures = vec![];
+        for down in orders(n_down) {
+            for up in orders(n_up) {
+                let (_, _, down_ok, up_ok) = exchange(Some(&down), Some(&up));
+                if !down_ok {
+                    failures.push(format!("seedless never read the primary's post: down {down:?}"));
+                }
+                if !up_ok {
+                    failures.push(format!("primary never read the seedless post: down {down:?} up {up:?}"));
+                }
+            }
+        }
+        failures.sort();
+        failures.dedup();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// F11 (FFI): the GRANTED self-sync key is exactly the account's seed-derived key, so a seedless

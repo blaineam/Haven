@@ -9,6 +9,17 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - Browsers could not open a WebSocket through a relay's front-door proxy (relay, in-app relay host)
+The path proxy rewrote every request's `Connection` header to `close` on its way to the backend, including WebSocket upgrades, which
+require `Connection: Upgrade`. The backend then answered without it and every browser refused the connection. Haven's own apps never
+checked the header, and a Cloudflare tunnel in front rebuilds the handshake, so this only showed for a browser reaching a relay
+directly or through a pass-through proxy (nginx, Caddy). Upgrades now keep the header; every other request is unchanged.
+
+### Changed - The Flatpak builds on a supported GNOME runtime (Linux, SteamOS)
+The Flatpak was built on the GNOME 47 runtime, which is end-of-life: it gets no security fixes (it carries the WebKitGTK that draws
+Haven's window), and installing it crashed the 2.1.3 release build once. It now uses GNOME 51, the current runtime, which still
+ships the WebKitGTK 4.1 the app needs. The manifest, both CI builder images and the install instructions moved together.
+
 ### Security - The relay's front-door proxy could be told to log requests (relay, in-app relay host)
 **Severity: low. Relay operators: update; members: nothing to do.** The path proxy that fronts a relay's public address had a
 diagnostic switch: if whoever runs the relay set the environment variable `HAVEN_PATH_PROXY_LOG`, it appended every request's time,

@@ -82,7 +82,7 @@ Or build it yourself from the **version-pinned manifest** the release publishes 
 `sha256` is already filled in):
 
 ```bash
-flatpak install -y flathub org.gnome.Platform//47 org.gnome.Sdk//47
+flatpak install -y flathub org.gnome.Platform//51 org.gnome.Sdk//51
 # com.blaineam.haven.yml is a release asset (the in-repo copy uses a placeholder sha256)
 flatpak-builder --user --install --force-clean build-dir com.blaineam.haven.yml
 flatpak run com.blaineam.haven

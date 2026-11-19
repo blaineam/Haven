@@ -8,7 +8,7 @@ Discover**, or the terminal.
 
 ```bash
 # 1. GNOME runtime (ships WebKitGTK, which the Tauri WebView needs)
-flatpak install -y flathub org.gnome.Platform//47 org.gnome.Sdk//47
+flatpak install -y flathub org.gnome.Platform//51 org.gnome.Sdk//51
 
 # 2. Build + install Haven from the manifest (uses the .deb CI publishes)
 flatpak-builder --user --install --force-clean build-dir com.blaineam.haven.yml

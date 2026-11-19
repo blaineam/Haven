@@ -242,7 +242,10 @@ async fn handle_client(mut client: TcpStream, state: &ProxyState) -> Result<()> 
         }
     }
 
-    let path = parse_request_path(&head).unwrap_or("/");
+    // A head we cannot parse is a bad request — never "the status page".
+    let Some(path) = parse_request_path(&head) else {
+        return write_simple(&mut client, 400, "bad request", b"unparseable request\n").await;
+    };
     let kind = classify_path(path);
     // No request log, and no switch that turns one on: the relay's "no logs are written" is a
     // promise to the circle's members, not to its operator, and a path is metadata (a mailbox
@@ -351,8 +354,21 @@ async fn serve_status(client: &mut TcpStream, head: &[u8], state: &ProxyState) -
     Ok(())
 }
 
+/// The request HEAD within what has been read so far: everything up to and including the first
+/// blank line. What follows is body — arbitrary bytes (sealed ciphertext), not text. A client is
+/// free to send its head and body in one segment, so the buffer the proxy parses routinely holds
+/// both; every parser below looks at this slice ONLY. Treating the whole buffer as text made a
+/// binary body un-parseable, and an un-parseable request was answered as a visit to the status
+/// page: `200 OK`, nothing forwarded, the upload silently gone.
+fn request_head(buf: &[u8]) -> &[u8] {
+    match buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(end) => &buf[..end + 4],
+        None => buf,
+    }
+}
+
 fn header_value<'a>(head: &'a [u8], name: &str) -> Option<&'a str> {
-    let text = std::str::from_utf8(head).ok()?;
+    let text = std::str::from_utf8(request_head(head)).ok()?;
     let want = name.to_ascii_lowercase();
     for line in text.lines().skip(1) {
         if line.is_empty() {
@@ -498,14 +514,16 @@ fn force_close_on_response(head: &[u8]) -> Vec<u8> {
 
 /// Adjust request head for a single-origin reverse proxy hop.
 fn rewrite_proxy_head(head: &[u8], backend: &str) -> Vec<u8> {
-    let Ok(text) = std::str::from_utf8(head) else {
+    // `head` is everything read so far: the request head and possibly the start of the body. Only
+    // the head is text; the body bytes after it are forwarded untouched.
+    let head_len = request_head(head).len();
+    let (head_bytes, rest) = head.split_at(head_len);
+    let Ok(text) = std::str::from_utf8(head_bytes) else {
         return head.to_vec();
     };
-    let Some(split) = text.find("\r\n\r\n") else {
+    let Some(header_block) = text.strip_suffix("\r\n\r\n") else {
         return head.to_vec();
     };
-    let header_block = &text[..split];
-    let rest = &text[split + 4..]; // may include already-read body bytes
     let lines: Vec<&str> = header_block.split("\r\n").collect();
     if lines.is_empty() {
         return head.to_vec();
@@ -560,13 +578,14 @@ fn rewrite_proxy_head(head: &[u8], backend: &str) -> Vec<u8> {
         out.push_str(if upgrading { "Connection: Upgrade\r\n" } else { "Connection: close\r\n" });
     }
     out.push_str("\r\n");
-    out.push_str(rest);
-    out.into_bytes()
+    let mut out = out.into_bytes();
+    out.extend_from_slice(rest);
+    out
 }
 
 /// Extract the request-target path from a raw HTTP request head.
 fn parse_request_path(head: &[u8]) -> Option<&str> {
-    let text = std::str::from_utf8(head).ok()?;
+    let text = std::str::from_utf8(request_head(head)).ok()?;
     let line = text.lines().next()?;
     // "GET /path HTTP/1.1"
     let mut parts = line.split_whitespace();
@@ -582,7 +601,7 @@ fn parse_request_path(head: &[u8]) -> Option<&str> {
 }
 
 fn parse_request_method(head: &[u8]) -> Option<&str> {
-    let text = std::str::from_utf8(head).ok()?;
+    let text = std::str::from_utf8(request_head(head)).ok()?;
     let line = text.lines().next()?;
     line.split_whitespace().next()
 }
@@ -590,6 +609,43 @@ fn parse_request_method(head: &[u8]) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A request whose binary body arrived in the same read as its head is still routed by its
+    /// head, and the body is forwarded byte for byte.
+    #[test]
+    fn a_binary_body_read_with_the_head_does_not_change_the_route_or_the_bytes() {
+        let body: Vec<u8> = (0u8..=255).rev().cycle().take(900).collect();
+        assert!(std::str::from_utf8(&body).is_err(), "the fixture must not be text");
+        let mut buf = b"PUT /k/haven/media/img_abc HTTP/1.1\r\nHost: relay.example\r\nContent-Length: 900\r\n\
+                        Authorization: Haven x\r\nConnection: keep-alive\r\n\r\n".to_vec();
+        let head_len = buf.len();
+        buf.extend_from_slice(&body);
+
+        assert_eq!(parse_request_method(&buf), Some("PUT"));
+        assert_eq!(parse_request_path(&buf), Some("/k/haven/media/img_abc"));
+        assert_eq!(classify_path(parse_request_path(&buf).unwrap()), RouteKind::Media);
+        assert_eq!(header_value(&buf, "content-length"), Some("900"));
+        assert_eq!(request_head(&buf).len(), head_len);
+
+        let out = rewrite_proxy_head(&buf, "127.0.0.1:8674");
+        let split = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let head = std::str::from_utf8(&out[..split]).unwrap();
+        assert!(head.starts_with("PUT /k/haven/media/img_abc HTTP/1.1\r\n"));
+        assert!(head.contains("\r\nHost: 127.0.0.1:8674\r\n") && head.contains("\r\nConnection: close\r\n"));
+        assert_eq!(&out[split..], &body[..], "the body is forwarded untouched");
+
+        // A body that itself contains a blank line does not move the head boundary.
+        let mut tricky = b"PUT /k/x HTTP/1.1\r\nHost: h\r\n\r\n".to_vec();
+        tricky.extend_from_slice(b"\xff\r\n\r\nGET / HTTP/1.1\r\n\r\n");
+        assert_eq!(parse_request_path(&tricky), Some("/k/x"));
+        assert!(rewrite_proxy_head(&tricky, "b:1").ends_with(b"\xff\r\n\r\nGET / HTTP/1.1\r\n\r\n"));
+    }
+
+    #[test]
+    fn a_request_line_that_is_not_text_has_no_path() {
+        assert_eq!(parse_request_path(b"\xff\xfe\r\n\r\n"), None);
+        assert_eq!(parse_request_path(b""), None);
+    }
 
     /// A WebSocket upgrade keeps its `Connection: Upgrade` on the way to the backend (a browser
     /// refuses the 101 otherwise); every other request is still forced to `close`.

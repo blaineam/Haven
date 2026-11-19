@@ -9,6 +9,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - A relay's front-door proxy could drop an upload and report success (relay, in-app relay host)
+When an upload's contents arrived in the same network segment as its request headers, the path proxy could not parse the request
+(sealed data is not text), took it for a visit to its own status page, and answered "200 OK" without passing anything on. The
+sender recorded the upload as done; the relay never stored it. Small uploads sent in one piece were the ones at risk, so this showed
+as media that "uploaded" but could not be found later. The proxy now reads only the headers as text, forwards the contents
+untouched, and refuses a request it cannot parse instead of answering it itself. No security impact: nothing was exposed.
+
 ### Fixed - Browsers could not open a WebSocket through a relay's front-door proxy (relay, in-app relay host)
 The path proxy rewrote every request's `Connection` header to `close` on its way to the backend, including WebSocket upgrades, which
 require `Connection: Upgrade`. The backend then answered without it and every browser refused the connection. Haven's own apps never

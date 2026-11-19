@@ -43,7 +43,9 @@ final class FeedStoreInboundTests: XCTestCase {
 
     func testAStrangersHelloBecomesAConnectionRequestUntilBlocked() async {
         let store = await Harness.feed()
-        let stranger = Peer(byte: 0x72, name: "Stranger")
+        // An identity no other test uses: one that another test befriends (and the host keeps
+        // between runs) is already a contact, so its hello never becomes a request.
+        let stranger = Peer(byte: 0x7E, name: "Stranger")
         let hello = lp("default") + lp("Their circle") + lp(stranger.bundle)
         // Start from a clean slate for this identity: a block, pending request or contact record left
         // by an earlier (killed or failed) run would swallow the hello and the wait below would time out.

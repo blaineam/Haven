@@ -13,8 +13,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 Each of an account's devices makes its own key for a circle and they settle on one once each has seen the other's. If a post from one
 device reached another before that device's key announcement did (each message travels separately, so this order is ordinary), the
 receiving device tried the key it already had, failed, discarded the post, and then ignored every later copy of it for as long as the
-app stayed open. The post is now kept and opened as soon as the key arrives. Found while building the web client, where every message
-is relayed and this order is common; it affected linked native devices too. No security impact: nothing was readable that should not
+app stayed open. The post is now kept and opened as soon as the key arrives. No security impact: nothing was readable that should not
 have been. Regression test: `s4_ffi_own_device_events_open_in_any_delivery_order`.
 
 ### Added - Web client groundwork (not shipped; `feat/web-client`)

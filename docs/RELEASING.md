@@ -188,8 +188,9 @@ Releases go out in **two hops: candidate, then promote.** Testers get the exact 
    review from the **Xcode Cloud build of that exact commit**: it finds the XCC run whose source
    commit is the tag's (starting one on the tag if auto-cancel ate it), waits for the run and for
    both uploads to finish processing, creates the App Store version, sets What's New on every
-   localization from `appstore-metadata*.md`, attaches the build, and opens + submits the review
-   submission. It is gated on three repo secrets (`ASC_API_KEY_ID`, `ASC_API_ISSUER_ID`,
+   localization from `appstore-metadata*.md`, sets the App Review notes from `## review_notes`
+   (a new version otherwise inherits the previous version's notes), attaches the build, and opens +
+   submits the review submission. It is gated on three repo secrets (`ASC_API_KEY_ID`, `ASC_API_ISSUER_ID`,
    `ASC_API_KEY_P8` — the key needs **App Manager**) and skips with a notice until they exist.
 
    **The notes gate:** `appstore-metadata.md`'s `## whats_new` must **start with the version**

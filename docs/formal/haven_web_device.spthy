@@ -1,0 +1,149 @@
+/*
+  Haven web device — what a browser linked to an account can and cannot do. Symbolic model
+  (Tamarin).
+
+  A browser is a SEEDLESS linked device: it holds its own device key and an account-signed
+  credential, never the account key (docs/WEB-PARITY.md). Its code is delivered by a relay, so
+  the design must hold up when a linked browser is fully compromised. This model checks the three
+  things that bound that compromise, and the one new message the web client added.
+
+  Code: core/haven-client/src/engine.rs (teach_my_devices_relay_interfaces, handle_relay_interface),
+  core/haven-client/src/wire.rs (RELAY_INTERFACE, frame 36), core/haven-p2p/src/device.rs
+  (DeviceCredential), core/haven-p2p/src/enroll.rs. Spec: docs/WEB-PARITY.md.
+
+  Run:  tamarin-prover --auto-sources --prove docs/formal/haven_web_device.spthy
+        tamarin-prover --auto-sources --prove -DDEVICE_SPEAKS docs/formal/haven_web_device.spthy
+
+  What is modelled
+   - An ACCOUNT has a long-term signing key, held only by its seed-holding device. Every device of
+     the account pins the account's public key (it arrives in the enrollment grant, checked
+     against the ticket).
+   - A DEVICE has a signing key and an encryption key. The account signs a CREDENTIAL binding a
+     device's keys to the account.
+   - RELAY INTERFACE (frame 36): the seed holder tells one of its own devices how to reach a relay
+     — a URL and the relay's access TOKEN — sealed to that device's encryption key and signed.
+     AS BUILT, the receiver accepts it only when the signature verifies under the pinned ACCOUNT
+     key.
+   - -DDEVICE_SPEAKS models the looser rule deliberately NOT built: accept the frame from any
+     device that carries a valid credential for the account ("a device speaks for its account",
+     which is how call frames are accepted). W1 is falsified there — that is the reason for the
+     stricter rule.
+   - The adversary controls the network and the relay, and may take everything a linked device
+     holds (RevealDevice) or the account key itself (RevealAccount).
+*/
+
+theory HavenWebDevice
+begin
+
+builtins: signing, asymmetric-encryption
+
+restriction Eq:   "All x y #i. Eq(x, y)@i ==> x = y"
+restriction Once: "All t #i #j. Once(t)@i & Once(t)@j ==> #i = #j"
+
+/* ---- Keys ---------------------------------------------------------------------------------- */
+
+rule Account:
+  [ Fr(~ask) ]
+  --[ Once(<'acct', $A>), AccountKey($A, ~ask) ]->
+  [ !Acct($A, ~ask), !Pin($A, pk(~ask)), Out(pk(~ask)) ]
+
+rule RevealAccount:      /* the account key itself leaks (a compromised seed-holding device) */
+  [ !Acct(A, ask) ] --[ RevealAccount(A) ]-> [ Out(ask) ]
+
+rule Device:             /* a device's own keys: one to sign, one to be sealed to */
+  [ Fr(~dsk), Fr(~dek) ]
+  --[ Once(<'dev', $D>), DevKey($D, pk(~dsk)) ]->
+  [ !Dev($D, ~dsk, ~dek), Out(<pk(~dsk), pk(~dek)>) ]
+
+rule RevealDevice:       /* EVERYTHING a linked (seedless) device holds — a compromised browser */
+  [ !Dev(D, dsk, dek) ] --[ RevealDevice(D) ]-> [ Out(<dsk, dek>) ]
+
+/* ---- Enrollment ---------------------------------------------------------------------------- */
+
+rule Credential:         /* the seed holder approves a device (the user confirms the request) */
+  let cred = <'cred', $A, $D, pk(dsk), pk(dek)> in
+  [ !Acct($A, ask), !Dev($D, dsk, dek) ]
+  --[ Enrolled($A, $D) ]->
+  [ !Cred($A, $D, pk(dsk), pk(dek)), Out(<cred, sign(cred, ask)>) ]
+
+rule VerifierAccept:     /* anyone holding the pinned account key judges a presented credential */
+  let cred = <'cred', $A, D, dspk, depk> in
+  [ In(<cred, sg>), !Pin($A, pka) ]
+  --[ Eq(verify(sg, cred, pka), true), AcceptDevice($Ver, $A, D, dspk) ]->
+  [ ]
+
+/* ---- Relay interface (frame 36) ------------------------------------------------------------ */
+
+rule TeachRelay:         /* the seed holder tells its device D how to reach relay R */
+  let body = <'iface', $A, $D, $R, ~tok> in
+  [ !Acct($A, ask), !Cred($A, $D, dspk, depk), Fr(~tok) ]
+  --[ Taught($A, $D, $R, ~tok), Token($A, $D, ~tok) ]->
+  [ Out(<aenc(body, depk), sign(body, ask)>) ]
+
+#ifdef DEVICE_SPEAKS
+/* NOT BUILT: any enrolled device may tell a sibling about a relay, signing with its DEVICE key… */
+rule TeachRelayByDevice:
+  let body = <'iface', $A, $D, $R, ~tok> in
+  [ !Dev($S, ssk, sek), !Cred($A, $S, pk(ssk), pk(sek)), !Cred($A, $D, dspk, depk), Fr(~tok) ]
+  --[ Taught($A, $D, $R, ~tok), Token($A, $D, ~tok) ]->
+  [ Out(<aenc(body, depk), sign(body, ssk)>) ]
+
+/* …and the receiver accepts the frame from any device with a valid credential for the account. */
+rule LearnRelayFromAnyDevice:
+  let body = <'iface', $A, $D, R, tok>
+      cred = <'cred', $A, S, sspk, sepk> in
+  [ In(<aenc(body, pk(dek)), sg>), In(<cred, csg>), !Dev($D, dsk, dek), !Pin($A, pka) ]
+  --[ Eq(verify(csg, cred, pka), true), Eq(verify(sg, body, sspk), true), Learn($D, $A, R, tok) ]->
+  [ ]
+#else
+/* AS BUILT: the signature must verify under the pinned ACCOUNT key. */
+rule LearnRelay:
+  let body = <'iface', $A, $D, R, tok> in
+  [ In(<aenc(body, pk(dek)), sg>), !Dev($D, dsk, dek), !Pin($A, pka) ]
+  --[ Eq(verify(sg, body, pka), true), Learn($D, $A, R, tok) ]->
+  [ ]
+#endif
+
+/* ---- Sanity -------------------------------------------------------------------------------- */
+
+lemma executable_learn:
+  exists-trace
+  "Ex D A R tok #i. Learn(D, A, R, tok)@i
+     & not (Ex B #r. RevealAccount(B)@r) & not (Ex E #r. RevealDevice(E)@r)"
+
+lemma executable_accept_device:
+  exists-trace
+  "Ex V A D k #i. AcceptDevice(V, A, D, k)@i
+     & not (Ex B #r. RevealAccount(B)@r) & not (Ex E #r. RevealDevice(E)@r)"
+
+/* ---- Properties ---------------------------------------------------------------------------- */
+
+/* W1 — a device learns a relay's address only from its own account's key. Whatever a device is
+   told about relay R with token tok, an HONEST sender really sent exactly that to exactly this
+   device (as built, that sender can only be the seed holder) — unless the account key leaked. A compromised linked device (RevealDevice, any number
+   of them, the receiver's siblings included) cannot repoint another device's relays, and neither
+   can a relay or the network.
+   Under -DDEVICE_SPEAKS this is FALSIFIED: one compromised linked device is enough. */
+lemma W1_relay_interface_only_from_the_account_key:
+  "All D A R tok #i. Learn(D, A, R, tok)@i ==>
+      (Ex #t. Taught(A, D, R, tok)@t) | (Ex #r. RevealAccount(A)@r)"
+
+/* W2 — a compromised linked device cannot enrol another device. If anyone accepts (D, key) as a
+   device of A, the account enrolled D with that key — unless the account key leaked. Taking every
+   key a browser holds adds no device to the account. */
+lemma W2_a_linked_device_cannot_enrol_another:
+  "All V A D k #i. AcceptDevice(V, A, D, k)@i ==>
+      ( (Ex #e. Enrolled(A, D)@e) & (Ex #d. DevKey(D, k)@d) ) | (Ex #r. RevealAccount(A)@r)"
+
+/* W3 — the account key is never learned from a linked device. Compromising any number of linked
+   devices does not give the adversary the account key. */
+lemma W3_the_account_key_survives_any_linked_device:
+  "All A ask #a #k. AccountKey(A, ask)@a & K(ask)@k ==> (Ex #r. RevealAccount(A)@r)"
+
+/* W4 — the relay token sent to a device is read only by that device. The network and the relay's
+   front door see the frame but not the token; it is known to the adversary only by taking the
+   device it was sealed to. (A leaked ACCOUNT key does not open it either — it only signs.) */
+lemma W4_the_relay_token_is_sealed_to_its_device:
+  "All A D tok #t #k. Token(A, D, tok)@t & K(tok)@k ==> (Ex #r. RevealDevice(D)@r)"
+
+end

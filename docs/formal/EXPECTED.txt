@@ -27,6 +27,18 @@ haven_device_roster :: R4_same_version_rosters_can_hide_a_revocation :: verified
 haven_device_roster :: R5_single_seed_holder_rosters_are_unique :: verified
 haven_device_roster :: executable_accept :: verified
 haven_device_roster :: executable_revoke_then_reauthorize :: verified
+haven_web_device :: W1_relay_interface_only_from_the_account_key :: verified
+haven_web_device :: W2_a_linked_device_cannot_enrol_another :: verified
+haven_web_device :: W3_the_account_key_survives_any_linked_device :: verified
+haven_web_device :: W4_the_relay_token_is_sealed_to_its_device :: verified
+haven_web_device :: executable_accept_device :: verified
+haven_web_device :: executable_learn :: verified
+haven_web_device -DDEVICE_SPEAKS :: W1_relay_interface_only_from_the_account_key :: falsified
+haven_web_device -DDEVICE_SPEAKS :: W2_a_linked_device_cannot_enrol_another :: verified
+haven_web_device -DDEVICE_SPEAKS :: W3_the_account_key_survives_any_linked_device :: verified
+haven_web_device -DDEVICE_SPEAKS :: W4_the_relay_token_is_sealed_to_its_device :: verified
+haven_web_device -DDEVICE_SPEAKS :: executable_accept_device :: verified
+haven_web_device -DDEVICE_SPEAKS :: executable_learn :: verified
 haven_treekem_as_wired :: T1_secrecy_without_compromise :: verified
 haven_treekem_as_wired :: T2_removed_member_locked_out :: verified
 haven_treekem_as_wired :: T3_pcs_committer_state_heals :: falsified

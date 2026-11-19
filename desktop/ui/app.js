@@ -5684,7 +5684,12 @@ async function relaySheet() {
       live ? el("div", { class: "muted small", style: "word-break:break-all" }, t("web_access_address"), " ", el("span", { style: "color:var(--tint)" }, live)) : null,
       el("div", { class: "muted small", style: "white-space:normal" }, t("web_access_warn")));
   })();
-  sheet(t("relays"), el("div", { class: "col", style: "gap:16px" }, hostCard, liveTunnelCard, publicCard, webCard, alwaysOn, adoptCard, s3card, headless));
+  // A tab cannot listen, so it cannot host: in a browser the sheet is the relays this account
+  // USES (adopt, activate, S3) and none of the hosting controls.
+  const cards = HOST_WEB
+    ? [adoptCard, s3card]
+    : [hostCard, liveTunnelCard, publicCard, webCard, alwaysOn, adoptCard, s3card, headless];
+  sheet(t("relays"), el("div", { class: "col", style: "gap:16px" }, ...cards));
 }
 
 // ---- You / Settings --------------------------------------------------------------------
@@ -6050,8 +6055,9 @@ async function settingsSheet() {
     group(row(t("blocked_people"), "hand.raised.fill", () => blockedSheet())),
     foot(t("blocked_foot")),
 
-    group(row(t("identities"), "icloud", () => identitiesSheet())),
-    foot(t("identities_foot")),
+    // A browser holds one linked device of one account — there are no identities to switch.
+    HOST_WEB ? null : group(row(t("identities"), "icloud", () => identitiesSheet())),
+    HOST_WEB ? null : foot(t("identities_foot")),
 
     group(row(t("devices"), "laptop", () => devicesSheet())),
     foot(t("devices_foot")),
@@ -6085,8 +6091,9 @@ async function settingsSheet() {
     paletteGroup(),
     foot(t("palette_foot")),
 
-    group(row(t("import_from_instagram"), "square.and.arrow.down", () => instagramImportSheet())),
-    foot(t("import_ig_foot")),
+    // The importer reads a multi-gigabyte archive straight off disk by path; a page has no path.
+    HOST_WEB ? null : group(row(t("import_from_instagram"), "square.and.arrow.down", () => instagramImportSheet())),
+    HOST_WEB ? null : foot(t("import_ig_foot")),
 
     group(row(t("advanced"), "wrench", () => advancedSheet())),
     foot(t("advanced_foot")),

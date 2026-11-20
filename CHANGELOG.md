@@ -9,6 +9,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - A relay's Cloudflare tunnel could shut down seconds after it started (desktop relay host, `haven-relay`)
+Haven starts `cloudflared` and reads its output to learn the tunnel's address. Once it had the address it stopped reading — and on
+macOS and Linux a program whose output nobody is reading is killed the next time it writes a log line. So a tunnel could be
+reported as up, with its address announced to the circle, and be gone a few seconds later; anything that then tried the address got
+no answer. Both the free automatic tunnel and a custom-domain tunnel start this way. Seen on macOS while testing; Linux behaves the
+same way with pipes; Windows does not kill the helper, so it was unaffected, and the Mac app starts its tunnel through different
+code. Haven now keeps reading the helper's output for as long as it runs. No security impact. Regression test:
+`the_helper_survives_logging_after_its_address_was_read`.
+
 ### Fixed - A relay's front-door proxy could drop an upload and report success (relay, in-app relay host)
 When an upload's contents arrived in the same network segment as its request headers, the path proxy could not parse the request
 (sealed data is not text), took it for a visit to its own status page, and answered "200 OK" without passing anything on. The

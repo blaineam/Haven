@@ -438,10 +438,17 @@ where
                       tx: mpsc::Sender<T>,
                       match_line: Arc<F>| {
         thread::spawn(move || {
-            for line in BufReader::new(reader).lines().flatten() {
-                if let Some(v) = match_line(&line) {
-                    let _ = tx.send(v);
-                    return;
+            // Read to END OF FILE, not to the first match. Returning at the match dropped this
+            // end of the pipe while the helper was still running, and its next log line killed it
+            // (a write to a closed pipe is SIGPIPE on macOS and Linux): the tunnel was reported up
+            // and was gone seconds later. After the match the lines are read and discarded — the
+            // helper's own `--logfile` is the record — and the thread ends when the helper does.
+            let mut tx = Some(tx);
+            for line in BufReader::new(reader).split(b'\n').flatten() {
+                let Some(sender) = tx.as_ref() else { continue };
+                if let Some(v) = match_line(&String::from_utf8_lossy(&line)) {
+                    let _ = sender.send(v);
+                    tx = None;
                 }
             }
         });
@@ -865,6 +872,38 @@ pub fn executable_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cloudflared keeps logging for as long as it runs. Its output must be read for just as long:
+    /// once the address was found the reader used to stop and drop its end of the pipe, and the
+    /// helper's NEXT log line then killed it (a write to a closed pipe — SIGPIPE on macOS and
+    /// Linux). A tunnel reported as up was dead a few seconds later.
+    #[cfg(unix)]
+    #[test]
+    fn the_helper_survives_logging_after_its_address_was_read() {
+        let mark = std::env::temp_dir().join(format!("haven-cfd-pipe-{}", std::process::id()));
+        let _ = std::fs::remove_file(&mark);
+        // A stand-in helper: prints its address on stderr, keeps logging to BOTH streams, and
+        // only then leaves its mark. Killed by a closed pipe, it never gets that far.
+        let script = format!(
+            "echo 'INF |  https://plain-quiet-test-words.trycloudflare.com  |' >&2; \
+             i=0; while [ $i -lt 40 ]; do echo \"out $i\"; echo \"err $i\" >&2; i=$((i+1)); sleep 0.02; done; \
+             echo done > '{}'",
+            mark.display()
+        );
+        let mut child = Command::new("sh")
+            .args(["-c", &script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let url = wait_for_log_signal(&mut child, Duration::from_secs(10), extract_trycloudflare_url, "no url").unwrap();
+        assert_eq!(url, "https://plain-quiet-test-words.trycloudflare.com");
+        let status = child.wait().unwrap();
+        assert!(status.success(), "the helper was killed after its address was read: {status}");
+        assert!(mark.exists(), "the helper did not finish");
+        let _ = std::fs::remove_file(&mark);
+    }
 
     #[test]
     fn extracts_trycloudflare_url_from_log_lines() {

@@ -107,6 +107,31 @@ final class FeedStoreHelloTests: XCTestCase {
         XCTAssertEqual(hints().filter { $0 == device }.count, 1, "hints are deduped")
     }
 
+    /// Answering a contact's hello tells THEM where the circle's relays are — not only the next
+    /// broadcast. A friend with no relay of their own, whose invite I took, learned mine only from
+    /// a re-announce up to ten minutes later, and until then nothing of theirs could reach me.
+    func testAnsweringAContactsHelloTellsThemWhereTheCirclesRelaysAre() async {
+        let store = await Harness.feed()
+        let gil = Peer(byte: 0x2b, name: "Gil")
+        await gil.befriend(store)
+        let alive = String(repeating: "c1", count: 32), stale = String(repeating: "c2", count: 32)
+        RelayMailboxStore.shared.add(circleId: "default", nodeHex: alive)
+        RelayMailboxStore.shared.add(circleId: "default", nodeHex: stale)
+        defer {
+            RelayMailboxStore.shared.remove(circleId: "default", nodeHex: alive)
+            RelayMailboxStore.shared.remove(circleId: "default", nodeHex: stale)
+        }
+        RelayHealth.shared.recordSuccess(alive)   // reached within the last five minutes; `stale` never was
+        let worth = store.relaysWorthAnnouncing(circleId: "default")
+        XCTAssertTrue(worth.contains(alive), "a relay with recent proof of life is announced")
+        XCTAssertFalse(worth.contains(stale), "a relay we have not reached is not vouched for")
+
+        XCTAssertNil(store.relayAnnouncesSent[gil.hex])
+        let consumed = await store.ingestInviteHello(hello(gil, circle: "default"))
+        XCTAssertTrue(consumed)
+        XCTAssertEqual(store.relayAnnouncesSent[gil.hex], worth.count, "the reply to their hello carries the circle's live relays, addressed to them")
+    }
+
     func testMalformedHellosAreConsumed() async {
         let store = await Harness.feed()
         for body in [Data(), Data([1, 2, 3]), lp("default") + lp("x") + lp(Data([1, 2])), lp("") + lp("x") + lp(Data(repeating: 7, count: 40))] {

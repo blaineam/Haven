@@ -1282,6 +1282,64 @@ test('advanced: storage limits save, unused media is cleaned, and the manage-med
   assert.equal(lastCall(app, 'media_unpin').args.refs[0], 'vid_pin');
 });
 
+// ── Web Push: "notify me when Haven is closed" (the browser client only) ────────────────────────
+
+const WP_OK = { supported: true, kept: true, permission: 'default', enabled: false };
+const wpBoot = (be) => boot({ host: { web: true }, be });
+const wpToggle = async (app, on) => {
+  const chk = app.q('#wp-toggle');
+  chk.checked = on;
+  chk.dispatchEvent(new app.ctx.Event('change', { bubbles: true }));
+  await app.settle();
+  return chk;
+};
+
+test('web push: the desktop app has no such switch; a browser does, off until asked for', async () => {
+  const desktop = await boot();
+  await openSettingsRow(desktop.app, /Privacy/);
+  assert.equal(desktop.app.q('#wp-toggle'), null);
+  assert.equal(lastCall(desktop.app, 'web_push_status'), undefined, 'the desktop app never asks');
+
+  const { app } = await wpBoot({ web_push_status: WP_OK, web_push_set: ({ on }) => ({ ...WP_OK, permission: 'granted', enabled: on }) });
+  await openSettingsRow(app, /Privacy/);
+  const chk = app.q('#wp-toggle');
+  assert.ok(chk && !chk.checked && !chk.disabled);
+  assert.match(app.q('#wp-note').textContent, /never who or what/, 'it says what the alert will and will not show');
+
+  assert.equal((await wpToggle(app, true)).checked, true);
+  assert.deepEqual(J(lastCall(app, 'web_push_set').args), { on: true });
+  assert.equal((await wpToggle(app, false)).checked, false);
+  assert.deepEqual(J(lastCall(app, 'web_push_set').args), { on: false });
+});
+
+test('web push: where it cannot work the switch is off and the row says why', async () => {
+  for (const [status, why] of [
+    [{ supported: false, kept: true, permission: 'unsupported', enabled: false }, /cannot show notifications/],
+    [{ ...WP_OK, kept: false }, /chose to stay linked/],
+    [{ ...WP_OK, permission: 'denied' }, /blocked for this site/],
+  ]) {
+    const { app } = await wpBoot({ web_push_status: status });
+    await openSettingsRow(app, /Privacy/);
+    assert.equal(app.q('#wp-toggle').disabled, true, JSON.stringify(status));
+    assert.match(app.q('#wp-note').textContent, why);
+  }
+  // Already on in a browser whose permission was since revoked: it can still be turned OFF.
+  const { app } = await wpBoot({ web_push_status: { ...WP_OK, permission: 'denied', enabled: true } });
+  await openSettingsRow(app, /Privacy/);
+  assert.equal(app.q('#wp-toggle').disabled, false);
+});
+
+test('web push: a refusal puts the switch back and says why', async () => {
+  for (const [code, why] of [['unavailable', /Not available right now/], ['blocked', /blocked for this site/], ['session', /chose to stay linked/]]) {
+    const { app } = await wpBoot({ web_push_status: WP_OK, web_push_set: () => { throw code; } });
+    await openSettingsRow(app, /Privacy/);
+    const chk = await wpToggle(app, true);
+    assert.equal(chk.checked, false, code);
+    assert.equal(chk.disabled, false);
+    assert.match(app.q('#wp-note').textContent, why);
+  }
+});
+
 test('privacy & media: the toggles write through to the backend', async () => {
   const { app } = await boot();
   await openSettingsRow(app, /Privacy/);

@@ -38,6 +38,8 @@ CONFIGS=(
   "haven_pair|-DUNBOUND|lemma"
   "haven_web_consent||lemma"
   "haven_web_consent|-DSTRIPPABLE|lemma"
+  "haven_web_push||lemma"
+  "haven_web_push|-DNO_CREDENTIAL|lemma"
   "haven_treekem_as_wired||lemma"
   "haven_treekem_stage1||lemma"
   "haven_treekem_stage1|-DLEGACY|lemma"

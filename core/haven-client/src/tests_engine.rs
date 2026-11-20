@@ -509,3 +509,39 @@ async fn a_seedless_engine_cannot_author_account_level_things() {
     assert!(seedless && !linked && linking);
     drop(e);
 }
+
+/// A browser files its push endpoint under its account with its DEVICE key and the credential the
+/// account signed for it; a device that is not a linked browser has nothing to file. (That the
+/// worker accepts exactly this body is held by the vector shared with `push/worker.test.mjs`.)
+#[tokio::test]
+async fn only_a_linked_browser_builds_a_web_push_registration() {
+    const ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/abc";
+    let (e, _) = engine(71);
+    assert!(e.web_push_registration_body(ENDPOINT, 1_800_000_000).is_none(), "no credential: not a linked device");
+
+    let account_seed = vec![72u8; 32];
+    let account_hex = haven_ffi::Account::from_seed(account_seed.clone()).unwrap().node_id_hex();
+    let (bundle, device_hex) = {
+        let r = e.roster.lock();
+        (r.device_bundle(), haven_ffi::Account::from_seed(r.device_seed.clone()).unwrap().node_id_hex())
+    };
+    let cred = |name: &str| haven_ffi::multidevice::issue_device_credential(account_seed.clone(), bundle.clone(), name.into(), 1_700_000_000).unwrap();
+
+    e.roster.lock().credential = Some(cred("Laptop"));
+    assert!(e.web_push_registration_body(ENDPOINT, 1_800_000_000).is_none(), "a linked app is not a web device");
+
+    e.roster.lock().credential = Some(cred(&haven_ffi::web_device_name("Chrome on Mac".into())));
+    let body = e.web_push_registration_body(ENDPOINT, 1_800_000_000).expect("a linked browser registers");
+    assert_eq!(body["nodeId"], account_hex, "filed under the ACCOUNT — that is who senders ring");
+    assert_eq!(body["deviceId"], device_hex);
+    assert_eq!(body["platform"], "web");
+    assert_eq!(body["token"], ENDPOINT);
+    assert_eq!(body["ts"], 1_800_000_000u64);
+    for k in ["sig", "cred", "credSig"] {
+        assert!(!body[k].as_str().unwrap().is_empty(), "{k}");
+    }
+    // The harness keeps every test engine off the production worker.
+    crate::netgate::set_push_off(true);
+    assert!(e.web_push_register(ENDPOINT.into()).await.is_err());
+    assert!(e.web_push_key().await.is_none());
+}

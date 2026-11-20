@@ -485,3 +485,38 @@ up-to-date browser refuses what such an app offers. The mark is applied at appro
 the browser linked by showing a code, by the browser itself otherwise. Circle names and member
 lists still reach a browser through the account's own device sync.
 
+
+## D23 — A browser is rung with a content-free doorbell, filed by its own device key (2026-11-20)
+
+**Decision.** A linked browser can be notified while its tab is closed (Web Push). The push worker
+sends it an empty request — no payload — and the browser's service worker shows a line that says
+only that something is waiting. The browser registers its push endpoint under its account with its
+DEVICE key and the credential the account signed for it; the worker verifies the account's
+signature on the credential, the web mark in it, and that it names the key that signed.
+
+**Why this shape.**
+- *No payload.* Anything put in a push is handed to a third party's push service. With nothing in
+  it there is nothing to encrypt, nothing to get wrong, and the service learns only timing — the
+  same as the Android wake. The cost is that the notification cannot say who or what, or tell a
+  call from a post.
+- *The device key, not the account key.* A browser never holds the account key (D21). The two
+  alternatives were to have a seed-holding device register on the browser's behalf (works only
+  when that device is online, and needs new code in all three apps) or to let the worker take any
+  key's word for its account (anyone could file their own endpoint under your account and learn
+  when you are active — falsified in the model as `-DNO_CREDENTIAL`). The credential already
+  exists, is account-signed, and names both the device key and the class.
+- *Only where the person chose to stay linked.* A browser linked "just for this visit" must not
+  keep a subscription after the tab closes.
+- *A service worker with no `fetch` handler.* Web Push requires a service worker; ours does
+  nothing but show the notification, so D21's "the page always runs what the relay serves now"
+  still holds.
+
+**What it does not give.** The worker holds no device list, so revoking a browser from another
+device does not remove its registration: it lapses after 30 days unless that browser renews it,
+or when the browser unsubscribes. Until then a revoked browser can still be rung. It learns that
+something happened and nothing else. Closing that needs the account's device to tell the worker,
+on every platform; it is not built.
+
+**Proof and tests.** `docs/formal/haven_web_push.spthy` (R1–R3, the limit as a trace, and the
+looser rule falsified); `push/worker.test.mjs`; a registration vector shared between the Rust core
+and the worker (`push/webpush-vector.json`).

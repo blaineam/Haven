@@ -261,6 +261,14 @@ await run(
     const n = assertEncrypted(await rawStorage(page), account, "session mode");
     step(`everything stored is ciphertext (${n} records; no JSON keys, no account id)`);
 
+    // Web Push is not offered in a browser the person did not choose to stay linked in: a
+    // borrowed computer must not go on being rung after the tab is closed.
+    const hostCall = (cmd, args = {}) => page.evaluate(([c, a]) => window.__TAURI__.core.invoke(c, a).then((v) => ({ ok: v }), (e) => ({ err: String(e) })), [cmd, args]);
+    const borrowed = await hostCall("web_push_status");
+    if (!borrowed.ok || borrowed.ok.kept || borrowed.ok.enabled) throw new Error(`web push in a session-only browser: ${JSON.stringify(borrowed)}`);
+    if ((await hostCall("web_push_set", { on: true })).err !== "session") throw new Error("a session-only browser was allowed to turn web push on");
+    step("a browser that will forget its link cannot be set to ring after the tab closes");
+
     // Leaving the page (anything but a reload) ends a shared-computer session for good.
     if (!process.env.SMOKE_SHOTS) {
       await page.goto(`${origin}/app/`);
@@ -317,6 +325,22 @@ await run(
       if (extractable !== false) throw new Error(`the storage key must be a non-extractable CryptoKey (got ${extractable})`);
       step("'this is my computer' stays linked across visits; records are ciphertext under a non-extractable key");
 
+      // Web Push, as far as a harness can take it (this page is kept off the push worker, and a
+      // headless browser has no push service): the relay serves the service worker, the browser
+      // accepts it for /app/, and the switch says "not available" rather than pretending.
+      const sw = await page.evaluate(async () => {
+        const res = await fetch("sw.js");
+        const reg = await navigator.serviceWorker.register("sw.js", { scope: "./" });
+        return { type: res.headers.get("content-type"), scope: reg.scope };
+      });
+      if (!/javascript/.test(sw.type) || sw.scope !== `${origin}/app/`) throw new Error(`service worker: ${JSON.stringify(sw)}`);
+      const mine = await hostCall("web_push_status");
+      if (!mine.ok || !mine.ok.supported || !mine.ok.kept || mine.ok.enabled) throw new Error(`web push status: ${JSON.stringify(mine)}`);
+      const refused = await hostCall("web_push_set", { on: true });
+      if (refused.err !== "unavailable") throw new Error(`expected "unavailable" with the push worker off: ${JSON.stringify(refused)}`);
+      if ((await hostCall("web_push_status")).ok.enabled) throw new Error("a refused switch left a subscription behind");
+      step("the relay serves the service worker for /app/; with no push worker the switch says so and subscribes nothing");
+
       // Start over: nothing of Haven's is left in the browser.
       await invoke(page, "reset");
       await page.reload();
@@ -325,7 +349,9 @@ await run(
       if (!(await page.evaluate(() => window.__HAVEN_WEB__.app().needsOnboarding()))) throw new Error("Start over left an identity behind");
       const after = await rawStorage(page);
       if (Object.keys(after).length !== 0) throw new Error(`Start over left databases behind: ${Object.keys(after)}`);
-      step("Start over erases every Haven database in the browser");
+      const workers = await page.evaluate(async () => (await navigator.serviceWorker.getRegistrations()).length);
+      if (workers !== 0) throw new Error("Start over left a service worker registered");
+      step("Start over erases every Haven database in the browser, and its service worker");
     }
 
     // The other views, for the screenshots (and as a check that they render without an error).

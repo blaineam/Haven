@@ -69,7 +69,7 @@ mkdir -p "$dist/pkg" "$dist/vendor" "$dist/palette-icons"
 cp "$ui/app.js" "$ui/strings.js" "$ui/styles.css" "$ui/imgworker.js" "$dist/"
 cp "$ui"/vendor/* "$dist/vendor/"
 cp "$ui"/palette-icons/* "$dist/palette-icons/"
-cp "$here/web-host.js" "$here/storage.js" "$here/responsive.css" "$dist/"
+cp "$here/web-host.js" "$here/storage.js" "$here/sw.js" "$here/responsive.css" "$dist/"
 cp "$here/pkg/haven_web.js" "$here/pkg/haven_web_bg.wasm" "$dist/pkg/"
 # index.html: the desktop page with the host shim loaded first and the responsive layer last.
 awk '

@@ -97,6 +97,18 @@ impl DeviceCredential {
         crate::webpolicy::is_web_device_name(&self.device_name)
     }
 
+    /// What a verifier that speaks only Ed25519 needs to check this credential: the exact bytes
+    /// the account signed, and the Ed25519 half of its signature over them. The push worker is
+    /// such a verifier (as it is for every registration): a browser, which holds no account key,
+    /// presents this to show that the account linked it. The layout the worker parses is
+    /// [`Self::signing_bytes`]' — `domain ‖ account(32) ‖ created(8) ‖ name_len(4) ‖ name ‖ bundle`,
+    /// the bundle beginning with the device's Ed25519 key — and is pinned by a vector shared with
+    /// `push/worker.test.mjs`.
+    pub fn ed25519_proof(&self) -> (Vec<u8>, Vec<u8>) {
+        let msg = Self::signing_bytes(&self.account_id, &self.device, &self.device_name, self.created_at);
+        (msg, self.sig[..64.min(self.sig.len())].to_vec())
+    }
+
     /// Issue a credential: the **account** identity vouches for `device`.
     pub fn issue(account: &Identity, device: &HavenId, name: &str, created_at: u64) -> Self {
         let account_id = account.public().node_id_bytes();

@@ -6513,7 +6513,40 @@ async function privacyMediaSheet() {
     el("div", { class: "muted small", style: "font-weight:600" }, t("notification_previews")),
     el("div", { class: "muted small" }, t("notification_previews_hint")),
     el("div", { class: "set-group" }, detailBox),
+    HOST_WEB ? await webPushSection() : null,
   ));
+}
+
+/** BROWSER ONLY: "notify me when Haven is closed" (Web Push). The switch is live only where it can
+ *  work — a browser that supports it, that the person chose to stay linked in, with notifications
+ *  not blocked. Everywhere else the row says, in a line, why not. */
+async function webPushSection() {
+  const st = await invoke("web_push_status").catch(() => ({ supported: false, kept: false, permission: "unsupported", enabled: false }));
+  const why = (code) => ({
+    unsupported: t("wp_unsupported"), session: t("wp_session"), unavailable: t("wp_unavailable"), blocked: t("wp_blocked"),
+  })[code] || String(code);
+  const note = el("div", { class: "muted small", id: "wp-note" },
+    !st.supported ? why("unsupported") : !st.kept ? why("session") : st.permission === "denied" ? why("blocked") : t("wp_hint"));
+  const chk = el("input", { type: "checkbox", style: "width:auto", id: "wp-toggle" });
+  chk.checked = !!st.enabled;
+  chk.disabled = !st.supported || !st.kept || (st.permission === "denied" && !st.enabled);
+  chk.onchange = async () => {
+    const want = chk.checked;
+    chk.disabled = true;
+    try {
+      const now = await invoke("web_push_set", { on: want });
+      chk.checked = !!now.enabled;
+      note.textContent = t("wp_hint");
+      toast(t("saved"));
+    } catch (e) {
+      chk.checked = !want;
+      note.textContent = why(e);
+    } finally { chk.disabled = false; }
+  };
+  return el("div", { class: "col", style: "gap:6px" },
+    el("div", { class: "set-group" },
+      el("label", { class: "set-row", style: "cursor:pointer" }, el("span", { style: "flex:1" }, t("wp_title")), chk)),
+    note);
 }
 
 async function blockedSheet() {

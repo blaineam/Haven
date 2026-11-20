@@ -54,3 +54,46 @@ token, never content (the same level of metadata Apple sees for APNs).
    No `google-services.json` and no Gradle plugin are used.
 5. In the app: Settings ▸ Connection ▸ **Push wake-up (Google)** (default off; hidden when the build has no
    Firebase values or the phone has no Play services).
+
+## Browser wake-up via Web Push (optional)
+
+A browser linked to an account (the web client, `docs/WEB-PARITY.md`) can be rung while its tab is
+closed. Like the Android wake, it is a **doorbell with no content**: the worker POSTs an empty,
+VAPID-signed request to the browser's push endpoint, the browser's service worker shows "something
+new is waiting", and the page fetches and decrypts the real thing from the circle's relay when it
+is opened. The push service (Google, Mozilla, Apple or Microsoft, depending on the browser) learns
+that this browser was rung and when — never by whom, about what, or which Haven account it is.
+
+- `GET /webpush` → `{ key }`, the VAPID public key a browser subscribes with. 404 until configured.
+- `POST /register { nodeId, platform:"web", token, deviceId, cred, credSig, ts, sig }` — `token` is
+  the subscription's endpoint URL. A browser holds **no account key**, so this registration is
+  authorized differently from a phone's: `cred` is the credential the account signed for this
+  device (its signed bytes; `credSig` the Ed25519 half of the account's signature), and `sig` is the
+  **device** key's signature over `webpush-v1:<endpoint>`. The worker checks that the account signed
+  the credential, that the credential marks the device as a browser, that it names the key that
+  signed, and that the endpoint belongs to a known push service. Filed under the account's node id,
+  so `/notify` and `/call` ring it with no change on the sender's side.
+- A registration lasts 30 days; a live browser renews it on every visit. A dead endpoint (404/410)
+  is pruned.
+- Every route answers with `Access-Control-Allow-Origin: *`: the web client is served from each
+  circle's own relay, so its origin is not known in advance. That is safe here — the worker has no
+  cookies and no ambient authority; every route that changes anything is authorized by a signature
+  in the body.
+- **Limit:** the worker cannot see an account's device list. A browser the account later revokes
+  keeps its registration until it lapses or the browser unsubscribes; until then it can still be
+  rung, and learns that something happened — nothing else.
+- **Off until configured:** with no VAPID keys the worker never speaks Web Push, and the web
+  client's switch says "not available right now".
+
+### Owner setup
+1. Make a key pair: `npx web-push generate-vapid-keys` (prints a public and a private key, both
+   base64url).
+2. ```
+   wrangler secret put VAPID_PRIVATE_KEY   # the private key
+   wrangler secret put VAPID_PUBLIC_KEY    # the public key (not secret; kept beside its pair)
+   wrangler secret put VAPID_SUBJECT       # a contact the push services can reach: https://… or mailto:…
+   ```
+3. `wrangler deploy`.
+
+Changing the key pair later invalidates every browser's subscription; each one re-subscribes the
+next time its owner opens Haven with the switch on.

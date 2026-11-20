@@ -59,7 +59,7 @@ export function fakeBackend(over = {}) {
 
 export async function boot(over = {}) {
   const { be, s } = fakeBackend(over);
-  const app = await loadApp({ backend: be, local: { 'haven-terms-accepted-version': '99', 'haven-named-nudged': '1', ...(over.local ?? {}) } });
+  const app = await loadApp({ backend: be, host: over.host, local: { 'haven-terms-accepted-version': '99', 'haven-named-nudged': '1', ...(over.local ?? {}) } });
   return { app, be, s };
 }
 

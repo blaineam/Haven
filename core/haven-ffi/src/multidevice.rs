@@ -45,6 +45,46 @@ pub fn issue_device_credential(
     Ok(DeviceCredential::issue(&acct, &dev, &name, created_at).to_bytes())
 }
 
+/// A browser's registration with the push worker (`push/worker.js` `registerWeb`).
+///
+/// A linked browser holds no account key, so it cannot sign a registration the way a phone that
+/// holds the seed does. It presents instead the credential its account signed for it — which
+/// names the account and this device's key, and marks the device as a browser — and signs the
+/// push endpoint with that device key.
+pub struct WebPushRegistration {
+    /// The account the registration is filed under (what senders ring).
+    pub account_hex: String,
+    pub device_hex: String,
+    /// The credential's signed bytes and the Ed25519 half of the account's signature over them.
+    pub cred: Vec<u8>,
+    pub cred_sig: Vec<u8>,
+    /// The device key's Ed25519 signature over `haven-push-register-v1:<device>:webpush-v1:<endpoint>:<ts>`.
+    pub sig: Vec<u8>,
+}
+
+/// Build a browser's push registration for `endpoint`, or `None` when this device is not a web
+/// device holding a credential for `device_seed`'s key. Not a signing oracle: the only message
+/// signed is the purpose-tagged registration, exactly as `Account::sign_push_registration`.
+pub fn web_push_registration(device_seed: &[u8], credential: &[u8], endpoint: &str, ts_secs: u64) -> Option<WebPushRegistration> {
+    let seed: [u8; 32] = device_seed.try_into().ok()?;
+    let device = Identity::from_seed(&seed);
+    let cred = DeviceCredential::from_bytes(credential).ok()?;
+    if !cred.is_web() || cred.device_id() != device.public().node_id_bytes() {
+        return None;
+    }
+    let device_hex = hex(&cred.device_id());
+    let msg = format!("haven-push-register-v1:{device_hex}:webpush-v1:{endpoint}:{ts_secs}");
+    let sig = device.sign(msg.as_bytes());
+    let (signed, cred_sig) = cred.ed25519_proof();
+    Some(WebPushRegistration {
+        account_hex: hex(&cred.account_id),
+        device_hex,
+        cred: signed,
+        cred_sig,
+        sig: sig[..64.min(sig.len())].to_vec(),
+    })
+}
+
 /// Verify a credential against the **pinned account public bundle**. On success returns the
 /// authorized device's node id (hex); errors if forged, tampered, or for a different account.
 #[uniffi::export]

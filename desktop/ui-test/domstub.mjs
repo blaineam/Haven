@@ -321,7 +321,7 @@ export function makeTimers() {
  * and hand back handles. `backend` maps a Tauri command name to `(args) => result | Promise`;
  * an unmapped command resolves to `undefined` (and is recorded in `calls`).
  */
-export async function loadApp({ backend = {}, lang = 'en-US', ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X) Haven', boot = true, local = {} } = {}) {
+export async function loadApp({ backend = {}, lang = 'en-US', ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X) Haven', boot = true, local = {}, host = undefined } = {}) {
   const document = new Document();
   const html = readFileSync(join(here, 'index.html'), 'utf8');
   const bodyHtml = html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>'));
@@ -388,6 +388,8 @@ export async function loadApp({ backend = {}, lang = 'en-US', ua = 'Mozilla/5.0 
     fetch: async () => { throw new Error('domstub: no network'); },
     RTCPeerConnection: FakePC, MediaStream: FakeStream,
     performance: { now: () => 0 },
+    // `host: { web: true }` loads the page as the browser client does (web-client/web-host.js).
+    __HAVEN_HOST__: host,
     __TAURI__: { core: { invoke }, event: { listen }, opener: { openUrl: (u) => { opened.push(u); } }, dialog: { open: async (o) => { dialogOpens.push(o); return sandbox.__pick ?? null; } } },
   };
   sandbox.innerWidth = 1280; sandbox.innerHeight = 800; sandbox.devicePixelRatio = 1;

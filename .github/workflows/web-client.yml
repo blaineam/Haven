@@ -26,6 +26,7 @@ on:
     branches: [main, feat/web-client]
     paths:
       - "web-client/**"
+      - "push/**"
       - "core/**"
       - "desktop/ui/**"
       - ".github/workflows/web-client.yml"
@@ -110,6 +111,8 @@ jobs:
         run: |
           npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright
           "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Service worker and push worker tests
+        run: node --test web-client/sw.test.mjs push/worker.test.mjs
       - name: Browser smoke
         env:
           NODE_PATH: ${{ runner.temp }}/pw/node_modules

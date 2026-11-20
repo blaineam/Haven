@@ -1192,6 +1192,18 @@ pub fn set_circle_web_access(engine: Eng, circle_id: String, allow: bool) -> boo
     engine.set_circle_web_access(cid, allow)
 }
 
+/// BROWSER: the key to subscribe to push with, or `None` when Web Push is not available (the push
+/// worker has none configured, is unreachable, or this is not a linked browser).
+pub async fn web_push_key(engine: Eng<'_>) -> Option<String> {
+    engine.web_push_key().await
+}
+
+/// BROWSER: file this browser's push endpoint under its account, so it is rung when its tab is
+/// closed. The push carries no content. Repeat on every visit — a registration lapses.
+pub async fn web_push_register(engine: Eng<'_>, endpoint: String) -> R<()> {
+    engine.web_push_register(endpoint).await
+}
+
 /// The current admin accounts (node hex) of a circle — the creator plus creator-delegated admins.
 pub fn circle_admins(engine: Eng, circle_id: String) -> Vec<String> {
     engine.circle_admins(&circle_id)

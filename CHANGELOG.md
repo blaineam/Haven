@@ -9,6 +9,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added - Notifications in a browser while Haven is closed (not shipped; `feat/web-client`, and it needs the push worker deployed)
+A linked browser can now be rung when something new arrives and no Haven tab is open. It is off by default, lives in Settings →
+Privacy, and is offered only in a browser you chose to stay linked in. What the browser receives is a doorbell with nothing in it:
+the notification says only that something is waiting, and the page fetches and decrypts the real thing from your circle's relay
+when you open it. The browser's push service (Google, Mozilla, Apple or Microsoft) learns that your browser was rung and when,
+not by whom or about what. A browser holds no account key, so it registers with its own device key and the credential your
+account signed for it; nobody can file their own browser under your account (proved, `haven_web_push.spthy`). The same change
+lets a post made in a browser wake other members' phones.
+**Known limit:** if you revoke a browser from another device, it can still be rung until its registration lapses (30 days at
+most, unless that browser keeps being opened) — it would learn that something happened, never what. Unlinking from the browser
+itself stops it at once. Nothing changes for anyone until the push worker is deployed with a Web Push key pair
+(`push/README.md`); until then the switch reads "not available right now".
+
 ### Changed - The web client's module is a quarter smaller (not shipped; `feat/web-client`)
 The release build now runs `wasm-opt -Oz` on the WebAssembly module (10.9 MB to 8.3 MB; about 3.2 MB as served). CI requires the
 tool and runs the browser smoke against the optimized module.

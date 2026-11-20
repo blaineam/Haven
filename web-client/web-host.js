@@ -52,7 +52,10 @@
     app.setRelays([location.origin]);
     // What the person approving this browser will read on their other device.
     app.setDeviceLabel(describeBrowser());
-    if (!app.needsOnboarding()) await app.boot();
+    if (!app.needsOnboarding()) {
+      await app.boot();
+      pushRenew();   // not awaited: the page does not wait on the push worker
+    }
   })();
   ready.catch((e) => console.error("Haven failed to start:", e));
 
@@ -64,9 +67,77 @@
 
   /** Unlink this browser: nothing of Haven's is left in it. */
   async function eraseEverything() {
+    await pushDisable().catch(() => {});   // an unlinked browser must not go on being rung
     if (storage) storage.stop();
     storage = null;
     await storageModule.eraseStorage();
+  }
+
+  // ── Web Push: a notification when no Haven tab is open ─────────────────────────────────────
+  // Off unless the person turns it on, and only in a browser they chose to stay linked in: a
+  // borrowed computer must not keep ringing for them after the tab is closed. What arrives is a
+  // doorbell with no content (push/worker.js); `sw.js` turns it into "something is waiting".
+  const engineCall = async (name, args = {}) => JSON.parse(await app.invoke(name, JSON.stringify(args)));
+  const pushSupported = () => window.isSecureContext && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  const pushRegistration = () => navigator.serviceWorker.getRegistration("./");
+  async function pushSubscription() {
+    const reg = pushSupported() ? await pushRegistration() : null;
+    return reg ? reg.pushManager.getSubscription() : null;
+  }
+  function keyBytes(b64url) {
+    const bin = atob(b64url.replace(/-/g, "+").replace(/_/g, "/"));
+    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  }
+  const sameKey = (a, b) => !!a && a.byteLength === b.length && new Uint8Array(a).every((v, i) => v === b[i]);
+
+  /** Where this browser stands: { supported, kept, permission, enabled }. */
+  async function pushStatus() {
+    const kept = !!storage && storage.mode === "persist";
+    if (!pushSupported()) return { supported: false, kept, permission: "unsupported", enabled: false };
+    return { supported: true, kept, permission: Notification.permission, enabled: !!(await pushSubscription()) };
+  }
+
+  async function pushEnable() {
+    if (!pushSupported()) throw "unsupported";
+    if (!storage || storage.mode !== "persist") throw "session";
+    const key = await engineCall("web_push_key");
+    if (!key) throw "unavailable";
+    if ((await Notification.requestPermission()) !== "granted") throw "blocked";
+    const reg = await navigator.serviceWorker.register("sw.js", { scope: "./" });
+    await navigator.serviceWorker.ready;
+    const want = keyBytes(key);
+    let sub = await reg.pushManager.getSubscription();
+    // A subscription made for another key (the worker's key changed) cannot be rung: replace it.
+    if (sub && !sameKey(sub.options.applicationServerKey, want)) { await sub.unsubscribe(); sub = null; }
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: want });
+    try {
+      await engineCall("web_push_register", { endpoint: sub.endpoint });
+    } catch (e) {
+      await sub.unsubscribe().catch(() => {});   // never leave a subscription nobody will ring
+      throw e;
+    }
+  }
+
+  /** Stop: the push service forgets this browser, and the worker drops the endpoint the next time
+   *  it tries it. Nothing of the service worker is left behind. */
+  async function pushDisable() {
+    if (!pushSupported()) return;
+    const reg = await pushRegistration();
+    if (!reg) return;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) await sub.unsubscribe().catch(() => {});
+    await reg.unregister().catch(() => {});
+  }
+
+  /** On every visit: a registration lapses after about thirty days, and the push service may have
+   *  replaced the endpoint. Quiet — a failure here is retried on the next visit. */
+  async function pushRenew() {
+    try {
+      const sub = await pushSubscription();
+      if (!sub) return;
+      if (!storage || storage.mode !== "persist") return pushDisable();
+      await engineCall("web_push_register", { endpoint: sub.endpoint });
+    } catch (_) { /* next visit */ }
   }
 
   const NOT_IN_A_BROWSER = "not available in a browser";
@@ -100,6 +171,10 @@
       await relaunch();
     },
     pair_stop: () => app.pairStop(),
+    // Notifications while no tab is open (Web Push). `web_push_set` rejects with one of
+    // "unsupported" | "session" | "unavailable" | "blocked", or the worker's own refusal.
+    web_push_status: () => pushStatus(),
+    web_push_set: async ({ on }) => { await (on ? pushEnable() : pushDisable()); return pushStatus(); },
     // A browser never holds an account seed, so it can neither create nor adopt an account.
     onboard_create: () => { throw NOT_IN_A_BROWSER; },
     onboard_link: () => { throw NOT_IN_A_BROWSER; },

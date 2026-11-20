@@ -82,7 +82,7 @@ What this does **not** do, said plainly:
 | Limit | Effect |
 |---|---|
 | No direct peer connections | Everything rides the circle relay: slower media, and the web client works only while that relay is online |
-| No background life | Notifications with the tab closed need Web Push; nothing else runs |
+| No background life | Notifications with the tab closed come by Web Push (a content-free doorbell); nothing else runs |
 | No Bluetooth / nearby mesh | Nearby delivery is unavailable |
 | Cannot host a relay | Hosting stays on the native apps and `haven-relay` |
 | Bring-your-own S3 | Each bucket needs CORS enabled |
@@ -389,9 +389,41 @@ Next, in order:
   device ids from signed rosters and from whoever writes to it, and it reaches a device only
   through a relay that device is also on. Someone who holds only your account id reaches your
   other devices, not your browser.
-- Not built, and not mine to decide: notifications while the tab is closed (Web Push). That
-  needs the maker-run push worker to accept browser subscriptions and speak Web Push. While a
-  tab is open it is notified through the page.
+- [x] **Notifications while the tab is closed (Web Push)** — built; it starts working when the
+      push worker is deployed with a key pair (`push/README.md`, "Browser wake-up via Web Push").
+      Until then the switch says "not available right now".
+      - Off by default. Settings → Privacy → "Notify me when Haven is closed", and only in a
+        browser the person chose to stay linked in: a borrowed computer is never left ringing.
+      - What arrives is a **doorbell with no content**: the worker sends an empty request to the
+        browser's push endpoint; `web-client/sw.js` shows "Something new is waiting for you"; the
+        page fetches and decrypts through the circle's relay when it is opened. The push service
+        (Google, Mozilla, Apple or Microsoft) learns that this browser was rung and when — not by
+        whom, about what, or which account. If a Haven page is already in front, nothing is shown.
+      - The service worker has **no `fetch` handler**: it never serves, caches or rewrites a
+        request, so the page still always loads exactly what the relay serves now.
+      - A browser has no account key, so it registers with its DEVICE key plus the credential its
+        account signed for it; the worker checks the account's signature, the web mark, and that
+        the credential names the key that signed (D23). Filed under the account, so everyone who
+        would wake the account's phones wakes the browser too, with no change on their side.
+      - Unlinking or "Start over" unsubscribes and removes the service worker.
+      - **Limit, stated:** the worker cannot see an account's device list. A browser you revoke
+        from another device keeps its registration until it lapses (30 days; only a browser that
+        is still being opened renews it) or the browser unsubscribes. Until then it can still be
+        rung — it learns that something happened, nothing else.
+      - Proved (`docs/formal/haven_web_push.spthy`): an endpoint is filed under an account only
+        for a browser that account linked (R1), only the endpoint that browser asked for (R2), a
+        phone's credential files nothing (R3); the limit above is on record as a reachable trace,
+        and R1–R3 are falsified for the looser rule that was not built (`-DNO_CREDENTIAL`).
+      - Tested: the worker's contract (`push/worker.test.mjs`, including a registration built by
+        the Rust core from a shared vector), the service worker (`web-client/sw.test.mjs`), the
+        switch (`desktop/ui-test`), and in a real browser by the smoke as far as a harness can go
+        (the relay serves the service worker, the browser accepts it, a refused switch subscribes
+        nothing, Start over leaves no worker).
+      - [ ] Not tested: an actual push arriving in an actual browser. That needs the deployed
+            worker and a browser with a push service; a headless test browser has none.
+      - Not built: telling a call from a post in the notification (a push has no payload to say
+        which), and Safari on iPhone, which only offers Web Push to a site added to the Home
+        Screen.
 - [x] **Formal model** — `docs/formal/haven_web_device.spthy`, re-proved by `docs/formal/verify.sh`
       (and so by the `security-proofs` workflow) against `EXPECTED.txt`. With the network, the
       relay and any number of linked devices in the adversary's hands:
@@ -412,9 +444,10 @@ Next, in order:
   their map and may be homed on one, so the tab should probably carry them too where the network
   allows, and fall back to the mailbox where it does not.
 
-- **Push from a browser.** The engine wakes other devices through the push worker. A page cannot
-  call it today (no CORS), so a web device relies on the mailbox poll and live frames. Allowing it
-  means the worker accepting browser origins — a decision about maker-run infrastructure.
+- **Push from a browser** — settled with Web Push: the push worker now answers browsers
+  (`Access-Control-Allow-Origin: *`; it has no cookies and every route that changes anything is
+  authorized by a signature in the body), so a post made in a browser wakes the other members'
+  phones the way a post from an app does. It takes effect when the worker is deployed.
 - **Engine restart.** The engine has no shutdown; the desktop app relaunches after linking, and a
   tab reloads. Fine, but it means every "switch identity / unlink" path in a browser is a reload.
 

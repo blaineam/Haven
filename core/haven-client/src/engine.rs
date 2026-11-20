@@ -1101,6 +1101,68 @@ impl Engine {
         self.social.is_web_device()
     }
 
+    // ---- Web Push (a browser with its tab closed) -----------------------------------------
+
+    /// The body of this browser's registration with the push worker for `endpoint`, or `None` when
+    /// this is not a linked web device. A browser has no account key: it files the endpoint under
+    /// its account by presenting the account-signed credential that names its device key, and
+    /// signing with that key (`haven_ffi::multidevice::web_push_registration`).
+    fn web_push_registration_body(&self, endpoint: &str, ts_secs: u64) -> Option<serde_json::Value> {
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let roster = self.roster.lock();
+        let reg = haven_ffi::multidevice::web_push_registration(&roster.device_seed, roster.credential.as_deref()?, endpoint, ts_secs)?;
+        Some(serde_json::json!({
+            "nodeId": reg.account_hex,
+            "deviceId": reg.device_hex,
+            "platform": "web",
+            "token": endpoint,
+            "ts": ts_secs,
+            "sig": b64(&reg.sig),
+            "cred": b64(&reg.cred),
+            "credSig": b64(&reg.cred_sig),
+        }))
+    }
+
+    /// The key a browser subscribes to push with (the worker's VAPID public key). `None` when the
+    /// worker has no Web Push configured, cannot be reached, or this process must not call it.
+    pub async fn web_push_key(&self) -> Option<String> {
+        if crate::netgate::push_off() || !self.is_web_device() {
+            return None;
+        }
+        let res = self.http.get(format!("{PUSH_RELAY}/webpush")).timeout(std::time::Duration::from_secs(15)).send().await.ok()?;
+        if !res.status().is_success() {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_str(&res.text().await.ok()?).ok()?;
+        v.get("key").and_then(|k| k.as_str()).filter(|k| !k.is_empty()).map(str::to_string)
+    }
+
+    /// File this browser's push endpoint under its account, so the people who would wake its
+    /// phones wake it too. What it is then sent is a doorbell with no content (push/worker.js).
+    /// Called again on every visit: a registration lapses after about thirty days.
+    pub async fn web_push_register(&self, endpoint: String) -> Result<(), String> {
+        if crate::netgate::push_off() {
+            return Err("push is turned off for this session".into());
+        }
+        let body = self
+            .web_push_registration_body(&endpoint, now_ms() / 1000)
+            .ok_or("only a linked browser registers for web push")?;
+        let res = self
+            .http
+            .post(format!("{PUSH_RELAY}/register"))
+            .header("content-type", "application/json")
+            .timeout(std::time::Duration::from_secs(15))
+            .body(body.to_string())
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if res.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("the push service refused the registration ({})", res.status().as_u16()))
+        }
+    }
+
     /// (seedless, linked, linking) for the UI — `linking` = seedless but the grant hasn't landed yet.
     pub fn seedless_status(&self) -> (bool, bool, bool) {
         let seedless = self.is_seedless();

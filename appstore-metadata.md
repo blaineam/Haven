@@ -68,10 +68,9 @@ https://wemiller.com/privacy/
 ## review_notes
 WHAT IS NEW IN 2.2.0
 One feature and several fixes. No new permissions or entitlements, and still no data collection.
-- A member can link a WEB BROWSER as one more device of their own account. The web page is served by a relay that the circle's own members run (never by the developer); this app's part is the approval. To see it: Settings → Devices → link a device → "Scan its code", which scans (or accepts as pasted text) the code a browser shows, then asks the user to confirm the device by name. A browser is marked as such in the device list, and each circle has a switch (circle settings → "Web browsers") deciding whether browsers may read that circle; it is off by default. Nothing in the app loads or displays web content, and the app works exactly as before if this is never used.
-- Fix: a friend added by scanning THEIR invite could take minutes to start exchanging posts; it now takes seconds.
-- Fix: during a call, a shared screen could be shown as an avatar, and a camera change could be applied out of order.
-- A browser the user linked can optionally be notified through our push worker, which sends it an empty Web Push message (no content). The same worker and the same blindness as described under NOTIFICATIONS below.
+- A member can link a WEB BROWSER as one more device of their own account. The web page is served by a relay the circle's own members run (never by the developer); this app's part is the approval. To see it: Settings → Devices → link a device → "Scan its code", which scans (or accepts as pasted text) the code a browser shows, then asks the user to confirm the device by name. A browser is marked as such in the device list, and each circle has a switch (circle settings → "Web browsers"), off by default, deciding whether browsers may read that circle. The app loads no web content and works as before if this is never used.
+- Fixes: a friend added by scanning THEIR invite now exchanges posts in seconds, not minutes; in a call, a shared screen could show as an avatar or not appear when shared a second time.
+- A linked browser can optionally be notified through our push worker with an empty Web Push message (no content); see NOTIFICATIONS.
 
 Haven is a serverless, peer-to-peer, end-to-end encrypted social app for small private circles. There is no central server and no login.
 

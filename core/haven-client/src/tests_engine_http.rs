@@ -1097,3 +1097,56 @@ async fn a_relay_interface_is_learned_only_from_the_accounts_own_key() {
     // And a seedless device never sends one (it holds no account key to sign with).
     s.teach_my_devices_relay_interfaces(); // must be a no-op, not a panic
 }
+
+
+/// A call frame is LEFT on the relay's live lane as well as sent: that is where a phone in a call
+/// looks. Sent only, everything after a call's opening frames — the camera coming on, a shared
+/// screen starting, hanging up — never reached a phone that had stopped listening on its node.
+#[tokio::test]
+async fn a_call_frame_is_left_on_the_relays_live_lane_for_the_recipient() {
+    let stub = Stub::start().await;
+    let (a, _) = new_engine(181);
+    let (b, _) = new_engine(182);
+    befriend(&a, &b);
+    wire_to(&a, &stub).await;
+    let to = b.node_id_hex();
+
+    // The key is the one the apps list: haven/mailbox/<circle>/__live__/<dest>/<sha256 of the frame>.
+    let frame = wire::frame(wire::CALL_CAMERA, b"sealed");
+    let digest: String = { use sha2::Digest; sha2::Sha256::digest(&frame).iter().map(|x| format!("{x:02x}")).collect() };
+    assert_eq!(
+        Engine::live_call_key(DEFAULT_CIRCLE, &to.to_uppercase(), &frame),
+        format!("haven/mailbox/default/__live__/{to}/{digest}")
+    );
+    assert_eq!(a.live_call_circles()[0], DEFAULT_CIRCLE, "left under the circles a device lists while in a call");
+    assert!(a.live_call_circles().iter().all(|c| c == DEFAULT_CIRCLE || c.starts_with("dm:")));
+
+    assert!(stub.keys_with("/__live__/").is_empty());
+    a.call_camera_state("sess-1".into(), true, vec![to.clone()]);
+    let landed = bounded("the frame on the live lane", async {
+        loop {
+            let keys = stub.keys_with("/__live__/");
+            if !keys.is_empty() {
+                return keys;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    // One slot per id the recipient answers to (their devices — a frame is sealed to each).
+    let theirs = [to.clone(), b.social.my_device_node_hex().to_lowercase()];
+    assert!(landed.iter().all(|k| k.starts_with("haven/mailbox/default/__live__/")), "under the default circle: {landed:?}");
+    assert!(
+        landed.iter().any(|k| theirs.iter().any(|id| k.contains(&format!("/__live__/{id}/")))),
+        "addressed to an id of the recipient's: {landed:?}"
+    );
+    // A different frame is a different slot; the same frame again is the same one.
+    let n = stub.keys_with("/__live__/").len();
+    a.call_camera_state("sess-1".into(), false, vec![to.clone()]);
+    bounded("the second frame", async {
+        while stub.keys_with("/__live__/").len() <= n {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+}

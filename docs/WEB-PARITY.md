@@ -410,19 +410,19 @@ Next, in order:
         showing up in the app, the three-way group call, and a call placed from the app ringing
         and connecting in the browser — the first run of the iPhone's per-device call sealing.
         The app's own camera is skipped there and said so: a simulator has none.
-      - [ ] **Open, about making friends rather than calls:** on iPhone the test has the other
-            accounts take the APP's invite and the app approve them (the ordinary "I invite a
-            friend" direction). The other direction — the iPhone takes the invite of an account
-            that has no relay of its own — did not finish exchanging anything inside five to
-            seven minutes in three attempts: the app enrolled the new contact at its relay 27 s
-            to 3 min 20 s later, and the contact never learned where the app's relay is, so
-            neither side's circle traffic reached the other. Approving a request tells the new
-            member where the relays are at once; taking an invite leaves it to a periodic
-            announcement. On Android the same direction completes in seconds. A change that
-            repeated the approval steps on taking an invite fired but did not fix it, and was
-            removed. Whether it eventually completes (the periodic announce is ten minutes on a
-            phone) was not measured.
-      - [ ] Not tested: screen sharing between a browser and an app, and a physical device.
+      - **Found and fixed on `main`:** an iPhone that took the invite of an account with no
+        relay of its own exchanged nothing with it for minutes. Answering a hello, Android sends
+        the circle's relays along with its recent posts; Apple sent the posts only, and left the
+        relays to a broadcast repeated every ten minutes on a phone. The answer now carries them
+        (`testAnsweringAContactsHelloTellsThemWhereTheCirclesRelaysAre`), and the test passes on
+        iPhone in both invite directions.
+      - **Screen sharing from the browser to an app** is in the test: with the browser's camera
+        off, its shared screen is shown by the app, and stopping takes the app back to the
+        avatar. That found a desktop bug, fixed on `main`: the page announced "camera off"
+        through a screen share, so phones drew an avatar over the shared screen.
+      - [ ] Not tested: an app sharing ITS screen to a browser (Android needs the system's
+            capture consent, an iPhone a broadcast extension — neither can be driven from this
+            test), and a physical device.
 - Decided: a browser does not publish itself to, or look people up in, public discovery (the
   native apps do, to find a contact's devices with no relay in common). A browser reaches the
   network through its circle's relay and nothing else — that is the point of it — so it learns
@@ -446,21 +446,35 @@ Next, in order:
         the credential names the key that signed (D23). Filed under the account, so everyone who
         would wake the account's phones wakes the browser too, with no change on their side.
       - Unlinking or "Start over" unsubscribes and removes the service worker.
-      - **Limit, stated:** the worker cannot see an account's device list. A browser you revoke
-        from another device keeps its registration until it lapses (30 days; only a browser that
-        is still being opened renews it) or the browser unsubscribes. Until then it can still be
-        rung — it learns that something happened, nothing else.
+      - **Revoking a browser stops it.** The worker cannot see an account's device list, so the
+        account tells it: when a browser is revoked from a device that holds the account key (the
+        desktop app, an iPhone, iPad, Mac or Android phone), that device sends the worker a
+        signed notice (`/unregister-web`). The worker drops the browser's endpoint and refuses
+        its credential from then on. The notice is queued until the worker answers, so a
+        revocation made offline is delivered later. **What is left:** until that device has
+        been online once after the revocation, the browser can still be rung — it learns that
+        something happened, nothing else. A registration also lapses by itself after 30 days.
       - Proved (`docs/formal/haven_web_push.spthy`): an endpoint is filed under an account only
         for a browser that account linked (R1), only the endpoint that browser asked for (R2), a
-        phone's credential files nothing (R3); the limit above is on record as a reachable trace,
+        phone's credential files nothing (R3), and only the account can bar a browser (R4). The
+        window between revoking and the worker hearing of it is on record as a reachable trace,
         and R1–R3 are falsified for the looser rule that was not built (`-DNO_CREDENTIAL`).
       - Tested: the worker's contract (`push/worker.test.mjs`, including a registration built by
         the Rust core from a shared vector), the service worker (`web-client/sw.test.mjs`), the
         switch (`desktop/ui-test`), and in a real browser by the smoke as far as a harness can go
         (the relay serves the service worker, the browser accepts it, a refused switch subscribes
         nothing, Start over leaves no worker).
-      - [ ] Not tested: an actual push arriving in an actual browser. That needs the deployed
-            worker and a browser with a push service; a headless test browser has none.
+      - **A real push, end to end** (`web-client/smoke/push.mjs`): real Google Chrome links as
+        a browser the person keeps and turns the switch on; the worker — `push/worker.js` itself,
+        run inside the test with a throwaway key pair, the page's requests to the deployed
+        worker's address intercepted so nothing reaches it — rings it through Google's push
+        service, which accepts the empty push; with no Haven page open, the service worker shows
+        "Haven — Something new is waiting for you."; switching it off unsubscribes, and the
+        worker drops the endpoint the next time it tries it. Run by hand: it needs real Chrome
+        and the internet.
+      - [ ] Not tested: Firefox, Safari and Edge (their push services are on the allow-list;
+            only Chrome's was exercised), and the DEPLOYED worker, which does not have this
+            code or a key pair yet.
       - Not built: telling a call from a post in the notification (a push has no payload to say
         which), and Safari on iPhone, which only offers Web Push to a site added to the Home
         Screen.

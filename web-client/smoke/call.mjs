@@ -143,6 +143,17 @@ try {
   await until("media to flow both ways", async () => (await received(a)) > a0 + 2000 && (await received(b)) > b0 + 2000, 60000);
   step("audio flows both ways");
 
+  // A SCREEN SHARED WITH THE CAMERA OFF. The page sends a screen in the camera's place, so the other
+  // side must be told the video slot is live — or it goes on showing the avatar.
+  const showsVideo = (w) => w.page.evaluate(() => [...document.querySelectorAll(".call-stage video")].some((v) => !v.closest(".call-pip")));
+  const shareBtn = (w) => w.page.locator(".call-controls .call-round").nth(2);
+  if (await showsVideo(b)) throw new Error("the guest's browser shows video before anything was turned on");
+  await shareBtn(a).click();
+  await until("the guest's browser to show the host's shared screen (camera off)", () => showsVideo(b), 30000);
+  await shareBtn(a).click();
+  await until("the guest's browser to go back to the avatar", async () => !(await showsVideo(b)), 30000);
+  step("a screen shared with the camera off is shown, and stopping it brings the avatar back");
+
   // VIDEO. Calls start audio-only; the host's browser turns its camera on with the real control.
   /** Video frames decoded over every connected peer connection in the page. */
   const frames = (w) => w.page.evaluate(async () => {

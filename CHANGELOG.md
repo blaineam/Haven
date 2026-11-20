@@ -9,6 +9,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - In a call placed from the desktop app, later changes could fail to reach a phone (desktop; web client)
+The phone apps put every call-signalling message on the relay as well as sending it directly, and read the relay while they are
+in a call. The desktop engine only sent it directly. A call from the desktop app rang and connected, because the opening messages
+got through, and then anything sent later could be lost on a phone that had stopped listening on the direct path: turning the
+camera on, starting a screen share, hanging up (the call then ended only when the phone noticed the silence). Seen on iPhone;
+Android kept listening and was not affected. The desktop engine now leaves call messages on the relay too. This lives in the
+shared engine the web client introduced, so it ships with that. No security impact: the messages are sealed to each of the
+recipient's devices exactly as before. Regression test: `a_call_frame_is_left_on_the_relays_live_lane_for_the_recipient`.
+
 ### Fixed - A friend you added by taking THEIR invite could be out of reach for minutes (iPhone, iPad, Mac)
 When someone's hello arrives, the app answers with its recent posts. On Android that answer has always included where the
 circle's relays are; on Apple devices it did not — a new friend learned the relays only from a broadcast repeated every ten
@@ -52,9 +61,9 @@ when you open it. The browser's push service (Google, Mozilla, Apple or Microsof
 not by whom or about what. A browser holds no account key, so it registers with its own device key and the credential your
 account signed for it; nobody can file their own browser under your account (proved, `haven_web_push.spthy`). The same change
 lets a post made in a browser wake other members' phones.
-**Known limit:** if you revoke a browser from another device, it can still be rung until its registration lapses (30 days at
-most, unless that browser keeps being opened) — it would learn that something happened, never what. Unlinking from the browser
-itself stops it at once. Nothing changes for anyone until the push worker is deployed with a Web Push key pair
+Revoking a browser from another device tells the push worker to drop it and to refuse it from then on; unlinking from the browser
+itself stops it at once. **Known limit:** until the device you revoked it from has been online once afterwards, a revoked browser
+can still be rung — it would learn that something happened, never what. Nothing changes for anyone until the push worker is deployed with a Web Push key pair
 (`push/README.md`); until then the switch reads "not available right now".
 
 ### Changed - The web client's module is a quarter smaller (not shipped; `feat/web-client`)

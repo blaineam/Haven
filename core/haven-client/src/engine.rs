@@ -12393,7 +12393,10 @@ impl Engine {
             };
             let Some(sealed) = sealed else { continue };
             self.send_frame(t, &sealed, dest);
-            self.originate_relay_internet(std::slice::from_ref(dest), &wire::frame(t, &sealed));
+            let framed = wire::frame(t, &sealed);
+            self.originate_relay_internet(std::slice::from_ref(dest), &framed);
+            // …and on the relay's live lane, where the recipient's in-call poll picks it up.
+            self.upload_live_call_frame(dest.clone(), framed);
             sent += 1;
         }
         if sent == 0 {
@@ -12403,6 +12406,81 @@ impl Engine {
                 self.social.device_node_ids_for(to_hex.to_string()).len(),
             );
         }
+    }
+
+    /// Where a call frame for `dest` waits on a relay: `haven/mailbox/<circle>/__live__/<dest>/<sha256
+    /// of the frame>`. The recipient lists that prefix every couple of seconds while it is in a
+    /// call. Content-addressed, so a re-sent frame is one slot. iOS `liveCallKey` / Android parity.
+    pub(crate) fn live_call_key(circle_id: &str, dest_hex: &str, frame: &[u8]) -> String {
+        let mut h = Sha256::new();
+        h.update(frame);
+        let digest: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        format!("haven/mailbox/{circle_id}/__live__/{}/{digest}", dest_hex.to_lowercase())
+    }
+
+    /// The circles a call frame is left under: the default circle and every direct-message
+    /// circle — exactly the ones a device lists while it is in a call.
+    pub(crate) fn live_call_circles(&self) -> Vec<String> {
+        let mut out = vec![DEFAULT_CIRCLE.to_string()];
+        for c in self.social.circles() {
+            if c.id.starts_with("dm:") && !out.contains(&c.id) {
+                out.push(c.id);
+            }
+        }
+        out
+    }
+
+    /// Leave a sealed call frame on the relay's live lane for `dest`, as well as sending it.
+    ///
+    /// The apps have always done both. This engine only SENT — directly and through the relay's
+    /// live forward — and both need the recipient to be listening on its messaging node at that
+    /// moment. A phone in a call is not, reliably: it sheds that work to stay cool, and reads the
+    /// live lane instead. So a call placed from the desktop app or a browser rang and connected
+    /// (the opening frames got through), and then nothing sent after that arrived: the camera
+    /// coming on, a shared screen starting, hanging up.
+    fn upload_live_call_frame(self: &Arc<Self>, dest: String, frame: Vec<u8>) {
+        if frame.is_empty() || dest.len() != 64 {
+            return;
+        }
+        let me = self.clone();
+        crate::rt::spawn(async move {
+            let hosted = me.relay_host.lock().as_ref().map(|h| h.node_id_hex());
+            for circle_id in me.live_call_circles() {
+                let key = Self::live_call_key(&circle_id, &dest, &frame);
+                for node_hex in me.relays_for(&circle_id) {
+                    if node_hex.starts_with("s3:") {
+                        continue;
+                    }
+                    // Our OWN hosted relay: straight into the local mailbox (no iroh self-dial).
+                    if hosted.as_deref() == Some(node_hex.as_str()) {
+                        let ok = me.relay_host.lock().as_ref().is_some_and(|h| h.local_put(key.clone(), frame.clone()));
+                        if ok {
+                            break;
+                        }
+                        continue;
+                    }
+                    let Some((bases, token)) = me.relay_http_reachable(&node_hex) else { continue };
+                    let mut landed = false;
+                    for base in bases.iter().filter(|b| !me.http_url_bad(b)) {
+                        match me.http_put(base, &token, &key, frame.clone()).await {
+                            Ok(()) => {
+                                me.mark_relay_ok(&node_hex);
+                                landed = true;
+                                break;
+                            }
+                            Err(RelayErr::Forbidden) => {
+                                me.note_refused(&node_hex, "live-call put");
+                                break;
+                            }
+                            Err(RelayErr::Unreachable) => me.mark_http_url_bad(base),
+                        }
+                    }
+                    if landed {
+                        break; // one relay per circle is enough: the recipient lists them all
+                    }
+                }
+            }
+        });
     }
 
     /// Originate a frame-9 live forward of `inner` to `dests` via up to 3 adopted internet relays.

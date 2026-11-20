@@ -511,12 +511,14 @@ signature on the credential, the web mark in it, and that it names the key that 
   nothing but show the notification, so D21's "the page always runs what the relay serves now"
   still holds.
 
-**What it does not give.** The worker holds no device list, so revoking a browser from another
-device does not remove its registration: it lapses after 30 days unless that browser renews it,
-or when the browser unsubscribes. Until then a revoked browser can still be rung. It learns that
-something happened and nothing else. Closing that needs the account's device to tell the worker,
-on every platform; it is not built.
+**Revocation.** The worker holds no device list, so revoking a browser does not by itself
+remove its registration. The account says so: a device holding the account key sends the worker
+`webpush-revoke-v1:<device>`, signed with the account key (queued until the worker answers). The
+worker drops the endpoint and bars that device id, so the credential the browser kept files
+nothing again. **What it does not give:** until an account device has been online once after the
+revocation, the revoked browser can still be rung. It learns that something happened and nothing
+else. A registration also lapses after 30 days unless that browser renews it.
 
-**Proof and tests.** `docs/formal/haven_web_push.spthy` (R1–R3, the limit as a trace, and the
-looser rule falsified); `push/worker.test.mjs`; a registration vector shared between the Rust core
+**Proof and tests.** `docs/formal/haven_web_push.spthy` (R1–R4, the window as a trace, and the
+looser rule falsified); a real push through Chrome and its push service (`web-client/smoke/push.mjs`); `push/worker.test.mjs`; a registration vector shared between the Rust core
 and the worker (`push/webpush-vector.json`).

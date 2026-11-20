@@ -79,9 +79,12 @@ that this browser was rung and when — never by whom, about what, or which Have
   circle's own relay, so its origin is not known in advance. That is safe here — the worker has no
   cookies and no ambient authority; every route that changes anything is authorized by a signature
   in the body.
-- **Limit:** the worker cannot see an account's device list. A browser the account later revokes
-  keeps its registration until it lapses or the browser unsubscribes; until then it can still be
-  rung, and learns that something happened — nothing else.
+- `POST /unregister-web { nodeId, deviceId, ts, sig }` — the ACCOUNT revokes a browser: `sig` is
+  the account key's signature over `webpush-revoke-v1:<deviceId>`. The worker drops that browser's
+  endpoint and remembers the device id (up to 64 per account), so its credential files nothing
+  again. The apps send this when a browser is revoked, and keep sending until the worker answers.
+- **Limit:** the worker cannot see an account's device list, so until that notice arrives a
+  revoked browser can still be rung — it learns that something happened, nothing else.
 - **Off until configured:** with no VAPID keys the worker never speaks Web Push, and the web
   client's switch says "not available right now".
 

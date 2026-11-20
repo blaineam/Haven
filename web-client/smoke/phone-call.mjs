@@ -67,8 +67,8 @@ async function linkedBrowser(peer, label) {
     if (m.type() === "error" && m.text().includes("[haven panic]")) w.crashes.push(m.text());
     if (process.env.SMOKE_DEBUG) w.logs.push(`${m.type()} ${m.text()}`);
   });
-  await page.addInitScript(() => {
-    window.__HAVEN_HARNESS__ = { pushOff: true };
+  await page.addInitScript((log) => {
+    window.__HAVEN_HARNESS__ = { pushOff: true, log };
     const Real = window.RTCPeerConnection;
     window.__pcs = [];
     window.RTCPeerConnection = function (...a) {
@@ -78,7 +78,7 @@ async function linkedBrowser(peer, label) {
       return pc;
     };
     window.RTCPeerConnection.prototype = Real.prototype;
-  });
+  }, process.env.SMOKE_LOG || "");
   w.invoke = async (name, args = {}) => {
     try {
       return await page.evaluate(async ([n, a]) => window.__TAURI__.core.invoke("engine_invoke", { name: n, args: a }), [name, args]);
@@ -211,6 +211,19 @@ try {
   }
   step("the browsers are linked through the app's relay and know the accounts they will call");
 
+  // A browser's call frames are left on the app's relay, and the relay takes writes only from
+  // devices the app has told it about. A browser linked a moment ago is not one yet: the app
+  // learns of it from its account's signed roster and enrols it on its next pass. Wait for that
+  // the way a person would find out — something posted from the browser shows up in the app.
+  const t0 = Date.now();
+  for (const w of browsers) {
+    const body = `from ${w.label} ${Date.now()}`;
+    await until(`${w.label} to be let into the circle`, async () => (await w.invoke("circle_web_access", { circleId: "" }))?.allowed, 180000);
+    await w.invoke("post", { circleId: "", body, media: [] });
+    await until(`the app's relay to accept writes from ${w.label}`, async () => JSON.stringify((await dump()).posts || []).includes(body), 900000, 5000);
+  }
+  step(`the app's relay accepts writes from the new browsers (${Math.round((Date.now() - t0) / 1000)} s after they linked)`);
+
   // 1. The browser calls the app.
   await a.emit({ action: "call_start", to: app });
   await until("the app to ring", async () => (await appCall()).ringing, 90000);
@@ -299,8 +312,10 @@ try {
   console.error(`FAIL ${e.message}`);
   try {
     for (const w of browsers) {
-      console.error(`${w.label}:`, JSON.stringify(await w.page.evaluate(() => ({ ui: !!document.querySelector(".call-screen, .call-overlay"), pcs: (window.__pcs || []).map((p) => p.connectionState), toast: document.querySelector("#toast")?.textContent || "" }))));
-      if (process.env.SMOKE_DEBUG) console.error(w.logs.filter((l) => /\[pc\]|call|offer|answer|fail|hairpin/i.test(l)).slice(-25).join("\n"));
+      console.error(`${w.label}:`, JSON.stringify(await w.page.evaluate(() => ({ ui: !!document.querySelector(".call-screen, .call-overlay"), pcs: (window.__pcs || []).map((p) => p.connectionState), toast: document.querySelector("#toast")?.textContent || "",
+        controls: [...document.querySelectorAll(".call-controls .call-round")].map((b) => `${b.getAttribute("aria-label")}${b.classList.contains("on") ? "*" : ""}`),
+        video: (window.__pcs || []).flatMap((p) => p.getSenders().map((x) => x.track).filter((t) => t && t.kind === "video").map((t) => `${t.readyState}/${t.enabled ? "on" : "off"}/${t.getSettings().displaySurface || "camera"}`)) }))));
+      if (process.env.SMOKE_DEBUG) console.error(w.logs.filter((l) => /\[pc\]|call|offer|answer|fail|hairpin|type=/i.test(l)).slice(-(+process.env.SMOKE_TAIL || 25)).join("\n"));
     }
     console.error("app call:", JSON.stringify(await appCall()));
   } catch {}

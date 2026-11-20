@@ -9,6 +9,18 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 2.2.0 (2026-11-20)
+
+**Haven in a web browser.** A member can link a web browser as one more device of their own account. The page is served by a
+relay the circle's own members run, it reaches the network only through that relay, it never holds the account key, and each
+circle decides whether browsers may read it (off until its members say yes). It is weaker than an app and says so: the relay
+serves the page's code. `docs/WEB-PARITY.md` is the full account of what it does, what was tested, and what was not.
+Web access is off unless the person running a relay turns it on. Notifications in a closed browser need the push worker to be
+deployed with a Web Push key pair (`push/README.md`); until then that switch reads "not available right now".
+
+**Fixes that reach every app** are listed first below: two Android call fixes (one a privacy fix), an iPhone/Mac fix for friends
+added by taking their invite, a desktop screen-share fix, and call messages that now arrive in order.
+
 ### Fixed - A camera or screen-share change could be undone by an older one arriving late (all platforms)
 A call message can reach the other person by two routes at once, and the slower copy of "camera on" could arrive after the
 "camera off" that followed it, leaving a picture where an avatar belonged (or the reverse). The camera-state message now says

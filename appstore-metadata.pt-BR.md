@@ -35,16 +35,21 @@ privado,criptografado,família,amigos,mensagens,seguro,offline,chamadas,sem anú
 Novo no 2.0: seu relay faz o trabalho pesado com fotos e vídeos para o celular não esquentar, e você sempre vê quem uma publicação alcança. Continua grátis.
 
 ## whats_new
-2.1.3 — Atualização de segurança. Atualize todos os seus dispositivos.
-• Proteção mais forte para as chaves de criptografia dos seus círculos caso um dispositivo seja comprometido. Ela é aplicada automaticamente quando todos em um círculo tiverem atualizado. Suas publicações permanecem intactas.
+2.2.0 — Use o Haven em um navegador web.
+• Novidade: adicione um navegador web como um dos seus próprios dispositivos. Abra o endereço do relay do seu círculo no navegador e escaneie o código exibido (Ajustes → Dispositivos). As publicações de um círculo só chegam a um navegador depois que o círculo permite; fica desativado até que seus membros digam sim.
+• Um amigo que você adiciona escaneando o convite dele agora se conecta em segundos.
+• Chamadas: uma tela compartilhada não fica mais coberta por um avatar, e as mudanças de câmera chegam na ordem certa.
 
 ## whats_new_macos
-2.1.3 — Atualização de segurança. Atualize todos os seus dispositivos.
-• Proteção mais forte para as chaves de criptografia dos seus círculos caso um dispositivo seja comprometido. Ela é aplicada automaticamente quando todos em um círculo tiverem atualizado. Suas publicações permanecem intactas.
+2.2.0 — Use o Haven em um navegador web.
+• Novidade: adicione um navegador web como um dos seus próprios dispositivos. Abra o endereço do relay do seu círculo no navegador e escaneie o código exibido (Ajustes → Dispositivos). As publicações de um círculo só chegam a um navegador depois que o círculo permite; fica desativado até que seus membros digam sim.
+• Um amigo que você adiciona escaneando o convite dele agora se conecta em segundos.
+• Chamadas: uma tela compartilhada não fica mais coberta por um avatar, e as mudanças de câmera chegam na ordem certa.
 
 ## whats_new_windows
-2.1.3 — Atualização de segurança. Atualize todos os seus dispositivos.
-• Proteção mais forte para as chaves de criptografia dos seus círculos caso um dispositivo seja comprometido. Ela é aplicada automaticamente quando todos em um círculo tiverem atualizado. Suas publicações permanecem intactas.
+2.2.0 — Use o Haven em um navegador web.
+• Novidade: um relay que você hospeda neste app pode oferecer o Haven em um navegador web. Ative o acesso web nos ajustes do relay, abra o endereço em um navegador e vincule-o escaneando ou colando o código exibido. As publicações de um círculo só chegam a um navegador depois que o círculo permite.
+• Chamadas a partir deste app: ligar a câmera, compartilhar a tela e desligar agora chegam aos telefones de forma confiável, e uma tela compartilhada não fica mais coberta por um avatar.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

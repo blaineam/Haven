@@ -35,16 +35,21 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Novità della 2.0: il tuo relay fa il lavoro pesante con foto e video, così il telefono resta fresco, e vedi sempre chi raggiunge un post. Sempre gratis.
 
 ## whats_new
-2.1.3 — Aggiornamento di sicurezza. Aggiorna tutti i tuoi dispositivi.
-• Protezione più forte per le chiavi di cifratura delle tue cerchie se un dispositivo venisse compromesso. Si applica automaticamente quando tutti in una cerchia hanno aggiornato. I tuoi post restano intatti.
+2.2.0 — Usa Haven in un browser web.
+• Novità: aggiungi un browser web come uno dei tuoi dispositivi. Apri l'indirizzo del relay della tua cerchia nel browser e scansiona il codice mostrato (Impostazioni → Dispositivi). I post di una cerchia arrivano a un browser solo dopo che la cerchia lo consente; resta disattivato finché i suoi membri non dicono di sì.
+• Un amico che aggiungi scansionando il suo invito ora si collega in pochi secondi.
+• Chiamate: uno schermo condiviso non è più coperto da un avatar e i cambi di fotocamera arrivano nell'ordine giusto.
 
 ## whats_new_macos
-2.1.3 — Aggiornamento di sicurezza. Aggiorna tutti i tuoi dispositivi.
-• Protezione più forte per le chiavi di cifratura delle tue cerchie se un dispositivo venisse compromesso. Si applica automaticamente quando tutti in una cerchia hanno aggiornato. I tuoi post restano intatti.
+2.2.0 — Usa Haven in un browser web.
+• Novità: aggiungi un browser web come uno dei tuoi dispositivi. Apri l'indirizzo del relay della tua cerchia nel browser e scansiona il codice mostrato (Impostazioni → Dispositivi). I post di una cerchia arrivano a un browser solo dopo che la cerchia lo consente; resta disattivato finché i suoi membri non dicono di sì.
+• Un amico che aggiungi scansionando il suo invito ora si collega in pochi secondi.
+• Chiamate: uno schermo condiviso non è più coperto da un avatar e i cambi di fotocamera arrivano nell'ordine giusto.
 
 ## whats_new_windows
-2.1.3 — Aggiornamento di sicurezza. Aggiorna tutti i tuoi dispositivi.
-• Protezione più forte per le chiavi di cifratura delle tue cerchie se un dispositivo venisse compromesso. Si applica automaticamente quando tutti in una cerchia hanno aggiornato. I tuoi post restano intatti.
+2.2.0 — Usa Haven in un browser web.
+• Novità: un relay che ospiti da questa app può offrire Haven in un browser web. Attiva l'accesso web nelle impostazioni del relay, apri l'indirizzo in un browser e collegalo scansionando o incollando il codice mostrato. I post di una cerchia arrivano a un browser solo dopo che la cerchia lo consente.
+• Chiamate da questa app: accendere la fotocamera, condividere lo schermo e riagganciare ora arrivano ai telefoni in modo affidabile, e uno schermo condiviso non è più coperto da un avatar.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

@@ -52,8 +52,14 @@ jobs:
           cargo test -p haven-client --manifest-path core/Cargo.toml
           cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib
 
+  # The web client archive (see web-client.yml). Never fails here.
+  web-client:
+    uses: ./.github/workflows/web-client.yml
+    with:
+      packaging_only: true
+
   build:
-    needs: test-core
+    needs: [test-core, web-client]
     strategy:
       fail-fast: false
       matrix:
@@ -89,9 +95,33 @@ jobs:
         shell: bash
         run: tools/fetch-cloudflared.sh --force
 
+      # The web client, for the relay this app can host (Settings ▸ Relays ▸ Web access). Optional:
+      # if the archive was not built, the app is complete and simply has no such switch.
+      - name: Fetch the web client
+        id: webclient
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: web-client
+          path: web-client-archive
+      - name: Unpack the web client into the app's resources
+        if: steps.webclient.outcome == 'success'
+        shell: bash
+        run: |
+          mkdir -p desktop/src-tauri/web-client
+          tar -C desktop/src-tauri/web-client -xzf web-client-archive/haven-web-client.tar.gz
+          rm -rf web-client-archive
+          test -f desktop/src-tauri/web-client/index.html
+
       - name: Build (GUI + headless relay)
         working-directory: desktop/src-tauri
-        run: cargo tauri build
+        shell: bash
+        run: |
+          if [ -f web-client/index.html ]; then
+            cargo tauri build --config '{"bundle":{"resources":["web-client/**/*"]}}'
+          else
+            cargo tauri build
+          fi
 
       - name: Upload installers
         uses: actions/upload-artifact@v4

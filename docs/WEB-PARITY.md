@@ -162,9 +162,18 @@ Next, in order:
         take part in linking: a phone that approves a browser, or re-announces its relay, teaches
         the account's other devices the relay's address with frame 37 (`FeedStore.swift`,
         `HavenNet.kt`), exactly as the desktop does.
-- [ ] Release packaging: no shipped build includes `web-client/dist` yet. The desktop installers
-      and the Mac app's Xcode Cloud build both need the wasm toolchain (rustup wasm32 target, an
-      LLVM clang for ring, the pinned `wasm-bindgen`) in CI before the switch appears anywhere.
+- [x] **Release packaging** (`.github/workflows/web-client.yml`). One job builds the web client
+      into `haven-web-client.tar.gz`; run on its own it also drives the browser smoke.
+      - Desktop installers (`desktop.yml`, `release.yml`) unpack it into the app's resources and
+        bundle it (`cargo tauri build --config '{"bundle":{"resources":["web-client/**/*"]}}'`),
+        so the Web access switch appears in shipped Windows and Linux builds. To do the same
+        locally: unpack a `web-client/dist` into `desktop/src-tauri/web-client/` first.
+      - A Release carries the archive as an asset, for `haven-relay --web-app <dir>`.
+      - The Mac app: `apple/ci_scripts/ci_post_clone.sh` builds it when the Xcode Cloud workflow
+        sets `HAVEN_BUILD_WEB_CLIENT=1` (off by default: it costs build minutes).
+      - None of it can hold a release back: called from an installer workflow the build step is
+        allowed to fail, and an installer without the archive is a complete app with no switch.
+      - Not verified until it has run: see the workflow's own runs.
 - [ ] Bundle size: ~10.8 MB of WebAssembly, ~3.5 MB on the wire (the proxy gzips every bundle
       file once, at load, and serves that to browsers that accept it). `wasm-opt` and a brotli
       variant (~2.3 MB measured) would cut it further; neither is done.

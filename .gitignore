@@ -88,3 +88,6 @@ appstore-creative/
 * [0-9].*
 */* [0-9]
 web-client/dist/
+
+# The built web client unpacked into the desktop app resources by CI (see web-client.yml)
+desktop/src-tauri/web-client/

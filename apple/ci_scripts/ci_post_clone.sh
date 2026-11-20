@@ -270,3 +270,29 @@ ls -d "$APPLE_DIR/Haven.xcodeproj" >/dev/null 2>&1 && echo "  Haven.xcodeproj �
 # here, where the cause is, instead of leaving the reader to connect this to a later embed failure.
 [ -x "$HELPERS_DIR/cloudflared" ] && echo "  Helpers/cloudflared ✅" \
   || echo "  ❌ Helpers/cloudflared MISSING — the macOS archive WILL fail at 'Embed and sign cloudflared' (iOS is unaffected)"
+
+# ---------------------------------------------------------------------------
+# 6. The web client for HavenMac's relay (Contents/Resources/web-client) — OPT-IN.
+#    A Mac that hosts a relay can offer Haven in a browser (Settings ▸ Relays ▸ Web access) only if
+#    the app carries the web client; `Scripts/embed-web-client.sh` copies web-client/dist when it
+#    exists and the app simply has no such switch when it does not. Building it here costs several
+#    Xcode Cloud minutes (a second Rust target, Homebrew llvm, wasm-bindgen-cli), so it runs only
+#    when the workflow sets HAVEN_BUILD_WEB_CLIENT=1, only for the Mac app, and NEVER fails the
+#    build: every step below is allowed to fail and the archive goes on without it.
+# ---------------------------------------------------------------------------
+if [ "${HAVEN_BUILD_WEB_CLIENT:-0}" = "1" ] && [ "${CI_PRODUCT_PLATFORM:-}" = "macOS" ]; then
+  echo "--- web client (HavenMac) ---"
+  (
+    set -e
+    export PATH="$HOME/.cargo/bin:$PATH"
+    command -v rustup >/dev/null 2>&1 || { echo "  rustup not installed on this run (xcframework came from cache)"; exit 1; }
+    rustup target add wasm32-unknown-unknown >/dev/null
+    # ring's C needs a clang that can target wasm32; Apple's cannot.
+    [ -x "$(brew --prefix llvm 2>/dev/null)/bin/clang" ] || brew install llvm
+    WANT=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' "$REPO_DIR/core/Cargo.lock")
+    [ "$(wasm-bindgen --version 2>/dev/null | awk '{print $2}')" = "$WANT" ] \
+      || cargo install wasm-bindgen-cli --version "$WANT" --locked
+    sh "$REPO_DIR/web-client/build.sh"
+  ) && echo "  web-client/dist ✅ — HavenMac will embed it" \
+    || { echo "  ⚠️  web client not built — HavenMac ships without the Web access switch"; rm -rf "$REPO_DIR/web-client/dist"; }
+fi

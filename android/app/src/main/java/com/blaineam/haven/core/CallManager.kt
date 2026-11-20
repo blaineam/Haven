@@ -1682,6 +1682,11 @@ object CallManager {
         routeCallback = null
         speakerChoice = null
         speakerOn.value = true   // default for the next call
+        // …and so is the camera: OFF. Every call starts audio-only; the camera comes on when the
+        // person turns it on. This was never reset, so a call that ended with the camera on left
+        // the NEXT call — one merely answered included — capturing and sending video from its
+        // first second, with nobody having asked for it. (Apple resets `videoOn` at the same point.)
+        cameraOn.value = false
         sessionId = ""; mediaStarted = false; isCaller = false; nativeAudioSuspended = false
         ringing.value = false; connecting.value = false; inCall.value = false; minimized.value = false; CallTones.stop(); mediaConnected.value = false
         peerName.value = ""

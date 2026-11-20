@@ -277,6 +277,16 @@ class CallManagerMeshTest {
         assertSame(null, CallManager.localVideo)
     }
 
+    /** A call that ended with the camera on must not hand that to the next call: every call starts audio-only. */
+    @Test fun a_call_that_ended_with_the_camera_on_leaves_the_next_call_starting_with_it_off() {
+        ringAndAnswer(roster = listOf(high, env.me))
+        CallManager.cameraOn.value = true            // the person turned their camera on during the call
+        CallManager.hangup(); drain()
+        assertFalse("the camera state must not outlive the call", CallManager.cameraOn.value)
+        ringAndAnswer(roster = listOf(high, env.me)) // …and the next call, merely answered
+        assertFalse("the next call starts with the camera off", CallManager.cameraOn.value)
+    }
+
     @Test fun the_camera_toggle_announces_my_state_to_everyone_and_flips_back_off_when_no_camera_exists() {
         ringAndAnswer()
         env.social.sealedCalls.clear()

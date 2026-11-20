@@ -805,6 +805,9 @@ object CallManager {
             Log.i(TAG, "HANGUP IGNORED from ${from.take(8)} for session ${sid.take(8)} — ours is ${sessionId.take(8)} (stale/replayed)")
             return
         }
+        // Said out loud: a call that ends for no visible reason is otherwise indistinguishable,
+        // in the log, from one this device ended itself.
+        Log.i(TAG, "HANGUP from ${from.take(8)} for session ${sessionId.take(12)} — dropping them")
         dropPeer(from)
         if ((roster - myHex).isEmpty()) {
             // Hung up before we answered = a missed call; after = the far end ending it.
@@ -1085,8 +1088,17 @@ object CallManager {
                 // Give it a grace period, then drop — but NEVER drop a peer whose media is riding the
                 // hairpin: when the relay carries the call, ICE legitimately sits failed. That is the
                 // whole reason we relayed. The relay's own inbound clock is the liveness signal.
+                //
+                // The check belongs to THIS connection and to a link that is STILL down. It used to
+                // ask only "is there a peer by this name?", so (1) a blip that recovered inside the
+                // grace was dropped anyway, six seconds after it had healed, and (2) a check left
+                // over from a call that had since ended hung up the NEXT call with the same person
+                // — call back within six seconds of a drop and the new call died. [DisconnectGrace].
+                val conn = peers[peer]
                 callHandler.postDelayed({
-                    if (peers[peer] == null) return@postDelayed
+                    if (!DisconnectGrace.stillDown(sameConnection = conn != null && peers[peer] === conn, ice = lastIce[peer])) {
+                        return@postDelayed
+                    }
                     if (CallMediaBridge.isRelaying(peer)) {
                         val quiet = CallMediaBridge.silenceSecs(peer)
                         if (quiet != null && quiet > RELAY_SILENCE_DROP_SECS) {
@@ -1098,7 +1110,7 @@ object CallManager {
                     }
                     dropPeer(peer)
                     if ((roster - myHex).isEmpty()) teardown()
-                }, 6_000)
+                }, DisconnectGrace.GRACE_MS)
             }
             else -> Unit
         }

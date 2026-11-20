@@ -9,6 +9,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - A call could hang itself up six seconds after a brief connection blip (Android)
+When a call's connection went quiet, the Android app scheduled a check for six seconds later and, if the other person was still
+listed in the call, dropped them — without looking at whether the connection had come back. So a blip that healed on its own could
+still end the call six seconds later. The same leftover check could also end the NEXT call: if a call ended and you called the same
+person back within six seconds, the new call was hung up when the old check fired. The check now applies only to the connection it
+was scheduled for, and only if that connection is still down. iPhone, iPad and Mac already checked this; desktop has no such timer.
+Found by placing a call from the Android app to a browser straight after one in the other direction. No security impact. Regression
+test: `DisconnectGraceTest`. The app also now logs when it ends a call because the other side hung up.
+
 ### Fixed - A relay's Cloudflare tunnel could shut down seconds after it started (desktop relay host, `haven-relay`)
 Haven starts `cloudflared` and reads its output to learn the tunnel's address. Once it had the address it stopped reading — and on
 macOS and Linux a program whose output nobody is reading is killed the next time it writes a log line. So a tunnel could be

@@ -246,6 +246,8 @@ struct DynState {
     /// from each peer — see [`Engine::camera_state_is_current`].
     camera_stamp_sent: u64,
     camera_stamp_seen: std::collections::HashMap<String, u64>,
+    /// Offers/answers already applied — see [`crate::callwire::SdpReplay`].
+    sdp_replay: crate::callwire::SdpReplay,
 }
 
 /// Where a self-sync slot can be read/written: a Haven relay (by node hex) or the user's S3.
@@ -11872,6 +11874,11 @@ impl Engine {
             *self.qa_last_call_event.lock() = format!("recv-unopenable:{t}");
             return;
         };
+        // Only a frame that OPENED is remembered: a forged copy must not be able to shadow the real one.
+        if !self.dyn_state.lock().sdp_replay.first_time(t, sealed) {
+            log::info!("call-frame t={t} already applied (a late copy by another route) — ignored");
+            return;
+        }
         let body = body.as_slice();
         let Some(ev) = self.call_event(t, body) else { return };
         if !self.call_event_allowed(t, &ev) {

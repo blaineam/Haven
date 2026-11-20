@@ -233,3 +233,31 @@ object CallSignal {
         Candidate(o.getString("c"), o.getInt("m"), if (o.has("i")) o.getString("i") else null)
     }.getOrNull()
 }
+
+
+/**
+ * Offers and answers already applied, by the exact sealed bytes that carried them.
+ *
+ * A call frame travels by more than one route (direct, relay forward, the relay's live lane under
+ * each circle) and the relay copies can land many seconds late. A late copy of an OLD offer was
+ * applied again: a screen share that had ended came back and went away again on the other side, and
+ * the next real offer then failed to carry its picture (e2e `screenshare … [again]`). Sealing is
+ * randomised, so identical bytes are always the same transmission. Rust `SdpReplay`, Apple
+ * `SdpReplay` parity.
+ */
+class SdpReplay(private val keep: Int = 512) {
+    private val seen = LinkedHashSet<String>()
+
+    /** True the first time these bytes are offered (and for every frame that is not an offer or an
+     *  answer); false for a copy already applied. */
+    @Synchronized
+    fun firstTime(type: Int, sealed: ByteArray): Boolean {
+        if (type != Wire.SDP_OFFER && type != Wire.SDP_ANSWER) return true
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        md.update(type.toByte()); md.update(sealed)
+        val key = md.digest().joinToString("") { "%02x".format(it) }
+        if (!seen.add(key)) return false
+        if (seen.size > keep) seen.iterator().let { it.next(); it.remove() }
+        return true
+    }
+}

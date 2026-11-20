@@ -31,6 +31,14 @@ relay for those only. This was only ever in the unreleased web-client work; no r
 `testASiblingDeviceIsToldARelayServesOnlyTheCirclesThatUseIt` (Apple),
 `a_sibling_device_is_told_a_relay_serves_only_the_circles_that_use_it` (Android), and the end-to-end check that caught it.
 
+### Fixed - Sharing your screen a second time in a call could show nothing on the other side (all platforms)
+A call message reaches the other person by more than one route, and the copy that goes through the relay can arrive many
+seconds late. A late copy of an old "start sharing" or "stop sharing" negotiation was applied again, so a share that had ended
+flickered back, and the next real share then arrived without its picture. Each app now applies a given offer or answer once and
+ignores later copies of the same message. Only a message that passed its signature check is remembered, so a forged copy
+cannot block the real one. No security impact. Found by the release gate (`screenshare … [again]`). Regression tests:
+`a_late_copy_of_an_offer_or_answer_is_applied_once` (engine and Android), `testALateCopyOfAnOfferOrAnswerIsAppliedOnce` (Apple).
+
 ### Fixed - A camera or screen-share change could be undone by an older one arriving late (all platforms)
 A call message can reach the other person by two routes at once, and the slower copy of "camera on" could arrive after the
 "camera off" that followed it, leaving a picture where an avatar belonged (or the reverse). The camera-state message now says

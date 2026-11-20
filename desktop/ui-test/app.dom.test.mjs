@@ -2487,6 +2487,25 @@ test('call screen share: shares replace the camera track for everyone and stoppi
   assert.equal(app.ev('call.screenOn'), false);
 });
 
+test('call screen share: with the camera off, peers are told the video slot is live while sharing', async () => {
+  // A shared screen goes out in the camera's place. Announcing only the camera switch left the
+  // phones showing an avatar over the screen being shared.
+  const { app } = await inCall();
+  const states = () => app.calls.filter((c) => c.cmd === 'call_camera_state').map((c) => c.args.on);
+  assert.equal(app.ev('call.camOn'), false);
+  const before = states().length;
+  await app.ev('toggleScreen()');
+  assert.equal(states().at(-1), true, 'sharing announces a live video slot although the camera is off');
+  await app.ev('toggleScreen()');
+  assert.equal(states().at(-1), false, 'stopping goes back to what the camera switch says');
+  assert.ok(states().length >= before + 2);
+  // With the camera ON the slot stays live through both.
+  await app.ev('toggleCam()');
+  await app.ev('toggleScreen()');
+  await app.ev('toggleScreen()');
+  assert.deepEqual(states().slice(-3), [true, true, true]);
+});
+
 test('call screen share: a refused or empty capture toasts and leaves the call alone', async () => {
   const { app } = await inCall();
   app.ctx.navigator.mediaDevices.getDisplayMedia = async () => { throw new Error('denied'); };

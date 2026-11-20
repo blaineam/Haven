@@ -7523,9 +7523,7 @@ async function startMesh() {
   // frames — so a peer that is never told renders a black rectangle and assumes video is broken.
   {
     const peers = invitees();
-    if (peers.length) {
-      invoke("call_camera_state", { sessionId: call.session, on: !!call.camOn, to: peers }).catch(() => {});
-    }
+    if (peers.length) announceVideoState(peers);
   }
   startSpeakerDetection();
   renderCallOverlay();
@@ -7810,17 +7808,28 @@ async function toggleCam() {
   // TELL the other participants (frame 22). Disabling the track locally stops sending frames, so
   // without this every peer is left staring at our frozen last frame instead of our avatar. iOS and
   // Android both send and handle this; desktop declared neither, so it was the odd one out.
-  const peers = invitees();
-  if (peers.length) {
-    invoke("call_camera_state", { sessionId: call.session, on: call.camOn, to: peers }).catch(() => {});
-  }
+  announceVideoState();
   renderCallOverlay();
+}
+
+/// Tell the other participants whether my VIDEO SLOT is showing something (frame 22): my camera,
+/// or my screen. A shared screen is sent in the camera's place, so "camera off" alone is the wrong
+/// thing to announce while sharing — the phones take it at its word and show my avatar over the
+/// screen I am sharing. (They send a screen as a separate track; this app replaces the camera's.)
+function announceVideoState(to) {
+  const peers = to || invitees();
+  if (!peers.length || !call.session) return;
+  invoke("call_camera_state", { sessionId: call.session, on: !!(call.camOn || call.screenOn), to: peers }).catch(() => {});
 }
 
 // Swap the outgoing video track on every peer connection without renegotiating (replaceTrack).
 function replaceOutgoingVideo(track) {
   call.pcs.forEach((pc) => {
-    const sender = pc.getSenders().find((s) => s.track && s.track.kind === "video");
+    // The sender that carries video — or, on a device with no camera at all, the empty video
+    // transceiver the call was negotiated with: a screen can be shared without owning a camera.
+    const sender = pc.getSenders().find((s) => s.track && s.track.kind === "video")
+      || ((pc.getTransceivers ? pc.getTransceivers() : [])
+        .find((t) => t.sender && !t.sender.track && t.receiver && t.receiver.track && t.receiver.track.kind === "video") || {}).sender;
     if (sender) sender.replaceTrack(track).catch(() => {});
   });
 }
@@ -7846,6 +7855,7 @@ async function toggleScreen() {
   if (call.camTrack) { try { call.localStream.removeTrack(call.camTrack); } catch (_) {} }
   call.localStream.addTrack(screenTrack);
   screenTrack.onended = () => { stopScreenShare(); renderCallOverlay(); }; // OS "stop sharing"
+  announceVideoState();   // my video slot is live now, whatever the camera switch says
   renderCallOverlay();
 }
 
@@ -7859,6 +7869,7 @@ function stopScreenShare() {
     call.localStream.getVideoTracks().forEach((t) => { if (t.readyState !== "live") { try { call.localStream.removeTrack(t); } catch (_) {} } });
     if (back && !call.localStream.getVideoTracks().includes(back)) call.localStream.addTrack(back);
   }
+  announceVideoState();   // back to what the camera switch says
 }
 
 /// Fill call.audioIns/audioOuts. Labels are only populated once mic permission is granted, so this

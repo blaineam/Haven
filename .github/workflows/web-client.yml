@@ -55,11 +55,13 @@ jobs:
           set -euo pipefail
           # ring's C needs a clang that can target wasm32 (Ubuntu's can), and its archiver.
           sudo apt-get update
-          sudo apt-get install -y clang llvm
+          sudo apt-get install -y clang llvm binaryen
           # The CLI and the crate must be the same version: read it from the lockfile.
           want=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' core/Cargo.lock)
           cargo install wasm-bindgen-cli --version "$want" --locked
-          CC_wasm32_unknown_unknown=clang AR_wasm32_unknown_unknown=llvm-ar web-client/build.sh
+          HAVEN_REQUIRE_WASM_OPT=1 CC_wasm32_unknown_unknown=clang AR_wasm32_unknown_unknown=llvm-ar web-client/build.sh
+          ls -l web-client/dist/pkg/haven_web_bg.wasm
+          gzip -9 -c web-client/dist/pkg/haven_web_bg.wasm | wc -c
           tar -C web-client/dist -czf haven-web-client.tar.gz .
           sha256sum haven-web-client.tar.gz
           ls -la web-client/dist web-client/dist/pkg

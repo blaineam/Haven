@@ -35,6 +35,29 @@ target=${CARGO_TARGET_DIR:-$core/target}
 (cd "$core" && CARGO_TARGET_DIR="$target" cargo build -p haven-web --target wasm32-unknown-unknown --release --locked)
 rm -rf "$here/pkg"
 "$bindgen" --target web --out-dir "$here/pkg" "$target/wasm32-unknown-unknown/release/haven_web.wasm"
+
+# Shrink the module with Binaryen's wasm-opt when it is installed (the release archive is built
+# with it; a local build without it is the same program, larger). -Oz because the module is paid
+# for on every first visit over a home connection. The feature flags name what rustc emits for
+# wasm32-unknown-unknown; without them wasm-opt rejects the module it is asked to shrink.
+# HAVEN_REQUIRE_WASM_OPT=1 (CI) makes a missing or failing wasm-opt an error instead of a note.
+wasm="$here/pkg/haven_web_bg.wasm"
+before=$(wc -c < "$wasm" | tr -d ' ')
+if command -v wasm-opt >/dev/null 2>&1; then
+  if wasm-opt -Oz --enable-bulk-memory --enable-sign-ext --enable-mutable-globals \
+       --enable-nontrapping-float-to-int --enable-reference-types --enable-multivalue \
+       -o "$wasm.opt" "$wasm"; then
+    mv "$wasm.opt" "$wasm"
+    echo "wasm-opt: $before -> $(wc -c < "$wasm" | tr -d ' ') bytes"
+  else
+    rm -f "$wasm.opt"
+    [ "${HAVEN_REQUIRE_WASM_OPT:-}" = 1 ] && { echo "wasm-opt failed" >&2; exit 1; }
+    echo "wasm-opt failed: shipping the unoptimized module ($before bytes)" >&2
+  fi
+else
+  [ "${HAVEN_REQUIRE_WASM_OPT:-}" = 1 ] && { echo "wasm-opt (binaryen) is required but not installed" >&2; exit 1; }
+  echo "wasm-opt not installed: module left unoptimized ($before bytes)"
+fi
 echo "built $here/pkg"
 
 # ── dist/: the bundle a relay serves under /app/ ─────────────────────────────────────────────

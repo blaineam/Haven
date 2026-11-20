@@ -3492,6 +3492,17 @@ final class FeedStore: ObservableObject {
     static var qaRelayLink: String = ""
     /// The last `pair_answer` op's outcome (`sent`, `notACode`, `expired`, `notPrimary`, `unreachable`).
     static var qaPairAnswer: String = ""
+    /// Whether this build carries a web client, whether the person turned web access on, and
+    /// whether the front door that is up is serving it (`host_web` in the dump; macOS hosts only).
+    static func qaHostWeb() -> [String: Any] {
+        #if os(macOS)
+        let h = RelayHost.shared
+        return ["available": h.webAccessAvailable, "enabled": h.webAccessEnabled, "serving": h.webAccessServing,
+                "hosting": h.enabled]
+        #else
+        return ["available": false, "enabled": false, "serving": false, "hosting": false]
+        #endif
+    }
     /// The last `web_access` op's reading of the circle (`web_access` in the dump).
     static var qaWebAccess: [String: Any] = [:]
     /// The last `relay_probe` op's answer (`relay_probe` in the dump; `[:]` until one ran).
@@ -3921,6 +3932,14 @@ final class FeedStore: ObservableObject {
             // QA: the "Host a relay on this device" toggle (Relays settings). The multirelay e2e takes
             // B's in-app relay offline and brings it back while A keeps posting.
             RelayHost.shared.setEnabled((obj["on"] as? Bool) ?? true)
+            qaWriteDump()
+            return
+        case "host_web_access":
+            // QA: Storage → "Web access" on a hosting Mac (serve the web client under /app/ on the
+            // relay's front door). The dump's `host_web` says what this build can do and is doing.
+            #if os(macOS)
+            RelayHost.shared.setWebAccess((obj["on"] as? Bool) ?? true)
+            #endif
             qaWriteDump()
             return
         case "remove_member":
@@ -4455,6 +4474,7 @@ final class FeedStore: ObservableObject {
             "pair_answer": Self.qaPairAnswer,
             "enroll_pending": pendingEnrollRequest?.name ?? "",
             "web_access": Self.qaWebAccess,
+            "host_web": Self.qaHostWeb(),
             "hosted_relay": ["node": RelayHost.shared.nodeId, "serving": RelayHost.shared.serving,
                              "enabled": RelayHost.shared.enabled, "httpPort": Int(RelayHost.shared.mediaHttpPort ?? 0),
                              "front_door_settled": RelayHost.shared.frontDoorSettled,

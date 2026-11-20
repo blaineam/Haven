@@ -670,7 +670,11 @@ each other by public discovery, and the fleet's emulator is kept in airplane mod
 `adb shell cmd connectivity airplane-mode disable` first (harmless under `-read-only`).
 
 It goes on to video each way and a three-way group call with a second browser
-(`PHONE_CALL_ONLY=1` keeps it to the two-party call).
+(`PHONE_CALL_ONLY=1` keeps it to the two-party call). `PHONE_INVITES=app|theirs` picks whose
+invite is taken: Android runs with `theirs` (the app takes the other accounts' invites), the
+iPhone app with `app` (they take the app's `invite_link` and the app approves) — see the open
+item in docs/WEB-PARITY.md for why. For the iPhone app: a fresh simulator, the signed-ad-hoc
+build, the relay as in step 3, then `PHONE_QA_DIR="<container>/Library/Application Support"`.
 
 Driver ops it uses, on Apple and Android: `connect_link` (`uri`: take a `haven://` invite — new
 on Android), `call` / `call_accept` / `call_end`, `call_video` (`on`: the camera button; new on

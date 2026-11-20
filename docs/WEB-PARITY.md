@@ -396,16 +396,22 @@ Next, in order:
         (`a_call_that_ended_with_the_camera_on_leaves_the_next_call_starting_with_it_off`).
       - The emulator the QA fleet keeps is in airplane mode; the accounts find each other by
         public discovery, so the test needs it off (docs/QA.md).
-      - [ ] **Not passing against the iPhone app, and not understood.** The same test in a
-            simulator gets as far as "the two accounts are contacts" and stops: the app never
-            registers the second account's yes to web devices, so no call is attempted and the
-            iPhone's per-device call sealing is still unproven. Observed: the app told its relay
-            about the new contact 27 s to 3 min 20 s after taking their invite (the relay refuses
-            the contact's writes until then), and in seven minutes the app showed nothing received
-            from that account. Whether that is the test's unusual shape (the other account hosts
-            no relay and was added seconds earlier) or a real delay for a friend you add by taking
-            THEIR invite is not established. Contacts left over from earlier runs also hold the
-            default circle shut (every member must agree), so each attempt needs a fresh simulator.
+      - **The iPhone app passes it too** (simulator): audio both ways, the browser's camera
+        showing up in the app, the three-way group call, and a call placed from the app ringing
+        and connecting in the browser — the first run of the iPhone's per-device call sealing.
+        The app's own camera is skipped there and said so: a simulator has none.
+      - [ ] **Open, about making friends rather than calls:** on iPhone the test has the other
+            accounts take the APP's invite and the app approve them (the ordinary "I invite a
+            friend" direction). The other direction — the iPhone takes the invite of an account
+            that has no relay of its own — did not finish exchanging anything inside five to
+            seven minutes in three attempts: the app enrolled the new contact at its relay 27 s
+            to 3 min 20 s later, and the contact never learned where the app's relay is, so
+            neither side's circle traffic reached the other. Approving a request tells the new
+            member where the relays are at once; taking an invite leaves it to a periodic
+            announcement. On Android the same direction completes in seconds. A change that
+            repeated the approval steps on taking an invite fired but did not fix it, and was
+            removed. Whether it eventually completes (the periodic announce is ten minutes on a
+            phone) was not measured.
       - [ ] Not tested: screen sharing between a browser and an app, and a physical device.
 - Decided: a browser does not publish itself to, or look people up in, public discovery (the
   native apps do, to find a contact's devices with no relay in common). A browser reaches the

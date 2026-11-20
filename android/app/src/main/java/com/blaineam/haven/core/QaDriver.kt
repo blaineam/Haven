@@ -185,6 +185,7 @@ object QaDriver {
     private val MUTATING_OPS = setOf(
         "post", "story", "dm", "react", "comment", "profile",
         "circle_create", "circle_invite", "file", "music_post", "mark_read", "wire_relay", "add_relay",
+        "connect_link",
     )
 
     /** The last `relay_link` op's link (dump `relay_link`). */
@@ -237,6 +238,12 @@ object QaDriver {
                 val reqs = HavenNet.pending.toList()
                 reqs.forEach { runCatching { HavenNet.approve(it) } }
                 Log.i("HavenQA", "approve_connections: approved ${reqs.size}")
+            }
+            // QA: scan/paste a `haven://` invite — the same connectByLink the scanner calls (Apple's
+            // `connect_link`). Lets a test make this account a contact of one it was not seeded with.
+            "connect_link" -> {
+                val ok = HavenNet.connectByLink(cmd.optString("uri"))
+                Log.i("HavenQA", "connect_link: started=$ok")
             }
             "link_constraint" -> LowDataMonitor.debugForced = when (cmd.optString("level").lowercase()) {
                 "ultra" -> LinkConstraint.ULTRA
@@ -372,7 +379,9 @@ object QaDriver {
             // QA: the "Allow this circle in web browsers" switch.
             "web_access" -> {
                 val cid = explicit ?: com.blaineam.haven.core.DEFAULT_CIRCLE
-                HavenNet.setCircleWebAccess(cid, cmd.optBoolean("allow", true))
+                // Without `allow` the op only READS the circle's standing (another member's answer
+                // changes it after the switch was flipped here).
+                if (cmd.has("allow")) HavenNet.setCircleWebAccess(cid, cmd.optBoolean("allow", true))
                 val st = HavenNet.circleWebAccess(cid)
                 qaWebAccess = JSONObject().put("circle_id", cid).put("allowed", st?.allowed ?: false)
                     .put("mine", st?.mine ?: false).put("can_sign", st?.canSign ?: false)

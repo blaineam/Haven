@@ -649,7 +649,31 @@ is run by hand, because it needs a simulator or emulator:
 4. `PHONE_QA_DIR="<container>/Library/Application Support" ORIGIN=http://127.0.0.1:18675
    node web-client/smoke/phone.mjs`
 
-Three driver ops exist for it, on Apple and Android: `pair_answer` (`code`: answer the
+**Android.** The same test drives the Android app over adb — its QA channel is `files/qa/`,
+reached with `run-as` — when `PHONE_ADB_PKG=com.blaineam.haven` is set instead of `PHONE_QA_DIR`:
+
+1. `ABIS=arm64-v8a android/build-rust.sh`, `./gradlew assembleDebug`, boot the emulator
+   (`emulator -avd haven_phone -read-only -no-window` leaves the fleet's saved state untouched),
+   `adb install -r -g` the debug APK. `-g` matters: a permission prompt in front of the app
+   pauses it, and a paused app does not read commands.
+2. A throwaway account: write `haven-seed:<base64 of 32 random bytes>` to `files/qa/qa-seed.txt`
+   (via `/data/local/tmp` and `run-as`) before the first launch, then
+   `adb shell am start -n com.blaineam.haven/.MainActivity`.
+3. Relay as in step 3 above, then `adb reverse tcp:<port> tcp:<port>` for its three ports — inside
+   the emulator `127.0.0.1` is the emulator, and the browser's code names the relay by that address.
+4. `PHONE_ADB_PKG=com.blaineam.haven ORIGIN=http://127.0.0.1:18675 node web-client/smoke/phone.mjs`
+
+**A call with the app** (`web-client/smoke/phone-call.mjs <web_primary_engine binary>`, same
+setup): a second account becomes the app's contact by invite link (`connect_link`), links a
+browser through the app's relay, and the two call each other, each way. The two accounts find
+each other by public discovery, and the fleet's emulator is kept in airplane mode:
+`adb shell cmd connectivity airplane-mode disable` first (harmless under `-read-only`).
+
+Driver ops it uses, on Apple and Android: `connect_link` (`uri`: take a `haven://` invite — new
+on Android), `call` / `call_accept` / `call_end`, and `web_access` without `allow`, which only
+re-reads the circle's standing (another member's answer changes it after the switch was flipped).
+
+Three driver ops exist for the linking test, on Apple and Android: `pair_answer` (`code`: answer the
 `haven-pair:` code a browser shows → dump `pair_answer`, then `enroll_pending`), `enroll_confirm`
 (the confirmation's "Link this device"), and `web_access` (`circle_id`, `allow`: the circle's
 "Allow in web browsers" switch → dump `web_access`). Shut the simulator down afterwards.

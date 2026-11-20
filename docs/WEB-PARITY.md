@@ -318,8 +318,12 @@ Next, in order:
         live. Every platform now re-sends it (at most once a minute) whenever one of the
         account's own devices makes contact;
       - nothing else: scan answer, bound ticket, web mark, consent and re-keying worked first time.
-      - [ ] Not run: the Android app (compiled, and it has the same driver ops), the Mac app as a
-            host, and a physical device.
+      - **The Android app passes the same test** (3 of 3), in the `haven_phone` emulator, driven
+        over adb (`PHONE_ADB_PKG=…`; the test's channel code is `web-client/smoke/qachannel.mjs`).
+        Its Kotlin code answered the code, marked the browser, held it out of the circle and let
+        it in, first time. The relay's ports are forwarded into the emulator with `adb reverse`.
+      - [ ] Not run: the Mac app as a host (it cannot be launched from a worktree without touching
+            the owner's real data), and a physical device.
 - [x] **Calls** (`web-client/smoke/call.mjs`): two accounts that are contacts on one relay, each
       with a browser linked to it; one browser calls, the other rings and answers with its real
       Accept button, the peer connection comes up in both, audio flows both ways, and hanging up
@@ -337,8 +341,25 @@ Next, in order:
         ignored.
       - A re-sent invite made the offering side create a SECOND offer on a connection that
         already had one. One offer per connection now; a repeat re-sends the same one.
-      - [ ] Not tested: video, screen sharing, group calls of three or more, and a call between a
-            browser and a phone.
+      - **Camera and screen sharing** are in the same test: the camera turned on mid-call shows
+        up in the other browser (judged by the picture — a camera that is off still sends black
+        frames at full rate, so a frame count proves nothing), both ways; a shared screen replaces
+        it; stopping the share brings the camera back.
+- [x] **A call between a browser and a real app** (`web-client/smoke/phone-call.mjs`): the Android
+      app in the emulator is one account; a second account becomes its contact by invite link and
+      links a browser through the app's relay. The browser calls the app and the app answers; the
+      app calls back and the browser answers; audio flows both ways each time and hanging up on
+      either side ends it on the other. Passes repeatedly. This is the first run of the Android
+      per-device call sealing: the app's invite rang in a browser that holds no account key. It
+      found one bug, in the shipped Android app:
+      - **A call could hang itself up six seconds after a connection blip.** The check Android
+        schedules when a link goes quiet never looked at whether the link had recovered, and a
+        check left over from an ended call hung up the next call with the same person. Fixed on
+        `main` (`DisconnectGraceTest`); iPhone and Mac already had the guard.
+      - The emulator the QA fleet keeps is in airplane mode; the two accounts find each other by
+        public discovery, so the test needs it off (docs/QA.md).
+      - [ ] Not tested: group calls of three or more, a call with the iPhone app (same driver
+            ops; not run), video between a browser and an app, and a physical device.
 - Decided: a browser does not publish itself to, or look people up in, public discovery (the
   native apps do, to find a contact's devices with no relay in common). A browser reaches the
   network through its circle's relay and nothing else — that is the point of it — so it learns

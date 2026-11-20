@@ -13,39 +13,22 @@
 //   PHONE_QA_DIR="<app data container>/Library/Application Support" \
 //   ORIGIN=http://127.0.0.1:18675 node web-client/smoke/phone.mjs
 //
+// The Android app keeps its QA channel in its own `files/qa/`, reached over adb with `run-as`:
+//   PHONE_ADB_PKG=com.blaineam.haven ORIGIN=http://127.0.0.1:18675 node web-client/smoke/phone.mjs
+// (`adb reverse tcp:<port> tcp:<port>` for each of the relay's ports first, so the address the
+// browser's code names is the same place inside the emulator. ANDROID_SERIAL picks the device.)
+//
 // Needs Playwright (NODE_PATH may point at a node_modules that has it).
 import { createRequire } from "node:module";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { configured, dump, qa, until, usage } from "./qachannel.mjs";
 
 const { chromium } = createRequire(import.meta.url)("playwright");
-const QA = process.env.PHONE_QA_DIR, ORIGIN = (process.env.ORIGIN || "").replace(/\/$/, "");
-if (!QA || !ORIGIN) {
-  console.error('usage: PHONE_QA_DIR="<app container>/Library/Application Support" ORIGIN=http://… node phone.mjs');
+const ORIGIN = (process.env.ORIGIN || "").replace(/\/$/, "");
+if (!configured || !ORIGIN) {
+  console.error(`usage: ${usage}\n       ORIGIN=http://… node phone.mjs`);
   process.exit(2);
 }
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function until(what, f, ms = 120000) {
-  const end = Date.now() + ms;
-  for (;;) {
-    const v = await f();
-    if (v) return v;
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-    await sleep(1500);
-  }
-}
-/** Drop one QA command and wait for the app to take it. */
-async function qa(op) {
-  const drop = join(QA, "qa-cmd.json");
-  writeFileSync(`${drop}.tmp`, JSON.stringify(op));
-  renameSync(`${drop}.tmp`, drop);
-  await until(`the app to take "${op.op}"`, () => !existsSync(drop), 30000);
-}
-async function dump() {
-  await qa({ op: "dump" });
-  return JSON.parse(readFileSync(join(QA, "qa-dump.json"), "utf8"));
-}
 const step = (s) => console.log(`ok  ${s}`);
 
 const browser = await chromium.launch();

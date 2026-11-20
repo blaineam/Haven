@@ -3885,9 +3885,11 @@ final class FeedStore: ObservableObject {
         case "web_access":
             // QA: the "Allow this circle in web browsers" switch (circle settings / a conversation).
             let cid = str("circle_id").isEmpty ? "default" : str("circle_id")
-            let allow = (obj["allow"] as? Bool) ?? true
+            // Without `allow` the op only READS the circle's standing (another member's answer
+            // changes it after the switch was flipped here).
+            let allow = obj["allow"] as? Bool
             Task { @MainActor in
-                await self.setCircleWebAccess(allow, in: cid)
+                if let allow { await self.setCircleWebAccess(allow, in: cid) }
                 let st = await self.circleWebAccess(cid)
                 Self.qaWebAccess = ["circle_id": cid, "allowed": st?.allowed ?? false, "mine": st?.mine ?? false,
                                     "can_sign": st?.canSign ?? false, "waiting_on": st?.waitingOn.count ?? 0]

@@ -34,7 +34,8 @@ let browsers = [];
 const host = startPeer(bin, [join(root, "dist")]);
 const guest = startPeer(bin, [join(root, "dist")], { HAVEN_SMOKE_GUEST: "1" });
 const browser = await chromium.launch({
-  args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", "--autoplay-policy=no-user-gesture-required"],
+  args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", "--autoplay-policy=no-user-gesture-required",
+    "--auto-select-desktop-capture-source=Entire screen"],
 });
 let failed = false;
 
@@ -124,6 +125,69 @@ try {
   const [a0, b0] = [await received(a), await received(b)];
   await until("media to flow both ways", async () => (await received(a)) > a0 + 2000 && (await received(b)) > b0 + 2000, 60000);
   step("audio flows both ways");
+
+  // VIDEO. Calls start audio-only; the host's browser turns its camera on with the real control.
+  /** Video frames decoded over every connected peer connection in the page. */
+  const frames = (w) => w.page.evaluate(async () => {
+    let n = 0;
+    for (const pc of window.__pcs || []) {
+      if (pc.connectionState !== "connected") continue;
+      (await pc.getStats()).forEach((s) => { if (s.type === "inbound-rtp" && s.kind === "video") n += s.framesDecoded || 0; });
+    }
+    return n;
+  });
+  /** What the page is sending as video: "camera", "screen", or "" for nothing live. */
+  const sending = (w) => w.page.evaluate(() => {
+    for (const pc of window.__pcs || []) {
+      if (pc.connectionState !== "connected") continue;
+      const t = pc.getSenders().map((s) => s.track).find((t) => t && t.kind === "video" && t.readyState === "live" && t.enabled);
+      if (t) return t.getSettings().displaySurface ? "screen" : "camera";
+    }
+    return "";
+  });
+  const control = (w, n) => w.page.locator(".call-controls .call-round").nth(n);   // mic, camera, screen
+  // A camera that is off still sends frames — black ones, at full rate — so "the picture arrived"
+  // is judged by what the other page actually shows: a remote video that is not black.
+  const picture = (w) => w.page.evaluate(() => {
+    for (const v of document.querySelectorAll(".call-stage video")) {
+      if (v.closest(".call-pip") || !v.videoWidth) continue;
+      const c = document.createElement("canvas");
+      c.width = 32; c.height = 32;
+      const g = c.getContext("2d");
+      g.drawImage(v, 0, 0, 32, 32);
+      const d = g.getImageData(0, 0, 32, 32).data;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) sum += d[i] + d[i + 1] + d[i + 2];
+      if (sum / (d.length / 4) > 30) return true;
+    }
+    return false;
+  });
+  const rate = async (w) => {
+    const f0 = await frames(w);
+    await sleep(3000);
+    return ((await frames(w)) - f0) / 3;
+  };
+  const flowing = (what, from, to) => until(what, async () => (await rate(to)) >= 8, 60000);
+  if ((await picture(a)) || (await picture(b))) throw new Error("a browser shows the other's picture before any camera was turned on");
+  await control(a, 1).click();
+  await until("the host's browser to send its camera", async () => (await sending(a)) === "camera", 30000);
+  await flowing("the guest's browser to decode the host's camera", a, b);
+  await until("the guest's browser to show the host's picture", () => picture(b), 30000);
+  if (await picture(a)) throw new Error("the host's browser shows the guest's picture, whose camera is still off");
+  step("the camera turned on mid-call reaches the other browser (no new offer)");
+  await control(b, 1).click();
+  await until("the host's browser to show the guest's picture", () => picture(a), 60000);
+  step("video flows both ways");
+
+  // SCREEN SHARING replaces the camera for everyone; stopping brings the camera back.
+  await control(a, 2).click();
+  await until("the host's browser to send its screen", async () => (await sending(a)) === "screen", 30000);
+  await flowing("the guest's browser to decode the shared screen", a, b);
+  step("a shared screen reaches the other browser");
+  await control(a, 2).click();
+  await until("the host's browser to go back to its camera", async () => (await sending(a)) === "camera", 30000);
+  await flowing("the guest's browser to decode the camera again", a, b);
+  step("stopping the share brings the camera back");
 
   await emit(a, { action: "call_end" });
   await until("the call to end in both browsers", async () =>

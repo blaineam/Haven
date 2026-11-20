@@ -6131,16 +6131,27 @@ final class FeedStore: ObservableObject {
         let targets = only.map { [$0.lowercased()] } ?? myOtherDeviceHexes()
         guard !targets.isEmpty else { return }
         let store = RelayMailboxStore.shared
+        let served = circles.reduce(into: [String: [String]]()) { $0[$1.id] = store.relays(forCircle: $1.id) }
         let relays: [[String: Any]] = store.entries.keys.sorted().compactMap { hex in
             guard hex.count == 64, !hex.hasPrefix("s3:"), store.isActive(hex),
                   let http = store.httpInterface(hex), !http.urls.isEmpty else { return nil }
-            return (try? JSONSerialization.jsonObject(with: relayAnnounceData(hex))) as? [String: Any]
+            guard var obj = (try? JSONSerialization.jsonObject(with: relayAnnounceData(hex))) as? [String: Any] else { return nil }
+            // WHICH circles this relay serves here: the receiver assigns it to exactly those. It
+            // used to assign every relay to every circle it had, which carried a private circle
+            // onto a friend's relay (e2e `multirelay: no private circle's media on a friend's relay`).
+            obj["circles"] = Self.circlesServed(by: hex, relaysByCircle: served)
+            return obj
         }
         guard !relays.isEmpty,
               let json = try? JSONSerialization.data(withJSONObject: relays, options: [.sortedKeys]) else { return }
         var body = Data(myNodeHex.lowercased().utf8)
         body.append(json)
         for dev in targets { sendCallFrame(37, body, to: dev) }
+    }
+
+    /// The circles (sorted) whose relay list holds `hex` — frame 37's `circles` for that relay.
+    nonisolated static func circlesServed(by hex: String, relaysByCircle: [String: [String]]) -> [String] {
+        relaysByCircle.filter { $0.value.contains(hex) }.keys.sorted()
     }
 
     /// The frame-19 announce body for one relay: bare 64-hex, or JSON with media/DERP/TURN.

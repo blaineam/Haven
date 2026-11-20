@@ -21,6 +21,16 @@ deployed with a Web Push key pair (`push/README.md`); until then that switch rea
 **Fixes that reach every app** are listed first below: two Android call fixes (one a privacy fix), an iPhone/Mac fix for friends
 added by taking their invite, a desktop screen-share fix, and call messages that now arrive in order.
 
+### Fixed - A linked desktop could copy a private circle's photos to a friend's relay (found by the release gate; never shipped)
+The new message that tells your own devices how to reach your relays (frame 37, added for the web client) made the receiving
+desktop app or browser attach every one of those relays to every circle it held. A private circle then counted a friend's relay
+as its own, and its photos and videos were mirrored there. They stay sealed (the relay cannot open them), but a relay that does
+not serve a circle should hold nothing of it. The message now names the circles each relay serves and the receiver uses the
+relay for those only. This was only ever in the unreleased web-client work; no released app did it. Regression tests:
+`a_relay_interface_assigns_a_relay_only_to_the_circles_it_serves` (engine),
+`testASiblingDeviceIsToldARelayServesOnlyTheCirclesThatUseIt` (Apple),
+`a_sibling_device_is_told_a_relay_serves_only_the_circles_that_use_it` (Android), and the end-to-end check that caught it.
+
 ### Fixed - A camera or screen-share change could be undone by an older one arriving late (all platforms)
 A call message can reach the other person by two routes at once, and the slower copy of "camera on" could arrive after the
 "camera off" that followed it, leaving a picture where an avatar belonged (or the reverse). The camera-state message now says

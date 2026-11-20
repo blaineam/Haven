@@ -71,19 +71,36 @@ async fn run() -> AnyResult<()> {
 
     let (http, derp, proxy) = (free_port()?, free_port()?, free_port()?);
     let origin = format!("http://127.0.0.1:{proxy}");
+    // `HAVEN_SMOKE_TUNNEL=1`: go out through a real Cloudflare quick tunnel instead of loopback —
+    // the path a browser on another network actually takes (TLS terminated by the tunnel provider,
+    // WebSockets and uploads through its proxy). Not hermetic; never the default.
+    // DO NOT use it on a machine that is hosting a real Haven relay: starting a tunnel first
+    // sweeps "leftover" Haven tunnel helpers (`kill_orphan_cloudflareds`), and a real relay's
+    // helper looks exactly like one.
+    let tunnel = std::env::var("HAVEN_SMOKE_TUNNEL").is_ok_and(|v| v == "1");
 
     let mut seed = [0u8; 32];
     std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom")?, &mut seed)?;
     let dir = std::env::temp_dir().join(format!("haven-web-primary-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)?;
+    // Nothing of a harness run may land in the real app's folders: the tunnel helper's log
+    // otherwise goes to the platform data dir (`…/Haven/logs`), next to a person's real identity.
+    std::env::set_var("HAVEN_CLOUDFLARED_LOG_DIR", dir.join("logs"));
     let paths = Paths { base: dir.clone(), root: dir.clone() };
     {
         // The operator's choices: announce this front door as-is (no tunnel), and offer web access.
         let mut prefs = Prefs::load(&paths);
-        prefs.relay_front_door = Some("manual".into());
-        prefs.relay_public_url = origin.clone();
-        prefs.relay_auto_tunnel = Some(false);
+        if tunnel {
+            // The shipping default: Haven starts its own free Cloudflare tunnel (cloudflared must be
+            // on PATH or beside this binary) and announces whatever hostname it is given.
+            prefs.relay_front_door = Some("auto".into());
+            prefs.relay_auto_tunnel = Some(true);
+        } else {
+            prefs.relay_front_door = Some("manual".into());
+            prefs.relay_public_url = origin.clone();
+            prefs.relay_auto_tunnel = Some(false);
+        }
         prefs.relay_web_access = true;
         prefs.save(&paths).map_err(|e| e.to_string())?;
     }
@@ -98,6 +115,21 @@ async fn run() -> AnyResult<()> {
     });
     engine.start().await;
     engine.start_hosting().await.map_err(|e| e.to_string())?;
+    let origin = if tunnel {
+        let mut public = None;
+        for _ in 0..240 {
+            if let (Some(url), _, true) = engine.live_front_door() {
+                if url.starts_with("https://") {
+                    public = Some(url.trim_end_matches('/').to_string());
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        public.ok_or("the tunnel never came up (is cloudflared on PATH?)")?
+    } else {
+        origin
+    };
     println!("ORIGIN={origin}");
     println!("ACCOUNT={}", engine.node_id_hex());
     println!("TICKET={}", engine.mint_enroll_ticket().map_err(|e| e.to_string())?);
@@ -111,6 +143,20 @@ async fn run() -> AnyResult<()> {
             }
         }
     });
+
+    // The harness stops this process with SIGTERM. Stop hosting first, so a tunnel helper this run
+    // started is stopped with it instead of being left behind pointing at a dead port.
+    #[cfg(unix)]
+    {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let (Ok(mut term), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) else { return };
+            tokio::select! { _ = term.recv() => {}, _ = int.recv() => {} }
+            engine.stop_hosting();
+            std::process::exit(0);
+        });
+    }
 
     let mut tickets = 1;
     let mut shown: HashSet<String> = HashSet::new();

@@ -681,6 +681,18 @@ impl LocalMedia {
         self.limit_sweep_raw(max_age_secs, max_bytes, pinned, in_use, grace_secs)
     }
 
+    /// [`Self::perform_limit_sweep`] with a size cap in BYTES and no age cap — for a host whose
+    /// whole media cache lives in memory (a browser tab), where whole-gigabyte steps are too coarse.
+    pub fn perform_size_sweep(
+        &self,
+        max_bytes: u64,
+        pinned: &std::collections::HashSet<String>,
+        in_use: &std::collections::HashSet<String>,
+        grace_secs: u64,
+    ) -> (u64, usize, std::collections::HashMap<String, u64>) {
+        self.limit_sweep_raw(0, max_bytes, pinned, in_use, grace_secs)
+    }
+
     /// The unit-testable core of [`Self::perform_limit_sweep`]: caps expressed as raw seconds / bytes
     /// (0 = off). Same age-then-size, oldest-first, pinned-skip semantics.
     fn limit_sweep_raw(

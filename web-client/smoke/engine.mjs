@@ -109,9 +109,16 @@ async function shots(page, label) {
 await run(
   "engine.mjs <web_primary_engine binary>",
   async ({ peer, step, onExit }) => {
-    const origin = await peer.line("ORIGIN=", 60000);
+    const origin = await peer.line("ORIGIN=", 180000);
     const account = await peer.line("ACCOUNT=");
     const ticket = await peer.line("TICKET=");
+    // Through a real tunnel (HAVEN_SMOKE_TUNNEL=1) the hostname is minutes old at most: wait for
+    // it to resolve and answer before pointing a browser at it.
+    if (origin.startsWith("https://")) {
+      await until("the tunnel's hostname to resolve and answer", async () => {
+        try { return (await fetch(`${origin}/_haven`)).ok; } catch { return false; }
+      }, 180000);
+    }
     const { browser, page } = await openPage(`${origin}/app/`, { ready: () => !!window.__HAVEN_WEB__, before: quiet });
     onExit(() => browser.close());
     // An uncaught error in the page — above all a Rust panic in the engine, which surfaces as a

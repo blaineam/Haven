@@ -3659,6 +3659,12 @@ fn device_is_web(st: &NetState, device_hex: &str) -> bool {
     st.device_lists.values().any(|cd| cd.credentials.iter().any(|c| c.device_id() == id && c.is_web()))
 }
 
+/// Is this a web device in a circle that has not allowed web devices — so key material offered to
+/// it for this circle is held unopened?
+fn web_keys_held(st: &NetState, idx: usize) -> bool {
+    self_is_web(st) && !circle_allows_web(st, idx)
+}
+
 /// Is THIS device a web device — does my own account-signed credential carry the web mark?
 fn self_is_web(st: &NetState) -> bool {
     let Some(me) = st.device.as_ref().map(|d| d.public().node_id_bytes()) else { return false };
@@ -3714,6 +3720,10 @@ fn store_web_policy(st: &mut NetState, idx: usize, body: &[u8]) -> bool {
 /// Ingest a web-device position riding the control lane. Never touches content: returns `false`.
 fn receive_web_policy(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, HavenError> {
     if store_web_policy(st, idx, body) {
+        // The answer changed. On a web device that was holding this circle's keys unopened, they
+        // can be opened now (and if the answer went the other way, the replay holds them again).
+        drain_pending_commits(st, idx);
+        drain_pending_tree(st, idx);
         // The leaf set just changed for this circle; let the tree catch up and re-drain.
         mls_refresh_keying(st, idx);
         drain_pending(st, idx);
@@ -5352,6 +5362,12 @@ fn receive_key_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
         .map_err(|e| HavenError::Invalid { msg: format!("bad commit: {e}") })?;
     let sender_hex = env.sender_hex();
     let me_hex = hex(&st.me().node_id_bytes());
+    // On a web device, in a circle that has not allowed web devices: hold the commit unopened (see
+    // `receive_locked`). Replayed from here when the circle's answer changes.
+    if web_keys_held(st, idx) {
+        park_pending_commit(&mut st.circles[idx], body);
+        return Ok(false);
+    }
     let Some((committer, committer_account_hex)) = resolve_committer(st, idx, &sender_hex, &me_hex) else {
         // Committer not resolvable YET (a new friend whose bundle/roster hasn't landed). Park it —
         // the mailbox already marked its key seen, so dropping it here lost the key until a resend.
@@ -5797,6 +5813,11 @@ fn drain_pending_tree(st: &mut NetState, idx: usize) {
         let mut progressed = false;
         for raw in pending {
             TREE_RETRYABLE.with(|f| f.set(false));
+            // A Welcome held on a web device stays held until its circle allows web devices.
+            if matches!(raw.first(), Some(&TAG_MLS_WELCOME | &TAG_MLS2_WELCOME)) && web_keys_held(st, idx) {
+                park_pending_tree(&mut st.circles[idx], &raw);
+                continue;
+            }
             let applied = match raw.first() {
                 Some(&TAG_MLS_COMMIT) => receive_mls_commit(st, idx, &raw[1..]).unwrap_or(false),
                 Some(&TAG_MLS_WELCOME) => receive_mls_welcome(st, idx, &raw[1..]).unwrap_or(false),
@@ -10015,15 +10036,26 @@ impl HavenSocial {
         let idx = st.circles.iter().position(|c| c.id == circle_id)?;
         // A WEB device takes no keys for a circle that has not allowed web devices — even when a
         // sender offers them (an app that predates the rule seals to every device in the roster).
-        // Only the envelopes that carry key material are refused; the control lane (rosters,
+        // Only the envelopes that carry key material are held back; the control lane (rosters,
         // grants, the policy itself) still has to arrive, or this device could never learn that
-        // the answer changed. After a change the circle re-keys, so nothing refused here is needed
-        // later.
-        if matches!(envelope[0], TAG_KEY_COMMIT | TAG_MLS_WELCOME | TAG_MLS2_WELCOME | b'{')
-            && self_is_web(&st)
-            && !circle_allows_web(&st, idx)
-        {
-            return Some(Ok(false));
+        // the answer changed.
+        //
+        // HELD, not dropped. A circle's yes and the key that follows it travel in the same bundle
+        // — the key first — and separately through the mailbox in no order at all. Dropping a key
+        // that arrived a moment before the yes lost it for good (its mailbox entry is already
+        // marked seen): the browser knew it was allowed and never read a thing. So the sealed
+        // bytes wait, unopened, in the same buffers that hold a key whose sender is not known yet,
+        // and are replayed when the circle's answer changes (`receive_web_policy`). A key commit
+        // is held inside `receive_key_commit`, which the replay also goes through.
+        if web_keys_held(&st, idx) {
+            match envelope[0] {
+                TAG_MLS_WELCOME | TAG_MLS2_WELCOME => {
+                    park_pending_tree(&mut st.circles[idx], envelope);
+                    return Some(Ok(false));
+                }
+                b'{' => return Some(Ok(false)), // legacy per-recipient seal: nothing re-sends it
+                _ => {}
+            }
         }
         Some(match envelope[0] {
             TAG_KEY_COMMIT => receive_key_commit(&mut st, idx, &envelope[1..]),

@@ -7789,7 +7789,12 @@ final class FeedStore: ObservableObject {
     func setCircleWebAccess(_ allow: Bool, in circleId: String) async -> Bool {
         guard let engine else { return false }
         let ok = await engine.run { $0.setCircleWebAccess(circleId: circleId, allow: allow) }
-        if ok, self.engine === engine { persistUserAction() }
+        if ok, self.engine === engine {
+            persistUserAction()
+            // Publish it now, not with the next scheduled sync: the position and the key commit that
+            // follows a change of answer go to the circle's mailbox for every member to pick up.
+            backfillMailbox(circleIds: [circleId])
+        }
         return ok
     }
 

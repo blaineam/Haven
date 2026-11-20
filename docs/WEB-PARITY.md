@@ -227,8 +227,13 @@ Next, in order:
       EXIF/GPS) — the same function the desktop's path-based drop now calls. Every file drag is
       cancelled window-wide, because a browser otherwise navigates to the dropped file and the
       session is gone. Checked by the smoke.
-- [ ] Media in a browser: the cache lives in the in-memory tree today, which is fine for text and
-      wrong for video. It needs a blob store of its own (OPFS / Cache API).
+- [x] Media in a browser is bounded. Everything a tab stores lives in the page's memory (mirrored,
+      encrypted, into its storage), so the media cache is capped at 256 MB
+      (`Engine::WEB_MEDIA_BUDGET_BYTES`): the oldest blobs become "Download" placeholders, the same
+      thing a storage limit does in the apps, and come back from the relay when asked for.
+      - [ ] Still true: one very large video has to fit in memory while it is being viewed or
+            posted. Lifting that means moving the engine into a worker with file-backed storage
+            (OPFS); it is not done.
 - [x] The engine's delayed save works in a page. It started an OS thread, which a browser cannot
       do: the first post received over the network crashed the task handling it and nothing
       network-driven was saved again (posts still showed, because the live state was intact).
@@ -289,7 +294,17 @@ Next, in order:
         screen can answer it first with a ticket for THEIR account, so that browser joins their
         account instead (the person sees the wrong name and an empty feed; nothing of theirs is
         exposed). The first answer wins.
-- [ ] The same against a shipping native app, and through a real Cloudflare tunnel.
+- [x] **Through a real Cloudflare tunnel.** `HAVEN_SMOKE_TUNNEL=1` makes the smoke's native
+      primary host its relay the shipping way — Haven starts `cloudflared` itself and announces the
+      `trycloudflare.com` address — and the browser does everything through that address: the
+      page, the DERP WebSocket, the mailbox, uploads. Passes repeatedly. Not hermetic (it uses
+      Cloudflare), so it is not in CI; and never run it on a machine hosting a real relay, because
+      starting a tunnel sweeps "leftover" Haven tunnel helpers. It found two bugs:
+      - the tunnel helper was killed seconds after starting (its output stopped being read once
+        the address was known) — fixed on `main`, it affected shipped desktop and `haven-relay`;
+      - a circle's key that reached a browser just before the circle's yes was dropped for good —
+        now held unopened and replayed (`a_key_that_reaches_a_browser_before_the_circles_yes_is_held_not_lost`).
+- [ ] Against a shipping native app (a phone as the primary).
 - [ ] Calls (WebRTC + the relay hairpin), Web Push.
 - [ ] Account → device discovery in a browser (resolve/publish are stubs; rosters and inbound
       frames supply device ids for now).

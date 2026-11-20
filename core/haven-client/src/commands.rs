@@ -1200,6 +1200,7 @@ pub fn circle_admins(engine: Eng, circle_id: String) -> Vec<String> {
 pub fn feed(engine: Eng, circle_id: String) -> Vec<FeedItemDto> {
     let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
     engine.maybe_purge_expired_media(&cid); // feed refresh = the purge hook (throttled, off-thread)
+    engine.enforce_web_media_budget(); // a browser's media cache is memory: keep it bounded (throttled)
     engine.feed(&cid).into_iter().map(|it| feed_item_dto(&engine, it)).collect()
 }
 

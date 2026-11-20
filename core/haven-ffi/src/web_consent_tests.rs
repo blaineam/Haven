@@ -270,6 +270,50 @@ fn a_browser_refuses_keys_a_sender_offers_it_for_a_circle_that_has_not_agreed() 
 }
 
 #[test]
+fn a_key_that_reaches_a_browser_before_the_circles_yes_is_held_not_lost() {
+    // Found through a real tunnel: the yes and the key it releases travel together, key first,
+    // and each envelope is delivered ONCE (a mailbox entry is marked seen). Whatever order they
+    // arrive in, the browser must end up reading — and must not read before the yes.
+    for order in ["as sent", "reversed", "keys first, then the control lane"] {
+        let f = fleet(false);
+        let Fleet { alice, bob, web, cid } = &f;
+        assert!(alice.set_circle_web_access(cid.clone(), true));
+        assert!(bob.set_circle_web_access(cid.clone(), true));
+        for _ in 0..2 {
+            sync(alice, bob, cid);
+            sync(bob, alice, cid);
+        }
+        assert!(alice.circle_web_access(cid.clone()).allowed);
+        post(alice, cid, "sealed after everyone agreed", 2_000);
+        let mut bundle = alice.sync_envelopes(cid.clone());
+        assert!(bundle.iter().any(|e| e.first() == Some(&TAG_WEB_POLICY)));
+        let commit_at = bundle.iter().position(|e| e.first() == Some(&TAG_KEY_COMMIT)).expect("a key commit");
+        let policy_at = bundle.iter().position(|e| e.first() == Some(&TAG_WEB_POLICY)).unwrap();
+        assert!(commit_at < policy_at, "the bundle really does carry the key before the yes");
+        match order {
+            "reversed" => bundle.reverse(),
+            "keys first, then the control lane" => {
+                let is_key = |e: &Vec<u8>| matches!(e.first(), Some(&TAG_KEY_COMMIT) | Some(&TAG_EPOCH_EVENT));
+                let (keys, rest): (Vec<_>, Vec<_>) = bundle.into_iter().partition(is_key);
+                // The browser has the key and the post in hand and still shows nothing…
+                for e in &keys {
+                    let _ = web.receive(cid.clone(), e.clone());
+                }
+                assert!(!reads(web, cid, "sealed after everyone agreed"), "{order}: nothing is opened before the yes");
+                bundle = rest;
+            }
+            _ => {}
+        }
+        // …each remaining envelope exactly once.
+        for e in bundle {
+            let _ = web.receive(cid.clone(), e);
+        }
+        assert!(web.circle_web_access(cid.clone()).allowed, "{order}");
+        assert!(reads(web, cid, "sealed after everyone agreed"), "{order}: the held key was opened once the yes arrived");
+    }
+}
+
+#[test]
 fn an_app_on_the_same_account_is_never_affected() {
     // The rule is about web devices only: a linked tablet reads the circle whatever it says.
     let alice = HavenSocial::new(ALICE.to_vec()).unwrap();

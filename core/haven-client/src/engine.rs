@@ -234,6 +234,9 @@ struct DynState {
     /// throttle). iOS `FeedStore.lastLimitSweepAt` / `limitSweepInFlight`.
     last_limit_sweep_ms: u64,
     limit_sweep_in_flight: bool,
+    /// Browser only: when the in-memory media budget was last enforced.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    last_web_budget_sweep_ms: u64,
 }
 
 /// Where a self-sync slot can be read/written: a Haven relay (by node hex) or the user's S3.
@@ -1682,6 +1685,7 @@ impl Engine {
         self.purge_stale_relays().await; // erase relays inactive AND unseen > 7 days (config else survives)
         self.maybe_weekly_media_sweep(); // orphaned media blobs (at most once a week; runs off-thread)
         self.enforce_local_limits(false); // #4 device-local age/size caps (throttled; no-op if both off)
+        self.enforce_web_media_budget();
         self.bump_activity(); // seed activity NOW so launch starts at tight cadence (idle=huge would else max-back-off)
         self.start_mailbox_loop();
     }
@@ -3109,10 +3113,18 @@ impl Engine {
         if created {
             self.social.set_circle_creator(circle_id.clone(), self.node_id_hex());
         }
-        let ok = self.social.set_circle_web_access(circle_id, allow);
+        let ok = self.social.set_circle_web_access(circle_id.clone(), allow);
         if ok {
             self.persist();
             self.emit_changed();
+            // Publish it NOW rather than with the next scheduled sync: the position, and the key
+            // commit that follows a change of answer, go to the circle's mailbox so every member
+            // (and a browser waiting to be let in) picks them up on their next poll. Left to the
+            // schedule, "allowed" could take minutes to mean anything.
+            let me = self.clone();
+            crate::rt::spawn(async move {
+                me.backfill_mailbox(&circle_id).await;
+            });
         }
         ok
     }
@@ -4069,6 +4081,40 @@ impl Engine {
                 log::info!("media limit sweep: freed {bytes}B across {files} files");
             }
         });
+    }
+
+    /// How much media a browser tab keeps: everything a tab stores lives in the page's memory (and
+    /// is mirrored, encrypted, into its storage), so an unbounded media cache is an unbounded tab.
+    pub const WEB_MEDIA_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+
+    /// In a browser, keep the media cache under [`Self::WEB_MEDIA_BUDGET_BYTES`]: the oldest blobs
+    /// go first and become "Download" placeholders, exactly as a user-set storage limit does on
+    /// the apps (nothing is lost — the relay still has them). Media touched in the last ten
+    /// minutes is left alone, so what is on screen or being posted is never pulled out from under
+    /// the page. A no-op everywhere else.
+    pub(crate) fn enforce_web_media_budget(self: &Arc<Self>) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            {
+                let mut st = self.dyn_state.lock();
+                let now = now_ms();
+                if st.limit_sweep_in_flight || now.saturating_sub(st.last_web_budget_sweep_ms) < 60_000 {
+                    return;
+                }
+                st.last_web_budget_sweep_ms = now;
+            }
+            let pinned = self.pinned_names();
+            let in_use = self.media_referenced_names();
+            let (bytes, files, evict) =
+                self.media.perform_size_sweep(Self::WEB_MEDIA_BUDGET_BYTES, &pinned, &in_use, 600);
+            if files > 0 {
+                for (name, b) in &evict {
+                    self.mark_evicted(name, *b);
+                }
+                self.emit_changed();
+                log::info!("web media budget: freed {bytes}B across {files} files");
+            }
+        }
     }
 
     /// Media refs any circle member flagged sensitive. Desktop has no on-device classifier (Apple's

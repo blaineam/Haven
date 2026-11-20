@@ -1460,7 +1460,12 @@ object HavenNet : InboundListener {
     fun setCircleWebAccess(circleId: String, allow: Boolean): Boolean {
         if (core.seedless) return false                             // account-key holder only
         val ok = runCatching { social.setCircleWebAccess(circleId, allow) }.getOrDefault(false)
-        if (ok) { persist(); scope.launch { runCatching { SelfSyncCoordinator.sync(social) } } }
+        if (ok) {
+            persist()
+            // Publish it now, not with the next scheduled sync: the position and the key commit that
+            // follows a change of answer go to the circle's mailbox for every member to pick up.
+            scope.launch { runCatching { backfillMailbox(circleId) }; runCatching { SelfSyncCoordinator.sync(social) } }
+        }
         return ok
     }
 

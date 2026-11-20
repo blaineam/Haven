@@ -253,10 +253,11 @@ Next, in order:
       - What this does NOT do: protect an open session on a compromised machine, or protect
         "my computer" storage from someone using that browser profile. A browser's own "reopen
         closed tab" may also bring a shared session back until the window is closed.
-- [ ] **Scan-to-link** — the browser shows a code and a device that has the account answers it
+- [x] **Scan-to-link** — the browser shows a code and a device that has the account answers it
       (a borrowed computer usually has no camera, and nobody can type a ticket into it from a
-      phone). Core, browser, desktop and both phones' scanners are written; see the last items
-      for what has and has not been exercised.
+      phone). Exercised end to end with the desktop engine, the iPhone app (simulator) and the
+      Android app (emulator) answering the code. Not exercised: pointing a real phone's camera
+      at the QR — the tests hand the code's text to the same function the scanner calls.
       - [x] Codec, in the crypto core so every platform agrees on the bytes
             (`core/haven-p2p/src/pair.rs`, FFI in `haven-ffi/src/enroll.rs`, fuzzed with the other
             wire parsers). A `haven-pair:` code holds the new device's id, the 16-byte check of
